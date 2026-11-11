@@ -33,7 +33,7 @@ export type PrerequisiteHost = {
 
 const nativeInstall = {
   postgres:
-    "Install PostgreSQL 17 server/client and matching pgvector (Debian/Ubuntu with PGDG: sudo apt-get install postgresql-17 postgresql-client-17 postgresql-17-pgvector). Put its bin directory on PATH and verify pg_config --version. Extension files must belong to that same installation. On macOS use the Docker backend; the native infrastructure launcher is Linux-only.",
+    "Install PostgreSQL 18 server/client and matching pgvector (Debian/Ubuntu with PGDG: sudo apt-get install postgresql-18 postgresql-client-18 postgresql-18-pgvector); an existing PostgreSQL 17 installation also works. Put its bin directory on PATH and verify pg_config --version. Extension files must belong to that same installation. On macOS use the Docker backend; the native infrastructure launcher is Linux-only.",
   nats: "Install pinned NATS server 2.11.8 and Temporal CLI 1.4.1 with: bun scripts/install-development-tools.ts --install --tools=nats,temporal. Add the reported binDirectory to PATH. The verified project-local installer provides nats-server, not the nats client; preflight itself installs nothing.",
   temporal:
     "Install pinned Temporal CLI 1.4.1 with: bun scripts/install-development-tools.ts --install --tools=nats,temporal. Add the reported binDirectory to PATH. The CLI must provide server start-dev; tctl is not a substitute.",
@@ -132,7 +132,7 @@ export async function collectDevelopmentPrerequisites(
   const dockerUsable =
     requested !== "native" &&
     Boolean(host.which("docker")) &&
-    (await host.probe("docker", ["info"])).ok;
+    (await host.probe("docker", ["version", "--format", "{{.Server.Version}}"])).ok;
   const backend =
     requested === "docker" || (requested === "auto" && dockerUsable) ? "docker" : "native";
   const fixture = environment.OPENGENI_OBJECT_STORAGE_FIXTURE || "garage";
@@ -154,7 +154,7 @@ export async function collectDevelopmentPrerequisites(
   if (backend === "docker") {
     if (!dockerUsable)
       errors.push(
-        "Docker backend requires an installed Docker CLI and a responsive daemon. Start Docker Desktop on macOS/WSL2 or the Docker Engine service on Linux, check socket permissions/context, then run docker info. Auto fallback is not used for explicit docker.",
+        "Docker backend requires an installed Docker CLI and a responsive daemon. Start Docker Desktop on macOS/WSL2 or the Docker Engine service on Linux, check socket permissions/context, then run docker version. Auto fallback is not used for explicit docker.",
       );
     if (host.which("docker")) {
       await requireProbe(
@@ -177,7 +177,7 @@ export async function collectDevelopmentPrerequisites(
   } else {
     if (host.platform === "darwin")
       errors.push(
-        "Native development infrastructure is Linux-only; macOS native supervision is unsupported for both Garage and MinIO. Install/start Docker Desktop, verify docker info, and select OPENGENI_DEV_BACKEND=docker. Installing GNU utilities alone does not provide a supported native macOS stack.",
+        "Native development infrastructure is Linux-only; macOS native supervision is unsupported for both Garage and MinIO. Install/start Docker Desktop, verify docker version, and select OPENGENI_DEV_BACKEND=docker. Installing GNU utilities alone does not provide a supported native macOS stack.",
       );
     if (!["x64", "arm64"].includes(host.arch))
       errors.push(
@@ -204,8 +204,8 @@ export async function collectDevelopmentPrerequisites(
       await requireProbe(
         "pg_config",
         ["--version"],
-        `Native PostgreSQL must be version 17 for the local fixture. ${nativeInstall.postgres}`,
-        /^PostgreSQL 17(?:\.|\s|$)/u,
+        `Native PostgreSQL must be version 18 or 17 for the local fixture. ${nativeInstall.postgres}`,
+        /^PostgreSQL 1[78](?:\.|\s|$)/u,
       );
       const bindir = await host.probe("pg_config", ["--bindir"]);
       const sharedir = await host.probe("pg_config", ["--sharedir"]);
@@ -252,8 +252,8 @@ export async function collectDevelopmentPrerequisites(
         await requireProbe(
           command,
           ["--version"],
-          `${command} must resolve to PostgreSQL 17 on PATH. ${nativeInstall.postgres}`,
-          /\(PostgreSQL\) 17(?:\.|\s|$)/u,
+          `${command} must resolve to PostgreSQL 18 or 17 on PATH. ${nativeInstall.postgres}`,
+          /\(PostgreSQL\) 1[78](?:\.|\s|$)/u,
         );
     }
     if (requireCommand("nats-server", nativeInstall.nats))
@@ -488,11 +488,11 @@ export async function checkDevelopmentSourceBuildPrerequisites(
 function assertPrerequisites(errors: string[]): void {
   if (errors.length > 0) {
     console.error(
-      "OpenGeni startup prerequisites are missing:\n" +
+      "Opengeni startup prerequisites are missing:\n" +
         errors.map((error) => `  - ${error}`).join("\n"),
     );
     throw new Error(
-      "OpenGeni startup prerequisites are not satisfied; no prerequisite installation was attempted",
+      "Opengeni startup prerequisites are not satisfied; no prerequisite installation was attempted",
     );
   }
 }

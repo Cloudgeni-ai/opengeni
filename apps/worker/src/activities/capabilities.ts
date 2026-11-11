@@ -1,47 +1,18 @@
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
-  CLAUDE_CONNECTION_KINDS,
-  claudeProviderId,
-  withClaudeConnectionCatalog,
-  withClaudeConnectionCredential,
-} from "@opengeni/config";
+  settingsWithCodexCredential as coreSettingsWithCodexCredential,
+  settingsWithEnabledCapabilityMcpServers,
+  settingsWithOrganizationProviderCredentials as coreSettingsWithOrganizationProviderCredentials,
+  settingsWithWorkspaceGatewayCredential as coreSettingsWithWorkspaceGatewayCredential,
+  settingsWithWorkspaceOpenRouterCredential as coreSettingsWithWorkspaceOpenRouterCredential,
+  settingsWithWorkspaceOpperCredential as coreSettingsWithWorkspaceOpperCredential,
+  withCodexProvider as coreWithCodexProvider,
+  withXaiSubscriptionProvider as coreWithXaiSubscriptionProvider,
+} from "@opengeni/core";
 import {
-  environmentsEncryptionKeyBytes,
-  type Settings,
-  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
-  withCodexCatalogProvider,
-  withWorkspaceGatewayCatalogProvider,
-  withWorkspaceGatewayCredential,
-  withWorkspaceOpenRouterCatalogProvider,
-  withWorkspaceOpenRouterCredential,
-  withOrganizationGatewayCatalogProvider,
-  withOrganizationGatewayCredential,
-  withOrganizationOpenRouterCatalogProvider,
-  withOrganizationOpenRouterCredential,
-  ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
-  ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
-  withXaiSubscriptionCatalogProvider,
-} from "@opengeni/config";
-import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
-import {
-  getWorkspaceGatewayCustomModelForExecution,
-  getWorkspaceOpenRouterCustomModelForExecution,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
   getSessionAttemptMcpApprovalPolicies,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  workspaceCodexSubscriptionActive,
-  loadWorkspaceVercelAiGatewayApiKey,
-  loadWorkspaceOpenRouterApiKey,
-  listOrganizationModelProviderCustomModelsForWorkspace,
-  getOrganizationModelProviderCustomModelForExecution,
-  loadOrganizationModelProviderApiKey,
-  listWorkspaceProviderCustomModels,
-  getWorkspaceProviderCustomModelForExecution,
-  loadWorkspaceProviderApiKey,
-  loadClaudeSubscriptionUsageCredential,
-  assertModelConnectionAllowsTurn,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
@@ -59,12 +30,28 @@ export async function settingsWithSessionMcpServersForRun(
   },
 ): Promise<Settings> {
   const encryptionKey = environmentsEncryptionKeyBytes(settings);
-  const policies = await getSessionAttemptMcpApprovalPolicies(
-    db,
-    workspaceId,
-    sessionId,
-    attemptId,
-  );
+  let policies: Awaited<ReturnType<typeof getSessionAttemptMcpApprovalPolicies>>;
+  let resolvedServers: SessionMcpServerForRun[] | undefined;
+  if (encryptionKey && typeof (db as Database & { rollback?: unknown }).rollback !== "function") {
+    // Both readers independently fence this exact active attempt. The server
+    // read must remain fresh for credential renewal; it does not consume the
+    // policy read's result. Root-pool RLS transactions may overlap, whereas
+    // nested scopes on a transaction handle must retain serial savepoints.
+    const [policyResult, serverResult] = await Promise.allSettled([
+      (async () =>
+        await getSessionAttemptMcpApprovalPolicies(db, workspaceId, sessionId, attemptId))(),
+      (async () =>
+        await listSessionMcpServersForRun(db, workspaceId, sessionId, attemptId, encryptionKey))(),
+    ]);
+    // Observe both reads before returning or propagating an error. Preserve the
+    // previous policy-first diagnostic priority, including synchronous ports.
+    if (policyResult.status === "rejected") throw policyResult.reason;
+    if (serverResult.status === "rejected") throw serverResult.reason;
+    policies = policyResult.value;
+    resolvedServers = serverResult.value;
+  } else {
+    policies = await getSessionAttemptMcpApprovalPolicies(db, workspaceId, sessionId, attemptId);
+  }
   const policySettings = {
     ...settings,
     mcpServers: settings.mcpServers.map((server) =>
@@ -84,13 +71,15 @@ export async function settingsWithSessionMcpServersForRun(
       );
     }
   }
-  const servers = await listSessionMcpServersForRun(
-    db,
-    workspaceId,
-    sessionId,
-    attemptId,
-    encryptionKey ?? null,
-  );
+  const servers =
+    resolvedServers ??
+    (await listSessionMcpServersForRun(
+      db,
+      workspaceId,
+      sessionId,
+      attemptId,
+      encryptionKey ?? null,
+    ));
   // Keep credential provenance coupled to the exact decrypted rows that are
   // overlaid into settings. A session projection read earlier in the turn can
   // be stale after a concurrent mcpCredentialUpdates renewal.
@@ -127,259 +116,15 @@ export function settingsWithSessionMcpServers(
   };
 }
 
-/**
- * When the workspace has an active Codex subscription connected and the feature
- * is enabled, inject a synthetic "codex-subscription" registry provider so a
- * `codex/<slug>` model id routes through the ChatGPT backend. No secrets touch
- * this overlay (metadata-only read); the per-request bearer is resolved later via
- * codexRequestStorage. Idempotent and a no-op when not applicable.
- */
-export async function settingsWithCodexCredential(
-  db: Database,
-  workspaceId: string,
-  settings: Settings,
-  activeOverride?: boolean,
-): Promise<Settings> {
-  // Same active-credential predicate the billing bypass uses, so provider
-  // injection and billing can never disagree on what an "active codex" turn is.
-  // The caller may pass `activeOverride` (a single, shared read; P2-b) so routing
-  // and billing decide from the exact same observation, immune to a concurrent
-  // disconnect/reconnect landing between two independent reads.
-  const active =
-    activeOverride ?? (await workspaceCodexSubscriptionActive(db, settings, workspaceId));
-  if (!active) {
-    return settings; // disabled / not connected / needs_relogin / error -> leave settings unchanged
-  }
-  const withProvider = withCodexProvider(settings);
-  return withProvider;
-}
-
-/** Pure: append the synthetic codex-subscription provider, idempotently. */
-export function withCodexProvider(settings: Settings): Settings {
-  return withCodexCatalogProvider(settings);
-}
-
-/**
- * Pure: append the synthetic SuperGrok/xAI subscription provider,
- * idempotently. The overlay is catalogue metadata only; the exact account,
- * authority snapshot, and bearer remain frozen later at turn admission.
- */
-export function withXaiSubscriptionProvider(settings: Settings): Settings {
-  return withXaiSubscriptionCatalogProvider(settings);
-}
-
-export async function settingsWithWorkspaceGatewayCredential(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  settings: Settings,
-  retainedProductModelId?: string | null,
-): Promise<Settings> {
-  const activeCustomModels = await listWorkspaceGatewayCustomModels(db, {
-    accountId,
-    workspaceId,
-  });
-  const retainedUpstreamModelId = retainedProductModelId?.startsWith(
-    WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-  )
-    ? retainedProductModelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length)
-    : null;
-  const retainedCustomModel = retainedUpstreamModelId
-    ? await getWorkspaceGatewayCustomModelForExecution(db, {
-        accountId,
-        workspaceId,
-        upstreamModelId: retainedUpstreamModelId,
-      })
-    : null;
-  const customModels =
-    retainedCustomModel &&
-    !activeCustomModels.some(
-      (model) => model.upstreamModelId === retainedCustomModel.upstreamModelId,
-    )
-      ? [...activeCustomModels, retainedCustomModel]
-      : activeCustomModels;
-  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings, customModels);
-  const apiKey = await loadWorkspaceVercelAiGatewayApiKey(
-    db,
-    settings,
-    workspaceId,
-    retainedProductModelId,
-  );
-  return apiKey
-    ? withWorkspaceGatewayCredential(catalogSettings, apiKey, customModels)
-    : catalogSettings;
-}
-
-export async function settingsWithWorkspaceOpenRouterCredential(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  settings: Settings,
-  retainedProductModelId?: string | null,
-): Promise<Settings> {
-  const activeCustomModels = await listWorkspaceOpenRouterCustomModels(db, {
-    accountId,
-    workspaceId,
-  });
-  const retainedUpstreamModelId = retainedProductModelId?.startsWith(
-    WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
-  )
-    ? retainedProductModelId.slice(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length)
-    : null;
-  const retainedCustomModel = retainedUpstreamModelId
-    ? await getWorkspaceOpenRouterCustomModelForExecution(db, {
-        accountId,
-        workspaceId,
-        upstreamModelId: retainedUpstreamModelId,
-      })
-    : null;
-  const customModels =
-    retainedCustomModel &&
-    !activeCustomModels.some(
-      (model) => model.upstreamModelId === retainedCustomModel.upstreamModelId,
-    )
-      ? [...activeCustomModels, retainedCustomModel]
-      : activeCustomModels;
-  const catalogSettings = withWorkspaceOpenRouterCatalogProvider(settings, customModels);
-  const apiKey = await loadWorkspaceOpenRouterApiKey(
-    db,
-    settings,
-    workspaceId,
-    retainedProductModelId,
-  );
-  return apiKey
-    ? withWorkspaceOpenRouterCredential(catalogSettings, apiKey, customModels)
-    : catalogSettings;
-}
-
-export async function settingsWithOrganizationProviderCredentials(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  settings: Settings,
-  retainedProductModelId?: string | null,
-): Promise<Settings> {
-  const buildModels = async (
-    providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription",
-    prefix: string,
-  ) => {
-    const active = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
-      accountId,
-      workspaceId,
-      providerKind,
-    });
-    const upstreamModelId = retainedProductModelId?.startsWith(prefix)
-      ? retainedProductModelId.slice(prefix.length)
-      : null;
-    const retained = upstreamModelId
-      ? await getOrganizationModelProviderCustomModelForExecution(db, {
-          accountId,
-          workspaceId,
-          providerKind,
-          upstreamModelId,
-        })
-      : null;
-    return retained && !active.some((model) => model.id === retained.id)
-      ? [...active, retained]
-      : active;
-  };
-  const gatewayModels = await buildModels("vercel_gateway", ORGANIZATION_GATEWAY_MODEL_ID_PREFIX);
-  const openRouterModels = await buildModels("openrouter", ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX);
-  const gatewayKey = await loadOrganizationModelProviderApiKey(db, settings, {
-    accountId,
-    workspaceId,
-    providerKind: "vercel_gateway",
-  });
-  const gatewaySettings = gatewayKey
-    ? withOrganizationGatewayCredential(settings, gatewayKey, gatewayModels)
-    : withOrganizationGatewayCatalogProvider(settings, gatewayModels);
-  const openRouterKey = await loadOrganizationModelProviderApiKey(db, settings, {
-    accountId,
-    workspaceId,
-    providerKind: "openrouter",
-  });
-  let result = openRouterKey
-    ? withOrganizationOpenRouterCredential(gatewaySettings, openRouterKey, openRouterModels)
-    : withOrganizationOpenRouterCatalogProvider(gatewaySettings, openRouterModels);
-  for (const kind of CLAUDE_CONNECTION_KINDS) {
-    if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
-    const models = await buildModels(kind, claudeProviderId(kind) + "/");
-    result = withClaudeConnectionCatalog(result, { [kind]: { models } });
-    const binding =
-      kind === "claude_subscription"
-        ? await loadClaudeSubscriptionUsageCredential(db, settings, {
-            accountId,
-            workspaceId,
-            scope: "organization",
-          })
-        : null;
-    const credential =
-      kind === "claude_subscription"
-        ? binding?.serializedCredential
-        : await loadOrganizationModelProviderApiKey(db, settings, {
-            accountId,
-            workspaceId,
-            providerKind: kind,
-          });
-    if (credential)
-      result = withClaudeConnectionCredential(
-        result,
-        kind,
-        credential,
-        "organization",
-        binding ?? undefined,
-      );
-    const workspaceModels = await listWorkspaceProviderCustomModels(db, {
-      accountId,
-      workspaceId,
-      providerKind: kind,
-    });
-    const workspacePrefix = claudeProviderId(kind, "workspace") + "/";
-    const workspaceModelId = retainedProductModelId?.startsWith(workspacePrefix)
-      ? retainedProductModelId
-      : null;
-    if (workspaceModelId) {
-      const retained = await getWorkspaceProviderCustomModelForExecution(db, {
-        accountId,
-        workspaceId,
-        providerKind: kind,
-        upstreamModelId: workspaceModelId.slice(workspacePrefix.length),
-      });
-      if (retained && !workspaceModels.some((model) => model.id === retained.id))
-        workspaceModels.push(retained);
-    }
-    result = withClaudeConnectionCatalog(
-      result,
-      { [kind]: { models: workspaceModels } },
-      "workspace",
-    );
-    const workspaceBinding =
-      kind === "claude_subscription"
-        ? await loadClaudeSubscriptionUsageCredential(db, settings, {
-            accountId,
-            workspaceId,
-            scope: "workspace",
-          })
-        : null;
-    if (workspaceBinding && workspaceModelId)
-      await assertModelConnectionAllowsTurn(db, {
-        workspaceId,
-        subjectId: "worker:model-access",
-        modelId: workspaceModelId,
-        workspaceProviderConnectionId: workspaceBinding.connectionId,
-      });
-    const workspaceCredential =
-      kind === "claude_subscription"
-        ? workspaceBinding?.serializedCredential
-        : await loadWorkspaceProviderApiKey(db, settings, workspaceId, kind, workspaceModelId);
-    if (workspaceCredential)
-      result = withClaudeConnectionCredential(
-        result,
-        kind,
-        workspaceCredential,
-        "workspace",
-        workspaceBinding ?? undefined,
-      );
-  }
-  return result;
-}
+// Provider credential overlays live in core so stateless single model calls
+// resolve providers exactly like agent turns. These module-local bindings keep
+// the claim's call sites (and their test seams) unchanged.
+export const settingsWithCodexCredential = coreSettingsWithCodexCredential;
+export const withCodexProvider = coreWithCodexProvider;
+export const withXaiSubscriptionProvider = coreWithXaiSubscriptionProvider;
+export const settingsWithWorkspaceGatewayCredential = coreSettingsWithWorkspaceGatewayCredential;
+export const settingsWithWorkspaceOpenRouterCredential =
+  coreSettingsWithWorkspaceOpenRouterCredential;
+export const settingsWithWorkspaceOpperCredential = coreSettingsWithWorkspaceOpperCredential;
+export const settingsWithOrganizationProviderCredentials =
+  coreSettingsWithOrganizationProviderCredentials;

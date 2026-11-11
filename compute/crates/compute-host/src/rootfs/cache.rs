@@ -1,0 +1,508 @@
+//! The host's copies of sandbox images (ADR 19), by id.
+//!
+//! ```text
+//! <root>/rootfs/
+//!   <id>.ext4                   an image, whole and checked against its id
+//!   <id>.ext4.fetching.<n>      one being fetched; removed on start
+//!   used/<id>                   modified when a create last used the image
+//! ```
+//!
+//! A create that names an image the host does not have fetches it from the
+//! store first: into a staging name of its own, checked against its id,
+//! synced, then renamed into place, so a file under its final name is
+//! always whole. One fetch runs per image; other creates of it wait for
+//! that one. New disks are copies of the image (a shared-extent clone where
+//! the file system has them), as from the host's base image.
+//!
+//! The cache alone vouches for what an image's file holds: nothing copies
+//! one it has not checked, and nothing writes to one, so whoever needs to
+//! know its content (a template's inputs) takes the id for it instead of
+//! reading the file.
+//!
+//! The cache keeps a share of the state root's ownership, and so does every
+//! piece of its work in flight, blocking work included: a fetch or removal
+//! an agent started ends before a successor takes the root. A successor
+//! still trusts no file by its name alone: an image an earlier agent left
+//! is checked against its id the first time a create wants it, and removed
+//! (then fetched again) if it does not match.
+//!
+//! An image's file is never written once it is in place, not even its
+//! times: fetching a disk over it trusts chunk hashes of the file taken
+//! once per version of its metadata (see `crate::chunked`). When a create
+//! last used the image is the modified time of its use mark instead; an
+//! image without one (an earlier agent's) was last used when its own file
+//! was last modified. An image no create used for as long as a template may
+//! go unused, that no template is being built or kept from, is removed with
+//! its mark. Every create or template build
+//! shares the image's file lock from the check until its copy is made, so
+//! any number copy one image at once, and never wait for each other's
+//! copies. Only a removal takes that lock alone, and it does not wait for
+//! it: it skips an image in use, and looks at the time again under the
+//! lock, so an image is never removed under a copy, a fetch or a check.
+//! An image's fetch and its first check run once each, under a second lock
+//! of its own; other creates of it wait for that work, never for a copy.
+
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock};
+
+use crate::layout::{remove_if_present, sync_parent};
+use crate::protocol::ImageId;
+use crate::state::Ownership;
+use crate::store::Store;
+
+const SUFFIX: &str = ".ext4";
+const FETCHING: &str = ".ext4.fetching";
+/// The directory of the use marks.
+const USED: &str = "used";
+
+/// Why an image could not be had.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Missing {
+    /// Neither this host nor its store has it.
+    #[error("no image {0} on this host or in its store")]
+    Unknown(ImageId),
+    /// The fetch failed; a later one may succeed.
+    #[error("fetching image {image}: {error}")]
+    Failed { image: ImageId, error: String },
+}
+
+/// An image a create may copy: it stays on the host while this is held.
+/// Others may hold it too.
+pub(crate) struct Held {
+    pub path: PathBuf,
+    _lock: OwnedRwLockReadGuard<()>,
+}
+
+/// One image's locks.
+#[derive(Clone, Debug, Default)]
+struct Locks {
+    /// Shared by everything that uses its file, taken alone only by its
+    /// removal.
+    file: Arc<RwLock<()>>,
+    /// Taken by its fetch and by its first check, under a share of `file`,
+    /// so each runs once while other creates of the image wait for it.
+    work: Arc<AsyncMutex<()>>,
+}
+
+/// The host's images.
+#[derive(Debug)]
+pub(crate) struct Cache {
+    dir: PathBuf,
+    /// The images the directory holds whole.
+    present: Mutex<HashSet<ImageId>>,
+    /// Images an earlier agent left, not checked against their ids yet.
+    recovered: Mutex<HashSet<ImageId>>,
+    locks: Mutex<HashMap<ImageId, Locks>>,
+    /// How long an image may go unused before it is removed.
+    unused_after: Duration,
+    /// Kept by every piece of work in flight.
+    owner: Ownership,
+    /// Numbers staging names, with the time the cache opened.
+    attempts: AtomicU64,
+    opened: u128,
+}
+
+impl Cache {
+    /// The images under `dir`, for the owner of the state root that
+    /// `owner` shares. Removes what fetches an earlier agent left, and use
+    /// marks of images it no longer has. Blocks.
+    pub fn open(dir: PathBuf, unused_after: Duration, owner: Ownership) -> io::Result<Self> {
+        fs::create_dir_all(&dir)?;
+        let mut recovered = HashSet::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.contains(FETCHING) {
+                remove_if_present(&entry.path())?;
+            } else if let Some(image) = name
+                .strip_suffix(SUFFIX)
+                .and_then(|id| id.parse::<ImageId>().ok())
+            {
+                recovered.insert(image);
+            }
+        }
+        match fs::read_dir(dir.join(USED)) {
+            Ok(marks) => {
+                for entry in marks {
+                    let entry = entry?;
+                    let kept = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.parse::<ImageId>().ok())
+                        .is_some_and(|image| recovered.contains(&image));
+                    if !kept {
+                        remove_if_present(&entry.path())?;
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Ok(Self {
+            dir,
+            present: Mutex::default(),
+            recovered: Mutex::new(recovered),
+            locks: Mutex::default(),
+            unused_after,
+            owner,
+            attempts: AtomicU64::new(0),
+            opened: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos()),
+        })
+    }
+
+    /// A staging name no other fetch, of this agent or another, uses.
+    fn staging(&self, image: ImageId) -> PathBuf {
+        let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+        self.dir.join(format!(
+            "{image}{FETCHING}.{}-{}-{attempt}",
+            self.opened,
+            std::process::id()
+        ))
+    }
+
+    /// Runs `work` on a blocking thread, keeping the root's ownership
+    /// until it ends, even if the task waiting for it is dropped.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        let owner = self.owner.clone();
+        tokio::task::spawn_blocking(move || {
+            let _owner = owner;
+            work()
+        })
+        .await
+        .unwrap_or_else(|error| Err(io::Error::other(error)))
+    }
+
+    /// Checks an image an earlier agent left against its id, once: it
+    /// becomes present if it matches and is removed if not. Call with a
+    /// share of the image's file lock and its work lock. It stays
+    /// unchecked until the check ends, so anyone who finds it unchecked
+    /// meanwhile waits for this one.
+    async fn check_recovered(&self, image: ImageId) {
+        if !self.unchecked(image) {
+            return;
+        }
+        let path = self.path(image);
+        let checked = self
+            .blocking(move || {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update_reader(io::BufReader::with_capacity(
+                    1 << 20,
+                    fs::File::open(&path)?,
+                ))?;
+                let matches = *hasher.finalize().as_bytes() == image.0;
+                if !matches {
+                    remove_if_present(&path)?;
+                }
+                Ok(matches)
+            })
+            .await;
+        match checked {
+            Ok(true) => {
+                self.present
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(image);
+            }
+            Ok(false) => tracing::warn!(%image, "a kept image did not match its id; removed"),
+            Err(error) => tracing::warn!(%image, %error, "could not check a kept image"),
+        }
+        self.recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&image);
+    }
+
+    /// Whether `image` is one an earlier agent left, not checked yet.
+    fn unchecked(&self, image: ImageId) -> bool {
+        self.recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&image)
+    }
+
+    /// Where the image `image` is kept.
+    pub fn path(&self, image: ImageId) -> PathBuf {
+        self.dir.join(format!("{image}{SUFFIX}"))
+    }
+
+    /// The use mark of `image`.
+    fn mark(&self, image: ImageId) -> PathBuf {
+        self.dir.join(USED).join(image.to_string())
+    }
+
+    /// Whether the host has `image`, checked, without waiting for
+    /// anything.
+    pub fn has(&self, image: ImageId) -> bool {
+        self.present
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&image)
+    }
+
+    fn locks(&self, image: ImageId) -> Locks {
+        self.locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(image)
+            .or_default()
+            .clone()
+    }
+
+    /// A share of the image's file lock, once the image is checked if an
+    /// earlier agent left it.
+    async fn shared(&self, image: ImageId) -> OwnedRwLockReadGuard<()> {
+        let locks = self.locks(image);
+        let shared = locks.file.read_owned().await;
+        // Only opening the cache adds to these, so one not among them now
+        // never needs the check.
+        if self.unchecked(image) {
+            let _work = locks.work.lock().await;
+            self.check_recovered(image).await;
+        }
+        shared
+    }
+
+    /// The image `image`, fetched from `store` first if the host does not
+    /// have it, and marked used now.
+    pub async fn get<S: Store>(&self, image: ImageId, store: &S) -> Result<Held, Missing> {
+        let shared = self.shared(image).await;
+        let path = self.path(image);
+        let failed = |error: String| Missing::Failed { image, error };
+        // One fetch runs per image: other creates of it wait here, then
+        // find it present. No one uses the file under its final name
+        // until then.
+        let work = self.locks(image).work;
+        let fetching = if self.has(image) {
+            None
+        } else {
+            Some(work.lock().await)
+        };
+        if fetching.is_some() && !self.has(image) {
+            let staging = self.staging(image);
+            // Kept until the fetch's last write: the store writes into the
+            // staging file.
+            let owner = self.owner.clone();
+            let fetched = store.fetch_image(image, &staging).await;
+            let found = matches!(fetched, Ok(true));
+            let placed = self
+                .blocking({
+                    let path = path.clone();
+                    move || {
+                        if found {
+                            fs::rename(&staging, &path)?;
+                            sync_parent(&path)
+                        } else {
+                            remove_if_present(&staging)
+                        }
+                    }
+                })
+                .await;
+            drop(owner);
+            match fetched {
+                Ok(true) => placed.map_err(|error| failed(error.to_string()))?,
+                Ok(false) => return Err(Missing::Unknown(image)),
+                Err(error) => return Err(failed(error.to_string())),
+            }
+            self.present
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(image);
+            tracing::info!(%image, "image fetched from the store");
+        }
+        drop(fetching);
+        Ok(self.used(image, path, shared).await)
+    }
+
+    /// Keeps the file at `path`, whose id is `image`, as the host's copy of
+    /// that image, marked used now: synced and renamed into place (on the
+    /// same file system), or removed when the host has the image already.
+    /// An image the host built itself then serves its creates without a
+    /// fetch, and stays on its disk only as any cached image does: disk
+    /// relief and the week rule remove it once nothing holds it.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be synced or moved; it is left where it was.
+    pub async fn adopt(&self, image: ImageId, path: &Path) -> io::Result<()> {
+        let shared = self.shared(image).await;
+        let work = self.locks(image).work;
+        let _work = work.lock().await;
+        let kept = self.path(image);
+        let have = self.has(image);
+        let from = path.to_owned();
+        self.blocking({
+            let kept = kept.clone();
+            move || {
+                if have {
+                    return remove_if_present(&from);
+                }
+                fs::File::open(&from)?.sync_all()?;
+                fs::rename(&from, &kept)?;
+                sync_parent(&kept)
+            }
+        })
+        .await?;
+        self.present
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(image);
+        drop(self.used(image, kept, shared).await);
+        Ok(())
+    }
+
+    /// The image `image` if the host has it, marked used now; never
+    /// fetches.
+    pub async fn hold(&self, image: ImageId) -> Option<Held> {
+        let lock = self.shared(image).await;
+        if !self.has(image) {
+            return None;
+        }
+        Some(self.used(image, self.path(image), lock).await)
+    }
+
+    /// Marks the image at `path` used now and holds it with `lock`.
+    async fn used(&self, image: ImageId, path: PathBuf, lock: OwnedRwLockReadGuard<()>) -> Held {
+        // Only the retirement clock depends on it.
+        let marks = self.dir.join(USED);
+        let mark = self.mark(image);
+        let marked = self
+            .blocking(move || {
+                let open = || {
+                    fs::File::options()
+                        .create(true)
+                        .truncate(false)
+                        .write(true)
+                        .open(&mark)
+                };
+                let file = match open() {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        fs::create_dir_all(&marks)?;
+                        open()?
+                    }
+                    opened => opened?,
+                };
+                file.set_modified(SystemTime::now())
+            })
+            .await;
+        if let Err(error) = marked {
+            tracing::warn!(%image, %error, "could not mark an image used");
+        }
+        Held { path, _lock: lock }
+    }
+
+    /// Every image the host keeps, checked or not.
+    pub fn images(&self) -> Vec<ImageId> {
+        let present = self.present.lock().unwrap_or_else(PoisonError::into_inner);
+        let recovered = self
+            .recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut images: Vec<ImageId> = present.union(&recovered).copied().collect();
+        images.sort_unstable();
+        images
+    }
+
+    /// When a create last used `image`: its use mark's time, or for one
+    /// without a mark (an earlier agent's) when its own file last changed.
+    /// Blocks.
+    pub fn last_used(&self, image: ImageId) -> io::Result<SystemTime> {
+        last_used(&self.path(image), &self.mark(image))
+    }
+
+    /// Removes the images no create used for long, except those in `keep`.
+    /// Returns the ones removed.
+    pub async fn retire(&self, keep: &HashSet<ImageId>, now: SystemTime) -> Vec<ImageId> {
+        let mut removed = Vec::new();
+        for image in self.images() {
+            if keep.contains(&image) {
+                continue;
+            }
+            let unused_after = self.unused_after;
+            let unused = move |used: SystemTime| {
+                now.duration_since(used)
+                    .is_ok_and(|since| since >= unused_after)
+            };
+            if self.remove_if(image, unused).await {
+                tracing::info!(%image, "image unused for long; removed");
+                removed.push(image);
+            }
+        }
+        removed
+    }
+
+    /// Removes `image` now, as disk relief asks, unless a copy, a fetch
+    /// or a check holds it. Returns whether it did.
+    pub async fn remove(&self, image: ImageId) -> bool {
+        self.remove_if(image, |_| true).await
+    }
+
+    /// Removes `image` with its use mark if nothing holds it and `unused`
+    /// says so of when it was last used, read under the image's lock.
+    /// Returns whether it did.
+    async fn remove_if(&self, image: ImageId, unused: impl FnOnce(SystemTime) -> bool) -> bool {
+        // A copy holding it is using it.
+        let Ok(_lock) = self.locks(image).file.try_write_owned() else {
+            return false;
+        };
+        let (path, mark) = (self.path(image), self.mark(image));
+        let used = self
+            .blocking({
+                let (path, mark) = (path.clone(), mark.clone());
+                move || last_used(&path, &mark)
+            })
+            .await;
+        if !used.is_ok_and(unused) {
+            return false;
+        }
+        self.present
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&image);
+        self.recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&image);
+        // A mark left behind if this stops between the two is removed
+        // when the next agent opens the cache.
+        match self
+            .blocking(move || {
+                remove_if_present(&path)?;
+                remove_if_present(&mark)
+            })
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%image, %error, "could not remove an image");
+                false
+            }
+        }
+    }
+}
+
+/// When a create last used the image at `path`: its use `mark`'s time, or
+/// for one without a mark (an earlier agent's) when its own file last
+/// changed. Blocks.
+fn last_used(path: &Path, mark: &Path) -> io::Result<SystemTime> {
+    match fs::metadata(mark) {
+        Ok(marked) => marked.modified(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::metadata(path)?.modified(),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests;

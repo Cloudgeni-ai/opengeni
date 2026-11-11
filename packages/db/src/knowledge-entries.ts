@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   FileAsset,
   KnowledgeFilePreparationResult,
@@ -15,6 +15,8 @@ import {
   KnowledgeEntryBatchReviewRequest,
   KnowledgeTaskNotePromotionRequest,
   KnowledgeEntryRecord,
+  KnowledgeEntryReach,
+  KnowledgeEntryReachRecord,
   KnowledgeEntryReviewRequest,
   KnowledgeEntryRestoreRequest,
   KnowledgeEntrySaveRequest,
@@ -27,6 +29,11 @@ import {
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { safeDatabaseErrorFacts } from "./persistence-errors";
+import {
+  isKnowledgeLearningScopeGuardError,
+  KnowledgeLearningScopeChangedError,
+} from "./knowledge-learning-errors";
+export { KnowledgeLearningScopeChangedError } from "./knowledge-learning-errors";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 import {
   fromPostgresLosslessJson,
@@ -160,6 +167,10 @@ export async function freezeAgentLearningPolicy(db: Database, context: Knowledge
       })
       .passthrough()
       .parse(row?.policy);
+  }).catch((error: unknown) => {
+    if (isKnowledgeLearningScopeGuardError(error))
+      throw new KnowledgeLearningScopeChangedError(error);
+    throw error;
   });
 }
 
@@ -312,6 +323,84 @@ export async function archiveKnowledgeEntry(
   return apply(db, context, { ...request, operation: "archive" });
 }
 
+/**
+ * Where an entry this workspace has works, and whether the person asking may
+ * change it (migration 1196). Null when this workspace doesn't have the entry.
+ * People and services only: agents use the entries their workspace has.
+ */
+export async function getKnowledgeEntryReach(
+  db: Database,
+  context: KnowledgeContext,
+  entryId: string,
+): Promise<KnowledgeEntryReachRecord | null> {
+  const request = { operation: "reach", entryId: z.uuid().parse(entryId) };
+  return inKnowledgeContext(db, context, async (tx) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`
+      SELECT knowledge_entry_read(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS result`,
+    );
+    return row?.result == null ? null : KnowledgeEntryReachRecord.parse(row.result);
+  });
+}
+
+const KnowledgeEntryReachChange = z
+  .object({
+    entryId: z.uuid(),
+    scope: z.enum(["organization", "personal"]),
+    originWorkspaceId: z.uuid(),
+    reach: KnowledgeEntryReach,
+    previous: KnowledgeEntryReach,
+  })
+  .strict();
+
+/**
+ * Change where an organization or personal entry works. The caller has
+ * checked the listed workspaces: shared workspaces of the organization for an
+ * organization entry, the owner's own workspaces for a personal one. The
+ * workspace it was added in always has it and is never stored. It is not a
+ * revision, so the entry keeps its version; the change is audited in the same
+ * transaction. People and services with write access to the entry's scope.
+ */
+export async function setKnowledgeEntryReach(
+  db: Database,
+  context: KnowledgeContext,
+  input: { entryId: string; reach: KnowledgeEntryReach },
+): Promise<KnowledgeEntryReachRecord> {
+  const request = {
+    operation: "reach",
+    operationId: randomUUID(),
+    entryId: z.uuid().parse(input.entryId),
+    reach: KnowledgeEntryReach.parse(input.reach),
+  };
+  return inKnowledgeContext(db, context, async (tx) => {
+    const [row] = await rawRows<{ receipt: unknown }>(
+      tx,
+      sql`
+      SELECT knowledge_entry_apply(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS receipt`,
+    );
+    const change = KnowledgeEntryReachChange.parse(row?.receipt);
+    await rawRows(
+      tx,
+      sql`INSERT INTO audit_events(account_id, workspace_id, subject_id, action, target_type,
+          target_id, metadata)
+        VALUES (${context.accountId}::uuid, ${context.workspaceId}::uuid,
+          ${context.actor.kind === "agent" ? null : context.actor.subjectId},
+          'knowledge.reach.changed', 'knowledge_entry', ${change.entryId},
+          ${JSON.stringify({ scope: change.scope, from: change.previous, to: change.reach })}::jsonb)`,
+    );
+    return {
+      entryId: change.entryId,
+      scope: change.scope,
+      originWorkspaceId: change.originWorkspaceId,
+      reach: change.reach,
+      canChange: true,
+    };
+  });
+}
+
 const StoredProjection = z
   .object({
     revision: z
@@ -449,14 +538,79 @@ export async function getKnowledgeEntry(
   return (await withIndexStatus(db, context, [record], request.view ?? "published"))[0]!;
 }
 
+/**
+ * Read a bounded set of current entries in input order. Every entry still goes
+ * through the native actor, scope and transitive-evidence authorization seam;
+ * only the transaction setup and round trips are shared. Missing or no longer
+ * visible entries retain their null slot. This is not a historical revision read.
+ */
+export async function getKnowledgeEntries(
+  db: Database,
+  context: KnowledgeContext,
+  entryIds: string[],
+  options: {
+    view?: "published" | "needs_review" | "archived" | "rejected" | undefined;
+  } = {},
+): Promise<Array<KnowledgeEntryRecord | null>> {
+  const { entryIds: ids, ...request } = z
+    .object({
+      entryIds: z.array(z.uuid()).max(50),
+      view: z.enum(["published", "needs_review", "archived", "rejected"]).optional(),
+    })
+    .strict()
+    .parse({ entryIds, ...options });
+  if (!ids.length) return [];
+  const records = await inKnowledgeContext(db, context, async (tx) => {
+    const rows = await rawRows<{ result: unknown }>(
+      tx,
+      sql`SELECT knowledge_entry_read(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,
+        jsonb_build_object('operation','get','limit',1,'entryId',entry.id)
+          || ${JSON.stringify(request)}::jsonb) AS result
+      FROM jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)
+        WITH ORDINALITY AS entry(id,position)
+      ORDER BY entry.position`,
+    );
+    return rows.map((row) => {
+      const values = z.array(z.unknown()).parse(row.result);
+      return values[0] ? decodeProjection(values[0], true) : null;
+    });
+  });
+  const decorated = await withIndexStatus(
+    db,
+    context,
+    records.filter((record) => record !== null),
+    request.view ?? "published",
+  );
+  let index = 0;
+  return records.map((record) => (record ? decorated[index++]! : null));
+}
+
 const Cursor = z
   .object({
-    v: z.literal(2),
+    v: z.literal(3),
     afterId: z.uuid(),
     afterScore: z.number().finite(),
+    /** The order key of the last row: latest change, or creation. A function
+     *  from before the order key returns none; its pages continue in id order. */
+    afterOrderedAt: z.iso.datetime({ offset: true }).optional(),
     queryHash: z.string().length(64),
   })
   .strict();
+
+/** The order key a list read returns beside each row; not part of the projection. */
+const OrderedRow = z
+  .object({ orderedAt: z.iso.datetime({ offset: true }).optional() })
+  .passthrough();
+function splitOrderedRow(row: unknown): { orderedAt: string | undefined; row: unknown } {
+  const { orderedAt, ...rest } = OrderedRow.parse(row);
+  return { orderedAt, row: rest };
+}
+
+function encodeCursor(cursor: z.infer<typeof Cursor>): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
 export async function listKnowledgeEntries(
   db: Database,
   context: KnowledgeContext,
@@ -464,8 +618,11 @@ export async function listKnowledgeEntries(
   embedding?: { model: string; values: number[] } | undefined,
 ) {
   const { cursor, ...request } = KnowledgeEntryListRequest.parse(input);
+  // Newest first: by latest change, or by creation inside an Added window. A
+  // query still ranks by relevance first; the order only breaks ties.
+  const order = request.createdSince ? "created" : "updated";
   const queryHash = createHash("sha256")
-    .update(JSON.stringify({ context, request, embeddingModel: embedding?.model ?? null }))
+    .update(JSON.stringify({ context, request, order, embeddingModel: embedding?.model ?? null }))
     .digest("hex");
   let position: z.infer<typeof Cursor> | null = null;
   try {
@@ -482,10 +639,19 @@ export async function listKnowledgeEntries(
       },
     ]);
   }
+  // A page that began without an order key continues in its original order.
+  const ordered = !position || position.afterOrderedAt !== undefined;
   const rows = await read(db, context, {
     ...request,
     operation: "list",
-    ...(position ? { afterId: position.afterId, afterScore: position.afterScore } : {}),
+    ...(ordered ? { order } : {}),
+    ...(position
+      ? {
+          afterId: position.afterId,
+          afterScore: position.afterScore,
+          ...(position.afterOrderedAt ? { afterOrderedAt: position.afterOrderedAt } : {}),
+        }
+      : {}),
     ...(embedding
       ? {
           embedding: z.array(z.number().finite()).min(1).max(4096).parse(embedding.values),
@@ -493,24 +659,28 @@ export async function listKnowledgeEntries(
         }
       : {}),
   });
+  const page = rows.slice(0, request.limit).map(splitOrderedRow);
   const entries = await withIndexStatus(
     db,
     context,
-    rows.slice(0, request.limit).map((row) => decodeProjection(row, false)),
+    page.map(({ orderedAt, row }) => {
+      const entry = decodeProjection(row, false);
+      return order === "updated" && orderedAt ? { ...entry, lastChangedAt: orderedAt } : entry;
+    }),
     request.view,
   );
+  const last = page.at(-1);
   return {
     entries,
     nextCursor:
-      rows.length > request.limit && entries.length
-        ? Buffer.from(
-            JSON.stringify({
-              v: 2,
-              afterId: entries.at(-1)!.id,
-              afterScore: entries.at(-1)!.score ?? 0,
-              queryHash,
-            }),
-          ).toString("base64url")
+      rows.length > request.limit && entries.length && last
+        ? encodeCursor({
+            v: 3,
+            afterId: entries.at(-1)!.id,
+            afterScore: entries.at(-1)!.score ?? 0,
+            ...(last.orderedAt ? { afterOrderedAt: last.orderedAt } : {}),
+            queryHash,
+          })
         : null,
   };
 }
@@ -522,7 +692,7 @@ export async function listKnowledgeReviewBatches(
 ) {
   const { cursor, ...request } = KnowledgeReviewBatchListRequest.parse(input);
   const queryHash = createHash("sha256")
-    .update(JSON.stringify({ context, request, operation: "review_batches" }))
+    .update(JSON.stringify({ context, request, operation: "review_batches", order: "updated" }))
     .digest("hex");
   let position: z.infer<typeof Cursor> | null = null;
   try {
@@ -535,21 +705,34 @@ export async function listKnowledgeReviewBatches(
       { code: "custom", path: ["cursor"], message: "Review groups changed. Refresh to continue." },
     ]);
   }
-  const rows = z.array(KnowledgeReviewBatch).parse(
+  // The newest pending change first.
+  const rows = (
     await read(db, context, {
       ...request,
       operation: "review_batches",
-      ...(position ? { afterId: position.afterId } : {}),
-    }),
-  );
-  const batches = rows.slice(0, request.limit);
+      ...(!position || position.afterOrderedAt ? { order: "updated" } : {}),
+      ...(position
+        ? {
+            afterId: position.afterId,
+            ...(position.afterOrderedAt ? { afterOrderedAt: position.afterOrderedAt } : {}),
+          }
+        : {}),
+    })
+  ).map(splitOrderedRow);
+  const page = rows.slice(0, request.limit);
+  const batches = page.map(({ row }) => KnowledgeReviewBatch.parse(row));
+  const last = page.at(-1);
   return {
     batches,
     nextCursor:
-      rows.length > request.limit && batches.length
-        ? Buffer.from(
-            JSON.stringify({ v: 2, afterId: batches.at(-1)!.id, afterScore: 0, queryHash }),
-          ).toString("base64url")
+      rows.length > request.limit && batches.length && last
+        ? encodeCursor({
+            v: 3,
+            afterId: batches.at(-1)!.id,
+            afterScore: 0,
+            ...(last.orderedAt ? { afterOrderedAt: last.orderedAt } : {}),
+            queryHash,
+          })
         : null,
   };
 }
@@ -908,58 +1091,4 @@ export async function recoverLegacyKnowledgeConfirmations(db: Database, context:
       })
       .parse(row?.result);
   });
-}
-
-/** Explicit content from this agent's bound source, including its own pending batch.
- * Ambient retrieval continues to return published knowledge only. */
-export async function readScheduledKnowledgeSource(
-  db: Database,
-  context: KnowledgeContext,
-  input: {
-    entryId?: string;
-    afterId?: string;
-    offset?: number;
-  },
-) {
-  const request = z
-    .object({
-      entryId: z.uuid().optional(),
-      afterId: z.uuid().optional(),
-      offset: z.number().int().min(0).max(100_000_000).optional(),
-    })
-    .strict()
-    .parse(input);
-  const rows = await read(db, context, {
-    operation: request.entryId ? "source_read" : "source_list",
-    limit: 20,
-    ...(request.entryId ? { entryId: request.entryId } : {}),
-    ...(request.afterId ? { afterId: request.afterId } : {}),
-  });
-  const records = rows.map((row) =>
-    z
-      .object({
-        entryId: z.uuid(),
-        revisionId: z.uuid(),
-        title: z.string(),
-        content: z.string().optional(),
-        codecVersion: z.number(),
-        pending: z.boolean(),
-      })
-      .parse(row),
-  );
-  const items = records.slice(0, 20).map((row) => {
-    const title = z.string().parse(fromPostgresLosslessJson(row.title, row.codecVersion));
-    if (row.content === undefined) return { ...row, title };
-    const content = z.string().parse(fromPostgresLosslessJson(row.content, row.codecVersion));
-    const offset = request.offset ?? 0;
-    return {
-      ...row,
-      title,
-      content: content.slice(offset, offset + 16_000),
-      offset,
-      totalCharacters: content.length,
-      nextOffset: offset + 16_000 < content.length ? offset + 16_000 : null,
-    };
-  });
-  return { items, nextCursor: records.length > 20 ? (items.at(-1)?.entryId ?? null) : null };
 }

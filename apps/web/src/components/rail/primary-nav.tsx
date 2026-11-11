@@ -1,16 +1,16 @@
 import { useRouterState } from "@tanstack/react-router";
-import { ChevronDownIcon, SquarePenIcon } from "lucide-react";
+import { ChevronDownIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
 import { useScheduledTaskAttentionIndicator } from "./use-scheduled-task-attention";
-import { useRail } from "@/components/rail/rail-context";
-import { NewSessionLink } from "@/components/rail/session-list";
+import { useMeetingRecorderState } from "@opengeni/react/meetings";
+import { InboxLink } from "@/components/rail/inbox-link";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
-import { Button } from "@/components/ui/button";
-import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
-import { cn } from "@/lib/utils";
+import { Button } from "@opengeni/react/ui/button";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 const WORKSPACE_SHORTCUTS_EXPANDED_KEY = "opengeni.rail.nav";
 
@@ -41,6 +41,8 @@ export function WorkspaceShortcutLinks({
     scheduleAttention === undefined,
   );
   const schedulesNeedAttention = scheduleAttention ?? fetchedAttention;
+  const recorderState = useMeetingRecorderState();
+  const recording = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   return (
@@ -51,8 +53,9 @@ export function WorkspaceShortcutLinks({
           item={item}
           needsReview={item.to === "/workspaces/$workspaceId/state" && pendingKnowledge}
           needsAttention={
-            item.to === "/workspaces/$workspaceId/schedules" && schedulesNeedAttention
+            item.to === "/workspaces/$workspaceId/automations" && schedulesNeedAttention
           }
+          recording={item.to === "/workspaces/$workspaceId/meetings" && recording}
           workspaceId={rail.workspaceId}
           variant="rail"
           collapsed={rail.collapsed}
@@ -64,13 +67,17 @@ export function WorkspaceShortcutLinks({
   );
 }
 
-/** Primary product navigation, kept separate from workspace administration. */
-export function PrimaryNav() {
+/**
+ * The web app's primary navigation after the shared "New session" link: the
+ * inbox and the workspace shortcuts, kept separate from workspace administration.
+ */
+export function PrimaryNavExtras() {
   const rail = useRail();
   const pendingKnowledge = useKnowledgeReviewIndicator(rail.workspaceId);
   const schedulesNeedAttention = useScheduledTaskAttentionIndicator(rail.workspaceId);
+  const recorderState = useMeetingRecorderState();
+  const recordingMeeting = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
   const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
     isConfigItemActive(pathname, rail.workspaceId, item.to),
   );
@@ -99,26 +106,8 @@ export function PrimaryNav() {
   };
 
   return (
-    <div className={cn("mt-2 grid gap-0.5 px-2", rail.collapsed && "justify-center")}>
-      <NewSessionLink
-        aria-label={`New session · ${shortcutLabel(NEW_SESSION_SHORTCUT)}`}
-        className={cn(
-          "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10",
-          "hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
-          newSessionActive && "bg-selection text-fg hover:bg-selection",
-          rail.collapsed ? "w-8 justify-center pointer-coarse:w-10" : "gap-2.5 px-2.5",
-        )}
-      >
-        <span
-          aria-hidden="true"
-          className={cn(
-            "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand transition-opacity",
-            newSessionActive ? "opacity-100" : "opacity-0",
-          )}
-        />
-        <SquarePenIcon className="size-4 shrink-0" />
-        {rail.collapsed ? null : <span className="min-w-0 truncate">New session</span>}
-      </NewSessionLink>
+    <>
+      <InboxLink />
 
       {rail.isMobile ? null : rail.collapsed ? (
         <WorkspaceShortcutLinks
@@ -171,7 +160,7 @@ export function PrimaryNav() {
                 <WorkspaceConfigLink
                   item={
                     PRIMARY_WORKSPACE_ITEMS.find(
-                      (item) => item.to === "/workspaces/$workspaceId/schedules",
+                      (item) => item.to === "/workspaces/$workspaceId/automations",
                     )!
                   }
                   workspaceId={rail.workspaceId}
@@ -180,7 +169,25 @@ export function PrimaryNav() {
                   active={isConfigItemActive(
                     pathname,
                     rail.workspaceId,
-                    "/workspaces/$workspaceId/schedules",
+                    "/workspaces/$workspaceId/automations",
+                  )}
+                  onNavigate={() => rail.setDrawerOpen(false)}
+                />
+              ) : null}
+              {recordingMeeting ? (
+                <WorkspaceConfigLink
+                  item={
+                    PRIMARY_WORKSPACE_ITEMS.find(
+                      (item) => item.to === "/workspaces/$workspaceId/meetings",
+                    )!
+                  }
+                  workspaceId={rail.workspaceId}
+                  variant="rail"
+                  recording
+                  active={isConfigItemActive(
+                    pathname,
+                    rail.workspaceId,
+                    "/workspaces/$workspaceId/meetings",
                   )}
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />
@@ -216,6 +223,6 @@ export function PrimaryNav() {
           )}
         </div>
       )}
-    </div>
+    </>
   );
 }

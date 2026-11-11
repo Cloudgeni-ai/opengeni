@@ -4,7 +4,9 @@ import {
   deriveExpectedReleasePackages,
   loadPublishablePackages,
   parseExpectedPackages,
+  readRegistryPackage,
   reconcileReleasePackages,
+  REGISTRY_SETTLEMENT_TIMEOUT_MS,
   resolveExpectedReleasePackages,
   validateVerifiedPackagePublicationReceipt,
   type PublishablePackage,
@@ -33,6 +35,125 @@ function receipt(pkg: PublishablePackage, gitHead: string): ReleasePackageReceip
     integrity: "sha512-release-integrity",
   };
 }
+
+describe("release registry settlement", () => {
+  test("verification tolerates delayed visibility and incomplete identity for eleven minutes", async () => {
+    let elapsed = 0;
+    let reads = 0;
+    const result = await readRegistryPackage(react, true, {
+      now: () => elapsed,
+      sleep: async (milliseconds) => {
+        elapsed += milliseconds;
+      },
+      fetchPackage: async () => {
+        reads += 1;
+        if (elapsed < 6 * 60_000) return null;
+        return {
+          ...published(react),
+          gitHead: elapsed < 9 * 60_000 ? null : sha,
+          integrity: elapsed < 11 * 60_000 ? null : "sha512-release-integrity",
+        };
+      },
+    });
+    expect(result).toEqual(published(react));
+    expect(elapsed).toBe(11 * 60_000);
+    expect(reads).toBe(133);
+    expect(elapsed).toBeLessThan(REGISTRY_SETTLEMENT_TIMEOUT_MS);
+  });
+
+  test("verification includes slow requests in its deadline and starts no read after expiry", async () => {
+    let elapsed = 0;
+    const readStarts: number[] = [];
+    const result = await readRegistryPackage(react, true, {
+      now: () => elapsed,
+      sleep: async (milliseconds) => {
+        elapsed += milliseconds;
+      },
+      fetchPackage: async () => {
+        readStarts.push(elapsed);
+        elapsed += 20_000;
+        return null;
+      },
+    });
+    expect(result).toBeNull();
+    expect(elapsed).toBe(REGISTRY_SETTLEMENT_TIMEOUT_MS);
+    expect(readStarts).toHaveLength(36);
+    expect(readStarts.every((start) => start < REGISTRY_SETTLEMENT_TIMEOUT_MS)).toBe(true);
+  });
+
+  test("verification propagates a terminal registry read failure instead of claiming settlement", async () => {
+    let elapsed = 0;
+    const error = new Error("registry unavailable");
+    await expect(
+      readRegistryPackage(react, true, {
+        now: () => elapsed,
+        sleep: async (milliseconds) => {
+          elapsed += milliseconds;
+        },
+        fetchPackage: async () => {
+          elapsed += 100_000;
+          throw error;
+        },
+      }),
+    ).rejects.toBe(error);
+  });
+
+  test("complete but wrong source identity is returned for immediate fail-closed reconciliation", async () => {
+    const wrongSource = published(react, "b".repeat(40));
+    const result = await readRegistryPackage(react, true, {
+      now: () => 0,
+      fetchPackage: async () => wrongSource,
+      sleep: async () => {
+        throw new Error("must not retry an immutable identity mismatch");
+      },
+    });
+    expect(result).toEqual(wrongSource);
+    expect(() =>
+      reconcileReleasePackages({
+        sourceSha: sha,
+        phase: "verify",
+        publishable: [react],
+        expected: [react],
+        registry: new Map([[react.name, result]]),
+      }),
+    ).toThrow("gitHead");
+  });
+
+  test("planning returns an absent package immediately without a settlement wait", async () => {
+    let reads = 0;
+    expect(
+      await readRegistryPackage(react, false, {
+        fetchPackage: async () => {
+          reads += 1;
+          return null;
+        },
+        sleep: async () => {
+          throw new Error("planning must not wait for publication");
+        },
+      }),
+    ).toBeNull();
+    expect(reads).toBe(1);
+  });
+
+  test("planning preserves its three-read transient-error retry limit", async () => {
+    let reads = 0;
+    const sleeps: number[] = [];
+    const error = new Error("registry unavailable");
+    await expect(
+      readRegistryPackage(react, false, {
+        fetchPackage: async () => {
+          reads += 1;
+          throw error;
+        },
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+        },
+      }),
+    ).rejects.toBe(error);
+    expect(reads).toBe(3);
+    expect(sleeps).toEqual([5_000, 5_000]);
+  });
+});
 
 describe("release package evidence", () => {
   test("inventories the exact publishable workspace closure, including app packages", () => {

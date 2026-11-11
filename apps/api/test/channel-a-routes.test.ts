@@ -13,9 +13,11 @@ import {
   ChannelAConflictError,
   ChannelAFileSystemRouteChangedError,
   ChannelAUnavailableError,
+  SynchronousCommandOutcomeUnknownError,
   ChannelAValidationError,
   BrowserControlTransportError,
   RoutingActiveRouteChangedError,
+  RoutingMutationOutputRejectedError,
   RoutingWorkspaceRootChangedError,
   NatsControlRpc,
   agentErrorToControlError,
@@ -39,14 +41,42 @@ import {
 //       runs BEFORE parseChannelABody (the Zod parse) in every handler.
 //   (2) FLAG-GATE: the preamble asserts sandboxOwnershipEnabled, so the routes
 //       are inert until the flag flips per-environment.
-//   (3) EXPLICIT 400 ON PARSE FAIL: parseChannelABody uses safeParse + an
-//       explicit HTTPException(400) — never a raw ZodError → 500.
+//   (3) EXPLICIT 400 ON PARSE FAIL: parseChannelABody uses parseRequestBody
+//       with an explicit 400 — never a raw ZodError → 500.
 //   (4) CORRECT PERMISSION: FS reads/Git ride files:read, FS mutations ride
 //       files:write, Terminal exec + PTY ride terminal:attach.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const sessionsRoute = readFileSync(resolve(here, "..", "src", "routes", "sessions.ts"), "utf8");
 const channelASeam = readFileSync(resolve(here, "..", "src", "sandbox", "channel-a.ts"), "utf8");
+
+test("pending synchronous commands preserve their original handle and never refresh/replay", async () => {
+  const pending = new SynchronousCommandOutcomeUnknownError(31, {
+    stdout: "already wrote",
+    stderr: "",
+  });
+  const mapped = mapChannelAError(pending);
+  expect(mapped).toBeInstanceOf(HTTPException);
+  expect((mapped as HTTPException).status).toBe(409);
+  expect((mapped as HTTPException).message).toContain("pending or unknown");
+  expect((mapped as HTTPException).message).not.toMatch(/retry|try again|already wrote/iu);
+  expect(shouldEvictChannelAHandleAfterError(pending, "read")).toBe(false);
+  let starts = 0;
+  let refreshed = 0;
+  await expect(
+    runChannelAReadWithFreshHandleRetry(
+      async () => {
+        starts++;
+        throw pending;
+      },
+      async () => {
+        refreshed++;
+      },
+    ),
+  ).rejects.toBe(pending);
+  expect(starts).toBe(1);
+  expect(refreshed).toBe(0);
+});
 
 type RouteSpec = {
   path: string;
@@ -222,17 +252,32 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(slice).toContain("HTTPException(404");
   });
 
-  test("parseChannelABody uses safeParse + an explicit HTTPException(400), never a raw ZodError", () => {
+  test("parseChannelABody validates with parseRequestBody and an explicit 400, never a raw ZodError", () => {
     const parser = sessionsRoute.slice(sessionsRoute.indexOf("async function parseChannelABody"));
     const slice = parser.slice(0, 600);
-    expect(slice).toContain(".safeParse(");
-    expect(slice).toContain("HTTPException(400");
+    expect(slice).toContain("parseRequestBody(");
+    expect(slice).toContain("status: 400");
   });
 
   test("the flag gate is a 404 (the routes are invisible while disabled)", () => {
     const gate = sessionsRoute.slice(sessionsRoute.indexOf("function assertOwnershipEnabled"));
     expect(gate.slice(0, 400)).toContain("HTTPException(404");
     expect(gate.slice(0, 400)).toContain("sandboxOwnershipEnabled");
+  });
+
+  test("durable PTY open refuses agent-transport routes before opening anything", () => {
+    // Connected Machines and compute sandboxes serve terminals as agent relay
+    // streams; the durable PTY route must refuse them up front rather than open
+    // a PTY it cannot retain under a session-home lease.
+    const open = sessionsRoute.slice(
+      sessionsRoute.indexOf(
+        'app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty"',
+      ),
+    );
+    const guard = open.indexOf("usesAgentTransport(ctx.session.sandboxBackend)");
+    expect(guard).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(open.indexOf("service.ptyOpen("));
+    expect(open.slice(guard, guard + 200)).toContain("ctx.session.activeSandboxId !== null");
   });
 
   test("the channel-a seam maps typed service errors to explicit HTTP status", () => {
@@ -318,6 +363,31 @@ describe("P4.4 Channel-A route discipline", () => {
       errorCode: "sandbox_channel_a_operation_failed",
     });
   });
+
+  test.each(["holder_fenced", "authority_revoked"])(
+    "physically settled output rejection %s remains nonretryable at the public boundary",
+    (reasonCode) => {
+      const error = new RoutingMutationOutputRejectedError("writeFiles", reasonCode);
+      const status = reasonCode === "authority_revoked" ? 403 : 409;
+      const mapped = mapChannelAError(error);
+      expect(mapped).toMatchObject({
+        status,
+        code: status === 403 ? "forbidden" : "conflict",
+        retryable: false,
+        outcomeUnknown: false,
+        details: {
+          code: "sandbox_mutation_output_rejected",
+          reasonCode,
+          physicalOutcome: "resolved",
+        },
+      });
+      expect(channelAOperationFailureDiagnostic(error)).toEqual({
+        reason: "request_rejected",
+        status,
+        errorCode: "sandbox_channel_a_operation_failed",
+      });
+    },
+  );
 
   test("request aborts map to a distinct 499 cancellation diagnostic", () => {
     const controller = new AbortController();
@@ -714,7 +784,9 @@ describe("P4.4 Channel-A route discipline", () => {
     const credentialAt = channelASeam.indexOf("withRunCredentialsSession(");
     const deriveAt = channelASeam.indexOf("codemodeTokenFileFromEnvironment(");
     const decorateAt = channelASeam.indexOf("withCodemodeTokenSession(");
-    const serviceAt = channelASeam.indexOf("new SandboxChannelAService(");
+    // The command seam's service, built from the credential session. Other
+    // seams (such as file operations on a run_on machine) run no commands.
+    const serviceAt = channelASeam.indexOf("new SandboxChannelAService(", credentialAt);
 
     expect(credentialAt).toBeGreaterThanOrEqual(0);
     expect(deriveAt).toBeGreaterThan(credentialAt);
@@ -780,7 +852,7 @@ describe("ephemeral controller callback replay fence", () => {
     const route = readFileSync(resolve(here, "..", "src", "routes", "browser-sessions.ts"), "utf8");
     const active = route.slice(
       route.indexOf("async function withActiveBrowserController"),
-      route.indexOf("async function throwBrowserSourcePlacementChanged"),
+      route.indexOf("async function browserControllerGone"),
     );
     const uncached = active.slice(active.indexOf("return await withBrowserPlacement("));
     expect(uncached).toContain('browserSessionStorageMode(record.session) !== "ephemeral_context"');

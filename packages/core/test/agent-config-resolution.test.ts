@@ -5,18 +5,144 @@ import {
   type Session,
   type ToolRef,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import {
   applySessionAgentConfigWriteThrough,
   legacySessionAgentCapabilities,
-  requireAgentConfigAdmission,
+  newSessionKnowledgeSearchTools,
+  newSessionOpeningTools,
   resolveSessionAgentConfigForCreate,
-  scheduledTaskAgentInput,
 } from "../src/domain/agent-config-resolution";
 
-const on = testSettings({ agentConfigAdmissionEnabled: true });
-const off = testSettings();
+const settings = testSettings();
+
+describe("new-session Knowledge search selection", () => {
+  // Mirrors the built-in Knowledge (`docs`) server that settings loading adds.
+  const builtInServers = [
+    { id: "docs", allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"] },
+  ];
+  const config = resolveSessionAgentConfigForCreate({
+    settings,
+    creator: "api",
+    request: { capabilities: "all" },
+    instructions: undefined,
+    workspaceSettings: {},
+    parent: null,
+    goal: false,
+  }).config!;
+
+  test("persists only search as eager without mutating the source selection", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni", eager: ["skill_read"] },
+      { kind: "mcp", id: "docs" },
+    ];
+    const saved = JSON.stringify(tools);
+    expect(
+      newSessionKnowledgeSearchTools(tools, config, ["knowledge_search"], builtInServers),
+    ).toEqual([
+      { kind: "mcp", id: "opengeni", eager: ["skill_read", "knowledge_search"] },
+      tools[1],
+    ]);
+    expect(JSON.stringify(tools)).toBe(saved);
+  });
+
+  test("does not attach servers, enable a disabled family or widen selected tools", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(newSessionKnowledgeSearchTools(tools, null, ["knowledge_search"], builtInServers)).toBe(
+      tools,
+    );
+    expect(
+      newSessionKnowledgeSearchTools(
+        tools,
+        { ...config, capabilities: { ...config.capabilities, knowledge: false } },
+        ["knowledge_search"],
+        builtInServers,
+      ),
+    ).toBe(tools);
+    expect(newSessionKnowledgeSearchTools(tools, config, [], builtInServers)).toBe(tools);
+    const narrowed: ToolRef[] = [{ kind: "mcp", id: "opengeni", allowedTools: [] }];
+    expect(
+      newSessionKnowledgeSearchTools(narrowed, config, ["knowledge_search"], builtInServers),
+    ).toBe(narrowed);
+    expect(
+      newSessionKnowledgeSearchTools([], config, ["knowledge_search"], builtInServers),
+    ).toEqual([]);
+  });
+
+  test("uses an already attached Docs search if first-party search is unavailable", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni" },
+      { kind: "mcp", id: "docs", allowedTools: ["knowledge_search"] },
+    ];
+    expect(newSessionKnowledgeSearchTools(tools, config, [], builtInServers)).toEqual([
+      tools[0],
+      { ...tools[1], eager: ["knowledge_search"] },
+    ]);
+  });
+
+  test("does not mark search eager on a deployment's own docs server without it", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "docs" }];
+    const customDocs = [{ id: "docs", allowedTools: ["search_documents", "fetch_document"] }];
+    expect(newSessionKnowledgeSearchTools(tools, config, [], customDocs)).toBe(tools);
+    expect(newSessionKnowledgeSearchTools(tools, config, [], [{ id: "docs" }])).toBe(tools);
+    expect(newSessionKnowledgeSearchTools(tools, config, [], builtInServers)).toEqual([
+      { kind: "mcp", id: "docs", eager: ["knowledge_search"] },
+    ]);
+  });
+
+  test("preserves explicit all-eager and leaves ordinary configuration updates unchanged", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni", eager: true }];
+    expect(
+      newSessionKnowledgeSearchTools(tools, config, ["knowledge_search"], builtInServers),
+    ).toEqual(tools);
+    const oldTools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(
+      applySessionAgentConfigWriteThrough({
+        config,
+        tools: oldTools,
+        firstPartyMcpTools: ["knowledge_search"],
+        productServerIds: [],
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      }).tools,
+    ).toEqual(oldTools);
+  });
+});
+
+describe("new-session tools named by the opening context", () => {
+  test("only selected first-party tools count; other names need another server; the session's tools are untouched", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni", eager: ["knowledge_search"] },
+      { kind: "mcp", id: "files" },
+    ];
+    const before = structuredClone(tools);
+    // A first-party name outside the selection never counts; any other name is
+    // left to the first turn, which loads it only if a selected server has it.
+    expect(
+      newSessionOpeningTools(
+        tools,
+        ["knowledge_search", "excel_run"],
+        ["excel_run", "session_create", "projects_search", "excel_run"],
+      ),
+    ).toEqual(["excel_run", "projects_search"]);
+    expect(tools).toEqual(before);
+  });
+
+  test("names nothing outside the opengeni ref's own selection", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(newSessionOpeningTools(tools, ["excel_run"], undefined)).toEqual([]);
+    expect(newSessionOpeningTools(tools, ["excel_run"], [])).toEqual([]);
+    expect(newSessionOpeningTools(tools, [], ["excel_run"])).toEqual([]);
+    expect(newSessionOpeningTools([], ["excel_run"], ["excel_run"])).toEqual([]);
+    const narrowed: ToolRef[] = [{ kind: "mcp", id: "opengeni", allowedTools: ["goal_set"] }];
+    expect(newSessionOpeningTools(narrowed, ["excel_run"], ["excel_run"])).toEqual([]);
+    // Without another selected server no application tool can answer a name.
+    expect(newSessionOpeningTools(tools, ["excel_run"], ["projects_search"])).toEqual([]);
+    expect(
+      newSessionOpeningTools([{ kind: "mcp", id: "app" }], [], ["excel_run", "projects_search"]),
+    ).toEqual(["projects_search"]);
+  });
+});
 
 function failure(fn: () => unknown): { status: number; code: string } | null {
   try {
@@ -49,52 +175,24 @@ describe("resolveSessionAgentConfigForCreate", () => {
     goal: false,
   };
 
-  test("switches off and no agent: legacy for every creator", () => {
-    for (const creator of [
-      "api",
-      "slack",
-      "scheduled",
-      "automation",
-      "site_auth_maintenance",
-    ] as const) {
-      expect(
-        resolveSessionAgentConfigForCreate({ ...base, settings: off, creator }).config,
-      ).toBeNull();
-    }
-  });
-
-  test("admission off turns an agent input into a typed 422", () => {
-    expect(
-      failure(() =>
-        resolveSessionAgentConfigForCreate({
-          ...base,
-          settings: off,
-          creator: "api",
-          request: { capabilities: "none" },
-        }),
-      ),
-    ).toEqual({ status: 422, code: "agent_config_not_enabled" });
-  });
-
   test("Slack defaults to the markdown renderer, other creators to opengeni", () => {
     const slack = resolveSessionAgentConfigForCreate({
       ...base,
-      settings: on,
+      settings,
       creator: "slack",
       request: { capabilities: "all" },
     }).config!;
     expect(slack.renderer).toBe("markdown");
     const api = resolveSessionAgentConfigForCreate({
       ...base,
-      settings: on,
+      settings,
       creator: "api",
       request: { capabilities: "all" },
     }).config!;
     expect(api.renderer).toBe("opengeni");
   });
 
-  test("default-for-new-sessions applies to every creator except site-auth maintenance", () => {
-    const settings = testSettings({ agentConfigDefaultForNewSessions: true });
+  test("the deployment default applies to every creator except site-auth maintenance", () => {
     for (const creator of ["api", "slack", "scheduled", "automation"] as const) {
       expect(
         resolveSessionAgentConfigForCreate({ ...base, settings, creator }).config?.source,
@@ -109,18 +207,56 @@ describe("resolveSessionAgentConfigForCreate", () => {
   test("hosted web search off on the deployment reports webSearch unavailable", () => {
     const config = resolveSessionAgentConfigForCreate({
       ...base,
-      settings: testSettings({ agentConfigAdmissionEnabled: true, webSearchEnabled: false }),
+      settings: testSettings({ webSearchEnabled: false }),
       creator: "api",
       request: { capabilities: "all" },
     }).config!;
     expect(config.capabilities.webSearch).toBe(false);
     expect(config.unavailable).toEqual(["webSearch"]);
+    expect(config).toHaveProperty(
+      "unavailableReasons.webSearch",
+      "web search is turned off on this server",
+    );
+  });
+
+  test("notification deployment limits explain defaults and reject an explicit family request", () => {
+    const restricted = testSettings({ allowedFirstPartyMcpTools: ["session_create"] });
+    const config = resolveSessionAgentConfigForCreate({
+      ...base,
+      settings: restricted,
+      creator: "api",
+      request: { capabilities: "all" },
+    }).config!;
+    expect(config).toHaveProperty(
+      "unavailableReasons.notifications",
+      expect.stringContaining("its tools are not allowed on this server: notify_user"),
+    );
+    // Asking questions has no first-party tool, so the limit leaves it on.
+    expect(config.unavailable).not.toContain("humanInput");
+    const unrestricted = resolveSessionAgentConfigForCreate({
+      ...base,
+      settings,
+      creator: "api",
+      request: { capabilities: "all" },
+    }).config!;
+    expect(unrestricted.unavailable).toEqual([]);
+    expect(unrestricted).not.toHaveProperty("unavailableReasons");
+    expect(
+      failure(() =>
+        resolveSessionAgentConfigForCreate({
+          ...base,
+          settings: restricted,
+          creator: "api",
+          request: { capabilities: { from: "none", humanInput: true, notifications: true } },
+        }),
+      ),
+    ).toEqual({ status: 422, code: "agent_capability_unavailable" });
   });
 
   test("workspace legacy human-input switch and stored defaults", () => {
     const config = resolveSessionAgentConfigForCreate({
       ...base,
-      settings: on,
+      settings,
       creator: "api",
       workspaceSettings: {
         agentHumanInputEnabled: false,
@@ -135,7 +271,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     const configuredParent = parentSession({
       agent: resolveSessionAgentConfigForCreate({
         ...base,
-        settings: on,
+        settings,
         creator: "api",
         request: { capabilities: "none" },
       }).config!,
@@ -143,7 +279,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     expect(
       resolveSessionAgentConfigForCreate({
         ...base,
-        settings: off,
+        settings,
         creator: "api",
         parent: configuredParent,
       }).config?.source,
@@ -151,7 +287,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     expect(
       resolveSessionAgentConfigForCreate({
         ...base,
-        settings: testSettings({ agentConfigDefaultForNewSessions: true }),
+        settings,
         creator: "api",
         parent: parentSession({}),
       }).config,
@@ -164,7 +300,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
       failure(() =>
         resolveSessionAgentConfigForCreate({
           ...base,
-          settings: on,
+          settings,
           creator: "api",
           parent: legacyNarrowParent,
           request: { capabilities: { from: "none", schedules: true } },
@@ -197,7 +333,7 @@ describe("applySessionAgentConfigWriteThrough", () => {
       workspaceSettings: {},
       parent: null,
       goal: false,
-      settings: on,
+      settings,
       creator: "api",
     }).config;
     expect(
@@ -218,12 +354,12 @@ describe("applySessionAgentConfigWriteThrough", () => {
 describe("legacy ceilings and stored-input admission", () => {
   test("workspace-default legacy sessions only count servers that are defaults", () => {
     const session = parentSession({});
-    const withoutDocs = legacySessionAgentCapabilities(off, session, {}, ["github"]);
+    const withoutDocs = legacySessionAgentCapabilities(settings, session, {}, ["github"]);
     expect(withoutDocs.knowledge).toBe(true); // default selection includes knowledge tools
     expect(withoutDocs.workspaceFiles).toBe(false);
     expect(withoutDocs.workspaceConnectors).toBe(true);
     const onlyBuiltins = legacySessionAgentCapabilities(
-      off,
+      settings,
       parentSession({ firstPartyMcpTools: ["wait_for_input"] }),
       {},
       ["files"],
@@ -234,18 +370,5 @@ describe("legacy ceilings and stored-input admission", () => {
       knowledge: false,
       goals: false,
     });
-  });
-
-  test("stored agent inputs require admission", () => {
-    expect(failure(() => requireAgentConfigAdmission(off, { capabilities: "all" }))).toEqual({
-      status: 422,
-      code: "agent_config_not_enabled",
-    });
-    expect(failure(() => requireAgentConfigAdmission(off, undefined))).toBeNull();
-    expect(failure(() => requireAgentConfigAdmission(on, { capabilities: "all" }))).toBeNull();
-    expect(scheduledTaskAgentInput({ agentConfig: { agent: { capabilities: "none" } } })).toEqual({
-      capabilities: "none",
-    });
-    expect(scheduledTaskAgentInput({ name: "x" })).toBeUndefined();
   });
 });

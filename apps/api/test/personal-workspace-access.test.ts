@@ -1,10 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessContext, type Workspace } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrantAuthorization,
+  requireConnectOwnerAuthority,
+  workspaceSettingsAuthorized,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import {
   createApiKey,
   createDb,
+  createSession,
   createWorkspace,
   countWorkspacesForAccount,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -12,11 +18,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import postgres from "postgres";
 import { registerApiKeyRoutes, organizationApiKeyPermissions } from "../src/routes/api-keys";
@@ -24,6 +27,18 @@ import { registerVideoGenerationRoutes } from "../src/routes/video-generation";
 import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 import { registerWorkspaceLearningRoutes } from "../src/routes/workspace-learning";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { registerBrowserSessionRoutes } from "../src/routes/browser-sessions";
+import { registerSitePublishingRoutes } from "../src/routes/site-publishing";
+import { sha256Hex } from "@opengeni/contracts/values";
+import { registerInsightsRoutes } from "../src/routes/insights";
+import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
+import { registerWorkspaceInstructionPolicyRoutes } from "../src/routes/workspace-instruction-policies";
+import { registerModelAccountSettingsRoutes } from "../src/routes/model-account-settings";
+import { registerSocialRoutes } from "../src/routes/social";
+import { registerCredentialProfileRoutes } from "../src/routes/credential-profiles";
+import { registerSecretRedactionRoutes } from "../src/routes/secret-redactions";
+import { registerMemorySlackPublicationRoutes } from "../src/routes/memory-slack-publications";
+import { registerSlackTaskPolicyRoutes } from "../src/routes/slack-task-policy";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -140,6 +155,25 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerWorkspaceLearningRoutes(registered, deps);
   registerKnowledgeRoutes(registered, deps);
   registerVideoGenerationRoutes(registered, deps);
+  registerBrowserSessionRoutes(registered, deps);
+  registerSitePublishingRoutes(registered, deps);
+  // The settings decision itself, as an accepted message records it.
+  registered.get("/probe/workspace-settings/:workspaceId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    return c.json({
+      authorized: await workspaceSettingsAuthorized(deps, authorization, workspaceId),
+    });
+  });
+  registerInsightsRoutes(registered, deps);
+  registerInsightsUsageRoutes(registered, deps);
+  registerWorkspaceInstructionPolicyRoutes(registered, deps);
+  registerModelAccountSettingsRoutes(registered, deps);
+  registerSocialRoutes(registered, deps);
+  registerCredentialProfileRoutes(registered, deps);
+  registerSecretRedactionRoutes(registered, deps);
+  registerMemorySlackPublicationRoutes(registered, deps);
+  registerSlackTaskPolicyRoutes(registered, deps);
   return registered;
 }
 
@@ -192,11 +226,12 @@ describe("managed personal workspace access", () => {
       name: "Personal workspace",
     });
 
-    const [personalMembershipCount] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count
+    // The only row in Personal is the owner's own (migration 1231).
+    const personalMembers = await shared.admin<Array<{ subjectId: string }>>`
+      select subject_id as "subjectId"
       from workspace_memberships
       where workspace_id = ${personalWorkspaceId}`;
-    expect(personalMembershipCount).toEqual({ count: 0 });
+    expect([...personalMembers]).toEqual([{ subjectId: access.subjectId }]);
 
     accountAdminToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     const legacyAccountKey = await createApiKey(client.db, {
@@ -212,6 +247,36 @@ describe("managed personal workspace access", () => {
       headers: { authorization: `Bearer ${accountAdminToken}` },
     });
     expect(denied.status).toBe(401);
+  });
+
+  test("Personal owners reach browser attachment validation while narrower delegations remain denied", async () => {
+    if (!shared || !client || !app) return;
+    const attachmentUrl = `https://example.test/v1/workspaces/${personalWorkspaceId}/browser-sessions/${crypto.randomUUID()}/attachments`;
+    // Invalid JSON exercises the real permission boundary before any controller
+    // lookup or frame-stream side effect can run.
+    const owner = await app.request(attachmentUrl, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: "{",
+    });
+    expect(owner.status).toBe(400);
+    expect(await owner.text()).toContain("invalid request body");
+
+    const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      subjectId: `user:${userId}`,
+      principalKind: "human_session",
+      permissions: ["workspace:read", "sessions:read", "sessions:control"],
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const limited = await app.request(attachmentUrl, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: "{",
+    });
+    expect(limited.status).toBe(403);
+    expect(await limited.text()).toContain("You don't have permission to watch live screens.");
   });
 
   test("Personal owners save settings and learning policy without gaining access-management powers", async () => {
@@ -300,9 +365,437 @@ describe("managed personal workspace access", () => {
       });
       expect(denied.status).toBe(403);
     }
-    const [count] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count from workspace_memberships where workspace_id = ${personalWorkspaceId}`;
-    expect(count?.count).toBe(0);
+    const members = await shared.admin<Array<{ subjectId: string }>>`
+      select subject_id as "subjectId" from workspace_memberships where workspace_id = ${personalWorkspaceId}`;
+    expect([...members]).toEqual([{ subjectId: `user:${userId}` }]);
+  });
+
+  test("Personal owners read Insights and change instructions; lookalikes do not", async () => {
+    if (!shared || !client || !app) return;
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    const headers = { cookie: "session=present", "content-type": "application/json" };
+
+    const insights = await app.request(`${base}/insights?range=week`, { headers });
+    expect(insights.status, await insights.clone().text()).toBe(200);
+    const usage = await app.request(`${base}/insights/usage`, { headers });
+    expect(usage.status, await usage.clone().text()).toBe(200);
+
+    const draft = await app.request(`${base}/instruction-policies/drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        kind: "policy",
+        scope: "global",
+        content: "Answer in British English.",
+      }),
+    });
+    expect(draft.status, await draft.clone().text()).toBe(201);
+    const created = (await draft.json()) as { id: string };
+    const activated = await app.request(`${base}/instruction-policies/${created.id}/activate`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedCurrentRevisionId: null,
+        expectedActivationVersion: 0,
+        reason: "Personal owner sets their own instructions",
+      }),
+    });
+    expect(activated.status, await activated.clone().text()).toBe(200);
+
+    // A delegated owner lookalike without workspace:admin in its ceiling stays refused.
+    for (const principalKind of ["human_session", "service"] as const) {
+      const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+        accountId,
+        workspaceId: personalWorkspaceId,
+        subjectId: `user:${userId}`,
+        principalKind,
+        permissions: managedPersonalWorkspacePermissions,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const delegated = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+      for (const [method, path, body] of [
+        ["GET", "/insights?range=week", undefined],
+        ["GET", "/insights/usage", undefined],
+        ["POST", "/instruction-policies/drafts", { kind: "policy", scope: "global", content: "x" }],
+      ] as const) {
+        const response = await app.request(`${base}${path}`, {
+          method,
+          headers: delegated,
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        expect(response.status).toBe(403);
+        expect(await response.text()).toContain(
+          path.startsWith("/instruction-policies")
+            ? "Only people who can start chats here, acting as themselves, can change this"
+            : "Only a workspace admin, or the owner of a Personal workspace, can do this",
+        );
+      }
+    }
+
+    // A read-only cookie in a shared workspace is not the Personal owner.
+    const access = await app.request("http://x/v1/access/me", {
+      headers: { cookie: "session=present" },
+    });
+    const sharedWorkspaceId = ((await access.json()) as AccessContext).defaultWorkspaceId!;
+    const subjectId = `user:${userId}`;
+    const [before] = await shared.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    try {
+      await shared.admin`update workspace_memberships set permissions = '["workspace:read"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+      for (const path of ["/insights?range=week", "/insights/usage"]) {
+        const response = await app.request(`http://x/v1/workspaces/${sharedWorkspaceId}${path}`, {
+          headers,
+        });
+        expect(response.status).toBe(403);
+      }
+      const sharedDraft = await app.request(
+        `http://x/v1/workspaces/${sharedWorkspaceId}/instruction-policies/drafts`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ kind: "policy", scope: "global", content: "x" }),
+        },
+      );
+      expect(sharedDraft.status).toBe(403);
+    } finally {
+      await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    }
+  });
+
+  test("Personal owners pass the settings checks scoped to their own workspace; lookalikes do not", async () => {
+    if (!shared || !client || !app) return;
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    const headers = {
+      cookie: "session=present",
+      "content-type": "application/json",
+    };
+    const subjectId = `user:${userId}`;
+
+    // Model account settings: the owner changes what the organization hasn't
+    // locked, as a shared workspace's admins can (migration 1233).
+    const settings = await app.request(`${base}/model-account-settings`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ crossProviderFailover: true }),
+    });
+    expect(settings.status, await settings.clone().text()).toBe(200);
+    const changed = (await settings.json()) as {
+      overrides: { crossProviderFailover: boolean | null };
+      canEdit: boolean;
+    };
+    expect(changed.overrides.crossProviderFailover).toBe(true);
+    expect(changed.canEdit).toBe(true);
+
+    // A workspace-owned social account in a Personal workspace is the owner's setting.
+    const social = await app.request(`${base}/social/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        provider: "x",
+        accountHandle: `owner-${crypto.randomUUID()}`,
+      }),
+    });
+    expect(social.status, await social.clone().text()).toBe(201);
+    const connection = (await social.json()) as {
+      id: string;
+      ownership: string;
+    };
+    expect(connection.ownership).toBe("workspace");
+    const post = await app.request(`${base}/social/posts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connectionId: connection.id,
+        text: "Owner post",
+        publishedAt: new Date().toISOString(),
+      }),
+    });
+    expect(post.status, await post.clone().text()).toBe(201);
+    const disconnected = await app.request(`${base}/social/connections/${connection.id}`, {
+      method: "DELETE",
+      headers,
+    });
+    expect(disconnected.status, await disconnected.clone().text()).toBe(200);
+
+    // The social OAuth and Connect callbacks opt in to re-checking the
+    // verified owner of the Personal workspace for workspace:admin; nobody else
+    // gains it, and callers that don't opt in (SuperGrok) still need a real admin.
+    const owner = { accountId, workspaceId: personalWorkspaceId, subjectId };
+    const optIn = { personalOwnerSettings: true };
+    await requireConnectOwnerAuthority(
+      client.db,
+      { ...owner, personalOwnerVerified: true },
+      "workspace:admin",
+      null,
+      optIn,
+    );
+    await expect(
+      requireConnectOwnerAuthority(
+        client.db,
+        { ...owner, personalOwnerVerified: true },
+        "workspace:admin",
+      ),
+    ).rejects.toThrow("Connection owner authority changed");
+    await expect(
+      requireConnectOwnerAuthority(
+        client.db,
+        { ...owner, personalOwnerVerified: false },
+        "workspace:admin",
+        null,
+        optIn,
+      ),
+    ).rejects.toThrow("Connection owner authority changed");
+    await expect(
+      requireConnectOwnerAuthority(
+        client.db,
+        {
+          ...owner,
+          subjectId: `user:${crypto.randomUUID()}`,
+          personalOwnerVerified: true,
+        },
+        "workspace:admin",
+        null,
+        optIn,
+      ),
+    ).rejects.toThrow("Connection owner authority changed");
+
+    // A delegated owner lookalike without workspace:admin in its ceiling stays refused.
+    const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      subjectId,
+      principalKind: "human_session",
+      permissions: managedPersonalWorkspacePermissions,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const delegated = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    };
+    const refusedBodies = [
+      ["PATCH", "/model-account-settings", { crossProviderFailover: true }],
+      ["POST", "/social/connections", { provider: "x", accountHandle: "lookalike" }],
+      ["POST", "/social/oauth/start", { provider: "x", ownership: "workspace" }],
+      [
+        "POST",
+        "/social/posts",
+        {
+          connectionId: connection.id,
+          text: "Lookalike post",
+          publishedAt: new Date().toISOString(),
+        },
+      ],
+    ] as const;
+    for (const [method, path, body] of refusedBodies) {
+      const response = await app.request(`${base}${path}`, {
+        method,
+        headers: delegated,
+        body: JSON.stringify(body),
+      });
+      expect(response.status, path).toBe(403);
+      expect(await response.text(), path).toContain(
+        "Only a workspace admin, or the owner of a Personal workspace, can do this.",
+      );
+    }
+
+    // A read-only cookie in a shared workspace is not the Personal owner, and
+    // the Connect re-check there still needs a real workspace:admin.
+    const access = await app.request("http://x/v1/access/me", {
+      headers: { cookie: "session=present" },
+    });
+    const sharedWorkspaceId = ((await access.json()) as AccessContext).defaultWorkspaceId!;
+    const [before] = await shared.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    try {
+      await shared.admin`update workspace_memberships set permissions = '["workspace:read"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+      for (const [method, path, body] of refusedBodies) {
+        const response = await app.request(`http://x/v1/workspaces/${sharedWorkspaceId}${path}`, {
+          method,
+          headers,
+          body: JSON.stringify(body),
+        });
+        expect(response.status, path).toBe(403);
+      }
+      await expect(
+        requireConnectOwnerAuthority(
+          client.db,
+          {
+            accountId,
+            workspaceId: sharedWorkspaceId,
+            subjectId,
+            personalOwnerVerified: true,
+          },
+          "workspace:admin",
+          null,
+          optIn,
+        ),
+      ).rejects.toThrow("Connection owner authority changed");
+    } finally {
+      await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    }
+  });
+
+  test("Personal owners change the remaining workspace settings; lookalikes do not", async () => {
+    if (!shared || !client) return;
+    // Secret redaction also requires a same-origin browser request.
+    const origin = "http://owner-settings.example.test";
+    const ownerApp = createTestApp({ publicBaseUrl: origin });
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    const headers = {
+      cookie: "session=present",
+      "content-type": "application/json",
+      origin,
+      "sec-fetch-site": "same-origin",
+    };
+    const subjectId = `user:${userId}`;
+    const refusal = "Only a workspace admin, or the owner of a Personal workspace, can do this.";
+    const ownChat = await createSession(client.db, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      initialMessage: "A chat in my Personal workspace",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+    } as Parameters<typeof createSession>[1]);
+    const requests = [
+      ["PUT", "/credential-profile", { entries: [], gitHelper: false }],
+      [
+        "PUT",
+        "/memory-slack-publications/configuration",
+        {
+          expectedRevision: 0,
+          enabled: false,
+          connectionId: null,
+          slackChannelId: null,
+          slackChannelName: null,
+          autoImportances: [],
+          reviewImportances: [],
+        },
+      ],
+      [
+        "PUT",
+        "/slack-task-policy",
+        {
+          operationId: crypto.randomUUID(),
+          policy: {
+            allowedTeamIds: ["T_HOME"],
+            allowedConversationIds: [],
+            allowGuestInitiators: false,
+            allowExternalInitiators: false,
+            allowMpim: false,
+            sharedConversationMode: "private_handoff",
+            resultPublicationMode: "approval_required",
+          },
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 0,
+          reason: "Owner sets their Personal workspace's Slack task policy",
+        },
+      ],
+      [
+        "POST",
+        "/secret-redactions",
+        {
+          sessionIds: [ownChat.id],
+          match: { patterns: [{ kind: "github_token" }] },
+          dryRun: true,
+        },
+      ],
+    ] as const;
+
+    // The owner gets past the settings check on every route.
+    const ownerStatuses: Record<string, number> = {};
+    for (const [method, path, body] of requests) {
+      const response = await ownerApp.request(`${base}${path}`, {
+        method,
+        headers,
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      expect(text, path).not.toContain(refusal);
+      ownerStatuses[path] = response.status;
+    }
+    expect(ownerStatuses).toEqual({
+      "/credential-profile": 200,
+      "/memory-slack-publications/configuration": 200,
+      "/slack-task-policy": 200,
+      "/secret-redactions": 200,
+    });
+    const saved = await ownerApp.request(`${base}/credential-profile`, { headers });
+    expect(saved.status).toBe(200);
+
+    // A delegated owner lookalike without workspace:admin in its ceiling stays refused.
+    const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      subjectId,
+      principalKind: "human_session",
+      permissions: managedPersonalWorkspacePermissions,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    for (const [method, path, body] of requests) {
+      const response = await ownerApp.request(`${base}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, path).toBe(403);
+      expect(await response.text(), path).toContain(refusal);
+    }
+
+    // A read-only member of a shared workspace is not its admin.
+    const access = await ownerApp.request("http://x/v1/access/me", {
+      headers: { cookie: "session=present" },
+    });
+    const sharedWorkspaceId = ((await access.json()) as AccessContext).defaultWorkspaceId!;
+    expect(sharedWorkspaceId).not.toBe(personalWorkspaceId);
+    const [before] = await shared.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    try {
+      await shared.admin`update workspace_memberships set permissions = '["workspace:read","secrets:write","secrets:list","sessions:read","sessions:control"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+      for (const [method, path, body] of requests) {
+        const response = await ownerApp.request(
+          `http://x/v1/workspaces/${sharedWorkspaceId}${path}`,
+          { method, headers, body: JSON.stringify(body) },
+        );
+        expect(response.status, path).toBe(403);
+      }
+    } finally {
+      await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    }
+  });
+
+  test("Personal owners administer their Sites' limits; delegated lookalikes do not", async () => {
+    if (!shared || !client) return;
+    const sitesApp = createTestApp({ sitesDomain: "sites.personal.example.test" });
+    const url = `http://x/v1/workspaces/${personalWorkspaceId}/site-limit-profile`;
+    const saved = await sitesApp.request(url, {
+      method: "PUT",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({ kind: "credits" }),
+    });
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    const current = await sitesApp.request(url, { headers: { cookie: "session=present" } });
+    expect(((await current.json()) as { profile: { kind: string } }).profile.kind).toBe("credits");
+
+    const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      subjectId: `user:${userId}`,
+      principalKind: "service",
+      permissions: managedPersonalWorkspacePermissions,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const denied = await sitesApp.request(url, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ kind: "unlimited" }),
+    });
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("Only a workspace admin can change Site limits");
   });
 
   test("Personal Knowledge uses the canonical API and validates pagination before retrieval", async () => {
@@ -350,6 +843,15 @@ describe("managed personal workspace access", () => {
   test("Personal settings deny delegated owner lookalikes and read-only shared-workspace cookies", async () => {
     if (!shared || !client || !app) return;
     const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    const decision = async (workspaceId: string, headers: Record<string, string>) =>
+      (
+        (await (
+          await app!.request(`http://x/probe/workspace-settings/${workspaceId}`, { headers })
+        ).json()) as { authorized: boolean }
+      ).authorized;
+    // The shared decision agrees with the routes: the signed-in owner may
+    // configure their Personal workspace; everyone below is refused.
+    expect(await decision(personalWorkspaceId, { cookie: "session=present" })).toBe(true);
     for (const principalKind of ["human_session", "service"] as const) {
       const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
         accountId,
@@ -359,6 +861,7 @@ describe("managed personal workspace access", () => {
         permissions: managedPersonalWorkspacePermissions,
         exp: Math.floor(Date.now() / 1000) + 3600,
       });
+      expect(await decision(personalWorkspaceId, { authorization: `Bearer ${token}` })).toBe(false);
       for (const [method, path, body] of [
         ["PATCH", "/settings", { memoryEnabled: true }],
         ["POST", "/learning/revisions", { workspaceMode: "automatic", sourceOverrides: [] }],
@@ -387,6 +890,7 @@ describe("managed personal workspace access", () => {
       select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${`user:${userId}`}`;
     try {
       await shared.admin`update workspace_memberships set permissions = '["workspace:read"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${`user:${userId}`}`;
+      expect(await decision(sharedWorkspaceId, { cookie: "session=present" })).toBe(false);
       const response = await app.request(`http://x/v1/workspaces/${sharedWorkspaceId}/settings`, {
         method: "PATCH",
         headers: { cookie: "session=present", "content-type": "application/json" },
@@ -960,10 +1464,3 @@ describe("managed personal workspace access", () => {
     expect(secondOverlap.status).toBe(429);
   });
 });
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}

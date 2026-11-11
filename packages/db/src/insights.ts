@@ -1,9 +1,16 @@
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
-import { and, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { parseModelCallProcessingResidency } from "@opengeni/contracts";
 import type { Database } from "./database";
-import { rlsContextForWorkspace, withRlsContext } from "./database";
+import {
+  rlsContextForWorkspace,
+  withRlsContext,
+  withDatabaseMaintenanceLifetime,
+} from "./database";
 import * as schema from "./schema";
+import { modelCallTimingColumns, modelCallTimingOrNull } from "./model-call-timing";
+import { reconcileModelCallFactPage } from "./model-call-fact-reconciliation";
 
 export const INSIGHTS_WARM_GROUP_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -569,6 +576,17 @@ export async function listLiveWarmLeases(
         lastMeterAt: schema.sandboxLeases.lastMeterAt,
       })
       .from(schema.sandboxLeases)
+      // A shared child may use an invisible parent's box. It cannot attest
+      // that group's identity; require the visible session owning the group.
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.accountId, schema.sandboxLeases.accountId),
+          eq(schema.sessions.workspaceId, schema.sandboxLeases.workspaceId),
+          eq(schema.sessions.id, schema.sandboxLeases.sandboxGroupId),
+          sql`(${schema.sessions.sandboxGroupId} is null or ${schema.sessions.sandboxGroupId} = ${schema.sessions.id})`,
+        ),
+      )
       .where(
         and(
           eq(schema.sandboxLeases.workspaceId, workspaceId),
@@ -1094,6 +1112,7 @@ export async function countOnlineMachines(
       .where(
         and(
           eq(schema.enrollments.workspaceId, workspaceId),
+          eq(schema.enrollments.kind, "machine"),
           eq(schema.enrollments.status, "active"),
           gte(schema.enrollments.lastSeenAt, cutoff),
         ),
@@ -1125,6 +1144,237 @@ export function enumerateUtcHours(since: Date, until: Date): string[] {
     cursor.setUTCHours(cursor.getUTCHours() + 1);
   }
   return hours;
+}
+
+type ModelUsageEventRow = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string | null;
+  turnAttemptId: string | null;
+  payload: unknown;
+  occurredAt: Date;
+};
+
+/**
+ * Rebuild one fact from its durable `agent.model.usage` event. Idempotent: an
+ * existing (workspace, turn, source_key) fact is left untouched.
+ */
+async function insertModelCallFactFromUsageEvent(
+  scopedDb: Database,
+  workspaceId: string,
+  event: ModelUsageEventRow,
+): Promise<boolean> {
+  if (!event.turnId) return false;
+  const payload =
+    event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? (event.payload as Record<string, unknown>)
+      : null;
+  if (!payload) return false;
+  const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey : null;
+  const provider = typeof payload.provider === "string" ? payload.provider : null;
+  const providerApi = typeof payload.providerApi === "string" ? payload.providerApi : null;
+  const model = typeof payload.model === "string" ? payload.model : null;
+  if (!sourceKey || !provider || !providerApi || !model) return false;
+  // Durable annotations are frozen observations, never recomputed prices.
+  const safeMicros = (value: unknown): number | null =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const durableEstimate = safeMicros(payload.estimatedProviderCostMicros);
+  const durablePricingSource =
+    payload.pricingSource === "configured_list_price" ||
+    payload.pricingSource === "gateway_reported"
+      ? payload.pricingSource
+      : null;
+  const estimate = durablePricingSource === null ? null : durableEstimate;
+  const classPayload =
+    payload.listByClassMicros !== null &&
+    typeof payload.listByClassMicros === "object" &&
+    !Array.isArray(payload.listByClassMicros)
+      ? (payload.listByClassMicros as Record<string, unknown>)
+      : null;
+  const classValues = ["uncachedInput", "cacheRead", "cacheWrite", "output"].map((key) =>
+    safeMicros(classPayload?.[key]),
+  );
+  const capturedClasses =
+    estimate !== null &&
+    classValues.every((value) => value !== null) &&
+    classValues.reduce<bigint>((total, value) => total + BigInt(value ?? 0), 0n) ===
+      BigInt(estimate);
+  const upstreamProvider =
+    typeof payload.upstreamProvider === "string" &&
+    /^[a-z0-9][a-z0-9-]{0,63}$/.test(payload.upstreamProvider)
+      ? payload.upstreamProvider
+      : null;
+  const durableBillingPath =
+    payload.billingPath === "external" || payload.billingPath === "opengeni_credits"
+      ? payload.billingPath
+      : null;
+
+  const sourceResourceId = `${event.turnId}:${sourceKey}`;
+  const [cost] = await scopedDb
+    .select({ quantity: schema.usageEvents.quantity })
+    .from(schema.usageEvents)
+    .where(
+      and(
+        eq(schema.usageEvents.workspaceId, workspaceId),
+        eq(schema.usageEvents.eventType, "model.cost"),
+        eq(schema.usageEvents.sourceResourceId, sourceResourceId),
+      ),
+    )
+    .limit(1);
+  const [tokenRow] = await scopedDb
+    .select({ id: schema.usageEvents.id })
+    .from(schema.usageEvents)
+    .where(
+      and(
+        eq(schema.usageEvents.workspaceId, workspaceId),
+        eq(schema.usageEvents.eventType, "model.tokens"),
+        eq(schema.usageEvents.sourceResourceId, sourceResourceId),
+      ),
+    )
+    .limit(1);
+
+  // New usage events carry the accepted billing authority because a
+  // deployment-funded free call legitimately writes both model.tokens
+  // and model.cost=0. Older events predate that field: their external
+  // subscription/workspace calls wrote cost=0 without tokens, while
+  // zero-token credits calls wrote neither.
+  const pricedCostMicros = cost ? Number(cost.quantity) : 0;
+  const billingPath =
+    durableBillingPath ??
+    (cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits");
+
+  const [turn] = await scopedDb
+    .select({
+      source: schema.sessionTurns.source,
+      initiatorKind: schema.sessionTurns.initiatorKind,
+      initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+      initiatorContext: schema.sessionTurns.initiatorContext,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.id, event.turnId),
+      ),
+    )
+    .limit(1);
+
+  let scheduledTaskId: string | null = null;
+  const runIds =
+    turn?.initiatorContext &&
+    typeof turn.initiatorContext === "object" &&
+    !Array.isArray(turn.initiatorContext) &&
+    Array.isArray((turn.initiatorContext as Record<string, unknown>).scheduledRunIds)
+      ? ((turn.initiatorContext as Record<string, unknown>).scheduledRunIds as unknown[]).filter(
+          (value): value is string => typeof value === "string",
+        )
+      : [];
+  if (runIds.length > 0) {
+    const [run] = await scopedDb
+      .select({ taskId: schema.scheduledTaskRuns.taskId })
+      .from(schema.scheduledTaskRuns)
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+          inArray(schema.scheduledTaskRuns.id, runIds),
+        ),
+      )
+      .orderBy(schema.scheduledTaskRuns.createdAt)
+      .limit(1);
+    scheduledTaskId = run?.taskId ?? null;
+  }
+
+  const insertedRows = await scopedDb
+    .insert(schema.modelCallFacts)
+    .values({
+      accountId: event.accountId,
+      workspaceId: event.workspaceId,
+      sessionId: event.sessionId,
+      turnId: event.turnId,
+      turnAttemptId: event.turnAttemptId,
+      sourceKey,
+      provider: upstreamProvider ?? provider,
+      providerApi,
+      model,
+      billingPath,
+      turnSource: turn?.source ?? null,
+      initiatorKind: turn?.initiatorKind ?? null,
+      initiatorSubjectId: turn?.initiatorSubjectId ?? null,
+      scheduledTaskId,
+      inputTokens: numberOrNull(payload.inputTokens),
+      outputTokens: numberOrNull(payload.outputTokens),
+      cachedTokens: numberOrNull(payload.cachedTokens),
+      cacheWriteTokens: numberOrNull(payload.cacheWriteTokens),
+      reasoningTokens: numberOrNull(payload.reasoningTokens),
+      totalTokens:
+        numberOrNull(payload.inputTokens) !== null || numberOrNull(payload.outputTokens) !== null
+          ? (numberOrNull(payload.inputTokens) ?? 0) + (numberOrNull(payload.outputTokens) ?? 0)
+          : null,
+      pricedCostMicros,
+      estimatedProviderCostMicros: estimate,
+      equivalentCreditCostMicros:
+        estimate === null ? null : safeMicros(payload.equivalentCreditCostMicros),
+      pricingSource: estimate === null ? null : durablePricingSource,
+      listUncachedInputCostMicros: capturedClasses ? classValues[0]! : null,
+      listCacheReadCostMicros: capturedClasses ? classValues[1]! : null,
+      listCacheWriteCostMicros: capturedClasses ? classValues[2]! : null,
+      listOutputCostMicros: capturedClasses ? classValues[3]! : null,
+      listCostIsApprox: capturedClasses ? payload.listByClassApprox === true : null,
+      ...modelCallTimingColumns(modelCallTimingOrNull(payload.timing)),
+      // The event's recorded route residency; events from before calls
+      // carried one rebuild a null (recorded before), never a guessed value.
+      processingResidency: parseModelCallProcessingResidency(payload.processingResidency),
+      occurredAt: event.occurredAt,
+      connectionId:
+        provider === "codex-subscription"
+          ? await repairedCodexFactConnectionId(scopedDb, workspaceId, event)
+          : null,
+    })
+    .onConflictDoNothing({
+      target: [
+        schema.modelCallFacts.workspaceId,
+        schema.modelCallFacts.turnId,
+        schema.modelCallFacts.sourceKey,
+      ],
+    })
+    .returning({ id: schema.modelCallFacts.id });
+  return insertedRows.length > 0;
+}
+
+/**
+ * The shared-core connection that served a repaired Codex call (M3 PR 3):
+ * the account the same turn attempt recorded in `codex.credential.selected`
+ * (one connection per attempt; a re-placement starts a new attempt), resolved
+ * through the provider's aliases to its canonical id. Read under the caller's
+ * row security, so a connection this workspace cannot see (a personal one)
+ * is not attributed and the fact keeps a NULL `connection_id`.
+ */
+async function repairedCodexFactConnectionId(
+  scopedDb: Database,
+  workspaceId: string,
+  event: ModelUsageEventRow,
+): Promise<string | null> {
+  if (!event.turnAttemptId || !event.turnId) return null;
+  const [row] = await scopedDb.execute<{ id: string | null }>(sql`
+    select coalesce(direct.id, alias.connection_id)::text as id
+    from ${schema.sessionEvents} selected
+    left join subscription_connections direct
+      on direct.account_id = selected.account_id and direct.provider = 'codex'
+     and direct.id::text = selected.payload->>'credentialId'
+    left join subscription_connection_aliases alias
+      on alias.account_id = selected.account_id and alias.provider = 'codex'
+     and alias.alias_connection_id::text = selected.payload->>'credentialId'
+    where selected.workspace_id = ${workspaceId}::uuid
+      and selected.turn_id = ${event.turnId}::uuid
+      and selected.turn_attempt_id = ${event.turnAttemptId}::uuid
+      and selected.type = 'codex.credential.selected'
+      and selected.occurred_at <= ${new Date(event.occurredAt).toISOString()}::timestamptz
+    order by selected.sequence desc
+    limit 1
+  `);
+  return row?.id ?? null;
 }
 
 /**
@@ -1191,142 +1441,9 @@ export async function backfillModelCallFactsFromSessionEvents(
     const batchUpserted = await withRlsContext(db, context, async (scopedDb) => {
       let inserted = 0;
       for (const event of page) {
-        if (!event.turnId) continue;
-        const payload =
-          event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
-            ? (event.payload as Record<string, unknown>)
-            : null;
-        if (!payload) continue;
-        const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey : null;
-        const provider = typeof payload.provider === "string" ? payload.provider : null;
-        const providerApi = typeof payload.providerApi === "string" ? payload.providerApi : null;
-        const model = typeof payload.model === "string" ? payload.model : null;
-        if (!sourceKey || !provider || !providerApi || !model) continue;
-        const upstreamProvider =
-          typeof payload.upstreamProvider === "string" &&
-          /^[a-z0-9][a-z0-9-]{0,63}$/.test(payload.upstreamProvider)
-            ? payload.upstreamProvider
-            : null;
-        const durableBillingPath =
-          payload.billingPath === "external" || payload.billingPath === "opengeni_credits"
-            ? payload.billingPath
-            : null;
-
-        const sourceResourceId = `${event.turnId}:${sourceKey}`;
-        const [cost] = await scopedDb
-          .select({ quantity: schema.usageEvents.quantity })
-          .from(schema.usageEvents)
-          .where(
-            and(
-              eq(schema.usageEvents.workspaceId, input.workspaceId),
-              eq(schema.usageEvents.eventType, "model.cost"),
-              eq(schema.usageEvents.sourceResourceId, sourceResourceId),
-            ),
-          )
-          .limit(1);
-        const [tokenRow] = await scopedDb
-          .select({ id: schema.usageEvents.id })
-          .from(schema.usageEvents)
-          .where(
-            and(
-              eq(schema.usageEvents.workspaceId, input.workspaceId),
-              eq(schema.usageEvents.eventType, "model.tokens"),
-              eq(schema.usageEvents.sourceResourceId, sourceResourceId),
-            ),
-          )
-          .limit(1);
-
-        // New usage events carry the accepted billing authority because a
-        // deployment-funded free call legitimately writes both model.tokens
-        // and model.cost=0. Older events predate that field: their external
-        // subscription/workspace calls wrote cost=0 without tokens, while
-        // zero-token credits calls wrote neither.
-        const pricedCostMicros = cost ? Number(cost.quantity) : 0;
-        const billingPath =
-          durableBillingPath ??
-          (cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits");
-
-        const [turn] = await scopedDb
-          .select({
-            source: schema.sessionTurns.source,
-            initiatorKind: schema.sessionTurns.initiatorKind,
-            initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-            initiatorContext: schema.sessionTurns.initiatorContext,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, event.turnId),
-            ),
-          )
-          .limit(1);
-
-        let scheduledTaskId: string | null = null;
-        const runIds =
-          turn?.initiatorContext &&
-          typeof turn.initiatorContext === "object" &&
-          !Array.isArray(turn.initiatorContext) &&
-          Array.isArray((turn.initiatorContext as Record<string, unknown>).scheduledRunIds)
-            ? (
-                (turn.initiatorContext as Record<string, unknown>).scheduledRunIds as unknown[]
-              ).filter((value): value is string => typeof value === "string")
-            : [];
-        if (runIds.length > 0) {
-          const [run] = await scopedDb
-            .select({ taskId: schema.scheduledTaskRuns.taskId })
-            .from(schema.scheduledTaskRuns)
-            .where(
-              and(
-                eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
-                inArray(schema.scheduledTaskRuns.id, runIds),
-              ),
-            )
-            .orderBy(schema.scheduledTaskRuns.createdAt)
-            .limit(1);
-          scheduledTaskId = run?.taskId ?? null;
+        if (await insertModelCallFactFromUsageEvent(scopedDb, input.workspaceId, event)) {
+          inserted += 1;
         }
-
-        const insertedRows = await scopedDb
-          .insert(schema.modelCallFacts)
-          .values({
-            accountId: event.accountId,
-            workspaceId: event.workspaceId,
-            sessionId: event.sessionId,
-            turnId: event.turnId,
-            turnAttemptId: event.turnAttemptId,
-            sourceKey,
-            provider: upstreamProvider ?? provider,
-            providerApi,
-            model,
-            billingPath,
-            turnSource: turn?.source ?? null,
-            initiatorKind: turn?.initiatorKind ?? null,
-            initiatorSubjectId: turn?.initiatorSubjectId ?? null,
-            scheduledTaskId,
-            inputTokens: numberOrNull(payload.inputTokens),
-            outputTokens: numberOrNull(payload.outputTokens),
-            cachedTokens: numberOrNull(payload.cachedTokens),
-            cacheWriteTokens: numberOrNull(payload.cacheWriteTokens),
-            reasoningTokens: numberOrNull(payload.reasoningTokens),
-            totalTokens:
-              numberOrNull(payload.inputTokens) !== null ||
-              numberOrNull(payload.outputTokens) !== null
-                ? (numberOrNull(payload.inputTokens) ?? 0) +
-                  (numberOrNull(payload.outputTokens) ?? 0)
-                : null,
-            pricedCostMicros,
-            occurredAt: event.occurredAt,
-          })
-          .onConflictDoNothing({
-            target: [
-              schema.modelCallFacts.workspaceId,
-              schema.modelCallFacts.turnId,
-              schema.modelCallFacts.sourceKey,
-            ],
-          })
-          .returning({ id: schema.modelCallFacts.id });
-        if (insertedRows.length > 0) inserted += 1;
       }
       return inserted;
     });
@@ -1335,6 +1452,74 @@ export async function backfillModelCallFactsFromSessionEvents(
   }
 
   return { considered, upserted };
+}
+
+/** One ordered page of workspace ids for global maintenance sweeps. */
+export async function listWorkspaceIdsAfter(
+  db: Database,
+  input: {
+    afterId: string | null;
+    limit: number;
+    signal?: AbortSignal;
+    deadlineAtMs?: number;
+  },
+): Promise<string[]> {
+  if (input.signal)
+    return withDatabaseMaintenanceLifetime(
+      db,
+      {
+        signal: input.signal,
+        ...(input.deadlineAtMs === undefined ? {} : { deadlineAtMs: input.deadlineAtMs }),
+      },
+      (scoped) => listWorkspaceIdsAfter(scoped, { afterId: input.afterId, limit: input.limit }),
+    );
+  const rows = await db
+    .select({ id: schema.workspaces.id })
+    .from(schema.workspaces)
+    .where(input.afterId ? gt(schema.workspaces.id, input.afterId) : undefined)
+    .orderBy(asc(schema.workspaces.id))
+    .limit(Math.max(1, Math.min(input.limit, 1_000)));
+  return rows.map((row) => row.id);
+}
+
+export type ModelCallFactReconciliation = {
+  /** Missing calls resolved (repaired or unrepairable) in this page. */
+  missing: number;
+  /** Missing facts rebuilt from their durable `agent.model.usage` event. */
+  repaired: number;
+  /** Missing facts not rebuilt: no usable durable usage event (or a concurrent writer won). */
+  unrepaired: number;
+  /** True while the persisted ledger/event scan has further pages. */
+  truncated: boolean;
+};
+
+/**
+ * Advance one durable ledger/event page, repairing exact missing (turn, source
+ * key) facts. `limit` bounds scanned input, not only returned gaps. Repeated
+ * calls finish the persisted window before beginning the requested new one.
+ * Never rewrites the ledger or an existing fact.
+ */
+export async function reconcileModelCallFacts(
+  db: Database,
+  input: {
+    workspaceId: string;
+    since: Date;
+    until: Date;
+    limit?: number;
+    signal?: AbortSignal;
+    deadlineAtMs?: number;
+  },
+): Promise<ModelCallFactReconciliation> {
+  if (input.signal)
+    return withDatabaseMaintenanceLifetime(
+      db,
+      {
+        signal: input.signal,
+        ...(input.deadlineAtMs === undefined ? {} : { deadlineAtMs: input.deadlineAtMs }),
+      },
+      (scoped) => reconcileModelCallFactPage(scoped, input, insertModelCallFactFromUsageEvent),
+    );
+  return reconcileModelCallFactPage(db, input, insertModelCallFactFromUsageEvent);
 }
 
 function numberOrNull(value: unknown): number | null {

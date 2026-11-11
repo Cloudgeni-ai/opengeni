@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { EMPTY_FINAL_REPLY_NOTICE, type SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 test("a repeated-empty completion renders an informational notice, not failure or a fake answer", () => {
   const event = {
@@ -13,7 +16,7 @@ test("a repeated-empty completion renders an informational notice, not failure o
     payload: { output: "", emptyFinalReply: true },
     occurredAt: "2026-09-30T17:30:00.000Z",
   } as SessionEvent;
-  const items = buildTimeline([event]);
+  const items = buildTimeline(englishText, [event]);
   expect(items).toContainEqual(
     expect.objectContaining({
       kind: "notice",
@@ -25,6 +28,8 @@ test("a repeated-empty completion renders an informational notice, not failure o
   expect(items.some((item) => item.kind === "agent-message")).toBe(false);
   expect(items.some((item) => item.kind === "turn-end" && item.outcome === "failed")).toBe(false);
   expect(
-    groupTimeline(items).some((group) => group.kind === "item" && group.item.kind === "notice"),
+    groupTimeline(englishText, items).some(
+      (group) => group.kind === "item" && group.item.kind === "notice",
+    ),
   ).toBe(true);
 });

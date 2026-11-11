@@ -1,6 +1,18 @@
 import { AuthApiError } from "@/api";
+import {
+  MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+  MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE,
+  MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
+  SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE,
+  SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE,
+  SIGNUPS_PAUSED_MESSAGE,
+} from "@/lib/signups-paused";
 
-export type ManagedAuthMode = "signin" | "signup";
+import {
+  ManagedAuthSessionUnavailableError,
+  type ManagedAuthMode,
+} from "@opengeni/react/app/lib/managed-auth-transition";
+
 export type ManagedAuthField = "name" | "email" | "password";
 
 export type ManagedAuthFormErrors = Partial<Record<ManagedAuthField, string>>;
@@ -11,17 +23,6 @@ export type ManagedAuthFailure = {
   switchTo: ManagedAuthMode | null;
   canResendVerification: boolean;
 };
-
-export class ManagedAuthSessionUnavailableError extends Error {
-  constructor(readonly mode: ManagedAuthMode) {
-    super(
-      mode === "signup"
-        ? "Account created without an active browser session"
-        : "Sign-in completed without an active browser session",
-    );
-    this.name = "ManagedAuthSessionUnavailableError";
-  }
-}
 
 export function validManagedAuthEmail(value: string): boolean {
   const email = value.trim();
@@ -63,6 +64,33 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
   }
 
   if (error instanceof AuthApiError) {
+    if (error.code?.startsWith("SIGNUP_CHALLENGE_")) {
+      return { fields: {}, message: error.message, switchTo: null, canResendVerification: false };
+    }
+    if (error.code === MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE) {
+      return {
+        fields: {},
+        message: `${SIGNUPS_PAUSED_MESSAGE} If you already have an account, sign in instead.`,
+        switchTo: "signin",
+        canResendVerification: false,
+      };
+    }
+    if (error.code === MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE) {
+      return {
+        fields: {},
+        message: `${SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE} If you already have an account, sign in instead.`,
+        switchTo: "signin",
+        canResendVerification: false,
+      };
+    }
+    if (error.code === MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE) {
+      return {
+        fields: {},
+        message: SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE,
+        switchTo: null,
+        canResendVerification: false,
+      };
+    }
     if (error.code === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL") {
       return {
         fields: { email: "An account already exists for this email." },

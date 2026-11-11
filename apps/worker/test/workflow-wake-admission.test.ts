@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { and, eq } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   claimPendingSessionWorkflowWakes,
@@ -14,6 +14,11 @@ import {
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import * as schema from "../../../packages/db/src/schema";
+import { createWorkflowWakeActivities } from "../src/activities/workflow-wake";
+import type { ControlActivityServices } from "../src/activities/types";
+import { internalMaintenanceCadences } from "../src/internal-maintenance";
+import { testSettings } from "@opengeni/testing/settings";
+import { createObservability } from "@opengeni/observability";
 
 import {
   reconcilePendingSessionWorkflowWakes,
@@ -202,4 +207,56 @@ test("transport acceptance survives a failed acknowledgment without consuming th
       wakeRevision: wake.wakeRevision,
     }),
   ).rejects.toThrow("acknowledgment database unavailable");
+});
+
+test("a committed prompt is delivered after its producer exits without signaling", async () => {
+  const ctx = await fixture();
+  await send(ctx, "durable prompt survives its API process");
+  // No immediate signal: the producer is gone after committing its transaction.
+  await client.close();
+  client = createDb(shared.appUrl);
+  const settings = testSettings();
+  const observability = createObservability(settings, { component: "worker-control" });
+  let admitted = false;
+  const service = {
+    db: client.db,
+    settings,
+    observability,
+    wakeSessionWorkflow: async (
+      wake: Parameters<NonNullable<NotifyServices["wakeSessionWorkflow"]>>[0],
+    ) => {
+      if (wake.sessionId !== ctx.session.id) return undefined;
+      const claimed = await claimSessionWorkForAttempt(client.db, wake.workspaceId, {
+        sessionId: wake.sessionId,
+        workflowId: wake.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      admitted = claimed.action === "claimed";
+      return await markSessionWorkflowWakeDelivered(client.db, {
+        ...wake,
+        temporalWorkflowId: wake.workflowId,
+      });
+    },
+  } as unknown as ControlActivityServices;
+  const activities = createWorkflowWakeActivities(async () => service);
+  const [cadence] = await internalMaintenanceCadences({
+    db: client.db,
+    settings,
+    observability,
+    jobs: ["session-workflow-wake-dispatcher"],
+    workflow: {
+      signalWithStart: async () => await activities.dispatchSessionWorkflowWakes(),
+      start: async () => {
+        throw new Error("unexpected maintenance dependency");
+      },
+    } as never,
+  });
+  expect(await cadence!.hasWork()).toBe(true);
+  await cadence!.start();
+  expect(admitted).toBe(true);
+  const row = await wakeRow(ctx.grant.workspaceId!, ctx.session.id);
+  expect(row?.deliveredRevision).toBe(row?.wakeRevision);
 });

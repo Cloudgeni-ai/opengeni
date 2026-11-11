@@ -7,10 +7,12 @@ import {
   type PrerequisiteHost,
 } from "./check-development-prerequisites";
 import { resolve } from "node:path";
+import { canonicalBunVersion } from "./bun-version";
 
+const requiredBunVersion = await canonicalBunVersion();
 const ready = {
-  bunVersion: "1.4.0",
-  requiredBunVersion: "1.4.0",
+  bunVersion: requiredBunVersion,
+  requiredBunVersion,
   platform: "linux",
   which: (command: string) => `/usr/bin/${command}`,
 };
@@ -21,13 +23,13 @@ describe("development prerequisites", () => {
       expect(developmentPrerequisiteErrors({ ...ready, platform })).toEqual([]);
     }
     expect(developmentPrerequisiteErrors({ ...ready, bunVersion: "1.5.0" })).toEqual([
-      expect.stringContaining("pinned Bun 1.4.0"),
+      expect.stringContaining(`pinned Bun ${requiredBunVersion}`),
     ]);
   });
 
   test("reports an older Bun before the frozen install fails", () => {
     expect(developmentPrerequisiteErrors({ ...ready, bunVersion: "1.3.5" })).toEqual([
-      expect.stringContaining("pinned Bun 1.4.0"),
+      expect.stringContaining(`pinned Bun ${requiredBunVersion}`),
     ]);
   });
 
@@ -167,7 +169,24 @@ describe("backend-aware read-only preflight", () => {
       backend: "docker",
       errors: [],
     });
-    expect(commands).toEqual(["docker info", "docker compose version", "docker buildx version"]);
+    expect(commands).toEqual([
+      "docker version --format {{.Server.Version}}",
+      "docker compose version",
+      "docker buildx version",
+    ]);
+  });
+
+  test("accepts a newer Docker Compose major version", async () => {
+    const { host } = fixture();
+    const probe = host.probe;
+    host.probe = (command, args) =>
+      command === "docker" && args.join(" ") === "compose version"
+        ? { ok: true, stdout: "Docker Compose version v5.1.2" }
+        : probe(command, args);
+    expect(await collectDevelopmentPrerequisites({ ...prebuilt, environment: {} }, host)).toEqual({
+      backend: "docker",
+      errors: [],
+    });
   });
 
   test("auto falls back to complete native checks when daemon probe fails", async () => {
@@ -280,7 +299,11 @@ describe("backend-aware read-only preflight", () => {
       (await collectDevelopmentPrerequisites({ artifactRuntime: "resolve", environment: {} }, host))
         .errors,
     ).toEqual([]);
-    expect(commands).toEqual(["docker info", "docker compose version", "docker buildx version"]);
+    expect(commands).toEqual([
+      "docker version --format {{.Server.Version}}",
+      "docker compose version",
+      "docker buildx version",
+    ]);
     const relay = await collectDevelopmentPrerequisites(
       { artifactRuntime: "resolve", environment: { OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true" } },
       host,

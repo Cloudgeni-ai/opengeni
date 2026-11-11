@@ -15,13 +15,17 @@ export {
   assertSkillRelativePath,
   listSkillPaths,
   readSkillFiles,
+  readSkillFilesReportingMissing,
   SkillFileError,
   skillScriptIndex,
+  SKILL_READ_AVAILABLE_PATHS_MAX_BYTES,
+  SKILL_READ_AVAILABLE_PATHS_MAX_ENTRIES,
   SKILL_READ_MAX_OUTPUT_BYTES,
   SKILL_READ_MAX_PATHS,
   SKILL_SCRIPT_INDEX_MAX_BYTES,
   SKILL_SCRIPT_INDEX_MAX_ENTRIES,
   SKILL_SCRIPT_USAGE_MAX_CHARS,
+  type SkillFilesRead,
   type SkillScriptIndexEntry,
   type SkillTextFile,
 } from "./skill-files";
@@ -256,7 +260,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
     sourceUrl:
       "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/azure-verified-modules",
-    provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+    provenance: "Vendored from hashicorp/agent-skills; reviewed Opengeni curated entry.",
     license: "MPL-2.0",
     documentationUrl: "https://azure.github.io/Azure-Verified-Modules/",
     compatibility: Object.freeze({
@@ -293,11 +297,11 @@ export function loadSkillManagementSkill(): SkillLibrarySkill {
     join(moduleDir, "..", "src", "bundled_management_skills"),
   ].find((candidate) => isRealDirectory(candidate));
   if (!root) throw new Error("Built-in Skill management guidance is missing from this deployment.");
-  const artifact = readSkillLibraryArtifact(join(root, "opengeni-skills"));
+  const artifact = readSkillLibraryArtifact(join(root, "skill-management"));
   const main = artifact.files.find((entry) => entry.path === "SKILL.md");
   if (!main) throw new Error("Built-in Skill management guidance has no SKILL.md.");
   const metadata = parsePortableSkillFrontmatter(main.content);
-  if (metadata.name !== "opengeni-skills" || !metadata.description) {
+  if (metadata.name !== "skill-management" || !metadata.description) {
     throw new Error("Built-in Skill management metadata is invalid.");
   }
   return { name: metadata.name, description: metadata.description, files: artifact.files };

@@ -1,0 +1,119 @@
+import { defineSchema } from "./define-schema";
+import { z } from "zod";
+
+/**
+ * Who a turn's usage is billed as. Frozen on every accepted turn
+ * (`session_turns.billing_origin`) and on every debit it causes
+ * (`credit_ledger_entries.usage_origin`). Unlike the analytics-only turn
+ * surface, this is a funding fact; it also restricts connected subscriptions
+ * to app work, never granting access to a workspace or credential.
+ *
+ * - `app`: a signed-in person in Opengeni's own web, desktop or mobile apps,
+ *   and work set up there (Slack and Teams bots, published Sites, schedules
+ *   and automations). Plan credit pays first, then other credit.
+ * - `api`: organization, personal and configured API keys, products built on
+ *   the SDK acting for their people, and outside agents over MCP. Paid only
+ *   from credits; plan credit never pays for it.
+ *
+ * Sub-agents, tools and continuations inherit the origin of the work they run
+ * in. A null stored value predates this column and is billed as `app`.
+ */
+export const BILLING_ORIGINS = ["app", "api"] as const;
+export const BillingOrigin = /* @__PURE__ */ defineSchema(() => z.enum(BILLING_ORIGINS));
+export type BillingOrigin = z.infer<typeof BillingOrigin>;
+
+/** A stored value, with legacy null (and anything unrecognized) billed as app. */
+export function storedBillingOrigin(value: unknown): BillingOrigin {
+  return value === "api" ? "api" : "app";
+}
+
+/** Refusal of API-origin work when no credits remain (plan credit never pays). */
+export const API_CREDITS_REQUIRED_CODE = "api_credits_required";
+export const API_CREDITS_REQUIRED_MESSAGE = "API usage uses credits, not your plan credit.";
+
+/** Where a person adds credits; the public refusal action for credit stops. */
+export const ADD_CREDITS_ACTION = Object.freeze({ type: "add_credits", href: "/billing" } as const);
+
+/** Where a person on the Free plan upgrades; the refusal action when only a paid plan helps. */
+export const UPGRADE_PLAN_ACTION = Object.freeze({
+  type: "upgrade_plan",
+  href: "/billing",
+} as const);
+/**
+ * Bring-your-own-key use (the person's own provider, gateway or custom
+ * endpoint API key) pays a platform fee on the list-price equivalent of each
+ * call. The fee is payable only from paid credit: a paid plan's credit (app
+ * use) and credits that were paid for. The person's own subscriptions
+ * (Claude, Codex, SuperGrok) pay no fee; they need a paid plan instead.
+ */
+export const BYOK_PLATFORM_FEE_TYPE = "byok_platform_fee";
+export const BYOK_PAID_CREDIT_REQUIRED_CODE = "byok_paid_credit_required";
+export const BYOK_PAID_CREDIT_REQUIRED_MESSAGE = "Add credits to use your own key.";
+/** The same refusal on the Free plan, where a paid plan is the fix. */
+export const BYOK_UPGRADE_REQUIRED_MESSAGE = "Upgrade to Pro to use your own key.";
+
+/** The one action that fixes an own-key refusal with `message`. */
+export function byokRefusalAction(message: string) {
+  return message === BYOK_UPGRADE_REQUIRED_MESSAGE ? UPGRADE_PLAN_ACTION : ADD_CREDITS_ACTION;
+}
+
+/**
+ * The person's own subscriptions (Claude, Codex, SuperGrok and any other
+ * subscription connection) pay no platform fee: the paid plan is the fee.
+ * Using them needs a paid plan of at least $20 a month (Pro or higher); the
+ * Free plan is refused with the one action that fixes it.
+ */
+export const SUBSCRIPTION_PLAN_REQUIRED_CODE = "subscription_plan_required";
+export const SUBSCRIPTION_PLAN_REQUIRED_MESSAGE = "Upgrade to Pro to use your own subscription.";
+
+/** Buying a plan cannot enable connected subscriptions for API-origin work. */
+export const SUBSCRIPTION_API_UNAVAILABLE_CODE = "subscription_api_unavailable";
+export const SUBSCRIPTION_API_UNAVAILABLE_MESSAGE =
+  "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.";
+
+/** The cheapest monthly plan price that includes the person's own subscriptions. */
+export const OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS = 20_000_000;
+
+/**
+ * Does a catalog plan include the person's own subscriptions? A paid plan of
+ * at least $20 a month, or a custom-priced one (Enterprise, or a plan the
+ * catalog no longer lists); never Free.
+ */
+export function planIncludesOwnSubscriptions(plan: {
+  key: string;
+  monthlyPriceMicros: number | null;
+}): boolean {
+  return (
+    plan.key !== "free" &&
+    (plan.monthlyPriceMicros === null ||
+      plan.monthlyPriceMicros >= OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS)
+  );
+}
+
+/** The catalog fields the own-subscription upgrade choice reads. */
+export type OwnSubscriptionUpgradeCandidate = {
+  key: string;
+  label: string;
+  monthlyPriceMicros: number | null;
+  selfService: boolean;
+};
+
+/**
+ * The plan to name when an organization's own subscriptions need a paid plan:
+ * the cheapest self-service catalog plan that includes them (Pro in the
+ * launch catalog). Null when the catalog sells none, so nothing is invented.
+ */
+export function ownSubscriptionUpgradePlan<T extends OwnSubscriptionUpgradeCandidate>(
+  plans: readonly T[],
+): T | null {
+  return (
+    plans
+      .filter(
+        (plan) =>
+          plan.selfService &&
+          plan.monthlyPriceMicros !== null &&
+          planIncludesOwnSubscriptions(plan),
+      )
+      .sort((a, b) => (a.monthlyPriceMicros ?? 0) - (b.monthlyPriceMicros ?? 0))[0] ?? null
+  );
+}

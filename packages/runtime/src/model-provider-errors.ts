@@ -34,7 +34,56 @@ export class OrganizationOpenRouterUnavailableError extends Error {
   }
 }
 
+export class WorkspaceOpperUnavailableError extends Error {
+  constructor() {
+    super(
+      "Your Opper model is unavailable: connect or reconnect the workspace Opper key in Settings, then retry.",
+    );
+    this.name = "WorkspaceOpperUnavailableError";
+  }
+}
+
+export class OrganizationOpperUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization Opper model is unavailable: ask an organization admin to connect or reconnect Opper in Organization settings, then retry.",
+    );
+    this.name = "OrganizationOpperUnavailableError";
+  }
+}
+
+export class OrganizationOpenAIUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization OpenAI model is unavailable: ask an organization admin to connect or reconnect OpenAI in Organization settings, then retry.",
+    );
+    this.name = "OrganizationOpenAIUnavailableError";
+  }
+}
+
+export class OrganizationAzureOpenAIUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization Azure OpenAI model is unavailable: ask an organization admin to connect or reconnect Azure OpenAI in Organization settings, then retry.",
+    );
+    this.name = "OrganizationAzureOpenAIUnavailableError";
+  }
+}
+
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
+export const INCOMPLETE_CHAT_COMPLETION_CODE = "provider_incomplete_response";
+
+/** Clean transport EOF is not proof that the provider completed its response.
+ * Throw before the SDK's synthetic response_done can commit partial output or
+ * execute tool calls. No automatic replay is authorized by this error. */
+export class IncompleteChatCompletionError extends Error {
+  readonly code = INCOMPLETE_CHAT_COMPLETION_CODE;
+
+  constructor() {
+    super("The model provider ended its response before confirming completion.");
+    this.name = "IncompleteChatCompletionError";
+  }
+}
 
 /**
  * A Chat Completions provider emitted a syntactically valid terminal chunk but
@@ -95,12 +144,15 @@ export class XaiSubscriptionUnavailableError extends Error {
  * is user-actionable and surfaces verbatim as a non-retryable turn.failed.
  */
 export class WorkspaceModelPolicyBlockedError extends Error {
-  constructor(modelName: string, providerId: string, reason: "provider" | "model") {
+  constructor(modelName: string, providerId: string, reason: "provider" | "model" | "credits") {
     super(
-      reason === "provider"
-        ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
+      reason === "credits"
+        ? `Model "${modelName}" uses credits, which are turned off in this workspace. ` +
+            `Pick a model paid by a subscription or API key, or ask a workspace admin to turn credits back on.`
+        : reason === "provider"
+          ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
             `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`
-        : `Model "${modelName}" is not in this workspace's allowed models. ` +
+          : `Model "${modelName}" is not in this workspace's allowed models. ` +
             `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`,
     );
     this.name = "WorkspaceModelPolicyBlockedError";

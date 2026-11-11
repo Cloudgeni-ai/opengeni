@@ -1,0 +1,63 @@
+diff --git a/src/vmm/src/vstate/vcpu.rs b/src/vmm/src/vstate/vcpu.rs
+--- a/src/vmm/src/vstate/vcpu.rs
++++ b/src/vmm/src/vstate/vcpu.rs
+@@ -319,6 +319,59 @@
+         match self.event_receiver.recv() {
+             // Paused ---- Resume ----> Running
+             Ok(VcpuEvent::Resume) => {
++                // Lab-only KVM stage-2 prefault experiment. Run with --no-seccomp.
++                // The test guest has one contiguous RAM region below the MMIO gap.
++                #[cfg(target_arch = "x86_64")]
++                {
++                    // Every vCPU waits here. The first one prefaults while all
++                    // others remain outside KVM_RUN; subsequent resumes skip it.
++                    static PREFAULT: std::sync::Once = std::sync::Once::new();
++                    PREFAULT.call_once(|| {
++                    let started = std::time::Instant::now();
++                    let mut ranges: Vec<(u64, u64)> = Vec::new();
++                    if let Ok(path) = std::env::var("WAKE_PREFAULT_PROFILE") {
++                        let value: serde_json::Value = serde_json::from_slice(
++                            &std::fs::read(path).expect("read prefault profile"),
++                        ).expect("parse prefault profile");
++                        let mut offsets: Vec<u64> = value["offsets"].as_array()
++                            .expect("profile offsets").iter()
++                            .map(|v| v.as_u64().expect("numeric offset")).collect();
++                        offsets.sort_unstable();
++                        offsets.dedup();
++                        for offset in offsets {
++                            assert!(offset < 2_u64.pow(31) && offset % 4096 == 0);
++                            ranges.push((offset, 4096));
++                        }
++                    } else if let Ok(mib) = std::env::var("WAKE_PREFAULT_MIB") {
++                        let size = mib.parse::<u64>().expect("numeric memory size") * 1024 * 1024;
++                        assert!(size <= 2_u64.pow(31));
++                        if size != 0 { ranges.push((0, size)); }
++                    }
++                    if !ranges.is_empty() {
++                        let mut calls = 0_u64;
++                        for (gpa, size) in ranges {
++                            // Eight u64 fields are the stable kvm_pre_fault_memory ABI.
++                            let mut range = [gpa, size, 0, 0, 0, 0, 0, 0];
++                            while range[1] != 0 {
++                                let before = range[1];
++                                // SAFETY: valid vCPU FD and writable 64-byte UAPI struct.
++                                let result = unsafe {
++                                    libc::ioctl(self.kvm_vcpu.fd.as_raw_fd(), 0xc040_aed5_u64,
++                                                range.as_mut_ptr())
++                                };
++                                if result < 0 {
++                                    let error = std::io::Error::last_os_error();
++                                    if error.kind() == std::io::ErrorKind::Interrupted { continue; }
++                                    panic!("KVM_PRE_FAULT_MEMORY: {error}");
++                                }
++                                assert!(range[1] < before, "prefault made no progress");
++                                calls += 1;
++                            }
++                        }
++                        eprintln!("WAKE_PREFAULT calls={calls} elapsed_us={}", started.elapsed().as_micros());
++                    }
++                    });
++                }
+                 if self.kvm_vcpu.fd.get_kvm_run().immediate_exit == 1u8 {
+                     warn!(
+                         "Received a VcpuEvent::Resume message with immediate_exit enabled. \

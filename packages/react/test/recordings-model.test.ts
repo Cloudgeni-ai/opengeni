@@ -1,0 +1,668 @@
+import { describe, expect, test } from "bun:test";
+
+import type {
+  Recording,
+  RecordingTrack,
+  RecordingTranscriptSegment,
+  RecordingTranscriptVersion,
+} from "@opengeni/contracts";
+
+import {
+  activeSegmentIndex,
+  defaultMeetingTitle,
+  defaultSpeakerName,
+  formatClock,
+  formatDuration,
+  groupTranscriptTurns,
+  interleaveUnrecordedMarks,
+  languageName,
+  meetingHereStatus,
+  meetingPhase,
+  meetingStatusLabel,
+  meetingTitle,
+  meetingUploadFailure,
+  ownerLiveLaneName,
+  speakerColorSlots,
+  speakerDisplayName,
+  speakerIsNamed,
+  trackSpeakerName,
+  transcribingText,
+  transcriptErrorText,
+  transcriptFixModel,
+  transcriptNeedsCredits,
+  transcriptUnrecordedMarks,
+  unrecordedMarkText,
+} from "../src/recordings-model";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+function segment(
+  index: number,
+  start: number,
+  end: number,
+  speakerLabel: string | null,
+): RecordingTranscriptSegment {
+  return {
+    index,
+    startMilliseconds: start,
+    endMilliseconds: end,
+    trackNumber: 0,
+    speakerLabel,
+    text: `line ${index}`,
+    edited: false,
+  };
+}
+
+function version(state: RecordingTranscriptVersion["state"]): RecordingTranscriptVersion {
+  return {
+    id: "v1",
+    recordingId: "r1",
+    versionNumber: 1,
+    providerId: "elevenlabs",
+    model: "scribe_v2",
+    options: {},
+    state,
+    isCurrent: state === "complete",
+    languages: [],
+    diarized: true,
+    diarization: "provider",
+    audioMilliseconds: 0,
+    segmentCount: 0,
+    costUsd: null,
+    requestedBySubjectId: "user:1",
+    errorCode: null,
+    createdAt: "2026-10-23T10:00:00Z",
+    completedAt: null,
+  };
+}
+
+function recordingWith(
+  state: Recording["state"],
+  transcript: RecordingTranscriptVersion | null,
+): Recording {
+  return {
+    id: "r1",
+    workspaceId: "w1",
+    ownerSubjectId: "user:1",
+    visibility: "private",
+    title: "Sync",
+    purpose: "meeting",
+    state,
+    startedAt: "2026-10-23T10:00:00Z",
+    captureEndedAt: null,
+    durationMilliseconds: 0,
+    errorCode: null,
+    externalRef: null,
+    audioDeletedAt: null,
+    metadata: {},
+    transcription: {},
+    tracks: [],
+    transcript,
+    createdAt: "2026-10-23T10:00:00Z",
+    updatedAt: "2026-10-23T10:00:00Z",
+  };
+}
+
+const tracks: RecordingTrack[] = [
+  {
+    trackNumber: 0,
+    kind: "audio",
+    source: "microphone",
+    mimeType: "audio/webm",
+    chunkCount: 1,
+    totalBytes: 1,
+    durationMilliseconds: 1,
+    unrecorded: [],
+    playable: true,
+    video: null,
+    live: null,
+  },
+  {
+    trackNumber: 1,
+    kind: "audio",
+    source: "system",
+    mimeType: "audio/webm",
+    chunkCount: 1,
+    totalBytes: 1,
+    durationMilliseconds: 1,
+    unrecorded: [],
+    playable: true,
+    video: null,
+    live: null,
+  },
+];
+
+describe("formatting", () => {
+  test("clock times round down and add hours only when needed", () => {
+    expect(formatClock(0)).toBe("0:00");
+    expect(formatClock(247_900)).toBe("4:07");
+    expect(formatClock(3_729_000)).toBe("1:02:09");
+    expect(formatClock(-5)).toBe("0:00");
+  });
+
+  test("durations read as seconds, minutes, then hours", () => {
+    expect(formatDuration(45_000)).toBe("45\u00a0sec");
+    expect(formatDuration(12 * 60_000)).toBe("12\u00a0min");
+    expect(formatDuration(65 * 60_000)).toBe("1\u00a0h 5\u00a0min");
+    expect(formatDuration(120 * 60_000)).toBe("2\u00a0h");
+  });
+});
+
+describe("meetingPhase", () => {
+  test('capturing keeps its compatible "uploading" kind, whatever the transcript', () => {
+    expect(meetingPhase(recordingWith("capturing", null)).kind).toBe("uploading");
+  });
+
+  test("a complete current version is ready even while the recording is reprocessing", () => {
+    expect(meetingPhase(recordingWith("processing", version("complete"))).kind).toBe("ready");
+  });
+
+  test("queued and processing versions are transcribing", () => {
+    expect(meetingPhase(recordingWith("processing", version("queued"))).kind).toBe("transcribing");
+    expect(meetingPhase(recordingWith("processing", null)).kind).toBe("transcribing");
+  });
+
+  test("a failed version or recording is failed", () => {
+    expect(meetingPhase(recordingWith("failed", version("failed"))).kind).toBe("failed");
+    expect(meetingPhase(recordingWith("failed", null)).kind).toBe("failed");
+  });
+});
+
+describe("meeting status", () => {
+  // The audio uploads while it records, so nothing the list or the meeting
+  // page says about a recording in progress is "Uploading".
+  test("a recording still capturing reads In progress, never Uploading", () => {
+    expect(meetingStatusLabel(meetingPhase(recordingWith("capturing", null)))).toEqual({
+      label: "In progress",
+      tone: "progress",
+    });
+  });
+
+  const upload = (overrides: Record<string, unknown> = {}) =>
+    ({
+      recordingId: "r1",
+      created: true,
+      pendingChunks: 1,
+      pendingBytes: 4_000,
+      uploading: true,
+      retryingAfterError: null,
+      failed: null,
+      finalized: false,
+      discarded: false,
+      ...overrides,
+    }) as const;
+
+  test("this device knows it is recording, paused, or stopped and transcribing", () => {
+    const here = (state: string, overrides = {}, online = true) =>
+      meetingHereStatus(
+        { state: state as "recording", recordingId: "r1", upload: upload(overrides) },
+        "r1",
+        online,
+      );
+    expect(here("recording")).toBe("recording");
+    expect(here("paused")).toBe("paused");
+    // After Stop the last few seconds of audio are on their way, then transcription starts.
+    expect(here("stopping")).toBe("transcribing");
+    expect(here("stopped", { finalized: true, pendingChunks: 0 })).toBe("transcribing");
+    // Only a connection problem or a refusal keeps it from transcribing.
+    expect(here("stopping", {}, false)).toBe("waiting_for_connection");
+    expect(here("stopping", { retryingAfterError: "Failed to fetch" })).toBe(
+      "waiting_for_connection",
+    );
+    expect(here("stopped", { failed: { code: "not_found", message: "Not found" } })).toBe(
+      "upload_failed",
+    );
+    expect(here("stopped", { discarded: true })).toBeNull();
+    // Capture failed before Stop: nothing is transcribing until it's recovered.
+    expect(here("failed")).toBeNull();
+    expect(here("failed", { finalized: true, pendingChunks: 0 })).toBe("transcribing");
+  });
+
+  test("another meeting, or no recorder, is left to the server's state", () => {
+    expect(meetingHereStatus(null, "r1")).toBeNull();
+    expect(
+      meetingHereStatus({ state: "recording", recordingId: "r2", upload: upload() }, "r1"),
+    ).toBeNull();
+    expect(meetingHereStatus({ state: "idle", recordingId: "r1", upload: null }, "r1")).toBeNull();
+  });
+
+  test("a meeting recorded here earlier is finished from the audio kept here, and says so", () => {
+    const finishing = (overrides: Record<string, unknown> = {}, online = true) =>
+      meetingHereStatus(
+        {
+          state: "idle",
+          recordingId: null,
+          upload: null,
+          uploads: { r1: { ...upload(overrides) } },
+        },
+        "r1",
+        online,
+      );
+    expect(finishing()).toBe("uploading");
+    expect(finishing({}, false)).toBe("waiting_for_connection");
+    expect(finishing({ finalized: true, pendingChunks: 0 })).toBe("transcribing");
+    const failed = { code: "insufficient_credits", message: "No credits." };
+    expect(finishing({ failed })).toBe("upload_failed");
+    expect(finishing({ discarded: true })).toBeNull();
+    expect(
+      meetingUploadFailure(
+        { recordingId: "r2", upload: upload(), uploads: { r1: { ...upload({ failed }) } } },
+        "r1",
+      ),
+    ).toEqual(failed);
+    // Another meeting this device knows nothing about stays the server's.
+    expect(
+      meetingHereStatus({ state: "idle", recordingId: null, upload: null, uploads: {} }, "r1"),
+    ).toBeNull();
+  });
+});
+
+test("a long meeting's transcribing line says how much audio, not a minute or two", () => {
+  expect(transcribingText(90_000)).toBe("Transcribing. This usually takes a minute or two.");
+  const long = transcribingText(51 * 60_000 + 44_000);
+  expect(long).toContain("52\u00a0min");
+  expect(long).not.toContain("minute or two");
+});
+
+describe("fixing a failed transcript", () => {
+  const model = (
+    providerId: string,
+    funding: "deployment" | "workspace_key" | "workspace_subscription",
+    overrides: Record<string, unknown> = {},
+  ) =>
+    ({
+      providerId,
+      providerName: providerId,
+      model: `${providerId}-model`,
+      name: `${providerId} model`,
+      available: true,
+      funding,
+      usdPerHour: funding === "workspace_subscription" ? null : 0.36,
+      capabilities: { batch: true, live: false },
+      ...overrides,
+    }) as never;
+  const mai = model("azure-speech", "deployment");
+  const chatgpt = model("codex-subscription", "workspace_subscription");
+  const eleven = model("elevenlabs", "workspace_key");
+  const failedOn = { providerId: "azure-speech", model: "azure-speech-model" };
+
+  test("a credit refusal offers a model that uses no credits, a subscription first", () => {
+    expect(transcriptNeedsCredits("insufficient_credits")).toBe(true);
+    expect(transcriptNeedsCredits("allowance_exhausted")).toBe(true);
+    expect(transcriptNeedsCredits("provider_unauthorized")).toBe(false);
+    expect(transcriptFixModel("insufficient_credits", failedOn, [mai, eleven, chatgpt])).toBe(
+      chatgpt,
+    );
+    expect(transcriptFixModel("allowance_exhausted", failedOn, [mai, eleven])).toBe(eleven);
+    // Another credit-charged model isn't a fix, nor is one that isn't connected.
+    const otherCharged = model("openai", "deployment");
+    const unconnected = model("codex-subscription", "workspace_subscription", {
+      available: false,
+    });
+    expect(
+      transcriptFixModel("insufficient_credits", failedOn, [mai, otherCharged, unconnected]),
+    ).toBeNull();
+    // A deployment's model it doesn't charge for is free here too.
+    const covered = model("openai", "deployment", { usdPerHour: null });
+    expect(transcriptFixModel("insufficient_credits", failedOn, [mai, covered])).toBe(covered);
+    // The server's word wins: charged in credits without a known price is still charged.
+    const unpriced = model("openai", "deployment", { usdPerHour: null, chargedInCredits: true });
+    expect(transcriptFixModel("insufficient_credits", failedOn, [mai, unpriced])).toBeNull();
+    // For a provider's failure, a model that costs no credits comes first.
+    const charged = model("openai", "deployment", { chargedInCredits: true });
+    const ownKey = model("elevenlabs", "workspace_key", { chargedInCredits: false });
+    expect(
+      transcriptFixModel("provider_unauthorized", { providerId: "azure-speech", model: "x" }, [
+        charged,
+        ownKey,
+      ]),
+    ).toBe(ownKey);
+  });
+
+  test("a provider's failure offers another provider; other failures offer none", () => {
+    expect(transcriptFixModel("missing_provider_key", failedOn, [mai, eleven])).toBe(eleven);
+    expect(transcriptFixModel("missing_provider_key", failedOn, [mai])).toBeNull();
+    expect(transcriptFixModel("timed_out", failedOn, [mai, eleven, chatgpt])).toBeNull();
+    expect(transcriptFixModel(null, failedOn, [chatgpt])).toBeNull();
+  });
+
+  test("the refusals say what to fix", () => {
+    expect(transcriptErrorText("subscription_plan_required")).toBe(
+      "Upgrade to Pro to use your own subscription.",
+    );
+    expect(transcriptErrorText("subscription_api_unavailable")).toContain(
+      "Choose a credit-billed model",
+    );
+    expect(
+      transcriptFixModel("subscription_plan_required", failedOn, [mai, eleven, chatgpt]),
+    ).toBeNull();
+    expect(
+      transcriptFixModel(
+        "subscription_api_unavailable",
+        { providerId: "codex-subscription", model: "chatgpt-dictation" },
+        [mai, chatgpt, model("other-subscription", "workspace_subscription")],
+      ),
+    ).toBe(mai);
+    expect(transcriptErrorText("insufficient_credits")).toContain("Add credits");
+    expect(
+      transcriptErrorText("insufficient_credits", undefined, {
+        modelName: "MAI-Transcribe-2",
+        providerName: "Azure Speech",
+      }),
+    ).toContain("MAI-Transcribe-2 uses credits");
+    expect(transcriptErrorText("allowance_exhausted")).toContain("allowance");
+    expect(transcriptErrorText("monthly_model_cost_limit")).toContain("monthly spending limit");
+    expect(transcriptErrorText("timed_out")).toContain("took too long");
+    expect(transcriptErrorText("policy_blocked")).toContain("policy");
+  });
+});
+
+describe("speakers", () => {
+  test("language names read the same with or without Intl.DisplayNames", () => {
+    expect(languageName("en")).toBe("English");
+    expect(languageName("eng")).toBe("English");
+    expect(languageName("zz")).toBe("zz");
+    const displayNames = Intl.DisplayNames;
+    const canonical = Intl.getCanonicalLocales;
+    try {
+      // Hermes, the phone's JavaScript engine, has no Intl.DisplayNames and
+      // leaves three-letter codes as they are.
+      Reflect.deleteProperty(Intl, "DisplayNames");
+      Object.defineProperty(Intl, "getCanonicalLocales", {
+        value: (code: string) => [code],
+        configurable: true,
+        writable: true,
+      });
+      expect(languageName("eng")).toBe("English");
+      expect(languageName("nob")).toBe("Norwegian Bokmål");
+      expect(languageName("en-GB")).toBe("English");
+      expect(languageName("zz")).toBe("zz");
+    } finally {
+      Object.defineProperty(Intl, "DisplayNames", {
+        value: displayNames,
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(Intl, "getCanonicalLocales", {
+        value: canonical,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
+
+  const speakers = [
+    {
+      label: "speaker_0",
+      name: "Maja Berg",
+      personId: "p1",
+      source: "confirmed" as const,
+      confidence: null,
+    },
+    // The server's default name for a label nobody named.
+    { label: "speaker_1", name: "Speaker 2", personId: null, source: null, confidence: null },
+    {
+      label: "speaker_2",
+      name: "Pilot customer",
+      personId: null,
+      source: "confirmed" as const,
+      confidence: null,
+    },
+  ];
+
+  test("named labels show the name; model labels count from one", () => {
+    expect(speakerDisplayName("speaker_0", speakers, tracks)).toBe("Maja Berg");
+    expect(speakerDisplayName("speaker_1", speakers, tracks)).toBe("Speaker 2");
+    expect(speakerDisplayName("t1_speaker_3", speakers, tracks)).toBe("Speaker 4");
+    expect(speakerDisplayName(null, speakers, tracks)).toBe("Unknown speaker");
+  });
+
+  test("track labels name the track's role", () => {
+    expect(defaultSpeakerName("track-0", tracks)).toBe("Microphone");
+    expect(defaultSpeakerName("track-1", tracks)).toBe("Shared audio");
+    expect(defaultSpeakerName("track-4", tracks)).toBe("Track 5");
+  });
+
+  test("beside computer audio the live microphone is the person recording, the rest is Others", () => {
+    expect(ownerLiveLaneName(tracks, 0, "Maja Berg")).toBe("Maja Berg");
+    expect(ownerLiveLaneName(tracks, 1, "Maja Berg")).toBe("Others");
+    // A microphone alone is named by its source as before.
+    const micOnly = tracks.filter((track) => track.source === "microphone");
+    expect(ownerLiveLaneName(micOnly, 0, "Maja Berg")).toBeNull();
+  });
+
+  test("a label is named only by a person or a name someone gave it", () => {
+    expect(speakerIsNamed("speaker_0", speakers)).toBe(true);
+    expect(speakerIsNamed("speaker_1", speakers)).toBe(false);
+    expect(speakerIsNamed("speaker_2", speakers)).toBe(true);
+    expect(speakerIsNamed("speaker_9", speakers)).toBe(false);
+    expect(speakerDisplayName("speaker_2", speakers, tracks)).toBe("Pilot customer");
+  });
+
+  test("colors follow first appearance and wrap after six", () => {
+    const slots = speakerColorSlots([
+      segment(0, 0, 1, "b"),
+      segment(1, 1, 2, "a"),
+      segment(2, 2, 3, "b"),
+      ...["c", "d", "e", "f", "g"].map((label, offset) => segment(3 + offset, 3, 4, label)),
+    ]);
+    expect(slots.get("b")).toBe(1);
+    expect(slots.get("a")).toBe(2);
+    expect(slots.get("g")).toBe(1);
+  });
+});
+
+describe("transcript turns", () => {
+  test("joins one speaker's consecutive segments and splits on a long pause", () => {
+    const turns = groupTranscriptTurns([
+      segment(0, 0, 4_000, "a"),
+      segment(1, 4_500, 9_000, "a"),
+      segment(2, 9_500, 12_000, "b"),
+      segment(3, 60_000, 64_000, "b"),
+    ]);
+    expect(turns.map((turn) => turn.segments.map((entry) => entry.index))).toEqual([
+      [0, 1],
+      [2],
+      [3],
+    ]);
+    expect(turns[0]!.endMilliseconds).toBe(9_000);
+  });
+
+  test("finds the segment playing now", () => {
+    const segments = [segment(0, 0, 4_000, "a"), segment(5, 5_000, 9_000, "b")];
+    expect(activeSegmentIndex(segments, 4_500)).toBe(0);
+    expect(activeSegmentIndex(segments, 7_000)).toBe(5);
+    expect(activeSegmentIndex([segment(0, 1_000, 2_000, "a")], 500)).toBe(null);
+  });
+
+  test("a track's stretches without audio sit where they start, in words a reader knows", () => {
+    const hour = 2_735_000;
+    const microphone: RecordingTrack = {
+      ...tracks[0]!,
+      unrecorded: [{ startMilliseconds: 1_059_000, endMilliseconds: null }],
+    };
+    const shared: RecordingTrack = {
+      ...tracks[1]!,
+      unrecorded: [{ startMilliseconds: 20_000, endMilliseconds: 95_000 }],
+    };
+    // A server from before tracks said where they have no audio.
+    const older = { ...tracks[0]!, unrecorded: undefined } as unknown as RecordingTrack;
+    expect(transcriptUnrecordedMarks([older], hour)).toEqual([]);
+    const marks = transcriptUnrecordedMarks([microphone, shared], hour);
+    expect(
+      marks.map((mark) => [mark.trackNumber, mark.startMilliseconds, mark.endMilliseconds]),
+    ).toEqual([
+      [1, 20_000, 95_000],
+      [0, 1_059_000, hour],
+    ]);
+    const segments = [
+      { ...segment(0, 0, 4_000, "track-0"), trackNumber: 0 },
+      { ...segment(1, 30_000, 34_000, "speaker_0"), trackNumber: 1 },
+      { ...segment(2, 1_100_000, 1_104_000, "speaker_0"), trackNumber: 1 },
+    ];
+    const turns = groupTranscriptTurns(segments);
+    const order = interleaveUnrecordedMarks(turns, marks).map((item) =>
+      item.kind === "turn" ? item.turn.key : item.mark.key,
+    );
+    expect(order).toEqual([0, "1:20000", 1, "0:1059000", 2]);
+    // With no turn after it, a mark ends the transcript.
+    expect(interleaveUnrecordedMarks(turns.slice(0, 1), marks).at(-1)).toMatchObject({
+      kind: "unrecorded",
+    });
+    // The microphone's one named voice is who is missing; computer audio is the others.
+    const speakers = [
+      {
+        label: "track-0",
+        name: "Ingrid Solberg",
+        personId: null,
+        source: "track" as const,
+        confidence: null,
+      },
+    ];
+    expect(trackSpeakerName(0, segments, speakers)).toBe("Ingrid Solberg");
+    expect(trackSpeakerName(0, segments, [])).toBeNull();
+    // A name only suggested from the voice waits until someone confirms it.
+    expect(
+      trackSpeakerName(0, segments, [{ ...speakers[0]!, source: "suggested" as const }]),
+    ).toBeNull();
+    expect(trackSpeakerName(1, segments, speakers)).toBeNull();
+    expect(unrecordedMarkText(marks[1]!, undefined, "Ingrid Solberg")).toBe(
+      "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35. Everyone else was still recorded.",
+    );
+    expect(unrecordedMarkText(marks[1]!)).toBe(
+      "The microphone wasn't recording from 17:39 to 45:35. Other people were still recorded.",
+    );
+    expect(unrecordedMarkText(marks[0]!)).toBe("Other people weren't recorded from 0:20 to 1:35.");
+    // With a third track also missing part of the microphone's stretch, not
+    // everyone else was recorded, so the line doesn't claim it.
+    const tab: RecordingTrack = {
+      ...tracks[1]!,
+      trackNumber: 2,
+      source: "browser_tab",
+      unrecorded: [{ startMilliseconds: 2_000_000, endMilliseconds: 2_100_000 }],
+    };
+    const three = transcriptUnrecordedMarks([microphone, shared, tab], hour);
+    const microphoneMark = three.find((mark) => mark.trackNumber === 0)!;
+    expect(microphoneMark.othersRecorded).toBe(false);
+    expect(unrecordedMarkText(microphoneMark, undefined, "Ingrid Solberg")).toBe(
+      "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35.",
+    );
+  });
+
+  test("when every track is silent at once, or the meeting has one, nothing was recorded", () => {
+    const both = transcriptUnrecordedMarks(
+      [
+        { ...tracks[0]!, unrecorded: [{ startMilliseconds: 300_000, endMilliseconds: 371_000 }] },
+        { ...tracks[1]!, unrecorded: [{ startMilliseconds: 301_000, endMilliseconds: 370_000 }] },
+      ],
+      600_000,
+    );
+    // One line for the time both were missing; a second either side is too short to mark.
+    expect(both).toEqual([
+      expect.objectContaining({
+        trackNumber: null,
+        startMilliseconds: 301_000,
+        endMilliseconds: 370_000,
+      }),
+    ]);
+    expect(unrecordedMarkText(both[0]!)).toBe("Nothing was recorded from 5:01 to 6:10.");
+    const alone = transcriptUnrecordedMarks(
+      [{ ...tracks[0]!, unrecorded: [{ startMilliseconds: 40_000, endMilliseconds: 50_000 }] }],
+      60_000,
+    );
+    expect(alone.map((mark) => [mark.trackNumber, unrecordedMarkText(mark)])).toEqual([
+      [null, "Nothing was recorded from 0:40 to 0:50."],
+    ]);
+    // One voice talking on both sides of the drop reads as two turns, with the line between.
+    const turns = groupTranscriptTurns(
+      [segment(0, 30_000, 39_000, "a"), segment(1, 52_000, 58_000, "a")],
+      undefined,
+      alone.map((mark) => mark.startMilliseconds),
+    );
+    expect(
+      interleaveUnrecordedMarks(turns, alone).map((item) =>
+        item.kind === "turn" ? item.turn.key : item.mark.key,
+      ),
+    ).toEqual([0, "all:40000", 1]);
+  });
+});
+
+test("error codes from the worker and providers read as plain advice", () => {
+  expect(transcriptErrorText("missing_provider_key")).toContain("Organization settings");
+  // A missing key is one provider's, not proof that none is connected.
+  expect(transcriptErrorText("missing_provider_key")).not.toContain("No transcription provider");
+  expect(
+    transcriptErrorText("missing_provider_key", undefined, {
+      modelName: "Scribe v2",
+      providerName: "ElevenLabs",
+    }),
+  ).toBe(
+    "Scribe v2 needs ElevenLabs, which isn't connected. Try another model, or an admin can connect ElevenLabs in Organization settings, under Models.",
+  );
+  const scribe = { modelName: "Scribe v2", providerName: "ElevenLabs" };
+  // A deployment with one model has no other to try.
+  const pinned = transcriptErrorText("missing_provider_key", undefined, {
+    ...scribe,
+    pinned: true,
+  });
+  expect(pinned).not.toContain("another model");
+  expect(pinned).toContain("Organization settings");
+  // The deployment's own key is for whoever runs it, not an organization admin.
+  const deployment = transcriptErrorText("missing_provider_key", undefined, {
+    ...scribe,
+    funding: "deployment",
+  });
+  expect(deployment).toContain("another model");
+  expect(deployment).toContain("whoever runs this deployment");
+  expect(deployment).not.toContain("Organization settings");
+  expect(
+    transcriptErrorText("missing_provider_key", undefined, {
+      ...scribe,
+      funding: "deployment",
+      pinned: true,
+    }),
+  ).toBe(
+    "Scribe v2 needs ElevenLabs, which this deployment hasn't set up. Ask whoever runs this deployment to set up ElevenLabs.",
+  );
+  expect(transcriptErrorText("provider_quota_exceeded")).toContain("out of credit");
+  expect(transcriptErrorText("something_new")).toContain("Try again");
+});
+
+test("a host's catalog and locale reach every label the helpers make", () => {
+  const msg = createOpenGeniText({
+    locale: "nb",
+    messages: {
+      "meetings.recordings.durationSeconds": "{seconds}\u00a0sek",
+      "meetings.recordings.durationHoursMinutes": "{hours}\u00a0t {minutes}\u00a0min",
+      "meetings.recordings.inProgress": "Pågår",
+      "meetings.recordings.speakerNumber": "Taler {number}",
+      "meetings.recordings.microphone": "Mikrofon",
+      "meetings.recordings.unknownSpeaker": "Ukjent taler",
+      "meetings.recordings.errorUnknown": "Noe gikk galt.",
+      "meetings.recordings.defaultTitle": "Møte {date} {time}",
+    },
+  });
+  expect(formatDuration(45_000, msg)).toBe("45\u00a0sek");
+  expect(formatDuration(65 * 60_000, msg)).toBe("1\u00a0t 5\u00a0min");
+  expect(meetingStatusLabel({ kind: "uploading" }, msg)?.label).toBe("Pågår");
+  expect(speakerDisplayName("t1_speaker_3", [], tracks, msg)).toBe("Taler 4");
+  expect(speakerDisplayName(null, [], tracks, msg)).toBe("Ukjent taler");
+  expect(defaultSpeakerName("track-0", tracks, msg)).toBe("Mikrofon");
+  expect(transcriptErrorText("something_new", msg)).toBe("Noe gikk galt.");
+  expect(defaultMeetingTitle(new Date(2026, 9, 23, 14, 5), msg)).toStartWith("Møte ");
+  // Language names follow the locale and start upper case, as a label does.
+  expect(languageName("nob", "nb")).toBe("Norsk bokmål");
+  expect(languageName("en", "nb")).toBe("Engelsk");
+});
+
+test("a meeting started without a title shows as a recorder would have named it", () => {
+  const startedAt = "2026-10-26T11:15:40.000Z";
+  const named = defaultMeetingTitle(new Date(startedAt));
+  expect(defaultMeetingTitle(new Date(2026, 9, 23, 14, 5))).toBe("Meeting, 23 Oct, 14:05");
+  expect(meetingTitle({ title: "Recording 2026-10-26 11:15 UTC", startedAt })).toBe(named);
+  expect(meetingTitle({ title: "  ", startedAt })).toBe(named);
+  // Its own title, or the stand-in for another time, stays as it is.
+  expect(meetingTitle({ title: "Weekly sync", startedAt })).toBe("Weekly sync");
+  expect(meetingTitle({ title: "Recording 2026-10-25 11:15 UTC", startedAt })).toBe(
+    "Recording 2026-10-25 11:15 UTC",
+  );
+});

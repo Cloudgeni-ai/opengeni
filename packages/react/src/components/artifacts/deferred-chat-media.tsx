@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useOpenGeniText } from "../../messages/runtime";
 
 /**
  * Reserve the chat slot before starting expensive media work. Activation is
@@ -19,6 +20,7 @@ export function DeferredChatMedia({
   /** The complete (translated) activation label; overrides `label`. */
   actionLabel?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const host = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState(false);
   useEffect(() => {
@@ -58,7 +60,10 @@ export function DeferredChatMedia({
             className="rounded-md px-3 py-2 text-sm text-fg-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
             onClick={() => setActive(true)}
           >
-            {actionLabel ?? `Load ${label ?? "media"}`}
+            {actionLabel ??
+              t("artifacts.deferredChatMedia.loadLabel", {
+                label: label ?? t("artifacts.deferredChatMedia.media"),
+              })}
           </button>
         </div>
       )}

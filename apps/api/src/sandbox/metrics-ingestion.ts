@@ -38,6 +38,8 @@ import {
   clearEnrollmentWentOffline,
   disconnectAttachedBrowserDevices,
   advanceEnrollmentAgentUpdate,
+  enrollmentMacPermissionCapabilities,
+  enrollmentMacPermissions,
   getEnrollment,
   getLiveEnrollmentConnection,
   ingestMachineMetricsSample,
@@ -50,27 +52,43 @@ import {
   setEnrollmentOpStreamState,
   type AppendEventInput,
   type Database,
+  type EnrollmentMacPermissions,
   type MachineMetricsSample,
 } from "@opengeni/db";
 import {
+  AttachedBrowserConnectionEnd as AttachedBrowserConnectionEndContract,
   AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContract,
+  MachineUpdateBlocker,
   type AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContractValue,
+  type AttachedBrowserConnectionEnd as AttachedBrowserConnectionEndValue,
 } from "@opengeni/contracts";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import type { SessionWorkflowClient } from "@opengeni/core";
 import { normalizeConnectedMachineWorkspaceRoot } from "@opengeni/runtime/sandbox";
+import type { AutomaticAgentUpdater } from "./agent-update";
 import {
   AgentEvent,
   AgentUpdateStage,
   Arch,
+  AttachedBrowserConnectionEndReason as WireConnectionEndReason,
   GoingOfflineReason,
   Hello,
   Os,
   goingOfflineReasonToJSON,
+  type AttachedBrowserConnectionEnd as WireAttachedBrowserConnectionEnd,
   type AttachedBrowserInventorySnapshot as WireAttachedBrowserInventorySnapshot,
   type MetricsSample,
 } from "@opengeni/agent-proto";
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
+import { reconcileScreenControlOnHello } from "./screen-control";
+import { ingestConnectedCommandCompletion } from "./command-completion";
+import {
+  createConnectedCommandCompletionLocator,
+  type ConnectedCommandCompletionLocator,
+} from "./completion-locator";
+import { answerOperationInventory } from "./operation-inventory";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
@@ -112,12 +130,45 @@ function payloadIsHeartbeat(payload: Uint8Array): boolean {
 
 /**
  * Drain agent events without making every Connected Machine wait behind one
- * deployment-wide serial DB queue. Each exact process subject retains FIFO order;
+ * deployment-wide serial DB queue. Within this consumer, each exact process subject retains FIFO order;
  * separate subjects drain concurrently. Consecutive pending heartbeats for one
  * subject are latest-wins because they are point-in-time liveness/metrics samples,
- * while GoingOffline and update-progress events remain ordered barriers.
+ * while GoingOffline and update-progress events remain ordered barriers. Exit
+ * collectors use a separate exact-operation lane: draining retained output must
+ * not hold that machine's heartbeats or unrelated command completions hostage.
+ * Operation inventory pages share that lane, in their own FIFO queue per
+ * runner process, because answering one can collect retained output too.
  */
 export function createAgentEventIngestionScheduler(
+  handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+  options: { maxConcurrentSubjects?: number; onHeartbeatCoalesced?: () => void } = {},
+): AgentEventIngestionScheduler {
+  // Data-plane collectors must never consume heartbeat/control admission. Both
+  // lanes reuse the existing concurrency discipline, with independent capacity.
+  const control = createAgentEventIngestionLane(handler, options);
+  const completions = createAgentEventIngestionLane(handler, options);
+  return {
+    enqueue(payload, subject) {
+      let completion = false;
+      try {
+        const kind = AgentEvent.decode(payload).event?.$case;
+        completion = kind === "operationCompleted" || kind === "operationInventory";
+      } catch {
+        /* The control handler owns malformed-event diagnostics. */
+      }
+      (completion ? completions : control).enqueue(payload, subject);
+    },
+    async whenIdle() {
+      await Promise.all([control.whenIdle(), completions.whenIdle()]);
+    },
+    close() {
+      control.close();
+      completions.close();
+    },
+  };
+}
+
+function createAgentEventIngestionLane(
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
   options: { maxConcurrentSubjects?: number; onHeartbeatCoalesced?: () => void } = {},
 ): AgentEventIngestionScheduler {
@@ -182,22 +233,36 @@ export function createAgentEventIngestionScheduler(
     enqueue(payload, subject) {
       if (!accepting) return;
       const heartbeat = payloadIsHeartbeat(payload);
-      let state = states.get(subject);
+      let queueKey = subject;
+      let completion = false;
+      try {
+        const event = AgentEvent.decode(payload).event;
+        if (event?.$case === "operationCompleted") {
+          completion = true;
+          queueKey = `${subject}:operation:${event.operationCompleted.opId}`;
+        } else if (event?.$case === "operationInventory") {
+          // Every page is answered, in order: never coalesced.
+          queueKey = `${subject}:inventory`;
+        }
+      } catch {
+        /* The handler owns malformed payload diagnostics. */
+      }
+      let state = states.get(queueKey);
       if (!state) {
         state = { scheduled: false, pending: [] };
-        states.set(subject, state);
+        states.set(queueKey, state);
       }
 
       const queued = { payload, subject, heartbeat };
       const lastIndex = state.pending.length - 1;
-      if (heartbeat && lastIndex >= 0 && state.pending[lastIndex]!.heartbeat) {
+      if (lastIndex >= 0 && (completion || (heartbeat && state.pending[lastIndex]!.heartbeat))) {
         state.pending[lastIndex] = queued;
-        options.onHeartbeatCoalesced?.();
+        if (heartbeat) options.onHeartbeatCoalesced?.();
       } else {
         state.pending.push(queued);
       }
 
-      schedule(subject, state);
+      schedule(queueKey, state);
     },
     async whenIdle() {
       if (states.size === 0) return;
@@ -314,7 +379,51 @@ export function wireAttachedBrowserInventoryToContract(
       tabCount: safeWireInteger(device.tabCount, "attached browser tab count"),
       capabilities: device.capabilities,
     })),
+    connectionEnds: (wire.connectionEnds ?? []).flatMap(wireConnectionEndToContract),
   });
+}
+
+const WIRE_CONNECTION_END_REASONS = new Map<
+  WireConnectionEndReason,
+  AttachedBrowserConnectionEndValue["reason"]
+>([
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_CLOSED_PORT,
+    "browser_closed_port",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_MESSAGE_INVALID,
+    "browser_message_invalid",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_OUTPUT_FAILED,
+    "browser_output_failed",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_NATIVE_HOST_LOST,
+    "native_host_lost",
+  ],
+  [WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_AGENT_REJECTED, "agent_rejected"],
+]);
+
+/** Connection ends are diagnostics. One the contract cannot hold (a future
+ *  reason, or the generation of a hello the bridge rejected as malformed) is
+ *  dropped instead of rejecting the authoritative device inventory. */
+function wireConnectionEndToContract(
+  wire: WireAttachedBrowserConnectionEnd,
+): AttachedBrowserConnectionEndValue[] {
+  const reason = WIRE_CONNECTION_END_REASONS.get(wire.reason);
+  const endedAtMs = Number(wire.endedAtUnixMs);
+  if (!reason || !Number.isSafeInteger(endedAtMs) || endedAtMs <= 0) return [];
+  const parsed = AttachedBrowserConnectionEndContract.safeParse({
+    deviceId: wire.deviceId,
+    connectionGeneration: wire.connectionGeneration,
+    reason,
+    detail: wire.detail.slice(0, 512) || null,
+    endedAt: new Date(endedAtMs).toISOString(),
+    connectedMs: Math.min(Number(wire.connectedMs) || 0, Number.MAX_SAFE_INTEGER),
+  });
+  return parsed.success ? [parsed.data] : [];
 }
 
 function safeWireInteger(value: string | number, label: string): number {
@@ -357,15 +466,14 @@ function wireBrowserArchitecture(architecture: Arch): "x64" | "arm64" {
 async function ingestAttachedBrowserInventory(
   db: Database,
   input: {
+    accountId: string;
     workspaceId: string;
     agentId: string;
     inventory: WireAttachedBrowserInventorySnapshot;
   },
 ): Promise<void> {
-  const enrollment = await getEnrollment(db, input.workspaceId, input.agentId);
-  if (!enrollment) return;
   await reconcileAttachedBrowserInventory(db, {
-    accountId: enrollment.accountId,
+    accountId: input.accountId,
     workspaceId: input.workspaceId,
     enrollmentId: input.agentId,
     snapshot: wireAttachedBrowserInventoryToContract(input.inventory),
@@ -433,7 +541,7 @@ async function fanOutMachineLinkEvents(
       observability?.warn?.("Failed to fan out a machine-link event to a session", {
         workspaceId,
         sessionId: session.sessionId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -452,6 +560,9 @@ export async function handleAgentEventPayload(
   payload: Uint8Array,
   subject: string,
   bus?: EventBus,
+  agentUpdates?: AutomaticAgentUpdater | null,
+  completionLocator?: ConnectedCommandCompletionLocator,
+  wakeSessionWorkflow?: SessionWorkflowClient["wakeSessionWorkflow"],
 ): Promise<void> {
   const ids = parseAgentEventSubject(subject);
   if (!ids) {
@@ -463,8 +574,47 @@ export async function handleAgentEventPayload(
   } catch (error) {
     observability?.warn?.("Failed to decode an agent event for metrics ingestion", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
+    return;
+  }
+  if (event.event?.$case === "operationCompleted") {
+    try {
+      await ingestConnectedCommandCompletion(
+        db,
+        ids,
+        event.event.operationCompleted,
+        bus,
+        undefined,
+        undefined,
+        completionLocator,
+        wakeSessionWorkflow,
+      );
+    } catch (error) {
+      observability?.warn?.("Failed to settle a Connected Machine completion event", {
+        subject,
+        error: errorMessage(error),
+      });
+    }
+    return;
+  }
+  if (event.event?.$case === "operationInventory") {
+    try {
+      await answerOperationInventory(
+        db,
+        ids,
+        event.event.operationInventory,
+        bus,
+        observability,
+        wakeSessionWorkflow ? { wakeSessionWorkflow } : undefined,
+      );
+    } catch (error) {
+      // Unanswered, the runner repeats the page on its next tick.
+      observability?.warn?.("Failed to answer a runner's operation inventory", {
+        subject,
+        error: errorMessage(error),
+      });
+    }
     return;
   }
   // A clean GoingOffline is the machine-plane's typed shutdown signal. Two things
@@ -507,7 +657,7 @@ export async function handleAgentEventPayload(
         } catch (error) {
           observability?.warn?.("Failed to disconnect attached browsers with their machine", {
             subject,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
         // Fan out the link-plane events to the sessions with an active op on this
@@ -543,7 +693,7 @@ export async function handleAgentEventPayload(
     } catch (error) {
       observability?.warn?.("Failed to record a machine clean going-offline", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     return;
@@ -573,6 +723,21 @@ export async function handleAgentEventPayload(
       }
     })();
     if (!status) return;
+    // Enrollment viewers need not have access to every controller on this
+    // physical host. Persist categories only, never private session identities.
+    const blockerCounts = new Map<string, number>();
+    for (const blocker of progress.blockers) {
+      const parsed = MachineUpdateBlocker.safeParse(blocker);
+      if (!parsed.success) continue;
+      const kind =
+        blockerCounts.has(parsed.data.kind) || blockerCounts.size < 32
+          ? parsed.data.kind
+          : "other_work";
+      blockerCounts.set(
+        kind,
+        Math.min(0xffff_ffff, (blockerCounts.get(kind) ?? 0) + parsed.data.count),
+      );
+    }
     try {
       await advanceEnrollmentAgentUpdate(db, {
         accountId: enrollment.accountId,
@@ -586,13 +751,14 @@ export async function handleAgentEventPayload(
           ? progress.expectedBinarySha256
           : null,
         errorCode: progress.errorCode || null,
+        blockers: [...blockerCounts].map(([kind, count]) => ({ kind, count })),
         retryable: progress.retryable,
         rolledBack: progress.rolledBack,
       });
     } catch (error) {
       observability?.warn?.("Failed to ingest a machine self-update progress event", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     return;
@@ -601,27 +767,35 @@ export async function handleAgentEventPayload(
     return; // an unknown event kind → not a metrics point.
   }
   const heartbeat = event.event.heartbeat;
-  const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId).catch(() => null);
-  if (!enrollment || enrollment.connectionInstanceId !== ids.connectionInstanceId) return;
+  let enrollment: Awaited<ReturnType<typeof getEnrollment>>;
   try {
     const renewed = await renewEnrollmentConnection(db, {
-      accountId: enrollment.accountId,
       workspaceId: ids.workspaceId,
       enrollmentId: ids.agentId,
       connectionInstanceId: ids.connectionInstanceId,
       leaseMs: AGENT_CONNECTION_LEASE_MS,
     });
-    if (!renewed.renewed) return;
+    if (!renewed.renewed || !renewed.enrollment) return;
+    enrollment = renewed.enrollment;
   } catch (error) {
     observability?.warn?.("Failed to renew a machine connection heartbeat", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return;
   }
+  // A live machine behind its promoted build is asked to update; the decision
+  // reads only this enrollment, and a request never blocks heartbeat ingestion.
+  // A compute sandbox is one too: it keeps its disk for as long as it lives, so
+  // the agent its image carried would otherwise run for good. A sandbox only
+  // heartbeats while it runs, so one that sleeps updates when next woken. An
+  // agent from before compute self-update refuses with a non-retryable
+  // `update_unsupported`, asked once per promoted version.
+  agentUpdates?.consider(enrollment);
   if (heartbeat.attachedBrowserInventory) {
     try {
       await ingestAttachedBrowserInventory(db, {
+        accountId: enrollment.accountId,
         workspaceId: ids.workspaceId,
         agentId: ids.agentId,
         inventory: heartbeat.attachedBrowserInventory,
@@ -629,7 +803,7 @@ export async function handleAgentEventPayload(
     } catch (error) {
       observability?.warn?.("Failed to ingest an attached-browser inventory", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -638,12 +812,18 @@ export async function handleAgentEventPayload(
       const status = heartbeat.desktopStatus;
       const available = status.available && !status.unavailableReason;
       const reason = status.unavailableReason || null;
+      const macPermissions = status.macPermissions;
+      const stored = enrollmentMacPermissions(enrollment.agentCapabilities);
       // The heartbeat already read the exact enrollment. Steady state adds no
       // extra query; the change path re-reads and fences its eventual write.
       if (
         enrollment.hasDisplay !== available ||
         (enrollment.desktopUnavailableReason ?? null) !== reason ||
-        enrollment.agentCapabilities?.desktop !== available
+        enrollment.agentCapabilities?.desktop !== available ||
+        (macPermissions !== undefined &&
+          (stored?.screenRecording !== macPermissions.screenRecording ||
+            stored?.accessibility !== macPermissions.accessibility ||
+            stored?.inputMonitoring !== macPermissions.inputMonitoring))
       ) {
         await refreshEnrollmentDisplay(db, {
           workspaceId: ids.workspaceId,
@@ -651,13 +831,14 @@ export async function handleAgentEventPayload(
           hasDisplay: available,
           desktopUnavailableReason: reason,
           runtimeDesktop: available,
+          ...(macPermissions ? { macPermissions } : {}),
           connectionInstanceId: ids.connectionInstanceId,
         });
       }
     } catch (error) {
       observability?.warn?.("Failed to refresh a machine desktop heartbeat", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -673,7 +854,7 @@ export async function handleAgentEventPayload(
   } catch (error) {
     observability?.warn?.("Failed to ingest a machine metrics heartbeat", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -687,10 +868,23 @@ export function startMetricsIngestion(deps: {
   db: Database;
   bus: EventBus;
   observability?: Observability;
-}): () => void {
+  agentUpdates?: AutomaticAgentUpdater | null;
+  /** Wakes a session waiting on a command this ingestion settles. */
+  wakeSessionWorkflow?: SessionWorkflowClient["wakeSessionWorkflow"];
+}): (() => void) & { whenIdle: () => Promise<void> } {
+  const completionLocator = createConnectedCommandCompletionLocator(deps.db);
   const scheduler = createAgentEventIngestionScheduler(
     (payload, subject) =>
-      handleAgentEventPayload(deps.db, deps.observability, payload, subject, deps.bus),
+      handleAgentEventPayload(
+        deps.db,
+        deps.observability,
+        payload,
+        subject,
+        deps.bus,
+        deps.agentUpdates,
+        completionLocator,
+        deps.wakeSessionWorkflow,
+      ),
     {
       onHeartbeatCoalesced: () =>
         deps.observability?.incrementCounter({
@@ -699,13 +893,21 @@ export function startMetricsIngestion(deps: {
         }),
     },
   );
-  const unsubscribe = deps.bus.subscribeAgentEvents(AGENT_EVENTS_SUBJECT, (payload, subject) => {
-    scheduler.enqueue(payload, subject);
-  });
-  return () => {
-    unsubscribe();
-    scheduler.close();
-  };
+  // This handler persists shared state; running it in every API replica repeats
+  // every lease, inventory and metrics write. Other agent-event subscribers keep
+  // broadcast delivery. Exact-runner database fences still own authority.
+  const unsubscribe = deps.bus.subscribeAgentEvents(
+    AGENT_EVENTS_SUBJECT,
+    (payload, subject) => scheduler.enqueue(payload, subject),
+    { queue: "opengeni-agent-state-ingestion" },
+  );
+  return Object.assign(
+    () => {
+      unsubscribe();
+      scheduler.close();
+    },
+    { whenIdle: scheduler.whenIdle },
+  );
 }
 
 // ── Connect-Hello display refresh ─────────────────────────────────────────────
@@ -770,6 +972,13 @@ export function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> 
     operationResourcePolicy: caps.operationResourcePolicy === true,
     operationCpuQuota: caps.operationCpuQuota === true,
     transactionalFsWrite: caps.transactionalFsWrite === true,
+    transactionalFsWriteMachine: caps.transactionalFsWriteMachine === true,
+    credentialRenew: caps.credentialRenew === true,
+    browserControlHttp: caps.browserControlHttp === true,
+    runAs: caps.runAs === true,
+    opRelease: caps.opRelease === true,
+    screenControl: caps.consentedScreenControl === true,
+    ...(caps.macPermissions ? enrollmentMacPermissionCapabilities(caps.macPermissions) : {}),
   };
 }
 
@@ -810,6 +1019,7 @@ export async function refreshEnrollmentDisplay(
     hasDisplay: boolean;
     desktopUnavailableReason?: string | null;
     runtimeDesktop?: boolean;
+    macPermissions?: EnrollmentMacPermissions;
     connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
@@ -822,7 +1032,14 @@ export async function refreshEnrollmentDisplay(
     enrollment.hasDisplay === input.hasDisplay &&
     (enrollment.desktopUnavailableReason ?? null) === desktopUnavailableReason &&
     (input.runtimeDesktop === undefined ||
-      enrollment.agentCapabilities?.desktop === input.runtimeDesktop)
+      enrollment.agentCapabilities?.desktop === input.runtimeDesktop) &&
+    (input.macPermissions === undefined ||
+      JSON.stringify(enrollmentMacPermissions(enrollment.agentCapabilities)) ===
+        JSON.stringify({
+          screenRecording: input.macPermissions.screenRecording,
+          accessibility: input.macPermissions.accessibility,
+          inputMonitoring: input.macPermissions.inputMonitoring,
+        }))
   ) {
     // Both fields unchanged — do not even issue the UPDATE (no churn on a
     // steady-state Hello).
@@ -835,6 +1052,7 @@ export async function refreshEnrollmentDisplay(
     hasDisplay: input.hasDisplay,
     desktopUnavailableReason,
     ...(input.runtimeDesktop !== undefined ? { runtimeDesktop: input.runtimeDesktop } : {}),
+    ...(input.macPermissions ? { macPermissions: input.macPermissions } : {}),
     ...(input.connectionInstanceId ? { connectionInstanceId: input.connectionInstanceId } : {}),
   });
 }
@@ -897,7 +1115,7 @@ export async function handleHelloPayload(
   } catch (error) {
     observability?.warn?.("Failed to decode an agent Hello for display refresh", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return;
   }
@@ -911,6 +1129,19 @@ export async function handleHelloPayload(
     });
     return;
   }
+  // Every compute sandbox agent serves OpRelease; there is no older release
+  // path for compute. An image built with an older agent is a version error,
+  // and the sandbox's operations are refused until the image is rebuilt.
+  if (authority.kind === "sandbox" && hello.capabilities?.opRelease !== true) {
+    observability?.error?.(
+      "A compute sandbox agent does not support releasing command output (capabilities.op_release); rebuild the sandbox image with the agent from this Opengeni release or later",
+      {
+        workspaceId: ids.workspaceId,
+        agentId: ids.agentId,
+        agentVersion: hello.agentVersion.trim() || "unknown",
+      },
+    );
+  }
   let workspaceRoot: string | undefined;
   if (hello.workspaceRoot.length > 0) {
     try {
@@ -919,7 +1150,7 @@ export async function handleHelloPayload(
       observability?.warn?.("Ignored an invalid Connected Machine workspace root", {
         workspaceId: ids.workspaceId,
         agentId: ids.agentId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -955,9 +1186,24 @@ export async function handleHelloPayload(
   } catch (error) {
     observability?.warn?.("Failed to refresh an enrollment's capabilities from a Hello", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
+  // Screen control allowed while this machine was offline (or before its agent
+  // could renew on request) applies now. Detached: it waits for the agent to
+  // subscribe and must not hold up Hello ingestion.
+  void reconcileScreenControlOnHello(
+    { bus, observability },
+    {
+      authority,
+      hello,
+      target: {
+        workspaceId: ids.workspaceId,
+        enrollmentId: ids.agentId,
+        connectionInstanceId: ids.connectionInstanceId,
+      },
+    },
+  );
   // A reconnect Hello re-announces the machine, so any pending clean going-offline
   // marker no longer holds — clear it so the liveness derivation stops reading the
   // machine offline. Best-effort + fail-soft, and change-guarded in the DB (a
@@ -986,7 +1232,7 @@ export async function handleHelloPayload(
   } catch (error) {
     observability?.warn?.("Failed to clear a machine going-offline marker on a Hello", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -1002,7 +1248,10 @@ export function startHelloIngestion(deps: {
   bus: EventBus;
   observability?: Observability;
 }): () => void {
-  return deps.bus.subscribeAgentEvents(AGENT_HELLO_SUBJECT, (payload, subject) =>
-    handleHelloPayload(deps.db, deps.observability, payload, subject, deps.bus),
+  return deps.bus.subscribeAgentEvents(
+    AGENT_HELLO_SUBJECT,
+    (payload, subject) =>
+      handleHelloPayload(deps.db, deps.observability, payload, subject, deps.bus),
+    { queue: "opengeni-agent-state-ingestion" },
   );
 }

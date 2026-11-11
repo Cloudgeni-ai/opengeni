@@ -1,0 +1,46 @@
+---
+title: "Opengeni plugin"
+description: "Give your coding agent Opengeni skills and access to your organization."
+icon: "puzzle-piece"
+---
+
+The **Opengeni** plugin gives your coding agent three skills:
+
+- `build-with-opengeni` builds products and demos on Opengeni.
+- `offload-to-opengeni` runs work in a cloud Opengeni session.
+- `opengeni-setup` sets up SDK and REST access.
+
+It also connects your coding agent to your organization through the Opengeni MCP server (`https://app.opengeni.ai/v1/mcp`). The first use opens a browser sign-in.
+
+## Install
+
+The plugin installs from the Opengeni GitHub marketplace, `Cloudgeni-ai/opengeni`.
+
+<Tabs>
+  <Tab title="Claude Code">
+    ```bash
+    claude plugin marketplace add Cloudgeni-ai/opengeni
+    claude plugin install opengeni@opengeni --scope user
+    ```
+  </Tab>
+  <Tab title="Codex">
+    Works in the Codex CLI, IDE extension, and the Codex app.
+
+    ```bash
+    codex plugin marketplace add Cloudgeni-ai/opengeni
+    codex plugin add opengeni@opengeni
+    ```
+
+  </Tab>
+  <Tab title="Cursor">
+    **Customize → From GitHub Repository**, enter `https://github.com/Cloudgeni-ai/opengeni`, then install **Opengeni**.
+  </Tab>
+</Tabs>
+
+To sign in ahead of time, run `/mcp` in Claude Code and select `opengeni`, or run `codex mcp login opengeni`.
+
+## Use
+
+Ask your coding agent to set up Opengeni access, build an Opengeni-powered product, or change your organization. In Claude Code, you can invoke `/opengeni:opengeni-setup` or `/opengeni:build-with-opengeni` directly.
+
+Next: [Embed with your coding agent](/embed-with-a-coding-agent) or [For AI agents](/reference/for-ai-agents).

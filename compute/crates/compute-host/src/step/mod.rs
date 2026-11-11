@@ -1,0 +1,1045 @@
+//! Carrying out one step for one sandbox.
+//!
+//! The core guarantees at most one step per sandbox at a time, so a step
+//! takes the sandbox's VM handle, owns it while it works and hands it back
+//! when it finishes. No locks are needed around a VM.
+//!
+//! A step is issued against the sandbox's record as it was at that moment
+//! and records what it did with compare-and-set writes against that
+//! version, so a step that outlived its sandbox, or raced anything else
+//! that changed the record, fails instead of overwriting newer state.
+//!
+//! Saving, restoring and moving memory images follow one rule: a copy of the
+//! sandbox's newest state is deleted or replaced only after another copy has
+//! been checked and found good, and a copy that fails a check is moved to
+//! quarantine rather than deleted. Local images are checked by
+//! [`Images::verify`]; the store's copy by [`Store::verify`]. Only a check
+//! that proves a copy bad counts: a copy that could not be read for reasons
+//! of the host's own (a full file table, a pager that did not start) is kept
+//! and the step retried.
+
+mod checkpoint;
+mod guest;
+mod remote;
+mod restore;
+#[cfg(test)]
+mod tests;
+
+use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use compute_core::{Failure, Outcome, Step};
+use compute_engine::{
+    CancellationToken, Completion, Engine, EngineError, ErrorKind, MemoryStats, SnapshotKind,
+    VmSpec,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::image::{Images, Made, Parts, Suspect, Verified};
+use crate::layout::{Paths, link_kernel, remove_if_present};
+#[cfg(target_os = "linux")]
+use crate::lazy::Fetcher;
+use crate::observe::Alarm;
+use crate::observe::notes::{self, Notes};
+use crate::protocol::Id;
+use crate::state::{Change, Identity, Record, Records, StateError, apply};
+use crate::store::{Receipt, Store};
+
+/// How long a step first waits before trying again to settle a record
+/// whose last write has an unknown fate, and the longest it waits between
+/// tries.
+const SETTLE_RETRY: (Duration, Duration) = (Duration::from_millis(50), Duration::from_secs(5));
+
+mod files;
+mod learned;
+mod live;
+
+use files::checkpoint_disk;
+#[cfg(target_os = "linux")]
+pub(crate) use files::reconnect_paging;
+use files::{
+    Taken, archive_receipt, diff_files, drop_snapshot, guest_memory, link, paged_marker,
+    pager_control, pager_dir, pager_learned, wake_profile,
+};
+pub(crate) use files::{
+    clear_checkpoint, clear_local, images_of, local_copy, mark_archived, paged, recover_images,
+    take_written,
+};
+pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected, recorded_base};
+use live::{lose_base, record_base, withdraw_base};
+
+/// A VM process the host owns.
+#[derive(Debug)]
+pub(crate) struct Live<V> {
+    pub vm: V,
+    /// Distinguishes this VM process from earlier ones of the same sandbox,
+    /// so a late exit notice from an old process is never blamed on a new one.
+    pub incarnation: u64,
+    /// Set before the host stops the VM on purpose, so its exit is not
+    /// reported as a crash.
+    pub stopping: Arc<AtomicBool>,
+    pub memory: LiveMemory,
+}
+
+/// What a step leaves behind.
+#[derive(Debug)]
+pub(crate) enum After<V> {
+    /// No VM process.
+    NoVm,
+    /// The VM the step was given.
+    Kept(Live<V>),
+    /// A VM process the step started.
+    New(V, LiveMemory),
+}
+
+/// How a step ended.
+#[derive(Debug)]
+pub(crate) struct Ran<V> {
+    pub outcome: Outcome,
+    pub after: After<V>,
+    pub report: Report,
+}
+
+/// What a step tells about itself besides its outcome.
+#[derive(Debug, Default)]
+pub(crate) struct Report {
+    /// VM processes the step started, counting any it ended again before
+    /// finishing, such as a restore whose resume failed.
+    pub launches: u32,
+    /// What it noted; its error only when it failed, for the sandbox's
+    /// status.
+    pub notes: Notes,
+    /// The memory statistics of the VM process it was given, with that
+    /// process's incarnation, read as it began: what the sandbox went
+    /// through while awake.
+    pub reading: Option<(u64, MemoryStats)>,
+    /// Whether it may have written to the host's local disk; see
+    /// [`compute_core::Input::Finished`]. `false`, as by default, only
+    /// when it certainly wrote nothing, as a step that never began its
+    /// work.
+    pub wrote: bool,
+}
+
+/// A VM's activity counters, read at one moment: what the host judges
+/// whether its guest is busy by.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Reading {
+    /// The VM process read.
+    pub incarnation: u64,
+    pub at: tokio::time::Instant,
+    /// Processor time so far, if it could be read.
+    pub cpu: Option<Duration>,
+    /// Traffic so far, if it could be read.
+    pub io: Option<u64>,
+    /// Whether it is the last reading before the step pauses the VM, so
+    /// the guest's window ends with it.
+    pub last_before_pause: bool,
+}
+
+impl Reading {
+    /// Reads the counters of `vm`, VM process `incarnation`, now.
+    pub fn of<E: Engine>(engine: &E, vm: &E::Vm, incarnation: u64) -> Self {
+        Self {
+            incarnation,
+            at: tokio::time::Instant::now(),
+            cpu: engine.cpu_time(vm).ok(),
+            io: engine.io_bytes(vm).ok(),
+            last_before_pause: false,
+        }
+    }
+
+    /// The same reading, marked as the last before the VM pauses.
+    #[must_use]
+    pub fn before_pause(self) -> Self {
+        Self {
+            last_before_pause: true,
+            ..self
+        }
+    }
+}
+
+/// Where a step that holds a running VM without stopping its guest sends
+/// readings of its activity (see [`Reading`]), so the guest's use still
+/// counts while the agent cannot read the VM itself.
+pub(crate) struct Meter {
+    /// How often.
+    pub every: Duration,
+    pub send: Box<dyn Fn(Reading) + Send + Sync>,
+}
+
+/// Which stored copy matches the local files. The record says whether an
+/// archived copy exists; this names it, so eviction can check the store
+/// still holds exactly that copy.
+#[derive(Debug, Serialize, Deserialize)]
+struct Archived {
+    receipt: Receipt,
+    memory: bool,
+}
+
+/// Everything one step needs.
+pub(crate) struct Job<E: Engine, S> {
+    pub engine: Arc<E>,
+    pub store: Arc<S>,
+    pub records: Arc<Records>,
+    /// The sandbox's record when the step was issued, then as the step
+    /// last committed it.
+    pub record: Record,
+    pub id: Id,
+    pub spec: VmSpec,
+    pub paths: Paths,
+    pub cancel: CancellationToken,
+    pub live: Option<Live<E::Vm>>,
+    /// Guest port to tell about a restore, if any.
+    pub restore_notice_port: Option<u32>,
+    /// The image the sandbox's disk started as, which a fetched disk
+    /// probably still mostly matches.
+    pub disk_image: PathBuf,
+    /// The host's guest kernel, linked into the jail at each boot.
+    pub kernel: PathBuf,
+    /// Fetches remote memory for every VM on the host, when the store keeps
+    /// memory as chunks.
+    #[cfg(target_os = "linux")]
+    pub fetcher: Option<Arc<Fetcher>>,
+    /// How VMs get a memory pager.
+    pub pager: crate::PagerConfig,
+    /// VM processes this job has started; zero when it is issued.
+    pub launches: u32,
+    /// The clock of the sandbox's agent-link streams, told before each VM
+    /// process the step starts: its guest is a new one (see
+    /// [`crate::resume::RunClock::launched`]).
+    pub link_clock: Option<crate::resume::RunClock>,
+    /// Whether the step is certain it wrote nothing to the host's local
+    /// disk: so until its work begins, and again where a step ends before
+    /// writing anything, as a checkpoint cancelled before its capture.
+    /// Set as the step begins, whatever it was issued with.
+    pub untouched: bool,
+    /// Called once the step no longer does the work its kind's
+    /// concurrency limit protects (a wake, once its VMM has resumed), so
+    /// another may start while this one waits for its guest.
+    pub unthrottle: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Takes readings of the VM's activity while the step holds it and its
+    /// guest runs: a checkpoint's, once the VM runs again.
+    pub meter: Option<Meter>,
+    /// The sandbox's last activity when the step was issued, in
+    /// milliseconds since the Unix epoch; every write of the record keeps it.
+    pub last_used_ms: u64,
+    /// How many times in a row the sandbox's steps had failed for now when
+    /// this one was issued; see [`compute_core::SandboxView::failures`].
+    pub failures: u32,
+}
+
+fn failure(error: &EngineError) -> Outcome {
+    tracing::warn!(%error, "step failed");
+    notes::error(error);
+    Outcome::Failed(match error.kind {
+        ErrorKind::Transient => Failure::Transient,
+        ErrorKind::MemoryLost => Failure::MemoryLost,
+        ErrorKind::Fatal => Failure::Fatal,
+    })
+}
+
+fn io_failure(operation: &'static str, error: io::Error) -> Outcome {
+    failure(&EngineError::io(operation, error))
+}
+
+/// What failing to record a step's effect means for the sandbox.
+fn state_failure(error: &StateError) -> Outcome {
+    notes::error(error);
+    if let StateError::Io(_) = error {
+        tracing::warn!(%error, "step could not record its effect");
+        Outcome::Failed(Failure::Transient)
+    } else {
+        tracing::error!(%error, "step refused: the sandbox's record moved on");
+        Outcome::Failed(Failure::Fatal)
+    }
+}
+
+fn suspect_error(operation: &'static str, suspect: Suspect) -> EngineError {
+    match suspect {
+        Suspect::Io(error) => EngineError::io(operation, error),
+        suspect => EngineError::caused_by(ErrorKind::MemoryLost, operation, suspect),
+    }
+}
+
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> io::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(io::Error::other)
+}
+
+impl<E: Engine, S: Store> Job<E, S> {
+    /// Tells the sandbox's agent-link streams that a VM process for it is
+    /// about to start. None of its VM processes runs then. On an error the
+    /// process must not start (see [`crate::resume::RunClock::launched`]).
+    fn launching(&self) -> io::Result<()> {
+        self.link_clock
+            .as_ref()
+            .map_or(Ok(()), crate::resume::RunClock::launched)
+    }
+
+    /// Runs `step` and reports how it went and what VM remains. A step that
+    /// lost the VM's memory leaves no VM process: it is ended before the
+    /// step reports, since the core may start a replacement on the same disk
+    /// right after.
+    ///
+    /// A step that may end its sandbox's time awake reads the VM's memory
+    /// statistics first; a wake does not, so it is not slowed.
+    pub async fn run(mut self, step: Step) -> Ran<E::Vm> {
+        let reading = if step.wakes() {
+            None
+        } else {
+            self.live.as_ref().and_then(|live| {
+                let stats = self.engine.memory_stats(&live.vm).ok()?;
+                Some((live.incarnation, stats))
+            })
+        };
+        let ((outcome, after), mut notes) = notes::scope(async {
+            // Boxed so a job's future stays small whatever its steps hold
+            // across their awaits.
+            let (mut outcome, mut after) = Box::pin(self.step(step)).await;
+            if outcome == Outcome::Failed(Failure::MemoryLost) {
+                // The memory (and any pager serving it) goes only after the
+                // process.
+                let ended = match after {
+                    After::NoVm => None,
+                    After::Kept(live) => {
+                        live.stopping.store(true, Ordering::Release);
+                        Some((live.vm, live.memory))
+                    }
+                    After::New(vm, memory) => Some((vm, memory)),
+                };
+                if let Some((vm, memory)) = ended {
+                    outcome = self.end_with_memory(vm, memory, outcome).await;
+                }
+                after = After::NoVm;
+            }
+            (outcome, after)
+        })
+        .await;
+        if !matches!(outcome, Outcome::Failed(_)) {
+            notes.error = None;
+        }
+        Ran {
+            outcome,
+            after,
+            report: Report {
+                launches: self.launches,
+                notes,
+                reading,
+                wrote: !self.untouched,
+            },
+        }
+    }
+
+    async fn step(&mut self, step: Step) -> (Outcome, After<E::Vm>) {
+        // Until its work begins, a step writes nothing.
+        self.untouched = true;
+        if self.cancel.is_cancelled() {
+            return (
+                Outcome::Cancelled,
+                self.live.take().map_or(After::NoVm, After::Kept),
+            );
+        }
+        // Every decision below reads the record, which must be what its
+        // file durably says: a write whose fate was unknown may have been
+        // lost, and acting on it could run or drop a VM against a record
+        // that a crash would take back.
+        match self.records.settle(self.id).await {
+            Ok(durable) if durable == self.record => {}
+            Ok(durable) => {
+                tracing::warn!(id = %self.id, issued = %self.record.fence(), durable = %durable.fence(), "record changed before the step began");
+                return (
+                    Outcome::Failed(Failure::Transient),
+                    self.live.take().map_or(After::NoVm, After::Kept),
+                );
+            }
+            Err(error) => {
+                return (
+                    state_failure(&error),
+                    self.live.take().map_or(After::NoVm, After::Kept),
+                );
+            }
+        }
+        self.untouched = false;
+        // Before anything of it can reach the store, its VM is fenced like
+        // any other's.
+        if matches!(step, Step::Archive | Step::Checkpoint)
+            && let Err(outcome) = self.no_longer_only_copy().await
+        {
+            return (outcome, self.live.take().map_or(After::NoVm, After::Kept));
+        }
+        match step {
+            Step::Pause
+            | Step::Resume
+            | Step::Compress
+            | Step::Save
+            | Step::Drop
+            | Step::Checkpoint => {
+                let Some(live) = self.live.take() else {
+                    // The VM vanished between the decision and the step; the
+                    // exit notice is on its way.
+                    return (Outcome::Failed(Failure::MemoryLost), After::NoVm);
+                };
+                match step {
+                    Step::Pause => self.pause(live).await,
+                    Step::Resume => self.resume(live).await,
+                    Step::Compress => self.compress(live).await,
+                    Step::Save => self.save(live).await,
+                    Step::Checkpoint => self.checkpoint(live).await,
+                    _ => self.end_process(live).await,
+                }
+            }
+            Step::Restore => self.restore().await,
+            Step::Boot => self.boot().await,
+            // A paused VM stays as it is while its saved copy is archived.
+            Step::Archive => {
+                let outcome = self.archive().await;
+                (outcome, self.live.take().map_or(After::NoVm, After::Kept))
+            }
+            Step::Evict => (self.evict().await, After::NoVm),
+            Step::Fetch => (self.fetch().await, After::NoVm),
+            Step::Forget => {
+                let outcome = self.forget().await;
+                (outcome, self.live.take().map_or(After::NoVm, After::Kept))
+            }
+        }
+    }
+
+    /// Ahead of a step that may put a copy of the sandbox in the store: its
+    /// VM loses the mark that it is the sandbox's only copy, so the guard
+    /// stops it with the others from here on, and then its record does,
+    /// so no later VM of it is marked (see [`Record::only_copy`]). A VM
+    /// whose mark is cleared already, or a record that says so already,
+    /// changes nothing. A mark that cannot be cleared fails the step, with
+    /// nothing written. Without a VM there is no mark to clear: a group
+    /// left behind holds no process, and the next VM starts unmarked.
+    async fn no_longer_only_copy(&mut self) -> Result<(), Outcome> {
+        if let Some(live) = &self.live {
+            self.engine
+                .set_only_copy(&live.vm, false)
+                .map_err(|error| failure(&error))?;
+        }
+        if self.record.only_copy {
+            self.commit(Change::new().copied())
+                .await
+                .map_err(|error| state_failure(&error))?;
+        }
+        Ok(())
+    }
+
+    /// Marks the VM `vm` just started its sandbox's only copy if its record
+    /// says so (see [`Record::only_copy`]); it started unmarked. A mark
+    /// that cannot be set leaves it fenced like any other, which is safe.
+    pub(super) fn mark_only_copy(&self, vm: &E::Vm) {
+        if !self.record.only_copy {
+            return;
+        }
+        if let Err(error) = self.engine.set_only_copy(vm, true) {
+            tracing::warn!(id = %self.id, %error, "the VM's mark as its sandbox's only copy is not set");
+        }
+    }
+
+    /// Records `change` against the version this step last saw. A write
+    /// whose fate is unknown is settled before this returns: it either
+    /// landed durably, which counts as success, or durably did not, which
+    /// is a plain I/O failure that changed nothing. Until one of the two is
+    /// established the step waits, trying again with backoff, and touches
+    /// nothing: an unknown fate says nothing about the sandbox's copies,
+    /// so it is never taken as their loss.
+    async fn commit(&mut self, change: Change) -> Result<(), StateError> {
+        let change = change.last_used(self.last_used_ms);
+        let before = self.record.clone();
+        let failed = match self
+            .records
+            .commit(self.id, before.fence(), change.clone())
+            .await
+        {
+            Ok(record) => {
+                self.record = record;
+                return Ok(());
+            }
+            Err(StateError::Io(error)) => error,
+            Err(error) => return Err(error),
+        };
+        let intended = apply(self.id, Some(&before), before.fence(), change);
+        let (mut wait, longest) = SETTLE_RETRY;
+        loop {
+            match self.records.settle(self.id).await {
+                Ok(durable) if durable == before => return Err(StateError::Io(failed)),
+                Ok(durable) if matches!(&intended, Ok(Some(next)) if *next == durable) => {
+                    self.record = durable;
+                    return Ok(());
+                }
+                // Only this step changes the record while it runs.
+                Ok(durable) => {
+                    return Err(StateError::Stale {
+                        id: self.id,
+                        expected: before.fence(),
+                        found: durable.fence(),
+                    });
+                }
+                Err(StateError::Io(error)) => {
+                    tracing::warn!(id = %self.id, %error, ?wait, "record write has an unknown fate; the step waits with every copy as it is");
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(longest);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[allow(clippy::unused_self)]
+    fn simple(
+        &self,
+        result: Result<(), EngineError>,
+        live: Live<E::Vm>,
+    ) -> (Outcome, After<E::Vm>) {
+        let outcome = result.map_or_else(|error| failure(&error), |()| Outcome::Done);
+        (outcome, After::Kept(live))
+    }
+
+    /// Pauses a running VM, first recording when it was last used: from
+    /// here on the sandbox sleeps, and a restarted agent counts its idle
+    /// time from the record. Recorded first, so a pause that fails to be
+    /// recorded leaves the VM as it was.
+    async fn pause(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        if !self.sync_guest().await {
+            return (Outcome::Cancelled, After::Kept(live));
+        }
+        if self
+            .record
+            .last_used_ms
+            .is_none_or(|was| was < self.last_used_ms)
+            && let Err(error) = self.commit(Change::new()).await
+        {
+            return (state_failure(&error), After::Kept(live));
+        }
+        self.simple(self.engine.pause(&live.vm).await, live)
+    }
+
+    /// Resumes a paused VM. A saved copy of it goes stale the moment the
+    /// guest runs and its disk moves on, so it is unmarked first, and marked
+    /// again if the resume was refused: the guest never ran, and the core
+    /// counts on a transient failure having changed nothing.
+    async fn resume(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        // The image stays on disk as the base the VM's next save is a diff
+        // against; only the record stops vouching for it.
+        let (image, archived) = (self.record.image, self.record.archived);
+        if (image || archived)
+            && let Err(error) = self
+                .commit(Change::new().image(false).archived(false))
+                .await
+        {
+            return (state_failure(&error), After::Kept(live));
+        }
+        let outcome = match self.engine.resume(&live.vm).await {
+            // A paused VM's guest knows its time; only one that has yet to
+            // learn which sandbox it is must be told.
+            Ok(()) if self.record.identity == Identity::Pending => {
+                self.unthrottle();
+                self.tell_guest_restored()
+                    .await
+                    .err()
+                    .unwrap_or(Outcome::Done)
+            }
+            Ok(()) => Outcome::Done,
+            Err(error) => self.after_failed_wake(&error, image, archived).await,
+        };
+        if outcome == Outcome::Done {
+            self.woke().await;
+        }
+        (outcome, After::Kept(live))
+    }
+
+    /// The outcome of a wake that failed after the record stopped vouching
+    /// for the saved copy (`image`, `archived`). A refused wake never ran
+    /// the guest, so the record vouches for the copy again; if it cannot,
+    /// the core can no longer count on nothing having changed and is told
+    /// the copy is untrusted. After any other failure the guest may have
+    /// run, so the copy stays unvouched.
+    async fn after_failed_wake(
+        &mut self,
+        error: &EngineError,
+        image: bool,
+        archived: bool,
+    ) -> Outcome {
+        if error.kind != ErrorKind::Transient || !(image || archived) {
+            return failure(error);
+        }
+        // One record write vouches for both copies at once, so the local
+        // copy is never trusted without the remote one being settled too:
+        // `Failure::RemoteUntrusted` cannot arise here.
+        match self
+            .commit(Change::new().image(image).archived(archived))
+            .await
+        {
+            Ok(()) => failure(error),
+            Err(lost) => {
+                tracing::error!(id = %self.id, error = %lost, "saved copy not vouched for again after a refused wake");
+                Outcome::Failed(Failure::Untrusted)
+            }
+        }
+    }
+
+    async fn compress(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        let outcome = match self.engine.compress(&live.vm, &self.cancel).await {
+            Ok(Completion::Finished) => Outcome::Done,
+            // Partly compressed is still a valid paused VM.
+            Ok(Completion::Cancelled) => Outcome::Cancelled,
+            Err(error) => failure(&error),
+        };
+        (outcome, After::Kept(live))
+    }
+
+    /// Writes the pages that changed and merges them offline into a new
+    /// self-contained image, which becomes valid and the base of the VM's
+    /// next save. The VM stays paused in memory, so a wake still only has to
+    /// resume it; the image lets memory pressure end the process instantly
+    /// and survives the process crashing. A wake that arrives during the
+    /// save cancels it.
+    async fn save(&mut self, mut live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        // A lazily woken VM's image must be whole, and its pager hold all
+        // of it, before a diff can be merged over it or the image replaced.
+        match self.settled(&live, "save").await {
+            None => return (Outcome::Cancelled, After::Kept(live)),
+            Some(Err(error)) => {
+                lose_base(&self.paths, &mut live.memory.base).await;
+                return (failure(&error), After::Kept(live));
+            }
+            Some(Ok(())) => {}
+        }
+        // A live VM's record never vouches for an image; this is a guard.
+        if self.record.image
+            && let Err(error) = self.commit(Change::new().image(false)).await
+        {
+            return (state_failure(&error), After::Kept(live));
+        }
+        match self.write_image(&mut live).await {
+            Ok(image) => {
+                if self.cancel.is_cancelled() {
+                    // The image matches this paused VM but goes stale the
+                    // moment it resumes; it is not marked saved.
+                    return (Outcome::Cancelled, After::Kept(live));
+                }
+                let valid = Change::new().image(true).archived(false);
+                if let Err(error) = self.commit(valid).await {
+                    return (state_failure(&error), After::Kept(live));
+                }
+                // The new image is good: older ones may go. The VM maps
+                // only the new one's content from now on.
+                let images = images_of(&self.paths);
+                if let Err(error) = blocking(move || images.retire(&image, &[]))
+                    .await
+                    .and_then(|r| r)
+                {
+                    tracing::warn!(id = %self.id, %error, "old memory images not removed");
+                }
+            }
+            Err(error) => {
+                lose_base(&self.paths, &mut live.memory.base).await;
+                if live.memory.disk.failed() {
+                    // No snapshot of this VM can be trusted again. It keeps
+                    // running, pausing and waking from memory until a new
+                    // process replaces it.
+                    tracing::error!(id = %self.id, %error, "the VM cannot be saved");
+                    return (Outcome::Failed(Failure::Unsavable), After::Kept(live));
+                }
+                return (failure(&error), After::Kept(live));
+            }
+        }
+        (Outcome::Done, After::Kept(live))
+    }
+
+    /// Waits until `live`'s memory has settled (see
+    /// [`LiveMemory::settled`]), unless the step is cancelled first, which
+    /// gives `None`: memory still arriving from a store that is away can
+    /// take as long as the store stays away, and a wake or a removal
+    /// meanwhile must not wait for it.
+    async fn settled(
+        &self,
+        live: &Live<E::Vm>,
+        operation: &'static str,
+    ) -> Option<Result<(), EngineError>> {
+        tokio::select! {
+            biased;
+            settled = live.memory.settled(operation) => Some(settled),
+            () = self.cancel.cancelled() => None,
+        }
+    }
+
+    /// Ends the VM process of a paused VM whose current state is saved, which
+    /// frees all of its memory at once and loses nothing.
+    async fn end_process(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        if !self.record.image {
+            // The core only drops a VM with a current copy; ending this one
+            // would lose its running programs.
+            tracing::error!(id = %self.id, "no saved copy to fall back on; keeping the VM");
+            notes::alarm(
+                Alarm::OnlyCopyKept,
+                &"no saved copy to fall back on; keeping the VM",
+            );
+            return (Outcome::Failed(Failure::Fatal), After::Kept(live));
+        }
+        live.stopping.store(true, Ordering::Release);
+        let outcome = self
+            .end_with_memory(live.vm, live.memory, Outcome::Done)
+            .await;
+        (outcome, After::NoVm)
+    }
+
+    /// Snapshots the paused VM and publishes the result as a new image
+    /// generation, which becomes the VM's base.
+    async fn write_image(&self, live: &mut Live<E::Vm>) -> Result<Verified, EngineError> {
+        let taken = self.take_snapshot(live).await?;
+        self.make_image(&mut live.memory.base, taken).await
+    }
+
+    /// Has the paused VM's VMM write a snapshot, moves it out of the jail
+    /// and makes the disk durable as the snapshot needs it. Only this needs
+    /// the VM paused: what it returns no longer changes when the guest
+    /// runs, and becomes an image in [`Self::make_image`]. The VM's base
+    /// is unknown from the snapshot on, until that image is made.
+    async fn take_snapshot(&self, live: &mut Live<E::Vm>) -> Result<Taken, EngineError> {
+        const OP: &str = "save";
+        let images = images_of(&self.paths);
+        #[cfg(target_os = "linux")]
+        if let (Some(_), Base::Image(generation)) = (&live.memory.paging, live.memory.base) {
+            let images = images.clone();
+            blocking(move || {
+                let image = images.verify(generation, crate::image::Depth::Light)?;
+                if image.meta().remote {
+                    images.mark_local(&image)?;
+                }
+                Ok::<_, Suspect>(())
+            })
+            .await
+            .map_err(|error| EngineError::io(OP, error))?
+            .map_err(|suspect| suspect_error(OP, suspect))?;
+        }
+        let base = live.memory.base;
+        let kind = if base == Base::Unknown {
+            SnapshotKind::Full
+        } else {
+            SnapshotKind::Diff
+        };
+        notes::detail(
+            "compute.snapshot",
+            if kind == SnapshotKind::Full {
+                "full"
+            } else {
+                "diff"
+            },
+        );
+        let files = diff_files(&self.paths);
+        let process = self
+            .engine
+            .process_identity(&live.vm)
+            .inspect_err(
+                |error| tracing::debug!(id = %self.id, %error, "the VM's process is not named"),
+            )
+            .ok();
+        // A VM whose disk check failed is not snapshotted at all. The
+        // snapshot resets the VMM's record of which pages changed, so the
+        // record of the base they changed from is withdrawn before it,
+        // whatever becomes of the snapshot.
+        let (starting, paths) = (Arc::clone(&live.memory.disk), self.paths.clone());
+        // A failed watch is final, which the caller finds on it.
+        blocking(move || starting.begin().and_then(|()| withdraw_base(&paths)))
+            .await
+            .and_then(|begun| begun)
+            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
+        notes::phase("prepare");
+        // From here on the VM's dirty pages are being reset: any failure
+        // leaves its base unknown.
+        live.memory.base = Base::Unknown;
+        self.engine.snapshot(&live.vm, &files, kind).await?;
+        notes::phase("snapshot");
+        // Asked while the VM is still paused, so nothing the guest does
+        // after can count. Without an answer the image holds those pages
+        // as before, which is only larger; so does a VM whose memory
+        // nothing can place, which is no fault.
+        let paths = self.paths.clone();
+        let memory = match kind {
+            SnapshotKind::Diff => blocking(move || guest_memory(&paths)).await.ok().flatten(),
+            SnapshotKind::Full => None,
+        };
+        let freed = match memory {
+            Some(memory) => match self.engine.freed_memory(&live.vm, &memory).await {
+                Ok(freed) => freed,
+                Err(error) => {
+                    tracing::warn!(id = %self.id, %error, "memory the guest gave back not found");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let given_back: u64 = freed.iter().map(|range| range.end - range.start).sum();
+        if given_back > 0 {
+            notes::bytes("freed", given_back);
+        }
+        let scratch = self.paths.dir.join("saving");
+        let watching = Arc::clone(&live.memory.disk);
+        let files = blocking(move || {
+            // The VMM wrote these inside its jail, where it could have put
+            // links instead: they move somewhere only the host reaches and
+            // must prove to be plain files before anything reads them.
+            let files = take_written(&files, &scratch)?;
+            // The image is only good with the disk as it was when the
+            // snapshot was taken, so the disk must be durable first, with
+            // nothing written since the VM started lost on the way.
+            watching.sync()?;
+            Ok::<_, std::io::Error>(files)
+        })
+        .await
+        .and_then(|files| files)
+        .map_err(|error| EngineError::io(OP, error))?;
+        notes::phase("taken");
+        Ok(Taken {
+            files,
+            over: match base {
+                Base::Image(generation) if kind == SnapshotKind::Diff => Some(generation),
+                // A diff over zeros, or a full snapshot, is already whole.
+                _ => None,
+            },
+            freed,
+            runtime: self.engine.vm_runtime(&live.vm).to_owned(),
+            process,
+        })
+    }
+
+    /// Publishes what [`Self::take_snapshot`] took as a new image
+    /// generation, merging a diff over the image it was taken against, and
+    /// makes it the VM's `base`, and the base its record names (see
+    /// [`record_base`]). The VM may run meanwhile.
+    async fn make_image(&self, base: &mut Base, taken: Taken) -> Result<Verified, EngineError> {
+        const OP: &str = "save";
+        let images = images_of(&self.paths);
+        let memory_len = self.spec.memory_bytes();
+        let vcpus = self.record.config.vcpus;
+        let paths = self.paths.clone();
+        let id = self.id;
+        let published = blocking(move || {
+            let Taken {
+                files,
+                over,
+                freed,
+                runtime,
+                process,
+            } = taken;
+            let parts = match over {
+                Some(generation) => Parts::Diff {
+                    base: generation,
+                    state: &files.state,
+                    diff: &files.memory,
+                    freed: &freed,
+                },
+                None => Parts::Whole {
+                    state: &files.state,
+                    memory: &files.memory,
+                    len: memory_len,
+                },
+            };
+            // The disk is as the guest knew it when it was paused.
+            let made = Made {
+                runtime: (!runtime.is_empty()).then_some(runtime.as_str()),
+                vcpus: Some(vcpus),
+                disk_len: std::fs::metadata(&paths.disk).ok().map(|found| found.len()),
+            };
+            let published = images.publish_made_by(parts, made);
+            match (&published, process) {
+                (Err(_), _) => {
+                    let _ = remove_if_present(&files.state);
+                    let _ = remove_if_present(&files.memory);
+                }
+                (Ok(image), Some(process)) => {
+                    // Without it, an agent that restarts beside the VM
+                    // saves every page next time.
+                    if let Err(error) = record_base(&paths, &process, Some(image.meta())) {
+                        tracing::warn!(%id, %error, "memory base not recorded");
+                    }
+                }
+                (Ok(_), None) => {}
+            }
+            published
+        })
+        .await
+        .map_err(|error| EngineError::io(OP, error))?
+        .map_err(|suspect| suspect_error(OP, suspect))?;
+        notes::phase("merge");
+        tracing::debug!(id = %self.id, generation = %published.generation(), "memory image saved");
+        *base = Base::Image(published.generation());
+        Ok(published)
+    }
+
+    /// The sandbox's current local image, checked. A missing one is lost
+    /// memory and the record says so; a bad one goes to quarantine; one
+    /// saved at another shape is given up (see `refuse_made_elsewhere`).
+    async fn saved_image(&mut self, images: &Images) -> Result<Verified, Outcome> {
+        const OP: &str = "restore";
+        let checked = {
+            let images = images.clone();
+            blocking(move || images.current_verified()).await
+        };
+        match checked {
+            Ok(Ok(Some(image))) => self.refuse_made_elsewhere(&image).await.map(|()| image),
+            Ok(Ok(None)) => {
+                notes::alarm(Alarm::CopyLost, &"the recorded memory image is missing");
+                let _ = self.commit(Change::new().image(false)).await;
+                Err(Outcome::Failed(Failure::MemoryLost))
+            }
+            Ok(Err(suspect)) => {
+                self.quarantine_current(images, &suspect).await;
+                Err(failure(&suspect_error(OP, suspect)))
+            }
+            Err(error) => Err(io_failure(OP, error)),
+        }
+    }
+
+    /// Moves the current image aside for inspection and records that the
+    /// sandbox has no usable memory image. A failure to read the image is
+    /// no verdict on it: the image is kept.
+    async fn quarantine_current(&mut self, images: &Images, suspect: &Suspect) {
+        if !suspect.is_verdict() {
+            tracing::warn!(id = %self.id, error = %suspect, "memory image unreadable for now; keeping it");
+            return;
+        }
+        notes::alarm(Alarm::VerificationFailed, suspect);
+        if let Ok(Some(generation)) = images.current() {
+            match images.quarantine(generation, suspect) {
+                Ok(true) => notes::alarm(Alarm::Quarantined, &format!("memory image: {suspect}")),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(id = %self.id, %error, "could not quarantine a bad image");
+                }
+            }
+        }
+        if let Err(error) = self.commit(Change::new().image(false)).await {
+            tracing::error!(id = %self.id, %error, "could not record a lost image");
+        }
+    }
+
+    /// Ends a VM process this step started and reports `outcome`, or a fatal
+    /// failure if the process would not end: without proof that it did,
+    /// nothing may replace it.
+    async fn end(&self, vm: E::Vm, outcome: Outcome) -> Outcome {
+        match self.engine.stop(vm).await {
+            Ok(()) => outcome,
+            Err(error) => {
+                tracing::error!(id = %self.id, %error, "a VM process would not end");
+                Outcome::Failed(Failure::Fatal)
+            }
+        }
+    }
+
+    /// Like [`Self::end`] for a VM with its memory: the pager going away is
+    /// expected, and once the process has ended its memory is closed. A VM
+    /// that would not end keeps its memory served, since it may still run.
+    async fn end_with_memory(&self, vm: E::Vm, memory: LiveMemory, outcome: Outcome) -> Outcome {
+        memory.ending();
+        let outcome = self.end(vm, outcome).await;
+        if outcome == Outcome::Failed(Failure::Fatal) {
+            memory.serve_detached();
+        } else {
+            memory.close().await;
+        }
+        outcome
+    }
+
+    /// Frees the step's place under its kind's concurrency limit: the work
+    /// the limit protects is done, though the step goes on.
+    fn unthrottle(&mut self) {
+        if let Some(unthrottle) = self.unthrottle.take() {
+            unthrottle();
+        }
+    }
+
+    /// Ends what the record keeps of the sandbox's first wake once a wake
+    /// of it succeeded, so no later agent books that room again; a failed
+    /// try keeps it. Kept by a failed write, it only lapses.
+    async fn woke(&mut self) {
+        if self.record.first_wake_by_ms.is_some()
+            && let Err(error) = self.commit(Change::new().woke()).await
+        {
+            tracing::warn!(id = %self.id, %error, "the first wake's booking stays until it lapses");
+        }
+    }
+
+    /// Has the engine keep the description `watch` syncs for as long as
+    /// `vm` lives, so a later agent can still vouch for the disk; see
+    /// `DiskWatch`. Without it, a later agent never saves the VM.
+    async fn hold_watch(&self, vm: &E::Vm, watch: &DiskWatch) {
+        let held = match watch.description() {
+            Ok(Some(description)) => self.engine.hold(vm, description).await,
+            Ok(None) => return,
+            Err(error) => Err(EngineError::io("hold", error)),
+        };
+        if let Err(error) = held {
+            tracing::warn!(id = %self.id, %error, "disk watch not kept beyond this agent; a later one will not save this VM");
+        }
+    }
+
+    /// Boot fresh from the disk; any old memory image is meaningless now.
+    ///
+    /// The guest finds its id on the kernel command line. A clone that never
+    /// acknowledged its identity (see [`Identity::Pending`]) boots from its
+    /// template's disk, machine identity included, so its guest must
+    /// acknowledge the restore notice here too before the sandbox runs; one
+    /// that does not is ended and the boot retried, as nothing changed.
+    async fn boot(&mut self) -> (Outcome, After<E::Vm>) {
+        let pending = self.record.identity == Identity::Pending;
+        let fresh = Change::new().image(false).archived(false).execution();
+        let fresh = if pending {
+            fresh
+        } else {
+            fresh.identity(Identity::Known)
+        };
+        if let Err(error) = self.commit(fresh).await {
+            return (state_failure(&error), After::NoVm);
+        }
+        drop_snapshot(&self.paths);
+        // Linked now rather than at creation, so a kernel upgrade reaches
+        // every sandbox's next boot. No VMM of this sandbox runs meanwhile.
+        let (kernel, paths) = (self.kernel.clone(), self.paths.clone());
+        let prepared = blocking(move || {
+            // Without it, a later save would take this VM's memory for the
+            // last pager's (see `guest_memory`).
+            crate::layout::remove_durably(&paged_marker(&paths))?;
+            link_kernel(&kernel, &paths)?;
+            DiskWatch::fresh(&paths)
+        })
+        .await
+        .and_then(|prepared| prepared);
+        let watch = match prepared {
+            Ok(watch) => watch,
+            Err(error) => return (io_failure("boot", error), After::NoVm),
+        };
+        notes::phase("prepare");
+        if let Err(error) = self.launching() {
+            return (io_failure("boot", error), After::NoVm);
+        }
+        match self.engine.boot(&self.spec).await {
+            Ok(vm) => {
+                self.launches += 1;
+                notes::phase("launch");
+                self.hold_watch(&vm, &watch).await;
+                self.record_started(&vm, None).await;
+                let memory = LiveMemory::booted(watch);
+                if pending && self.tell_guest_restored().await.is_err() {
+                    let outcome = self
+                        .end_with_memory(vm, memory, Outcome::Failed(Failure::Transient))
+                        .await;
+                    return (outcome, After::NoVm);
+                }
+                self.woke().await;
+                (Outcome::Done, After::New(vm, memory))
+            }
+            Err(error) => {
+                self.launches += u32::from(error.launched);
+                (failure(&error), After::NoVm)
+            }
+        }
+    }
+}

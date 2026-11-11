@@ -341,19 +341,13 @@ export const designPreviewAccessRequests: AccessRequest[] = [
     personId: "person-jonas",
     source: "Slack",
     requestedLabel: "2 hours ago",
-    message: "Asked from #design-reviews to use OpenGeni in Design preview.",
+    message: "Asked from #design-reviews to use Opengeni in Design preview.",
   },
 ];
 
 /* ----------------------------------------------------------------------------
    Workspace general settings
    -------------------------------------------------------------------------- */
-
-export const agentActivity = {
-  state: "running" as "running" | "paused",
-  runningLabel: "Running",
-  pausedLabel: "Paused · resumes in 52 min",
-};
 
 export const sessionDefaults = {
   voiceInput: true,
@@ -582,63 +576,6 @@ export function variableSetById(id: string): VariableSet {
 /** Deleting this set is blocked: a schedule uses it. */
 export const blockedDeleteVariableSet: VariableSet = variableSetById("vs-aws-production");
 
-/** A new set with no variables yet, for the empty state. */
-export const emptyVariableSet: VariableSet = {
-  id: "vs-sentry",
-  name: "Sentry",
-  description: "Auth token for reading issues from the acme-robotics Sentry org.",
-  scope: "workspace",
-  variables: [],
-  usedBy: [],
-  variablesLabel: "No variables",
-  usageLabel: "Not used",
-  updatedAt: "2026-09-26T11:30:00Z",
-  updatedLabel: "18 min ago",
-};
-
-export type EnvPasteRowStatus = "new" | "duplicate" | "reserved";
-
-export interface EnvPasteRow {
-  name: string;
-  kind: VariableKind;
-  /** Plain values only; secret values are never echoed back. */
-  value?: string;
-  status: EnvPasteRowStatus;
-  /** Inline message for duplicate and reserved rows. */
-  message?: string;
-}
-
-/** Paste .env into GitHub automation: one reserved name and one duplicate. */
-export const envPastePreview: { targetSetId: string; rows: EnvPasteRow[] } = {
-  targetSetId: "vs-github-automation",
-  rows: [
-    {
-      name: "GITHUB_ORG",
-      kind: "plain",
-      value: "acme-robotics",
-      status: "duplicate",
-      message: "Already in this set. Pasting replaces its value.",
-    },
-    {
-      name: "GITHUB_TOKEN",
-      kind: "secret",
-      status: "reserved",
-      message:
-        "OpenGeni sets GITHUB_TOKEN for repository access. Use another name, like GITHUB_BOT_TOKEN.",
-    },
-    { name: "RENOVATE_PLATFORM", kind: "plain", value: "github", status: "new" },
-    { name: "RENOVATE_AUTODISCOVER", kind: "plain", value: "false", status: "new" },
-  ],
-};
-
-/** Name validation copy for Add variable. */
-export const variableNameRules = {
-  hint: "Letters, numbers and underscores. Saved in uppercase.",
-  reserved: "GITHUB_TOKEN is reserved. OpenGeni sets it for repository access.",
-  duplicate: "AWS_REGION is already in this set.",
-  replaceHint: "Takes effect from the next turn. Turns already running keep the current value.",
-};
-
 /* ----------------------------------------------------------------------------
    Sandbox environments and repositories (referenced by other fixtures)
    -------------------------------------------------------------------------- */
@@ -684,7 +621,7 @@ export const repositories = [
    Models and model accounts
    -------------------------------------------------------------------------- */
 
-export type Payer = "Codex plan" | "OpenGeni credits" | "AI Gateway" | "OpenRouter";
+export type Payer = "Codex plan" | "Opengeni credits" | "AI Gateway" | "OpenRouter";
 
 export interface ModelOption {
   id: string;
@@ -725,8 +662,8 @@ export const modelCatalog: ModelOption[] = [
   {
     id: "credits:gpt-6-astra",
     label: "GPT-6 Astra",
-    payer: "OpenGeni credits",
-    displayLabel: "GPT-6 Astra · OpenGeni credits",
+    payer: "Opengeni credits",
+    displayLabel: "GPT-6 Astra · Opengeni credits",
     description: "Billed to your organization's credit balance.",
     available: false,
     unavailableReason: "No credit balance. An owner can add credits in Billing.",
@@ -782,11 +719,11 @@ export interface ModelAccount {
 export const codexProvider = {
   name: "Codex",
   subtitle: "ChatGPT plan",
-  /** "Spread work | Primary only", shown only with 2+ accounts. */
+  /** "Spread work | Primary first", shown only with 2+ accounts. */
   rotation: "spread" as "spread" | "primary",
   rotationOptions: [
     { id: "spread", label: "Spread work" },
-    { id: "primary", label: "Primary only" },
+    { id: "primary", label: "Primary first" },
   ],
   /** "Organization | This workspace", shown only when the org assigns an account. */
   source: "workspace" as "organization" | "workspace",
@@ -912,7 +849,7 @@ export const exhaustedUsageWindow: UsageWindow = {
 };
 
 export interface GatewayProvider {
-  id: "vercel" | "openrouter";
+  id: "vercel" | "openrouter" | "opper";
   name: string;
   description: string;
   connected: boolean;
@@ -936,10 +873,14 @@ export const gatewayProviders: GatewayProvider[] = [
     keyHint: "•••• 4f2a",
     customModels: ["anthropic/claude-sonnet-4.5", "meta-llama/llama-4-maverick"],
   },
+  {
+    id: "opper",
+    name: "Opper",
+    description: "Use EU-hosted models through Opper, billed to your Opper key.",
+    connected: false,
+    customModels: ["gemini-3.8-flash", "aws/claude-sonnet-4-6-eu"],
+  },
 ];
-
-/** SuperGrok is turned off on this deployment, so it is never rendered. */
-export const hiddenProviders = ["SuperGrok"];
 
 export const allowedModelsSummary = "All models from connected accounts";
 
@@ -1745,14 +1686,14 @@ export const popularCapabilities: Capability[] = [
     byLine: "By GitHub",
     status: "unavailable",
     statusDetail:
-      "GitHub isn't available on this OpenGeni server yet. An admin needs to add the GitHub App.",
+      "GitHub isn't available on this Opengeni server yet. An admin needs to add the GitHub App.",
     logoKey: "github",
     monogram: "G",
   },
   {
     id: "cap-slack",
     name: "Slack",
-    description: "Chat with OpenGeni in Slack, or let it read and send messages as you.",
+    description: "Chat with Opengeni in Slack, or let it read and send messages as you.",
     kind: "connection",
     byLine: "By Slack",
     status: "available",

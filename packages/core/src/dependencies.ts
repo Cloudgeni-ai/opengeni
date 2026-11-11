@@ -1,8 +1,8 @@
 import type { Settings } from "@opengeni/config";
 import type {
-  ConnectionCredentialsPort,
   Document,
   DocumentAuthorityKind,
+  EntitlementsPort,
   GitHubAppApiPort,
   ScheduledTask,
   ScheduledTaskTriggerType,
@@ -10,14 +10,20 @@ import type {
   TurnInitiator,
 } from "@opengeni/contracts";
 import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
+import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
+import type { OnePasswordVaultProviderFactory } from "./domain/vaults/provider-registry";
+import type { ExternalVaultProviderFactories } from "./domain/vaults/external-provider-connections";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import type { UserPresenceRecorder } from "./user-presence";
 import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./managed-auth-type";
 import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
+import type { SpeechToTextDeployment } from "./transcription-service/deployment";
+import type { ModelCallService, DecisionCallService } from "./model-call";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
 import type { ResolvedCatalogSettings } from "./model-catalog";
 import type {
@@ -27,11 +33,6 @@ import type {
 } from "./editable-artifacts";
 
 export type SessionWorkflowClient = {
-  triggerAutomationRun?: (input: {
-    accountId: string;
-    workspaceId: string;
-    runId: string;
-  }) => Promise<void>;
   signalUserMessage: (input: {
     sessionId: string;
     eventId: string;
@@ -68,13 +69,23 @@ export type SessionWorkflowClient = {
     workflowId: string;
     workflowWakeRevision: number;
   }) => Promise<void>;
-  syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
+  syncScheduledTask: (input: {
+    task: Pick<ScheduledTask, "id" | "workspaceId" | "temporalScheduleId">;
+    /**
+     * Compensate under the same per-schedule writer lock. Return the error to
+     * throw only after this transaction commits; lock/commit failures bypass
+     * that receipt. A failing compensation must roll back its own savepoint.
+     */
+    onFailure?: (tx: Database, error: unknown) => Promise<Error>;
+  }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: {
     task: ScheduledTask;
     agentRunUsageIdempotencyKey: string;
     triggerWorkflowId: string;
     initiator: TurnInitiator;
+    /** Server-frozen caller ceiling for this run, independent of task ownership. */
+    credentialRestriction?: "developer_setup";
     triggerType?: Extract<
       ScheduledTaskTriggerType,
       "manual" | "initial" | "provider_event" | "retry" | "repair"
@@ -85,6 +96,84 @@ export type SessionWorkflowClient = {
     changeId?: string;
     versionId?: string;
     workflowId?: string;
+  }) => Promise<void>;
+  /**
+   * Durably deletes objects a request staged in storage once `deleteAfter`
+   * passes, whether or not the request ever finishes. Repeating the same keys
+   * is a no-op. Optional for embedded clients; callers without it must clean
+   * up within the request.
+   */
+  scheduleTransientObjectDeletion?: (input: {
+    workspaceId: string;
+    objectKeys: string[];
+    deleteAfter: Date;
+  }) => Promise<void>;
+  /**
+   * Durably runs the step after an Archive's undo window (stopping the chat's
+   * remaining work so it can be stored) at `runAt`. Repeating one Archive is a
+   * no-op. Optional for embedded clients; without it an archived chat is
+   * stored once it goes idle on its own.
+   */
+  scheduleSessionArchive?: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    archivedAt: string;
+    runAt: Date;
+  }) => Promise<void>;
+  /**
+   * Durably restores the stored content of a chat (and the sub-chats
+   * archived with it) whose restore was just requested. Repeating one
+   * request is a no-op. Optional for embedded clients; without it the
+   * maintenance pass restores them a few minutes later.
+   */
+  scheduleSessionArchiveRestore?: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    /** Who restored it: the chats it brings back are resumed as them. */
+    subjectId: string;
+    requestedAt: string;
+  }) => Promise<void>;
+  /**
+   * Start a recording's transcript or deletion workflow. Starting one that is
+   * already running does nothing. Optional for embedded clients; the worker's
+   * recovery sweep starts any it misses.
+   */
+  startRecordingWorkflow?: (input: {
+    kind: "transcript" | "deletion";
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    versionId: string | null;
+    ownerSubjectId: string;
+  }) => Promise<void>;
+  /**
+   * Tell a meeting's speakers apart while it is still being recorded. Starting
+   * it while it runs does nothing. Optional: without it the speakers are told
+   * apart only after the meeting ends, which takes longer.
+   */
+  startRecordingSpeakerScan?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    ownerSubjectId: string;
+  }) => Promise<void>;
+  /**
+   * Record an agent's browser recording whose frame bundle is uploaded and
+   * make its video. Starting it again for the same recording while it runs,
+   * or after it finished, does nothing.
+   */
+  startBrowserRecordingVideo?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    ownerSubjectId: string;
+    visibility: "private" | "workspace";
+    startedAt: string;
+    durationMilliseconds: number;
+    bundle: { byteLength: number; sha256: string };
   }) => Promise<void>;
   check?: () => Promise<void>;
 };
@@ -105,7 +194,9 @@ export type ManagedEmailMessage = {
     | "email_verification"
     | "password_reset"
     | "organization_user_setup"
-    | "sign_in_method_changed";
+    | "sign_in_method_changed"
+    | "billing_credit_notification"
+    | "site_abuse_notice";
   from: string;
   to: string;
   subject: string;
@@ -144,6 +235,8 @@ export type AppDependencies = {
    */
   catalogSourceSettings?: Settings;
   db: Database;
+  /** Read-only host funding admission; unset uses the standalone billing ledger. */
+  entitlements?: EntitlementsPort | null;
   /**
    * Host-composed editable artifact engine. Standalone startup binds the same
    * native kernel/DB/object-store implementation; embedded hosts may inject an
@@ -169,6 +262,11 @@ export type AppDependencies = {
   documentIndexer?: DocumentIndexClient;
   documentServices?: DocumentServices;
   observability?: Observability;
+  /**
+   * Throttled server-side presence for canonical managed browser sessions
+   * (`createUserPresenceRecorder`). Analytics only; never an authorization input.
+   */
+  userPresence?: UserPresenceRecorder | null;
   readinessChecks?: Partial<Record<"db" | "nats" | "temporal", () => Promise<void> | void>>;
   githubStateSecret?: string;
   /**
@@ -177,14 +275,22 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
-  /** Optional provider seam for the separately registered OpenGeni Lens App. */
-  prReviewGithubAppApi?: GitHubAppApiPort;
+  /** Optional provider seam for the separately registered Opengeni Lens App. */
   /**
    * Optional host-owned connection credential seam. API-side consumers use
    * the MCP leg for Codemode/Code Mode; worker consumers bind the same port
-   * for model MCP, Git, and sandbox-secret resolution.
+   * for model MCP, Git, and run credentials. `vaultProvider` is the host's
+   * password manager, linked as vaults with `source: "host"` (OP-6).
    */
-  connectionCredentials?: ConnectionCredentialsPort | null;
+  connectionCredentials?: VaultConnectionCredentialsPort | null;
+  /**
+   * Builds 1Password providers for linked vaults. apps/api and apps/worker
+   * bind it to a dynamic `import("@opengeni/vaults-onepassword")`; unset means
+   * 1Password vaults report `provider_unavailable`.
+   */
+  onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
+  /** Lazy native/remote vault adapters; null disables the first-wave integrations. */
+  externalVaultProviders?: ExternalVaultProviderFactories | null;
   /**
    * Optional embedding-host session ACL. Unset preserves standalone workspace
    * authorization; once bound, every session-addressed surface fails closed on
@@ -198,31 +304,57 @@ export type AppDependencies = {
   managedEmailTransport?: ManagedEmailTransport;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */
   codexFetch?: typeof fetch;
+  /** Injectable transport for customer OpenAI/Azure connection checks. */
+  directModelFetch?: typeof fetch;
   /** Injectable GitHub transport for deterministic personal-OAuth tests. */
   githubPersonalFetch?: typeof fetch;
   /** Injectable credential-free GitHub transport for public repository verification tests. */
   githubAnonymousFetch?: typeof fetch;
   /** Injectable xAI OAuth/subscription transport for deterministic API/provider tests. */
   xaiFetch?: typeof fetch;
+  /** Injectable Claude usage transport on the shared core, for deterministic API tests. */
+  claudeFetch?: typeof fetch;
   /** Injectable Slack Web API transport for deterministic bot-connection tests. */
   slackFetch?: typeof fetch;
   /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
   googleDriveFetch?: typeof fetch;
+  /** Injectable transport for reading event sources (MCP servers and Gmail), for tests. */
+  eventSourceFetch?: typeof fetch;
   /** Injectable Fiken API transport for deterministic connector tests. */
   fikenFetch?: typeof fetch;
   /** Injectable Integration Definition OAuth/API transport for deterministic tests. */
   apiIntegrationOAuthFetch?: typeof fetch;
   /** Injectable specification/introspection transport, still network-policy checked. */
   apiIntegrationSourceFetch?: typeof fetch;
+  /**
+   * Injectable MCP auto-connect transport (issuer discovery and key sets,
+   * Client ID Metadata Documents, and redeeming ID-JAGs at an app), still
+   * network-policy checked. For tests.
+   */
+  mcpAutoConnectFetch?: typeof fetch;
+  /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
+  mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;
+  /** Injectable Microsoft sign-in transport for Teams self-serve setup tests. */
+  teamsAdminSignInFetch?: typeof fetch;
+  /** Injectable calendar transport for naming meetings after calendar events, for tests. */
+  meetingCalendarFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
   /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */
   oauthCallbackDeadlineMs?: number;
+  /**
+   * The deployment's speech-to-text providers, shared by voice input and
+   * recordings; built from settings when omitted.
+   */
+  speechToText?: SpeechToTextDeployment;
   /** Optional host-owned voice-input transcription service. */
   transcription?: TranscriptionService | null;
   /** Optional host-owned long-form audio normalization/segmentation service. */
   transcriptionSegmenter?: TranscriptionSegmenter | null;
+  /** Stateless single model calls (chat completions); built from settings when omitted. */
+  modelCalls?: ModelCallService | null;
+  decisions?: DecisionCallService | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes
@@ -269,6 +401,7 @@ export type AcceptSessionUserMessageDependencies = Pick<
   | "bus"
   | "sessionAuthorization"
   | "schedulePromptPostCommit"
+  | "observability"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

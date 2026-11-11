@@ -5,8 +5,13 @@ import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { INTEGRATION_DEFINITION_PRESENTATIONS } from "@opengeni/capabilities";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
-import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import {
+  OPENGENI_API_CONTRACT_REVISION,
+  type ConnectorToolPermissionsResponse,
+} from "@opengeni/sdk";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = new URL("../../.agent/evidence/capabilities-custom-api/", import.meta.url)
@@ -55,6 +60,11 @@ describe("custom API control center diagnostics", () => {
     for (const query of [
       "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active",
       "archiveStatus=active&sortBy=updatedAt&parentSessionId=null&limit=50&view=page",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false&includeTotals=true",
+      "view=page&limit=1&projection=summary&pinsOnly=true",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includeTotals=true&includePinned=false&siteConversations=group",
+      "view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=include",
     ]) {
       expect(
         isExpectedSessionPageCancellation("GET", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"),
@@ -85,7 +95,16 @@ describe("custom API control center diagnostics", () => {
 
   test("retains other request failures as diagnostics", () => {
     const query = "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active";
+    const totalsQuery =
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false&includeTotals=true";
     for (const [method, url, error] of [
+      ["GET", `${sessionsUrl}?${totalsQuery}&unexpected=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${totalsQuery}&includeTotals=true`, "net::ERR_ABORTED"],
+      [
+        "GET",
+        `${sessionsUrl}?${totalsQuery.replace("includeTotals=true", "includeTotals=false")}`,
+        "net::ERR_ABORTED",
+      ],
       ["POST", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"],
       ["GET", `${sessionsUrl}?${query}`, "net::ERR_CONNECTION_RESET"],
       ["GET", `${sessionsUrl}?${query}&unexpected=true`, "net::ERR_ABORTED"],
@@ -132,6 +151,23 @@ describe("custom API control center diagnostics", () => {
       ),
     ).toBe(false);
   });
+
+  test("allows only the exact Teams bot status read the card replaces when the catalog refreshes", () => {
+    const teamsBotUrl = `http://127.0.0.1:9/v1/workspaces/${workspaceId}/integrations/teams/bot`;
+    expect(isExpectedTeamsBotStatusCancellation("GET", teamsBotUrl, "net::ERR_ABORTED")).toBe(true);
+    for (const [method, url, error] of [
+      ["PUT", teamsBotUrl, "net::ERR_ABORTED"],
+      ["DELETE", teamsBotUrl, "net::ERR_ABORTED"],
+      ["GET", teamsBotUrl, "net::ERR_CONNECTION_RESET"],
+      ["GET", `${teamsBotUrl}?unexpected=true`, "net::ERR_ABORTED"],
+      ["GET", `${teamsBotUrl}/link`, "net::ERR_ABORTED"],
+      ["GET", teamsBotUrl.replace(workspaceId, accountId), "net::ERR_ABORTED"],
+      ["GET", teamsBotUrl.replace(":9/", ":10/"), "net::ERR_ABORTED"],
+      ["GET", "not a URL", "net::ERR_ABORTED"],
+    ]) {
+      expect(isExpectedTeamsBotStatusCancellation(method!, url!, error!)).toBe(false);
+    }
+  });
 });
 
 describe("custom API control center browser acceptance", () => {
@@ -177,7 +213,9 @@ describe("custom API control center browser acceptance", () => {
   }, 30_000);
 
   test("pass 1: desktop light shows two independently identified Linear instances", async () => {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+    });
     const page = await context.newPage();
     const diagnostics = collectRuntimeDiagnostics(page);
     try {
@@ -189,11 +227,14 @@ describe("custom API control center browser acceptance", () => {
       await expectText(page.locator('[data-custom-api-instance="finance"]'), "Finance credential");
       await expectText(page.locator('[data-custom-api-instance="sales"]'), "Sales credential");
       await assertAccessibleAndBounded(page, '[aria-labelledby="custom-apis-heading"]');
-      await page.screenshot({ path: `${evidenceDir}pass-1-desktop-light.png`, fullPage: true });
+      await page.screenshot({
+        path: `${evidenceDir}pass-1-desktop-light.png`,
+        fullPage: true,
+      });
       expect(diagnostics).toEqual([]);
     } catch (error) {
       throw new Error(
-        `${error instanceof Error ? error.message : String(error)}\nRuntime diagnostics:\n${diagnostics.join("\n") || "(none)"}`,
+        `${errorMessage(error)}\nRuntime diagnostics:\n${diagnostics.join("\n") || "(none)"}`,
         { cause: error },
       );
     } finally {
@@ -218,14 +259,19 @@ describe("custom API control center browser acceptance", () => {
       const box = await connect.boundingBox();
       expect(box?.height ?? 0).toBeGreaterThanOrEqual(36);
       await assertAccessibleAndBounded(page, '[aria-labelledby="custom-apis-heading"]');
-      await page.screenshot({ path: `${evidenceDir}pass-2-mobile-light.png`, fullPage: true });
+      await page.screenshot({
+        path: `${evidenceDir}pass-2-mobile-light.png`,
+        fullPage: true,
+      });
     } finally {
       await context.close();
     }
   }, 60_000);
 
   test("pass 3: failed unauthenticated GraphQL preview preserves context and opens auth", async () => {
-    const context = await browser.newContext({ viewport: { width: 1180, height: 900 } });
+    const context = await browser.newContext({
+      viewport: { width: 1180, height: 900 },
+    });
     const page = await context.newPage();
     try {
       await installApi(page, readyState());
@@ -240,7 +286,10 @@ describe("custom API control center browser acceptance", () => {
       await expectText(dialog, "Create a new Connection");
       await expectText(dialog, "Personal");
       await assertAccessibleAndBounded(page, '[role="dialog"]');
-      await page.screenshot({ path: `${evidenceDir}pass-3-auth-error.png`, fullPage: true });
+      await page.screenshot({
+        path: `${evidenceDir}pass-3-auth-error.png`,
+        fullPage: true,
+      });
 
       await dialog.getByRole("button", { name: "Back" }).click();
       expect(await dialog.getByLabel("API URL or domain").inputValue()).toBe(
@@ -252,7 +301,9 @@ describe("custom API control center browser acceptance", () => {
   }, 60_000);
 
   test("pass 4: desktop dark update review keeps new tools opt-in", async () => {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+    });
     const page = await context.newPage();
     try {
       await installApi(page, readyState());
@@ -268,17 +319,26 @@ describe("custom API control center browser acceptance", () => {
       await expectText(dialog, "Tools installed for this exact instance (2/3)");
       expect(await dialog.getByLabel("Create issue").isChecked()).toBe(false);
       await assertAccessibleAndBounded(page, '[role="dialog"]');
-      await page.screenshot({ path: `${evidenceDir}pass-4-update-dark.png`, fullPage: true });
+      await page.screenshot({
+        path: `${evidenceDir}pass-4-update-dark.png`,
+        fullPage: true,
+      });
     } finally {
       await context.close();
     }
   }, 60_000);
 
   test("pass 5: unavailable, permission, loading, and dense states stay truthful", async () => {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+    });
     try {
       const unavailable = await context.newPage();
-      await installApi(unavailable, { ...readyState(), connectionsUnavailable: true, dense: true });
+      await installApi(unavailable, {
+        ...readyState(),
+        connectionsUnavailable: true,
+        dense: true,
+      });
       await openCapabilities(unavailable);
       await expectText(
         unavailable.locator('[data-custom-api-instance="finance"]'),
@@ -322,15 +382,25 @@ describe("custom API control center browser acceptance", () => {
       });
       await expectVisible(loading.getByRole("status").filter({ hasText: "Loading connections" }));
       expect(await loading.getByRole("button", { name: "Refresh", exact: true }).count()).toBe(0);
-      await loading.screenshot({ path: `${evidenceDir}pass-5c-loading.png`, fullPage: true });
+      await loading.screenshot({
+        path: `${evidenceDir}pass-5c-loading.png`,
+        fullPage: true,
+      });
     } finally {
       await context.close();
     }
   }, 90_000);
 
   test("pass 6: per-account facets configure and pause without exposing provider state", async () => {
-    const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
+    const context = await browser.newContext({
+      viewport: { width: 1180, height: 960 },
+    });
     const page = await context.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
     try {
       const state = readyState();
       await installApi(page, state);
@@ -340,7 +410,9 @@ describe("custom API control center browser acceptance", () => {
       const account = sheet.locator('[data-integration-access-item="account-finance"]');
       await expectText(account, "Outlook Mail — Finance");
       await account
-        .getByRole("button", { name: "Manage facets for Outlook Mail — Finance" })
+        .getByRole("button", {
+          name: "Manage facets for Outlook Mail — Finance",
+        })
         .click();
       const facets = account.locator('[data-integration-facets="account-finance"]');
       await expectText(facets, "Mail inbox");
@@ -359,14 +431,20 @@ describe("custom API control center browser acceptance", () => {
       await inbox.getByRole("button", { name: "Pause" }).click();
       await expectText(inbox, "Paused");
       await assertAccessibleAndBounded(page, "[data-capability-page]");
-      await page.screenshot({ path: `${evidenceDir}pass-6-account-facets.png`, fullPage: true });
+      await page.screenshot({
+        path: `${evidenceDir}pass-6-account-facets.png`,
+        fullPage: true,
+      });
+      expect(pageErrors).toEqual([]);
     } finally {
       await context.close();
     }
   }, 60_000);
 
   test("pass 7: shared Connect opens provider consent and retries one exact account", async () => {
-    const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
+    const context = await browser.newContext({
+      viewport: { width: 1180, height: 960 },
+    });
     const page = await context.newPage();
     const state = readyState();
     try {
@@ -377,7 +455,10 @@ describe("custom API control center browser acceptance", () => {
       // Shared Connect keeps the exact account target and opens consent only
       // from the explicit user gesture, without a local account-naming form.
       let sheet = await openOutlookMailSheet(page);
-      const addAccount = sheet.getByRole("button", { name: "Add account", exact: true });
+      const addAccount = sheet.getByRole("button", {
+        name: "Add account",
+        exact: true,
+      });
       await expectVisible(addAccount);
       await addAccount.click();
       await page.getByRole("radio", { name: "This workspace", exact: false }).check();
@@ -402,7 +483,11 @@ describe("custom API control center browser acceptance", () => {
       // Reconnect targets the exact existing account, keeping its instance key
       // and its optimistic version, and a failed start never creates one.
       const repair = await context.newPage();
-      const repairState = { ...readyState(), unhealthyAccount: true, oauthFailuresRemaining: 1 };
+      const repairState = {
+        ...readyState(),
+        unhealthyAccount: true,
+        oauthFailuresRemaining: 1,
+      };
       await installApi(repair, repairState);
       await openCapabilities(repair);
       sheet = await openOutlookMailSheet(repair);
@@ -457,6 +542,11 @@ describe("custom API control center browser acceptance", () => {
       reducedMotion: "reduce",
     });
     const page = await context.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
     try {
       await installApi(page, { ...readyState(), canManage: false });
       await openCapabilities(page);
@@ -494,6 +584,7 @@ describe("custom API control center browser acceptance", () => {
       await page.getByRole("button", { name: "Capabilities", exact: true }).click();
       await sheet.waitFor({ state: "hidden" });
       await expectVisible(row);
+      expect(pageErrors).toEqual([]);
     } finally {
       await context.close();
     }
@@ -521,9 +612,31 @@ function collectRuntimeDiagnostics(page: Page): string[] {
   page.on("requestfailed", (request) => {
     const errorText = request.failure()?.errorText ?? "failed";
     if (isExpectedSessionPageCancellation(request.method(), request.url(), errorText)) return;
+    if (isExpectedTeamsBotStatusCancellation(request.method(), request.url(), errorText)) return;
     diagnostics.push(`request:${request.method()} ${request.url()} ${errorText}`);
   });
   return diagnostics;
+}
+
+// The Teams card re-reads its bot status when the capability catalog
+// refreshes and cancels the read it replaces.
+function isExpectedTeamsBotStatusCancellation(
+  method: string,
+  requestUrl: string,
+  errorText: string,
+): boolean {
+  if (method !== "GET" || errorText !== "net::ERR_ABORTED") return false;
+  let url: URL;
+  try {
+    url = new URL(requestUrl);
+  } catch {
+    return false;
+  }
+  return (
+    url.origin === "http://127.0.0.1:9" &&
+    url.pathname === `/v1/workspaces/${workspaceId}/integrations/teams/bot` &&
+    url.search === ""
+  );
 }
 
 function isExpectedSessionPageCancellation(
@@ -553,9 +666,16 @@ function isExpectedSessionPageCancellation(
   return new Set([
     // Default root page on this fixture's capabilities route; keep exact keys and values.
     "archiveStatus=active&limit=50&parentSessionId=null&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&includeTotals=true&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
+    // The rail groups Site conversations under their Site and includes them in pins.
+    "archiveStatus=active&includePinned=false&limit=4&parentSessionId=null&projection=summary&siteConversations=group&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&includeTotals=true&limit=4&parentSessionId=null&projection=summary&siteConversations=group&sortBy=updatedAt&view=page",
     "limit=50&parentSessionId=null&view=page",
     "archivedOnly=true&limit=50&parentSessionId=null&view=page",
     "limit=1&pinsOnly=true&view=page",
+    "limit=1&pinsOnly=true&projection=summary&view=page",
+    "limit=1&pinsOnly=true&projection=summary&siteConversations=include&view=page",
   ]).has(actual);
 }
 
@@ -615,6 +735,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         body: JSON.stringify(body),
       });
 
+    if (url.pathname === "/v1/inbox" && request.method() === "GET") {
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
+    }
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "capabilities-browser",
@@ -628,10 +751,44 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
         productAccessMode: "configured",
         auth: { mode: "none" },
-        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+        structuredServices: {
+          fileSystem: false,
+          git: false,
+          terminalEvents: false,
+        },
       });
     }
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
+    if (
+      url.pathname ===
+      `/v1/workspaces/${workspaceId}/capabilities/api%3Amicrosoft-outlook-mail/tool-permissions`
+    ) {
+      expect(request.method()).toBe("GET");
+      const selectedConnection = url.searchParams.get("connectionId");
+      if (selectedConnection !== null) expect(selectedConnection).toBe(outlookConnectionId);
+      const selectedInstance = url.searchParams.get("instanceKey");
+      if (selectedInstance !== null) expect(selectedInstance).toBe("account-finance");
+      return json({
+        connectionId: outlookConnectionId,
+        serverId: "api:microsoft-outlook-mail",
+        instanceKey: "account-finance",
+        accountLabel: "Outlook Mail — Finance",
+        defaultPermission: null,
+        tools: [],
+        discoveryError: null,
+        canManage: state.canManage,
+        appliesTo: "next_attempt",
+        revision: "fixture-permissions-1",
+        accounts: [
+          {
+            connectionId: outlookConnectionId,
+            instanceKey: "account-finance",
+            label: "Outlook Mail — Finance",
+            scope: "workspace",
+          },
+        ],
+      } satisfies ConnectorToolPermissionsResponse);
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts`) {
       if (request.method() === "GET") return json([]);
       const input = request.postDataJSON();
@@ -658,6 +815,17 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts/fixture-connect`)
       return json(connectAttempt);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connect/catalog`)
+      return json([
+        {
+          id: "microsoft-outlook-mail",
+          label: "Outlook Mail",
+          family: "microsoft",
+          readiness: "available",
+          ownership: ["workspace", "personal"],
+          setup: ["oauth"],
+        },
+      ]);
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
@@ -686,7 +854,19 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));
@@ -694,7 +874,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));
-      return json({ integrations: instances(state.dense, state.unhealthyAccount === true) });
+      return json({
+        integrations: instances(state.dense, state.unhealthyAccount === true),
+      });
     }
     if (
       request.method() === "POST" &&
@@ -790,7 +972,10 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       request.method() === "POST" &&
       url.pathname === `/v1/workspaces/${workspaceId}/integrations/preview`
     ) {
-      const body = request.postDataJSON() as { connectionId?: string; source: unknown };
+      const body = request.postDataJSON() as {
+        connectionId?: string;
+        source: unknown;
+      };
       if (!body.connectionId) {
         return json({ message: "GraphQL introspection requires authentication" }, 422);
       }
@@ -1005,7 +1190,9 @@ function mailFacetDefinitions() {
       kind: "delivery_destination",
       configSchema: {
         type: "object",
-        properties: { fromAlias: { type: "string", minLength: 1, maxLength: 512 } },
+        properties: {
+          fromAlias: { type: "string", minLength: 1, maxLength: 512 },
+        },
         additionalProperties: false,
       },
       capabilities: {
@@ -1017,7 +1204,11 @@ function mailFacetDefinitions() {
     {
       facetKey: "account-identity",
       kind: "identity_link",
-      configSchema: { type: "object", properties: {}, additionalProperties: false },
+      configSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
       capabilities: { provider: "microsoft", connectionRequired: true },
     },
   ];

@@ -7,6 +7,9 @@ import {
   type TimelineGroup,
 } from "../src/timeline";
 import recorded from "./fixtures/exchange-answer-before-machine-turns.json";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /*
  * Answers stay visible; settled progress joins only its own turn's work. A settled answer is
@@ -129,7 +132,9 @@ function emptyTurn(turnId: string): SessionEvent[] {
 }
 
 function fold(events: SessionEvent[]): TimelineGroup[] {
-  const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+  const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+    readableTurns: true,
+  });
   if (
     events.some(
       (entry) => (entry.payload as { text?: string }).text === "Querying the regional tables.",
@@ -176,7 +181,7 @@ function answeredFirstTurn(settle: typeof answer = answer): SessionEvent[] {
 describe("answers stay visible across readable turns", () => {
   test("recorded exchange: an agent message after the answer starts one more short turn", () => {
     const events = recorded as SessionEvent[];
-    const final = buildTimeline(events).find(
+    const final = buildTimeline(englishText, events).find(
       (item): item is AgentMessageItem =>
         item.kind === "agent-message" && item.phase === "final_answer",
     );
@@ -360,6 +365,41 @@ describe("answers stay visible across readable turns", () => {
     ]);
   });
 
+  test("live progress stays visible and is also listed, in order, in its work history", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Build the regional report" }, null),
+      event("turn.started", {}, "turn-1"),
+      ...note("Querying the regional tables.", "turn-1"),
+      ...tool("query", "exec_command", "turn-1"),
+      event(
+        "agent.message.completed",
+        { text: "Rendering the chart.", phase: "commentary", messageId: "turn-1-second" },
+        "turn-1",
+      ),
+      ...tool("render", "exec_command", "turn-1"),
+    ];
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
+    expect(visibleMessages(groups)).toEqual([
+      "Querying the regional tables.",
+      "Rendering the chart.",
+    ]);
+    const work = groups.find((group) => group.kind === "activity" && group.work);
+    if (work?.kind !== "activity") throw new Error("expected a live work row");
+    expect(work.work!.endedAt).toBeUndefined();
+    const noteIds = groups.flatMap((group) =>
+      group.kind === "item" && group.item.kind === "agent-message" ? [group.item.id] : [],
+    );
+    expect(work.work!.liveNoteIds).toEqual(noteIds);
+    expect(
+      work.work!.details.map((entry) =>
+        entry.kind === "item" && entry.item.kind === "agent-message" ? entry.item.text : entry.kind,
+      ),
+    ).toEqual(["Querying the regional tables.", "activity", "Rendering the chart.", "activity"]);
+  });
+
   test("a note that more work followed stays visible beside the earlier answer", () => {
     const events = [
       ...answeredFirstTurn(),
@@ -422,7 +462,7 @@ describe("answers stay visible across readable turns", () => {
       machineInput("agent_message", "turn-2"),
       ...quietTurn("turn-2"),
     ];
-    expect(topLevelKinds(groupTimeline(buildTimeline(events)))).toEqual([
+    expect(topLevelKinds(groupTimeline(englishText, buildTimeline(englishText, events)))).toEqual([
       "user-message",
       "turn",
       "agent-message",
@@ -475,4 +515,273 @@ describe("answers stay visible across readable turns", () => {
     expect(topLevelKinds(groups)).toContain("human-input");
     expect(visibleMessages(groups)).toEqual([ANSWER_A]);
   });
+});
+
+describe("a person's question answered before a wait", () => {
+  const ANSWER = "**Yes, 28 versus 128 costs the same** if the actual node count stays the same.";
+  const CORRECTION = "Please disregard the citation links above; the conclusion stands.";
+
+  function commentary(text: string, id: string, turnId: string): SessionEvent[] {
+    return [
+      event("agent.message.delta", { text, phase: "commentary", messageId: id }, turnId),
+      event("agent.message.completed", { text, phase: "commentary", messageId: id }, turnId),
+    ];
+  }
+
+  function waitThenSettle(turnId: string): SessionEvent[] {
+    return [
+      event(
+        "agent.toolCall.created",
+        { id: `${turnId}-wait`, name: "opengeni__wait_for_input", arguments: {} },
+        turnId,
+      ),
+      event(
+        "session.wait.started",
+        { actor: "agent", reason: "Waiting for the reviews.", waitTurnId: turnId },
+        turnId,
+      ),
+      event(
+        "agent.toolCall.output",
+        { id: `${turnId}-wait`, output: { status: "waiting_for_input" } },
+        turnId,
+      ),
+      event("turn.completed", { output: "", reply: CORRECTION }, turnId),
+    ];
+  }
+
+  /** The recorded shape: answer as commentary, more tools, a short note, then a wait. */
+  function answeredThenWaited(opener: SessionEvent): SessionEvent[] {
+    return [
+      opener,
+      event("turn.started", {}, "turn-q"),
+      ...tool("search", "web_search_call", "turn-q"),
+      ...commentary(ANSWER, "answer", "turn-q"),
+      ...tool("search-2", "web_search_call", "turn-q"),
+      ...tool("clock", "exec_command", "turn-q"),
+      ...commentary(CORRECTION, "correction", "turn-q"),
+      ...tool("clock-2", "exec_command", "turn-q"),
+      ...waitThenSettle("turn-q"),
+    ];
+  }
+
+  test("the answer stays visible after the work row instead of folding into it", () => {
+    sequence = 0;
+    const events = answeredThenWaited(
+      event("user.message", { text: "Does the scaler maximum change what we pay?" }, null),
+    );
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
+    expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
+    const kinds = topLevelKinds(groups);
+    expect(kinds.slice(0, 4)).toEqual([
+      "user-message",
+      "activity",
+      "agent-message",
+      "agent-message",
+    ]);
+    const work = groups[1];
+    expect(work?.kind === "activity" && visibleMessages(work.work!.details)).toEqual([]);
+  });
+
+  test("progress between the immediate answer and the latest word still folds", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Roll out the new bounds" }, null),
+      event("turn.started", {}, "turn-q"),
+      ...commentary("I'll use 2 to 28 in production.", "first", "turn-q"),
+      ...tool("read", "exec_command", "turn-q"),
+      ...commentary("Checking the rollout gates.", "middle", "turn-q"),
+      ...tool("check", "exec_command", "turn-q"),
+      ...commentary(CORRECTION, "last", "turn-q"),
+      ...waitThenSettle("turn-q"),
+    ];
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
+    expect(visibleMessages(groups)).toEqual(["I'll use 2 to 28 in production.", CORRECTION]);
+    const work = groups.find((group) => group.kind === "activity");
+    expect(work?.kind === "activity" && visibleMessages(work.work!.details)).toEqual([
+      "Checking the rollout gates.",
+    ]);
+  });
+
+  test("a machine-started turn that ends waiting keeps only its latest note visible", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Build the regional report" }, null),
+      event("turn.started", {}, "turn-1"),
+      ...answer(ANSWER_A, "turn-1"),
+      machineInput("child_progress", "turn-q"),
+      event("turn.started", {}, "turn-q"),
+      ...commentary("Checking the worker result.", "first", "turn-q"),
+      ...tool("check", "exec_command", "turn-q"),
+      ...commentary(CORRECTION, "last", "turn-q"),
+      ...waitThenSettle("turn-q"),
+    ];
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
+    expect(visibleMessages(groups)).toEqual([ANSWER_A, CORRECTION]);
+  });
+
+  for (const readableTurns of [true, false]) {
+    test(`an absorbed steer does not make the next machine turn answer a person (readable=${readableTurns})`, () => {
+      sequence = 0;
+      const events = [
+        event("user.message", { text: "Build the report" }, null),
+        event("turn.started", {}, "turn-1"),
+        ...tool("t1", "exec_command", "turn-1"),
+        event("user.message", { text: "Also include the EU", delivery: "steer" }, "turn-1"),
+        ...tool("t2", "exec_command", "turn-1"),
+        ...answer(ANSWER_A, "turn-1"),
+        machineInput("child_progress", "turn-m"),
+        event("turn.started", {}, "turn-m"),
+        ...commentary("Checking the worker result.", "first", "turn-m"),
+        ...tool("t3", "exec_command", "turn-m"),
+        ...commentary(CORRECTION, "last", "turn-m"),
+        ...waitThenSettle("turn-m"),
+      ];
+      const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+        readableTurns,
+      });
+      expect(visibleMessages(groups)).toEqual([ANSWER_A, CORRECTION]);
+    });
+
+    test(`a person's turn that compacts before answering keeps the answer (readable=${readableTurns})`, () => {
+      sequence = 0;
+      const events = [
+        event("user.message", { text: "Status?" }, null),
+        event("turn.started", {}, "turn-q"),
+        event("session.context.compacted", { trigger: "auto" }, "turn-q"),
+        ...commentary(ANSWER, "first", "turn-q"),
+        ...tool("t3", "exec_command", "turn-q"),
+        ...commentary(CORRECTION, "last", "turn-q"),
+        ...waitThenSettle("turn-q"),
+      ];
+      const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+        readableTurns,
+      });
+      expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
+    });
+  }
+
+  test("a person's message that supersedes a live turn is answered by the next turn", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Lower the floor to two" }, null),
+      event("turn.started", {}, "turn-1"),
+      ...tool("t1", "exec_command", "turn-1"),
+      event("user.message", { text: "Does the scaler maximum change what we pay?" }, null),
+      event("turn.superseded", { reason: "steer" }, "turn-1"),
+      event("turn.started", {}, "turn-q"),
+      ...tool("search", "web_search_call", "turn-q"),
+      ...commentary(ANSWER, "answer", "turn-q"),
+      ...tool("clock", "exec_command", "turn-q"),
+      ...commentary(CORRECTION, "correction", "turn-q"),
+      ...waitThenSettle("turn-q"),
+    ];
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
+    expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
+  });
+
+  test("the classic grouping also keeps the answer outside the folded turn", () => {
+    sequence = 0;
+    const events = answeredThenWaited(
+      event("user.message", { text: "Does the scaler maximum change what we pay?" }, null),
+    );
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events));
+    expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
+    expect(topLevelKinds(groups).slice(0, 4)).toEqual([
+      "user-message",
+      "turn",
+      "agent-message",
+      "agent-message",
+    ]);
+  });
+});
+
+/*
+ * Session df030716, 13:13 UTC on 2026-10-23: Claude Opus 5.5 wrote its answer
+ * (an A/B explanation, three artifact images and a table) before
+ * wait_for_input, and it came back only as Anthropic's one-paragraph summary.
+ * The summary is now reasoning, and the answer arrives verbatim through the
+ * wait's `reply`, which settlement publishes as the turn's final answer.
+ */
+describe("a wait's verbatim reply", () => {
+  const SUMMARY =
+    "I confirmed the images weren't actually posted before, and here are the actual before/A/B comparison pictures.";
+  const REPLY = [
+    "You're right, the images never reached you. Here they are:",
+    "",
+    "- **A** keeps the sidebar collapsed.",
+    "- **B** opens it beside the Site.",
+    "",
+    "![Before](artifact:cf247ccc0000000000000000000000aa)",
+    "![Option A](artifact:f79ba9240000000000000000000000bb)",
+    "![Option B](artifact:a3dba5210000000000000000000000cc)",
+    "",
+    "| | A | B |",
+    "| --- | --- | --- |",
+    "| Sidebar | collapsed | open |",
+  ].join("\n");
+
+  function repliedWait(turnId: string, reply: string, readable: boolean): TimelineGroup[] {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Show me the before, A and B pictures" }, null),
+      event("turn.started", {}, turnId),
+      ...tool("look", "exec_command", turnId),
+      event("agent.reasoning.delta", { text: SUMMARY }, turnId),
+      event(
+        "agent.toolCall.created",
+        {
+          id: `${turnId}-wait`,
+          name: "opengeni__wait_for_input",
+          arguments: { reply, reason: "Waiting for your pick of A or B.", timeoutSeconds: 6900 },
+        },
+        turnId,
+      ),
+      event(
+        "session.wait.started",
+        { actor: "agent", reason: "Waiting for your pick of A or B.", waitTurnId: turnId },
+        turnId,
+      ),
+      event(
+        "agent.toolCall.output",
+        { id: `${turnId}-wait`, output: { status: "waiting_for_input" } },
+        turnId,
+      ),
+      event(
+        "agent.message.completed",
+        { text: reply, phase: "final_answer", messageId: "wait_for_input:reply:attempt-1" },
+        turnId,
+      ),
+      event("turn.completed", { output: "", reply }, turnId),
+    ];
+    return groupTimeline(
+      englishText,
+      buildTimeline(englishText, events),
+      readable ? { readableTurns: true } : undefined,
+    );
+  }
+
+  for (const readable of [true, false]) {
+    test(`is the turn's visible answer, images and table included (readable=${readable})`, () => {
+      const groups = repliedWait("turn-r", REPLY, readable);
+      expect(visibleMessages(groups)).toEqual([REPLY]);
+      const answerItem = groups.find(
+        (group) => group.kind === "item" && group.item.kind === "agent-message",
+      );
+      const answerMessage =
+        answerItem?.kind === "item" ? (answerItem.item as AgentMessageItem) : undefined;
+      expect(answerMessage?.phase).toBe("final_answer");
+      expect(answerMessage?.text).toContain(
+        "![Option B](artifact:a3dba5210000000000000000000000cc)",
+      );
+      expect(visibleMessages(groups).join("\n")).not.toContain(SUMMARY);
+    });
+  }
 });

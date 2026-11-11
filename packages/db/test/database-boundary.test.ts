@@ -5,7 +5,10 @@ import { describe, expect, test } from "bun:test";
 
 import * as database from "../src/database";
 import * as membershipAccess from "../src/workspace-membership-access";
+import * as connectionMetadata from "../src/connection-metadata";
 import * as root from "../src/index";
+import * as creditLedger from "../src/credit-ledger";
+import * as billingCustomer from "../src/billing-customer";
 import type {
   CreateDbOptions as RootCreateDbOptions,
   Database as RootDatabase,
@@ -41,8 +44,17 @@ describe("database foundation boundary", () => {
 
   test("keeps the existing root runtime and type surface compatible", () => {
     expect(root.createDb).toBe(database.createDb);
+    expect(root.applyCreditLedgerEntry).toBe(creditLedger.applyCreditLedgerEntry);
+    expect(root.applyCreditLedgerEntryOnce).toBe(creditLedger.applyCreditLedgerEntryOnce);
+    expect(root.getBillingCustomer).toBe(billingCustomer.getBillingCustomer);
     expect(root.grantWorkspaceAccess).toBe(membershipAccess.grantWorkspaceAccess);
     expect(root.listWorkspaceMembers).toBe(membershipAccess.listWorkspaceMembers);
+    expect(root.getConnectionMetadata).toBe(connectionMetadata.getConnectionMetadata);
+    expect(root.listConnectionsMetadata).toBe(connectionMetadata.listConnectionsMetadata);
+    expect(root).not.toHaveProperty("connectionMetadataColumns");
+    expect(root).not.toHaveProperty("mapConnectionMetadata");
+    expect(root).not.toHaveProperty("connectionSubjectVisibility");
+    expect(root).not.toHaveProperty("withConnectionSubjectRls");
     expect(root.registerDbBinding).toBe(database.registerDbBinding);
     expect(root.rlsContextForWorkspace).toBe(database.rlsContextForWorkspace);
     expect(root.rlsStrategyFor).toBe(database.rlsStrategyFor);
@@ -79,6 +91,10 @@ describe("database foundation boundary", () => {
     const allowedRootConsumers = new Set([
       // Executable entry point; the root does not import it.
       "runtime-posture-cli.ts",
+      // Loaded only by migrate.ts; the root does not re-export it.
+      "interrupted-turn-retirement-migration.ts",
+      // Its own subpath (@opengeni/db/app-action-targets); the root does not import it.
+      "app-action-targets.ts",
     ]);
 
     const offenders: string[] = [];

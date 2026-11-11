@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   SessionEvent,
   SessionHumanInputRequest,
@@ -9,7 +10,10 @@ import {
   type EmbeddedHumanInputClientOverride,
 } from "../session-context";
 import { isActionableHumanInputRequest } from "../human-input";
+import { forgetSessionHumanInputDrafts, pruneHumanInputDrafts } from "../human-input-draft-store";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
+  projectionReadThrough,
   useDebouncedCallback,
   useMutationRunner,
   usePolledValue,
@@ -28,7 +32,7 @@ export function isHumanInputEvent(event: Pick<SessionEvent, "type">): boolean {
   );
 }
 
-export type UseHumanInputRequestsOptions = EmbeddedHumanInputClientOverride &
+export type UseHumanInputRequestsOptions = EmbeddedHumanInputClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     /** Optional safety-net polling. Durable events drive refresh by default. */
     pollIntervalMs?: number | undefined;
@@ -60,19 +64,36 @@ export function useHumanInputRequests(
 ): UseHumanInputRequestsResult {
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedHumanInputSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
-  const load = useCallback(
-    async (): Promise<SessionHumanInputRequest[]> =>
-      sessionId
-        ? await client.listHumanInputRequests(workspaceId, sessionId, { status: "pending" })
-        : [],
-    [client, sessionId, workspaceId],
-  );
+  const load = useCallback(async (): Promise<SessionHumanInputRequest[]> => {
+    if (!sessionId) return [];
+    const readStartedAt = Date.now();
+    const requests = await client.listHumanInputRequests(workspaceId, sessionId, {
+      status: "pending",
+    });
+    // Unsent answers belong only to requests that are still answerable here:
+    // forget drafts for requests answered elsewhere, skipped, or expired.
+    const now = Date.now();
+    pruneHumanInputDrafts(
+      workspaceId,
+      sessionId,
+      requests
+        .filter((request) => isActionableHumanInputRequest(request, now))
+        .map((request) => request.id),
+      readStartedAt,
+    );
+    return requests;
+  }, [client, sessionId, workspaceId]);
   const state = usePolledValue(load, {
     enabled,
     pollIntervalMs: options.pollIntervalMs,
   });
   const loadedRequests = state.data;
   const refreshRequests = state.refresh;
+  // A person who may no longer see this session keeps none of its unsent answers.
+  const readDenied = enabled && Boolean(sessionId) && deniesRetainedView(state.error);
+  useEffect(() => {
+    if (readDenied && sessionId) forgetSessionHumanInputDrafts(workspaceId, sessionId);
+  }, [readDenied, sessionId, workspaceId]);
   const mutation = useMutationRunner(`${workspaceId}\u0000${sessionId ?? ""}`);
   const [respondingRequestId, setRespondingRequestId] = useState<string | null>(null);
   const [deadlineVersion, setDeadlineVersion] = useState(0);
@@ -91,7 +112,19 @@ export function useHumanInputRequests(
   useSessionEventTrigger(client, workspaceId, sessionId, isHumanInputEvent, scheduleRefresh, {
     enabled,
     ...(options.events !== undefined ? { events: options.events } : {}),
+    readThrough: projectionReadThrough(state.data, state.loading),
+    refresh: scheduleRefresh,
   });
+  // Until the first read lands, show the questions pending when this
+  // conversation was last left (only when the host retains reads).
+  const retainedRequests = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "human-input",
+    state.data,
+    { enabled, discard: deniesRetainedView(state.error) },
+  );
 
   useEffect(() => {
     const now = Date.now();
@@ -141,13 +174,13 @@ export function useHumanInputRequests(
   const now = Date.now();
   void deadlineVersion;
   return {
-    requests: [...(state.data ?? [])]
+    requests: [...(state.data ?? retainedRequests ?? [])]
       .filter((request) => isActionableHumanInputRequest(request, now))
       .sort(
         (left, right) =>
           left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
       ),
-    loading: state.loading,
+    loading: state.loading && retainedRequests === null,
     error: state.error,
     refresh: state.refresh,
     respond,

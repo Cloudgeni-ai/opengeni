@@ -1,8 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+
+import { expectWindowTop, simulateWindowsTitleBar, WINDOW_BAR_HEIGHT } from "./desktop-window-bar";
 
 describe("signed-out homepage on the real app route", () => {
   let browser: Browser;
@@ -103,7 +106,11 @@ describe("signed-out homepage on the real app route", () => {
     return posts;
   }
 
-  const SIGNED_OUT_HEADING = "Infrastructure for agents that actually finish the job.";
+  // The component unit test owns approved landing copy. Browser acceptance identifies
+  // the actual labelled landing heading, not a marketing sentence that can change.
+  function signedOutHeading(page: Page) {
+    return page.getByRole("heading", { level: 1 }).and(page.locator("#signed-out-heading"));
+  }
 
   async function chooseTheme(page: Page, theme: "Light" | "Dark" | "System") {
     await page.getByRole("button", { name: "Appearance", exact: true }).click();
@@ -124,7 +131,8 @@ describe("signed-out homepage on the real app route", () => {
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(baseUrl);
-      await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).waitFor();
+      await signedOutHeading(page).waitFor();
+      expect((await signedOutHeading(page).innerText()).trim()).not.toBe("");
       expect(await page.locator("h1").count()).toBe(1);
       expect(await page.locator("main ul li").count()).toBe(3);
       expect(await page.getByRole("button", { name: "Continue with Google" }).isVisible()).toBe(
@@ -172,11 +180,80 @@ describe("signed-out homepage on the real app route", () => {
       expect(posts).toContain("/v1/auth/request-password-reset");
       await page.goto(`${baseUrl}/reset-password`);
       await page.getByRole("heading", { name: "Reset password", exact: true }).waitFor();
-      expect(await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(0);
+      expect(await signedOutHeading(page).count()).toBe(0);
       expect(errors).toEqual([]);
     } finally {
       await context.close();
     }
+  }, 90_000);
+
+  test("in the desktop app the page starts below the window bar", async () => {
+    const brand = new Map<string, { x: number; y: number }>();
+    for (const platform of ["browser", "macos", "windows"] as const) {
+      const context = await browser.newContext();
+      try {
+        await installApi(context, "legacy");
+        if (platform !== "browser") {
+          // A current shell reports its window bar; without it a macOS page
+          // keeps the taller bar of the 0.1.33 and older apps.
+          await context.addInitScript(
+            ({ desktopPlatform, windowBarHeight }) => {
+              Object.assign(window, {
+                opengeniDesktop: {
+                  version: 1,
+                  platform: desktopPlatform,
+                  windowBarHeight,
+                  capabilities: [],
+                  setAppearance: () => {},
+                  openExternal: () => {},
+                },
+              });
+            },
+            { desktopPlatform: platform, windowBarHeight: WINDOW_BAR_HEIGHT },
+          );
+        }
+        if (platform === "windows") await simulateWindowsTitleBar(context);
+        const top = platform === "browser" ? 0 : WINDOW_BAR_HEIGHT;
+        const page = await context.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        await page.goto(baseUrl);
+        await signedOutHeading(page).waitFor();
+        const header = page.locator("header[data-signed-out-column]");
+        const brandRow = header.locator("> div").first();
+        for (const width of [720, 900, 1100, 1128, 1280]) {
+          await page.setViewportSize({ width, height: 800 });
+          const box = (await brandRow.boundingBox())!;
+          brand.set(`${platform}-${width}`, { x: box.x, y: box.y - top });
+          // The header, page and footer keep one edge.
+          expect((await signedOutHeading(page).boundingBox())!.x).toBe(box.x);
+          await expectWindowTop(page, platform);
+        }
+        // Scrolled to the end in the smallest window, nothing on the page
+        // reaches the window controls.
+        await page.setViewportSize({ width: 720, height: 520 });
+        await header.evaluate((element) => {
+          const scroller = element.closest(".overflow-y-auto")!;
+          scroller.scrollTop = scroller.scrollHeight;
+        });
+        expect(
+          await header.evaluate((element) => element.closest(".overflow-y-auto")!.scrollTop),
+        ).toBeGreaterThan(0);
+        await expectWindowTop(page, platform);
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+    // Below the bar the page is the web page: 16px in a 720px window, then
+    // the 1040px column's 40px inset.
+    for (const width of [720, 900, 1100, 1128, 1280]) {
+      expect(brand.get(`macos-${width}`)).toEqual(brand.get(`browser-${width}`)!);
+      expect(brand.get(`windows-${width}`)).toEqual(brand.get(`browser-${width}`)!);
+    }
+    expect([720, 900, 1100, 1128, 1280].map((width) => brand.get(`browser-${width}`)!.x)).toEqual([
+      16, 40, 70, 84, 160,
+    ]);
   }, 90_000);
 
   test("broker registration stays embedded and social providers remain in the isolated popup", async () => {
@@ -189,7 +266,9 @@ describe("signed-out homepage on the real app route", () => {
       expect(await page.locator("h1").count()).toBe(1);
       await page.getByRole("button", { name: "Create an account", exact: true }).click();
       await page.getByLabel("Name", { exact: true }).waitFor();
-      expect(await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(1);
+      expect(await signedOutHeading(page).count()).toBe(1);
+      expect(await signedOutHeading(page).isVisible()).toBe(true);
+      expect((await signedOutHeading(page).innerText()).trim()).not.toBe("");
       await page.getByRole("button", { name: "Back to sign in", exact: true }).click();
       const popupPromise = page.waitForEvent("popup");
       await page.getByRole("button", { name: "Continue with email", exact: true }).click();
@@ -198,8 +277,8 @@ describe("signed-out homepage on the real app route", () => {
       expect(await popup.getByRole("button", { name: "Continue with GitHub" }).isVisible()).toBe(
         true,
       );
-      expect(await popup.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(0);
-      expect(await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(1);
+      expect(await signedOutHeading(popup).count()).toBe(0);
+      expect(await signedOutHeading(page).count()).toBe(1);
     } finally {
       await context.close();
     }

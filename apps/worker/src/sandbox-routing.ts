@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 // apps/worker/src/sandbox-routing.ts — wire the agent-loop-free routing proxy
 // (`@opengeni/runtime` RoutingSandboxSession + makeActiveBackendResolver) to the
 // real DB pointer + the live NATS control plane for the WORKER TURN path (M7).
@@ -14,9 +15,20 @@
 // target lookup), and the selfhosted ControlRpc built over the events bus's NATS
 // request/reply connection.
 
-import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import {
+  sandboxLifecycleTransitionWaitMs,
+  sandboxProviderMaxRemainingLifetimeMs,
+  type Settings,
+} from "@opengeni/config";
+import {
+  agentBackgroundCommandDeps,
+  backgroundCommandWakeSender,
+  captureConnectedCommandOutput,
+} from "@opengeni/core";
+export { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
 import {
   createProviderCommandRetainer,
+  getRetainedProviderCommand,
   supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
@@ -25,44 +37,55 @@ import {
   advanceWorkspaceGenerationForRetainedProcess,
   retainedProviderCommandPersistence,
   advanceWorkspaceGeneration,
+  findRunningSessionBackgroundProcess,
   getRetainedProcess,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
   settleConnectedMachineSessionBackgroundCommand,
   settleRetainedProcess,
+  signalBackgroundCommandWakes,
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
+  getSandboxForAttempt,
   getLiveEnrollmentConnection,
   markWarmLeaseInstanceLost,
   readLease,
   readActiveSandbox,
+  nestedPostgresMessage,
+  nestedPostgresSqlState,
   resolvePersonalMachineConnectionForAttempt,
+  safeDatabaseErrorFacts,
   SandboxRetainedProcessPromotionFencedError,
+  SandboxRetainedProcessTerminalError,
+  SandboxWorkspaceMutationOutputRejectedError,
   type Database,
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
 import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-background-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
-import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
+import type { Observability } from "@opengeni/observability";
+import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   buildSelfhostedBackendSession,
   ActiveBackendUnresolvableError,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
+  isInSandboxSupervisedProcess,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
+  PROVIDER_REGISTRY,
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
+  RoutingMutationOutputRejectedError,
   resolveModalCheckpointProviderBindingForSession,
   resolveConnectedMachineWorkspaceRoot,
   sandboxProviderInstanceIdFromEnvelope,
   sandboxBackendForSdkBackendId,
-  selectBackend,
   verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -76,6 +99,7 @@ import {
   type RoutingSandboxCaptureWaitObserver,
   type RoutingSandboxWaitObservation,
   type RoutingRetainedProcess,
+  type RoutingRetainedProcessAdoption,
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
   type SelfhostedConnectionBinding,
@@ -84,6 +108,7 @@ import {
   type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime";
 import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
+import type { WakeSessionWorkflowSignal } from "./activities/types";
 
 const retainWorkspaceProviderCommand = createProviderCommandRetainer(
   retainWorkspaceMutationProcess,
@@ -135,6 +160,12 @@ export type RoutingWiringServices = {
   }) => void | Promise<void>;
   /** Cancel bounded capture waits with the owning turn activity. */
   waitSignal?: AbortSignal;
+  /** Wakes a session waiting on a background command this routing settles.
+   * Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: WakeSessionWorkflowSignal | null | undefined;
+  /** Logs a refused Connected Machine authority check with the database's own
+   * reason. Absent: the refusal is still thrown unchanged, just not logged. */
+  observability?: Pick<Observability, "warn">;
 };
 
 /** Worker-turn routing may final-ack streamed command output, so it must always
@@ -149,12 +180,12 @@ export type RoutingWiringIds = {
   sessionId: string;
   resourceAccountId?: string;
   resourceSubjectId?: string;
-  /** Frozen initiating-human authority for personal Connected Machine use.
+  /** Exact accepted attempt, including turns without an initiating human.
    * Every routed operation reasserts this exact accepted attempt before the
    * control-plane connection is resolved. */
   personalMachineAttempt?: {
     accountId: string;
-    subjectId: string;
+    subjectId: string | null;
     turnId: string;
     attemptId: string;
     executionGeneration: number;
@@ -197,16 +228,6 @@ export type RoutingWiringIds = {
    * swap target is built fresh).
    */
   pinnedSelfhosted?: { sandboxId: string; epoch: number };
-  /**
-   * Whether the turn's `defaultBackend` IS the session's home (so the null pointer may
-   * resolve to it). Defaults to TRUE (omitted). Set explicitly FALSE on a machine-primary
-   * turn of a Modal-HOME session (pinned to a machine, no Modal group box established this
-   * turn): the routing resolver's null branch then throws a typed `home_unavailable_this_turn`
-   * error on a mid-turn clear-to-null instead of silently serving the pinned machine — the
-   * detach's pointer commit stands and takes effect next turn. A genuine machine-HOME turn
-   * (home IS the machine) passes true.
-   */
-  defaultIsHome?: boolean;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape
@@ -399,13 +420,26 @@ async function resolveCurrentHomeBackend(
       expectedInstanceId: lease.instanceId,
       expectedBackend: lease.backend,
       diagnostic: "provider_not_found_during_home_route_rebind",
+      providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+        services.settings,
+        lease.backend as Settings["sandboxBackend"],
+      ),
     });
     if (marked.status === "marked") {
+      await publishDurableSessionEvents(
+        services.bus,
+        ids.workspaceId,
+        marked.backgroundCommandEvents,
+      );
       await services.onHomeSandboxLost?.({
         sandboxGroupId: ids.sandboxGroupId,
         instanceId: lease.instanceId,
         leaseEpoch: marked.lease.leaseEpoch,
       });
+      await signalBackgroundCommandWakes(
+        marked.backgroundCommandWakes,
+        backgroundCommandWakeSender(services.wakeSessionWorkflow),
+      );
     }
     throw new RoutingBackendRecoveryRequiredError(
       "resolve_home_backend",
@@ -538,6 +572,10 @@ function afterPersistableHomeMutation(
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
           providerBinding: boundAdmission.providerBinding ?? null,
+          inSandboxSupervisor: isInSandboxSupervisedProcess(
+            backend.session,
+            retainedProcess.providerSessionId,
+          ),
           owner: {
             kind: "turn",
             turnId: fence.turnId,
@@ -584,21 +622,37 @@ function afterPersistableHomeMutation(
     }
     if (outcome === "outcome_unknown")
       throw new Error("Outcome-unknown command settlement requires its exact retained invocation");
-    await verifyWorkspaceMutationSettlement(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      turnId: fence.turnId,
-      executionGeneration: fence.executionGeneration,
-      attemptId: fence.attemptId,
-      holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
-      sandboxGroupId: home.sandboxGroupId,
-      expectedEpoch: backend.leaseEpoch,
-      expectedInstanceId: backend.providerInstanceId,
-      admission: exactAdmission,
-      operation: op,
-      outcome,
-    });
+    try {
+      await verifyWorkspaceMutationSettlement(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        turnId: fence.turnId,
+        executionGeneration: fence.executionGeneration,
+        attemptId: fence.attemptId,
+        holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+        sandboxGroupId: home.sandboxGroupId,
+        expectedEpoch: backend.leaseEpoch,
+        expectedInstanceId: backend.providerInstanceId,
+        admission: exactAdmission,
+        operation: op,
+        outcome,
+      });
+    } catch (error) {
+      if (
+        error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        error.matchesPhysicalSettlement({
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          admission: exactAdmission,
+          operation: op,
+          outcome,
+        })
+      ) {
+        throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+      }
+      throw error;
+    }
   };
 }
 
@@ -651,34 +705,41 @@ function afterRetainedProcessMutation(
     ) {
       throw new Error("Retained-process mutation settlement lacked its exact admission");
     }
-    await verifyRetainedProcessMutationSettlement(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      processId: process.id,
-      admission: admission as SandboxWorkspaceMutationAdmission,
-      operation: op,
-      outcome,
-    });
-  };
-}
-
-export function captureConnectedCommandOutput(
-  db: Database,
-  ids: { accountId: string; workspaceId: string; sessionId: string },
-  bus?: EventBus,
-) {
-  return async (commandId: string, frames: OpStreamOutputFrame[]) => {
-    for (const frame of frames) {
-      const events = await appendSessionCommandOutput(db, {
-        ...ids,
-        commandId,
-        chunkId: `op-frame:${frame.sequence}`,
-        stream: frame.stream,
-        chunk: frame.chunk,
+    try {
+      await verifyRetainedProcessMutationSettlement(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: process.id,
+        admission: admission as SandboxWorkspaceMutationAdmission,
+        operation: op,
+        outcome,
       });
-      if (events.length && bus)
-        await bus.publish(ids.workspaceId, ids.sessionId, events).catch(() => undefined);
+    } catch (error) {
+      if (
+        error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        error.matchesPhysicalSettlement({
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          admission: admission as SandboxWorkspaceMutationAdmission,
+          operation: op,
+          outcome,
+        })
+      ) {
+        if (error.retainedProcessTerminal) {
+          // Another authority (the reaper's exact-proof reconciliation) settled
+          // this retained process terminal between admission and settlement.
+          // The admission is physically settled and its output stays rejected;
+          // surface the durable terminal truth so routing reports completion
+          // instead of failing the turn. Nothing is replayed.
+          throw new SandboxRetainedProcessTerminalError(
+            error.retainedProcessTerminal.state,
+            error.retainedProcessTerminal.exitCode,
+          );
+        }
+        throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+      }
+      throw error;
     }
   };
 }
@@ -782,6 +843,66 @@ function settleRetainedProcessForTurn(
         .publish(ids.workspaceId, ids.sessionId, settlement.backgroundCommandEvents)
         .catch(() => undefined);
     }
+    await signalBackgroundCommandWakes(
+      settlement.backgroundCommandWakes,
+      backgroundCommandWakeSender(services.wakeSessionWorkflow),
+    );
+  };
+}
+
+/** Cleanup can observe the independently settled row even when this worker's
+ * pending output receipt or original provider transport can no longer advance. */
+function isRetainedProcessSettledForTurn(services: RoutingWiringServices, ids: RoutingWiringIds) {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({
+    backend,
+    process,
+  }: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+  }): Promise<boolean> => {
+    const durable = await getRetainedProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    if (
+      !durable ||
+      durable.state === "active" ||
+      durable.providerSessionId !== process.providerSessionId ||
+      durable.providerBackend !== (sandboxBackendForSdkBackendId(backend.kind) ?? backend.kind) ||
+      durable.providerInstanceId !== backend.providerInstanceId ||
+      durable.leaseEpoch !== backend.leaseEpoch ||
+      durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
+      durable.routeTargetId !== backend.sandboxId ||
+      durable.routeEpoch !== backend.activeEpoch
+    )
+      return false;
+    if (process.providerCommand) {
+      // The general process projection deliberately omits the provider locator.
+      // Load its immutable identity through the exact protected persistence seam.
+      const command = await retainedProviderCommandPersistence(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: process.id,
+      }).load();
+      if (
+        !command ||
+        command.kind !== process.providerCommand.kind ||
+        command.execId !== process.providerCommand.execId ||
+        command.taskId !== process.providerCommand.taskId ||
+        command.sandboxId !== process.providerCommand.sandboxId ||
+        Boolean(command.pty) !== Boolean(process.providerCommand.pty) ||
+        (command.kind === "modal-router-v1" &&
+          process.providerCommand.kind === "modal-router-v1" &&
+          !isDeepStrictEqual(command.supervision, process.providerCommand.supervision))
+      )
+        return false;
+    }
+    // Terminal rows are written only through proof-gated physical settlement.
+    return true;
   };
 }
 
@@ -829,6 +950,49 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
   };
 }
 
+/** A later turn reaches a background command an earlier turn of this session
+ * started by the handle the model was given. The lookup is only a locator: the
+ * routing session binds the result to its exact home backend or refuses it. */
+function findSessionProcessForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+  sdkBackendId: string,
+  home?: { leaseEpoch: number; instanceId: string },
+): ((providerSessionId: number) => Promise<RoutingRetainedProcessAdoption | null>) | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  const providerBackend = sandboxBackendForSdkBackendId(sdkBackendId) ?? sdkBackendId;
+  return async (providerSessionId) => {
+    const process = await findRunningSessionBackgroundProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      providerSessionId,
+      providerBackend,
+      ...(home ? { leaseEpoch: home.leaseEpoch, providerInstanceId: home.instanceId } : {}),
+    });
+    if (!process) return null;
+    const providerCommand = await getRetainedProviderCommand(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    return {
+      process: {
+        id: process.id,
+        providerSessionId: process.providerSessionId,
+        ...(providerCommand ? { providerCommand } : {}),
+      },
+      backend: {
+        sandboxId: null,
+        leaseEpoch: process.leaseEpoch,
+        providerInstanceId: process.providerInstanceId,
+        activeEpoch: process.routeEpoch,
+      },
+    };
+  };
+}
+
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
  *  connection. A null bus / unconfigured NATS yields a NatsControlRpc whose
  *  connection factory returns null → agent_offline on every op (never a throw). */
@@ -867,26 +1031,40 @@ export function wrapTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const isProcessSettled = isRetainedProcessSettledForTurn(services, ids);
   const adoptProcessAsBackgroundCommand = adoptRetainedProcessAsBackgroundCommandForTurn(
     services,
     ids,
   );
+  const findSessionProcess = ids.homeLease
+    ? findSessionProcessForTurn(services, ids, established.backendId, ids.homeLease)
+    : undefined;
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
+      const sandbox = ids.personalMachineAttempt
+        ? await getSandboxForAttempt(
+            db,
+            {
+              ...ids.personalMachineAttempt,
               workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : ids.workspaceId,
-        sandboxId,
-      );
+              sessionId: ids.sessionId,
+            },
+            sandboxId,
+          )
+        : await getSandbox(
+            db,
+            ids.resourceAccountId && ids.resourceSubjectId
+              ? {
+                  accountId: ids.resourceAccountId,
+                  workspaceId: ids.workspaceId,
+                  subjectId: ids.resourceSubjectId,
+                }
+              : ids.workspaceId,
+            sandboxId,
+          );
       return sandbox
         ? {
             id: sandbox.id,
@@ -901,7 +1079,7 @@ export function wrapTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
-      const enrollment = await resolveRoutedMachineConnection(db, ids, sandbox);
+      const enrollment = await resolveRoutedMachineConnection(services, ids, sandbox);
       return connectionBindingFor(services, enrollment);
     },
     relay: relayConfigFromSettings(settings),
@@ -925,6 +1103,7 @@ export function wrapTurnBoxWithRouting(
               connectionInstanceId: command.connectionInstanceId,
               opId: command.opId,
               command: command.command,
+              ...(command.abandoned ? { abandoned: true } : {}),
             });
             return { commandId: adopted.id };
           },
@@ -941,12 +1120,19 @@ export function wrapTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              backgroundChildrenStopped: command.backgroundChildrenStopped,
               ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
               await bus
                 .publish(ids.workspaceId, ids.sessionId, settlement.events)
                 .catch(() => undefined);
+            }
+            if (settlement) {
+              await signalBackgroundCommandWakes(
+                settlement.wakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
           },
           selfhostedCaptureBackgroundCommandOutput: captureConnectedCommandOutput(
@@ -987,11 +1173,14 @@ export function wrapTurnBoxWithRouting(
     // session points at a sibling modal box the turn cannot resume here) and the
     // op surfaces unresolvable — never a silent wrong-box landing.
     //
-    // For a machine-primary turn of a Modal-HOME session (pinned to a machine, no
-    // group box established this turn), a mid-turn clear-to-null must NOT fall back to
-    // the pinned machine — passing defaultIsHome:false makes the null branch throw typed
-    // `home_unavailable_this_turn` instead. Forward the explicit boolean (including false).
-    ...(ids.defaultIsHome !== undefined ? { defaultIsHome: ids.defaultIsHome } : {}),
+    // A pinned machine is never this turn's home. A null pointer means the chat's
+    // own managed box, for machine-home chats too: turn start never resolves null to
+    // a machine. So a mid-turn move home must not keep dispatching to the pinned
+    // machine (whose per-operation authority now refuses it, because the machine is
+    // no longer the active sandbox). The null branch throws the typed
+    // `home_unavailable_this_turn` transition, and failure settlement continues the
+    // same logical turn on the home box in a fresh attempt.
+    ...(ids.pinnedSelfhosted ? { defaultIsHome: false } : {}),
     ...(ids.homeLease
       ? {
           resolveDefaultBackend: () =>
@@ -1063,6 +1252,7 @@ export function wrapTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(isProcessSettled ? { isProcessSettled } : {}),
     ...(ids.workspaceMutationFence
       ? { observeProcessTerminal: observeRetainedProcessTerminalForTurn(services, ids)! }
       : {}),
@@ -1070,6 +1260,7 @@ export function wrapTurnBoxWithRouting(
       ? { captureProcessOutput: captureRetainedProcessOutputForTurn(services, ids)! }
       : {}),
     ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
+    ...(findSessionProcess ? { findSessionProcess } : {}),
     ...(ids.homeLease
       ? {
           onDefaultBackendError: async ({
@@ -1091,13 +1282,26 @@ export function wrapTurnBoxWithRouting(
               expectedInstanceId,
               expectedBackend: home.backend,
               diagnostic: "provider_not_found_during_routed_operation",
+              providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+                settings,
+                home.backend as Settings["sandboxBackend"],
+              ),
             });
             if (marked.status === "marked") {
+              await publishDurableSessionEvents(
+                services.bus,
+                ids.workspaceId,
+                marked.backgroundCommandEvents,
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: expectedInstanceId,
                 leaseEpoch: marked.lease.leaseEpoch,
               });
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
             const lease = marked.lease;
             const restore = lease?.recovery.restore.status;
@@ -1149,20 +1353,29 @@ export function wrapLazyTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const isProcessSettled = isRetainedProcessSettledForTurn(services, ids);
   const adoptProcessAsBackgroundCommand = adoptRetainedProcessAsBackgroundCommandForTurn(
     services,
     ids,
   );
   const defaultBackend = sandboxBackendForSdkBackendId(args.backendId);
+  // The lazily provisioned home's epoch and instance are known only after
+  // provisioning; the routing session binds the lookup to that exact backend.
+  const findSessionProcess = args.homeLeaseIdentity
+    ? findSessionProcessForTurn(services, ids, args.backendId)
+    : undefined;
   const defaultSupportsPty = defaultBackend
-    ? selectBackend(defaultBackend).capabilities.Terminal.pty
+    ? PROVIDER_REGISTRY[defaultBackend].sessionSupportsPty
     : false;
   const syntheticSession: RoutableBackendSession = {
     state: { manifest: args.agentDefaultManifest },
-    // The SDK binds shell tools synchronously before lazy provisioning. Preserve
-    // the authoritative descriptor's PTY shape so a Modal home exposes
-    // write_stdin on its first turn operation; the async cancellation transport
-    // below still resolves the exact live route before executing a command.
+    // The SDK binds shell tools synchronously before lazy provisioning, so this
+    // answer decides whether the turn offers write_stdin. It is the provider's
+    // own live-session answer: a turn whose box was resolved before binding (an
+    // attached file, a resumed box) must offer exactly the same tools as one
+    // that binds first, or the tool list flips and the prompt cache misses. The
+    // async cancellation transport below still resolves the exact live route
+    // before executing a command.
     supportsPty: () => defaultSupportsPty,
   };
   const routedResolver = makeActiveBackendResolver({
@@ -1170,17 +1383,27 @@ export function wrapLazyTurnBoxWithRouting(
     defaultBackend: syntheticSession,
     defaultKind: "unprovisioned",
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
+      const sandbox = ids.personalMachineAttempt
+        ? await getSandboxForAttempt(
+            db,
+            {
+              ...ids.personalMachineAttempt,
               workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : ids.workspaceId,
-        sandboxId,
-      );
+              sessionId: ids.sessionId,
+            },
+            sandboxId,
+          )
+        : await getSandbox(
+            db,
+            ids.resourceAccountId && ids.resourceSubjectId
+              ? {
+                  accountId: ids.resourceAccountId,
+                  workspaceId: ids.workspaceId,
+                  subjectId: ids.resourceSubjectId,
+                }
+              : ids.workspaceId,
+            sandboxId,
+          );
       return sandbox
         ? {
             id: sandbox.id,
@@ -1195,7 +1418,7 @@ export function wrapLazyTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
-      const enrollment = await resolveRoutedMachineConnection(db, ids, sandbox);
+      const enrollment = await resolveRoutedMachineConnection(services, ids, sandbox);
       return connectionBindingFor(services, enrollment);
     },
     relay: relayConfigFromSettings(settings),
@@ -1217,6 +1440,7 @@ export function wrapLazyTurnBoxWithRouting(
               connectionInstanceId: command.connectionInstanceId,
               opId: command.opId,
               command: command.command,
+              ...(command.abandoned ? { abandoned: true } : {}),
             });
             return { commandId: adopted.id };
           },
@@ -1233,12 +1457,19 @@ export function wrapLazyTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              backgroundChildrenStopped: command.backgroundChildrenStopped,
               ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
               await bus
                 .publish(ids.workspaceId, ids.sessionId, settlement.events)
                 .catch(() => undefined);
+            }
+            if (settlement) {
+              await signalBackgroundCommandWakes(
+                settlement.wakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
           },
           selfhostedCaptureBackgroundCommandOutput: captureConnectedCommandOutput(
@@ -1324,6 +1555,7 @@ export function wrapLazyTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(isProcessSettled ? { isProcessSettled } : {}),
     ...(ids.workspaceMutationFence
       ? { observeProcessTerminal: observeRetainedProcessTerminalForTurn(services, ids)! }
       : {}),
@@ -1331,6 +1563,7 @@ export function wrapLazyTurnBoxWithRouting(
       ? { captureProcessOutput: captureRetainedProcessOutputForTurn(services, ids)! }
       : {}),
     ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
+    ...(findSessionProcess ? { findSessionProcess } : {}),
     ...(args.homeLeaseIdentity
       ? {
           onDefaultBackendError: async ({
@@ -1353,13 +1586,26 @@ export function wrapLazyTurnBoxWithRouting(
               expectedInstanceId: backend.providerInstanceId,
               expectedBackend: home.backend,
               diagnostic: "provider_not_found_during_routed_operation",
+              providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+                settings,
+                home.backend as Settings["sandboxBackend"],
+              ),
             });
             if (marked.status === "marked") {
+              await publishDurableSessionEvents(
+                services.bus,
+                ids.workspaceId,
+                marked.backgroundCommandEvents,
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: backend.providerInstanceId,
                 leaseEpoch: marked.lease.leaseEpoch,
               });
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
             const lease = marked.lease;
             const restore = lease?.recovery.restore.status;
@@ -1416,6 +1662,9 @@ export type SelfhostedTurnSessionArgs = {
   operationCpuQuotaSupported: boolean;
   /** Feature advertisement only; refreshed by exact live admission for each operation. */
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
+  browserControlHttpSupported?: boolean;
+  runAsSupported?: boolean;
   /** The active pointer's epoch — the control-op fence echoed to the agent. */
   epoch: number;
   /** The run's declared sandbox environment (the SAME object fed to buildAgent +
@@ -1428,8 +1677,10 @@ export type SelfhostedTurnSessionArgs = {
   workingDir: string | null;
   /** Effective absolute host-native root frozen for this attempt. */
   workspaceRoot: string;
-  /** Present only for a user-owned machine. Every provider operation rechecks
-   * this frozen accepted-attempt authority immediately before dispatch. */
+  /** Present whenever the turn has an initiating human. A machine can become
+   * Only me during the turn, so every provider operation reads the current
+   * scope and rechecks this frozen accepted-attempt authority immediately
+   * before dispatch while the machine is user-owned. */
   personalMachineAttempt?: NonNullable<RoutingWiringIds["personalMachineAttempt"]> & {
     sessionId: string;
   };
@@ -1462,6 +1713,8 @@ export type SelfhostedTurnSessionArgs = {
 function opStreamDepsFor(
   services: RoutingWiringServices,
   machineAdvertisesOpStream: boolean,
+  outputReleaseSupported = false,
+  connectionGeneration?: number,
 ): SelfhostedOpStreamDeps | undefined {
   const { settings, bus, opJournal } = services;
   if (!machineAdvertisesOpStream || settings.agentOpStreamEnabled !== true || !bus) {
@@ -1470,6 +1723,10 @@ function opStreamDepsFor(
   return {
     transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
     ...(opJournal !== undefined ? { journal: opJournal } : {}),
+    ...(outputReleaseSupported ? { outputReleaseSupported: true } : {}),
+    ...(connectionGeneration !== undefined
+      ? { connectionGeneration: String(connectionGeneration) }
+      : {}),
   };
 }
 
@@ -1480,7 +1737,12 @@ export function connectionBindingFor(
   enrollment: EnrollmentRecord | null,
 ): SelfhostedConnectionBinding | null {
   if (!enrollment?.connectionInstanceId) return null;
-  const opStream = opStreamDepsFor(services, enrollment.opStream === true);
+  const opStream = opStreamDepsFor(
+    services,
+    enrollment.opStream === true,
+    enrollment.agentCapabilities.opRelease === true,
+    enrollment.connectionGeneration,
+  );
   return {
     workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
@@ -1490,45 +1752,94 @@ export function connectionBindingFor(
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    transactionalFsWriteMachineSupported:
+      enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+    browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
   };
 }
 
-/** Personal-machine discovery is not execution authority. Recheck the frozen
- * initiating human, exact current attempt, immutable authorization snapshot,
- * and current visibility-keyed grant immediately before each routed operation
- * resolves a live control-plane connection. */
+/** One line an operator can read when a Connected Machine authority check is
+ * refused: the SQLSTATE, the fixed reason the database raised, and the
+ * database functions that raised it. Never parameters or SQL text. */
+export function machineAuthorityFailureLog(error: unknown): string {
+  const sqlState = nestedPostgresSqlState(error);
+  const reason = nestedPostgresMessage(error);
+  const functions = safeDatabaseErrorFacts(error).plpgsql?.join(",");
+  return (
+    `Connected Machine authority check failed: sqlState=${sqlState ?? "none"}` +
+    (reason ? ` reason=${reason}` : "") +
+    (functions ? ` functions=${functions}` : "") +
+    (sqlState ? "" : ` error=${error instanceof Error ? error.name : typeof error}`)
+  );
+}
+
+/** The model only sees a failed authority check as tool text, which names the
+ * query but not why PostgreSQL refused it. Log the refusal before rethrowing the
+ * same error unchanged; its driver error stays attached as `cause`. */
+async function resolvePersonalMachineConnectionWithDiagnostics(
+  services: Pick<RoutingWiringServices, "db" | "observability">,
+  input: Parameters<typeof resolvePersonalMachineConnectionForAttempt>[1],
+): Promise<EnrollmentRecord | null> {
+  try {
+    return await resolvePersonalMachineConnectionForAttempt(services.db, input);
+  } catch (error) {
+    try {
+      services.observability?.warn(machineAuthorityFailureLog(error), {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        attemptId: input.attemptId,
+        enrollmentId: input.enrollmentId,
+      });
+    } catch {
+      // Logging must not replace the refusal the caller is about to see.
+    }
+    throw error;
+  }
+}
+
+/** Personal-machine discovery is not execution authority. A machine's audience
+ * can change in place while a routed session is cached, so the current scope is
+ * read from the enrollment itself, never from the sandbox snapshot taken when
+ * the session was built. A machine that is Only me now rechecks the frozen
+ * initiating human, exact current attempt, authorization snapshot and current
+ * visibility-keyed grant immediately before each routed operation resolves a
+ * live control-plane connection. */
 async function resolveRoutedMachineConnection(
-  db: Database,
+  services: Pick<RoutingWiringServices, "db" | "observability">,
   ids: RoutingWiringIds,
   sandbox: RoutableSandbox,
 ): Promise<EnrollmentRecord | null> {
+  const { db } = services;
   if (!sandbox.enrollmentId) return null;
-  if (sandbox.scope !== "user") {
-    return await getLiveEnrollmentConnection(
-      db,
-      ids.resourceAccountId && ids.resourceSubjectId
-        ? {
-            accountId: ids.resourceAccountId,
-            workspaceId: ids.workspaceId,
-            subjectId: ids.resourceSubjectId,
-          }
-        : sandbox.workspaceId,
-      sandbox.enrollmentId,
-    );
+  const current = await getLiveEnrollmentConnection(db, sandbox.workspaceId, sandbox.enrollmentId);
+  if (!current) return null;
+  if (current.scope === "user") {
+    const authority = ids.personalMachineAttempt;
+    if (!authority) return null;
+    return await resolvePersonalMachineConnectionWithDiagnostics(services, {
+      accountId: authority.accountId,
+      workspaceId: ids.workspaceId,
+      subjectId: authority.subjectId,
+      sessionId: ids.sessionId,
+      turnId: authority.turnId,
+      attemptId: authority.attemptId,
+      executionGeneration: authority.executionGeneration,
+      enrollmentId: sandbox.enrollmentId,
+      requireActiveSandbox: true,
+    });
   }
-  const authority = ids.personalMachineAttempt;
-  if (!authority) return null;
-  return await resolvePersonalMachineConnectionForAttempt(db, {
-    accountId: authority.accountId,
-    workspaceId: ids.workspaceId,
-    subjectId: authority.subjectId,
-    sessionId: ids.sessionId,
-    turnId: authority.turnId,
-    attemptId: authority.attemptId,
-    executionGeneration: authority.executionGeneration,
-    enrollmentId: sandbox.enrollmentId,
-    requireActiveSandbox: true,
-  });
+  if (!ids.resourceAccountId || !ids.resourceSubjectId) return current;
+  return await getLiveEnrollmentConnection(
+    db,
+    {
+      accountId: ids.resourceAccountId,
+      workspaceId: ids.workspaceId,
+      subjectId: ids.resourceSubjectId,
+    },
+    sandbox.enrollmentId,
+  );
 }
 
 export async function establishSelfhostedTurnSession(
@@ -1561,24 +1872,34 @@ export async function establishSelfhostedTurnSession(
     operationResourcePolicySupported: args.operationResourcePolicySupported,
     operationCpuQuotaSupported: args.operationCpuQuotaSupported,
     transactionalFsWriteSupported: args.transactionalFsWriteSupported === true,
+    transactionalFsWriteMachineSupported: args.transactionalFsWriteMachineSupported === true,
+    browserControlHttpSupported: args.browserControlHttpSupported === true,
+    runAsSupported: args.runAsSupported === true,
     resolveOperationAdmission: async () => {
-      const enrollment = args.personalMachineAttempt
-        ? await resolvePersonalMachineConnectionForAttempt(db, {
-            accountId: args.personalMachineAttempt.accountId,
-            workspaceId: args.workspaceId,
-            subjectId: args.personalMachineAttempt.subjectId,
-            sessionId: args.personalMachineAttempt.sessionId,
-            turnId: args.personalMachineAttempt.turnId,
-            attemptId: args.personalMachineAttempt.attemptId,
-            executionGeneration: args.personalMachineAttempt.executionGeneration,
-            enrollmentId: args.agentId,
-            requireActiveSandbox: true,
-          })
-        : await getLiveEnrollmentConnection(
-            db,
-            args.controlWorkspaceId ?? args.workspaceId,
-            args.agentId,
-          );
+      // The machine's audience can change in place during a turn. Read the
+      // current scope on every admitted operation: a machine that is Only me now
+      // needs the frozen accepted-attempt authority, a shared one does not.
+      const current = await getLiveEnrollmentConnection(
+        db,
+        args.controlWorkspaceId ?? args.workspaceId,
+        args.agentId,
+      );
+      const enrollment =
+        current?.scope !== "user"
+          ? current
+          : args.personalMachineAttempt
+            ? await resolvePersonalMachineConnectionWithDiagnostics(services, {
+                accountId: args.personalMachineAttempt.accountId,
+                workspaceId: args.workspaceId,
+                subjectId: args.personalMachineAttempt.subjectId,
+                sessionId: args.personalMachineAttempt.sessionId,
+                turnId: args.personalMachineAttempt.turnId,
+                attemptId: args.personalMachineAttempt.attemptId,
+                executionGeneration: args.personalMachineAttempt.executionGeneration,
+                enrollmentId: args.agentId,
+                requireActiveSandbox: true,
+              })
+            : null;
       const binding = connectionBindingFor(services, enrollment);
       if (!binding) return null;
       if (!binding.workspaceRoot) {
@@ -1592,57 +1913,15 @@ export async function establishSelfhostedTurnSession(
         workspaceRoot: resolveConnectedMachineWorkspaceRoot(binding.workspaceRoot, args.workingDir),
       };
     },
-    ...(args.backgroundCommandAttempt
-      ? {
-          adoptBackgroundCommand: async (command) => {
-            const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
-              accountId: args.accountId,
-              workspaceId: args.workspaceId,
-              sessionId: args.sessionId,
-              turnId: args.backgroundCommandAttempt!.turnId,
-              executionGeneration: args.backgroundCommandAttempt!.executionGeneration,
-              attemptId: args.backgroundCommandAttempt!.attemptId,
-              commandId: crypto.randomUUID(),
-              controlWorkspaceId: command.controlWorkspaceId,
-              enrollmentId: command.enrollmentId,
-              connectionInstanceId: command.connectionInstanceId,
-              opId: command.opId,
-              command: command.command,
-            });
-            return { commandId: adopted.id };
-          },
-        }
-      : {}),
-    captureBackgroundCommandOutput: captureConnectedCommandOutput(
-      db,
-      {
-        accountId: args.accountId,
-        workspaceId: args.workspaceId,
-        sessionId: args.sessionId,
-      },
-      bus,
-    ),
-    settleBackgroundCommand: async (command) => {
-      const settlement = await settleConnectedMachineSessionBackgroundCommand(db, {
-        accountId: args.accountId,
-        workspaceId: args.workspaceId,
-        sessionId: args.sessionId,
-        commandId: command.commandId,
-        controlWorkspaceId: command.controlWorkspaceId,
-        enrollmentId: command.enrollmentId,
-        connectionInstanceId: command.connectionInstanceId,
-        opId: command.opId,
-        outcome: command.outcome,
-        exitCode: command.exitCode,
-        reason: command.reason,
-        ...(command.failure ? { failure: command.failure } : {}),
-      });
-      if (settlement && bus) {
-        await bus
-          .publish(args.workspaceId, args.sessionId, settlement.events)
-          .catch(() => undefined);
-      }
-    },
+    ...agentBackgroundCommandDeps(db, bus, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      sessionId: args.sessionId,
+      wake: backgroundCommandWakeSender(services.wakeSessionWorkflow),
+      ...(args.backgroundCommandAttempt
+        ? { backgroundCommandAttempt: args.backgroundCommandAttempt }
+        : {}),
+    }),
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the

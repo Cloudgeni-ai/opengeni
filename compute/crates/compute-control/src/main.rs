@@ -1,0 +1,1190 @@
+//! `compute-control`: the control service, adding API keys to its store,
+//! and the hosts' authority: making one and issuing a host's first
+//! certificate where Google Cloud's identity tokens cannot.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Context as _;
+use clap::{Args, Parser, Subcommand};
+use compute_control::api::key_digest;
+use compute_control::authority::{self, Authority};
+use compute_control::e2b;
+use compute_control::group::{COMPUTE_API, Credentials, GcpGroup, METADATA, ServiceAccountKey};
+use compute_control::hostapi::Certificates;
+use compute_control::identity::{Expected, GOOGLE_KEYS, GceIdentity, GoogleKeys};
+use compute_control::images::Images;
+use compute_control::leader::Scaling;
+use compute_control::link::Links;
+use compute_control::service::Settings;
+use compute_control::store::{MemoryStore, PostgresStore, Store};
+use compute_control::tls::{Tls, database_client};
+use compute_control::{Config, start};
+use compute_fleet::ScalePolicy;
+use compute_protocol::host::{ImageId, SleepConfig};
+use compute_storage::store::ChunkStore;
+
+#[derive(Parser)]
+#[command(about = "The Opengeni compute control service")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Runs a replica of the service.
+    Serve(Box<Serve>),
+    /// Adds a new API key for a team to the store and prints it.
+    AddKey {
+        #[command(flatten)]
+        database: StoreArgs,
+        /// The team the key acts for.
+        #[arg(long)]
+        team: String,
+    },
+    /// Makes a new hosts' authority, `ca.crt` and `ca.key`, in a directory:
+    /// for a deployment without the Terraform module, which makes one.
+    NewHostAuthority {
+        /// The directory to write them to; it must not hold a key yet.
+        #[arg(long)]
+        out: PathBuf,
+        /// The authority's common name.
+        #[arg(long, default_value = "Opengeni compute hosts")]
+        name: String,
+    },
+    /// Issues the first certificate of a host off Google Cloud, where the
+    /// authority's key is, and prints it (PEM). The host renews it with
+    /// itself from then on.
+    IssueHostCertificate {
+        /// The host's name in the fleet, its only DNS name.
+        #[arg(long)]
+        name: String,
+        /// The host's certificate request, PEM; only its key is used.
+        #[arg(long)]
+        csr: PathBuf,
+        /// The directory holding the authority: `ca.crt` and `ca.key`.
+        #[arg(long, default_value = ".")]
+        authority: PathBuf,
+    },
+    /// Deletes the chunks and manifests in the archive store that no
+    /// pointer the service keeps names any more (ADR 25). Run on a
+    /// schedule, such as daily; safe while hosts archive, on any object
+    /// store. Without `--delete`, only reports. Refused until the fleet's
+    /// pointers are in the service.
+    Sweep {
+        #[command(flatten)]
+        database: StoreArgs,
+        /// The archive store, as `serve --archive` takes it.
+        #[arg(long)]
+        store: String,
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Copies the archive to another object store, for moving it there:
+    /// every chunk and manifest a pointer the service keeps names, checked
+    /// as it is read, unless the other store holds it already. The
+    /// pointers stay in the service (ADR 25). Safe while hosts archive;
+    /// run it again once archives stopped, before pointing the service and
+    /// hosts at the other store, and only what was stored since is copied.
+    /// Prints a report, and fails if the other store lacks anything.
+    /// Refused until the fleet's pointers are in the service.
+    CopyArchive {
+        #[command(flatten)]
+        database: StoreArgs,
+        /// The archive store copied from, as `serve --archive` takes it.
+        #[arg(long)]
+        from: String,
+        /// The store copied to, in the same form.
+        #[arg(long)]
+        to: String,
+        /// Settings for the store copied to alone, instead of the
+        /// environment: a file of its provider's environment variables, one
+        /// `NAME=value` a line (such as `AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`
+        /// and `AWS_SECRET_ACCESS_KEY`), for a copy between two stores of
+        /// one kind.
+        #[arg(long)]
+        to_env: Option<PathBuf>,
+        /// Objects copied at once.
+        #[arg(long, default_value_t = 16)]
+        at_once: usize,
+    },
+}
+
+#[derive(Args)]
+struct StoreArgs {
+    /// The store: a Postgres connection string or URL, or `memory` to keep
+    /// everything in memory (one replica, forgotten when it stops).
+    #[arg(long, env = "COMPUTE_CONTROL_DATABASE")]
+    database: String,
+    /// The database password, kept out of the connection string so that
+    /// any password works as it is, without quoting.
+    #[arg(
+        long,
+        env = "COMPUTE_CONTROL_DATABASE_PASSWORD",
+        hide_env_values = true
+    )]
+    database_password: Option<String>,
+    /// Trust this authority, rather than the system's, for TLS to the
+    /// database. A connection string with `sslmode=require` is always
+    /// encrypted and its server checked, by this authority or else the
+    /// system's; with `disable` or `prefer` and no authority the connection
+    /// is unencrypted, for a database on the same machine. Every command
+    /// that opens the store reads it, the sweep as much as the service.
+    #[arg(long, env = "COMPUTE_CONTROL_DATABASE_CA")]
+    database_ca: Option<PathBuf>,
+    /// Connections to keep to the database.
+    #[arg(long, default_value_t = 32)]
+    connections: usize,
+}
+
+#[derive(Args)]
+struct Serve {
+    #[command(flatten)]
+    database: StoreArgs,
+    /// Where the public API listens.
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    api: SocketAddr,
+    /// The public API's certificate chain, PEM; with it the API serves
+    /// HTTPS itself, without it plain HTTP for a TLS terminator in front.
+    #[arg(long, requires = "api_tls_key")]
+    api_tls_cert: Option<PathBuf>,
+    /// The key of `--api-tls-cert`, PEM.
+    #[arg(long, requires = "api_tls_cert")]
+    api_tls_key: Option<PathBuf>,
+    /// Where hosts reach the service, over TLS.
+    #[arg(long, default_value = "0.0.0.0:8443")]
+    hosts: SocketAddr,
+    /// Where Prometheus scrapes the service's metrics, `GET /metrics` over
+    /// plain HTTP, such as `0.0.0.0:9464`; without it there are none.
+    #[arg(long)]
+    metrics_listen: Option<SocketAddr>,
+    /// An OTLP/HTTP metrics endpoint that takes JSON, such as Prometheus's
+    /// `http://prometheus:9090/api/v1/otlp/v1/metrics`: hosts' metrics are
+    /// passed on to it. Without it hosts may not post any.
+    #[arg(long)]
+    host_metrics_to: Option<String>,
+    /// The URL hosts reach the service at, such as
+    /// `https://compute-control.example.com:8443`, exactly as they are given
+    /// it: the service's own certificate is for its host, and hosts' identity
+    /// tokens are for it.
+    #[arg(long)]
+    host_url: String,
+    /// A further name hosts reach the service by, in its certificate; repeat
+    /// for more.
+    #[arg(long = "host-name")]
+    host_names: Vec<String>,
+    /// The directory holding the hosts' authority: `ca.crt` (its
+    /// certificate, then any other authority trusted beside it) and `ca.key`
+    /// (its key, PKCS#8 PEM).
+    #[arg(long)]
+    host_authority: PathBuf,
+    /// The Google Cloud project whose instances may prove themselves hosts
+    /// with an instance identity token.
+    #[arg(long, requires = "gce_host_account")]
+    gce_project: Option<String>,
+    /// The service account those instances run as.
+    #[arg(long, requires = "gce_project")]
+    gce_host_account: Option<String>,
+    #[arg(long, default_value = GOOGLE_KEYS, hide = true)]
+    gce_keys: String,
+    /// The object store hosts archive to, as they are given it.
+    #[arg(long)]
+    archive: Option<String>,
+    /// The image a create that names none starts from.
+    #[arg(long, default_value = "base")]
+    image: String,
+    /// A stored image creates may name, as `name=<image id>`; repeat for
+    /// more. The default image is the hosts' base image unless named here.
+    #[arg(long = "stored-image", value_parser = parse_image)]
+    stored_images: Vec<(String, ImageId)>,
+    /// The OCI image this release's sandboxes of an image name start from,
+    /// as `name=registry/repository@sha256:<hex>`; repeat for more. A host
+    /// builds it into a stored image when none was, and new creates of the
+    /// name start from that; until then from the image the name had
+    /// before, or the one `--stored-image` names.
+    #[arg(long = "image-source", value_parser = parse_source)]
+    image_sources: Vec<(String, String)>,
+    /// Disk in MiB each sandbox is booked for where it is placed.
+    #[arg(long, default_value_t = 1024)]
+    disk_mib: u64,
+    /// Seconds a wake or connect may take in all.
+    #[arg(long, default_value_t = 60)]
+    wake_within_s: u64,
+    /// Seconds the leader waits for a host that stopped renewing while it
+    /// holds sandboxes before giving up on it, which costs them their
+    /// running programs; one that holds none, or whose instance is found
+    /// stopped or gone, goes as soon as its lease allows.
+    #[arg(long, default_value_t = 120)]
+    give_up_after_s: u64,
+    /// Seconds a sandbox whose create names no sleep config runs between
+    /// checkpoints, the fleet's target for how much work losing a host
+    /// costs; 0 takes none.
+    #[arg(long, default_value_t = 600)]
+    checkpoint_every_s: u64,
+    /// The team whose keys manage hosts.
+    #[arg(long, default_value = "operator")]
+    operator_team: String,
+    /// A file of `team key` lines whose keys are added at start.
+    #[arg(long)]
+    keys_file: Option<PathBuf>,
+    /// The Ed25519 key (PKCS#8 PEM) agent-link tokens are signed with.
+    /// Without it no sandbox may run Opengeni's agent.
+    #[arg(long, env = "COMPUTE_CONTROL_LINK_KEY")]
+    link_key: Option<PathBuf>,
+    /// A key tokens were signed with before, still listed until they
+    /// expire; repeat for more.
+    #[arg(long = "link-previous-key")]
+    link_previous_keys: Vec<PathBuf>,
+    /// The issuer link tokens name.
+    #[arg(long, default_value = "opengeni-compute")]
+    link_issuer: String,
+    /// A team's agent gateway, as `team=wss://...`; repeat for more.
+    #[arg(long = "team-link", value_parser = parse_team_link)]
+    team_links: Vec<(String, String)>,
+    /// What a team's sandboxes may ask to reach of what hosts offer
+    /// (`compute-host --offer`), as `team=offer`; repeat for more. A team
+    /// given none may ask for none. Taking one away refuses new sandboxes
+    /// that ask for it; those made before keep it. Creates through the E2B
+    /// front door, which cannot ask, reach every offer their team is given.
+    #[arg(long = "team-reach", value_parser = parse_team_reach)]
+    team_reach: Vec<(String, String)>,
+    /// A Google Cloud managed instance group of hosts to grow, as
+    /// `projects/P/zones/Z/instanceGroupManagers/N`.
+    #[arg(long)]
+    gcp_group: Option<String>,
+    #[arg(long, default_value = COMPUTE_API, hide = true)]
+    gcp_api: String,
+    #[arg(long, default_value = METADATA, hide = true)]
+    gcp_metadata: String,
+    /// A service account key file whose account manages the group, for a
+    /// service that runs off Google Cloud. Without one, its tokens come from
+    /// the metadata server (the instance's or the GKE workload's account).
+    #[arg(long, env = "GOOGLE_APPLICATION_CREDENTIALS")]
+    gcp_credentials: Option<PathBuf>,
+    /// Fewest hosts the group keeps.
+    #[arg(long, default_value_t = 1)]
+    scale_min: u32,
+    /// Most hosts the group may have.
+    #[arg(long, default_value_t = 10)]
+    scale_max: u32,
+    /// Spare memory to keep, in thousandths of the group's.
+    #[arg(long, default_value_t = 200)]
+    scale_spare_per_mille: u32,
+    /// And rooms for this many of the largest sandboxes, each with its
+    /// memory and processor time on one host.
+    #[arg(long, default_value_t = 2)]
+    scale_spare_largest: u32,
+    /// The largest sandbox's guaranteed memory, in MiB.
+    #[arg(long, default_value_t = 4096)]
+    scale_largest_mib: u64,
+    /// The largest sandbox's guaranteed processor time, in millicores.
+    #[arg(long, default_value_t = 2000)]
+    scale_largest_cpu_millis: u64,
+    /// Memory in MiB a new host brings for sandboxes.
+    #[arg(long, default_value_t = 0)]
+    scale_host_memory_mib: u64,
+    /// Seconds between looks at the group.
+    #[arg(long, default_value_t = 10)]
+    scale_every_s: u64,
+    /// Seconds a member of the group without a registered host counts as
+    /// booting; past it, it no longer stands in for capacity and the group
+    /// grows around it.
+    #[arg(long, default_value_t = 600)]
+    scale_boot_within_s: u64,
+    /// Where the E2B front door listens; without it there is none.
+    #[arg(long)]
+    e2b_listen: Option<SocketAddr>,
+    /// The domain sandbox host names are under, `<port>-<id>.<domain>`.
+    #[arg(long, default_value = "localhost")]
+    e2b_domain: String,
+    /// The front door's certificate chain, PEM, naming the API's host and
+    /// `*.<domain>`; with it the front door serves HTTPS itself, without it
+    /// plain HTTP for a TLS terminator in front.
+    #[arg(long, requires = "e2b_tls_key")]
+    e2b_tls_cert: Option<PathBuf>,
+    /// The key of `--e2b-tls-cert`, PEM.
+    #[arg(long, requires = "e2b_tls_cert")]
+    e2b_tls_key: Option<PathBuf>,
+    /// An E2B template, as `id=image:VCPUSxMEMORY_MIB`, for example
+    /// `base=base:2x1024`, or `id=image:VCPUSxMEMORY_MIBxDISK_MIB` for
+    /// sandboxes with a disk of at least `DISK_MIB` (`ci=runner:4x8192x65536`);
+    /// either may end in `,memory-request=MIB` and `,cpu-request=MILLIS`
+    /// for sandboxes guaranteed only that much memory and processor time,
+    /// using more when the host has it free
+    /// (`ci=runner:8x24576x65536,memory-request=8192`). Repeat for more.
+    /// Without any, `base` is the default image at 2x1024.
+    #[arg(long = "e2b-template", value_parser = parse_template)]
+    e2b_templates: Vec<(String, e2b::Template)>,
+}
+
+fn parse_image(text: &str) -> Result<(String, ImageId), String> {
+    let (name, id) = text
+        .split_once('=')
+        .ok_or("a stored image is `name=<image id>`")?;
+    Ok((name.to_owned(), id.parse()?))
+}
+
+fn parse_source(text: &str) -> Result<(String, String), String> {
+    let (name, source) = text
+        .split_once('=')
+        .ok_or("an image source is `name=registry/repository@sha256:<hex>`")?;
+    let pinned = source.rsplit_once("@sha256:").is_some_and(|(image, hex)| {
+        !image.is_empty() && hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if name.is_empty() || !pinned {
+        return Err(format!(
+            "{source:?} is not an image pinned by digest (`registry/repository@sha256:<hex>`)"
+        ));
+    }
+    Ok((name.to_owned(), source.to_owned()))
+}
+
+fn parse_team_link(text: &str) -> Result<(String, String), String> {
+    let (team, url) = text
+        .split_once('=')
+        .ok_or("a team link is `team=wss://...`")?;
+    Ok((team.to_owned(), url.to_owned()))
+}
+
+fn parse_team_reach(text: &str) -> Result<(String, String), String> {
+    let (team, offer) = text
+        .split_once('=')
+        .ok_or("a team's reach is `team=offer`")?;
+    if !compute_protocol::host::is_offer_name(offer) {
+        return Err(format!(
+            "{offer:?} is not an offer's name: 1 to 63 lowercase letters, digits and inner hyphens"
+        ));
+    }
+    Ok((team.to_owned(), offer.to_owned()))
+}
+
+fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
+    let shape = "a template is `id=image:VCPUSxMEMORY_MIB` or `id=image:VCPUSxMEMORY_MIBxDISK_MIB`, \
+                 then optionally `,memory-request=MIB` and `,cpu-request=MILLIS`";
+    let (id, rest) = text.split_once('=').ok_or(shape)?;
+    let (image, sized) = rest.rsplit_once(':').ok_or(shape)?;
+    let mut options = sized.split(',');
+    let size = options.next().unwrap_or_default();
+    let mut parts = size.split('x');
+    let (Some(vcpus), Some(memory), disk, None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(shape.into());
+    };
+    let disk = disk
+        .map(|disk| {
+            disk.parse::<u32>()
+                .ok()
+                .filter(|disk| (1..=compute_protocol::host::MAX_DISK_MIB).contains(disk))
+                .ok_or_else(|| {
+                    format!(
+                        "{text:?}: DISK_MIB must be between 1 and {}",
+                        compute_protocol::host::MAX_DISK_MIB
+                    )
+                })
+        })
+        .transpose()?;
+    let mut template = e2b::Template {
+        image: image.to_owned(),
+        vcpus: vcpus.parse().map_err(|_| shape)?,
+        memory_mib: memory.parse().map_err(|_| shape)?,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        disk,
+        disk_mib: 0,
+    };
+    for option in options {
+        let (key, value) = option.split_once('=').ok_or(shape)?;
+        let value: u32 = value.parse().map_err(|_| shape)?;
+        let slot = match key {
+            "memory-request" => &mut template.memory_request_mib,
+            "cpu-request" => &mut template.cpu_request_millis,
+            _ => return Err(shape.into()),
+        };
+        if slot.replace(value).is_some() {
+            return Err(format!("{text:?} names {key} twice"));
+        }
+    }
+    template
+        .config(compute_protocol::host::SleepConfig::default())
+        .validate()
+        .map_err(|why| format!("{text:?}: {why}"))?;
+    Ok((id.to_owned(), template))
+}
+
+/// The service's names in `url`, an `https://` URL, and `extra`.
+fn host_names(url: &str, extra: &[String]) -> anyhow::Result<Vec<String>> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("--host-url {url:?}"))?;
+    anyhow::ensure!(
+        parsed.scheme() == "https",
+        "--host-url must be https://host[:port], not {url:?}"
+    );
+    // An IPv6 address comes in brackets.
+    let host = parsed
+        .host_str()
+        .with_context(|| format!("--host-url {url:?} names no host"))?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    // "control.example." is another name than "control.example" to a host
+    // checking the certificate, so one form is configured, never both.
+    anyhow::ensure!(
+        !host.ends_with('.'),
+        "--host-url {url:?}: give the host without its trailing dot"
+    );
+    let mut names = vec![host.to_owned()];
+    for name in extra {
+        anyhow::ensure!(
+            !name.ends_with('.'),
+            "--host-name {name:?}: give the name without its trailing dot"
+        );
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    Ok(names)
+}
+
+impl Serve {
+    fn tls(&self) -> anyhow::Result<(Tls, Option<GceIdentity>)> {
+        let authority = Arc::new(Authority::load(&self.host_authority)?);
+        let tls = Tls::new(authority, host_names(&self.host_url, &self.host_names)?)?;
+        let identity = match (&self.gce_project, &self.gce_host_account) {
+            (Some(project), Some(account)) => Some(GceIdentity::new(
+                Expected {
+                    audience: self.host_url.clone(),
+                    project: project.clone(),
+                    account: account.clone(),
+                },
+                Arc::new(GoogleKeys::new(&self.gce_keys)?),
+            )),
+            _ => None,
+        };
+        Ok((tls, identity))
+    }
+
+    fn links(&self) -> anyhow::Result<Option<Arc<Links>>> {
+        let Some(key) = &self.link_key else {
+            anyhow::ensure!(
+                self.team_links.is_empty(),
+                "--team-link needs --link-key to sign with"
+            );
+            return Ok(None);
+        };
+        let teams: BTreeMap<String, String> = self.team_links.iter().cloned().collect();
+        anyhow::ensure!(
+            teams.len() == self.team_links.len(),
+            "a team has more than one --team-link"
+        );
+        Ok(Some(Arc::new(Links::load(
+            key,
+            &self.link_previous_keys,
+            self.link_issuer.clone(),
+            teams,
+        )?)))
+    }
+
+    fn e2b_listen(&self) -> anyhow::Result<Option<e2b::listen::Listen>> {
+        let Some(address) = self.e2b_listen else {
+            return Ok(None);
+        };
+        let tls = match (&self.e2b_tls_cert, &self.e2b_tls_key) {
+            (Some(cert), Some(key)) => Some(compute_control::tls::public_server(cert, key)?),
+            _ => None,
+        };
+        Ok(Some(e2b::listen::Listen {
+            address,
+            tls,
+            settings: self.e2b_settings(),
+        }))
+    }
+
+    fn e2b_settings(&self) -> e2b::Settings {
+        let mut settings = e2b::Settings {
+            domain: self.e2b_domain.clone(),
+            ..e2b::Settings::default()
+        };
+        if !self.e2b_templates.is_empty() {
+            settings.templates = self
+                .e2b_templates
+                .iter()
+                .map(|(id, template)| {
+                    let mut template = template.clone();
+                    // Each sandbox is booked for the longer of the two.
+                    template.disk_mib = template
+                        .disk
+                        .map_or(self.disk_mib, |disk| self.disk_mib.max(u64::from(disk)));
+                    (id.clone(), template)
+                })
+                .collect();
+        } else if let Some(base) = settings.templates.get_mut("base") {
+            base.image.clone_from(&self.image);
+            base.disk_mib = self.disk_mib;
+        }
+        settings
+    }
+
+    fn scaling(&self) -> anyhow::Result<Option<Scaling>> {
+        let Some(path) = &self.gcp_group else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            self.scale_host_memory_mib > 0,
+            "--scale-host-memory-mib is needed to grow a group"
+        );
+        Ok(Some(Scaling {
+            group: std::sync::Arc::new(GcpGroup::new(
+                path,
+                &self.gcp_api,
+                self.gcp_credentials()?,
+            )?),
+            policy: ScalePolicy {
+                spare_per_mille: self.scale_spare_per_mille,
+                spare_largest: self.scale_spare_largest,
+                largest_mib: self.scale_largest_mib,
+                largest_cpu_millis: self.scale_largest_cpu_millis,
+                host_memory_mib: self.scale_host_memory_mib,
+                min_hosts: self.scale_min,
+                max_hosts: self.scale_max,
+            },
+            every: Duration::from_secs(self.scale_every_s),
+            boot_within: Duration::from_secs(self.scale_boot_within_s),
+        }))
+    }
+
+    /// Where the group's tokens come from: the key file, if one is named.
+    fn gcp_credentials(&self) -> anyhow::Result<Credentials> {
+        let Some(file) = &self.gcp_credentials else {
+            return Ok(Credentials::Metadata(self.gcp_metadata.clone()));
+        };
+        let json = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+        let key = ServiceAccountKey::from_json(&json)
+            .with_context(|| format!("the key file {}", file.display()))?;
+        Ok(Credentials::Key(Box::new(key)))
+    }
+}
+
+fn seed() -> anyhow::Result<u64> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).context("random bytes")?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+async fn add_keys<S: Store>(store: &S, file: &Path) -> anyhow::Result<()> {
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let (team, key) = line
+            .split_once(char::is_whitespace)
+            .with_context(|| format!("{}: lines are `team key`", file.display()))?;
+        store.add_key(&key_digest(key.trim()), team).await?;
+    }
+    Ok(())
+}
+
+async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
+    if let Some(file) = &args.keys_file {
+        add_keys(&*store, file).await?;
+    }
+    let (tls, identity) = args.tls()?;
+    let archive = match &args.archive {
+        Some(url) => Some(
+            ChunkStore::from_url(url)
+                .with_context(|| format!("the archive store {url}"))?
+                .with_context(|| format!("{url} names no object store"))?,
+        ),
+        None => None,
+    };
+    let api_tls = match (&args.api_tls_cert, &args.api_tls_key) {
+        (Some(cert), Some(key)) => Some(compute_control::tls::public_server(cert, key)?),
+        _ => None,
+    };
+    let config = Config {
+        api: args.api,
+        api_tls,
+        hosts: args.hosts,
+        tls,
+        identity,
+        archive,
+        settings: Settings {
+            disk_mib: args.disk_mib,
+            wake_within: Duration::from_secs(args.wake_within_s),
+            give_up_after: Duration::from_secs(args.give_up_after_s),
+            sleep: SleepConfig {
+                checkpoint_every_ms: (args.checkpoint_every_s > 0)
+                    .then(|| args.checkpoint_every_s.saturating_mul(1000)),
+                ..Settings::default().sleep
+            },
+            image: args.image.clone(),
+            images: Images::new(
+                args.stored_images
+                    .iter()
+                    .map(|(name, id)| (name.clone(), Some(*id)))
+                    .collect::<BTreeMap<_, _>>(),
+            ),
+            links: args.links()?,
+            reach: args
+                .team_reach
+                .iter()
+                .fold(BTreeMap::new(), |mut reach, (team, offer)| {
+                    reach
+                        .entry(team.clone())
+                        .or_insert_with(BTreeSet::new)
+                        .insert(offer.clone());
+                    reach
+                }),
+            ..Settings::default()
+        },
+        operator: args.operator_team.clone(),
+        scaling: args.scaling()?,
+        seed: seed()?,
+        e2b: args.e2b_listen()?,
+        metrics: args.metrics_listen,
+        host_metrics: args.host_metrics_to.clone(),
+        image_sources: args.image_sources.iter().cloned().collect(),
+    };
+    let running = start(store, config).await?;
+    tracing::info!(
+        api = %running.api,
+        hosts = %running.hosts,
+        e2b = ?running.e2b,
+        metrics = ?running.metrics,
+        "serving"
+    );
+    shutdown().await;
+    Ok(())
+}
+
+async fn shutdown() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("a SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+}
+
+async fn postgres(database: &StoreArgs) -> anyhow::Result<PostgresStore> {
+    let config = database_config(database)?;
+    let tls = match database_trust(database.database_ca.as_deref(), config.get_ssl_mode()) {
+        DatabaseTrust::None => None,
+        DatabaseTrust::Authority(ca) => Some(database_client(Some(ca))?),
+        DatabaseTrust::System => Some(database_client(None)?),
+    };
+    Ok(PostgresStore::connect_with(config, tls, database.connections).await?)
+}
+
+/// What TLS to the database trusts.
+#[derive(Debug, PartialEq, Eq)]
+enum DatabaseTrust<'a> {
+    /// No TLS.
+    None,
+    /// The authorities in this file.
+    Authority(&'a Path),
+    /// The system's authorities.
+    System,
+}
+
+/// The given authority whenever there is one; the system's when the
+/// connection string requires TLS without naming one, rather than no TLS,
+/// which such a database always refuses; and otherwise none.
+fn database_trust(ca: Option<&Path>, mode: tokio_postgres::config::SslMode) -> DatabaseTrust<'_> {
+    match (ca, mode) {
+        (Some(ca), _) => DatabaseTrust::Authority(ca),
+        (None, tokio_postgres::config::SslMode::Require) => DatabaseTrust::System,
+        (None, _) => DatabaseTrust::None,
+    }
+}
+
+/// The store's connection settings: the connection string, and the
+/// password given apart from it, if any.
+fn database_config(database: &StoreArgs) -> anyhow::Result<tokio_postgres::Config> {
+    let mut config: tokio_postgres::Config = database
+        .database
+        .parse()
+        .context("the database connection string")?;
+    if let Some(password) = &database.database_password {
+        config.password(password);
+    }
+    Ok(config)
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+    match Cli::parse().command {
+        Command::Serve(args) => {
+            if args.database.database == "memory" {
+                serve(Arc::new(MemoryStore::new()), *args).await
+            } else {
+                let store = postgres(&args.database).await?;
+                serve(Arc::new(store), *args).await
+            }
+        }
+        Command::AddKey { database, team } => {
+            anyhow::ensure!(
+                database.database != "memory",
+                "a memory store forgets its keys"
+            );
+            let store = postgres(&database).await?;
+            let mut bytes = [0u8; 24];
+            getrandom::fill(&mut bytes).context("random bytes")?;
+            let key: String = std::iter::once("ck_".to_owned())
+                .chain(bytes.iter().map(|byte| format!("{byte:02x}")))
+                .collect();
+            store.add_key(&key_digest(&key), &team).await?;
+            println!("{key}");
+            Ok(())
+        }
+        Command::NewHostAuthority { out, name } => new_host_authority(&out, &name),
+        Command::IssueHostCertificate {
+            name,
+            csr,
+            authority,
+        } => {
+            let csr = std::fs::read_to_string(&csr)
+                .with_context(|| format!("reading {}", csr.display()))?;
+            let certificates = Certificates {
+                authority: Arc::new(Authority::load(&authority)?),
+                identity: None,
+                reserved: Vec::new(),
+            };
+            let issued = certificates
+                .issue(
+                    &name,
+                    &csr,
+                    std::time::SystemTime::now(),
+                    authority::Proven::Certificate,
+                )
+                .map_err(|(_, message)| anyhow::anyhow!(message))?;
+            print!("{}", issued.certificate);
+            eprintln!(
+                "issued a certificate for {}, serial {}",
+                issued.name, issued.serial
+            );
+            Ok(())
+        }
+        Command::Sweep {
+            database,
+            store,
+            delete,
+        } => sweep(&database, &store, delete).await,
+        Command::CopyArchive {
+            database,
+            from,
+            to,
+            to_env,
+            at_once,
+        } => copy_archive(&database, &from, &to, to_env.as_deref(), at_once).await,
+    }
+}
+
+/// Sweeps the archive store `url` with the pointers the service keeps in
+/// `database`, printing the report. It goes by the fleet's clock (the
+/// database's), as hosts name what they store by it, and first adopts any
+/// pointer the store still holds that the import missed, so nothing such a
+/// pointer names is deleted.
+async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        database.database != "memory",
+        "a memory store keeps no fleet's pointers"
+    );
+    let store = Arc::new(postgres(database).await?);
+    let imported = store.pointers_imported().await?.context(
+        "the fleet's pointers are not in the service yet: it moves them in once no host \
+         of an earlier release is live, and nothing is swept before",
+    )?;
+    let chunks = ChunkStore::from_url(url)
+        .with_context(|| format!("the archive store {url}"))?
+        .with_context(|| format!("{url} names no object store"))?;
+    let from = chunks.object_pointers();
+    if delete {
+        let adopted = compute_control::pointers::adopt(&*store, &from).await?;
+        if !adopted.is_empty() {
+            eprintln!(
+                "adopted {} pointers the store held that the import missed: {adopted:?}",
+                adopted.len()
+            );
+        }
+    } else {
+        let missed = compute_control::pointers::missed(&*store, &from).await?;
+        if !missed.is_empty() {
+            eprintln!(
+                "{} pointers the store holds were missed by the import and would be adopted \
+                 before a sweep that deletes; what they name counts as unnamed here: {missed:?}",
+                missed.len()
+            );
+        }
+    }
+    let pointers = Arc::new(compute_control::pointers::Pointers::new(store));
+    let fleet_ms = pointers.now_ms().await?;
+    let chunks =
+        chunks
+            .with_pointers(pointers)
+            .with_clock(compute_storage::fresh::Clock::following(Arc::new(
+                compute_storage::fresh::Heard::at(fleet_ms),
+            )));
+    let chunks = &chunks;
+    let moved = std::time::UNIX_EPOCH + std::time::Duration::from_millis(imported.at_ms);
+    let report = compute_storage::sweep::sweep(
+        chunks,
+        &compute_storage::copy::Copies(chunks),
+        delete,
+        moved,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Copies the archive store `from` to `to` by the pointers the service
+/// keeps in `database`, printing the report. It first adopts any pointer
+/// `from` still holds that the import missed, as a sweep does, so nothing
+/// such a pointer names is left behind, and marks `to` as a store whose
+/// pointers the service keeps, so no host on its own keeps its pointers
+/// there.
+async fn copy_archive(
+    database: &StoreArgs,
+    from: &str,
+    to: &str,
+    to_env: Option<&Path>,
+    at_once: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        database.database != "memory",
+        "a memory store keeps no fleet's pointers"
+    );
+    anyhow::ensure!(at_once > 0, "copy at least one object at once");
+    anyhow::ensure!(
+        from != to || to_env.is_some(),
+        "the archive is in {to} already"
+    );
+    let settings = to_env
+        .map(|path| {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            compute_storage::store::settings(&text)
+                .with_context(|| format!("the settings in {}", path.display()))
+        })
+        .transpose()?;
+    let store = Arc::new(postgres(database).await?);
+    let imported = store.pointers_imported().await?.context(
+        "the fleet's pointers are not in the service yet: hosts of an earlier release keep \
+         them in the object store, and a copy of what they name would leave them behind",
+    )?;
+    let open = |url: &str, settings: Option<&[(String, String)]>| -> anyhow::Result<ChunkStore> {
+        match settings {
+            None => ChunkStore::from_url(url),
+            Some(settings) => ChunkStore::from_url_with(url, settings),
+        }
+        .with_context(|| format!("the archive store {url}"))?
+        .with_context(|| format!("{url} names no object store"))
+    };
+    let source = open(from, None)?;
+    let destination = open(to, settings.as_deref())?;
+    let adopted = compute_control::pointers::adopt(&*store, &source.object_pointers()).await?;
+    if !adopted.is_empty() {
+        eprintln!(
+            "adopted {} pointers {from} held that the import missed: {adopted:?}",
+            adopted.len()
+        );
+    }
+    destination
+        .object_pointers()
+        .mark_moved(imported.at_ms)
+        .await
+        .with_context(|| format!("marking {to}"))?;
+    let source = source.with_pointers(Arc::new(compute_control::pointers::Pointers::new(store)));
+    let report = compute_storage::transfer::copy(&source, &destination, at_once).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    anyhow::ensure!(
+        report.complete(),
+        "{to} lacks what {} pointers and {} objects in the report keep; fix or decide on \
+         those, then copy again",
+        report.unreadable.len(),
+        report.failed.len()
+    );
+    Ok(())
+}
+
+/// Writes a new authority to `out`, refusing to replace one there.
+fn new_host_authority(out: &Path, name: &str) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(out)
+        .with_context(|| format!("creating {}", out.display()))?;
+    let (certificate, key) = authority::generate(name)?;
+    let write = |file: &str, mode: u32, contents: &str| -> anyhow::Result<()> {
+        let path = out.join(file);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "creating {} (an authority is never replaced in place)",
+                    path.display()
+                )
+            })?
+            .write_all(contents.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))
+    };
+    write(authority::KEY_FILE, 0o600, &key)?;
+    write(authority::CERTIFICATE_FILE, 0o644, &certificate)?;
+    eprintln!(
+        "wrote {} and {} to {}",
+        authority::CERTIFICATE_FILE,
+        authority::KEY_FILE,
+        out.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_service_is_named_by_its_host_url_and_extra_names() {
+        assert_eq!(
+            host_names("https://control.example:8443", &["10.0.0.2".into()]).unwrap(),
+            ["control.example", "10.0.0.2"]
+        );
+        assert_eq!(
+            host_names("https://10.0.0.2:8443/", &["10.0.0.2".into()]).unwrap(),
+            ["10.0.0.2"]
+        );
+        assert!(host_names("http://control.example:8443", &[]).is_err());
+        assert!(host_names("control.example", &[]).is_err());
+        // A trailing dot, in the URL or an extra name, is refused at start.
+        let error = host_names("https://control.example.:8443", &[]).unwrap_err();
+        assert!(format!("{error:#}").contains("trailing dot"), "{error:#}");
+        let error =
+            host_names("https://control.example:8443", &["extra.example.".into()]).unwrap_err();
+        assert!(format!("{error:#}").contains("trailing dot"), "{error:#}");
+    }
+
+    #[test]
+    fn a_new_authority_issues_host_certificates_and_is_never_overwritten() {
+        use rustls::pki_types::pem::PemObject as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("authority");
+        new_host_authority(&out, "test hosts").unwrap();
+        assert!(new_host_authority(&out, "again").is_err());
+        let authority = Authority::load(&out).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let csr = rcgen::CertificateParams::new(vec!["asked.example".to_owned()])
+            .unwrap()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let certificates = Certificates {
+            authority: Arc::new(authority),
+            identity: None,
+            reserved: Vec::new(),
+        };
+        let issued = certificates
+            .issue(
+                "host-9",
+                &csr,
+                std::time::SystemTime::now(),
+                authority::Proven::Certificate,
+            )
+            .unwrap();
+        assert_eq!(issued.name, "host-9");
+        let der = rustls::pki_types::CertificateDer::from_pem_slice(issued.certificate.as_bytes())
+            .unwrap();
+        authority::verify(
+            &certificates.authority.roots(),
+            &der,
+            std::time::SystemTime::now(),
+            "host-9",
+        )
+        .unwrap();
+        assert!(
+            authority::verify(
+                &certificates.authority.roots(),
+                &der,
+                std::time::SystemTime::now(),
+                "asked.example"
+            )
+            .is_err(),
+            "never the name the request asks for"
+        );
+        let mode = |file: &str| {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::metadata(out.join(file))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode(authority::KEY_FILE), 0o600);
+    }
+
+    #[test]
+    fn a_password_given_apart_needs_no_quoting_in_quoted_settings() {
+        // As the chart writes them: every value quoted, the password apart.
+        let database = StoreArgs {
+            database:
+                r"host='db.example.com' port='5432' dbname='it\'s' user='compute' sslmode='disable'"
+                    .into(),
+            database_password: Some(r"two words \ and ' quote".into()),
+            database_ca: None,
+            connections: 1,
+        };
+        let config = database_config(&database).unwrap();
+        assert_eq!(config.get_dbname(), Some("it's"));
+        assert_eq!(config.get_user(), Some("compute"));
+        assert_eq!(
+            config.get_password(),
+            Some(&b"two words \\ and ' quote"[..])
+        );
+    }
+
+    #[test]
+    fn a_database_that_requires_tls_gets_it_without_an_authority_named() {
+        // As the chart writes the settings for a managed database. Without
+        // TLS such a database refuses every connection, as staging's did
+        // the nightly sweep, which was given no authority.
+        let mode = |sslmode: &str| {
+            database_config(&StoreArgs {
+                database: format!(
+                    "host='db.example.com' port='5432' dbname='opengeni' user='compute' sslmode='{sslmode}'"
+                ),
+                database_password: None,
+                database_ca: None,
+                connections: 1,
+            })
+            .unwrap()
+            .get_ssl_mode()
+        };
+        let ca = Path::new("/etc/compute/database-ca.crt");
+        assert_eq!(database_trust(None, mode("require")), DatabaseTrust::System);
+        assert_eq!(
+            database_trust(Some(ca), mode("require")),
+            DatabaseTrust::Authority(ca)
+        );
+        // A database on the same machine: no TLS unless an authority is
+        // named, as before.
+        assert_eq!(database_trust(None, mode("disable")), DatabaseTrust::None);
+        assert_eq!(database_trust(None, mode("prefer")), DatabaseTrust::None);
+        assert_eq!(
+            database_trust(Some(ca), mode("prefer")),
+            DatabaseTrust::Authority(ca)
+        );
+    }
+
+    #[test]
+    fn every_command_that_opens_the_store_reads_how_to_reach_it_from_the_environment() {
+        // A deployment sets these once, for the service and its jobs alike,
+        // so no command may take one only as a flag (the sweep was given
+        // the connection string but not the authority).
+        use clap::CommandFactory as _;
+        let cli = Cli::command();
+        let mut opening = Vec::new();
+        for command in cli.get_subcommands() {
+            let argument = |id: &str| command.get_arguments().find(|a| a.get_id() == id);
+            if argument("database").is_none() {
+                continue;
+            }
+            opening.push(command.get_name().to_owned());
+            for (id, env) in [
+                ("database", "COMPUTE_CONTROL_DATABASE"),
+                ("database_password", "COMPUTE_CONTROL_DATABASE_PASSWORD"),
+                ("database_ca", "COMPUTE_CONTROL_DATABASE_CA"),
+            ] {
+                assert_eq!(
+                    argument(id).and_then(clap::Arg::get_env),
+                    Some(std::ffi::OsStr::new(env)),
+                    "{} {id}",
+                    command.get_name()
+                );
+            }
+        }
+        assert_eq!(opening, ["serve", "add-key", "sweep", "copy-archive"]);
+    }
+
+    #[test]
+    fn a_template_may_name_the_disk_its_sandboxes_get() {
+        let (id, template) = parse_template("base=base:2x1024").unwrap();
+        assert_eq!((id.as_str(), template.disk), ("base", None));
+        let (id, template) = parse_template("ci=runner:4x8192x65536").unwrap();
+        assert_eq!(id, "ci");
+        assert_eq!(
+            (template.image.as_str(), template.vcpus, template.memory_mib),
+            ("runner", 4, 8192)
+        );
+        assert_eq!(template.disk, Some(65536));
+        for wrong in [
+            "ci=runner:4x8192x0",
+            "ci=runner:4x8192x99999999",
+            "ci=runner:4x8192x1x2",
+            "ci=runner:4",
+        ] {
+            assert!(parse_template(wrong).is_err(), "{wrong}");
+        }
+    }
+
+    #[test]
+    fn a_template_may_guarantee_less_than_its_sandboxes_may_use() {
+        let (_, template) = parse_template("ci=runner:8x24576x65536").unwrap();
+        assert_eq!(
+            (template.memory_request_mib, template.cpu_request_millis),
+            (None, None)
+        );
+        let (_, template) =
+            parse_template("ci=runner:8x24576x65536,memory-request=8192,cpu-request=2000").unwrap();
+        assert_eq!(
+            (template.memory_request_mib, template.cpu_request_millis),
+            (Some(8192), Some(2000))
+        );
+        assert_eq!(template.disk, Some(65536));
+        let config = template.config(compute_protocol::host::SleepConfig::default());
+        assert_eq!(
+            (config.memory_request(), config.cpu_request()),
+            (8192, 2000)
+        );
+        let (_, template) = parse_template("small=base:2x1024,cpu-request=500").unwrap();
+        assert_eq!(
+            (
+                template.disk,
+                template.memory_request_mib,
+                template.cpu_request_millis
+            ),
+            (None, None, Some(500))
+        );
+        for wrong in [
+            // More guaranteed than the sandbox has.
+            "ci=runner:8x8192,memory-request=16384",
+            "ci=runner:2x1024,cpu-request=4000",
+            "ci=runner:2x1024,memory-request=8",
+            "ci=runner:2x1024,memory-request=512,memory-request=256",
+            "ci=runner:2x1024,memory-request",
+            "ci=runner:2x1024,memory-request=lots",
+            "ci=runner:2x1024,disk=4096",
+            "ci=runner:2x1024,",
+        ] {
+            assert!(parse_template(wrong).is_err(), "{wrong}");
+        }
+    }
+}

@@ -1,0 +1,3 @@
+[alias]
+# Structure rules in ARCHITECTURE.toml; see crates/archcheck/README.md.
+arch = "run -q --locked -p compute-archcheck --"

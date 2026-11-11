@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { HumanInputQuestion } from "@opengeni/contracts";
 import {
   HumanInputResponseValidationError,
@@ -29,6 +29,7 @@ import {
   peekSessionWork,
   registerPendingSessionToolCall,
   submitHumanPromptInTransaction,
+  validateHumanInputResponse,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 
@@ -112,6 +113,9 @@ async function freezeRequest(
   } = {},
 ) {
   const { grant, session } = await createFixture();
+  // Real Agent messages carry their exact sender attempt; the same human's
+  // informational messages join this human request's execution context.
+  const senderLineage = options.initialUpdate ? await sameHumanSenderLineage(grant) : null;
   await send(grant, session.id, "continue with my decision");
   const initialUpdate = options.initialUpdate
     ? await addSessionSystemUpdate(client.db, {
@@ -128,6 +132,7 @@ async function freezeRequest(
           text: "INITIAL-ACK",
           operationId: crypto.randomUUID(),
         },
+        lineage: senderLineage!,
       })
     : null;
   const queuedPrompt = options.queueEditPrompt
@@ -232,6 +237,47 @@ async function freezeRequest(
     parallelRequestId,
     questions,
     initialUpdate,
+    senderLineage,
+  };
+}
+
+/** Claim a turn of the same human in a sibling session to send Agent messages. */
+async function sameHumanSenderLineage(grant: {
+  accountId: string;
+  workspaceId: string | null;
+  subjectId: string;
+}) {
+  const sender = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    initialMessage: "Report back to the other session",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none",
+  });
+  await send(
+    { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId },
+    sender.id,
+    "report back",
+  );
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+    sessionId: sender.id,
+    workflowId: `session-${sender.id}`,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error(`could not claim sender: ${claim.reason}`);
+  return {
+    callerSessionId: sender.id,
+    callerTurnId: claim.turn.id,
+    callerAttemptId: attemptId,
+    callerExecutionGeneration: claim.turn.executionGeneration,
   };
 }
 
@@ -402,6 +448,8 @@ describe("durable structured human input", () => {
         text: "FOLLOWUP-ACK",
         operationId: crypto.randomUUID(),
       },
+
+      lineage: frozen.senderLineage!,
     });
     if (!followUp.added) throw new Error(`follow-up was not added: ${followUp.reason}`);
     const accepted = await acceptSessionHumanInputResponse(client.db, {
@@ -457,6 +505,8 @@ describe("durable structured human input", () => {
         text: "NEXT-TURN-ONLY",
         operationId: crypto.randomUUID(),
       },
+
+      lineage: frozen.senderLineage!,
     });
     if (!laterFollowUp.added) {
       throw new Error(`later follow-up was not added: ${laterFollowUp.reason}`);
@@ -637,6 +687,83 @@ describe("durable structured human input", () => {
         respondedBy: required.grant.subjectId,
       }),
     ).rejects.toMatchObject({ code: "SKIP_NOT_ALLOWED" });
+
+    // "Let the agent decide" settles even a request that cannot be skipped,
+    // and the agent's resume sees that it was asked to decide.
+    // Only a person can make that choice: an agent (a parent answering for
+    // its child) or the system is refused.
+    for (const respondedBy of [`agent_attempt:${crypto.randomUUID()}`, "system:test"]) {
+      await expect(
+        acceptSessionHumanInputResponse(client.db, {
+          accountId: required.grant.accountId,
+          workspaceId: required.grant.workspaceId!,
+          sessionId: required.session.id,
+          requestId: required.requestId,
+          response: { outcome: "skipped", agentDecides: true },
+          respondedBy,
+        }),
+      ).rejects.toMatchObject({ code: "SKIP_NOT_ALLOWED" });
+    }
+    const decided = await acceptSessionHumanInputResponse(client.db, {
+      accountId: required.grant.accountId,
+      workspaceId: required.grant.workspaceId!,
+      sessionId: required.session.id,
+      requestId: required.requestId,
+      response: { outcome: "skipped", agentDecides: true },
+      respondedBy: required.grant.subjectId,
+    });
+    expect(decided).toMatchObject({
+      action: "accepted",
+      request: { status: "skipped", response: { outcome: "skipped", agentDecides: true } },
+    });
+    expect(
+      (await getSessionHumanInputRequest(
+        client.db,
+        required.grant.workspaceId!,
+        required.session.id,
+        required.requestId,
+      ))!.response,
+    ).toEqual({ outcome: "skipped", agentDecides: true });
+  });
+
+  test("only the person answers secrets, Skill reviews and secret approvals", () => {
+    const text: HumanInputQuestion = {
+      id: "branch",
+      kind: "text",
+      prompt: "Which branch?",
+      options: [],
+      required: true,
+      allowOther: false,
+    };
+    const decide = { outcome: "skipped" as const, agentDecides: true as const };
+    expect(validateHumanInputResponse({ questions: [text], allowSkip: false }, decide)).toEqual(
+      decide,
+    );
+    const secret = {
+      ...text,
+      kind: "secret",
+      secret: { item: "Token", field: "token" },
+    } as unknown as HumanInputQuestion;
+    const skillReview = {
+      ...text,
+      skillReview: { skillId: "skill" },
+    } as unknown as HumanInputQuestion;
+    const approval = { ...text, id: `secret-approval:${crypto.randomUUID()}` };
+    for (const questions of [[secret], [text, secret], [skillReview], [approval]]) {
+      expect(() => validateHumanInputResponse({ questions, allowSkip: true }, decide)).toThrow(
+        HumanInputResponseValidationError,
+      );
+    }
+    expect(() =>
+      validateHumanInputResponse(
+        { questions: [text], allowSkip: true, origin: "secret_use_approval" },
+        decide,
+      ),
+    ).toThrow(HumanInputResponseValidationError);
+    // An ordinary skip is unchanged.
+    expect(
+      validateHumanInputResponse({ questions: [secret], allowSkip: true }, { outcome: "skipped" }),
+    ).toEqual({ outcome: "skipped" });
   });
 
   test("answer and early-expiry racers have one winner, while a passed deadline expires", async () => {
@@ -708,6 +835,69 @@ describe("durable structured human input", () => {
       throw new Error("expiry did not produce accepted and completed results");
     }
     expect(repeated.event.id).toBe(expired.event.id);
+  });
+
+  test("expiry leaves an eventless historical cancellation unchanged", async () => {
+    const frozen = await freezeRequest({ expiresAt: new Date(Date.now() - 1_000) });
+    await shared.admin`
+      update session_human_input_requests
+      set status = 'cancelled', response = null, responded_by = null, responded_at = null
+      where workspace_id = ${frozen.grant.workspaceId!}
+        and session_id = ${frozen.session.id}
+        and id = ${frozen.requestId}`;
+    const input = {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      requestId: frozen.requestId,
+    };
+    for (let retry = 0; retry < 2; retry += 1) {
+      expect(await expireSessionHumanInputRequest(client.db, input)).toMatchObject({
+        action: "conflict",
+        request: { status: "cancelled", response: null, respondedAt: null },
+        events: [],
+        workflowWakeRevision: null,
+      });
+    }
+    await expect(
+      acceptSessionHumanInputResponse(client.db, {
+        ...input,
+        response: { outcome: "skipped" },
+        respondedBy: frozen.grant.subjectId,
+      }),
+    ).rejects.toThrow("Terminal human-input request has no response event");
+    const [evidence] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from session_events
+      where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId}
+        and type = 'user.humanInputResponse'
+        and payload ->> 'requestId' = ${input.requestId}`;
+    expect(evidence?.count).toBe(0);
+  });
+
+  test("expiry never repairs or changes an already answered request", async () => {
+    const frozen = await freezeRequest({ expiresAt: new Date(Date.now() + 60_000) });
+    const input = {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      requestId: frozen.requestId,
+    };
+    const answer = await acceptSessionHumanInputResponse(client.db, {
+      ...input,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "environment", values: ["production"] }],
+      },
+      respondedBy: frozen.grant.subjectId,
+    });
+    expect(answer.action).toBe("accepted");
+    if (answer.action !== "accepted") throw new Error("answer was not accepted");
+    expect(await expireSessionHumanInputRequest(client.db, input)).toEqual({
+      action: "conflict",
+      request: answer.request,
+      events: [],
+      workflowWakeRevision: null,
+    });
   });
 
   test("repairs an eventless cancelled terminal row once without waking terminal work", async () => {
@@ -803,6 +993,7 @@ describe("durable structured human input", () => {
       action: "conflict",
       request: { id: parallelRequestId, status: "pending" },
     });
+    // An ordinary sibling approval stays decidable; a later resume applies it.
     expect(
       await acceptSessionApprovalDecision(client.db, {
         accountId: frozen.grant.accountId,
@@ -811,7 +1002,7 @@ describe("durable structured human input", () => {
         subjectId: frozen.grant.subjectId,
         payload: { approvalId: "ordinary-call", decision: "approve" },
       }),
-    ).toMatchObject({ action: "conflict" });
+    ).toMatchObject({ action: "accepted" });
 
     if (first.action !== "accepted") throw new Error("first response was not accepted");
     const resumedAttemptId = crypto.randomUUID();
@@ -875,6 +1066,8 @@ describe("durable structured human input", () => {
     ).toMatchObject({ action: "accepted" });
 
     const ordinaryFirst = await freezeRequest();
+    // An approval decided first never blocks the question's answer: the
+    // answer's resume applies that approval too.
     expect(
       await acceptSessionApprovalDecision(client.db, {
         accountId: ordinaryFirst.grant.accountId,
@@ -897,8 +1090,7 @@ describe("durable structured human input", () => {
         respondedBy: ordinaryFirst.grant.subjectId,
       }),
     ).toMatchObject({
-      action: "conflict",
-      request: { id: ordinaryFirst.requestId, status: "pending" },
+      action: "accepted",
     });
 
     const concurrent = await freezeRequest({ parallel: true });

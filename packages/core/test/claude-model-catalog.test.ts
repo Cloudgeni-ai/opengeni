@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import {
+  claudeNativeModelProfile,
   configuredModels,
   configuredProviders,
   resolveTurnExecutionPolicyV1,
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
 } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   resolveWorkspaceModelSelection,
   workspaceCustomModelReference,
@@ -184,7 +185,14 @@ test("managed Claude catalog enables reasoning only for verified adaptive models
     models.find((candidate) => candidate.upstreamModelId === "claude-custom-future")?.label,
   ).toBe("claude-custom-future");
   expect(verified.capabilities.reasoning.runnable).toBe(true);
-  expect(verified.capabilities.reasoning.efforts).toEqual(["low", "medium", "high"]);
+  expect(verified.capabilities.reasoning.efforts).toEqual([
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
+  expect(verified.capabilities.reasoning.defaultEffort).toBe("medium");
   for (const model of models.filter((candidate) => candidate !== verified)) {
     expect(model.reasoningEffort).toBe(false);
     expect(model.capabilities.reasoning).toMatchObject({
@@ -195,6 +203,75 @@ test("managed Claude catalog enables reasoning only for verified adaptive models
     });
   }
 });
+
+test.each(["workspace", "organization"] as const)(
+  "Claude native capabilities are per model on both connection kinds (%s)",
+  (scope) => {
+    const models = [
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5-20251001",
+      "claude-unknown",
+    ].map((upstreamModelId) => ({ upstreamModelId }));
+    const settings = withClaudeConnectionCatalog(
+      testSettings({ claudeSubscriptionEnabled: true }),
+      {
+        anthropic: { models },
+        claude_subscription: { models },
+      },
+      scope,
+    );
+    for (const kind of ["anthropic", "claude-subscription"]) {
+      const catalog = configuredModels(settings).filter(
+        (model) => model.providerId === `${scope}-${kind}`,
+      );
+      for (const [id, autoCompactTokenLimit] of [
+        ["claude-opus-5-5", 300_000],
+        ["claude-sonnet-5-5", 800_000],
+      ] as const) {
+        const model = catalog.find((candidate) => candidate.upstreamModelId === id)!;
+        expect(model.capabilities.reasoning).toMatchObject({
+          runnable: true,
+          efforts: ["low", "medium", "high", "xhigh", "max"],
+          defaultEffort: "medium",
+        });
+        expect(model.executionLimits).toMatchObject({
+          contextWindowTokens: 1_000_000,
+          effectiveContextWindowTokens: 872_000,
+          autoCompactTokenLimit,
+        });
+      }
+      expect(
+        catalog.find((model) => model.upstreamModelId === "claude-opus-4-7")?.capabilities.reasoning
+          .defaultEffort,
+      ).toBe("xhigh");
+      for (const id of ["claude-opus-4-6", "claude-sonnet-4-6"]) {
+        expect(
+          catalog.find((model) => model.upstreamModelId === id)?.capabilities.reasoning,
+        ).toMatchObject({
+          runnable: true,
+          efforts: ["low", "medium", "high", "max"],
+          defaultEffort: "high",
+        });
+      }
+      for (const id of ["claude-haiku-4-5-20251001", "claude-unknown"]) {
+        const model = catalog.find((candidate) => candidate.upstreamModelId === id)!;
+        expect(model.capabilities.reasoning).toMatchObject({
+          runnable: false,
+          efforts: [],
+          defaultEffort: null,
+        });
+        expect(model.executionLimits.contextWindowTokens).toBe(200_000);
+        expect(model.executionLimits.autoCompactTokenLimit!).toBeLessThan(
+          model.executionLimits.effectiveContextWindowTokens!,
+        );
+      }
+    }
+  },
+);
 
 test("subscription identity stays inside scoped credentials without changing model admission", () => {
   const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
@@ -313,4 +390,61 @@ test("workspace Claude readiness, connection restrictions and admission referenc
   expect(
     disabled.find((row) => row.model.providerId === "workspace-anthropic")?.availability.selectable,
   ).toBe(true);
+});
+
+test("Claude Fable 5.2 is a full native model on API keys and subscriptions", () => {
+  expect(claudeNativeModelProfile("claude-fable-5-2")).toEqual({
+    efforts: ["low", "medium", "high", "xhigh", "max"],
+    defaultEffort: "high",
+    contextWindowTokens: 1_000_000,
+    maxOutputTokens: 128_000,
+    autoCompactTokenLimit: 300_000,
+    prefixBoundThinking: true,
+    progressUpdates: true,
+  });
+  const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
+    anthropic: { active: true, models: [{ upstreamModelId: "claude-fable-5-2" }] },
+    claude_subscription: { active: true, models: [{ upstreamModelId: "claude-fable-5-2" }] },
+  });
+  for (const id of [
+    "organization-anthropic/claude-fable-5-2",
+    "organization-claude-subscription/claude-fable-5-2",
+  ]) {
+    const model = configuredModels(settings).find((row) => row.id === id);
+    expect(model?.label).toBe("Claude Fable 5.2");
+    expect(model?.contextWindowTokens).toBe(1_000_000);
+    expect(model?.autoCompactTokenLimit).toBe(300_000);
+    expect(model?.capabilities.reasoning).toMatchObject({
+      runnable: true,
+      defaultEffort: "high",
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+    });
+  }
+});
+
+test.each([
+  "sk-ant-api03-synthetic",
+  "sk-ant-usr-synthetic",
+  "sk-ant-svc-synthetic",
+  "sk-ant-new07-synthetic",
+  // Even a subscription-shaped value keeps the API-key wire auth: the
+  // connection kind, never the key prefix, decides x-api-key versus OAuth.
+  "sk-ant-oat01-synthetic",
+])("an Anthropic API connection uses API-key auth for %s at both scopes", (key) => {
+  const connections = {
+    anthropic: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  };
+  for (const scope of ["organization", "workspace"] as const) {
+    const settings = withClaudeConnectionCredential(
+      withClaudeConnectionCatalog(testSettings(), connections, scope),
+      "anthropic",
+      key,
+      scope,
+    );
+    const provider = configuredProviders(settings).find(
+      (candidate) => candidate.id === `${scope}-anthropic`,
+    );
+    expect(provider?.apiKey).toBe(key);
+    expect(provider?.anthropic?.auth).toBe("api-key");
+  }
 });

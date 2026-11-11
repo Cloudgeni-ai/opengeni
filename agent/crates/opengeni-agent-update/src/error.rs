@@ -83,6 +83,34 @@ pub enum UpdateError {
 }
 
 impl UpdateError {
+    /// Whether a download failed because connection, headers, or body progress
+    /// timed out. Body reads wrap reqwest's timeout inside an I/O error.
+    #[must_use]
+    pub fn is_download_timeout(&self) -> bool {
+        let Self::Download { source, .. } = self else {
+            return false;
+        };
+        let mut current: &(dyn std::error::Error + 'static) = source.as_ref();
+        loop {
+            if let Some(error) = current.downcast_ref::<reqwest::Error>() {
+                return error.is_timeout();
+            }
+            if let Some(error) = current.downcast_ref::<std::io::Error>() {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    return true;
+                }
+                if let Some(inner) = error.get_ref() {
+                    current = inner;
+                    continue;
+                }
+            }
+            match current.source() {
+                Some(inner) => current = inner,
+                None => return false,
+            }
+        }
+    }
+
     /// Helper to wrap an IO error with the path it touched.
     pub(crate) fn io(path: impl Into<String>, source: std::io::Error) -> Self {
         Self::Io {

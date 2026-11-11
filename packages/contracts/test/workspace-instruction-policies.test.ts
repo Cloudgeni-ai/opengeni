@@ -109,6 +109,63 @@ describe("workspace instruction-policy contracts", () => {
     ).toBe(false);
   });
 
+  test("empty draft text clears a policy, and blank text normalizes to empty", () => {
+    const draft = {
+      kind: "policy" as const,
+      scope: "global" as const,
+      roleKey: null,
+    };
+    expect(
+      CreateWorkspaceInstructionPolicyDraftRequest.parse({ ...draft, content: "" }),
+    ).toMatchObject({ content: "" });
+    expect(
+      CreateWorkspaceInstructionPolicyDraftRequest.parse({ ...draft, content: " \n\t " }),
+    ).toMatchObject({ content: "" });
+    expect(
+      CreateWorkspaceInstructionPolicyDraftRequest.parse({ ...draft, content: "  Be brief.\n" }),
+    ).toMatchObject({ content: "  Be brief.\n" });
+    // Only a person clears: an empty proposal or onboarding draft is refused.
+    for (const provenanceSource of ["knowledge_proposal", "onboarding"]) {
+      expect(
+        CreateWorkspaceInstructionPolicyDraftRequest.safeParse({
+          ...draft,
+          content: " ",
+          provenanceSource,
+          provenanceSourceId: "source",
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  test("reads every stored revision text, including empty and whitespace-only", () => {
+    for (const content of ["", "\n", "Be brief."]) {
+      const parsed = WorkspaceInstructionPolicyListResponse.parse({
+        revisions: [
+          {
+            id: "00000000-0000-4000-8000-000000000031",
+            revision: 1,
+            contentHash: "a".repeat(64),
+            operationId: "00000000-0000-4000-8000-000000000032",
+            accountId: "00000000-0000-4000-8000-000000000033",
+            workspaceId: "00000000-0000-4000-8000-000000000034",
+            kind: "policy",
+            scope: "global",
+            roleKey: null,
+            content,
+            provenance: { source: "human", sourceId: null },
+            supersedesRevisionId: null,
+            createdBySubjectId: "user:maja",
+            createdAt: "2026-10-28T10:00:00.000Z",
+          },
+        ],
+        activeHeads: [],
+        activationEvents: [],
+        nextAfterRevision: null,
+      });
+      expect(parsed.revisions[0]?.content).toBe(content);
+    }
+  });
+
   test("normalizes onboarding provenance while preserving typed content validation", () => {
     const request = CreateWorkspaceInstructionPolicyOnboardingProposalRequest.parse({
       operationId: "00000000-0000-4000-8000-000000000010",

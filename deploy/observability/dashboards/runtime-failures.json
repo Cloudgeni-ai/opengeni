@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-runtime-failures",
-  "title": "OpenGeni · Runtime Failures",
+  "title": "Opengeni · Runtime Failures",
   "description": "One exact deployment's turn, MCP, sandbox, API, provider, and durable-write failures. Identity and error content stay in authenticated logs and durable events, never metric labels.",
   "schemaVersion": 39,
   "version": 5,
@@ -88,7 +88,7 @@
       "id": 17,
       "type": "stat",
       "title": "Critical alerts",
-      "description": "Current firing OpenGeni critical alerts. Zero is explicit because Prometheus omits the ALERTS series when no alert is firing.",
+      "description": "Current firing Opengeni critical alerts. Zero is explicit because Prometheus omits the ALERTS series when no alert is firing.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -117,7 +117,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
+          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"Opengeni.*\",severity=\"critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
           "legendFormat": "critical",
           "editorMode": "code",
           "instant": true,
@@ -130,7 +130,7 @@
       "id": 18,
       "type": "stat",
       "title": "Warnings",
-      "description": "Current firing OpenGeni warning alerts. The card turns amber immediately and red when several warnings overlap.",
+      "description": "Current firing Opengeni warning alerts. The card turns amber immediately and red when several warnings overlap.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -160,7 +160,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"warning\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
+          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"Opengeni.*\",severity=\"warning\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
           "legendFormat": "warning",
           "editorMode": "code",
           "instant": true,
@@ -173,7 +173,7 @@
       "id": 19,
       "type": "stat",
       "title": "Scrape health",
-      "description": "Percentage of selected OpenGeni application scrape targets currently reachable. No data is a telemetry outage, not a healthy zero.",
+      "description": "Percentage of selected Opengeni application scrape targets currently reachable. No data is a telemetry outage, not a healthy zero.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -346,7 +346,7 @@
     {
       "id": 23,
       "type": "table",
-      "title": "Firing OpenGeni alerts",
+      "title": "Firing Opengeni alerts",
       "description": "The exact warning and critical alert names behind the summary cards. Open Alerting for full annotations and runbook context.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
@@ -367,7 +367,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=~\"warning|critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}",
+          "expr": "ALERTS{alertstate=\"firing\",alertname=~\"Opengeni.*\",severity=~\"warning|critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}",
           "format": "table",
           "legendFormat": "{{severity}} · {{alertname}}",
           "editorMode": "code",
@@ -428,19 +428,36 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Turn failure and recovery ratios",
-      "description": "Failures and recoveries divided by all observed turn outcomes over the selected rate interval.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "title": "Platform failures, customer provider failures and recoveries",
+      "description": "Platform failure ratio excludes proven customer-managed quota, billing and upstream availability failures from numerator and denominator. Unknown failures still count as platform failures. Customer provider failures remain visible separately; historical unlabeled series remain unclassified.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
-          "legendFormat": "failed",
+          "expr": "(sum(rate(opengeni_turns_total{failure_origin!=\"customer_provider\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{failure_origin!=\"customer_provider\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "platform / unclassified failures",
           "editorMode": "code",
           "range": true
         },
@@ -450,9 +467,21 @@
           "legendFormat": "recovering",
           "editorMode": "code",
           "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\",failure_origin=\"customer_provider\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "customer provider failures (all outcomes denominator)",
+          "editorMode": "code",
+          "range": true
         }
       ],
-      "gridPos": { "x": 12, "y": 11, "w": 12, "h": 8 }
+      "gridPos": {
+        "x": 12,
+        "y": 11,
+        "w": 12,
+        "h": 8
+      }
     },
     {
       "id": 4,
@@ -509,8 +538,8 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "MCP tool-call p95 by outcome",
-      "description": "Separates slow successful tools from timeout and transport tails.",
+      "title": "MCP tool-call p95 by outcome and tool",
+      "description": "Separates slow successful tools from timeout and transport tails, and names the slow first-party tool. Every connector and custom tool shares the bounded \"external\" tool series.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": {
@@ -522,6 +551,13 @@
           "refId": "A",
           "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
           "legendFormat": "{{outcome}} p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "tool {{tool}} p95",
           "editorMode": "code",
           "range": true
         }
@@ -980,6 +1016,49 @@
         "x": 12,
         "y": 77,
         "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Provider invalid requests by path",
+      "description": "Provider 400 invalid-request answers to model calls, by the request path the provider names (indices collapsed, such as input[].tools[].name) and its error code. A new path is a new class of malformed request, usually one failing a chat on every retry. Monitoring only: nothing is blocked or retried because of it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, path, code) (increase(opengeni_model_invalid_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{provider}} · {{path}} · {{code}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 85,
+        "w": 24,
         "h": 8
       }
     }

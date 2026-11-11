@@ -3,6 +3,9 @@ import { basename, join } from "node:path";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../../src/timeline";
 import { serializeTimeline } from "./serialize";
+import { createOpenGeniText } from "../../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const fixturesDir = join(import.meta.dir, "fixtures");
 const snapshotsDir = join(import.meta.dir, "snapshots");
@@ -16,8 +19,8 @@ const fixtureFiles = readdirSync(fixturesDir)
 for (const file of fixtureFiles) {
   const name = basename(file, ".json");
   const fixture = JSON.parse(readFileSync(join(fixturesDir, file), "utf8")) as SessionEvent[];
-  const items = buildTimeline(fixture);
-  const groups = groupTimeline(items);
+  const items = buildTimeline(englishText, fixture);
+  const groups = groupTimeline(englishText, items);
   await Bun.write(join(snapshotsDir, `${name}.json`), `${JSON.stringify(serializeTimeline(items, groups), null, 2)}\n`);
 }
 

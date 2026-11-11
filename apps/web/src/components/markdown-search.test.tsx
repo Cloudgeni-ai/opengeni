@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { act } from "react";
-import { MarkdownText } from "./markdown";
+import { MarkdownText } from "@opengeni/react/app/components/markdown";
 import { registerDom, renderComponent } from "../../../../packages/react/test/render-hook";
 
 registerDom();

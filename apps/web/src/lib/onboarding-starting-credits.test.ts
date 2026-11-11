@@ -103,6 +103,30 @@ describe("starting credits in the post-signup model step", () => {
     });
   });
 
+  test("monthly Free funding preserves its plan terms for truthful onboarding copy", () => {
+    const plan = {
+      key: "free",
+      label: "Free",
+      status: "active",
+      creditGrantedMicros: 10_000_000,
+      creditRemainingMicros: 7_000_000,
+      creditScoped: true,
+      periodResetAt: "2026-11-19T00:00:00Z",
+      seatLimit: 5,
+      seatsUsed: 1,
+      cancelAtPeriodEnd: false,
+    };
+    const result = startingCreditsForOnboarding({
+      catalog: creditsDefault,
+      billing: {
+        ...trialBilling,
+        balance: { ...trialBilling.balance, balanceMicros: 32_000_000, plan },
+      },
+    });
+    expect(result?.balance?.plan).toEqual(plan);
+    expect(result?.balance?.balanceMicros).toBe(32_000_000);
+  });
+
   test("an already credits-billed deployment default counts while the balance is positive", () => {
     const catalog = {
       ...creditsDefault,

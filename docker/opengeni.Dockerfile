@@ -1,16 +1,20 @@
-ARG BUN_VERSION=1.4.0
+ARG BUN_VERSION=1.4.4
 # Share the frozen-install inputs without tying them to a CPU architecture.
 FROM scratch AS workspace-manifests
 
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
+COPY apps/desktop/package.json apps/desktop/package.json
+COPY apps/site-gateway/package.json apps/site-gateway/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
 COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
+COPY examples/tool-server/package.json examples/tool-server/package.json
+COPY packages/agent-host/package.json packages/agent-host/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -26,35 +30,87 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/deployment/package.json packages/deployment/package.json
+COPY packages/desktop/package.json packages/desktop/package.json
 COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
 COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/decisions/package.json packages/decisions/package.json
 COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
+COPY packages/react-native/package.json packages/react-native/package.json
 COPY packages/react/package.json packages/react/package.json
 COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
+COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
+COPY packages/vaults/package.json packages/vaults/package.json
+COPY packages/vaults-bitwarden/package.json packages/vaults-bitwarden/package.json
+COPY packages/vaults-keeper/package.json packages/vaults-keeper/package.json
+COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
+COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 
+# Bun trusts roots compiled into its own binary, apart from the OS store. Distrust
+# the compromised emSign roots there once, natively on the build machine, for the
+# target architecture's Bun (never executed here); every stage that runs or
+# ships Bun copies this binary (see docker/distrust-embedded-roots.ts).
+FROM oven/bun:${BUN_VERSION} AS bun-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS bun-distrusted
+COPY --from=bun-target /usr/local/bin/bun /out/bun
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/bun
+
+# Bun (like curl and git) also trusts the OS store in /etc/ssl/certs, and the
+# oven/bun base images ship a ca-certificates older than Debian's distrust of
+# emSign ECC Root CA - G3 and Comodo AAA Services (20250419+deb13u1). Stages
+# that install system packages upgrade ca-certificates with them. Stages that
+# install none (web runs no target-architecture step at all) copy this current
+# store instead, built natively from the same Debian release (the package is
+# architecture-independent), and point OpenSSL-style lookups at it, since a
+# COPY cannot remove the stale entries in /etc/ssl/certs.
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION}-slim AS trust-store
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && cp -rL /etc/ssl/certs /out-certs
+
 FROM oven/bun:${BUN_VERSION} AS source-base
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 COPY --from=workspace-manifests / /app/
-RUN bun install --frozen-lockfile
+# Retry only this dependency-install boundary, never later builds or doctors.
+# A private retry cache avoids reusing a failed download/extraction without
+# deleting the original cache or changing the frozen dependency selection.
+RUN bun install --frozen-lockfile || { \
+      status=$?; \
+      for attempt in 1 2; do \
+        sleep "$((attempt * 5))" || exit "$?"; \
+        retry_cache="$(mktemp -d)" || exit "$?"; \
+        if BUN_INSTALL_CACHE_DIR="$retry_cache" bun install --frozen-lockfile; then \
+          exit 0; \
+        else \
+          status=$?; \
+        fi; \
+      done; \
+      exit "$status"; \
+    }
 
 COPY --chown=bun:bun . .
 
 ENV NODE_ENV=production
 USER root
-RUN install -d -o bun -g bun -m 0755 /workspace
+# WORKDIR leaves /app root-owned. Build stages run as bun and assemble their
+# runtime closures under /app/.release, which a build context may not contain.
+RUN install -d -o bun -g bun -m 0755 /workspace /app/.release
 USER bun
 
 # Most workloads share the same network/source-control tools. Keep that stable
@@ -69,11 +125,81 @@ USER bun
 
 # Keep worker before artifact-runtime stages so legacy remote Docker builders
 # do not execute unrelated API/materializer prerequisites when targeting it.
-FROM source-base AS worker
+
+# Our own CPU speaker models for meeting recordings (apps/worker/speakers):
+# the Rust executable, cross-built natively for the target with xx, and the
+# pinned open models it loads (pyannote segmentation 3.0, MIT; 3D-Speaker
+# CAM++ "common advanced", trained on about 200,000 Chinese and English
+# speakers, Apache-2.0), both as exported by sherpa-onnx. On real phone and
+# laptop meetings it tells voices apart far better than the VoxCeleb-only
+# models (docs/recordings.md).
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS speakers-xx
+FROM --platform=$BUILDPLATFORM rust:1.97.1-trixie AS speakers-build
+COPY --from=speakers-xx / /
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends clang lld \
+  && rm -rf /var/lib/apt/lists/*
+ARG TARGETPLATFORM
+RUN set -eux; \
+  xx-apt-get update; \
+  xx-apt-get install -y --no-install-recommends xx-c-essentials xx-cxx-essentials; \
+  rm -rf /var/lib/apt/lists/*
+WORKDIR /src/speakers
+COPY apps/worker/speakers/Cargo.toml apps/worker/speakers/Cargo.lock ./
+COPY apps/worker/speakers/src ./src
+RUN --mount=type=cache,id=opengeni-speakers-cargo-registry,target=/usr/local/cargo/registry,sharing=shared \
+    --mount=type=cache,id=opengeni-speakers-target-${TARGETPLATFORM},target=/src/speakers/target,sharing=locked \
+    set -eux; \
+    rust_target="$(xx-cargo --print-target-triple)"; \
+    xx-cargo build --locked --release --target-dir /src/speakers/target; \
+    install -D -m 0755 "target/${rust_target}/release/opengeni-speakers" /out/bin/opengeni-speakers; \
+    xx-verify /out/bin/opengeni-speakers
+ADD --checksum=sha256:24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 /tmp/segmentation.tar.bz2
+ADD --checksum=sha256:aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx /tmp/embedding.onnx
+ADD --checksum=sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 https://raw.githubusercontent.com/modelscope/3D-Speaker/065629c313eaf1a01c65c640c46d77e61e9607b4/LICENSE /tmp/embedding-LICENSE
+# The word aligner: Meta's Omnilingual ASR CTC 300M (Apache-2.0, about 1,600
+# languages) as exported to int8 ONNX by sherpa-onnx, 365 MB.
+ARG ALIGNMENT_MODEL_URL=https://huggingface.co/csukuangfj/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12/resolve/6abf1ece20cd2308bdb7d13cd78ec1c44fa4c094
+ADD --checksum=sha256:e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c ${ALIGNMENT_MODEL_URL}/model.int8.onnx /tmp/alignment.onnx
+ADD --checksum=sha256:a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31 ${ALIGNMENT_MODEL_URL}/tokens.txt /tmp/alignment-tokens.txt
+ADD --checksum=sha256:a70a523bafbb595c2844104feb313d204904dac91c3d186c05f22a10a71c7a94 ${ALIGNMENT_MODEL_URL}/LICENSE /tmp/alignment-LICENSE
+RUN set -eux; \
+  tar -xjf /tmp/segmentation.tar.bz2 -C /tmp; \
+  install -D -m 0444 /tmp/sherpa-onnx-pyannote-segmentation-3-0/model.onnx /out/models/segmentation.onnx; \
+  install -D -m 0444 /tmp/sherpa-onnx-pyannote-segmentation-3-0/LICENSE /out/models/segmentation-LICENSE; \
+  install -D -m 0444 /tmp/embedding.onnx /out/models/embedding.onnx; \
+  install -D -m 0444 /tmp/embedding-LICENSE /out/models/embedding-LICENSE; \
+  install -D -m 0444 /tmp/alignment.onnx /out/models/alignment.onnx; \
+  install -D -m 0444 /tmp/alignment-tokens.txt /out/models/alignment-tokens.txt; \
+  install -D -m 0444 /tmp/alignment-LICENSE /out/models/alignment-LICENSE
+
+# The pinned rg builds the worker delivers to managed sandboxes, with the static
+# musl jq committed under agent/vendor/jq/. Pins equal
+# packages/runtime/src/sandbox/shell-tools-manifest.ts (checked by
+# scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
+FROM scratch AS shell-tools-linux
+ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
+
+FROM source-base AS worker-build
+COPY --from=shell-tools-linux --chown=bun:bun /cache/ /tmp/shell-tools-cache/
+RUN OPENGENI_SHELL_TOOLS_CACHE=/tmp/shell-tools-cache bun scripts/fetch-shell-tools.ts --offline \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --out /tmp/shell-tools \
+  && OPENGENI_SHELL_TOOLS_DIR=/tmp/shell-tools bun scripts/build-runtime-processes.ts worker \
+  && bun scripts/assemble-server-runtime.ts worker
+
+FROM oven/bun:${BUN_VERSION}-slim AS worker
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # The docker sandbox backend needs the Docker CLI to talk to the mounted host
 # daemon socket. Interactive/cancellable commands use the Agents SDK's
 # host-side Python PTY bridge, so Python must live in this worker image rather
 # than only inside the sandbox. The daemon remains outside this image.
+# Control activities parse Documents with LibreOffice and native OCR data;
+# turn activities validate video with ffprobe (provided by ffmpeg). Desktop
+# recordings execute ffmpeg in the sandbox, not on this worker host.
 USER root
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client python3 tesseract-ocr-eng \
@@ -87,11 +213,16 @@ RUN apt-get update \
   && apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
   && /usr/bin/python3 -c 'import pty' \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
 ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3 \
   TESSDATA_PREFIX=/opt/opengeni/tessdata
+COPY --from=speakers-build --chown=root:root /out/ /opt/opengeni/speakers/
+ENV OPENGENI_RECORDING_SPEAKERS_BINARY_PATH=/opt/opengeni/speakers/bin/opengeni-speakers \
+  OPENGENI_RECORDING_SPEAKER_MODELS_DIR=/opt/opengeni/speakers/models \
+  OPENGENI_RECORDING_WORD_ALIGNMENT=true
+COPY --from=worker-build --chown=bun:bun /app/.release/server-runtime/worker/ /app/
 USER bun
-RUN bun scripts/build-runtime-processes.ts worker
 CMD ["bun", "apps/worker/dist/process/index.js"]
 
 FROM base AS northstar-demo-build
@@ -129,16 +260,25 @@ ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
 USER bun
 RUN bun packages/artifact-tool/src/runtime-cli-entry.ts doctor --json
 
-FROM artifact-runtime-base AS api
+FROM artifact-runtime-base AS api-build
+RUN bun scripts/build-runtime-processes.ts api \
+  && bun scripts/assemble-server-runtime.ts api
+
+FROM oven/bun:${BUN_VERSION}-slim AS api
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # API-owned browser/computer sessions use the Docker sandbox adapter directly,
 # including `docker network connect`. Install only the client; the daemon stays
 # outside this image and is reached through the mounted host socket.
+# Voice normalization/segmentation executes ffmpeg here, without a worker hop.
+# Artifact rasterization needs fonts; a bot's emoji avatar for Slack is drawn
+# with the colour emoji font. Documents upload parsing is queued to the
+# existing control worker, so LibreOffice and OCR data belong only in worker.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client tesseract-ocr-eng \
-  && install -d -o root -g root -m 0555 /opt/opengeni/tessdata \
-  && find /usr/share/tesseract-ocr -name eng.traineddata -exec cp {} /opt/opengeni/tessdata/eng.traineddata \; \
-  && chmod 0444 /opt/opengeni/tessdata/eng.traineddata \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation fonts-noto-color-emoji git gnupg openssh-client \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -146,14 +286,20 @@ RUN apt-get update \
   && apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
   && docker --version \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
+COPY --from=api-build --chown=bun:bun /app/.release/server-runtime/api/ /app/
+COPY --from=api-build --chown=root:root /app/artifact-runtime/ /app/artifact-runtime/
 USER bun
-ENV TESSDATA_PREFIX=/opt/opengeni/tessdata
-RUN bun scripts/build-runtime-processes.ts api
+# The worker image aligns text-only models' words, so meetings may use them.
+ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
+  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs \
+  OPENGENI_RECORDING_WORD_ALIGNMENT=true
+RUN bun artifact-runtime-doctor.js doctor --json
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
 # the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via
-# the `COPY --chown=bun:bun . .` above. The API serves them from /agent/* (see
+# the process bundle's assets/agent-install directory. The API serves /agent/* (see
 # apps/api/src/routes/install.ts), so a fresh machine installs an agent that matches
 # THIS control plane exactly. The signing key never enters this build — signing is
 # done in the pre-build CI step. When nothing is baked (a plain `docker build`),
@@ -163,31 +309,64 @@ RUN bun scripts/build-runtime-processes.ts api
 EXPOSE 8000
 CMD ["bun", "apps/api/dist/process/index.js"]
 
+# These sidecar bundles have no runtime npm externals. Keep the full frozen
+# dependency install and source tree in builders, not in deployed images.
+FROM source-base AS artifact-outbox-build
+RUN bun scripts/build-runtime-processes.ts artifact-outbox
+
 # Dedicated durable live-hint outbox dispatcher. It has no native artifact
 # runtime and authenticates with the narrow dispatcher-only PostgreSQL role.
-FROM base AS artifact-outbox-dispatcher
+FROM oven/bun:${BUN_VERSION}-slim AS artifact-outbox-dispatcher
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+COPY --from=trust-store /out-certs /etc/ssl/opengeni-certs
+ENV SSL_CERT_DIR=/etc/ssl/opengeni-certs SSL_CERT_FILE=/etc/ssl/opengeni-certs/ca-certificates.crt
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 ENV OPENGENI_ARTIFACT_OUTBOX_ENABLED=true \
   OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE=opengeni_artifact_outbox_dispatcher \
   OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=9466
-RUN bun scripts/build-runtime-processes.ts artifact-outbox
+COPY --from=artifact-outbox-build --chown=bun:bun /app/apps/worker/dist/process/artifact-outbox/ ./apps/worker/dist/process/artifact-outbox/
+USER bun
 EXPOSE 9466
 CMD ["bun", "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js"]
 
-# Dedicated artifact materializer image. It inherits the same exact runtime
-# authority as API and never compiles, downloads, or substitutes kernel bytes.
-FROM artifact-runtime-base AS artifact-materializer
+# Build against the same verified native runtime authority as API. Compilation
+# of the subprocess stays out of the final image; kernel bytes are never rebuilt.
+FROM artifact-runtime-base AS artifact-materializer-build
 USER root
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends bubblewrap ca-certificates git openssh-client util-linux \
-  && rm -rf /var/lib/apt/lists/* \
-  && install -d -o bun -g bun -m 0755 /opt/opengeni/bin
+RUN install -d -o bun -g bun -m 0755 /opt/opengeni/bin
 USER bun
 RUN bun build --compile packages/artifact-tool/src/materializer-cli-entry.ts \
   --outfile /opt/opengeni/bin/opengeni-artifact-materializer
+# The compiled program embeds this stage's (already distrusted) Bun; prove it.
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts --check /opt/opengeni-docker/distrusted-roots.pem \
+  /opt/opengeni/bin/opengeni-artifact-materializer
 USER root
 RUN chown root:root /opt/opengeni/bin/opengeni-artifact-materializer \
   && chmod 0555 /opt/opengeni/bin/opengeni-artifact-materializer
 USER bun
+RUN bun scripts/build-runtime-processes.ts artifact-materializer
+
+# The runtime installation includes its own exact file closure. Preserve its
+# root-owned/read-only permissions and recheck its native ABI in the slim image.
+FROM oven/bun:${BUN_VERSION}-slim AS artifact-materializer
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends bubblewrap ca-certificates util-linux \
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
+COPY --from=artifact-materializer-build --chown=root:root /app/artifact-runtime/ ./artifact-runtime/
+COPY --from=artifact-materializer-build --chown=root:root /opt/opengeni/bin/opengeni-artifact-materializer /opt/opengeni/bin/opengeni-artifact-materializer
+COPY --from=artifact-materializer-build --chown=bun:bun /app/apps/worker/dist/process/artifact-materializer/ ./apps/worker/dist/process/artifact-materializer/
+USER bun
+ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
+  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs
 ENV OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true \
   OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE=/opt/opengeni/bin/opengeni-artifact-materializer \
   OPENGENI_ARTIFACT_MATERIALIZER_BWRAP=/usr/bin/bwrap \
@@ -196,7 +375,6 @@ ENV OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true \
   OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=9465
 # Build-time load verifies the complete manifest/file chain and native ABI.
 RUN /opt/opengeni/bin/opengeni-artifact-materializer --opengeni-materializer-identity-v1
-RUN bun scripts/build-runtime-processes.ts artifact-materializer
 EXPOSE 9465
 CMD ["bun", "apps/worker/dist/process/artifact-materializer/artifact-materializer-entry.js"]
 
@@ -219,6 +397,9 @@ RUN bun run --cwd apps/web build \
 
 # No target-architecture RUN steps or copied native build dependencies.
 FROM oven/bun:${BUN_VERSION} AS web
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+COPY --from=trust-store /out-certs /etc/ssl/opengeni-certs
+ENV SSL_CERT_DIR=/etc/ssl/opengeni-certs SSL_CERT_FILE=/etc/ssl/opengeni-certs/ca-certificates.crt
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -228,4 +409,6 @@ COPY --from=web-build --chown=bun:bun /app/web-server/server.ts ./apps/web/src/s
 COPY --from=web-build --chown=bun:bun /workspace /workspace
 USER bun
 EXPOSE 3000
-CMD ["bun", "run", "--cwd", "apps/web", "start"]
+# Run the server as PID 1 directly, like the API and worker images. A
+# `bun run` wrapper as PID 1 crashed with SIGSEGV on every SIGTERM at rollout.
+CMD ["bun", "apps/web/src/server.ts"]

@@ -4,9 +4,9 @@
 
 ## 1. Overview
 
-OpenGeni gains a first-class integrations layer: users connect external services (one browser OAuth round-trip or a pasted key), agents use them through MCP, and credentials live behind a single broker that no model, sandbox, or workflow payload can see.
+Opengeni gains a first-class integrations layer: users connect external services (one browser OAuth round-trip or a pasted key), agents use them through MCP, and credentials live behind a single broker that no model, sandbox, or workflow payload can see.
 
-Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) _client side_ once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero OpenGeni-side provider registration. OpenGeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
+Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) _client side_ once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero Opengeni-side provider registration. Opengeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
 
 Three layers, kept distinct throughout this doc:
 
@@ -51,7 +51,7 @@ Decisions baked in:
 - `credential_encrypted` is the only column that may hold secret material; `metadata` is UI-renderable verbatim. API list/get helpers never select `credential_encrypted`.
 - Revoking sets `status='revoked'` (row kept for audit) and best-effort calls the provider's revocation endpoint when known.
 
-**Ownership defaults.** New providers default to workspace ownership. Mail, calendar, contacts and drive setup suggest personal ownership. Users can explicitly choose either. OAuth profiles describe protocol requirements and optional `defaultOwnership`; they cannot prohibit a supported ownership choice. Reconnecting preserves the saved ownership.
+**Ownership defaults.** New providers default to workspace ownership. Mail, calendar, contacts and drive setup suggest personal ownership. Users can explicitly choose either when the provider supports both. OAuth profiles describe protocol requirements and optional `defaultOwnership`; reviewed built-in profiles may also require one ownership. The exact built-in Gmail bridge requires personal ownership at start, callback, reconnect and capability enablement. Historical workspace Gmail grants remain available for cleanup, never personal execution. Reconnecting preserves the saved ownership and cannot bypass the provider's ownership restriction.
 
 Generic MCP OAuth applies its profile default when ownership is omitted. The Integration Definition OAuth API requires an explicit ownership for a new account, while native setup supplies the user's choice. Workspace sharing uses the authorized provider account; it does not create a separate provider identity.
 
@@ -75,16 +75,16 @@ authority. This ownership-value helper and `requireConnectionAuthorityOwner`
 share the core checks: `contextIntegrity`, exact authenticated/grant subject
 identity, `principalKind: "human_session"`, and no service-initiator provenance.
 They are intentionally not identical: this helper additionally rejects every
-OpenGeni-reserved machine-subject namespace as defence-in-depth. Start-time
+Opengeni-reserved machine-subject namespace as defence-in-depth. Start-time
 ownership-value rejection is a 422; the sibling self-owner authority surface
 uses a 403.
 
 A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`,
 `sandbox:`, `scheduled_task:`, `attempt:`, `service:`) is defence-in-depth
 against a delegation-secret holder signing a human claim over an
-OpenGeni-minted machine subject. It is deliberately **not** an allow-list of
+Opengeni-minted machine subject. It is deliberately **not** an allow-list of
 human subjects: `docs/embedding.md` states that `subjectId` "remains opaque to
-OpenGeni" and that hosts must not have the kind inferred from a subject-id
+Opengeni" and that hosts must not have the kind inferred from a subject-id
 prefix, so a trusted embedding host legitimately signs `human_session` over a
 non-`user:` subject.
 
@@ -111,21 +111,38 @@ in their parsers.
 **OAuth callbacks enforce a signed claim, not a subject shape.** A callback
 carries signed state and no live principal, so it cannot re-evaluate
 `principalKind`. Every start path that may persist a personal owner therefore
-stamps a `personalOwnerVerified` claim into its HMAC-signed state, and all five
-callbacks that can persist one — Integration Definition OAuth, MCP OAuth,
-Google Drive, Atlassian, and social — require it. A state minted before the
+stamps a `personalOwnerVerified` claim into its HMAC-signed state, and the active
+callbacks that persist one — Integration Definition OAuth, MCP OAuth,
+Google Drive, and social — require it; retired Atlassian callbacks retain the
+same check before settling historical attempts. A state minted before the
 claim existed simply lacks it and fails closed, which closes the one
-`oauthStateTtlMs` in-flight window across a rolling deploy. This is also why the
+`oauthStateTtlMs` in-flight window across a rolling deploy.
+
+Workspace-owned connectors (Fiken, the Slack bot, GitHub App Connect) sign the
+same claim. Their callbacks re-check the starting person through
+`requireConnectOwnerAuthority`, and a managed human's Personal workspace has
+no membership row, so the claim is the only way that re-check finds its owner
+there. Every owner-bound start mints the owner fields through
+`connectOwnerStateFields` (the claim is a required argument), the
+`ConnectOwner` type makes the claim required on every re-check, and
+`apps/api/test/connect-owner-state-surface.test.ts` keeps new states on the
+helper and keeps callbacks off bare `getWorkspaceGrant` lookups. Fiken and the
+Slack bot once omitted the claim and the legacy social callback re-checked
+through a bare membership lookup; each failed only in Personal workspaces,
+after provider consent. This is also why the
 MCP callback's legacy `ownership: … ?? "personal"` decode cannot land a
 machine-owned row. Callback refusals retain each flow's existing bounded
 redirect/error projection rather than sharing one HTTP status: for example,
 Integration Definition OAuth reports `connection_conflict`, while social OAuth
 reports `not_authorized`.
 
-The two personal-only first-party connectors (`google-drive/install`,
-`atlassian/install`) carry no ownership field at all and always write
-`subject_id = <caller>`, so their start routes apply the principal fence
-directly.
+**Native Google Drive and Atlassian removal.** Integration Knowledge sync was
+removed, and with it the native Google Drive and Atlassian source connectors:
+their install, OAuth callback, browsing and source routes are gone. Agents reach
+Google Drive and Atlassian through the hosted MCP connectors and their OAuth
+flows. The routes the public SDK still calls answer `410` until its next major;
+the old native tool names are compatibility-only. See [Atlassian](atlassian.md)
+and [Google Drive](google-drive.md).
 
 ## 3. Credential encryption
 
@@ -184,7 +201,7 @@ Broker rules:
 - 403 step-up must NOT poison good credentials: `insufficient_scope` does not flip status to `needs_reauth`; only an unusable refresh grant does.
 - Settings carry only `connectionRef` (non-secret pointer); the `mcpServers` entry schema in `packages/config/src/index.ts` gains an optional `connectionRef { connectionId?, providerDomain, kind?, scopes?, resource?, subjectScope? }`.
 
-The broker passes resolved connection credentials directly to the outbound request rather than deliberately copying them into session configuration, events, run state, or Temporal inputs. OpenGeni does not heuristically scan or rewrite arbitrary provider, user, agent, or tool content if that content contains credential-shaped text; internal persisted and model-visible data remains exact.
+The broker passes resolved connection credentials directly to the outbound request rather than deliberately copying them into session configuration, events, run state, or Temporal inputs. Opengeni does not heuristically scan or rewrite arbitrary provider, user, agent, or tool content if that content contains credential-shaped text; internal persisted and model-visible data remains exact.
 
 ## 5. MCP OAuth client (current profile with 2025-03-26 compatibility)
 
@@ -224,9 +241,9 @@ STEP-UP    runtime 403 error="insufficient_scope" → tool.auth_needed → re-AU
 
 ### 5.2 Short provider-facing grant state
 
-When enabled, MCP OAuth sends a short signed reference in the provider-facing `state` parameter. The full signed callback context is encrypted under the variable-sets key and stored in `integration_oauth_pending_states` for ten minutes. It includes the actor and ownership decision, PKCE verifier, client registration, resource, exact discovery provenance, scopes, and return destination. The reference carries only its random row id and account/workspace scope, so provider state-length limits do not reject the grant. The callback verifies the reference, loads the pending context under workspace RLS, checks that the two scopes match, and then validates the full signed state. Existing full signed states remain readable for their normal ten-minute lifetime during rolling deployment. Expired pending rows are removed in bounded batches on later starts in the same workspace.
+MCP OAuth always sends a short signed reference in the provider-facing `state` parameter. The full signed callback context is encrypted under the variable-sets key and stored in `integration_oauth_pending_states` for ten minutes. It includes the actor and ownership decision, PKCE verifier, client registration, resource, exact discovery provenance, scopes, and return destination. The reference carries only its random row id and account/workspace scope, so provider state-length limits do not reject the grant. The callback verifies the reference, loads the pending context under workspace RLS, checks that the two scopes match, and then validates the full signed state. Existing full signed states remain readable for their normal ten-minute lifetime during rolling deployment. Expired pending rows are removed in bounded batches on later starts in the same workspace.
 
-Issuance is gated by `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED`, default `false`. Deploy the new callback reader to every API instance with the flag off. After the old instances are drained, set the flag to `true` in a separate configuration rollout. Readers accept both formats regardless of this flag, so mixed flag values in the second rollout are safe. Resend and other providers with short state limits require the flag enabled.
+Providers limit `state` length (Stripe rejects more than 1024 characters; Resend has its own limit) and the full context exceeds those limits, so there is no full-state issuance mode. The former rollout switch `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED` is retired: the API ignores it with a one-time startup warning.
 
 The PKCE verifier remains encrypted inside the full signed context, which is encrypted again at rest in the pending row. Single-use is still enforced by inserting the context nonce into `integration_oauth_state_nonces`; its primary key makes replay fail across API instances. `integrationsStateSecret` and the variable-sets encryption key must be shared across API instances.
 
@@ -244,9 +261,9 @@ Every integration callback returns the browser to a real page with a plain-langu
 
 ### 5.2.1 Authorization-server clients
 
-DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
+DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres. An operator client is selected only by the authorization server whose metadata was actually fetched (or an issuer equal to it); an issuer that the metadata merely claims never selects one, because the same metadata chooses the token endpoint that receives the client secret.
 
-Some authorization servers advertise both CIMD and DCR but reject a metadata-document URL as the authorization `client_id`. OpenGeni therefore prefers the authorization-server-issued DCR identity whenever both mechanisms are advertised. The DCR client is reused deployment-wide and replaced when its registered endpoints, redirect URI, or scope policy becomes stale. A reviewed provider profile may explicitly force CIMD when a server's advertised registration endpoint is unsuitable (§5.2.2).
+Some authorization servers advertise both CIMD and DCR but reject a metadata-document URL as the authorization `client_id`. Opengeni therefore prefers the authorization-server-issued DCR identity whenever both mechanisms are advertised. The DCR client is reused deployment-wide and replaced when its registered endpoints, redirect URI, or scope policy becomes stale. A reviewed provider profile may explicitly force CIMD when a server's advertised registration endpoint is unsuitable (§5.2.2).
 
 ### 5.2.2 Provider OAuth quirks as data (profiles)
 
@@ -257,14 +274,14 @@ parameters are expressed as an `OAuthProviderProfile`
 the flow. `oauth-client.ts` resolves exactly one profile per start and reads
 every quirk from it: start-time payload fences (caller-client rejection,
 provider identity, exact MCP URL, required deployment client), ownership
-defaults, exact-URL reconnect binding and connection
+defaults and reviewed restrictions, exact-URL reconnect binding and connection
 selection, post-discovery authorization-server origin pins, `resource`
 parameter suppression, extra authorize parameters, and an exact scope override.
 
 Profiles come from two layers with a fixed resolution order — built-in, then
 catalog, then default:
 
-- **Built-in profiles** (hosted Slack MCP, official Gmail) live in code as data
+- **Built-in profiles** (Slack and Gmail API bridges) live in code as data
   because their fences are security invariants that must not depend on catalog
   import state. Reserved authorization servers (Google's) are an adjacent data
   table. Deployment-managed client
@@ -285,15 +302,19 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 ```json
 {
   "client_id": "<this document's exact URL>",
-  "client_name": "OpenGeni",
+  "client_name": "Opengeni",
   "redirect_uris": ["<publicBaseUrl>/v1/integrations/oauth/callback"],
   "token_endpoint_auth_method": "none",
-  "grant_types": ["authorization_code", "refresh_token"],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token",
+    "urn:ietf:params:oauth:grant-type:jwt-bearer"
+  ],
   "response_types": ["code"]
 }
 ```
 
-`client_id` byte-matches its serving URL. Base URL is `settings.publicBaseUrl` (`OPENGENI_PUBLIC_BASE_URL`, already required in managed mode); HTTPS is enforced when integrations are enabled outside local dev. Per-deployment documents differ by construction, so staging/prod/embedded hosts each get their own client identity automatically.
+`client_id` byte-matches its serving URL. Base URL is `settings.publicBaseUrl` (`OPENGENI_PUBLIC_BASE_URL`, already required in managed mode); HTTPS is enforced when integrations are enabled outside local dev. Per-deployment documents differ by construction, so staging/prod/embedded hosts each get their own client identity automatically. The JWT bearer grant is listed for auto-connect (§ 5.5).
 
 ### 5.4 Client-side security requirements
 
@@ -316,9 +337,65 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
   PRM mode, subject to reviewed provider-profile suppression. It is always
   omitted in legacy 2025-03-26 mode.
 - Exact-match redirect URI only; never follow AS-supplied alternative redirects.
-- SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless running in local/test or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`.
-- No token passthrough: tokens minted for an MCP server go only to that server; our own first-party MCP servers keep validating audience on inbound tokens.
+- SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless the actual destination matches the operator's `OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS`, running in local/test, or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`. See [trusted private destinations](workspace-integrations.md#trusted-private-network-destinations) for the exact-host/optional-port format and redirect/DNS-pinning rules.
+- No arbitrary token passthrough: hosted MCP credentials go only to their exact bound server. Reviewed first-party API bridges may send their provider grant only to explicitly approved provider API destinations, with the same owner, resource and scope fences. Gmail's historical MCP resource identifies the local REST bridge: setup uses pinned Google OAuth metadata and a required Gmail profile check, without contacting Google's MCP preview server. Our own first-party MCP servers keep validating audience on inbound tokens.
 - Token responses stored, never logged.
+
+### 5.5 Auto-connect: Opengeni as the ID-JAG issuer
+
+An organization connector with `login: "auto_connect"` connects each member
+to an outside MCP app with no sign-in screen, using MCP Enterprise-Managed
+Authorization in the client role. (The server role, Claude or an identity
+provider connecting members to Opengeni's own `/v1/mcp`, is in
+[MCP surfaces](mcp-surfaces.md#auto-connect-enterprise-managed-authorization).)
+
+- **Issuer.** Each organization has its own issuer,
+  `<publicBaseUrl>/v1/organizations/:organizationId/identity`, with
+  OIDC and RFC 8414 metadata (`/.well-known/openid-configuration`, both
+  `oauth-authorization-server` placements) and its key set at `/jwks.json`.
+  The signing key (`organization_identity_issuers`) is created the first time
+  an admin adds an auto-connect connector; its private half is encrypted with
+  the environments encryption key and never leaves the database.
+- **Setup.** `POST /v1/organizations/:id/connectors/auto-connect/check`
+  (`checkOrganizationConnectorAutoConnect`) probes the server like a sign-in
+  would (§ 5.4) with the `assertion_grant` purpose and reports whether its
+  authorization server lists the JWT bearer grant or the ID-JAG profile, and
+  whether it reads Client ID Metadata Documents. If it does, Opengeni's client
+  ID is its document URL (§ 5.3); otherwise the admin enters the client ID the
+  app gave Opengeni (`autoConnectClientId`). In the app, the admin pastes the
+  organization's issuer URL as a trusted (ID-JAG) issuer. The connector's
+  `config.autoConnect` keeps the authorization server issuer (every ID-JAG's
+  `aud`, spelled exactly as the server publishes it), token endpoint,
+  resource, scopes, client ID and the last result; nothing in it is secret.
+- **Test.** `POST /v1/organizations/:id/connectors/:connectorId/auto-connect/test`
+  (`testOrganizationConnectorAutoConnect`) signs and redeems one ID-JAG for
+  the admin, saves nothing, and returns the app's refusal in plain words.
+- **Connecting a member.** Opengeni signs a five-minute ID-JAG (`typ`
+  `oauth-id-jag+jwt`, RS256) with `sub` the member's subject ID, `email` and
+  `email_verified: true` (people with an unverified email are not connected),
+  `aud`, `client_id`, `resource` and `scope`, and redeems it at the token
+  endpoint with the JWT bearer grant. The token is saved as the member's own
+  `oauth2` connection (credential `grant: "id_jag"`, metadata
+  `clientRegistrationMethod: "id_jag"`) and turned on in the workspace. A
+  member who already has a working login to that server is left alone.
+- **When.** Before each turn, for at most four auto-connect connectors the turn
+  may use that the person has no login to (connectors they already have a
+  login to, turned on in this workspace, are left out before the limit
+  applies; a login from another workspace is turned on here), best effort;
+  after a refusal that
+  person's turns stop asking that app for ten minutes and the usual sign-in
+  prompt stands in. A member's own **Connect** calls
+  `POST /v1/workspaces/:id/organization-connectors/:connectorId/connect`
+  (`connectWorkspaceOrganizationConnector`) and falls back to the OAuth sign-in
+  when the app refuses.
+- **Refresh.** There is no refresh token: the token broker signs and redeems
+  a new ID-JAG when the token runs out. The app refusing it is permanent, like
+  a refused refresh token; not reaching it is retried. Each renewal first
+  checks that the originating connector (`connector_id` in the credential) is
+  still active with the same authorization server and client ID, and that the
+  person is still an active member; otherwise renewal fails as `invalid_grant`.
+  Only the person's own session can create their login; service principals
+  are refused like any other personal connection.
 
 ## 6. Tool↔connection contract and `tool.auth_needed`
 
@@ -370,7 +447,7 @@ the current DNS/IP/SSRF and redirect policy. Auth-gated rows carry one of:
 
 - Source-of-truth order: (1) the service's own well-known signals probed at add-by-domain time, (2) a **vendored, reviewed snapshot** of the integrations.sh registry (MIT) — import pipeline re-verifies `detected` entries (probe endpoint, confirm PRM) and demotes the rest to `community`, (3) the committed **curated overlay** `data/catalog/curated.json`, keyed by exact MCP URL, which wins over the snapshot field-by-field and carries reviewed first-party contracts, branding, category, and the checkable `featured` / `official` flags. Never live-consume the registry at request time; snapshots are versioned with import provenance. See `docs/capabilities.md` § Curated overlay.
 - Catalog rows extend `capability_catalog_items` with surface type, MCP URL, transports, credential facts, tier, provenance.
-- **Consent copy is data, not frontend code.** A curated row may carry a `presentation` object (provider name, icon, introduction, capabilities, permission summary, scope labels) that flows overlay -> importer -> `metadata.presentation` and renders in the connector sheet's connect step through `capabilityPresentation()` / `presentationPermissions()` (`apps/web/src/components/capabilities/integration-experience.ts`); API integration definitions serve the same shape from `INTEGRATION_DEFINITION_PRESENTATIONS` (`@opengeni/capabilities`) on the definitions endpoint, and it is available to any future definition surface - the one-row-per-provider integration sheet does not render it today, so that definition-side copy currently has no web consumer. Presentation is cosmetic only — it never grants a scope or replaces server-side authorization, a malformed object degrades to the generic copy, and an uncurated connector renders exactly the pre-existing fallback. The provider-neutral `COMMON_SCOPE_LABELS` stay in the web bundle.
+- **Consent copy is data, not frontend code.** A curated row may carry a `presentation` object (provider name, icon, introduction, capabilities, permission summary, scope labels) that flows overlay -> importer -> `metadata.presentation` and renders in the connector sheet's connect step through `capabilityPresentation()` / `presentationPermissions()` (`packages/react/src/app/components/capabilities/integration-experience.tsx`); API integration definitions serve the same shape from `INTEGRATION_DEFINITION_PRESENTATIONS` (`@opengeni/capabilities`) on the definitions endpoint, and it is available to any future definition surface - the one-row-per-provider integration sheet does not render it today, so that definition-side copy currently has no web consumer. Presentation is cosmetic only — it never grants a scope or replaces server-side authorization, a malformed object degrades to the generic copy, and an uncurated connector renders exactly the pre-existing fallback. The provider-neutral `COMMON_SCOPE_LABELS` stay in the web bundle.
 - Phase I4 imports use `scripts/import-integrations-catalog.ts` against a reviewed snapshot or precomputed `importRows` file. Imported rows are global `source: "registry"` capability rows keyed by `(provider_domain, mcp_url)`, linked to `import_batches`, and stale-marked on removal rather than deleted. Logo URLs are fetched at import time and stored as self-hosted object-storage assets (`logo_asset_path`); third-party logo URLs are not served from the catalog.
 - **Agent registry tools (implemented):** `capability_catalog_search` lets a session query the trusted merged catalog for capabilities it lacks, and `capability_authorization_request` emits a concrete, attempt-fenced `tool.auth_needed` recommendation with mandatory human domain confirmation. The agent can never silently add a server. The web resolves live catalog state again before acting: supported OAuth MCPs return to and enable from the originating session, while API-key/variable/admin-review cases use the protected Capabilities setup sheet. GitHub remains on its existing owner-authority spine until I6; its adapter mints fresh browser-only `github:manage` state at click time and never widens the worker grant. Enabled personal MCPs are reported ready to the agent only when the exact caller's attempt catalog contains that server's tools. Otherwise discovery reports authorization required and allows a human review card; workspace installation alone does not prove session access.
 
@@ -383,7 +460,7 @@ the current DNS/IP/SSRF and redirect policy. Auth-gated rows carry one of:
 | `codex_subscription_credentials`                            | Stays separate (account-level rotation semantics, own resolver). Not a goal of this program.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | First-party delegated bearer                                | Unchanged — identity plumbing, not an external credential.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `social_connections`                                        | Superseded for future use; existing rows untouched until a consumer needs migration.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ConnectionCredentialsPort`                                 | Its `mcpCredentials(request)` leg receives account/workspace/session, exact turn lineage, immutable initiator, server/tool, opaque connection ref, and forced-refresh intent. OpenGeni's own table is the default implementation; host-provided implementations take precedence (embed doctrine: host owns connections).                                                                                                                                                                                                                                     |
+| `ConnectionCredentialsPort`                                 | Its `mcpCredentials(request)` leg receives account/workspace/session, exact turn lineage, immutable initiator, server/tool, opaque connection ref, and forced-refresh intent. Opengeni's own table is the default implementation; host-provided implementations take precedence (embed doctrine: host owns connections).                                                                                                                                                                                                                                     |
 
 ## 12. Security invariants and phase acceptance
 

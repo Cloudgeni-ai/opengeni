@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
@@ -17,9 +17,7 @@ describe("provider-neutral operational instructions", () => {
     expect(guidance).toContain("`capability_catalog_search`");
     expect(guidance).toContain("`capability_authorization_request`");
     expect(guidance).toContain("Use available integration tools directly");
-    expect(guidance).toContain(
-      "If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.",
-    );
+    expect(guidance).toContain("If access is missing, search `capability_catalog_search`.");
     expect(guidance).toContain("`setup.nextAction`");
     expect(guidance).toContain("does not need integration-management permission");
     expect(guidance).toContain("authenticated human must authorize");
@@ -35,7 +33,9 @@ describe("provider-neutral operational instructions", () => {
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(guidance).toContain("check whether OpenGeni already provides the capability natively");
+    expect(guidance).toContain(
+      "check whether the workspace already provides the capability natively",
+    );
     expect(guidance).toContain(
       "a Site reaches the model and workspace tools through the host bridge",
     );
@@ -92,6 +92,16 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
+  test("limits programmatic coverage to the Codemode catalog, not sandbox built-ins", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).not.toContain("Every tool available to you");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Every tool in the Codemode catalog (what `ogtool list` shows)",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog",
+    );
+  });
+
   test("does not carry Codex-only runtime language", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("You are Codex");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("GPT-5");
@@ -103,7 +113,7 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("/abs/path");
   });
 
-  test("teaches OpenGeni sandbox file links with optional line numbers", () => {
+  test("teaches Opengeni sandbox file links with optional line numbers", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "[My Component.ts](<sandbox:/workspace/My Project/My Component.ts:3>)",
@@ -137,7 +147,7 @@ describe("provider-neutral operational instructions", () => {
 
   test("answers in chat by default and routes document deliverables before local-file guidance", () => {
     const reportRouting = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
-      "Answer in chat by default, including summaries and reports",
+      "Answer in chat by default, including summaries, reports, briefs, letters and plans",
     );
     const localLinks = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "When referencing a real local source file",
@@ -151,13 +161,16 @@ describe("provider-neutral operational instructions", () => {
       "including audit or summary reports produced while doing another task",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "only when the user asks for a document or file, or when the deliverable is large (multi-page) or clearly meant to be kept or shared",
+      "only when the user asks for a document, asks to edit an existing document Artifact, or the deliverable is too long to read comfortably in chat (several pages)",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "A Word, Excel, PDF or PowerPoint file the user sends to be changed is edited in the sandbox with ordinary tools",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "give a short summary and the artifact link in chat, not a full restatement",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Read the opengeni-documents Skill and create the native document artifact before authoring",
+      "Read the documents Skill and create the native document artifact before authoring",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "including ones discovered after the goal was created",
@@ -212,12 +225,8 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable.",
     );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "A session cannot gain a Variable Set while it works",
-    );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "run that step in a child created with those `variableSetIds` instead of asking the user to attach it.",
-    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("variable_set_list");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("variableSetIds");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain('waitFor: "completion"');
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A `goal.completed` event records goal state but is not a terminal child result",
@@ -235,6 +244,9 @@ describe("provider-neutral operational instructions", () => {
   });
 
   test("defaults to direct handling but honors independent delegation and result-bearing wakes", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "When you are a child session, your final answer is delivered automatically to your parent session. Send a separate message when the parent needs information before you finish, or when you need to message another session.",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Delegation has setup and coordination overhead: by default",
     );
@@ -301,21 +313,25 @@ describe("provider-neutral operational instructions", () => {
     // active goal it instead starts a continuation that rediscovers the same
     // wait. The re-wait rule must not be conditional on having no goal.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "If work you already started is still in flight (a child, a command, or a timed recheck), give the answer, then call `wait_for_input` when available so its result resumes you, even when a goal is active.",
+      "If work you already started is still in flight (a child, a command, or a timed recheck), call `wait_for_input` when available with the answer in its `reply`, so its result resumes you, even when a goal is active.",
     );
-    // Each turn's wait sets a fresh absolute deadline from its timeout, so a
-    // re-wait with the full timeout would push a timed recheck back on every
-    // status question.
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.",
+    // Keeping the deadline (time remaining, not a fresh full timeout) and the
+    // verbatim `reply` are stated once, in the wait_for_input description
+    // (apps/api/test/first-party-mcp-tool-policy.test.ts), not repeated here.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "reuse that reason and keep its deadline",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "put the whole answer in its `reply` argument",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("again with the same reason");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
       "Otherwise the answer is your final response: an active goal continues on its own",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "do not post a status right before `wait_for_input` unless it answers the user",
+      "do not post a status right before `wait_for_input`: its reason is the status.",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("unless it answers the user");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "For ordinary background commands, register that session-level wait before ending your turn.",
     );
@@ -328,8 +344,10 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "when further progress genuinely depends on work already in flight or a meaningful timed recheck",
     );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.",
+    // When (not) to wait at all, including "only waiting for the person: reply
+    // and end the turn", is the opening of the wait_for_input description.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "Do not use `wait_for_input` for work you can still advance",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information or an explicit user/task/Skill update cadence calls for an update.",
@@ -337,7 +355,7 @@ describe("provider-neutral operational instructions", () => {
     // Any turn may end with a wait instead of a final response, so a turn that
     // starts long work and waits still has a compliant ending.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "a turn that ends with `wait_for_input` has none, and its reason is the user-visible status.",
+      "a turn that ends with `wait_for_input` has none: its `reply` carries any answer, and its reason is the user-visible status.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
       "unchanged-wait `wait_for_input` continuation",
@@ -370,6 +388,20 @@ describe("proportional effort", () => {
     expect(guidance).toContain("instead of rediscovering");
   });
 
+  test("proceeds past routine, reversible blocks instead of ending the turn with a question", () => {
+    // API, scheduled and other headless sessions often have no one to answer, so
+    // a question about a step with a conventional default leaves the work unfinished.
+    const autonomy = section("## Autonomy and persistence");
+    expect(autonomy).toContain(
+      "When a routine, reversible step of the task is blocked, take the conventional default without changing user or machine configuration, say which default you took in your final answer, and continue.",
+    );
+    // Asking stays right for destructive, external or unauthorized steps and for
+    // a choice with no conventional default that changes the result.
+    expect(autonomy).toContain(
+      "End the turn with a question only when the step is destructive, acts outside the workspace, needs authority the user has not given, or has no conventional default and the choice would materially change the result.",
+    );
+  });
+
   test("keeps progress updates short and skips the opening update for quick answers", () => {
     const guidance = section("## Progress updates");
     expect(guidance).not.toContain("If the request requires tools, start with a progress update");
@@ -377,6 +409,11 @@ describe("proportional effort", () => {
     expect(guidance).toContain("one short, plain sentence");
     expect(guidance).toContain(
       "Skip the opening update when you expect to answer within about 20 seconds",
+    );
+    // Hosted search runs inside one model response for 10 to 45 s; without this the
+    // person saw no text until every search had finished.
+    expect(guidance).toContain(
+      "Web searches take several seconds each, so before searching the web, write the opening update in a few words.",
     );
     expect(guidance).not.toContain("at least every two minutes");
     expect(guidance).toContain("During active work, update at meaningful milestones");
@@ -392,21 +429,22 @@ describe("proportional effort", () => {
   test("distinguishes overnight waits, meaningful monitoring, and live-attempt tool limits", () => {
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS;
     expect(guidance).not.toContain("Avoid blocking sleep or wait calls longer than 60 seconds");
-    expect(guidance).toContain("No short execution wait or preliminary status recheck is required");
-    expect(guidance).toContain("hours or days can be appropriate");
     expect(guidance).toContain("Both time out after at most 50 seconds");
     expect(guidance).toContain("pending Codemode calls need the current live attempt");
     expect(guidance).toContain(
-      "preservation of an existing deadline when answering a question during a wait",
+      "When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.",
     );
-    expect(guidance).toContain("explicit user/task/Skill monitoring cadence");
-    expect(guidance).toContain(
+    // The timeout, deadline and no-preliminary-wait rules are the
+    // wait_for_input description's (first-party-mcp-tool-policy.test.ts); the
+    // prompt no longer repeats them.
+    for (const repeated of [
+      "No short execution wait or preliminary status recheck is required",
       "remaining time is below the tool's minimum or its deadline has passed",
-    );
-    expect(guidance).toContain(
       "has not consumed immediate machine input may finish without replacing the retained wait",
-    );
-    expect(guidance).toContain("make any unavoidable deadline adjustment explicit");
+      "Avoid holding execution open with long sleeps",
+    ]) {
+      expect(guidance).not.toContain(repeated);
+    }
   });
 
   test("preserves comprehensive audits, scoped evidence reuse, and evidence-based persistence", () => {
@@ -503,12 +541,12 @@ describe("proportional effort", () => {
       videoGeneration: true,
     });
     const descriptions = new Map(index.map((entry) => [entry.name, entry.description]));
-    expect(descriptions.get("opengeni-sites")).toBeDefined();
-    expect(descriptions.get("opengeni-visualize")).toBeDefined();
+    expect(descriptions.get("sites")).toBeDefined();
+    expect(descriptions.get("visualize")).toBeDefined();
     for (const [name, description] of descriptions) {
       expect(description, name).not.toMatch(/proactively|even when the user doesn't name/i);
     }
-    expect(descriptions.get("opengeni-sites")).toContain("Use when the user asks");
-    expect(descriptions.get("opengeni-visualize")).toContain("Use when the user asks");
+    expect(descriptions.get("sites")).toContain("Use when the user asks");
+    expect(descriptions.get("visualize")).toContain("Use when the user asks");
   });
 });

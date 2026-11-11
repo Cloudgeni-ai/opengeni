@@ -27,6 +27,14 @@ export class ToolGatewayApprovalRequiredError extends Error {
   }
 }
 
+export class ToolGatewayBlockedError extends Error {
+  readonly code = "tool_blocked";
+  constructor() {
+    super("This action is blocked by your tool permissions");
+    this.name = "ToolGatewayBlockedError";
+  }
+}
+
 export class ToolGatewayCatalogIntegrityError extends Error {
   readonly code = "catalog_integrity_failed";
 
@@ -45,6 +53,11 @@ export class ToolGatewayCatalogTooLargeError extends Error {
   }
 }
 
+/**
+ * @deprecated Catalog builds no longer throw on path collisions: a colliding
+ * tool gets a disambiguated path or is left out with a warning. Kept exported
+ * so existing `instanceof` checks keep compiling.
+ */
 export class ToolGatewayPathCollisionError extends Error {
   readonly code = "tool_path_collision";
 
@@ -55,6 +68,15 @@ export class ToolGatewayPathCollisionError extends Error {
         : `Tool path ${path.join(".")} collides`,
     );
     this.name = "ToolGatewayPathCollisionError";
+  }
+}
+
+export class ToolGatewaySchemaCompilationError extends Error {
+  readonly code = "tool_schema_invalid";
+
+  constructor(cause: unknown) {
+    super("Tool is unavailable because its input or output schema is invalid", { cause });
+    this.name = "ToolGatewaySchemaCompilationError";
   }
 }
 

@@ -9,6 +9,7 @@ import type { SlashCommand } from "../src/commands/types";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
 import type { SlashCommandContext } from "../src/hooks/use-slash-commands";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
@@ -642,6 +643,41 @@ describe("compound composer framework", () => {
     expect(search.value).toBe("Needle");
   });
 
+  test("hydration autofocus preserves restored button and link focus", async () => {
+    for (const kind of ["button", "link"] as const) {
+      let setDisabled: ((value: boolean) => void) | null = null;
+      function Harness() {
+        const [disabled, set] = useState(true);
+        setDisabled = set;
+        return (
+          <>
+            {kind === "button" ? (
+              <button type="button" data-return-focus>
+                Search sessions
+              </button>
+            ) : (
+              <a href="#sessions" data-return-focus>
+                Sessions
+              </a>
+            )}
+            <ChatComposer composer={fullComposer()} disabled={disabled} autoFocus />
+          </>
+        );
+      }
+      mounted = await renderComponent(<Harness />);
+      const opener = mounted.container.querySelector<HTMLElement>("[data-return-focus]")!;
+      opener.focus();
+      await act(async () => {
+        setDisabled?.(false);
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      });
+      expect(mounted.container.querySelector("textarea")?.disabled).toBe(false);
+      expect(document.activeElement).toBe(opener);
+      await mounted.unmount();
+      mounted = null;
+    }
+  });
+
   test("autoFocus on an interactive mount focuses the composer", async () => {
     mounted = await renderComponent(<ChatComposer composer={fullComposer()} autoFocus />);
     const textarea = mounted.container.querySelector("textarea")!;
@@ -724,5 +760,37 @@ describe("compound composer framework", () => {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+
+  test("a refused send's notice tells a member to ask an owner, and the owner to add credits", async () => {
+    const refused = new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: {
+          status: 402,
+          code: "payment_required",
+          message: "Add credits to use your own key.",
+          retryable: false,
+          details: {
+            code: "byok_paid_credit_required",
+            action: { type: "add_credits", href: "/billing" },
+          },
+        },
+      }),
+    );
+    const seen: Array<string | undefined> = [];
+    function Harness({ canBuyCredits }: { canBuyCredits: boolean | undefined }) {
+      const controller = Composer.useChatComposerController({
+        delivery: delivery("ready", () => {}, { error: refused, canBuyCredits }),
+      });
+      seen.push(controller.activeNotice?.message);
+      return null;
+    }
+    mounted = await renderComponent(<Harness canBuyCredits={false} />);
+    expect(seen.at(-1)).toBe("Ask an organization owner to add credits to use your own key.");
+    await mounted.unmount();
+    mounted = await renderComponent(<Harness canBuyCredits={undefined} />);
+    expect(seen.at(-1)).toContain("Add credits to use your own key");
+    expect(seen.at(-1)).not.toContain("Ask an organization owner");
   });
 });

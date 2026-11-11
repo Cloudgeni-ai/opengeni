@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { argHint } from "../commands/registry";
 import type { SlashCommand } from "../commands/types";
 import { cn } from "../lib/cn";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type CommandPaletteProps = {
   open: boolean;
@@ -35,9 +36,11 @@ export function CommandPalette({
   onRun,
   argHintText,
   listboxId,
-  label = "Slash commands",
+  label: labelProp,
   dangerLabel = "danger",
 }: CommandPaletteProps) {
+  const t = useOpenGeniText();
+  const label = labelProp === undefined ? t("commandPalette.slashCommands") : labelProp;
   return (
     <AnimatePresence>
       {open ? (

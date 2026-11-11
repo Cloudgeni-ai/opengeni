@@ -1,5 +1,5 @@
 /* ----------------------------------------------------------------------------
-   The one menu spec, SDK side. Mirrors `apps/web/src/components/ui/menu-styles.ts`
+   The one menu spec, SDK side. Mirrors `src/ui/menu-styles.tsx`
    (and apps/web DESIGN.md "Menus and popovers") in `og-` token names so the
    SDK's menus and pickers draw the same surface and rows as the web app's.
    Change both together.

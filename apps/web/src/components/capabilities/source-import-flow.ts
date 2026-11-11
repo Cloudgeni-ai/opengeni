@@ -6,7 +6,7 @@ import type {
   PluginInstallationSummary,
   PluginPreview,
   SkillImportPreview,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 export type SourceImportKind = "skill" | "plugin";
 export type SourceImportIntent = "create" | "update";

@@ -1,0 +1,609 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { ChatClient } from "@opengeni/sdk";
+import { useOpenGeniText } from "@opengeni/react/messages";
+import {
+  organizationLandingWorkspaceId,
+  organizationsForSubject,
+  type OrgOption,
+} from "@opengeni/react/organization-model";
+import {
+  OpenGeniApiError,
+  OpenGeniClient,
+  type AccessContext,
+  type ClientConfig,
+  type ClientModel,
+  type Workspace,
+} from "@opengeni/sdk";
+import {
+  createHydratedPersistenceAdapter,
+  type OpenGeniReactNativeAdapters,
+} from "@opengeni/react-native";
+import { createExpoOpenGeniAdapters, expoStreamingFetch } from "@opengeni/react-native/expo";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { AppState } from "react-native";
+import { router, usePathname } from "expo-router";
+import {
+  forgetAccountToken,
+  loadAccounts,
+  readAccountToken,
+  sameIdentity,
+  saveAccounts,
+  type AccountsSnapshot,
+  type StoredAccount,
+  writeAccountToken,
+} from "@/account-store";
+import { planAccountPick, wayBackWhenLeaving } from "@/account-switching";
+import { openLinkFromApp } from "@/app-link-registry";
+import { recordingRequests } from "@/feedback/recent-errors";
+import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
+
+/** The deployment a new account signs in to unless the person names another. */
+export const DEFAULT_SERVER_URL = process.env.EXPO_PUBLIC_OPENGENI_URL ?? "https://app.opengeni.ai";
+
+export type AccountStatus = "loading" | "signedOut" | "ready";
+
+interface AccountState {
+  status: AccountStatus;
+  accounts: StoredAccount[];
+  /** The account in use; null while signed out. */
+  account: StoredAccount | null;
+  client: ChatClient<OpenGeniClient>;
+  adapters: OpenGeniReactNativeAdapters;
+  accessContext: AccessContext | null;
+  workspaces: Workspace[];
+  /** Organizations of the account, default first (shared web rules). */
+  organizations: OrgOption[];
+  workspace: Workspace | null;
+  /** The deployment's client configuration (defaults, model catalog). */
+  config: ClientConfig | null;
+  /** The deployment's client model catalog (labels for the composer pill). */
+  models: ClientModel[];
+  workspaceId: string | null;
+  setWorkspaceId(id: string): void;
+  /** Switch organization: its remembered workspace, else its first shared one. */
+  selectOrganization(accountId: string): void;
+  error: Error | null;
+  reload(): Promise<void>;
+  /** Sign in through the deployment's web sign-in and make it the active account. */
+  addAccount(baseUrl: string): Promise<WebSignInResult>;
+  switchAccount(id: string): void;
+  /**
+   * The person picked an account: a signed-in one becomes active at once; one
+   * that must sign in again stays inactive and answers "signIn".
+   */
+  chooseAccount(id: string): Promise<"stay" | "switched" | "signIn">;
+  /** The account in use before the current one, this run of the app. */
+  previousAccountId: string | null;
+  /**
+   * Accounts whose saved sign-in couldn't be read the last time it was tried.
+   * They are not signed out: the read may work next time.
+   */
+  unreadable: ReadonlySet<string>;
+  /**
+   * Read an account's saved sign-in again. A readable one becomes the account
+   * in use ("ready"); a missing one marks it signed out ("signIn").
+   */
+  retrySignIn(id: string): Promise<"ready" | "signIn" | "unreadable">;
+  signOut(id: string): Promise<void>;
+}
+
+const AccountContext = createContext<AccountState | null>(null);
+
+function newClient(baseUrl: string, token?: string | null): ChatClient<OpenGeniClient> {
+  return new OpenGeniClient({
+    baseUrl,
+    // The latest requests are remembered (in memory) so a feedback report can show them.
+    fetch: recordingRequests(expoStreamingFetch),
+    ...(token ? { apiKey: token } : {}),
+  }).withSessionResponse("chat");
+}
+
+function unauthorized(caught: unknown): boolean {
+  return caught instanceof OpenGeniApiError && caught.status === 401;
+}
+
+const ORG_WORKSPACE_KEY = "opengeni:native:org-workspaces:";
+
+export function AccountProvider({ children }: { children: ReactNode }) {
+  const t = useOpenGeniText();
+  const [snapshot, setSnapshot] = useState<AccountsSnapshot | null>(null);
+  const [token, setToken] = useState<{ id: string; value: string | null } | null>(null);
+  const snapshotRef = useRef<AccountsSnapshot | null>(null);
+  snapshotRef.current = snapshot;
+  const [previousAccountId, setPreviousAccountId] = useState<string | null>(null);
+  // The way back is a signed-in account: leaving a signed-out one keeps it.
+  const rememberWayBack = useCallback((current: AccountsSnapshot, nextId: string) => {
+    setPreviousAccountId((way) => wayBackWhenLeaving(current, nextId, way));
+  }, []);
+
+  useEffect(() => {
+    void loadAccounts().then(setSnapshot);
+  }, []);
+
+  const account = snapshot?.accounts.find((each) => each.id === snapshot.activeId) ?? null;
+  const accountId = account?.id ?? null;
+  const activeToken = token && token.id === accountId ? token.value : null;
+  const baseUrl = account?.baseUrl ?? DEFAULT_SERVER_URL;
+  const client = useMemo(() => newClient(baseUrl, activeToken), [baseUrl, activeToken]);
+  const adapters = useMemo(
+    () => ({
+      ...createExpoOpenGeniAdapters({
+        persistence: createHydratedPersistenceAdapter(
+          AsyncStorage,
+          `opengeni:native:${accountId ?? "signed-out"}`,
+        ),
+      }),
+      // Tapped Opengeni links open in the app when it can show them.
+      links: { openUrl: openLinkFromApp },
+    }),
+    [accountId],
+  );
+
+  const persist = useCallback(async (next: AccountsSnapshot) => {
+    snapshotRef.current = next;
+    setSnapshot(next);
+    await saveAccounts(next);
+  }, []);
+
+  const updateAccount = useCallback(
+    (id: string, patch: Partial<StoredAccount>) => {
+      const current = snapshotRef.current;
+      if (!current) return;
+      void persist({
+        ...current,
+        accounts: current.accounts.map((each) => (each.id === id ? { ...each, ...patch } : each)),
+      });
+    },
+    [persist],
+  );
+
+  const [unreadable, setUnreadable] = useState<ReadonlySet<string>>(() => new Set());
+  const noteRead = useCallback((id: string, failed: boolean) => {
+    setUnreadable((current) => {
+      if (current.has(id) === failed) return current;
+      const next = new Set(current);
+      if (failed) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  /** Mark accounts signed out, all in one save so no write undoes another. */
+  const markSignedOut = useCallback(
+    (ids: readonly string[]) => {
+      const current = snapshotRef.current;
+      if (!current || ids.length === 0) return;
+      const marks = new Set(
+        ids.filter((id) => current.accounts.some((each) => each.id === id && !each.signedOut)),
+      );
+      if (marks.size === 0) return;
+      void persist({
+        ...current,
+        accounts: current.accounts.map((each) =>
+          marks.has(each.id) ? { ...each, signedOut: true } : each,
+        ),
+      });
+    },
+    [persist],
+  );
+  // Reads of one account can overlap; only the newest one may mark it.
+  const readGenerations = useRef(new Map<string, number>());
+  // Bumped only when an account signs in or out: a credential read from
+  // before that must not set the token either.
+  const signIns = useRef(new Map<string, number>());
+  /** Reads of an account still in flight no longer count (it signed in or out). */
+  const supersedeReads = useCallback((id: string) => {
+    readGenerations.current.set(id, (readGenerations.current.get(id) ?? 0) + 1);
+    signIns.current.set(id, (signIns.current.get(id) ?? 0) + 1);
+  }, []);
+  /**
+   * Read accounts' saved sign-ins. A missing one marks the account signed
+   * out, so every menu and list shows it as it is; one that couldn't be read
+   * is only noted, since the read may work next time.
+   */
+  const checkCredentials = useCallback(
+    async (ids: readonly string[]) => {
+      const generations = ids.map((id) => {
+        const next = (readGenerations.current.get(id) ?? 0) + 1;
+        readGenerations.current.set(id, next);
+        return next;
+      });
+      const reads = await Promise.all(
+        ids.map((id) =>
+          readAccountToken(id).then(
+            (credential) => ({ credential, failed: false }),
+            () => ({ credential: null, failed: true }),
+          ),
+        ),
+      );
+      const missing: string[] = [];
+      ids.forEach((id, index) => {
+        const read = reads[index];
+        if (!read || readGenerations.current.get(id) !== generations[index]) return;
+        noteRead(id, read.failed);
+        if (!read.failed && !read.credential) missing.push(id);
+      });
+      markSignedOut(missing);
+      return reads;
+    },
+    [markSignedOut, noteRead],
+  );
+  const checkCredential = useCallback(
+    async (id: string) => {
+      const [read] = await checkCredentials([id]);
+      return read ?? { credential: null, failed: true };
+    },
+    [checkCredentials],
+  );
+
+  useEffect(() => {
+    if (!accountId) return;
+    let live = true;
+    const signIn = signIns.current.get(accountId);
+    // A failed read settles too: the account's sign-in screen offers a retry
+    // instead of loading forever. A sign-in meanwhile already set the token.
+    void checkCredential(accountId).then(({ credential }) => {
+      if (live && signIns.current.get(accountId) === signIn) {
+        setToken({ id: accountId, value: credential });
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [accountId, checkCredential]);
+
+  // The other accounts' saved sign-ins, once per launch, so the menus and the
+  // sign-in screen's list show which ones still have one.
+  const loaded = snapshot !== null;
+  useEffect(() => {
+    const current = snapshotRef.current;
+    if (!loaded || !current) return;
+    const others = current.accounts.filter(
+      (each) => each.id !== current.activeId && !each.signedOut,
+    );
+    if (others.length > 0) void checkCredentials(others.map((each) => each.id));
+  }, [loaded, checkCredentials]);
+
+  const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [config, setConfig] = useState<ClientConfig | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const retries = useRef(0);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Refreshes overlap (foreground, pull to refresh, opening the switcher); only
+  // the latest one may apply, so a slow older answer never brings back a stale list.
+  const reloadGeneration = useRef(0);
+  const models = useMemo(() => config?.models ?? [], [config]);
+
+  const reload = useCallback(async () => {
+    if (!accountId || !activeToken) return;
+    const generation = ++reloadGeneration.current;
+    try {
+      const [nextContext, next, nextConfig] = await Promise.all([
+        client.getAccessContext(),
+        client.listWorkspaces(),
+        client.getClientConfig().catch(() => null),
+      ]);
+      if (generation !== reloadGeneration.current) return;
+      setAccessContext(nextContext);
+      setWorkspaces(next);
+      if (nextConfig) setConfig(nextConfig);
+      setError(null);
+      const current = snapshotRef.current?.accounts.find((each) => each.id === accountId);
+      const kept = next.find((workspace) => workspace.id === current?.workspaceId);
+      const landing =
+        kept?.id ??
+        (nextContext.defaultAccountId
+          ? organizationLandingWorkspaceId(next, nextContext.defaultAccountId)
+          : null) ??
+        next[0]?.id ??
+        null;
+      if (current && (landing !== current.workspaceId || current.signedOut)) {
+        updateAccount(accountId, { workspaceId: landing, signedOut: false });
+      }
+      retries.current = 0;
+    } catch (caught) {
+      if (generation !== reloadGeneration.current) return;
+      if (unauthorized(caught)) {
+        updateAccount(accountId, { signedOut: true });
+      } else {
+        // A deployment that is briefly unreachable comes back on its own:
+        // retry with backoff instead of leaving the account empty.
+        const delay = Math.min(30_000, 2_000 * 2 ** retries.current);
+        retries.current += 1;
+        if (retryTimer.current) clearTimeout(retryTimer.current);
+        retryTimer.current = setTimeout(() => void reloadRef.current(), delay);
+      }
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
+    }
+  }, [accountId, activeToken, client, updateAccount]);
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
+  useEffect(() => {
+    setAccessContext(null);
+    setWorkspaces([]);
+    setConfig(null);
+    setError(null);
+    retries.current = 0;
+    void reload();
+    return () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+    };
+  }, [reload]);
+
+  // Coming back to the app refreshes the account (new workspaces, access).
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") void reloadRef.current();
+    });
+    return () => subscription.remove();
+  }, []);
+
+  const workspaceId = account?.workspaceId ?? null;
+  const setWorkspaceId = useCallback(
+    (id: string) => {
+      if (!accountId) return;
+      updateAccount(accountId, { workspaceId: id });
+      const owner = workspaces.find((workspace) => workspace.id === id)?.accountId;
+      if (owner) void AsyncStorage.setItem(`${ORG_WORKSPACE_KEY}${accountId}:${owner}`, id);
+    },
+    [accountId, updateAccount, workspaces],
+  );
+  const selectOrganization = useCallback(
+    (organizationId: string) => {
+      if (!accountId) return;
+      void AsyncStorage.getItem(`${ORG_WORKSPACE_KEY}${accountId}:${organizationId}`).then(
+        (remembered) => {
+          const landing = organizationLandingWorkspaceId(workspaces, organizationId, remembered);
+          if (landing) updateAccount(accountId, { workspaceId: landing });
+        },
+      );
+    },
+    [accountId, updateAccount, workspaces],
+  );
+
+  const addAccount = useCallback(
+    async (serverUrl: string): Promise<WebSignInResult> => {
+      const result = await signInThroughWeb(serverUrl);
+      if (result.kind !== "signedIn") return result;
+      let context: AccessContext;
+      try {
+        context = await newClient(serverUrl, result.accessToken).getAccessContext();
+      } catch (caught) {
+        return {
+          kind: "failed",
+          message: caught instanceof Error ? caught.message : "Couldn't load the account.",
+        };
+      }
+      const current = snapshotRef.current ?? { accounts: [], activeId: null };
+      const identity = { baseUrl: serverUrl, subjectId: context.subjectId };
+      const existing = current.accounts.find((each) => sameIdentity(each, identity));
+      const id = existing?.id ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+      await writeAccountToken(id, result.accessToken);
+      supersedeReads(id);
+      noteRead(id, false);
+      // Other writers (the launch check) may have saved meanwhile.
+      const latest = snapshotRef.current ?? current;
+      const known = latest.accounts.some((each) => each.id === id);
+      const stored: StoredAccount = {
+        id,
+        baseUrl: serverUrl,
+        subjectId: context.subjectId,
+        email: context.subjectLabel ?? context.subjectId,
+        workspaceId:
+          latest.accounts.find((each) => each.id === id)?.workspaceId ??
+          existing?.workspaceId ??
+          null,
+      };
+      setToken({ id, value: result.accessToken });
+      rememberWayBack(latest, id);
+      await persist({
+        accounts: known
+          ? latest.accounts.map((each) => (each.id === id ? stored : each))
+          : [...latest.accounts, stored],
+        activeId: id,
+      });
+      return result;
+    },
+    [noteRead, persist, rememberWayBack, supersedeReads],
+  );
+
+  const switchAccount = useCallback(
+    (id: string) => {
+      const current = snapshotRef.current;
+      if (!current || current.activeId === id) return;
+      if (!current.accounts.some((each) => each.id === id)) return;
+      rememberWayBack(current, id);
+      void persist({ ...current, activeId: id });
+    },
+    [persist, rememberWayBack],
+  );
+
+  const chooseAccount = useCallback(
+    async (id: string): Promise<"stay" | "switched" | "signIn"> => {
+      // The account in use stays as it is: its state comes from its own loading.
+      if (snapshotRef.current?.activeId === id) return "stay";
+      // An unreadable credential opens the sign-in too (with a retry), but
+      // only a missing one marks the account signed out.
+      const read = await checkCredential(id);
+      const current = snapshotRef.current;
+      if (!current) return "stay";
+      const pick = planAccountPick(current, id, Boolean(read.credential));
+      if (pick.kind === "signIn") return "signIn";
+      if (pick.kind === "stay") return "stay";
+      rememberWayBack(current, id);
+      await persist(pick.next);
+      return "switched";
+    },
+    [checkCredential, persist, rememberWayBack],
+  );
+
+  const retrySignIn = useCallback(
+    async (id: string): Promise<"ready" | "signIn" | "unreadable"> => {
+      const signIn = signIns.current.get(id);
+      const read = await checkCredential(id);
+      // Signed in or out while the read ran: that settled it.
+      if (signIns.current.get(id) !== signIn) return "signIn";
+      if (read.failed) return "unreadable";
+      if (!read.credential) return "signIn";
+      const current = snapshotRef.current;
+      // Removed while the read ran: nothing to go to.
+      if (!current?.accounts.some((each) => each.id === id)) return "signIn";
+      setToken({ id, value: read.credential });
+      if (current.activeId !== id) {
+        rememberWayBack(current, id);
+        await persist({ ...current, activeId: id });
+      }
+      return "ready";
+    },
+    [checkCredential, persist, rememberWayBack],
+  );
+
+  const signOut = useCallback(
+    async (id: string) => {
+      const current = snapshotRef.current;
+      const target = current?.accounts.find((each) => each.id === id);
+      if (!current || !target) return;
+      const stored = await readAccountToken(id);
+      if (stored) {
+        // Revoke on the server first; the device forgets the account either way.
+        await newClient(target.baseUrl, stored)
+          .signOutNativeApp()
+          .catch((caught: unknown) => {
+            if (__DEV__) console.warn("Native sign-out was not confirmed by the server", caught);
+          });
+      } else if (__DEV__) {
+        console.warn("Native sign-out: no stored credential for the account");
+      }
+      await forgetAccountToken(id);
+      supersedeReads(id);
+      noteRead(id, false);
+      // Other writers (the launch check) may have saved meanwhile.
+      const latest = snapshotRef.current ?? current;
+      const accounts = latest.accounts.filter((each) => each.id !== id);
+      await persist({
+        accounts,
+        activeId: latest.activeId === id ? (accounts[0]?.id ?? null) : latest.activeId,
+      });
+    },
+    [noteRead, persist, supersedeReads],
+  );
+
+  const organizations = useMemo(
+    () => (accessContext ? organizationsForSubject(t, accessContext, workspaces) : []),
+    [t, accessContext, workspaces],
+  );
+  const workspace = workspaces.find((each) => each.id === workspaceId) ?? null;
+  const tokenLoaded = token?.id === accountId;
+  const status: AccountStatus = !snapshot
+    ? "loading"
+    : !account || account.signedOut
+      ? "signedOut"
+      : !tokenLoaded
+        ? "loading"
+        : activeToken
+          ? "ready"
+          : "signedOut";
+
+  const value = useMemo<AccountState>(
+    () => ({
+      status,
+      accounts: snapshot?.accounts ?? [],
+      account,
+      client,
+      adapters,
+      accessContext,
+      workspaces,
+      organizations,
+      workspace,
+      config,
+      models,
+      workspaceId,
+      setWorkspaceId,
+      selectOrganization,
+      error,
+      reload,
+      addAccount,
+      switchAccount,
+      chooseAccount,
+      previousAccountId,
+      unreadable,
+      retrySignIn,
+      signOut,
+    }),
+    [
+      status,
+      snapshot,
+      account,
+      client,
+      adapters,
+      accessContext,
+      workspaces,
+      organizations,
+      workspace,
+      config,
+      models,
+      workspaceId,
+      setWorkspaceId,
+      selectOrganization,
+      error,
+      reload,
+      addAccount,
+      switchAccount,
+      chooseAccount,
+      previousAccountId,
+      unreadable,
+      retrySignIn,
+      signOut,
+    ],
+  );
+  return <AccountContext.Provider value={value}>{children}</AccountContext.Provider>;
+}
+
+export function useAccount(): AccountState {
+  const value = useContext(AccountContext);
+  if (!value) throw new Error("useAccount must be used inside AccountProvider");
+  return value;
+}
+
+/**
+ * What the account menus and Settings do with a picked account: switch to a
+ * signed-in one, or open the sign-in for one that is signed out over the
+ * account in use, so Cancel returns to it.
+ */
+export function usePickAccount(): (id: string, onInUse?: () => void) => void {
+  const { chooseAccount } = useAccount();
+  // A second tap while the first pick settles, or once its sheet is up,
+  // would open a second sheet. (The sheet's route also has one id, so a
+  // push that slips through goes to the open sheet.)
+  const picking = useRef(false);
+  const sheetOpen = usePathname() === "/add-account";
+  return useCallback(
+    (id: string, onInUse?: () => void) => {
+      if (picking.current || sheetOpen) return;
+      picking.current = true;
+      void chooseAccount(id)
+        .then((outcome) => {
+          if (outcome === "signIn")
+            router.push({ pathname: "/add-account", params: { account: id } });
+          else onInUse?.();
+        })
+        .catch((caught: unknown) => {
+          if (__DEV__) console.warn("Couldn't switch accounts", caught);
+        })
+        .finally(() => {
+          picking.current = false;
+        });
+    },
+    [chooseAccount, sheetOpen],
+  );
+}

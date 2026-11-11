@@ -1,123 +1,173 @@
 ---
 title: "Embed manually"
-description: "Add the full OpenGeni conversation to your product in four steps."
+description: "Add the Opengeni conversation to your product in three steps."
 icon: "code"
 ---
 
-The default integration is the complete OpenGeni conversation inside your product: `OpenGeniChat` (the user's chats plus the conversation) in the browser, backed by a packaged proxy on your backend. The browser talks only to your backend, and the organization API key never leaves it.
+You add one backend route and one component. The browser talks to your backend; your backend holds the API key and tells Opengeni who the user is.
+
+Everything on this page works on [app.opengeni.ai](https://app.opengeni.ai) today, including attachments, tool output, and approvals.
 
 ```bash
 bun add @opengeni/sdk @opengeni/react
 ```
 
-Install both packages from the same release.
+Keep all `@opengeni` packages on the same version.
 
 <Steps>
-  <Step title="Create an organization API key">
-    In **Organization settings → Developer**, create a **full-access** organization API key and store the token in your secret manager. Copy the **Organization ID** from **Organization settings → General**. Your backend needs:
+  <Step title="Get an API key">
+    Sign up at [app.opengeni.ai](https://app.opengeni.ai). In **Organization settings → Developer → API keys**, create a **full-access** key and put it in your server environment:
 
     ```bash
-    OPENGENI_API_BASE_URL=https://app.opengeni.ai   # or your self-hosted API
-    OPENGENI_ORGANIZATION_ID=...
-    OPENGENI_API_KEY=ogk_...                        # server only
+    OPENGENI_API_KEY=ogk_...   # server only
     ```
 
-    This one key is all the integration needs: it creates workspaces, adds your users as members, and creates and controls sessions as them. `GET /v1/access/me` lists only its organization grants (`account:read`, `workspace:create`, `api_keys:manage`) under `accountGrants`; that is expected. Check `credential.access` (`"full"`) and `credential.effectiveWorkspacePermissions` instead. A read-only key can inspect sessions but cannot create them. See [Authentication](/reference/authentication).
+    Self-hosting? Also pass `baseUrl` to `new Opengeni(...)` below.
 
   </Step>
-  <Step title="Onboard each user">
-    Map each tenant to an OpenGeni workspace and make each user a member, once, when your product admits them:
-
+  <Step title="Add the backend route">
     ```ts
-    import { OpenGeniClient } from "@opengeni/sdk";
+    // lib/opengeni.ts (server only)
+    import { Opengeni } from "@opengeni/sdk/chat";
 
-    export const og = new OpenGeniClient({
-      baseUrl: process.env.OPENGENI_API_BASE_URL!,
-      apiKey: process.env.OPENGENI_API_KEY!,
-    });
-    export const source = "acme-product"; // stable namespace for your user ids
-
-    export async function onboard(tenant: Tenant, user: User, operationId: string) {
-      const { workspace } = await og.ensureWorkspace({
-        accountId: process.env.OPENGENI_ORGANIZATION_ID!,
-        externalSource: source,
-        externalId: tenant.id,
-        name: tenant.name,
-      });
-      await og.addExternalWorkspaceMember(workspace.id, {
-        identity: { externalId: user.id, source },
-        permissions: [
-          "workspace:read",
-          "sessions:create",
-          "sessions:read",
-          "sessions:control",
-          "files:upload",
-          "files:read",
-          // add "mcp_servers:attach" when sessions carry per-session MCP servers
-        ],
-        operationId, // a UUID you persist first; reuse it only to retry this request
-      });
-      return workspace.id; // persist the tenant -> workspace mapping
-    }
+    export const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
     ```
 
-    `ensureWorkspace` is idempotent. Without membership the API answers `403`. See [Users, tenants & privacy](/integrate/users-and-tenants).
-
-  </Step>
-  <Step title="Mount the proxy">
-    Add one catch-all route. With the Next.js App Router, in `app/api/opengeni/[...path]/route.ts`:
-
     ```ts
+    // app/api/opengeni/[...path]/route.ts
     import { createSessionProxyRoute } from "@opengeni/sdk/next";
-    import { authenticate, verifyCsrf } from "@/lib/auth"; // your product's own checks
+    import { og } from "@/lib/opengeni";
 
     export const dynamic = "force-dynamic";
     export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
-      chats: "private", // each user's chats are theirs; "shared" lets the team see them
       resolve: async (request) => {
-        const me = await authenticate(request);
+        const me = await authenticate(request); // your existing session check
         if (!me) return new Response("Unauthorized", { status: 401 });
-        return { workspaceId: me.workspaceId, user: me.userId, source };
+        return { user: me.id, tenant: me.orgId }; // or { user: me.id } | { user: me.id, workspaceId }
       },
-      authorizeMutation: (request) => verifyCsrf(request),
-      // New chats: the browser sends only the first message; you choose the rest.
-      createSession: ({ initialMessage, idempotencyKey }) => ({
-        initialMessage,
-        idempotencyKey,
-        agent: {
-          identity: "You are Acme's assistant. Friendly and brief.",
-          capabilities: "none", // your tools plus asking questions: see "Configure the agent"
-        },
-        tools: [], // add your product's tools: see "Give the agent your data"
-        sandboxBackend: "none", // a chat-and-tools agent needs no sandbox
-      }),
+      // A lighter reasoning effort replies faster; omit it for the deployment
+      // default (often higher: deeper answers, slower replies).
+      createSession: (input) => ({ reasoningEffort: "medium", ...input }),
     });
     ```
 
-    For Express or Connect, use `app.use("/api/opengeni", toNodeMiddleware(createSessionProxyHandler(og, options)))` from `@opengeni/sdk/express`; for Hono, `app.all("/api/opengeni/*", toHonoHandler(...))` from `@opengeni/sdk/hono`. See the [SDK reference](/reference/sdk#framework-adapters). A Django, Rails, Go, PHP, or Java backend needs no Node sidecar: see [Proxy from any backend](/integrate/proxy-from-any-backend).
+    `resolve` maps your signed-in user to Opengeni. Workspaces and memberships are created on first use, so there is no onboarding step. See [Users & tenants](/integrate/users-and-tenants) for the three shapes.
+
+    When the user sends their first message in a new chat, the proxy calls your backend's `createSession` hook and creates the session as that user. The hook chooses the agent, tools, and model; see [Choose what your agent can do](#choose-what-your-agent-can-do) below.
+
+    Not on Next.js? Use the Express or Hono adapter, or `createSessionProxyHandler` from `@opengeni/sdk/session-proxy` (see [Proxy from any backend](/integrate/proxy-from-any-backend)).
 
   </Step>
   <Step title="Render the conversation">
     ```tsx
-    import { OpenGeniClient } from "@opengeni/sdk";
-    import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react/session-ui";
+    "use client";
+    import { OpenGeniChat } from "@opengeni/react";
     import "@opengeni/react/compiled.css";
 
-    const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-
-    export function Assistant({ workspaceId }: { workspaceId: string }) {
-      return (
-        <OpenGeniProvider client={client} workspaceId={workspaceId}>
-          <OpenGeniChat />
-        </OpenGeniProvider>
-      );
+    export function Assistant() {
+      return <OpenGeniChat baseUrl="/api/opengeni" />;
     }
     ```
 
-    `OpenGeniChat` lists the chats the signed-in user started (a sidebar when wide, a drawer when narrow) and starts new ones through your `createSession` hook. For an assistant bound to one record, create the session on your server as the user (`og.asUser(userId, { source }).createSession(...)` with a stable `idempotencyKey`) and render `<SessionConversation sessionId={id} />`. The stylesheet is scoped and needs no Tailwind setup. See [Conversation UI & theming](/integrate/conversation-ui).
+    `OpenGeniChat` shows the user's chats and the open conversation. For one chat tied to a record, render `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />`. The stylesheet is scoped and needs no Tailwind. See [Conversation UI & theming](/integrate/conversation-ui).
 
   </Step>
 </Steps>
+
+Chats are private to each user by default. That needs private chats enabled for your organization; if they are off, the proxy returns an error that says who can turn them on.
+
+### A backend on another origin
+
+A same-origin backend route needs no CORS configuration. If your browser calls a
+different origin, use both SDK header lists in that backend's CORS middleware:
+
+```ts
+import { OPENGENI_BROWSER_REQUEST_HEADERS, OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/sdk";
+
+const corsOptions = {
+  origin: "https://your-product.example",
+  credentials: true,
+  allowHeaders: [...OPENGENI_BROWSER_REQUEST_HEADERS],
+  exposeHeaders: [...OPENGENI_BROWSER_RESPONSE_HEADERS],
+};
+```
+
+Use your framework's equivalent of `allowHeaders` and `exposeHeaders`. Add any
+headers your product sends itself. The packaged proxy and server-route adapters
+already preserve and expose Opengeni's response metadata; middleware outside them
+must not replace that exposure list. Allowing request headers does **not** expose
+response headers. Missing exposure breaks history paging and conversation filtering;
+the SDK warns once per client when the required metadata is unreadable.
+
+### Session data and operator configuration
+
+The packaged chat UI opts into `client.withSessionResponse("chat")`. Its SDK client sends
+`Accept: application/json; opengeni-session=chat`; session reads, lists and
+mutation responses then omit `instructions`, `skills` and `effectiveTools`. The
+chat does not need these to render. An authorized settings
+page or server-side SDK caller can explicitly use
+`client.getSessionConfiguration(workspaceId, sessionId)` (`GET .../sessions/{id}/configuration`),
+which returns the full session configuration and requires `sessions:control` plus
+access to that session. There is no automatic full-configuration fallback.
+
+The SDK default itself remains unchanged: `new OpenGeniClient({ baseUrl })` returns
+the full `Session` shape. For your own chat client, use
+`client.withSessionResponse("chat")` to create a separate compact client without
+changing existing readers. Its session methods return `ChatSession`, with optional
+configuration fields for compatibility with older APIs.
+
+With a server-owned `createSession` hook, the packaged relay also refuses browser
+reads of `configuration` and `model-context`. Read operator configuration on your
+backend instead. These are response projections only: the agent's stored instructions,
+skills and model input do not change. Upgrade the API as well as the SDK; older
+APIs still return their historical full session payloads.
+
+Previously shipped clients without this Accept preference keep the historical full response.
+The packaged browser relay always adds the compact preference itself, even for older
+browser clients. A custom relay must do the same; never pass a browser's choice
+through as a way to read the legacy configuration.
+The existing `Accept` header works with older APIs' CORS allowlists; they ignore
+the new preference and continue to return the full response.
+
+## Choose what your agent can do
+
+Embedded agents can use Opengeni's built-in capabilities and your product's own tools. Configure them on your backend; the conversation component stays the same.
+
+For example, replace the route above with this configuration to give a support agent web search and your product's MCP tools, with approval required before updating a ticket:
+
+```ts
+// app/api/opengeni/[...path]/route.ts
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
+import { og } from "@/lib/opengeni";
+
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
+  resolve: async (request) => {
+    const me = await authenticate(request); // your existing session check
+    if (!me) return new Response("Unauthorized", { status: 401 });
+    return { user: me.id, tenant: me.orgId };
+  },
+  createSession: (input) => ({
+    ...input,
+    agent: {
+      identity: "You are Acme's support assistant.",
+      capabilities: { from: "none", webSearch: true },
+      renderer: "opengeni",
+    },
+    sandboxBackend: "none", // this agent uses API tools, without shell or compute tools
+  }),
+  toolServer: {
+    url: "https://app.example.com/api/mcp", // your product's MCP endpoint
+    approvals: { ask: ["update_ticket"] },
+  },
+});
+```
+
+- **Built-in capabilities:** `agent.capabilities` selects features such as web search, Knowledge, artifacts, and subagents. `from: "none"` starts with essentials such as asking questions and reading Skills; this example adds web search. Your attached product tools remain available. Use `from: "all"` to start with all capabilities, then turn individual ones off. See [Configure the agent](/integrate/configure-the-agent) for the full list and how to update an existing session.
+- **Your product's tools:** `toolServer` attaches your MCP endpoint and supplies a signed user token. You implement the endpoint, verify the token, and authorize each action against your product's data. See [Give the agent your data](/integrate/your-data) for the matching server example, tool allowlists, per-session MCP servers, and OpenAPI integrations.
+- **Approvals:** `approvals.ask` requests human approval for the named tools; the embedded conversation displays the approval. Tool selection and approval do not grant access to your data: your API still enforces the user's permissions. See [Approvals & questions](/integrate/approvals-and-questions) for saved permission choices and approval behavior.
+
+Without an explicit agent configuration, new sessions inherit the workspace and deployment defaults. Use the backend hook to choose the capabilities appropriate for your product.
 
 ## Next
 
@@ -126,7 +176,7 @@ Install both packages from the same release.
     Connect your API through MCP or OpenAPI, as the signed-in user.
   </Card>
   <Card title="Going to production" icon="rocket" href="/integrate/production">
-    Key storage, costs, versions, cleanup, and a minimal tool surface.
+    Key storage, costs, versions, and cleanup.
   </Card>
 </CardGroup>
 

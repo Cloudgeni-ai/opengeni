@@ -1,4 +1,4 @@
-// Verified against xAI's public OIDC discovery document and Grok Build 1.0.3.
+// Verified against xAI's public OIDC discovery document and the Grok CLI.
 
 export const XAI_OAUTH_ISSUER = "https://auth.x.ai";
 export const XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
@@ -20,14 +20,17 @@ export const XAI_DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:devi
 export const XAI_SUBSCRIPTION_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 export const XAI_PUBLIC_API_BASE_URL = "https://api.x.ai/v1";
 export const XAI_TOKEN_AUTH_HEADER_VALUE = "xai-grok-cli";
-export const XAI_CLIENT_VERSION = "1.0.3";
+// The Grok CLI release Opengeni presents. xAI refuses clients below its
+// minimum; scripts/xai-client-version-pin.ts keeps this on the current stable
+// release, and client-version.ts adopts a higher minimum named by a refusal.
+export const XAI_CLIENT_VERSION = "1.0.70";
 export const XAI_CLIENT_MODE = "opengeni";
 
 export const XAI_SUBSCRIPTION_PROVIDER_ID = "supergrok-subscription";
 export const XAI_SUBSCRIPTION_MODEL_ID_PREFIX = "supergrok/";
 export const XAI_SUBSCRIPTION_MODEL_SLUGS = ["grok-4.7"] as const;
 
-// Static product limits used by the OpenGeni catalog, matching the Codex seam.
+// Static product limits used by the Opengeni catalog, matching the Codex seam.
 export const XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS = 500_000;
 export const XAI_SUBSCRIPTION_EFFECTIVE_CONTEXT_PERCENT = 95;
 export const XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS = Math.floor(

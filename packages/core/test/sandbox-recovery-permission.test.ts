@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as database from "@opengeni/db";
 import {
   requireSandboxRecoveryPreviewHuman,
   getManagedHumanSandboxRecovery,
@@ -41,6 +42,15 @@ for (const [name, overrides] of [
         authorization(overrides),
         workspaceId,
         sessionId,
+        { action: "continue_fresh" } as never,
+      ),
+    ).rejects.toThrow("managed-human");
+    await expect(
+      consentManagedHumanSandboxRecovery(
+        {} as never,
+        authorization(overrides),
+        workspaceId,
+        sessionId,
         {} as never,
       ),
     ).rejects.toThrow("managed-human");
@@ -61,6 +71,40 @@ test("read-only grant and wrong tenant cannot authorize consent", async () => {
       {} as never,
     ),
   ).rejects.toThrow("managed-human");
+});
+
+test("the exact local human may select recovery but an actor-hidden group member never grants reset authority", async () => {
+  const local = authorization({
+    authenticatedSubjectId: "dev",
+    canonicalManagedHumanSession: false,
+    canonicalLocalHumanSession: true,
+  });
+  local.grant.subjectId = "dev";
+  local.grant.principalKind = "human_session";
+  const hiddenId = crypto.randomUUID();
+  // No host authorization port: core's historical standalone missing-target
+  // result is null, which must not be mistaken for group-control permission.
+  const facts = spyOn(database, "getSessionAuthorizationFacts").mockResolvedValue({
+    target: null,
+    caller: null,
+  } as never);
+  const persist = spyOn(database, "consentPublicSandboxRecovery").mockImplementation(
+    async (db, input) => {
+      expect(input.canControlMember).toBeDefined();
+      expect(await input.canControlMember!(db, hiddenId)).toBe(false);
+      return { outcome: "accepted" } as never;
+    },
+  );
+  try {
+    await consentManagedHumanSandboxRecovery({ db: {} } as never, local, workspaceId, sessionId, {
+      action: "continue_fresh",
+    } as never);
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(facts).toHaveBeenCalledTimes(2);
+  } finally {
+    persist.mockRestore();
+    facts.mockRestore();
+  }
 });
 
 test("the exact built-in local human may preview but cannot submit managed-human consent", async () => {

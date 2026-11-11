@@ -12,11 +12,11 @@ import { CheckIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { useState } from "react";
 
 import { AuthApiError, resetPassword } from "@/api";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Notice } from "@/components/ui/notice";
-import { apiErrorAdvice } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { Notice } from "@opengeni/react/ui/notice";
+import { apiErrorAdvice } from "@opengeni/react/ui/api-error";
 
 // Minimum matches the sign-up form's `password.length < 8` rule so the two
 // screens agree on what a valid password is.

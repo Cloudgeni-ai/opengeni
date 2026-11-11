@@ -20,8 +20,13 @@
 //
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
+import type { EventBus } from "@opengeni/events";
+import { publishDurableSessionEvents } from "./session-event-fanout";
+import { backgroundCommandWakeSender } from "@opengeni/core";
+import type { WakeSessionWorkflowSignal } from "./activities/types";
 import {
   effectiveSandboxLifecycle,
+  sandboxProviderMaxRemainingLifetimeMs,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
@@ -32,6 +37,7 @@ import { retainsHolderForWarmCapture } from "./warm-capture-holder";
 import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
+  signalBackgroundCommandWakes,
   beginSandboxRematerialization,
   sessionHoldsFreshWorkspaceRecovery,
   claimWorkspaceArchiveCapture,
@@ -49,17 +55,20 @@ import {
   registerSandboxCheckpointArtifact,
   recordWarmingSandboxCreated,
   reinstateTurnLeaseHolder,
+  leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
   releaseLeaseHolder,
   touchLeaseHolder,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
   SandboxLeaseTransitionError,
+  waitWhileLeaseWarming,
   type Database,
-  type LeaseHolderKind,
 } from "@opengeni/db";
 import {
   captureWorkspaceArchiveForStorage,
+  ComputeSandboxSession,
+  type ComputeTurnDeps,
   disposeWorkspaceArchive,
   type VerifiedWorkspaceArchivePayload,
   describeLegacyNativeSnapshotArchive,
@@ -72,6 +81,7 @@ import {
   parseWorkspaceArchiveDescriptor,
   providerWorkspaceCapturePolicy,
   SandboxProviderContinuityUnavailableError,
+  SandboxProviderWorkspaceAbsentError,
   requirePersistableReplacementSandboxEnvelope,
   renewSandboxProviderExpiration,
   modalSessionMatchesCheckpointProviderBinding,
@@ -81,8 +91,10 @@ import {
   terminateUnpublishedSandboxSession,
   verifySandboxExecReadiness,
   withoutSandboxProviderIdentity,
+  workspaceArchiveDownloadTemporaryDirectory,
   type EstablishedSandboxSession,
   type RuntimeMetricsHooks,
+  type WorkspaceCaptureSkipReason,
   type SandboxReadinessReplacementOutcome,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
@@ -99,9 +111,7 @@ import {
   persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "./sandbox-archive-storage";
-
-// Re-exported for callers that just want the ack-kind union.
-export type ResumeHolderKind = LeaseHolderKind;
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * The durable identity of a turn holding a shared sandbox lease.
@@ -164,6 +174,9 @@ export type SandboxResumeServices = {
    * replacement. Production uses {@link freshSandboxReadinessReplacementDelayMs}.
    * It may be async so a test can observe the rolled-back lease in between. */
   freshSandboxReadinessReplacementDelayMs?: () => number | Promise<number>;
+  /** Test seam: runs immediately after the elected spawner published its box
+   * warm, before the final cancellation check. */
+  onSpawnedSandboxPublished?: () => void | Promise<void>;
   /**
    * The turn attempt's fresh-box readiness replacement budget. The lazy
    * provisioner may call resumeBoxForTurn again after a typed lease
@@ -171,6 +184,15 @@ export type SandboxResumeServices = {
    * call. Absent, the call gets its own single replacement.
    */
   freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
+  /** Live fanout for background commands a provider loss settled. */
+  bus?: EventBus | null;
+  /** Wakes a session waiting on a background command this resume settles as
+   * lost. Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: WakeSessionWorkflowSignal | null | undefined;
+  /** One turn's journal, background-command ledger and metering, bound onto a
+   * compute box's agent session before the turn receives it. Other backends
+   * ignore it. */
+  computeTurn?: ComputeTurnDeps;
   /** Called only by the observer that wins the exact warm->cold loss CAS. */
   onSandboxLost?: (input: {
     sandboxGroupId: string;
@@ -178,6 +200,16 @@ export type SandboxResumeServices = {
     leaseEpoch: number;
   }) => Promise<void>;
 };
+
+/** A compute box's agent session, bound with the turn's own deps. The binding
+ * shares the box's live state; only the turn-scoped hooks differ. */
+function bindComputeTurn(
+  established: EstablishedSandboxSession,
+  turn: ComputeTurnDeps | undefined,
+): EstablishedSandboxSession {
+  if (!turn || !(established.session instanceof ComputeSandboxSession)) return established;
+  return { ...established, session: established.session.bindTurn(turn) as never };
+}
 
 export type ResumeBoxIds = {
   accountId: string;
@@ -255,7 +287,7 @@ export class SandboxProvisionStageError extends Error {
     public readonly stage: SandboxProvisionFailureStage,
     public readonly source: unknown,
   ) {
-    super(source instanceof Error ? source.message : String(source), { cause: source });
+    super(errorMessage(source), { cause: source });
   }
 }
 
@@ -433,10 +465,6 @@ export class SandboxLeaseInstanceLostError extends SandboxLeaseSupersededError {
 // Bounded poll while a sibling spawner is mid cold-restore. The wait budget is
 // user-facing and separate from the lease TTL heartbeat/reaper horizon.
 const WARMING_POLL_INTERVAL_MS = 250;
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * A remote provider may return a sandbox handle before its command router
@@ -781,16 +809,23 @@ export type WarmWorkspaceSnapshotPromise = Promise<boolean> & {
   readonly settled: Promise<void>;
 };
 
+/** Who owns a warm checkpoint: the exact turn attempt holding the box, or
+ * (`idleCheckpoint`) the reaper checkpointing a box that no turn holds and
+ * viewers, interactions or running background commands keep warm. The idle
+ * owner is fenced by its exact capture claim alone and is limited to
+ * point-in-time Modal captures. */
+export type WarmWorkspaceSnapshotOwner = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+} & (
+  | { sessionId: string; turnId: string; attemptId: string; idleCheckpoint?: never }
+  | { idleCheckpoint: true; sessionId?: never; turnId?: never; attemptId?: never }
+);
+
 export function maybePersistWarmWorkspaceSnapshot(
   services: SandboxResumeServices,
-  ids: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    sandboxGroupId: string;
-  },
+  ids: WarmWorkspaceSnapshotOwner,
   session: unknown,
   leaseEpoch: number,
   signal?: AbortSignal,
@@ -826,14 +861,7 @@ export function maybePersistWarmWorkspaceSnapshot(
 
 async function persistWarmWorkspaceSnapshot(
   services: SandboxResumeServices,
-  ids: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    sandboxGroupId: string;
-  },
+  ids: WarmWorkspaceSnapshotOwner,
   session: unknown,
   leaseEpoch: number,
   signal: AbortSignal | undefined,
@@ -852,6 +880,16 @@ async function persistWarmWorkspaceSnapshot(
       else console.warn(message, fields);
     } catch {
       // Diagnostics cannot change provider settlement or capture-gate cleanup.
+    }
+  };
+  const reportSkipped = (backend: unknown, reason: WorkspaceCaptureSkipReason): void => {
+    try {
+      services.sandboxMetrics?.onWorkspaceCaptureSkipped?.({
+        backend: typeof backend === "string" ? backend : "unknown",
+        reason,
+      });
+    } catch {
+      // Telemetry never changes whether a checkpoint is attempted.
     }
   };
   const intervalMs = settings.sandboxSnapshotIntervalMs;
@@ -874,12 +912,13 @@ async function persistWarmWorkspaceSnapshot(
     console.error("mid-session workspace snapshot skipped (no persist primitive)", {
       backendId: typeof persistable.backendId === "string" ? persistable.backendId : null,
     });
+    reportSkipped(persistable.backendId, "no_persist_primitive");
     return false;
   }
   // Filesystem and directory snapshots create retained Images without
   // terminating the source Sandbox. (Modal's termination warning applies to
   // memory snapshots.) They are therefore the preferred warm-checkpoint path:
-  // the durable capture gate pauses OpenGeni commands while the provider reads
+  // the durable capture gate pauses Opengeni commands while the provider reads
   // the filesystem, then the same live instance continues serving the turn.
   const workspacePersistence =
     persistable.state?.workspacePersistence ??
@@ -899,7 +938,8 @@ async function persistWarmWorkspaceSnapshot(
       lease?.liveness === "draining" &&
       lease.instanceId !== null &&
       lease.leaseEpoch === leaseEpoch;
-    if (!lease || (!canWarmCapture && !canForceDrainingCapture)) {
+    const turnOwner = ids.idleCheckpoint === true ? null : ids;
+    if (!lease || (!canWarmCapture && (!canForceDrainingCapture || !turnOwner))) {
       console.error("mid-session workspace snapshot skipped (lease not warm)", {
         sandboxGroupId: ids.sandboxGroupId,
         expectedEpoch: leaseEpoch,
@@ -907,12 +947,15 @@ async function persistWarmWorkspaceSnapshot(
         leaseEpoch: lease?.leaseEpoch ?? null,
         hasInstance: lease?.instanceId !== null && lease?.instanceId !== undefined,
       });
+      reportSkipped(lease?.backend ?? persistable.backendId, "lease_not_warm");
       return false;
     }
     // A checkpoint of this exact mutation generation already protects every
     // settled operation admitted so far. Capturing it again cannot improve the
-    // recovery point, even when the wall-clock interval has elapsed.
-    if (lease.archiveComplete) {
+    // recovery point, even when the wall-clock interval has elapsed. An
+    // attached viewer or interaction can write without advancing the
+    // generation; the claim then decides whether the box is really clean.
+    if (lease.archiveComplete && !leaseMayHaveUntrackedWriters(lease)) {
       return false;
     }
     if (lease.instanceId === null) {
@@ -927,11 +970,25 @@ async function persistWarmWorkspaceSnapshot(
         backend: lease.backend,
         liveInstance: capturePolicy?.liveInstance ?? null,
       });
+      reportSkipped(lease.backend, "capture_policy");
+      return false;
+    }
+    if (!force && capturePolicy.warmCheckpoints === "forced_only") {
+      // The provider persists the live sandbox itself: reading it for a
+      // periodic recovery point would only cost a capture (and on compute,
+      // keep the sandbox awake).
+      reportSkipped(lease.backend, "capture_policy");
       return false;
     }
     const nativeModalPersistence =
       workspacePersistence === "snapshot_filesystem" ||
       workspacePersistence === "snapshot_directory";
+    if (!turnOwner && !nativeModalPersistence) {
+      // Only a paused-box image may run around the commands keeping an idle
+      // box warm; a file-by-file read of the running box could tear.
+      reportSkipped(lease.backend, "capture_policy");
+      return false;
+    }
     const checkpointBinding = nativeModalPersistence
       ? await resolveModalCheckpointBindingBeforeCapture(settings, persistable, signal)
       : null;
@@ -951,25 +1008,31 @@ async function persistWarmWorkspaceSnapshot(
       minIntervalMs: force ? 0 : intervalMs,
       providerReplaySafe: capturePolicy.takeover === "same_request",
       takeoverSafe: capturePolicy.takeover !== "exclusive",
-      ...(captureLiveness === "warm"
-        ? {
-            warmAttempt: {
-              sessionId: ids.sessionId,
-              turnId: ids.turnId,
-              attemptId: ids.attemptId,
-              holderId: sandboxLeaseHolderIdForAttempt(ids.attemptId),
-            },
-          }
-        : {}),
+      // Modal pauses the box for a native snapshot, so the image is one
+      // instant even while background commands run.
+      pointInTimeCapture: nativeModalPersistence,
+      ...(captureLiveness !== "warm"
+        ? {}
+        : turnOwner
+          ? {
+              warmAttempt: {
+                sessionId: turnOwner.sessionId,
+                turnId: turnOwner.turnId,
+                attemptId: turnOwner.attemptId,
+                holderId: sandboxLeaseHolderIdForAttempt(turnOwner.attemptId),
+              },
+            }
+          : { idleCheckpoint: true }),
     });
     if (claimed.status !== "claimed") {
       // A scheduled interval not being due is normal, including after a failed
       // attempt. Do not turn every ten-second heartbeat into an error log.
-      if (claimed.status === "throttled") return false;
+      if (claimed.status === "throttled" || claimed.status === "clean") return false;
       console.error("mid-session workspace snapshot skipped (capture claim)", {
         sandboxGroupId: ids.sandboxGroupId,
         status: claimed.status,
       });
+      reportSkipped(lease.backend, claimed.status);
       return false;
     }
 
@@ -1016,10 +1079,20 @@ async function persistWarmWorkspaceSnapshot(
         reason,
       }).catch(() => undefined);
     };
-    // The SDK capture itself is not cancellable. Keep one owned continuation
+    // A provider-native capture is not cancellable. Keep one owned continuation
     // alive through provider settlement even if this caller's bounded wait or
     // turn signal resolves first. Its finally block is the only normal release
     // of the exact admission gate; a late callback cannot release a successor.
+    // A host-backed spool capture reads the workspace locally, so it is
+    // stopped at the snapshot timeout instead: its rejection is the physical
+    // end of the reads, and holding the write fence for an unbounded local
+    // read would turn a slow host into failed workspace writes.
+    const captureAbort = new AbortController();
+    const captureAbortTimer = setTimeout(
+      () => captureAbort.abort(new SnapshotTimeoutError(settings.sandboxSnapshotTimeoutMs)),
+      settings.sandboxSnapshotTimeoutMs,
+    );
+    captureAbortTimer.unref?.();
     const captureAndPublish = (async (): Promise<boolean> => {
       const captureStarted = performance.now();
       let captureOutcome: "completed" | "failed" = "failed";
@@ -1033,9 +1106,11 @@ async function persistWarmWorkspaceSnapshot(
           {
             requestId: claimed.claim.providerRequestId,
             strategy: capturePolicy.strategy,
+            signal: captureAbort.signal,
           },
           Boolean(services.objectStorage),
         );
+        clearTimeout(captureAbortTimer);
         candidate = await registerCandidate(archive);
         const archiveDescriptor = archive.descriptor;
         const published = await putVersion1TarArchiveOrInline({
@@ -1055,9 +1130,13 @@ async function persistWarmWorkspaceSnapshot(
             persistWarmSnapshot(db, {
               accountId: ids.accountId,
               workspaceId: ids.workspaceId,
-              sessionId: ids.sessionId,
-              turnId: ids.turnId,
-              attemptId: ids.attemptId,
+              ...(turnOwner
+                ? {
+                    sessionId: turnOwner.sessionId,
+                    turnId: turnOwner.turnId,
+                    attemptId: turnOwner.attemptId,
+                  }
+                : { idleCheckpoint: true as const }),
               sandboxGroupId: ids.sandboxGroupId,
               expectedEpoch: leaseEpoch,
               expectedInstanceId: instanceId,
@@ -1080,6 +1159,7 @@ async function persistWarmWorkspaceSnapshot(
           await abandonCandidate(candidate.id, "snapshot_capture_failed");
         throw error;
       } finally {
+        clearTimeout(captureAbortTimer);
         await disposeWorkspaceArchive(archive).catch(() => {
           console.warn("workspace archive spool cleanup failed");
         });
@@ -1572,6 +1652,12 @@ async function resumeBoxForTurnOnce(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    // Set once commitWarmingToWarm publishes this box. From then on the box is
+    // the group's shared, attachable workspace: a later cancellation (Pause,
+    // Steer, worker shutdown) only drops this attempt's holder. Terminating it
+    // here would hand the next attempt a warm lease naming a dead box, whose
+    // exact-id resume then records a lost workspace that never lost anything.
+    let published = false;
     let providerCreateOperationId: string | undefined;
     let providerCreateBindingKey: string | undefined;
     let rematerialization: {
@@ -1715,10 +1801,12 @@ async function resumeBoxForTurnOnce(
           ? {
               loadHostWorkspaceArchive: async (ref) => {
                 try {
-                  return await downloadWorkspaceArchiveSpool(services.objectStorage!, ref.key, {
-                    bytes: ref.bytes,
-                    sha256: ref.sha256,
-                  });
+                  return await downloadWorkspaceArchiveSpool(
+                    services.objectStorage!,
+                    ref.key,
+                    { bytes: ref.bytes, sha256: ref.sha256 },
+                    { temporaryDirectory: workspaceArchiveDownloadTemporaryDirectory },
+                  );
                 } catch (error) {
                   if (error instanceof WorkspaceArchiveStorageError) {
                     throw new WorkspaceArchiveIntegrityError(error.code, error.message, {
@@ -1732,6 +1820,11 @@ async function resumeBoxForTurnOnce(
             }
           : {}),
         backendOverride: ids.backend as never,
+        createIdentity: {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+        },
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         ...(services.logicalFallbackSettings
@@ -2017,13 +2110,25 @@ async function resumeBoxForTurnOnce(
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
       }
+      published = true;
       holderLeaseHeartbeat = {
         expectedEpoch: committed.lease.leaseEpoch,
         leaseTtlMs,
       };
+      await services.onSpawnedSandboxPublished?.();
       throwIfReleasedOrCancelled();
-      return { established, leaseEpoch: committed.lease.leaseEpoch, release };
+      return {
+        established: bindComputeTurn(established, services.computeTurn),
+        leaseEpoch: committed.lease.leaseEpoch,
+        release,
+      };
     } catch (error) {
+      if (published) {
+        // The published warm box stays for the replacement attempt to resume
+        // by exact provider id; ordinary idle drain owns its capture/teardown.
+        await release();
+        throw error;
+      }
       if (error instanceof SandboxLeaseSupersededError) {
         await terminateEstablishedSandbox(createdEstablished);
         await release();
@@ -2037,6 +2142,9 @@ async function resumeBoxForTurnOnce(
       // tracked backstops, and we must not erase the only provider pointer.
       if (terminated) {
         const continuityUnavailable = error instanceof SandboxProviderContinuityUnavailableError;
+        // Only proof that the workspace itself is gone ends its lineage as a
+        // loss; otherwise the receipt is retired for an archive restore.
+        const workspaceAbsent = error instanceof SandboxProviderWorkspaceAbsentError;
         if (rematerialization && !createdEstablished?.providerContinuity) {
           await failSandboxRematerialization(db, {
             accountId: ids.accountId,
@@ -2055,6 +2163,7 @@ async function resumeBoxForTurnOnce(
                 ? error.retryable
                 : true,
             ...(continuityUnavailable ? { discardContinuity: true } : {}),
+            ...(workspaceAbsent ? { providerWorkspaceAbsent: true } : {}),
           });
         } else {
           await failWarmingToCold(db, {
@@ -2063,6 +2172,7 @@ async function resumeBoxForTurnOnce(
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
             ...(continuityUnavailable ? { discardContinuity: true } : {}),
+            ...(workspaceAbsent ? { providerWorkspaceAbsent: true } : {}),
           });
         }
       }
@@ -2120,7 +2230,7 @@ async function resumeBoxForTurnOnce(
       });
       throwIfReleasedOrCancelled();
       // A durable `warm` row is an ownership assertion, not provider liveness.
-      // A provider may have ended the exact box while OpenGeni was idle. Prove
+      // A provider may have ended the exact box while Opengeni was idle. Prove
       // the command router before handing the session to the
       // agent so terminal evidence enters the atomic warm->cold recovery path
       // below instead of surfacing inside a model-visible tool call.
@@ -2153,13 +2263,26 @@ async function resumeBoxForTurnOnce(
         expectedEpoch: leaseEpoch,
         expectedInstanceId: live.instanceId,
         expectedBackend: ids.backend,
+        providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+          settings,
+          ids.backend as Settings["sandboxBackend"],
+        ),
       });
       if (marked.status === "marked") {
+        await publishDurableSessionEvents(
+          services.bus,
+          ids.workspaceId,
+          marked.backgroundCommandEvents,
+        );
         await services.onSandboxLost?.({
           sandboxGroupId: ids.sandboxGroupId,
           instanceId: live.instanceId,
           leaseEpoch: marked.lease.leaseEpoch,
         });
+        await signalBackgroundCommandWakes(
+          marked.backgroundCommandWakes,
+          backgroundCommandWakeSender(services.wakeSessionWorkflow),
+        );
         throw new SandboxLeaseInstanceLostError(
           ids.sandboxGroupId,
           marked.lease.leaseEpoch,
@@ -2172,7 +2295,11 @@ async function resumeBoxForTurnOnce(
       );
     }
     throwIfReleasedOrCancelled();
-    return { established, leaseEpoch, release };
+    return {
+      established: bindComputeTurn(established, services.computeTurn),
+      leaseEpoch,
+      release,
+    };
   } catch (error) {
     await release();
     recordSandboxWarmingTimeout(services.sandboxMetrics, error);
@@ -2191,53 +2318,67 @@ async function waitForWarm(
   ids: ResumeBoxIds,
 ): Promise<{ leaseEpoch: number }> {
   const { db, settings } = services;
-  const deadline = Date.now() + settings.sandboxWarmingTimeoutMs;
-  let instanceId: string | null = null;
-  while (Date.now() < deadline) {
-    await sleep(WARMING_POLL_INTERVAL_MS);
-    const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-    if (!lease) {
-      // Lease vanished (cold-reaped). Re-dispatch from scratch.
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, 0);
-    }
-    instanceId = lease.instanceId;
-    if (lease.liveness === "warm") {
-      return { leaseEpoch: lease.leaseEpoch };
-    }
-    if (lease.liveness === "draining") {
-      // The warming attempt either failed into drain or committed+released before
-      // this waiter observed it. Re-dispatch so acquireLease can re-arm or spawn
-      // through the normal path.
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
-    }
-    if (lease.liveness === "cold") {
-      if (isRetryableDegradedRestore(lease.recovery.restore)) {
-        // The elected spawner hit a transient archive verification failure.
-        // Re-enter admission so one caller can become the next fenced spawner;
-        // the archive remains authoritative and must not become terminal.
-        throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
-      }
-      if (
-        lease.recovery.restore.status === "degraded" ||
-        lease.recovery.restore.status === "unrecoverable"
-      ) {
-        throw new SandboxLeaseRecoveryBlockedError(
-          ids.sandboxGroupId,
-          lease.leaseEpoch,
-          lease.recovery.restore.status === "degraded"
-            ? "restore_degraded"
-            : "restore_unrecoverable",
-          lease.recovery,
-        );
-      }
-      // The spawner died; re-dispatch so the normal acquireLease path can win
-      // cold->warming and run the full spawner branch.
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
-    }
-    // still warming — keep polling.
+  let lease: Awaited<ReturnType<typeof waitWhileLeaseWarming>>;
+  try {
+    // A cancelled waiter owns no box and must not keep polling for up to the
+    // warming budget: its activity finalizer joins this exact promise.
+    lease = await waitWhileLeaseWarming(db, ids.workspaceId, ids.sandboxGroupId, {
+      timeoutMs: settings.sandboxWarmingTimeoutMs,
+      pollMs: WARMING_POLL_INTERVAL_MS,
+      signal: services.cancellationSignal,
+    });
+  } catch (error) {
+    if (!services.cancellationSignal?.aborted) throw error;
+    throw services.cancellationSignal.reason instanceof Error
+      ? services.cancellationSignal.reason
+      : new Error("Sandbox warming wait was cancelled with its owning turn attempt");
   }
-  throw new SandboxSiblingWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs, {
-    sandboxGroupId: ids.sandboxGroupId,
-    instanceId,
-  });
+  if (!lease) {
+    // Lease vanished (cold-reaped). Re-dispatch from scratch.
+    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, 0);
+  }
+  if (lease.liveness === "warm") {
+    return { leaseEpoch: lease.leaseEpoch };
+  }
+  if (lease.liveness === "draining") {
+    // The warming attempt either failed into drain or committed+released before
+    // this waiter observed it. Re-dispatch so acquireLease can re-arm or spawn
+    // through the normal path.
+    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+  }
+  if (lease.liveness === "cold") {
+    if (isRetryableDegradedRestore(lease.recovery.restore)) {
+      // The elected spawner hit a transient archive verification failure.
+      // Re-enter admission so one caller can become the next fenced spawner;
+      // the archive remains authoritative and must not become terminal.
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+    }
+    if (
+      lease.recovery.restore.status === "degraded" ||
+      lease.recovery.restore.status === "unrecoverable"
+    ) {
+      throw new SandboxLeaseRecoveryBlockedError(
+        ids.sandboxGroupId,
+        lease.leaseEpoch,
+        lease.recovery.restore.status === "degraded" ? "restore_degraded" : "restore_unrecoverable",
+        lease.recovery,
+      );
+    }
+    // The spawner died; re-dispatch so the normal acquireLease path can win
+    // cold->warming and run the full spawner branch.
+    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+  }
+  // The wait budget bounds this activity, not the elected creator's work.
+  // Large verified restores can exceed it while the creator keeps its warming
+  // lease alive. Yield to same-turn lifecycle recovery without replacing that
+  // box. Only the creator renews warming expiry; an abandoned owner still goes
+  // through the normal reaper and epoch fence on the next admission.
+  throw new SandboxLeaseTransitionError(
+    ids.sandboxGroupId,
+    lease.leaseEpoch,
+    "provider_recovery_in_progress",
+    lease.backend,
+    lease.instanceId,
+    lease.liveness,
+  );
 }

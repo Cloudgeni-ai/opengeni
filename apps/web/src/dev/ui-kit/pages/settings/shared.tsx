@@ -1,11 +1,11 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { CirclePauseIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { DisabledReason } from "@/components/ui/disabled-reason";
-import { Notice } from "@/components/ui/notice";
-import { formatAbsoluteTime, formatRelativeTime } from "@/components/ui/relative-time";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { Button } from "@opengeni/react/ui/button";
+import { DisabledReason } from "@opengeni/react/ui/disabled-reason";
+import { Notice } from "@opengeni/react/ui/notice";
+import { formatAbsoluteTime, formatRelativeTime } from "@opengeni/react/ui/relative-time";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 
 import { KIT_NOW, KIT_TIME_ZONE } from "../../fixtures";
 import { ADMIN_ONLY_REASON } from "./data";

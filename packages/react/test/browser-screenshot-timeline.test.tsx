@@ -156,6 +156,46 @@ describe("browser screenshot timeline", () => {
     }
   });
 
+  test("a look at a computer's screen shows its screenshot without repeating the step's title", async () => {
+    const tool = item("interaction__computer_observe", {
+      ...browserReceipt,
+      kind: "computer_screenshot",
+    });
+    const Renderer = defaultToolRegistry.resolve(tool);
+    const createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: () => "blob:computer-screenshot",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: () => {} });
+    try {
+      const rendered = await renderComponent(
+        <Renderer
+          item={tool}
+          loadRetainedScreenshot={async () => Uint8Array.of(0xff, 0xd8, 0xff, 0xd9)}
+        />,
+      );
+      await flush();
+      await flush();
+      const trigger = rendered.container.querySelector<HTMLElement>('[role="button"]');
+      expect(trigger).not.toBeNull();
+      await act(async () => trigger!.click());
+      await flush();
+      expect(
+        rendered.container.querySelectorAll('img[src="blob:computer-screenshot"]').length,
+      ).toBeGreaterThan(0);
+      expect(rendered.container.querySelector("figure img")).not.toBeNull();
+      expect(rendered.container.querySelector("figcaption")).toBeNull();
+      await rendered.unmount();
+    } finally {
+      if (createDescriptor) Object.defineProperty(URL, "createObjectURL", createDescriptor);
+      else Reflect.deleteProperty(URL, "createObjectURL");
+      if (revokeDescriptor) Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+      else Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
+  });
+
   test("browser observe image shares the renderer; an expired receipt stays unavailable", async () => {
     const observed = item("interaction__browser_observe", browserReceipt);
     const Renderer = defaultToolRegistry.resolve(observed);

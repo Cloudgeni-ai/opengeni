@@ -5,6 +5,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import {
   controllerCacheAllowsHostFetch,
+  controllerHasCacheableDataPlane,
   controllerCachedUrlIsUsable,
   isOpenSandboxSignedControllerUrl,
   shouldPersistControllerDataPlaneUrl,
@@ -362,5 +363,19 @@ describe("signed controller cache", () => {
     expect(controllerCachedUrlIsUsable(fresh)).toBe(true);
     expect(controllerCachedUrlIsUsable(expired)).toBe(false);
     expect(controllerCachedUrlIsUsable(native)).toBe(true);
+  });
+});
+
+describe("controllerHasCacheableDataPlane", () => {
+  test("caches exposed-port controllers, never agent-native ones", () => {
+    const resolveExposedPort = async () => ({ host: "box.example.test", port: 443, tls: true });
+    const ensureBrowserControl = async () => ({ port: 9222, sidecarGeneration: "1" });
+    // Modal-style home sandbox: browserd behind an exposed port.
+    expect(controllerHasCacheableDataPlane({ resolveExposedPort })).toBe(true);
+    // A compute sandbox's agent: its controller lives behind the agent session.
+    expect(controllerHasCacheableDataPlane({ resolveExposedPort, ensureBrowserControl })).toBe(
+      false,
+    );
+    expect(controllerHasCacheableDataPlane({})).toBe(false);
   });
 });

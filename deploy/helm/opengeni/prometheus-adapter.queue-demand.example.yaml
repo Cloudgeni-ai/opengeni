@@ -1,0 +1,53 @@
+# Fragment for the official prometheus-community/prometheus-adapter chart
+# (5.3.0 / adapter v0.12.0). Merge with your existing authenticated Prometheus
+# connection and APIService/TLS values; this file installs nothing itself.
+# SOURCE-BOUND example identity: namespace/release opengeni, production,
+# Temporal default, opengeni-runs-ts-turns. Replace ALL five literals in discovery
+# and EVERY query selector with the identity labels on EVERY rendered scaler rule.
+# Do not replace this fence with request-only LabelMatchers: partial API queries
+# must never select another environment/Temporal namespace/queue.
+rules:
+  default: false
+  custom:
+    # Keep the existing agent-only Pods metric during the initial opt-in.
+    - seriesQuery: 'opengeni_turns_inflight{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: namespace}
+          pod: {resource: pod}
+      name:
+        as: opengeni_turns_inflight
+      metricsQuery: 'max(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+    # Namespace Object metrics: discovery AND queries bind the source identity.
+    # The HPA also supplies all five labels as exact request LabelMatchers.
+    - seriesQuery: '{__name__=~"opengeni_turn_worker_(demand|queued|busy)",namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns"}'
+      resources:
+        overrides:
+          namespace: {resource: namespace}
+      name:
+        matches: '^(opengeni_turn_worker_(demand|queued|busy))$'
+        as: '${1}'
+      # No lookback resurrection on stalled/evaluation-error rule groups.
+      # An empty/error result must remain missing at custom.metrics, not zero.
+      # Pair value and expiry from the SAME evaluation and complete label cohort
+      # BEFORE aggregation. A fresh expiry cannot renew an older count, nor can
+      # an old expiry authorize a newly observed fleet. Do not join by namespace
+      # alone: disjoint HA/exporter series must never lend each other deadlines.
+      metricsQuery: |
+        max(
+          <<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} >= 0
+          and <<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} < +Inf
+          and (time() - timestamp(<<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) < 30)
+          and (time() - timestamp(<<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) >= -5)
+          and ignoring (__name__) (
+            timestamp(<<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>})
+            == ignoring (__name__)
+            timestamp(<<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>})
+          )
+          and ignoring (__name__) (
+            <<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} > time()
+            and <<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} <= time() + 65
+            and (time() - timestamp(<<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) < 30)
+            and (time() - timestamp(<<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) >= -5)
+          )
+        ) by (<<.GroupBy>>)

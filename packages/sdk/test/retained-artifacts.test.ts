@@ -110,6 +110,29 @@ describe("retained sandbox file wire validation", () => {
     expect(parseSandboxFileArtifactReceipt(JSON.stringify(receipt), workspaceId)).toEqual(receipt);
   });
 
+  test("accepts who can open the file, and only that exact shape", () => {
+    const withAccess = {
+      ...receipt,
+      access: { visibility: "private" as const, whoCanOpen: "Only Ada can open this file." },
+    };
+    expect(parseSandboxFileArtifactReceipt(withAccess, workspaceId)).toEqual(withAccess);
+    expect(
+      parseSandboxFileArtifactReceipt({
+        ...receipt,
+        access: { visibility: "public", whoCanOpen: "Anyone" },
+      }),
+    ).toBeNull();
+    expect(
+      parseSandboxFileArtifactReceipt({
+        ...receipt,
+        access: { ...withAccess.access, owner: "user:ada" },
+      }),
+    ).toBeNull();
+    expect(
+      parseSandboxFileArtifactReceipt({ ...receipt, access: { visibility: "workspace" } }),
+    ).toBeNull();
+  });
+
   test("rejects traversal, filename drift, extra metadata, and workspace drift", () => {
     expect(
       parseSandboxFileArtifactReceipt({

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline, type TimelineGroup } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 let sequence = 0;
 
@@ -68,7 +71,7 @@ function kinds(groups: TimelineGroup[]): string[] {
 }
 
 function fold(events: SessionEvent[]): TimelineGroup[] {
-  return groupTimeline(buildTimeline(events), { foldExchanges: true });
+  return groupTimeline(englishText, buildTimeline(englishText, events), { foldExchanges: true });
 }
 
 /**
@@ -254,14 +257,17 @@ describe("readable per-turn grouping", () => {
       "Second progress",
       "Final response",
     ]);
+    // The declared answer already streams below the row, where it stays once
+    // the turn settles: the answer being read never hops past the work row.
     expect(kinds(streaming)).toEqual([
       "agent-message",
       "agent-message",
-      "agent-message",
       "activity",
+      "agent-message",
     ]);
     const settled = fold([...live, final, event("turn.completed", {})]);
     expect(visibleProse(settled)).toEqual(["Final response"]);
+    expect(kinds(settled)).toEqual(["activity", "agent-message"]);
     const work = workRows(settled)[0]!;
     expect(work.kind === "activity" && kinds(work.work!.details)).toEqual([
       "agent-message",
@@ -302,6 +308,7 @@ describe("readable per-turn grouping", () => {
     expect(waitingRow?.kind === "activity" && waitingRow.work?.waiting).toEqual({
       label: "Waiting for you",
       since: waiting.occurredAt,
+      waitingOn: "you",
     });
     for (const status of ["cancelled", "failed"]) {
       const terminal = legacy("session.status.changed", { status });
@@ -425,7 +432,8 @@ describe("readable per-turn grouping", () => {
     expect(
       kinds(
         groupTimeline(
-          buildTimeline([
+          englishText,
+          buildTimeline(englishText, [
             x.prompt,
             ...x.first,
             x.result,
@@ -619,6 +627,44 @@ describe("readable per-turn grouping", () => {
     expect(groups[0]).toMatchObject({ kind: "item", item: { phase: "compacted" } });
   });
 
+  test("a proactive maintenance compaction as the last turn leaves no live work row", () => {
+    sequence = 0;
+    const turn = { turnId: "maintenance" };
+    const groups = fold([
+      ...tool("read", "exec_command", "turn-1"),
+      event("turn.completed", {}),
+      event("session.context.compaction.requested", { trigger: "proactive" }),
+      event("turn.started", {}, turn),
+      event("turn.startup.phase.started", { phase: "tools" }, turn),
+      event("turn.startup.phase.completed", { phase: "tools", durationMs: 20 }, turn),
+      event("turn.startup.phase.started", { phase: "model_preparation" }, turn),
+      event(
+        "turn.startup.phase.failed",
+        {
+          phase: "model_preparation",
+          expectedTransition: true,
+          failureCode: "compaction_required",
+          retryable: true,
+        },
+        turn,
+      ),
+      event("session.context.compaction.started", { trigger: "proactive" }, turn),
+      event("session.context.compacted", { trigger: "proactive" }, turn),
+      event("turn.completed", { result: "compacted", maintenance: "context_compaction" }, turn),
+      event("session.status.changed", { status: "idle" }, turn),
+    ]);
+    // Only the conversational turn keeps a (settled) work row; the
+    // maintenance turn's startup rows leave nothing live behind.
+    expect(workRows(groups)).toHaveLength(1);
+    expect(workRows(groups).every((row) => row.kind === "activity" && row.work!.endedAt)).toBe(
+      true,
+    );
+    expect(groups.at(-1)).toMatchObject({
+      kind: "item",
+      item: { kind: "context-compaction", phase: "compacted" },
+    });
+  });
+
   test("compaction before real work attaches only to its own conversational turn", () => {
     sequence = 0;
     const groups = fold([
@@ -719,7 +765,7 @@ describe("readable per-turn grouping", () => {
     ).toHaveLength(2);
   });
 
-  test("a new approval after resumed work remains waiting and retains both status landmarks", () => {
+  test("a new approval after resumed work remains waiting; only the resolved wait keeps a landmark", () => {
     sequence = 0;
     const groups = fold([
       event("turn.started", {}),
@@ -729,9 +775,13 @@ describe("readable per-turn grouping", () => {
       event("session.status.changed", { status: "requires_action" }),
     ]);
     expect(workRows(groups)[0]).toMatchObject({ work: { waiting: { label: "Waiting for you" } } });
-    expect(
-      groups.filter((group) => group.kind === "item" && group.item.kind === "session-status"),
-    ).toHaveLength(2);
+    // The live wait is carried by the header alone; the earlier, resolved wait
+    // stays as its "work resumed" landmark.
+    const statuses = groups.filter(
+      (group) => group.kind === "item" && group.item.kind === "session-status",
+    );
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ item: { resolvedAt: expect.any(String) } });
   });
 
   test("failure stays on its own work row and scheduled input stays visible", () => {

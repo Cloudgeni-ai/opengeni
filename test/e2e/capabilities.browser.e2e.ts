@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
-import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -34,9 +35,15 @@ type MobbinUiState = {
   oauthRequest: Record<string, unknown> | null;
 };
 
+type AtlassianUiState = {
+  nativeRetired: true;
+  nativeConnected: boolean;
+  nativeRequests: number;
+};
+
 type DriveUiState = {
+  /** Requests to the retired facet browse and source routes; must stay 0. */
   driveSaves: number;
-  sourceRequest: Record<string, unknown> | null;
   binding: Record<string, unknown> | null;
 };
 
@@ -590,11 +597,54 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
-  test("Google Drive folders configure only the exact named Integration instance", async () => {
+  test("a historical native Atlassian connection stays hidden while hosted agent tools remain", async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    try {
+      const state: AtlassianUiState = {
+        nativeRetired: true,
+        nativeConnected: true,
+        nativeRequests: 0,
+      };
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/plugins`, {
+        waitUntil: "networkidle",
+      });
+      await expectVisible(page.getByRole("button", { name: /^Jira & Confluence(?:\s|$)/ }));
+      await page.screenshot({
+        path: `${evidenceDir}atlassian-catalog-desktop.png`,
+        fullPage: true,
+      });
+      await page.getByRole("button", { name: /^Jira & Confluence(?:\s|$)/ }).click();
+      await expectVisible(
+        page.getByRole("button", { name: /Let agents work in Jira and Confluence/ }),
+      );
+      // Integration Knowledge sync was removed: a saved native connection is
+      // inert and no longer shown, and nothing calls the native routes.
+      expect(await page.getByRole("button", { name: /Previous sync connections/ }).count()).toBe(0);
+      expect(await page.getByText(/Knowledge sync retired/).count()).toBe(0);
+      await expectVisible(page.getByRole("heading", { name: "Jira & Confluence", exact: true }));
+      await assertAccessibleAndBounded(page, "main");
+      expect(state.nativeRequests).toBe(0);
+    } catch (error) {
+      console.error(
+        "Jira failed browser body:",
+        (await page.locator("body").innerText()).slice(0, 4000),
+      );
+      await page.screenshot({
+        path: `${evidenceDir}atlassian-failure-desktop.png`,
+        fullPage: true,
+      });
+      throw error;
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("a saved Google Drive Knowledge source facet is never shown", async () => {
     const state: DriveUiState = {
       driveSaves: 0,
-      sourceRequest: null,
-      binding: null,
+      binding: driveBinding(),
     };
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
@@ -604,9 +654,7 @@ describe("capabilities browser e2e", () => {
         waitUntil: "networkidle",
       });
 
-      // One Google Drive row folds every account in: the primary knowledge
-      // connection plus each named Drive account (its own tool namespace).
-      // The row's accessible name carries the state, and the accounts - with
+      // One Google Drive row folds every account in. The accounts - with
       // their per-instance facets - live in the row's detail sheet.
       const driveRow = page.getByRole("button", {
         name: "Google Drive. Not connected",
@@ -622,35 +670,12 @@ describe("capabilities browser e2e", () => {
       await instance
         .getByRole("button", { name: "Manage facets for Google Drive — Finance" })
         .click();
-      const facet = instance.locator('[data-integration-facet="drive-content"]');
-      await expectVisible(facet);
-      await facet.getByRole("button", { name: "Configure" }).click();
-
-      const dialog = page.locator('[data-slot="dialog-content"]').filter({
-        hasText: "Google Drive locations · Google Drive — Finance",
-      });
-      await expectVisible(dialog);
-      await expectText(dialog, "Google Drive locations · Google Drive — Finance");
-      await dialog.getByRole("checkbox", { name: "Connect My Drive" }).check();
-      await assertAccessibleAndBounded(page, '[data-slot="dialog-content"]');
-      await dialog.getByRole("button", { name: "Save 1 location" }).click();
-      await expectHidden(dialog);
-
-      expect(state.driveSaves).toBe(1);
-      expect(state.sourceRequest).toMatchObject({
-        sources: [
-          {
-            id: "root",
-            name: "My Drive",
-            mimeType: "application/vnd.google-apps.folder",
-            driveId: null,
-          },
-        ],
-        destination: { authorityKind: "workspace", collectionId: null },
-        syncCadence: "hourly",
-        readPolicy: "allow",
-      });
-      await expectText(facet, "Active");
+      // Integration Knowledge sync was removed: a stale knowledge_source facet
+      // from an older server is never shown; the account's other facets are.
+      await expectVisible(instance.locator('[data-integration-facet="account-identity"]'));
+      expect(await instance.locator('[data-integration-facet="drive-content"]').count()).toBe(0);
+      await assertAccessibleAndBounded(page, '[data-integration-sheet="google-drive"]');
+      expect(state.driveSaves).toBe(0);
     } finally {
       await context.close();
     }
@@ -688,7 +713,7 @@ describe("capabilities browser e2e", () => {
                   h1{font-size:25px;margin:20px 0 10px} p{line-height:1.55;color:#aeb8c7} code{color:#d7e3f4} .fixture{font-size:12px;color:#8994a3;border-top:1px solid #30363d;margin-top:24px;padding-top:18px}
                 </style>
               </head>
-              <body><main aria-labelledby="authorization-heading"><div class="brand" aria-hidden="true">M</div><h1 id="authorization-heading">Authorize Mobbin for OpenGeni</h1><p>Requested access: <code>openid</code></p><p>You would return to OpenGeni after approving access.</p><p class="fixture">Browser evidence fixture - no account, client, credential, or token was used.</p></main></body>
+              <body><main aria-labelledby="authorization-heading"><div class="brand" aria-hidden="true">M</div><h1 id="authorization-heading">Authorize Mobbin for Opengeni</h1><p>Requested access: <code>openid</code></p><p>You would return to Opengeni after approving access.</p><p class="fixture">Browser evidence fixture - no account, client, credential, or token was used.</p></main></body>
             </html>`,
         });
       });
@@ -727,7 +752,7 @@ describe("capabilities browser e2e", () => {
         page.waitForURL(`${authorizationOrigin}/**`),
         page.getByRole("dialog").getByRole("button", { name: "Connect for workspace" }).click(),
       ]);
-      await expectVisible(page.getByRole("heading", { name: "Authorize Mobbin for OpenGeni" }));
+      await expectVisible(page.getByRole("heading", { name: "Authorize Mobbin for Opengeni" }));
       expect(state.oauthStarts).toBe(1);
       expect(state.oauthRequest).toMatchObject({
         mcpUrl: "https://api.mobbin.com/mcp",
@@ -889,9 +914,7 @@ async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> 
           member.startsWith("capabilities-services-") ||
           member.startsWith("integration-account-facets-") ||
           member.startsWith("integration-facets-panel-") ||
-          member.startsWith("custom-api-setup-dialog-") ||
-          member.startsWith("google-drive-folder-dialog-") ||
-          member.startsWith("google-drive-knowledge-source-dialog-"),
+          member.startsWith("custom-api-setup-dialog-"),
       )
         ? cycle
         : null;
@@ -921,7 +944,7 @@ async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> 
 
 async function installCapabilityApi(
   page: Page,
-  state: CapabilityState | MobbinUiState | DriveUiState,
+  state: CapabilityState | MobbinUiState | DriveUiState | AtlassianUiState,
 ): Promise<void> {
   await page.route("http://127.0.0.1:9/**", async (route) => {
     const request = route.request();
@@ -935,6 +958,30 @@ async function installCapabilityApi(
         body: JSON.stringify(body),
       });
 
+    if ("nativeRetired" in state) {
+      if (url.pathname === `/v1/workspaces/${workspaceId}/connect/catalog`) return json([]);
+      if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`) {
+        return json({ items: [], total: 0, nextOffset: null });
+      }
+      if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`) {
+        return json({
+          provider: "skills_sh",
+          query: url.searchParams.get("q") ?? "",
+          items: [],
+          nextCursor: null,
+        });
+      }
+      if (url.pathname === `/v1/workspaces/${workspaceId}`) return json(workspace());
+      if (url.pathname === `/v1/workspaces/${workspaceId}/knowledge/entries/search`) {
+        return json({ entries: [], nextCursor: null, truncated: false });
+      }
+      if (url.pathname === `/v1/workspaces/${workspaceId}/scheduled-tasks/attention`)
+        return json([]);
+    }
+    if ("nativeRetired" in state && url.pathname.includes("/connections/atlassian")) {
+      state.nativeRequests++;
+      return json({ error: "Native provider is retired" }, 410);
+    }
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "browser-focus-test",
@@ -979,6 +1026,7 @@ async function installCapabilityApi(
               "capabilities:read",
               "capabilities:write",
               "connections:read",
+              ...("nativeRetired" in state ? ["connections:write"] : []),
             ],
           },
         ],
@@ -993,9 +1041,22 @@ async function installCapabilityApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({
         items:
-          "driveSaves" in state
-            ? []
-            : ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
+          "nativeRetired" in state
+            ? [
+                {
+                  ...mobbinCapability("disconnected"),
+                  id: "mcp:atlassian-browser",
+                  name: "Atlassian",
+                  providerDomain: "atlassian.com",
+                  mcpUrl: "https://mcp.atlassian.com/v1/mcp",
+                  endpointUrl: "https://mcp.atlassian.com/v1/mcp",
+                  description: "Hosted Jira and Confluence agent tools.",
+                  metadata: { curation: { featured: true, official: true } },
+                },
+              ]
+            : "driveSaves" in state
+              ? []
+              : ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
         installations: [],
       });
     }
@@ -1005,11 +1066,15 @@ async function installCapabilityApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({
         connections:
-          "driveSaves" in state
-            ? [driveConnection()]
-            : "mode" in state
-              ? mobbinConnections(state.mode)
-              : [],
+          "nativeRetired" in state
+            ? state.nativeConnected
+              ? [historicalAtlassianConnection()]
+              : []
+            : "driveSaves" in state
+              ? [driveConnection()]
+              : "mode" in state
+                ? mobbinConnections(state.mode)
+                : [],
       });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
@@ -1040,28 +1105,12 @@ async function installCapabilityApi(
     }
     if (
       "driveSaves" in state &&
-      request.method() === "GET" &&
-      url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/browse`
-    ) {
-      return json(driveBrowse());
-    }
-    if (
-      "driveSaves" in state &&
-      request.method() === "PUT" &&
-      url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/source`
+      url.pathname.startsWith(
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/`,
+      )
     ) {
       state.driveSaves += 1;
-      state.sourceRequest = request.postDataJSON() as Record<string, unknown>;
-      state.binding = driveBinding(state.sourceRequest);
-      return json({
-        capabilityId: driveCapabilityId,
-        instanceKey: "finance",
-        facetKey: "drive-content",
-        status: "configured",
-        binding: state.binding,
-      });
+      return json({ message: "retired" }, 410);
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) {
       return json([]);
@@ -1071,7 +1120,19 @@ async function installCapabilityApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     if (
       "mode" in state &&
@@ -1219,7 +1280,19 @@ async function installLargeCatalogApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     return json({});
   });
@@ -1325,7 +1398,19 @@ async function installWorkspaceCatalogApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (resource === "sessions") {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     return json({});
   });
@@ -1590,6 +1675,46 @@ function driveInstallation() {
   };
 }
 
+function historicalAtlassianConnection() {
+  const now = new Date(0).toISOString();
+  return {
+    id: "00000000-0000-4000-8000-000000000140",
+    accountId,
+    workspaceId,
+    subjectId: "browser-focus-subject",
+    providerDomain: "api.atlassian.com",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: {
+      credentialRole: "atlassian_knowledge",
+      credentialLabel: "Atlassian read-only knowledge sync",
+      atlassianAccountId: "historical-owner",
+      displayName: "Historical Owner",
+      email: "owner@example.test",
+      sites: [
+        {
+          cloudId: "cloud-1",
+          name: "Previous site",
+          url: "https://fixture.atlassian.net",
+          products: ["jira", "confluence"],
+        },
+      ],
+      verifiedAt: now,
+      accessMode: "readonly",
+      lifecycle: { state: "active", recoverable: true, observedAt: now },
+      selectedSources: [],
+    },
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 function driveConnection() {
   return {
     id: driveConnectionId,
@@ -1661,39 +1786,7 @@ function driveIdentityDefinition() {
   };
 }
 
-function driveBrowse() {
-  return {
-    connection: driveConnection(),
-    parentId: "root",
-    current: {
-      id: "root",
-      name: "My Drive",
-      mimeType: "application/vnd.google-apps.folder",
-      kind: "folder",
-      driveId: null,
-      modifiedTime: null,
-      size: null,
-      webViewLink: "https://drive.google.com/drive/my-drive",
-    },
-    items: [
-      {
-        id: "folder-1",
-        name: "Product",
-        mimeType: "application/vnd.google-apps.folder",
-        kind: "folder",
-        driveId: null,
-        modifiedTime: "2026-08-11T00:00:00.000Z",
-        size: null,
-        webViewLink: "https://drive.google.com/drive/folders/folder-1",
-      },
-    ],
-    nextPageToken: null,
-    incompleteSearch: false,
-  };
-}
-
-function driveBinding(request: Record<string, unknown>) {
-  const sources = Array.isArray(request.sources) ? request.sources : [];
+function driveBinding() {
   return {
     id: "00000000-0000-4000-8000-000000000132",
     facetKey: "drive-content",
@@ -1703,18 +1796,14 @@ function driveBinding(request: Record<string, unknown>) {
     connectionId: driveConnectionId,
     status: "active",
     config: {
-      sources: sources.map((source) => ({
-        ...(source as Record<string, unknown>),
-        sourceKind: (source as Record<string, unknown>).id === "root" ? "my_drive" : "folder",
-        includeDescendants: true,
-      })),
+      sources: [{ id: "root", name: "My Drive", sourceKind: "my_drive", includeDescendants: true }],
       destination: {
         authorityKind: "workspace",
         authorityAccountId: accountId,
         authorityWorkspaceId: workspaceId,
       },
-      syncCadence: request.syncCadence,
-      readPolicy: request.readPolicy,
+      syncCadence: "hourly",
+      readPolicy: "allow",
     },
     version: 1,
     hasCursor: false,

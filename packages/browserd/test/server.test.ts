@@ -2,13 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  BrowserActionCommand,
-  BrowserObservation,
-  BrowserProtectedAuthFillCommand,
-  BrowserTarget,
-} from "@opengeni/contracts";
-import { InteractionControllerError } from "@opengeni/interaction";
+import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
+import {
+  InteractionControllerError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -16,6 +14,9 @@ import {
   BrowserControlServer,
   CdpCommandTimeoutError,
   CdpTransportError,
+  CdpSessionDetachedError,
+  CdpProtocolError,
+  CdpResponseRefusedError,
   BrowserSupervisor,
   ComputerSupervisor,
   LatestBrowserFrameSubscription,
@@ -26,6 +27,7 @@ import {
   type BrowserSupervisorDriver,
   type BrowserSupervisorDriverContext,
   type BrowserSupervisorOptions,
+  type ControllerFailureContext,
 } from "../src";
 
 const adminToken = `admin.${"a".repeat(48)}`;
@@ -37,27 +39,57 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
-  test("keeps update idle proof private and includes open browser lifetimes", async () => {
+  test("tells the supervisor whether a create's caller can take a session with no observation", async () => {
     await withServer(async ({ server, reference }) => {
-      for (const token of [undefined, viewToken, controlToken]) {
-        expect((await request(server, "/v1/runtime", token ? { token } : {})).status).toBe(401);
+      const supervisor = (server as unknown as { supervisor: BrowserSupervisor }).supervisor;
+      const create = supervisor.createSession.bind(supervisor);
+      const creations: unknown[] = [];
+      supervisor.createSession = (async (options: never, creation?: unknown) => {
+        creations.push(creation);
+        return await create(options, creation as never);
+      }) as typeof supervisor.createSession;
+      for (const path of ["/v1/browser-sessions?acceptsNoObservation=1", "/v1/browser-sessions"]) {
+        const created = await request(server, path, {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBeLessThan(300);
       }
-      expect(
-        (await request(server, "/v1/runtime", { token: adminToken, method: "POST" })).status,
-      ).toBe(405);
-      const idle = async () =>
-        await json(await request(server, "/v1/runtime", { token: adminToken }));
-      expect((await idle()).data).toEqual({ idle: true });
-      expect(
-        (
-          await request(server, "/v1/browser-sessions", {
-            method: "POST",
-            token: adminToken,
-            body: createBody(reference),
-          })
-        ).status,
-      ).toBe(201);
-      expect((await idle()).data).toEqual({ idle: false });
+      // An older caller, which sends no parameter, is told apart.
+      expect(creations).toEqual([{ acceptsNoObservation: true }, { acceptsNoObservation: false }]);
+    });
+  });
+
+  test("fences new controller work atomically and releases only the owning update", async () => {
+    await withServer(async ({ server, reference }) => {
+      const operationId = randomUUID();
+      const update = async (method: string, id = operationId, token = adminToken) =>
+        await request(server, "/v1/runtime/update", { method, token, body: { operationId: id } });
+      for (const token of [controlToken, viewToken])
+        expect((await update("POST", operationId, token)).status).toBe(401);
+      const proof = await json(await update("POST"));
+      expect(proof.data).toEqual({ idle: true, operationId });
+      const create = async () =>
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+      expect((await create()).status).toBe(503);
+      expect((await json(await update("POST", randomUUID()))).data).toMatchObject({
+        idle: false,
+        blockers: [{ kind: "controller_previous_update", count: 1 }],
+      });
+      expect((await update("DELETE", randomUUID())).status).toBe(409);
+      expect((await create()).status).toBe(503);
+      expect((await json(await update("DELETE"))).data).toMatchObject({
+        operationId,
+        released: true,
+      });
+      expect((await create()).status).toBe(201);
+      expect((await json(await update("POST"))).data.idle).toBe(false);
+      // A failed idle proof must not prevent accepted work from closing normally.
       expect(
         (
           await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
@@ -67,11 +99,123 @@ describe("BrowserControlServer", () => {
           })
         ).status,
       ).toBe(200);
-      expect((await idle()).data).toEqual({ idle: true });
+      expect((await json(await update("POST"))).data.idle).toBe(true);
+      await update("DELETE");
+    });
+  });
+
+  test("a create still reading JSON blocks controller update admission", async () => {
+    await withServer(async ({ server, reference }) => {
+      let finishBody: (() => void) | undefined;
+      let beginBody: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        beginBody = resolve;
+      });
+      const body = JSON.stringify(createBody(reference));
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body.slice(0, 10)));
+          finishBody = () => {
+            controller.enqueue(new TextEncoder().encode(body.slice(10)));
+            controller.close();
+          };
+          beginBody!();
+        },
+      });
+      const create = fetch(`${server.url}/v1/browser-sessions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
+        body: stream,
+      });
+      try {
+        await started;
+        let queued = false;
+        for (let attempt = 0; attempt < 20 && !queued; attempt += 1) {
+          queued = !(await json(await request(server, "/v1/runtime", { token: adminToken }))).data
+            .idle;
+        }
+        expect(queued).toBe(true);
+        // The query shares the same real HTTP server: native in-flight requests
+        // include bodies queued before the supervisor starts constructing a runtime.
+        const operationId = randomUUID();
+        const proof = await json(
+          await request(server, "/v1/runtime/update", {
+            method: "POST",
+            token: adminToken,
+            body: { operationId },
+          }),
+        );
+        expect(proof.data.idle).toBe(false);
+        expect(proof.data.blockers).toContainEqual({ kind: "controller_request", count: 1 });
+      } finally {
+        finishBody!();
+      }
+      expect((await create).status).toBe(201);
+    });
+  });
+
+  test("keeps update idle proof private and includes open browser lifetimes", async () => {
+    // `empty` additionally requires that no session exists at all; only then
+    // may the parent agent stop this controller to reclaim its memory.
+    await withServer(async ({ server, reference }) => {
+      for (const token of [undefined, viewToken, controlToken]) {
+        expect((await request(server, "/v1/runtime", token ? { token } : {})).status).toBe(401);
+      }
+      expect(
+        (await request(server, "/v1/runtime", { token: adminToken, method: "POST" })).status,
+      ).toBe(405);
+      const idle = async () =>
+        await json(await request(server, "/v1/runtime", { token: adminToken }));
+      expect((await idle()).data).toEqual({ idle: true, empty: true });
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      expect((await idle()).data).toEqual({ idle: false, empty: false });
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
+            method: "POST",
+            token: adminToken,
+            body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await idle()).data).toEqual({ idle: true, empty: true });
     });
   });
 
   test.each([
+    {
+      operation: "observe" as const,
+      label: "observation",
+      suffix: "/observation",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpProtocolError("Page.getFrameTree", -32_000, "synthetic debugger rejection"),
+    },
+    {
+      operation: "observe" as const,
+      label: "observation",
+      suffix: "/observation",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpSessionDetachedError("Page.getFrameTree"),
+    },
+    {
+      // The target state route is as read-only as an observation.
+      operation: "targetState" as const,
+      label: "observation",
+      suffix: "/state",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpSessionDetachedError("Page.getFrameTree"),
+    },
     {
       operation: "listTargets" as const,
       label: "target inventory",
@@ -142,6 +286,464 @@ describe("BrowserControlServer", () => {
     },
   );
 
+  test("classifies a page read whose tab debugging ended as a retryable observation failure", async () => {
+    let failing = false;
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/dom-read`;
+        const body = {
+          kind: "count",
+          selector: "button",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+          expectedFrameId: "frame-1",
+        };
+        failing = true;
+        const failed = await request(server, path, { method: "POST", token: viewToken, body });
+        expect(failed.status).toBe(503);
+        expect(((await failed.json()) as { error: unknown }).error).toEqual({
+          code: "resource_unavailable",
+          message: "browser observation unavailable",
+          retryable: true,
+        });
+        expect(attempts).toBe(1);
+        failing = false;
+        expect(
+          (await request(server, path, { method: "POST", token: viewToken, body })).status,
+        ).toBe(200);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (failing && name === "readDom") {
+            attempts++;
+            throw new CdpSessionDetachedError("DOM.resolveNode");
+          }
+        },
+      },
+    );
+  });
+
+  test.each([
+    { operation: "listTargets" as const, label: "target inventory", suffix: "" },
+    { operation: "observe" as const, label: "observation", suffix: "/observation" },
+    { operation: "targetState" as const, label: "observation", suffix: "/state" },
+    { operation: "readDom" as const, label: "observation", suffix: "/dom-read" },
+    { operation: "captureScreenshot" as const, label: "screenshot", suffix: "/screenshot" },
+  ])(
+    "tries an unclassified $operation failure once more, then reports it as retryable",
+    async ({ operation, label, suffix }) => {
+      let failures = 0;
+      let attempts = 0;
+      const reported: Array<{ error: unknown; context: ControllerFailureContext }> = [];
+      await withServer(
+        async ({ server, reference }) => {
+          const created = await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          expect(created.status).toBe(201);
+          const path = `/v1/browser-sessions/${reference.browserSessionId}/targets${suffix ? `/target-${reference.browserSessionId}${suffix}` : ""}`;
+          const read = () =>
+            operation === "readDom"
+              ? request(server, path, {
+                  method: "POST",
+                  token: viewToken,
+                  body: {
+                    kind: "count",
+                    selector: "button",
+                    expectedTargetGeneration: "target-1",
+                    expectedDocumentGeneration: "document-1",
+                    expectedFrameId: "frame-1",
+                  },
+                })
+              : request(server, path, { token: viewToken });
+
+          // A failure that is gone a moment later never reaches the caller.
+          failures = 1;
+          attempts = 0;
+          const recovered = await read();
+          expect(recovered.status).toBe(200);
+          expect(attempts).toBe(2);
+          expect(reported).toHaveLength(1);
+          expect(reported[0]?.context).toEqual({
+            method: operation === "readDom" ? "POST" : "GET",
+            pathname: path,
+            kind: "driver_failed",
+          });
+          expect(reported[0]?.error).toMatchObject({ message: "frames still changing" });
+
+          // One that persists is retryable, not a final driver failure.
+          failures = Number.POSITIVE_INFINITY;
+          attempts = 0;
+          reported.length = 0;
+          const failed = await read();
+          expect(failed.status).toBe(503);
+          const body = (await failed.json()) as { error: unknown; diagnostic?: unknown };
+          expect(body.error).toEqual({
+            code: "resource_unavailable",
+            message: `browser ${label} unavailable`,
+            retryable: true,
+          });
+          // The driver's error class travels beside the error for the
+          // caller's log, never inside it.
+          expect(body.diagnostic).toMatchObject({ errorClass: "Error" });
+          expect(attempts).toBe(2);
+          expect(reported).toHaveLength(2);
+        },
+        {
+          beforeDriverOperation(name) {
+            if (name !== operation) return;
+            attempts++;
+            if (attempts <= failures) throw new Error("frames still changing");
+          },
+          onUnexpectedError: (error, context) => reported.push({ error, context }),
+        },
+      );
+    },
+  );
+
+  test("never repeats a mutation whose failure is unclassified", async () => {
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const failed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          { method: "POST", token: controlToken, body: { url: "https://example.test" } },
+        );
+        expect(failed.status).toBe(500);
+        expect(((await failed.json()) as { error: unknown }).error).toMatchObject({
+          code: "driver_failed",
+          retryable: false,
+        });
+        expect(attempts).toBe(1);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (name === "openTarget") {
+            attempts++;
+            throw new Error("frames still changing");
+          }
+        },
+      },
+    );
+  });
+
+  test("gives a tab's notice only to a caller that asks for it, once", async () => {
+    // A person's viewer, an auth check or an API client reading the tab first
+    // leaves the notice for the agent, whose tools ask for it.
+    const notices: string[] = [];
+    await withServer(
+      async ({ server, reference }) => {
+        expect(
+          (
+            await request(server, "/v1/browser-sessions", {
+              method: "POST",
+              token: adminToken,
+              body: createBody(reference),
+            })
+          ).status,
+        ).toBe(201);
+        const tab = `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}`;
+        const observed = async (path: string, init: Parameters<typeof request>[2]) => {
+          const response = await request(server, path, init);
+          expect(response.status).toBe(200);
+          const body = await json(response);
+          return (body.data.observation ?? body.data) as BrowserObservation;
+        };
+        const reloaded = "This tab's page reloaded.";
+
+        // Readers that do not ask see no notice and leave it in place.
+        notices.push(reloaded);
+        expect((await observed(`${tab}/observation`, { token: viewToken })).notice).toBeUndefined();
+        expect(
+          (await observed(`${tab}/select`, { method: "POST", token: controlToken, body: {} }))
+            .notice,
+        ).toBeUndefined();
+        const created = await observed(`${tab}/observation`, { token: viewToken });
+        expect(
+          (
+            await observed(`/v1/browser-sessions/${reference.browserSessionId}/actions`, {
+              method: "POST",
+              token: controlToken,
+              body: command(created),
+            })
+          ).notice,
+        ).toBeUndefined();
+        expect(notices).toEqual([reloaded]);
+        // The agent's observation receives it, once.
+        expect((await observed(`${tab}/observation?notices=1`, { token: viewToken })).notice).toBe(
+          reloaded,
+        );
+        expect(
+          (await observed(`${tab}/observation?notices=1`, { token: viewToken })).notice,
+        ).toBeUndefined();
+
+        // A tab selection and an action's receipt carry it the same way.
+        notices.push(reloaded);
+        expect(
+          (
+            await observed(`${tab}/select?notices=1`, {
+              method: "POST",
+              token: controlToken,
+              body: {},
+            })
+          ).notice,
+        ).toBe(reloaded);
+        notices.push(reloaded);
+        expect(
+          (
+            await observed(
+              `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptNotes=2&notices=1`,
+              { method: "POST", token: controlToken, body: command(created) },
+            )
+          ).notice,
+        ).toBe(reloaded);
+        expect(notices).toEqual([]);
+      },
+      { reloadedTabNotices: notices },
+    );
+  });
+
+  test("metadata-only opening keeps exact control authority and the default observation response", async () => {
+    const calls: string[] = [];
+    await withServer(
+      async ({ server, reference }) => {
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        calls.length = 0;
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`;
+        for (const token of [undefined, viewToken]) {
+          expect(
+            (await request(server, path, { method: "POST", ...(token ? { token } : {}), body: {} }))
+              .status,
+          ).toBe(401);
+        }
+        expect(calls).toEqual([]);
+        const response = await request(server, path, {
+          method: "POST",
+          token: controlToken,
+          body: { url: "https://new.example.test/" },
+        });
+        expect(response.status).toBe(201);
+        const inventory = (await json(response)).data;
+        expect(inventory).toMatchObject({
+          ...reference,
+          targets: [{ url: "https://new.example.test/", selected: true }],
+        });
+        expect(inventory).not.toHaveProperty("observation");
+        expect(calls).toEqual(["openTargetWithInventory"]);
+        const defaultResponse = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          { method: "POST", token: controlToken, body: {} },
+        );
+        expect(defaultResponse.status).toBe(201);
+        expect((await json(defaultResponse)).data).toHaveProperty("semantic");
+      },
+      {
+        beforeDriverOperation: (name) => {
+          calls.push(name);
+        },
+      },
+    );
+  });
+
+  test("create returns the launch observation with the tab inventory", async () => {
+    await withServer(async ({ server, reference }) => {
+      const created = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(created.status).toBe(201);
+      const data = (await json(created)).data as {
+        observation: { target: { id: string } };
+        targets: Array<{ id: string }>;
+      };
+      const listed = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+        { token: viewToken },
+      );
+      expect(data.targets).toEqual((await json(listed)).data as unknown as Array<{ id: string }>);
+      expect(data.targets.map((target) => target.id)).toContain(data.observation.target.id);
+    });
+  });
+
+  test("passkey sync is control-only, bound to the session path and validated", async () => {
+    await withServer(async ({ server, reference, supervisor }) => {
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/passkeys/sync`;
+      const body = {
+        protocolVersion: 1,
+        ...reference,
+        credentials: null,
+        acknowledgeEventIds: [],
+      };
+      for (const token of [undefined, viewToken]) {
+        expect(
+          (await request(server, path, { method: "POST", ...(token ? { token } : {}), body }))
+            .status,
+        ).toBe(401);
+      }
+      expect((await request(server, path, { token: controlToken })).status).toBe(405);
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, credentials: "all" },
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, browserSessionId: randomUUID() },
+          })
+        ).status,
+      ).toBe(409);
+      const synced = await request(server, path, { method: "POST", token: controlToken, body });
+      expect(synced.status).toBe(200);
+      // The fake driver hosts no page authenticators; the manager still answers.
+      expect((await json(synced)).data).toEqual({ ...reference, authenticators: 0, events: [] });
+      const negotiated = await request(server, `${path}?backupFlags=1`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(negotiated)).data).toEqual({
+        ...reference,
+        authenticators: 0,
+        events: [],
+        supportsBackupFlags: true,
+      });
+      // An owner rides in the query; the manager answers that it stamps owners.
+      const owner = randomUUID();
+      const owned = await request(server, `${path}?backupFlags=1&owner=${owner}`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(owned)).data).toEqual({
+        ...reference,
+        authenticators: 0,
+        events: [],
+        supportsBackupFlags: true,
+        supportsOwners: true,
+      });
+      expect(
+        (
+          await request(server, `${path}?owner=not-an-owner`, {
+            method: "POST",
+            token: controlToken,
+            body,
+          })
+        ).status,
+      ).toBe(400);
+      const credential = {
+        rpId: "localhost",
+        credentialId: "Y3JlZA==",
+        userHandle: null,
+        userName: null,
+        userDisplayName: null,
+        privateKey: "a2V5",
+        signCount: 0,
+      };
+      const event = {
+        type: "registered" as const,
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+        targetId: "target-1",
+        origin: "http://localhost",
+        credential: { ...credential, backupEligibility: true, backupState: true },
+      };
+      supervisor.passkeySync = async () => ({ ...reference, authenticators: 1, events: [event] });
+      const legacyRegistration = await request(server, path, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(legacyRegistration)).data).toEqual({
+        ...reference,
+        authenticators: 1,
+        events: [{ ...event, credential }],
+      });
+      const modernRegistration = await request(server, `${path}?backupFlags=1`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(modernRegistration)).data).toEqual({
+        ...reference,
+        authenticators: 1,
+        events: [event],
+        supportsBackupFlags: true,
+      });
+      expect(event.credential.backupEligibility).toBe(true);
+    });
+  });
+
+  test("metadata-only opening never replays a mutation whose completion is unknown", async () => {
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const failed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`,
+          { method: "POST", token: controlToken, body: { url: "https://new.example.test/" } },
+        );
+        expect(failed.status).toBe(500);
+        expect(((await failed.json()) as { error: unknown }).error).toMatchObject({
+          code: "driver_failed",
+          retryable: false,
+        });
+        expect(attempts).toBe(1);
+      },
+      {
+        beforeDriverOperation: (name) => {
+          if (name === "openTargetWithInventory") {
+            attempts++;
+            throw new CdpCommandTimeoutError("Target.getTargets");
+          }
+        },
+      },
+    );
+  });
+
   test("does not classify a CDP mutation timeout as retryable or redispatch it", async () => {
     let attempts = 0;
     await withServer(
@@ -202,6 +804,22 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("browser and computer actions run without the idle timeout, then restore it", async () => {
+    const source = await readFile(new URL("../src/server.ts", import.meta.url), "utf8");
+    for (const run of [
+      "async () => await this.supervisor.action(command, observationNotices(url))",
+      "async () => await supervisor.action(command)",
+    ]) {
+      const at = source.indexOf(run);
+      expect(at).toBeGreaterThan(0);
+      const lift = source.lastIndexOf("await withoutActionIdleTimeout(", at);
+      expect(lift).toBeGreaterThan(source.lastIndexOf('segments[3] === "actions"', at));
+    }
+    expect(source).toContain("server.timeout(request, 0)");
+    expect(source).toContain("server.timeout(request, BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS)");
+    expect(source).toContain("idleTimeout: BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS");
+  });
+
   test.each([
     { code: "timeout" as const, status: 504 },
     { code: "resource_unavailable" as const, status: 503 },
@@ -225,6 +843,62 @@ describe("BrowserControlServer", () => {
         expect(failure.error).toEqual({ code, message, retryable: true });
       },
       { screenshotError: new InteractionControllerError(code, message, true) },
+    );
+  });
+
+  test("a screenshot too large to transfer says so and names a smaller capture", async () => {
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const screenshot = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/screenshot`,
+          { token: viewToken },
+        );
+        expect(screenshot.status).toBe(400);
+        const failure = (await screenshot.json()) as { error: unknown };
+        expect(failure.error).toEqual({
+          code: "invalid_action",
+          message:
+            "the page's screenshot is too large to transfer; capture the viewport instead of the full page, or use JPEG",
+          retryable: false,
+        });
+      },
+      {
+        screenshotError: new CdpResponseRefusedError(
+          "Page.captureScreenshot",
+          "too_large",
+          40 * 1024 * 1024,
+        ),
+      },
+    );
+  });
+
+  test("reports a tab close the driver cannot confirm as an unknown outcome", async () => {
+    const message = "The browser profile's connection ended while closing this tab";
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const closed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}`,
+          { method: "DELETE", token: controlToken },
+        );
+        expect(closed.status).toBe(409);
+        const failure = (await closed.json()) as { error: unknown };
+        expect(failure.error).toEqual({ code: "outcome_unknown", message, retryable: false });
+      },
+      { closeError: new InteractionOutcomeUnknownDriverError("outcome_unknown", message, false) },
     );
   });
 
@@ -491,33 +1165,68 @@ describe("BrowserControlServer", () => {
         { method: "POST", token: controlToken, body: command(observation) },
       );
       expect(acted.status).toBe(200);
-      expect((await json(acted)).data.state).toBe("completed");
+      const actedBody = await json(acted);
+      expect(actedBody.data.state).toBe("completed");
+      // Callers that did not ask for resolved targets or notes may parse
+      // strictly.
+      expect(actedBody.data).not.toHaveProperty("targets");
+      expect(actedBody.data).not.toHaveProperty("notes");
+      const traced = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect(traced.data.state).toBe("completed");
+      expect(traced.data.targets).toEqual([
+        {
+          actionIndex: 0,
+          ref: "e1",
+          role: "button",
+          name: "Close",
+          container: { role: "dialog", name: "Edit item" },
+        },
+      ]);
+      expect(traced.data).not.toHaveProperty("notes");
+      const noted = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=1`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect(noted.data.targets).toHaveLength(1);
+      expect(noted.data.notes).toEqual([
+        {
+          actionIndex: 0,
+          kind: "network_busy",
+          message: "page loaded; its network was still busy after 30 s, so the wait ended there",
+        },
+      ]);
+      // Each note kind goes only to callers whose receipt version knows it.
+      const newer = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptNotes=2`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect((newer.data.notes as Array<{ kind: string }>).map((note) => note.kind)).toEqual([
+        "network_busy",
+        "observation_unavailable",
+      ]);
 
-      const protectedCommand = protectedAuthCommand(observation);
-      const protectedPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-fills`;
+      // Protected fill is gone; logins use ordinary fill actions.
       expect(
         (
-          await request(server, protectedPath, {
-            method: "POST",
-            token: viewToken,
-            body: protectedCommand,
-          })
+          await request(
+            server,
+            `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-fills`,
+            { method: "POST", token: controlToken, body: {} },
+          )
         ).status,
-      ).toBe(401);
-      const protectedFill = await request(server, protectedPath, {
-        method: "POST",
-        token: controlToken,
-        body: protectedCommand,
-      });
-      expect(protectedFill.status).toBe(200);
-      const protectedBody = await protectedFill.text();
-      expect(protectedBody).not.toContain("server-test-password");
-      expect(JSON.parse(protectedBody).data.state).toBe("completed");
-      const protectedReceiptPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-operations/${protectedCommand.operationId}`;
-      expect((await request(server, protectedReceiptPath, { token: viewToken })).status).toBe(401);
-      expect((await request(server, protectedReceiptPath, { token: controlToken })).status).toBe(
-        200,
-      );
+      ).toBe(404);
 
       const externalAuthPath = `/v1/browser-sessions/${reference.browserSessionId}/external-auth`;
       const externalAuthCommand = {
@@ -572,6 +1281,7 @@ describe("BrowserControlServer", () => {
       );
       expect(screenshot.status).toBe(200);
       expect(screenshot.headers.get("content-type")).toBe("image/png");
+      expect(screenshot.headers.get("x-opengeni-browser-frame-note")).toBeNull();
       expect(
         decodeBrowserFrameMetadataHeader(screenshot.headers.get("x-opengeni-browser-frame")!),
       ).toMatchObject({
@@ -614,6 +1324,20 @@ describe("BrowserControlServer", () => {
         ).status,
       ).toBe(200);
 
+      const malformedSetAside = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/end`,
+        {
+          method: "POST",
+          token: adminToken,
+          body: {
+            controllerGeneration: reference.controllerGeneration,
+            removeState: true,
+            setAsideInterruptedLaunch: "yes",
+          },
+        },
+      );
+      expect(malformedSetAside.status).toBe(400);
       const ended = await request(
         server,
         `/v1/browser-sessions/${reference.browserSessionId}/end`,
@@ -623,6 +1347,9 @@ describe("BrowserControlServer", () => {
           body: {
             controllerGeneration: reference.controllerGeneration,
             removeState: true,
+            // A resident browser ends normally; the flag only affects a
+            // preserved interrupted launch.
+            setAsideInterruptedLaunch: true,
           },
         },
       );
@@ -1019,6 +1746,91 @@ describe("BrowserControlServer", () => {
     });
   });
 
+  test("a failed frame producer closes the viewer socket with a terminal error", async () => {
+    let subscription: LatestBrowserFrameSubscription | undefined;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const observation = (await json(created)).data.observation as BrowserObservation;
+        const websocket = new WebSocket(
+          `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+          [
+            BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+            `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+          ],
+        );
+        websocket.binaryType = "arraybuffer";
+        await websocketMessage(websocket);
+        const closed = websocketClosed(websocket);
+        subscription!.fail(new Error("browser target closed"));
+        expect(await closed).toMatchObject({
+          code: 1011,
+          reason: "frame stream unavailable: browser target closed",
+        });
+      },
+      {
+        onFrameSubscription: (value) => {
+          subscription = value;
+        },
+      },
+    );
+  });
+
+  test("a frame socket is told its stream is open before its first frame", async () => {
+    // A page busy when its view opens sends its first frame only once it
+    // answers; a relaying agent is ready at this ping instead.
+    let sendFirstFrame: (() => void) | undefined;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const observation = (await json(created)).data.observation as BrowserObservation;
+        const websocket = new WebSocket(
+          `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+          [
+            BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+            `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+          ],
+        );
+        websocket.binaryType = "arraybuffer";
+        let framesBeforePing = 0;
+        websocket.addEventListener("message", () => {
+          framesBeforePing += 1;
+        });
+        // Bun's WebSocket client reports pings as a "ping" event.
+        const ping = await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("no subscribed ping")), 2_000);
+          websocket.addEventListener("ping" as "message", (event) => {
+            clearTimeout(timer);
+            resolve(Buffer.from((event as MessageEvent).data as ArrayBuffer).toString());
+          });
+        });
+        expect(ping).toBe("opengeni.frames.subscribed");
+        expect(framesBeforePing).toBe(0);
+        const message = websocketMessage(websocket);
+        sendFirstFrame!();
+        expect(decodeBrowserFrameMessage(new Uint8Array(await message))).toMatchObject({
+          browserSessionId: reference.browserSessionId,
+          sequence: 1,
+        });
+        websocket.close(1000, "done");
+        await websocketClosed(websocket);
+      },
+      {
+        deferFirstFrame: (send) => {
+          sendFirstFrame = send;
+        },
+      },
+    );
+  });
+
   test("a stale lifecycle request cannot disrupt the active session or its viewers", async () => {
     await withServer(async ({ server, reference }) => {
       const created = await request(server, "/v1/browser-sessions", {
@@ -1057,6 +1869,71 @@ describe("BrowserControlServer", () => {
       ).toBe(200);
       websocket.close(1000, "done");
       await websocketClosed(websocket);
+    });
+  });
+
+  test("a wait hold is admin-only, exact-generation and validated", async () => {
+    await withServer(async ({ server, reference }) => {
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/wait-hold`;
+      const until = new Date(Date.now() + 30 * 60_000).toISOString();
+      const hold = async (token: string, body: unknown) =>
+        await request(server, path, { method: "POST", token, body });
+      // Nothing is running yet: the hold never launches a browser.
+      const before = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect(before.status).toBe(200);
+      expect((await json(before)).data).toEqual({ held: false });
+      await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(
+        (await hold(controlToken, { controllerGeneration: reference.controllerGeneration, until }))
+          .status,
+      ).toBe(401);
+      const held = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect((await json(held)).data).toEqual({ held: true });
+      const stale = await hold(adminToken, { controllerGeneration: "controller-stale", until });
+      expect((await json(stale)).data).toEqual({ held: false });
+      // A hold only extends: an earlier time leaves it held.
+      const earlier = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until: new Date().toISOString(),
+      });
+      expect((await json(earlier)).data).toEqual({ held: true });
+      // Only the generation and the time are accepted.
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            endsWaitUntil: until,
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until: "tomorrow",
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            extra: true,
+          })
+        ).status,
+      ).toBe(400);
     });
   });
 
@@ -1124,7 +2001,7 @@ describe("BrowserControlServer", () => {
   test("rejects malformed bodies without reflecting private driver failures", async () => {
     const unexpected: Array<{
       error: unknown;
-      context: { method: string; pathname: string };
+      context: ControllerFailureContext;
     }> = [];
     await withServer(
       async ({ server, reference }) => {
@@ -1143,11 +2020,23 @@ describe("BrowserControlServer", () => {
           body: createBody(reference),
         });
         expect(failed.status).toBe(500);
-        expect(JSON.stringify(await json(failed))).not.toContain("private-driver-detail");
+        const body = await json(failed);
+        expect(JSON.stringify(body)).not.toContain("private-driver-detail");
+        // Operators learn which class failed where, beside the unchanged error.
+        expect(body).toMatchObject({
+          error: { code: "driver_failed", message: "interaction controller request failed" },
+          diagnostic: { errorClass: "Error" },
+        });
+        expect(Object.keys((body as unknown as { error: object }).error).sort()).toEqual([
+          "code",
+          "message",
+          "retryable",
+        ]);
         expect(unexpected).toHaveLength(1);
         expect(unexpected[0]?.context).toEqual({
           method: "POST",
           pathname: "/v1/browser-sessions",
+          kind: "unexpected",
         });
         expect(unexpected[0]?.error).toMatchObject({ message: "private-driver-detail" });
       },
@@ -1162,6 +2051,7 @@ describe("BrowserControlServer", () => {
 async function withServer(
   callback: (fixture: {
     server: BrowserControlServer;
+    supervisor: BrowserSupervisor;
     reference: { browserSessionId: string; controllerGeneration: string };
   }) => Promise<void>,
   options: {
@@ -1169,8 +2059,20 @@ async function withServer(
     focusedInputObservations?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
+    closeError?: Error;
+    onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
+    /** Holds a subscription's first frame until the test sends it. */
+    deferFirstFrame?: (send: () => void) => void;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "readDom"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch"
+        | "captureScreenshot",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1181,13 +2083,14 @@ async function withServer(
       environment: NodeJS.ProcessEnv;
     };
     onBrowserContext?: (context: BrowserSupervisorDriverContext) => void;
-    onUnexpectedError?: (error: unknown, context: { method: string; pathname: string }) => void;
+    onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
+    /** Notices the driver gives, each once, for its tab. */
+    reloadedTabNotices?: string[];
   } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-server-");
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: join(directory, "sockets"),
     createDriver: async (context) => {
       options.onBrowserContext?.(context);
       return fakeDriver(context, options);
@@ -1195,6 +2098,12 @@ async function withServer(
     ...(options.uploadArtifact ? { uploadArtifact: options.uploadArtifact } : {}),
     ...(options.uploadDownload ? { uploadDownload: options.uploadDownload } : {}),
   });
+  // Opening starts sweeps for browsers an earlier controller left behind, and
+  // the controller does not report itself empty until they finish. Join them
+  // so every test starts from a controller that holds nothing, however slow
+  // the machine running it.
+  await supervisor.releaseDetachedBrowsers();
+  await supervisor.releaseAttachedLeftovers();
   const computerSupervisor = options.linkedComputer
     ? ({
         launchEnvironment(reference: { computerSessionId: string; controllerGeneration: string }) {
@@ -1220,6 +2129,7 @@ async function withServer(
   try {
     await callback({
       server,
+      supervisor,
       reference: {
         browserSessionId: randomUUID(),
         controllerGeneration: "controller-1",
@@ -1238,9 +2148,22 @@ function fakeDriver(
     focusedInputObservations?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
+    closeError?: Error;
+    onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
+    /** Holds a subscription's first frame until the test sends it. */
+    deferFirstFrame?: (send: () => void) => void;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "readDom"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch"
+        | "captureScreenshot",
     ) => void;
+    reloadedTabNotices?: string[];
   },
 ): BrowserSupervisorDriver {
   const target: BrowserTarget = {
@@ -1295,10 +2218,19 @@ function fakeDriver(
       target.url = url ?? "about:blank";
       return observation();
     },
+    async openTargetWithInventory(url) {
+      options.beforeDriverOperation?.("openTargetWithInventory");
+      target.url = url ?? "about:blank";
+      return [{ ...target }];
+    },
     async selectTarget() {
       return observation();
     },
+    takeReloadedTabNotice(tabId) {
+      return tabId === target.id ? (options.reloadedTabNotices?.shift() ?? null) : null;
+    },
     async closeTarget() {
+      if (options.closeError) throw options.closeError;
       return [];
     },
     async observe() {
@@ -1306,6 +2238,7 @@ function fakeDriver(
       return observation();
     },
     async targetState() {
+      options.beforeDriverOperation?.("targetState");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,
@@ -1316,6 +2249,7 @@ function fakeDriver(
       };
     },
     async readDom(_targetId, domRequest) {
+      options.beforeDriverOperation?.("readDom");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,
@@ -1328,12 +2262,26 @@ function fakeDriver(
         truncated: false,
       };
     },
-    async dispatch() {
+    async dispatch(_command, trace) {
       options.beforeDriverOperation?.("dispatch");
+      trace?.record({
+        actionIndex: 0,
+        ref: "e1",
+        role: "button",
+        name: "Close",
+        container: { role: "dialog", name: "Edit item" },
+      });
+      trace?.record({
+        actionIndex: 0,
+        kind: "network_busy",
+        message: "page loaded; its network was still busy after 30 s, so the wait ended there",
+      });
+      trace?.record({
+        actionIndex: 0,
+        kind: "observation_unavailable",
+        message: "the action completed, but the page could not be read after it",
+      });
       return observation();
-    },
-    async protectedFill() {
-      return { target: { ...target }, status: "submitted" };
     },
     async externalAuth() {
       return {
@@ -1349,12 +2297,16 @@ function fakeDriver(
       };
     },
     async captureScreenshot() {
+      options.beforeDriverOperation?.("captureScreenshot");
       if (options.screenshotError) throw options.screenshotError;
       return frame(context, target);
     },
     async subscribeFrames() {
       const subscription = new LatestBrowserFrameSubscription(async () => undefined);
-      queueMicrotask(() => subscription.push(frame(context, target)));
+      options.onFrameSubscription?.(subscription);
+      const send = () => subscription.push(frame(context, target));
+      if (options.deferFirstFrame) options.deferFirstFrame(send);
+      else queueMicrotask(send);
       return subscription;
     },
     async debug() {
@@ -1536,32 +2488,6 @@ function command(observation: BrowserObservation): BrowserActionCommand {
   };
 }
 
-function protectedAuthCommand(observation: BrowserObservation): BrowserProtectedAuthFillCommand {
-  return {
-    protocolVersion: 1,
-    operationId: randomUUID(),
-    browserSessionId: observation.browserSessionId,
-    controllerGeneration: observation.target.controllerGeneration,
-    targetId: observation.target.id,
-    expectedTargetGeneration: observation.target.targetGeneration,
-    expectedDocumentGeneration: observation.target.documentGeneration!,
-    expectedFrameId: observation.frameId!,
-    actor: { kind: "system", subjectId: "credential-broker-test" },
-    authorityId: "password-authority",
-    credentialVersion: 1,
-    allowedOrigins: ["https://example.test"],
-    fields: [
-      {
-        fieldId: "password",
-        locator: { kind: "ref", ref: "e-password" },
-        purpose: "password",
-        value: "server-test-password",
-      },
-    ],
-    submit: { type: "press", key: "Enter" },
-  };
-}
-
 async function request(
   server: BrowserControlServer,
   path: string,
@@ -1623,3 +2549,33 @@ async function websocketClosed(websocket: WebSocket): Promise<CloseEvent> {
     );
   });
 }
+
+test("private working-directory intent accepts only managed exact transport without restore or navigation", async () => {
+  await withServer(async ({ server, reference }) => {
+    const post = (body: unknown) =>
+      request(server, "/v1/browser-sessions", { method: "POST", token: adminToken, body });
+    for (const extra of [
+      { recoverExistingWorkingDirectory: false },
+      { recoverExistingWorkingDirectory: true, initialUrl: "https://example.test/" },
+      { recoverExistingWorkingDirectory: true, restore: {} },
+    ])
+      expect((await post({ ...createBody(reference), ...extra })).status).toBe(400);
+    expect((await post(createBody(reference))).status).toBe(201);
+    expect(
+      (await post({ ...createBody(reference), recoverExistingWorkingDirectory: true })).status,
+    ).toBe(200);
+    const attached = {
+      ...createBody({ ...reference, browserSessionId: randomUUID() }),
+      headed: true,
+      recoverExistingWorkingDirectory: true,
+      transport: {
+        kind: "attached_chrome",
+        deviceId: randomUUID(),
+        connectionGeneration: "synthetic-connection",
+        browserName: "Chrome",
+        browserVersion: "151",
+      },
+    };
+    expect((await post(attached)).status).toBe(409);
+  });
+});

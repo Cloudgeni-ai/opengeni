@@ -1,4 +1,4 @@
-import { LoadingPanel } from "@/components/common";
+import { LoadingPanel } from "@opengeni/react/app/components/common";
 
 export function RoutePending() {
   return <LoadingPanel />;

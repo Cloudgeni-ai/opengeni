@@ -115,6 +115,6 @@ mod tests {
         let mut ring = ReplayRing::new(3);
         ring.push(frame(0));
         ring.push(frame(1));
-        assert!(ring.replay_from(99).is_empty());
+        assert_eq!(ring.replay_from(99), Vec::<StreamFrame>::new());
     }
 }

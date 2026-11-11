@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sites"
+  short_description: "Build and publish Bun + React Sites"
+  default_prompt: "Use $sites to build a polished, editable Site and publish its retained source plus self-contained HTML."

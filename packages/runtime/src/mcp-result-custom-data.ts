@@ -1,8 +1,9 @@
 import {
   AttemptToolResult,
+  omitStructuredContentTextDuplicates,
   type AttemptToolResult as AttemptToolResultValue,
 } from "@opengeni/contracts";
-import { UserError, type MCPServer } from "@openai/agents";
+import type { MCPServer } from "@openai/agents";
 import { randomUUID } from "node:crypto";
 import { normalizeProtocolJsonValue } from "./protocol-json";
 
@@ -38,6 +39,86 @@ export function sdkModelOutputForServer(
   return result.content.length === 1 ? result.content[0] : result.content;
 }
 
+/** Image types every supported model provider accepts as inline input. */
+const MODEL_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+export type McpModelContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+function base64ByteLength(data: string): number {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
+
+function withheldBlockText(kind: string, mimeType: unknown, data: unknown, uri?: unknown): string {
+  const facts = [
+    typeof mimeType === "string" && mimeType ? mimeType : null,
+    typeof data === "string" ? `${base64ByteLength(data)} bytes` : null,
+  ].filter((fact): fact is string => fact !== null);
+  const source = typeof uri === "string" && uri ? ` ${uri}` : "";
+  const detail = facts.length ? ` (${facts.join(", ")})` : "";
+  return `[The tool returned ${kind}${source}${detail}. It cannot be shown to the model.]`;
+}
+
+function modelBlockFromMcpContent(entry: unknown): McpModelContentBlock {
+  if (!isPlainRecord(entry)) return { type: "text", text: JSON.stringify(entry) };
+  if (entry.type === "text" && typeof entry.text === "string") {
+    return { type: "text", text: entry.text };
+  }
+  if (entry.type === "image" && typeof entry.data === "string") {
+    const mimeType = typeof entry.mimeType === "string" ? entry.mimeType.toLowerCase() : "";
+    return MODEL_IMAGE_MEDIA_TYPES.has(mimeType) && entry.data.length > 0
+      ? { type: "image", data: entry.data, mimeType }
+      : { type: "text", text: withheldBlockText("an image", entry.mimeType, entry.data) };
+  }
+  if (entry.type === "audio") {
+    return { type: "text", text: withheldBlockText("audio", entry.mimeType, entry.data) };
+  }
+  if (entry.type === "resource" && isPlainRecord(entry.resource)) {
+    const resource = entry.resource;
+    if (typeof resource.text === "string") {
+      const kind = typeof resource.mimeType === "string" ? ` (${resource.mimeType})` : "";
+      return { type: "text", text: `Resource ${String(resource.uri)}${kind}:\n${resource.text}` };
+    }
+    const mimeType = typeof resource.mimeType === "string" ? resource.mimeType.toLowerCase() : "";
+    if (typeof resource.blob === "string" && MODEL_IMAGE_MEDIA_TYPES.has(mimeType)) {
+      return { type: "image", data: resource.blob, mimeType };
+    }
+    return {
+      type: "text",
+      text: withheldBlockText("a resource", resource.mimeType, resource.blob, resource.uri),
+    };
+  }
+  // resource_link and future block types carry no raw bytes: show their
+  // protocol fields, minus block-level metadata meant for clients.
+  const { _meta: _blockMeta, ...visible } = entry;
+  return { type: "text", text: JSON.stringify(visible) };
+}
+
+/**
+ * What the model sees of one MCP tool result. MCP separates content for the
+ * model from protocol data for clients: text and images go to the model as
+ * native blocks (so pixels reach it as image input, not base64 text);
+ * structuredContent is added once as compact JSON, and a text block that only
+ * repeats it is dropped; an error result is marked as one. `_meta` and non-standard
+ * envelope fields stay in the retained audit result only.
+ */
+export function mcpResultModelContent(result: AttemptToolResultValue): McpModelContentBlock[] {
+  const deduplicated = omitStructuredContentTextDuplicates(result);
+  const blocks: McpModelContentBlock[] = [];
+  if (result.isError === true) blocks.push({ type: "text", text: "The tool reported an error." });
+  for (const entry of deduplicated.content) blocks.push(modelBlockFromMcpContent(entry));
+  if (result.structuredContent !== undefined) {
+    blocks.push({
+      type: "text",
+      text: `Structured result: ${JSON.stringify(result.structuredContent)}`,
+    });
+  }
+  if (blocks.length === 0) blocks.push({ type: "text", text: "The tool returned no content." });
+  return blocks;
+}
+
 function cloneSdkMcpCustomDataContextValue<T>(value: T): T {
   try {
     return structuredClone(value);
@@ -52,54 +133,61 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function assertSdkJsonCompatible(value: unknown): void {
-  if (value == null) return;
-  const valueType = typeof value;
-  if (valueType === "string" || valueType === "boolean") return;
-  if (valueType === "number") {
-    if (!Number.isFinite(value)) {
-      throw new UserError("customDataExtractor must return JSON-compatible data.");
-    }
-    return;
-  }
-  if (
-    valueType === "undefined" ||
-    valueType === "function" ||
-    valueType === "symbol" ||
-    valueType === "bigint"
-  ) {
-    throw new UserError("customDataExtractor must return JSON-compatible data.");
-  }
-  if (Array.isArray(value)) {
-    value.forEach((entry) => assertSdkJsonCompatible(entry));
-    return;
-  }
-  if (!isPlainRecord(value)) {
-    throw new UserError("customDataExtractor must return JSON-compatible data.");
-  }
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string") {
-      throw new UserError("customDataExtractor must return JSON-compatible data.");
-    }
-    assertSdkJsonCompatible(value[key]);
-  }
-}
-
 function normalizeSdkToolOutputCustomData(value: unknown): Record<string, unknown> | undefined {
   if (value == null) return undefined;
-  if (!isPlainRecord(value)) {
-    throw new UserError("customDataExtractor must return an object or null.");
+  // A value JSON cannot carry (a symbol key, a function, a bigint, a cycle, a
+  // class instance) is converted and logged instead of failing the tool call.
+  const safe: unknown = normalizeProtocolJsonValue(value, "$.customData");
+  if (!isPlainRecord(safe)) {
+    // Custom data is optional audit data: a server extractor that returns
+    // something other than an object loses it instead of failing the run.
+    warnMcpBoundary("MCP custom data dropped", { reason: "not_an_object", type: typeName(safe) });
+    return undefined;
   }
-  if (Reflect.ownKeys(value).some((key) => typeof key !== "string")) {
-    throw new UserError("customDataExtractor must return an object with string keys.");
-  }
-  if (Object.keys(value).length === 0) return undefined;
-  assertSdkJsonCompatible(value);
-  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  if (Object.keys(safe).length === 0) return undefined;
+  // The SDK's own JSON copy of custom data, so both paths store the same form.
+  return JSON.parse(JSON.stringify(safe)) as Record<string, unknown>;
 }
 
 function normalizeMcpResult(value: unknown): AttemptToolResultValue {
-  return normalizeProtocolJsonValue(AttemptToolResult.parse(value), "$.mcpResult");
+  // Convert what JSON cannot carry before the schema sees it, so a server's
+  // bigint, Date or symbol-keyed mark never fails the tool call.
+  const safe = normalizeProtocolJsonValue(value, "$.mcpResult");
+  const parsed = AttemptToolResult.safeParse(safe);
+  if (parsed.success) return normalizeProtocolJsonValue(parsed.data, "$.mcpResult");
+  // A result the schema refuses even after conversion (for example a
+  // structuredContent whose toJSON returns a string, or an oversized key) is
+  // kept as its JSON text, so the model and the audit copy still see it.
+  warnMcpBoundary("MCP result kept as text", {
+    reason: "schema_mismatch",
+    issues: String(parsed.error.issues.length),
+  });
+  // `_meta` stays out of the model's view here too, and an error result stays one.
+  const record = isPlainRecord(safe) ? safe : null;
+  const { _meta: _resultMeta, ...visible } = record ?? {};
+  return {
+    content: [{ type: "text", text: JSON.stringify(record ? visible : safe) ?? "null" }],
+    ...(record?.isError === true ? { isError: true } : {}),
+  };
+}
+
+function typeName(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+const MCP_WARNING_INTERVAL_MS = 60_000;
+const recentMcpWarnings = new Map<string, number>();
+
+function warnMcpBoundary(message: string, detail: Record<string, string>): void {
+  const key = `${message}|${Object.values(detail).join("|")}`;
+  const now = Date.now();
+  const last = recentMcpWarnings.get(key);
+  if (last !== undefined && now - last < MCP_WARNING_INTERVAL_MS) return;
+  if (recentMcpWarnings.size >= 100) recentMcpWarnings.clear();
+  recentMcpWarnings.set(key, now);
+  console.warn(message, detail);
 }
 
 /**
@@ -191,7 +279,7 @@ export class McpResultCustomDataBridge {
         ) {
           // A PrefixedMcpServer may itself be wrapped by another prefixed
           // server. The outer bridge already retains the exact result, so do
-          // not nest another copy of OpenGeni's private marker. Preserve only
+          // not nest another copy of Opengeni's private marker. Preserve only
           // the actual extractor payload carried through the inner bridge.
           const nestedInnerCustomData =
             normalizedInnerCustomData[OPENGENI_INNER_MCP_CUSTOM_DATA_KEY];
@@ -219,17 +307,18 @@ export class McpResultCustomDataBridge {
   ): Promise<unknown> {
     const { arguments: cleanArguments, token } = this.copyArgumentsWithoutToken(args);
     const invoked = await invoke(cleanArguments);
-    const result = normalizeMcpResult(isSdkResultProjection(invoked) ? invoked.content : invoked);
+    const result = normalizeMcpResult(unwrapSdkMcpResultProjection(invoked));
     if (token) this.resultsByToken.set(token, result);
     if (token && this.input?.sdkModelOutput === "result") {
-      // The prefixed server historically exposed the complete MCP result as
-      // model output. Keep that shape while the SDK reads the standard result
-      // fields and the bridge retains the exact audit copy out of band. Mark
-      // the compatibility projection privately so another prefixed wrapper
-      // can recover the raw result before parsing it at its own boundary.
-      const projected = { ...result, content: result } as Record<PropertyKey, unknown>;
+      // The SDK hands `content` to the model. Give it the model view of the
+      // result (native text and image blocks, see mcpResultModelContent) and
+      // nothing else, so it never falls back to serializing the envelope as
+      // text. The bridge retains the exact audit copy out of band. The exact
+      // result is also attached privately so another prefixed wrapper can
+      // recover it before parsing it at its own boundary.
+      const projected = { content: mcpResultModelContent(result) } as Record<PropertyKey, unknown>;
       Object.defineProperty(projected, SDK_RESULT_PROJECTION, {
-        value: true,
+        value: result,
         enumerable: false,
         configurable: false,
         writable: false,
@@ -278,19 +367,11 @@ export class McpResultCustomDataBridge {
   }
 }
 
-function isSdkResultProjection(
-  value: unknown,
-): value is Record<PropertyKey, unknown> & { content: unknown } {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    (value as Record<PropertyKey, unknown>)[SDK_RESULT_PROJECTION] === true,
-  );
-}
-
+/** Recover the exact result from a prefixed server's SDK model projection. */
 export function unwrapSdkMcpResultProjection(value: unknown): unknown {
-  return isSdkResultProjection(value) ? value.content : value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const exact = (value as Record<PropertyKey, unknown>)[SDK_RESULT_PROJECTION];
+  return exact === undefined ? value : exact;
 }
 
 function stripMcpResultMarkerFromCustomData(customData: unknown): boolean {
@@ -311,7 +392,7 @@ function compactSerializedRunItem(item: unknown): boolean {
 }
 
 /**
- * Release OpenGeni's duplicate full-result marker from the live SDK run item
+ * Release Opengeni's duplicate full-result marker from the live SDK run item
  * after its normalized event has crossed the durable append boundary. The SDK
  * output and any inner extractor custom data remain available for subsequent
  * model calls and approval resume.
@@ -331,7 +412,7 @@ export function releaseMcpResultCustomDataFromSdkEvent(event: unknown): boolean 
 }
 
 /**
- * Remove only OpenGeni's redundant full-result marker from an approval
+ * Remove only Opengeni's redundant full-result marker from an approval
  * RunState after the worker has durably recorded the exact event output. The
  * SDK's model-visible output, protocol raw item, and any inner custom data stay
  * intact, so approval resume behavior is unchanged without triplicating a

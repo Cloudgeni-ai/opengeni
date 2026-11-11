@@ -1,8 +1,10 @@
 import { SESSION_SCOPE_HEADER, type ClientConfig, type OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifacts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "../../lib/cn";
+import { joinClientConfigRead } from "../../lib/client-config-read";
 import { useOpenGeni, type ClientOverride } from "../../session-context";
 import {
   ArtifactLabelsProvider,
@@ -17,6 +19,7 @@ import {
 import { EditableArtifactView, type EditableArtifactRuntimes } from "./editable-artifact-view";
 import type { SiteToolBridgeFactory } from "./chat-interactive-block";
 import { SiteView } from "./site-view";
+import { useOpenGeniText } from "../../messages/runtime";
 
 /** An artifact opened from a session: the targets agent links and Site previews name. */
 export type SessionArtifactTarget = Readonly<
@@ -27,7 +30,7 @@ export type SessionArtifactTarget = Readonly<
 /** Every string the viewer shows, including its Site frame and states. */
 export type SessionArtifactViewerLabels = Partial<ArtifactLabels>;
 
-export type SessionArtifactViewerProps = ClientOverride &
+export type SessionArtifactViewerProps = ClientOverride<ChatClient> &
   Readonly<{
     /** The conversation the artifact belongs to; the proxy only serves its artifacts. */
     sessionId: string;
@@ -45,7 +48,7 @@ export type SessionArtifactViewerProps = ClientOverride &
   }>;
 
 type ViewerClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "withHeaders"
   | "apiUrl"
   | "fetchApi"
@@ -70,7 +73,7 @@ function viewerClientKey(client: ViewerClient): string {
  * A host-mountable viewer for one editable artifact or Site from a session,
  * with its own header (title, Back, Close). Mount it in any sized container
  * (a side panel, a sheet); it fills it. Data flows through the provider's
- * client and `createSessionProxyHandler({ artifacts: true })`, scoped to
+ * client (for example through `createSessionProxyHandler`), scoped to
  * `sessionId`.
  */
 export function SessionArtifactViewer({ labels, ...props }: SessionArtifactViewerProps) {
@@ -195,6 +198,7 @@ function EditableBody({
   onOpened: (title: string, modality: ArtifactKind) => void;
   onUnavailable: () => void;
 }) {
+  const t = useOpenGeniText();
   const labels = useArtifactLabels();
   const clientKey = viewerClientKey(client);
   const [retryEpoch, setRetryEpoch] = useState(0);
@@ -203,7 +207,7 @@ function EditableBody({
     workspaceId: string;
     sessionId: string;
     result:
-      | { kind: "ready"; config: NonNullable<ClientConfig["artifacts"]> }
+      | { kind: "ready"; config: Exclude<NonNullable<ClientConfig["artifacts"]>, false> }
       | { kind: "unavailable" }
       | { kind: "error"; error: unknown };
   } | null>(null);
@@ -219,7 +223,7 @@ function EditableBody({
   useEffect(() => {
     let live = true;
     setConfigState(null);
-    client.getClientConfig().then(
+    joinClientConfigRead(client).then(
       (value) =>
         live &&
         setConfigState({
@@ -314,7 +318,7 @@ function EditableBody({
   if (current.kind === "error") {
     return (
       <ArtifactProblem
-        view={artifactLoadErrorView(current.error, "editable", labels)}
+        view={artifactLoadErrorView(t, current.error, "editable", labels)}
         onRetry={() => setRetryEpoch((value) => value + 1)}
       />
     );
@@ -359,7 +363,9 @@ function EditableBody({
   );
 }
 
-function artifactCapabilityKey(config: NonNullable<ClientConfig["artifacts"]>): string {
+function artifactCapabilityKey(
+  config: Exclude<NonNullable<ClientConfig["artifacts"]>, false>,
+): string {
   return JSON.stringify([
     config.editableLiveUrl,
     config.cachePartition.accountId,

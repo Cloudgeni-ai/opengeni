@@ -2,19 +2,24 @@ import { expect, test } from "bun:test";
 import {
   CreateSessionRequest,
   ScheduledTaskAgentConfig,
-  AutomationSessionTemplate,
   BundledSkillSelection,
+  bundledSkillSelectionForAgentConfig,
   resolveBundledSkillSelection,
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
   storedBundledSkillSelectionIdentity,
 } from "../src";
 
-const documents = "builtin:opengeni-documents" as const;
-const sites = "builtin:opengeni-sites" as const;
-const projects = "builtin:opengeni-projects" as const;
+const documents = "builtin:documents" as const;
+const sites = "builtin:sites" as const;
+const projects = "builtin:projects" as const;
 
-for (const help of ["builtin:opengeni-help", "builtin:opengeni-client"] as const)
+for (const help of [
+  "builtin:opengeni-help",
+  "builtin:opengeni-client",
+  "builtin:schedules",
+  "builtin:secrets",
+] as const)
   test(`${help} is addressable and cannot escape a host's empty selection`, () => {
     expect(
       CreateSessionRequest.parse({ initialMessage: "Help", bundledSkillIds: [help] })
@@ -22,9 +27,6 @@ for (const help of ["builtin:opengeni-help", "builtin:opengeni-client"] as const
     ).toEqual([help]);
     expect(
       ScheduledTaskAgentConfig.parse({ prompt: "Help", bundledSkillIds: [help] }).bundledSkillIds,
-    ).toEqual([help]);
-    expect(
-      AutomationSessionTemplate.parse({ prompt: "Help", bundledSkillIds: [help] }).bundledSkillIds,
     ).toEqual([help]);
     expect(resolveBundledSkillSelection(undefined, [])).toEqual([]);
     expect(() => resolveBundledSkillSelection([help], [])).toThrow("cannot widen");
@@ -37,10 +39,6 @@ test("Projects uses the ordinary bundle selection and inheritance contract", () 
   ).toEqual([projects]);
   expect(
     ScheduledTaskAgentConfig.parse({ prompt: "Organize", bundledSkillIds: [projects] })
-      .bundledSkillIds,
-  ).toEqual([projects]);
-  expect(
-    AutomationSessionTemplate.parse({ prompt: "Organize", bundledSkillIds: [projects] })
       .bundledSkillIds,
   ).toEqual([projects]);
   expect(resolveBundledSkillSelection(undefined, [projects])).toEqual([projects]);
@@ -56,10 +54,6 @@ test("bundle selection preserves omitted versus empty across public creation con
   expect(
     ScheduledTaskAgentConfig.parse({ prompt: "Run", bundledSkillIds: [] }).bundledSkillIds,
   ).toEqual([]);
-  expect(
-    AutomationSessionTemplate.parse({ prompt: "Run", bundledSkillIds: [documents] })
-      .bundledSkillIds,
-  ).toEqual([documents]);
   expect(BundledSkillSelection.safeParse(["builtin:unknown"]).success).toBe(false);
   expect(BundledSkillSelection.safeParse([documents, documents]).success).toBe(false);
 });
@@ -128,4 +122,43 @@ test("stored selection drops ids this build does not know, while input stays str
   expect(
     CreateSessionRequest.safeParse({ initialMessage: "Run", bundledSkillIds: [unknown] }).success,
   ).toBe(false);
+});
+
+test('a "none" agent freezes no bundled guides unless the request lists them', () => {
+  const none = { from: "none" } as const;
+  const all = { from: "all" } as const;
+  expect(bundledSkillSelectionForAgentConfig(undefined, none)).toEqual([]);
+  expect(bundledSkillSelectionForAgentConfig([projects], none)).toEqual([projects]);
+  expect(bundledSkillSelectionForAgentConfig([], none)).toEqual([]);
+  expect(bundledSkillSelectionForAgentConfig(undefined, all)).toBeUndefined();
+  expect(bundledSkillSelectionForAgentConfig([sites], all)).toEqual([sites]);
+  expect(bundledSkillSelectionForAgentConfig(undefined, null)).toBeUndefined();
+  expect(bundledSkillSelectionForAgentConfig(undefined, undefined)).toBeUndefined();
+  // A child of a "none" parent inherits the frozen empty selection.
+  expect(
+    resolveBundledSkillSelection(undefined, bundledSkillSelectionForAgentConfig(undefined, none)),
+  ).toEqual([]);
+});
+
+test("renamed product-named ids stay accepted and resolve to their neutral ids", () => {
+  expect(
+    CreateSessionRequest.parse({
+      initialMessage: "Help",
+      bundledSkillIds: ["builtin:opengeni-documents", "builtin:opengeni-skills"],
+    }).bundledSkillIds,
+  ).toEqual([documents, "builtin:skill-management"]);
+  expect(() => BundledSkillSelection.parse(["builtin:opengeni-documents", documents])).toThrow(
+    "unique",
+  );
+  expect(
+    bundledSkillSelectionFromMetadata({
+      _opengeni_bundled_skill_ids_v1: ["builtin:opengeni-sites", "builtin:opengeni-help"],
+    }),
+  ).toEqual(["builtin:opengeni-help", sites]);
+  expect(
+    resolveBundledSkillSelection(
+      ["builtin:opengeni-sites"] as never,
+      ["builtin:opengeni-sites", "builtin:opengeni-projects"] as never,
+    ),
+  ).toEqual([sites]);
 });

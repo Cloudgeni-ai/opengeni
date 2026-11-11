@@ -1,9 +1,9 @@
 /**
  * Static analysis for migration-time backfills that silently no-op
- * under OpenGeni's production migration principal.
+ * under Opengeni's production migration principal.
  *
  * `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER, not merely ordinary roles;
- * only a genuine `SUPERUSER` (or `BYPASSRLS`) escapes it. OpenGeni's documented
+ * only a genuine `SUPERUSER` (or `BYPASSRLS`) escapes it. Opengeni's documented
  * deployment posture (`docs/deployment.md`) runs migrations as a NON-superuser
  * owner without `BYPASSRLS`. During a migration no `opengeni.account_id` /
  * `opengeni.workspace_id` GUC is set, so a GUC-gated `workspace_isolation`
@@ -11,9 +11,7 @@
  * `INSERT ... SELECT` / `DO $$ ... $$` backfill loop touches ZERO rows and
  * reports success.
  *
- * One mitigation is the owner-only posture window already used by
- * `0009_goal_sessions_first_party_goals_manage.sql` and
- * `0120_durable_goal_wake.sql`:
+ * One mitigation is the owner-only posture window:
  *
  *   ALTER TABLE "t" NO FORCE ROW LEVEL SECURITY;
  *   -- ... the backfill ...
@@ -29,126 +27,25 @@
  * The latter may be set inside the statement or by the exact governed batched-
  * migration runner contract before the statement executes.
  */
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { batchedBackfillTransactionLocalSetting } from "../packages/db/src/migration-runner-settings";
+import { splitStatements, stripComments } from "../packages/db/src/migration-sql";
+export { splitStatements, stripComments } from "../packages/db/src/migration-sql";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
-/**
- * Migrations that shipped before this class was identified. Their bytes are
- * frozen by the release schema-contract hash ladder and cannot be rewritten, so
- * they are recorded here instead. `0296_force_rls_backfill_noop_repair.sql`
- * repairs the instances that genuinely lost data; the rest are classified in
- * `docs/force-rls-migration-backfills.md`.
- *
- * DO NOT add to this list. A new migration that needs a backfill over a
- * FORCE-RLS table must open the `NO FORCE` window instead.
- */
-export const GRANDFATHERED_MIGRATIONS: readonly string[] = [
-  "0014_repair_orphaned_function_call_results.sql",
-  "0018_sandbox_os.sql",
-  "0045_workspace_memory_v1.sql",
-  "0057_durable_queue_control.sql",
-  "0058_turn_admission_usage_enrollment.sql",
-  "0061_session_workflow_wake_outbox.sql",
-  "0063_session_control_mega_foundation.sql",
-  "0064_rotation_strategy_sharded_backfill.sql",
-  "0065_session_attempt_quiescence.sql",
-  "0068_workspace_control_event_bounds.sql",
-  "0069_session_event_history_backfill.sql",
-  "0094_quarantine_credential_bearing_catalog_urls.sql",
-  "0104_host_export_root_session_backfill.sql",
-  "0111_nested_agent_depth_backfill.sql",
-  "0117_sandbox_recovery_generations.sql",
-  "0122_codex_capacity_same_turn.sql",
-  "0126_document_access_constraints.sql",
-  "0132_connection_subject_isolation.sql",
-  "0135_durable_machine_input_batches.sql",
-  "0136_unified_session_tool_policy.sql",
-  "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
-  "0143_session_codex_compaction_mode.sql",
-  "0148_session_turn_latency_mode.sql",
-  "0149_workspace_artifacts.sql",
-  "0152_hierarchical_memory_foundation.sql",
-  "0157_session_policy_role_snapshots.sql",
-  "0170_session_control_wake_revision.sql",
-  "0172_retire_model_visible_github_token.sql",
-  "0175_resumable_transcription_provider_deadline.sql",
-  "0180_retained_screenshot_lifecycle_fences.sql",
-  "0184_sandbox_drain_teardown_fence.sql",
-  "0186_sandbox_capture_provider_contract.sql",
-  "0197_knowledge_source_sync_schedules.sql",
-  "0201_company_profile_authority.sql",
-  "0202_document_index_checkpoints.sql",
-  "0212_browser_state_transfer_hardening.sql",
-  "0212_slack_installation_bindings.sql",
-  "0213_browser_interaction_authority.sql",
-  "0215_browser_controller_host.sql",
-  "0216_browser_auth_health_evidence.sql",
-  "0219_organization_tenancy_managed_human_provisioning.sql",
-  "0222_session_visibility_authority_epochs.sql",
-  "0224_slack_post_outcome_reconciliation.sql",
-  "0225_session_visibility_fork_activation.sql",
-  "0226_personal_codex_authority_foundation.sql",
-  "0231_integration_definition_identity_cutover.sql",
-  "0232_integration_facet_authority_cutover.sql",
-  "0233_skill_and_integration_authority_cutover.sql",
-  "0234_xai_subscription_authority.sql",
-  "0235_canonical_human_login_bindings.sql",
-  "0238_goal_persistence_policy.sql",
-  "0238_recover_unclaimed_session_turns.sql",
-  "0240_model_context_user_messages.sql",
-  "0241_atomic_personal_resource_delegation.sql",
-  "0247_terraform_stacks_provenance_repair.sql",
-  "0249_personal_resource_delegation_authority_correction.sql",
-  "0252_scheduled_personal_resource_delegation.sql",
-  "0253_common_user_resource_authority_lifecycle.sql",
-  "0254_scoped_variable_set_authority.sql",
-  "0256_connection_authority_delegation.sql",
-  "0258_three_scope_document_knowledge_authority.sql",
-  "0262_scoped_connected_machines_and_rigs.sql",
-  "0263_organization_membership_lifecycle.sql",
-  "0264_connection_authority_runtime_activation.sql",
-  "0275_scheduled_connection_authority.sql",
-  "0277_workspace_writer_authority_attribution.sql",
-  "0280_connection_and_variable_set_audit_attribution.sql",
-  "0289_session_composer_policy_authority.sql",
-];
-
-/**
- * Migrations whose `DO $$ ... IF EXISTS (SELECT ... FROM <FORCE-RLS table>)
- * ... RAISE EXCEPTION` preflight guard reads zero rows for the same reason, so
- * the guard passes vacuously and never fires. These predate the guard.
- * The safety of those cutovers came from `VALIDATE CONSTRAINT` / `SET NOT NULL`
- * / unique-index builds, which are internal scans and DO bypass RLS - never
- * from the `DO` block.
- *
- * DO NOT add to this list. A new preflight guard over a FORCE-RLS table must
- * open the `NO FORCE` window too, or it is decoration.
- */
-export const GRANDFATHERED_VACUOUS_GUARDS: readonly string[] = [
-  "0057_durable_queue_control.sql",
-  "0063_session_control_mega_foundation.sql",
-  "0106_session_attempt_mcp_approval_policies.sql",
-  "0107_host_export_lineage_contract.sql",
-  "0110_nested_agent_depth_boundary.sql",
-  "0122_codex_capacity_same_turn.sql",
-  "0135_durable_machine_input_batches.sql",
-  "0137_preference_registry.sql",
-  "0157_session_policy_role_snapshots.sql",
-  "0197_knowledge_source_sync_schedules.sql",
-  "0199_workspace_learning_policy.sql",
-  "0225_session_visibility_fork_activation.sql",
-  "0231_integration_definition_identity_cutover.sql",
-  "0232_integration_facet_authority_cutover.sql",
-  "0233_skill_and_integration_authority_cutover.sql",
-  "0240_model_context_user_messages.sql",
-  "0247_terraform_stacks_provenance_repair.sql",
-  "0248_terraform_stacks_component_resolution_fence.sql",
-  "0264_connection_authority_runtime_activation.sql",
-  "0275_scheduled_connection_authority.sql",
-];
+// Each complete statement here (including comments) only reads catalog source
+// and replaces a routine definition. The writes it names run in that routine,
+// not during migration. Bind this classification to reviewed bytes: changed
+// statements keep conservative analysis. DO NOT add a statement that runs a
+// migration-time backfill.
+const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 = new Set([
+  // 0995 statement 3: patch organization_membership_command_0263's role change.
+  "1b890ad9397f53351e98d62dc8e9973732a3a28596c7fd6ff627632705ee6cf8",
+  // 1032 statement 17: patch knowledge_entry_read to use kept collection activity.
+  "1a71acab125baec541ce1c3dd514cda222d8c761b90adec97b0797e582ebea01",
+]);
 
 export type BackfillFinding = {
   /** Migration file name, e.g. `0296_...sql`. */
@@ -166,69 +63,10 @@ export type BackfillFinding = {
   snippet: string;
 };
 
-/** Split a migration file into top-level statements, honouring dollar quoting. */
-export function splitStatements(sql: string): string[] {
-  const out: string[] = [];
-  let current = "";
-  let index = 0;
-  while (index < sql.length) {
-    const char = sql[index]!;
-    if (char === "-" && sql[index + 1] === "-") {
-      const newline = sql.indexOf("\n", index);
-      const stop = newline === -1 ? sql.length : newline + 1;
-      current += sql.slice(index, stop);
-      index = stop;
-      continue;
-    }
-    if (char === "/" && sql[index + 1] === "*") {
-      const close = sql.indexOf("*/", index + 2);
-      const stop = close === -1 ? sql.length : close + 2;
-      current += sql.slice(index, stop);
-      index = stop;
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      let cursor = index + 1;
-      while (cursor < sql.length) {
-        if (sql[cursor] === char && sql[cursor + 1] === char) {
-          cursor += 2;
-          continue;
-        }
-        if (sql[cursor] === char) {
-          cursor += 1;
-          break;
-        }
-        cursor += 1;
-      }
-      current += sql.slice(index, cursor);
-      index = cursor;
-      continue;
-    }
-    if (char === "$") {
-      const tag = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(sql.slice(index))?.[0];
-      if (tag) {
-        const close = sql.indexOf(tag, index + tag.length);
-        const stop = close === -1 ? sql.length : close + tag.length;
-        current += sql.slice(index, stop);
-        index = stop;
-        continue;
-      }
-    }
-    if (char === ";") {
-      current += ";";
-      if (current.trim()) out.push(current.trim());
-      current = "";
-      index += 1;
-      continue;
-    }
-    current += char;
-    index += 1;
-  }
-  if (current.trim()) out.push(current.trim());
-  return out;
-}
-
-const stripComments = (text: string) =>
+/** Literal-unaware stripping: removes every `--`/`/* *\/` run, even in
+ * literals. Suppressing tokens must survive this too, so comment text can
+ * never suppress a finding. */
+const stripAllCommentText = (text: string) =>
   text.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ");
 
 const TABLE_REF = (table: string) => `(?:"${table}"|${table})`;
@@ -297,7 +135,77 @@ export function stripRoutineBodies(statement: string): string {
  * source, not an executed migration query. Keep arbitrary EXECUTE strings and
  * every actual query outside the replacement visible to the guard. */
 function stripCatalogRoutinePatchLiterals(statement: string): string {
-  const assignments = /\b([a-z_]\w*)\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
+  // Chained replacements of a pg_get_functiondef result are also routine
+  // source, provided the resulting definition is the block's sole dynamic
+  // execution. Keep every other statement visible to the backfill analyzer.
+  // The built-ins may be schema-qualified with pg_catalog; no other schema.
+  const source =
+    /\b([a-z_]\w*)\s*:=\s*(?:pg_catalog\s*\.\s*)?pg_get_functiondef\s*\([\s\S]*?\)\s*;/gi;
+  const sources = [...statement.matchAll(source)];
+  if (sources.length === 1) {
+    const variable = sources[0]![1]!;
+    const execution = new RegExp(`\\bEXECUTE\\s+${variable}\\s*;`, "gi");
+    const executions = [...statement.matchAll(execution)];
+    const otherExecutions = [...statement.matchAll(/\bEXECUTE\b/gi)].length;
+    const assignments = [...statement.matchAll(new RegExp(`\\b${variable}\\s*:=`, "gi"))];
+    if (executions.length === 1 && otherExecutions === 1) {
+      const replacements: Array<{ start: number; end: number }> = [];
+      let cursor = sources[0]!.index! + sources[0]![0].length;
+      const assignment = new RegExp(
+        `\\b${variable}\\s*:=\\s*(?:pg_catalog\\s*\\.\\s*)?replace\\s*\\(\\s*${variable}\\s*,`,
+        "gi",
+      );
+      let match: RegExpExecArray | null;
+      while ((match = assignment.exec(statement))) {
+        if (match.index < cursor) continue;
+        let depth = 1;
+        let quoted = false;
+        let end = match.index + match[0].length;
+        for (; end < statement.length; end += 1) {
+          const char = statement[end]!;
+          if (!quoted && char === "$") {
+            // A dollar-quoted literal is opaque text: its parentheses, quotes
+            // and semicolons are routine source, not this call's syntax.
+            const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(statement.slice(end))?.[0];
+            if (tag) {
+              const close = statement.indexOf(tag, end + tag.length);
+              if (close === -1) break;
+              end = close + tag.length - 1;
+              continue;
+            }
+          }
+          if (char === "'") {
+            if (quoted && statement[end + 1] === "'") {
+              end += 1;
+              continue;
+            }
+            quoted = !quoted;
+          } else if (!quoted && char === "(") depth += 1;
+          else if (!quoted && char === ")") depth -= 1;
+          else if (!quoted && char === ";" && depth === 0) break;
+        }
+        if (depth !== 0 || quoted || statement[end] !== ";") break;
+        replacements.push({ start: match.index, end: end + 1 });
+        cursor = end + 1;
+        assignment.lastIndex = cursor;
+      }
+      if (replacements.length > 0 && assignments.length === replacements.length + 1) {
+        const ranges = [
+          ...replacements,
+          { start: executions[0]!.index!, end: executions[0]!.index! + executions[0]![0].length },
+        ].sort((left, right) => right.start - left.start);
+        let stripped = statement;
+        for (const range of ranges) {
+          stripped = `${stripped.slice(0, range.start)}${stripped.slice(range.end)}`;
+        }
+        return stripped;
+      }
+    }
+  }
+
+  // The literal may be assigned in the body or initialised in DECLARE
+  // (`replacement text := $new$...$new$;`); both bind the same variable.
+  const assignments = /\b([a-z_]\w*)(?:\s+text)?\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
   return statement.replace(assignments, (whole, variable: string, _tag: string) => {
     const outside = statement.replace(whole, `${variable} := NULL;`);
     const use = new RegExp(
@@ -413,7 +321,6 @@ function ownerCapabilityPolicy(statement: string): OwnerCapabilityPolicy | null 
 function activatedOwnerCapabilityTables(
   statement: string,
   policies: ReadonlyMap<string, OwnerCapabilityPolicy>,
-  runnerCapabilityGuc?: string,
 ): Set<string> {
   const activeGucs = new Set<string>();
   for (const match of statement.matchAll(
@@ -421,12 +328,69 @@ function activatedOwnerCapabilityTables(
   )) {
     activeGucs.add(match[1]!);
   }
-  if (runnerCapabilityGuc) activeGucs.add(runnerCapabilityGuc);
   return new Set(
     [...policies.values()]
       .filter((policy) => activeGucs.has(policy.guc))
       .map((policy) => policy.table),
   );
+}
+
+/** Recognize only the catalog-filtered, closed regclass window used by 0882.
+ * Attribute visibility to its single backfill statement, never to subsequent
+ * statements or files. Unrecognized/mutated windows retain ordinary analysis.
+ */
+function catalogOwnerWindows(statements: readonly string[]): Map<number, Set<string>> {
+  const windows = new Map<number, Set<string>>();
+  const normalized = statements.map((statement) =>
+    stripComments(statement).trim().replace(/\s+/g, " "),
+  );
+  for (let index = 0; index + 3 < statements.length; index += 1) {
+    const capture =
+      /^CREATE TEMP TABLE ([a-z_][a-z0-9_]*) ON COMMIT DROP AS SELECT class\.oid::regclass AS relation FROM pg_class class WHERE class\.oid IN \(\s*((?:'[a-z_][a-z0-9_]*'::regclass\s*,\s*)*'[a-z_][a-z0-9_]*'::regclass)\s*\) AND class\.relforcerowsecurity;$/i.exec(
+        normalized[index]!,
+      );
+    if (!capture) continue;
+    const temporary = capture[1]!;
+    const tables = new Set(
+      [...capture[2]!.matchAll(/'([a-z_][a-z0-9_]*)'::regclass/gi)].map((match) =>
+        match[1]!.toLowerCase(),
+      ),
+    );
+    if (tables.has(temporary.toLowerCase())) continue;
+    const loop = (operation: "NO FORCE" | "FORCE") =>
+      new RegExp(
+        String.raw`^DO (\$[a-z_][a-z0-9_]*\$) DECLARE forced regclass; BEGIN FOR forced IN SELECT relation FROM ${temporary} ORDER BY relation::text LOOP EXECUTE format\('ALTER TABLE %s ${operation} ROW LEVEL SECURITY', forced\); END LOOP; END \1;$`,
+        "i",
+      );
+    if (
+      !loop("NO FORCE").test(normalized[index + 1]!) ||
+      !loop("FORCE").test(normalized[index + 3]!)
+    )
+      continue;
+    const body = normalized[index + 2]!;
+    // No intervening policy/DDL changes, temp-snapshot edits, or executable DO
+    // blocks can inherit the exemption. Matching both comment views prevents
+    // quoted/comment text from manufacturing a recognized posture window.
+    if (
+      !/^(WITH|INSERT|UPDATE|DELETE)\b/i.test(body) ||
+      /\b(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|CALL)\b/i.test(body) ||
+      /\bDO\b(?!\s+(UPDATE|NOTHING)\b)/i.test(body) ||
+      writesTable(body, temporary)
+    )
+      continue;
+    if (
+      statements
+        .slice(index, index + 4)
+        .some(
+          (statement, offset) =>
+            stripAllCommentText(statement).trim().replace(/\s+/g, " ") !==
+            normalized[index + offset],
+        )
+    )
+      continue;
+    windows.set(index + 2, tables);
+  }
+  return windows;
 }
 
 /**
@@ -446,21 +410,24 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
 
   for (const file of files) {
     const raw = readFileSync(join(migrationsDir, file), "utf8");
-    const runnerSetting = batchedBackfillTransactionLocalSetting(file);
-    const runnerCapabilityGuc =
-      runnerSetting?.value === "1" &&
-      /^-- deployment-mode: (?:rolling|maintenance)\r?\n-- opengeni:batched-backfill\b/u.test(raw)
-        ? runnerSetting.guc.slice("opengeni.".length)
-        : undefined;
     // Owner-only posture window and tenant GUC state are per-file: the runner
     // executes one file as one implicit transaction.
     const unforced = new Set<string>();
     let tenantGuc = false;
     let statementNumber = 0;
+    const statements = splitStatements(raw);
+    const ownerWindows = catalogOwnerWindows(statements);
 
-    for (const rawStatement of splitStatements(raw)) {
+    for (const rawStatement of statements) {
       statementNumber += 1;
+      if (
+        REVIEWED_ROUTINE_SOURCE_PATCH_SHA256.has(
+          createHash("sha256").update(rawStatement).digest("hex"),
+        )
+      )
+        continue;
       const statement = stripComments(rawStatement);
+      const commentFreeStatement = stripAllCommentText(rawStatement);
       const head = statement.trim().replace(/\s+/g, " ");
 
       const createdPolicy = ownerCapabilityPolicy(statement);
@@ -482,7 +449,8 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       // backfill" is exactly the shape this repo's authority migrations take.
       if (
         !DDL_ONLY.test(head) &&
-        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(statement)
+        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(statement) &&
+        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(commentFreeStatement)
       ) {
         tenantGuc = true;
       }
@@ -544,21 +512,31 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       if (tenantGuc) continue;
 
       const executable = isBlock ? stripRoutineBodies(statement) : statement;
-      const ownerVisible = activatedOwnerCapabilityTables(
-        executable,
+      const commentFreeExecutable = isBlock
+        ? stripRoutineBodies(commentFreeStatement)
+        : commentFreeStatement;
+      const commentFreeOwnerVisible = activatedOwnerCapabilityTables(
+        commentFreeExecutable,
         ownerCapabilityPolicies,
-        runnerCapabilityGuc,
       );
+      const ownerVisible = new Set(
+        [...activatedOwnerCapabilityTables(executable, ownerCapabilityPolicies)].filter((table) =>
+          commentFreeOwnerVisible.has(table),
+        ),
+      );
+      const relaxesPosture = (table: string, text: string) =>
+        new RegExp(
+          String.raw`ALTER TABLE\s+${TABLE_REF(table)}\s+(NO FORCE|DISABLE) ROW LEVEL SECURITY`,
+          "i",
+        ).test(text);
       const opaque = [...forced].filter(
         (table) =>
           enabled.has(table) &&
           !unforced.has(table) &&
+          !ownerWindows.get(statementNumber - 1)?.has(table) &&
           !ownerVisible.has(table) &&
           // A DO block that relaxes the posture itself is protected.
-          !new RegExp(
-            String.raw`ALTER TABLE\s+${TABLE_REF(table)}\s+(NO FORCE|DISABLE) ROW LEVEL SECURITY`,
-            "i",
-          ).test(executable),
+          !(relaxesPosture(table, executable) && relaxesPosture(table, commentFreeExecutable)),
       );
 
       const written = opaque.filter((table) => writesTable(executable, table)).sort();
@@ -589,21 +567,4 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
     }
   }
   return findings;
-}
-
-/** Findings in migrations that are not grandfathered - i.e. real violations. */
-export function unreviewedFindings(findings: readonly BackfillFinding[]): BackfillFinding[] {
-  const allowedWrites = new Set(GRANDFATHERED_MIGRATIONS);
-  const allowedGuards = new Set(GRANDFATHERED_VACUOUS_GUARDS);
-  return findings.filter((finding) =>
-    finding.kind === "write" ? !allowedWrites.has(finding.file) : !allowedGuards.has(finding.file),
-  );
-}
-
-/** Grandfathered entries that no longer match any file (a stale allowlist). */
-export function staleAllowlistEntries(migrationsDir: string): string[] {
-  const files = new Set(readdirSync(migrationsDir).filter((file) => file.endsWith(".sql")));
-  return [...GRANDFATHERED_MIGRATIONS, ...GRANDFATHERED_VACUOUS_GUARDS].filter(
-    (entry) => !files.has(entry),
-  );
 }

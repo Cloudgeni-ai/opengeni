@@ -1,16 +1,20 @@
+import { agentPrivateFileOwnerSubjectId, unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
+  getSlackPrivateSessionOwnerSubjectId,
+  canSpendSubscriptionCoreCodexExtraCredits,
+  reserveSubscriptionCoreCodexRequest,
+  settleSubscriptionCoreCodexRequest,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
-  loadClaudeSubscriptionUsageCredential,
-  resolveClaudeSubscriptionCredential,
-  ClaudeSubscriptionReconnectRequired,
+  markSessionTurnModelTransportHttpOnly,
+  readSessionAgentPrompt,
 } from "@opengeni/db";
-import { routingEnabled } from "../../sandbox-routing";
+import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
+import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
+import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
-import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
-  assertModelConnectionAllowsTurn,
   freezeAgentLearningPolicy,
   recoverLegacyKnowledgeConfirmations,
   withSessionRlsActorContext,
@@ -35,24 +39,29 @@ import {
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
   type CodemodeTokenWriterSession,
+  warmCodexResponsesWebSocket,
 } from "@opengeni/runtime";
-import { buildCodexTokenResolver } from "../codex-auth";
+
 import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
   codexRequestStorage,
   withCodexRequestOverrides,
+  withResponsesConversation,
+  createResponsesTurn,
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import { parseModelProvidersJson } from "@opengeni/config";
-import { withClaudeUsageObserver } from "@opengeni/runtime";
-import { createClaudeUsageObserver } from "./claude-usage-observer";
+import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
+import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
+import { sessionTitlePromptFor } from "./session-title";
+import { createCodexCreditGuard } from "./codex-credit-policy";
+import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
-import { buildXaiTurnRequestAuthorization } from "../xai-auth";
+import { xaiTurnRequestContext, type XaiTurnRequestContextOptions } from "../xai-auth";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext } from "../streaming";
 import type {
@@ -61,25 +70,39 @@ import type {
   RunAgentTurnResult,
 } from "../types";
 import {
+  codexRequestTransportLabel,
   makeMachineOpObserver,
   modelRequestLifecycleMetricsFor,
   recordModelRequestPhase,
+  recordResponsesTransportDiagnostic,
+  type ModelRequestTransportLabel,
+  type ModelRequestPreDispatchStage,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { ToolResultSpill } from "./tool-result-spill";
+import { attendanceChangeNote } from "./unattended";
+import { createEagerOwnedSandboxSetup, hasEagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
-import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
-import { providerRecoveryCountAfterModelRequestPhase } from "./errors";
-import { sandboxRunAs } from "@opengeni/runtime";
+import {
+  ActiveRouteDispatchBoundary,
+  activeRouteSessionForBoundary,
+  checkpointHistoryBeforeProviderDispatch,
+} from "./provider-dispatch-barrier";
+import {
+  assertProviderOverloadRecoveryActive,
+  providerRecoveryCountAfterModelRequestPhase,
+  sandboxRouteTransitionCode,
+} from "./errors";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { codexWorkspaceMetricKey } from "./codex";
+import { codexCacheAffinityKey, codexWorkspaceMetricKey } from "./codex";
 import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
@@ -93,7 +116,17 @@ import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
+import { selectServingTurnCapacity } from "./subscription-serving-capacity";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
+import {
+  admitCoreCodexDispatch,
+  assertTurnModelConnection,
+  assertCoreCodexSourceConnected,
+  buildCoreCodexRequestTokenResolver,
+  prepareCoreCodexTurnEntitlements,
+} from "./codex-core-capacity";
+import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
+import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
@@ -102,22 +135,43 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectXaiTurnCapacity } from "./xai-capacity";
+import {
+  buildClaudeCoreRequestAuthorization,
+  claudeCoreSettingsCredential,
+  claudeCoreRequestPreparer,
+  claudeSubscriptionProviderIds,
+  claudeSubscriptionUpstreamModelIds,
+  selectClaudeTurnCapacity,
+  withClaudeCoreConnectionCredential,
+  type ClaudeCoreRequestAuthorization,
+} from "./claude-core";
+import {
+  buildXaiCoreRequestAuthorization,
+  selectXaiTurnCapacity,
+  xaiCoreTitleCustody,
+  type XaiCoreRequestAuthorization,
+} from "./xai-core";
+import type { CoreSubscriptionRequests } from "./subscription-core-requests";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
+import { assertTurnSandboxBackendServed, shouldDeferRepositorySkillIndex } from "./sandbox-route";
+import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
  * Retain subscription credential/account authority for the title sidecar
  * without sharing main-stream recovery, startup, audit, or opaque-artifact
- * callbacks. Title usage is returned by the runtime and metered separately.
+ * callbacks. Title usage is returned by the runtime and metered separately, and
+ * its dispatches run the main checks without counting as a main-stream dispatch.
  */
 export function sessionTitleCodexRequestContext(
   context: CodexRequestContext,
   nextRequestId: () => string,
+  requests?: ReturnType<typeof createCoreCodexRequests>,
 ): CodexRequestContext {
+  const mainChecks = context.beforeProviderDispatch;
   return {
     clientVersion: context.clientVersion,
     ...(context.sessionId !== undefined ? { sessionId: context.sessionId } : {}),
@@ -125,9 +179,25 @@ export function sessionTitleCodexRequestContext(
     refresh: context.refresh,
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
-    ...(context.beforeProviderDispatch
-      ? { beforeProviderDispatch: context.beforeProviderDispatch }
-      : {}),
+    ...(context.persistUsageHeaders ? { persistUsageHeaders: context.persistUsageHeaders } : {}),
+    ...(context.onReportedUsage ? { onReportedUsage: context.onReportedUsage } : {}),
+    ...(requests
+      ? {
+          beforeProviderDispatch: async (
+            request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
+          ) => {
+            if (mainChecks) await runAuxiliaryProviderDispatch(() => mainChecks());
+            if (request) await requests.reserve(request);
+          },
+          onProviderRequestSettled: requests.observe,
+        }
+      : mainChecks
+        ? {
+            beforeProviderDispatch: (
+              request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
+            ) => runAuxiliaryProviderDispatch(() => mainChecks(request)),
+          }
+        : {}),
     ...(context.responseTimeoutPolicy
       ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
       : {}),
@@ -136,16 +206,43 @@ export function sessionTitleCodexRequestContext(
   };
 }
 
+/**
+ * The durable `agent.model.request` payload of a SuperGrok request event. It
+ * carries every transport field, including `meaningfulOutput` on `completed`,
+ * which the shared false-resumption breaker resets on.
+ */
+export function xaiModelRequestEventPayload<Event extends object>(
+  event: Event,
+  ids: {
+    turnId: string;
+    attemptId: string;
+    dispatchId: string | undefined;
+    executionGeneration: number | null | undefined;
+  },
+): Event & { provider: "supergrok-subscription" } & typeof ids {
+  return { ...event, provider: "supergrok-subscription", ...ids };
+}
+
 export function sessionTitleXaiRequestContext(
   context: XaiSubscriptionRequestContext,
   nextRequestId: () => string,
+  /**
+   * On the shared core: the turn's request admission (its reservation is the
+   * dispatch fence), the title custody lane and the title lane's bearer (which never moves the main lane's refusal fence).
+   */
+  core?: {
+    admit: (reserve: () => Promise<unknown>) => Promise<void>;
+    requests: CoreSubscriptionRequests;
+    getToken: XaiSubscriptionRequestContext["getToken"];
+    refresh: XaiSubscriptionRequestContext["refresh"];
+  },
 ): XaiSubscriptionRequestContext {
   return {
     clientVersion: context.clientVersion,
     sessionId: context.sessionId,
     turnId: context.turnId,
-    getToken: context.getToken,
-    refresh: context.refresh,
+    getToken: core?.getToken ?? context.getToken,
+    refresh: core?.refresh ?? context.refresh,
     resolveModel: context.resolveModel,
     ...(context.streamIdleTimeoutMs !== undefined
       ? { streamIdleTimeoutMs: context.streamIdleTimeoutMs }
@@ -153,19 +250,20 @@ export function sessionTitleXaiRequestContext(
     ...(context.hostedToolContinuationTimeoutMs !== undefined
       ? { hostedToolContinuationTimeoutMs: context.hostedToolContinuationTimeoutMs }
       : {}),
+    ...(core
+      ? {
+          beforeProviderDispatch: async (request) => {
+            await core.admit(() => core.requests.reserve(request));
+          },
+          onProviderRequestSettled: core.requests.observe,
+        }
+      : {}),
     nextRequestId,
   };
 }
 
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
-  let documents: Promise<import("@opengeni/documents").DocumentServices> | undefined;
-  const sourceActivities = createKnowledgeSourceSyncActivities(services, async () => {
-    documents ??= import("@opengeni/documents").then(async ({ createDocumentServices }) =>
-      createDocumentServices((await services()).settings),
-    );
-    return documents;
-  });
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   // Keep a distinct cooldown for terminal collection. A collection at the
   // final model checkpoint happens while the activity still owns its complete
@@ -183,6 +281,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       bus,
       runtime,
       summarizeContextForCompaction,
+      requestWorkerDrain,
+      turnFinalizationTimeoutMs,
       objectStorage,
       observability,
       wakeSessionWorkflow,
@@ -192,9 +292,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       connectionCredentials,
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
+      startSessionTitleWorkflow,
+      startRigProviderImageRefresh,
     } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
+    let codexEntitlementPreparation: Promise<number> | undefined;
     // Temporal cancellation is not the only way an activity loses ownership:
     // a database attempt fence or workflow abandonment can finalize the logical
     // turn while the SDK cancellation signal remains open. Bind sandbox
@@ -229,6 +332,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       once: true,
     });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
+    const requestIdPrefix = providerRequestIdPrefix({
+      turnAttemptId: input.attemptId,
+      activityId: dispatchId,
+      activityAttempt: activityContext?.info.attempt ?? 1,
+    });
     const activityStarted = performance.now();
     const acknowledgeLostAttemptOwnership = (): void => {
       // A stale terminal/recovery settlement can lose either to a benign
@@ -295,6 +403,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       workspaceId: input.workspaceId,
       codexWorkspaceKey,
       getTurnId: () => attempt.turnId,
+      getSessionId: () => input.sessionId,
     });
 
     const sandboxRuntime = createSandboxTurnRuntime({
@@ -368,6 +477,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getSetupBoxSession: () => sandboxState.setupBoxSession,
       getSdkOwnedSandboxSession: () => media.sdkOwnedSandboxSession,
       getSandboxGroupId: () => sandboxState.sandboxGroupId,
+      getTurnSandboxProvisioner: () => sandboxState.turnSandboxProvisioner,
       runWorkspaceMutation: runWorkspaceMutationForSandbox,
     });
     const historySink = createTurnHistorySink({
@@ -382,13 +492,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
+    const assertRecoveryWindow = () =>
+      assertProviderOverloadRecoveryActive({
+        failureCode: attempt.providerRecoveryPolicyCode,
+        providerRecoveryCount: attempt.providerRecoveryCount,
+        recoveryStartedAt: attempt.providerRecoveryStartedAt,
+      });
+    const activeRoute = new ActiveRouteDispatchBoundary({
+      session: () => activeRouteSessionForBoundary(sandboxState),
+      isRouteTransition: (error) => sandboxRouteTransitionCode(error) !== null,
+    });
     const checkpointBeforeProviderDispatch = async () => {
+      assertRecoveryWindow();
       await awaitModelCallAdmission();
       await checkpointHistoryBeforeProviderDispatch(historySink, {
         effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
         routingEnabled: routingEnabled(settings),
         readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
+        activeRoute,
       });
+      assertRecoveryWindow();
     };
 
     try {
@@ -415,11 +538,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         media,
         claimedResult,
         acknowledgeLostAttemptOwnership,
+        startCodexEntitlementPreparation: (turn) => {
+          if (cancellationSignal?.aborted) return;
+          codexEntitlementPreparation ??= prepareCoreCodexTurnEntitlements({
+            db,
+            settings,
+            input,
+            turn,
+            observability,
+          });
+          // This is a hint. The original placement-stage read remains the
+          // authority and retries if this preparation could not finish.
+          void codexEntitlementPreparation.catch(() => undefined);
+        },
       });
       if ("exit" in claimed) return claimed.exit;
       if (!eventing.publish || !eventing.settle) {
         throw new Error("turn eventing was not wired during claim");
       }
+      assertRecoveryWindow();
       // Same object, narrowed type: every post-claim phase mutates this exact
       // context, so this must stay an assertion and never become a copy.
       const wiredEventing = eventing as EventingState & {
@@ -430,11 +567,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turn,
         session,
         installedApiIntegrations,
+        capabilityServerCategories,
         credentialSubjectId,
         fileAuthoritySubjectId,
-        capabilitySettings,
-        codexAppsCredentialId,
+        capabilitySettings: claimedCapabilitySettings,
+        codexAppsCoreConnectionId,
         turnExecutionPolicy,
+        portableModelSwitchPending,
         trigger,
         humanInputResume,
         interactionInterventionResume,
@@ -446,25 +585,69 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
+      // A stored session (or a shared-box child inheriting its parent's backend)
+      // may name a host backend this deployment does not serve. Refuse it here,
+      // against the worker's own settings, before any phase below can build a
+      // box, run a clone/setup/Rig/hydration hook or materialize credentials.
+      assertTurnSandboxBackendServed(settings, turn.sandboxBackend);
+      // EU-ONLY INFERENCE — read the workspace's setting again on every
+      // attempt, before any model call: a setting turned on after the claim
+      // still applies. Every later phase uses these settings, so resolution,
+      // run settings and every client carry the requirement, and this
+      // attempt's transport context is bound to it (never widened).
+      const capabilitySettings = await settingsWithTurnInferenceResidency({
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        settings: claimedCapabilitySettings,
+      });
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
-      const learning = await freezeAgentLearningPolicy(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        actor: {
-          kind: "agent",
-          sessionId: input.sessionId,
-          turnId: attempt.turnId,
-          attemptId: input.attemptId,
-          executionGeneration: attempt.executionGeneration,
-        },
-      });
-      const attachmentAuthority = await getSessionAuthorityProjection(
-        db,
-        input.workspaceId,
-        input.sessionId,
-      );
+      const learningActor = {
+        kind: "agent" as const,
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        attemptId: input.attemptId,
+        executionGeneration: attempt.executionGeneration,
+      };
+      // Both use the accepted attempt, but neither depends on the other.
+      // Finish both before installing the file-access context below.
+      const [learningResult, attachmentResult] = await Promise.allSettled([
+        measureTurnStartupPhase(
+          observability,
+          {
+            phase: "learning_policy_freeze",
+            provider: turnExecutionPolicy.providerId,
+            backend: turn.sandboxBackend,
+          },
+          () =>
+            freezeAgentLearningPolicy(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              actor: learningActor,
+            }),
+        ),
+        measureTurnStartupPhase(
+          observability,
+          {
+            phase: "attachment_authority_projection",
+            provider: turnExecutionPolicy.providerId,
+            backend: turn.sandboxBackend,
+          },
+          () =>
+            Promise.all([
+              getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+              getSlackPrivateSessionOwnerSubjectId(db, input.workspaceId, input.sessionId),
+            ]),
+        ),
+      ]);
+      // Observe both operations before failure handling; the policy write
+      // must not outlive this stage if the independent authority read fails.
+      if (learningResult.status === "rejected") throw learningResult.reason;
+      if (attachmentResult.status === "rejected") throw attachmentResult.reason;
+      const learning = learningResult.value;
+      const [attachmentAuthority, slackPrivateOwnerSubjectId] = attachmentResult.value;
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
         {
@@ -481,9 +664,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           },
           subjectId: "service:agent-turn",
+          // The claim and canonical projection above establish this root. Site
+          // guests have no initiating human, so their worker reads need the
+          // same root-scoped audience as native attempt-authorized tool reads.
+          agentRootSessionId: attachmentAuthority.rootSessionId,
           initiatingHumanSubjectId: fileAuthoritySubjectId,
-          privateFileOwnerSubjectId:
-            learning.defaultScope === "personal" ? learning.subjectId : null,
+          // A private Slack session is its owner's, like an Only-me session.
+          privateFileOwnerSubjectId: agentPrivateFileOwnerSubjectId(
+            learning,
+            slackPrivateOwnerSubjectId,
+          ),
         },
         async () => {
           if (!leases.codex.holderId) {
@@ -498,6 +688,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Gated on the codex-billed predicate — non-codex turns never touch this.
           {
             const capacityDeps: CapacityPhaseDeps = {
+              codexEntitlementPreparation,
               input,
               settings,
               db,
@@ -523,15 +714,58 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               trigger,
               codexWorkspaceKey,
             };
-            const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
-            if ("exit" in codexCapacity) return codexCapacity.exit;
-            const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
-            if ("exit" in xaiCapacity) return xaiCapacity.exit;
+            if (claimed.ok.servingAttempt) {
+              const servingCapacity = await selectServingTurnCapacity(
+                { ...capacityDeps, settings: capabilitySettings },
+                claimed.ok.servingAttempt,
+              );
+              if ("exit" in servingCapacity) return servingCapacity.exit;
+            } else {
+              const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
+              if ("exit" in codexCapacity) return codexCapacity.exit;
+              const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
+              if ("exit" in xaiCapacity) return xaiCapacity.exit;
+              const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
+              if ("exit" in claudeCapacity) return claudeCapacity.exit;
+            }
           }
 
+          let selectedCapabilitySettings = capabilitySettings;
+          let claudeCoreAuthorization: ClaudeCoreRequestAuthorization | null = null;
+          const claudeCore = billingState.isClaudeTurn ? providerTurn.claudeSubscriptionCore : null;
+          if (claudeCore) {
+            // On the shared core the bearer, refresh and request custody come
+            // from the core placement; the scope is the accepted model's.
+            claudeCoreAuthorization = buildClaudeCoreRequestAuthorization({
+              db,
+              settings,
+              core: claudeCore,
+              lease: leases.claude,
+              execution: {
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration!,
+              },
+              upstreamModelIds: claudeSubscriptionUpstreamModelIds(capabilitySettings),
+            });
+            const token = await claudeCoreAuthorization.getToken();
+            // The settings carry the account identity but never the live
+            // bearer: every core request gets it from its custody, so a
+            // request outside a custody wrapper fails closed upstream.
+            selectedCapabilitySettings = withClaudeCoreConnectionCredential(
+              capabilitySettings,
+              claudeCoreSettingsCredential(token, claudeCore.connectionId),
+              { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
+            );
+          } else if (billingState.isClaudeTurn) {
+            // The legacy Claude runtime is deleted: a Claude turn is placed
+            // by the shared core or failed by its route before this point.
+            throw new Error("Claude turn was not placed on the shared subscription core");
+          }
           const governance = await prepareGovernanceAndModel({
+            learningPolicy: learning,
             input,
             db,
+            observability,
             runtime,
             objectStorage,
             eventing,
@@ -539,19 +773,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             media,
             turn,
             session,
-            capabilitySettings,
+            capabilitySettings: selectedCapabilitySettings,
             fileAuthoritySubjectId,
             humanInputResume,
             turnExecutionPolicy,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             requiredGeneratedVideoFiles,
+            startRigProviderImageRefresh: startRigProviderImageRefresh ?? null,
           });
           if ("exit" in governance) return governance.exit;
-          await assertModelConnectionAllowsTurn(db, {
+          await assertTurnModelConnection(db, providerTurn, {
             workspaceId: input.workspaceId,
             subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
             modelId: turnExecutionPolicy.productModelId,
             codexCredentialId: providerTurn.effectiveCodexCredentialId,
-            xaiCredentialId: providerTurn.effectiveXaiCredentialId,
           });
           const {
             runtimePreparationStartedAt,
@@ -563,6 +798,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
+            workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             workspaceMemory,
             buildCompanyBrainContributionReceiptFor,
             logicalSandboxSettings,
@@ -577,6 +814,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelHistoryProjector,
             generatedImageHistoryProjector,
             compactionModelHistoryProjector,
+            searchRecords,
           } = governance.ok;
 
           // A codex-subscription turn resolves the bearer for THIS turn's effective
@@ -590,50 +828,114 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           let codexModelRequestSequence = 0;
           let firstModelRequestAuditRecorded = false;
           const firstModelRequestCheckpoints = new Set<string>();
+          const enterModelRequestStage = (stage: ModelRequestPreDispatchStage) =>
+            eventing.enterModelRequestStage?.(stage);
           const codexContext: CodexRequestContext | null =
             resolvedModel?.provider.kind === "codex-subscription"
               ? ((): CodexRequestContext => {
-                  // The empty-string fallback yields no row → null credential → the
-                  // existing CodexReloginRequired path (a codex turn with no usable
-                  // account fails closed, exactly as before multi-account).
-                  const resolver = buildCodexTokenResolver(
-                    db,
-                    runSettings,
-                    input.workspaceId,
-                    providerTurn.effectiveCodexCredentialId ?? "",
-                    undefined,
-                    {
-                      turnId: turn.id,
+                  const coreCodex = providerTurn.codexSubscriptionCore;
+                  if (!coreCodex) throw new Error("Codex core placement is required for dispatch");
+                  if (coreCodex) {
+                    const ref = {
+                      connectionId: coreCodex.connectionId,
                       holderId: leases.codex.holderId!,
                       generation: leases.codex.generation!,
+                    };
+                    const execution = {
+                      attemptId: input.attemptId,
+                      executionGeneration: attempt.executionGeneration!,
+                    };
+                    const requestDeps: Parameters<typeof createCoreCodexRequests>[0] = {
+                      reserve: (request) =>
+                        reserveSubscriptionCoreCodexRequest(db, coreCodex.identity, ref, {
+                          ...request,
+                          ...execution,
+                        }),
+                      settle: (request) =>
+                        settleSubscriptionCoreCodexRequest(db, coreCodex.identity, ref, {
+                          ...request,
+                          ...execution,
+                        }),
+                    };
+                    coreCodex.requests = createCoreCodexRequests(requestDeps);
+                    coreCodex.titleRequests = createCoreCodexRequests(requestDeps);
+                  }
+                  const resolver = buildCoreCodexRequestTokenResolver(
+                    db,
+                    runSettings,
+                    coreCodex,
+                    leases.codex,
+                    {
+                      signalCodexCapacityWorkflow,
                     },
                   );
+                  const trackToken = (token: Awaited<ReturnType<typeof resolver.getToken>>) => {
+                    providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
+                    return token;
+                  };
+                  const codexRequestTransports = new Map<string, ModelRequestTransportLabel>();
+                  const creditGuard = createCodexCreditGuard({
+                    canSpendCredits: async () => {
+                      if (!leases.codex.holderId || leases.codex.generation === null) return false;
+                      return await canSpendSubscriptionCoreCodexExtraCredits(db, {
+                        identity: coreCodex.identity,
+                        connectionId: coreCodex.connectionId,
+                        attemptId: input.attemptId,
+                        executionGeneration: attempt.executionGeneration!,
+                        holderId: leases.codex.holderId,
+                        productModelId: providerTurn.codexProductModelId!,
+                        reasoningLevel: turnExecutionPolicy.reasoningEffort,
+                        leaseTtlMs: 60_000,
+                      });
+                    },
+                  });
                   const resolveTrackedToken = async (
                     resolve: () => ReturnType<typeof resolver.getToken>,
                   ) => {
-                    const token = await resolve();
-                    providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
+                    const token = trackToken(await resolve());
+                    await leases.codex.assertCurrentForDispatch();
                     return token;
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
-                    // Backend sticky cache-routing key — the SAME id as the body's
-                    // prompt_cache_key (set from input.sessionId for codex turns),
-                    // so routing and cache key agree. Without this header on the
-                    // wire, byte-identical resends hit the prompt cache ~50%
-                    // (per-request shard lottery = prod's measured 48.6% on sol);
-                    // with it, resends pin to the warm shard (Codex CLI parity).
                     sessionId: input.sessionId,
+                    cacheAffinityKey: codexCacheAffinityKey(
+                      input.workspaceId,
+                      session.scopeSubjectId,
+                      input.sessionId,
+                    ),
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
                     }, // latest wins; flushed once in finally
-                    beforeProviderDispatch: () => {
-                      leases.codex.assertUsable();
+                    onReportedUsage: (usage) => creditGuard.observe(usage),
+                    persistUsageHeaders: async (snapshot) => {
+                      if (!coreCodex) return;
+                      await recordCoreCodexUsageReading({
+                        db,
+                        core: coreCodex,
+                        lease: leases.codex,
+                        usage: snapshot,
+                        credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+                      });
                     },
+                    beforeProviderDispatch: async (request) => {
+                      enterModelRequestStage("provider_admission");
+                      await admitCoreCodexDispatch({
+                        lease: leases.codex,
+                        assertSourceConnected: () => assertCoreCodexSourceConnected(db, coreCodex),
+                        assertCredits: creditGuard.assertKnownUsageAllowsDispatch,
+                        reserve: request ? () => coreCodex.requests!.reserve(request) : null,
+                      });
+                      enterModelRequestStage("transport");
+                    },
+                    ...(coreCodex ? { onProviderRequestSettled: coreCodex.requests!.observe } : {}),
                     onRequestPreparationDiagnostic: (phase) => {
+                      enterModelRequestStage(
+                        phase === "transport_entry" ? "credential" : "request_build",
+                      );
                       if (
                         eventing.firstModelRequestCheckpointAt === null ||
                         firstModelRequestCheckpoints.has(phase)
@@ -664,6 +966,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     onModelRequestDiagnostic: (event) => {
                       if (event.phase === "started")
                         sandboxState.firstProviderRequestStarted = true;
+                      // Only a call that produced a response advances the core
+                      // binding's cache clock at finalization.
+                      observeCodexResponseCompletion(providerTurn, event);
                       if (
                         event.phase === "started" &&
                         eventing.firstModelRequestPreparationStartedAt !== null &&
@@ -692,8 +997,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                               ? "terminal"
                               : null;
                       if (!phase) return;
+                      // The transport is known once headers arrive; later
+                      // phases of the same request carry the same label.
+                      const transportKey = `${event.requestId}:${event.transportAttempt}`;
+                      if (event.transport) {
+                        codexRequestTransports.set(
+                          transportKey,
+                          codexRequestTransportLabel(event.transport),
+                        );
+                        if (
+                          event.transport.kind === "websocket" &&
+                          event.transport.handshakeMs !== undefined
+                        ) {
+                          recordModelRequestPhase(observability, {
+                            provider: "codex-subscription",
+                            transport: "websocket_new",
+                            phase: "handshake",
+                            durationSeconds: event.transport.handshakeMs / 1000,
+                          });
+                        }
+                      }
+                      const transport = codexRequestTransports.get(transportKey);
+                      if (phase === "terminal") codexRequestTransports.delete(transportKey);
                       recordModelRequestPhase(observability, {
                         provider: "codex-subscription",
+                        ...(transport ? { transport } : {}),
                         phase,
                         ...(event.phase === "completed"
                           ? { outcome: "completed" as const }
@@ -705,7 +1033,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         durationSeconds: event.durationMs / 1000,
                       });
                     },
-                    nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
+                    nextRequestId: () => `${requestIdPrefix}:${++codexModelRequestSequence}`,
                     onModelRequestEvent: async (event) => {
                       if (!eventing.publish || !attempt.turnId) {
                         throw new Error(
@@ -713,7 +1041,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         );
                       }
                       if (event.phase === "started") {
+                        enterModelRequestStage("dispatch_checkpoint");
                         await checkpointBeforeProviderDispatch();
+                        enterModelRequestStage("request_audit");
                       }
                       const shouldRecordStartedAudit =
                         event.phase === "started" && !firstModelRequestAuditRecorded;
@@ -777,21 +1107,52 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                 })()
               : null;
+          providerTurn.persistentModelTransportHttpOnly =
+            turn.metadata?.persistentModelTransportHttpOnly === true;
+          const responsesTurn = createResponsesTurn(
+            input.sessionId,
+            (event) =>
+              recordResponsesTransportDiagnostic(
+                observability,
+                turnExecutionPolicy.providerId,
+                event,
+              ),
+            {
+              httpOnly: providerTurn.persistentModelTransportHttpOnly,
+              onFallback: async () => {
+                providerTurn.persistentModelTransportHttpOnly = true;
+                const persisted = await markSessionTurnModelTransportHttpOnly(db, {
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  executionGeneration: turn.executionGeneration,
+                  attemptId: input.attemptId,
+                });
+                if (!persisted)
+                  throw new TurnAttemptFencedError("Model transport fallback lost turn ownership");
+              },
+            },
+          );
+          if (codexContext && runSettings.codexResponsesWebSocketEnabled) {
+            // Open this conversation's Responses WebSocket now, so its
+            // handshake overlaps the rest of turn preparation instead of
+            // delaying the first model response. No model request is sent.
+            void withResponsesConversation(responsesTurn, () =>
+              codexRequestStorage.run(codexContext, () =>
+                warmCodexResponsesWebSocket(resolvedModel?.provider.baseUrl),
+              ),
+            );
+          }
+          let xaiCoreAuthorization: XaiCoreRequestAuthorization | null = null;
           if (resolvedModel?.provider.kind === "xai-subscription") {
-            if (!providerTurn.effectiveXaiCredentialId || !leases.xai.subjectId) {
+            const xaiCore = providerTurn.xaiSubscriptionCore;
+            if (!providerTurn.effectiveXaiCredentialId || !xaiCore) {
               throw new Error("SuperGrok subscription execution has no leased credential");
             }
             let xaiModelRequestSequence = 0;
-            const authorization = await buildXaiTurnRequestAuthorization({
-              db,
-              settings: runSettings,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: leases.xai.subjectId,
+            const xaiRequestOptions: XaiTurnRequestContextOptions = {
               sessionId: input.sessionId,
               turnId: turn.id,
-              credentialId: providerTurn.effectiveXaiCredentialId,
-              authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
               hostedSearch: {
                 webSearch: resolveAgentToolFamilies(session.agent, {
                   webSearch: runSettings.webSearchEnabled,
@@ -801,7 +1162,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
-              nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
+              nextRequestId: () => `${requestIdPrefix}:xai:${++xaiModelRequestSequence}`,
               onModelRequestDiagnostic: (event) => {
                 const requestKey = `${event.requestId}:${event.transportAttempt}`;
                 if (event.phase === "started") {
@@ -899,14 +1260,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       : []),
                     {
                       type: "agent.model.request",
-                      payload: {
-                        ...event,
-                        provider: "supergrok-subscription",
+                      payload: xaiModelRequestEventPayload(event, {
                         turnId: attempt.turnId,
                         attemptId: input.attemptId,
                         dispatchId,
                         executionGeneration: attempt.executionGeneration,
-                      },
+                      }),
                     },
                   ]);
                   attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
@@ -929,73 +1288,94 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   }
                 }
               },
+            };
+            // The bearer, refresh and request custody come from the core
+            // placement.
+            xaiCoreAuthorization = buildXaiCoreRequestAuthorization({
+              db,
+              settings: runSettings,
+              core: xaiCore,
+              lease: leases.xai,
+              execution: {
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration!,
+              },
             });
-            providerTurn.xaiRequestContext = authorization.context;
+            providerTurn.xaiRequestContext = xaiTurnRequestContext(
+              xaiRequestOptions,
+              xaiCoreAuthorization,
+            );
           }
-          const claudeUsageObserver = await createClaudeUsageObserver(
-            parseModelProvidersJson(runSettings.modelProvidersJson),
-            providerTurn.latestClaudeUsage,
-            (scope) =>
-              loadClaudeSubscriptionUsageCredential(db, settings, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                scope,
-              }),
-          );
-          const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
-              const binding = claudeUsageObserver.binding(providerId);
-              if (!binding) return headers;
-              const credential = await resolveClaudeSubscriptionCredential(
-                db,
-                settings,
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  scope: binding.scope,
-                },
-                {
-                  expectedConnectionId: binding.expectedConnectionId,
-                  expectedCredentialVersion: binding.expectedCredentialVersion,
-                },
+          // A core-placed Claude turn: every physical request carries the core
+          // bearer and the custody of its lane (the agent's, or the session
+          // title's). Any other turn sends no Claude subscription request.
+          const claudeProviderIds = claudeSubscriptionProviderIds(runSettings);
+          let claudeModelRequestSequence = 0;
+          let claudeTitleRequestSequence = 0;
+          const withClaudeCoreLane =
+            (lane: "requests" | "titleRequests") =>
+            <T>(fn: () => Promise<T>): Promise<T> => {
+              const custody = claudeCore?.[lane];
+              if (!claudeCoreAuthorization || !custody)
+                throw new Error("Claude core request custody was not initialized");
+              return withClaudeUsageObserver(
+                () => undefined,
+                fn,
+                claudeCoreRequestPreparer({
+                  authorization: claudeCoreAuthorization,
+                  lane: custody,
+                  mainLane: lane === "requests",
+                  nextRequestId: () =>
+                    lane === "requests"
+                      ? `${requestIdPrefix}:claude:${++claudeModelRequestSequence}`
+                      : `${requestIdPrefix}:claude:title:${++claudeTitleRequestSequence}`,
+                  providerIds: claudeProviderIds,
+                  observe: claudeCoreAuthorization.observeResponse,
+                }),
               );
-              if (!credential) return headers; // A replaced connection never lends its new token to this turn.
-              if ("reconnectRequired" in credential)
-                throw new ClaudeSubscriptionReconnectRequired();
-              claudeUsageObserver.renew(providerId, credential);
-              headers.set("authorization", `Bearer ${credential.token}`);
-              headers.delete("x-api-key");
-              return headers;
-            });
+            };
+          const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            claudeCore ? withClaudeCoreLane("requests")(fn) : fn();
+          const withClaudeTitleUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn();
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
+          // The turn's model requests belong to this session's conversation,
+          // so OpenAI/Azure Responses requests can share one WebSocket
+          // connection and continue the previous response on it.
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsage(() =>
-              providerTurn.xaiRequestContext
-                ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
-                : withCodex(fn),
+            withResponsesConversation(responsesTurn, () =>
+              withClaudeUsage(() =>
+                providerTurn.xaiRequestContext
+                  ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
+                  : withCodex(fn),
+              ),
             );
           let codexSessionTitleRequestSequence = 0;
           let xaiSessionTitleRequestSequence = 0;
           const codexSessionTitleContext = codexContext
             ? sessionTitleCodexRequestContext(
                 codexContext,
-                () => `${dispatchId}:title:${++codexSessionTitleRequestSequence}`,
+                () => `${requestIdPrefix}:title:${++codexSessionTitleRequestSequence}`,
+                providerTurn.codexSubscriptionCore?.titleRequests,
               )
             : null;
           const xaiSessionTitleContext = providerTurn.xaiRequestContext
             ? sessionTitleXaiRequestContext(
                 providerTurn.xaiRequestContext,
-                () => `${dispatchId}:xai:title:${++xaiSessionTitleRequestSequence}`,
+                () => `${requestIdPrefix}:xai:title:${++xaiSessionTitleRequestSequence}`,
+                xaiCoreTitleCustody(providerTurn.xaiSubscriptionCore, xaiCoreAuthorization),
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsage(() =>
-              xaiSessionTitleContext
-                ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
-                : codexSessionTitleContext
-                  ? codexRequestStorage.run(codexSessionTitleContext, fn)
-                  : fn(),
+            withResponsesConversation(undefined, () =>
+              withClaudeTitleUsage(() =>
+                xaiSessionTitleContext
+                  ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+                  : codexSessionTitleContext
+                    ? codexRequestStorage.run(codexSessionTitleContext, fn)
+                    : fn(),
+              ),
             );
           const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
             withClaudeUsage(() =>
@@ -1015,7 +1395,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ),
               ),
             );
+          // The agent revision in this chat's system prompt, read once so every
+          // compaction and the turn itself use the same instructions. The
+          // turn's first attempt records it, so retries build the same prompt.
+          const agentPrompt = await readSessionAgentPrompt(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turn: {
+              turnId: attempt.turnId!,
+              expectedExecutionGeneration: attempt.executionGeneration!,
+              expectedAttemptId: input.attemptId,
+            },
+          });
           const compactionPrep = await prepareCompaction({
+            entitlements,
             input,
             settings: capabilitySettings,
             db,
@@ -1035,13 +1429,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelUsageDispatchId,
             turn,
             session,
+            agentPrompt,
             turnExecutionPolicy,
+            portableModelSwitchPending,
             resolvedModel,
             workspaceAgentInstructions,
             workspaceAgentIdentity,
-            workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
+            lazyToolTransport,
             rigVersion,
             rigName,
             compactionModelHistoryProjector,
@@ -1066,23 +1462,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             input,
             db,
             cancellationSignal,
-            connectionCredentials,
             turn,
             session,
             fileAuthoritySubjectId,
             capabilitySettings,
             runSettings,
             rigVersion,
-            workspaceRefs,
           });
           const {
             turnResources: claimedTurnResources,
             runtimeResources: claimedRuntimeResources,
-            mcpAvailabilityNote,
+            repositoryRemoval,
+            unavailableMcpConnectors,
             turnTools,
             connectionScope,
-            workspaceVariableSet,
-            sandboxWorkspaceEnvironmentValues,
           } = toolPolicy;
 
           let knowledgeRecoveryNote: string | undefined;
@@ -1105,7 +1498,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               recovered.instructionReceipts.length ||
               recovered.unavailable
             ) {
-              knowledgeRecoveryNote = `[OpenGeni legacy confirmation recovery]\n${JSON.stringify(recovered)}\nThese are publication receipts for the human's earlier answer. Do not call the retired remember tools or duplicate these entries. Unavailable confirmations were not published. Inspect the current Knowledge or instruction review before taking further action.`;
+              knowledgeRecoveryNote = `[Opengeni legacy confirmation recovery]\n${JSON.stringify(recovered)}\nThese are publication receipts for the human's earlier answer. Do not call the retired remember tools or duplicate these entries. Unavailable confirmations were not published. Inspect the current Knowledge or instruction review before taking further action.`;
               for (const receipt of recovered.instructionReceipts) {
                 await eventing.publish!(
                   [{ type: "instruction.confirmation.recovered", payload: { receipt } }],
@@ -1122,12 +1515,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             cancellationSignal?.throwIfAborted();
             knowledgeRecoveryNote =
-              "[OpenGeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
+              "[Opengeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
           }
           const knowledgeSourcePreparationNote = knowledgeRecoveryNote;
 
           const sandboxRoute = await resolveSandboxRoute({
             input,
+            turn,
             settings,
             db,
             eventing,
@@ -1155,6 +1549,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // an unusable bound repository stays bare and is reported visibly.
           const hasCredentialProvider =
             activeSandboxBackend !== "selfhosted" &&
+            // This flag only controls inferred bindings for bare GitHub
+            // repositories. No matching resource means no consumer of the
+            // provider configuration; actual credential minting keeps its
+            // own live provider/authority checks below.
+            unboundGitHubRepositoryResources(claimedTurnResources).length > 0 &&
             (
               await waitForTurnOperation(
                 getWorkspaceCredentialProvider(db, {
@@ -1194,6 +1593,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } = await waitForTurnOperation(
             dropUnavailableOptionalRepositories({
               db,
+              ...(cancellationSignal ? { signal: cancellationSignal } : {}),
               settings: runSettings,
               workspaceId: input.workspaceId,
               activeSandboxBackend,
@@ -1226,9 +1626,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxRuntime,
             turn,
             session,
+            turnExecutionPolicy,
             fileAuthoritySubjectId,
             runSettings,
-            workspaceVariableSet,
             turnResources,
             requiredGeneratedVideoFiles,
             machinePrimary,
@@ -1236,7 +1636,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             groupBoxBackend,
             sandboxCreationBackend,
             effectiveRunCredentialBackend,
-            sandboxWorkspaceEnvironmentValues,
             connectionScope,
             runWorkspaceMutationForSandbox,
           });
@@ -1258,6 +1657,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             initialGitCredentials,
             startRunGitCredentialsMint,
             attachGitCredentialRenewal,
+            prepareCodemodeTokenSeed,
             attachCodemodeTokenRenewal,
             attachRunCredentialRenewal,
           } = runCredentials;
@@ -1268,6 +1668,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             settings,
             db,
             bus,
+            wakeSessionWorkflow,
             objectStorage,
             observability,
             cancellationSignal,
@@ -1363,8 +1764,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ]),
             ).values(),
           ];
+          // Connected vaults (1Password, host) resolve under the acting human;
+          // one provider read budget covers every resolver of this attempt.
+          const vaultAccess = createAttemptVaultAccess({
+            db,
+            settings,
+            workspaceId: input.workspaceId,
+            subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? null,
+            hostVaultProvider: connectionCredentials?.vaultProvider,
+            onePasswordVaultProvider: resolvedServices.onePasswordVaultProvider,
+            externalVaultProviders: resolvedServices.externalVaultProviders ?? null,
+            executionContext: {
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+            },
+          });
           const toolRuntime = await prepareTurnToolRuntime({
-            fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
+            independentSessionTitles: !!startSessionTitleWorkflow,
+            learningModes: learning.effective,
+            vaultAccess,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
             input,
@@ -1385,13 +1804,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             capabilitySettings,
             installedApiIntegrations,
-            codexAppsCredentialId,
+            ...(capabilityServerCategories ? { capabilityServerCategories } : {}),
+            codexAppsCoreConnectionId,
             turnExecutionPolicy,
             trigger,
             runSettings,
             resolvedModel,
             lazyToolTransport,
+            workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             turnTools,
+            unavailableMcpConnectors,
             connectionScope,
             sandboxArtifactRuntime,
             activeSandboxBackend,
@@ -1412,13 +1835,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             generateSessionTitleInParallel,
             postToolPreparationStartedAt,
             preparationIndependentToolNames,
+            mcpAvailabilityNote,
           } = toolRuntime;
 
           const builtAgent = await buildTurnAgent({
+            vaultAccess,
             skillCatalog: toolRuntime.skillCatalog,
             mcpServers: toolRuntime.mcpServers,
             input,
             db,
+            bus,
             runtime,
             objectStorage,
             observability,
@@ -1432,6 +1858,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             leases,
             turn,
             session,
+            agentPrompt,
             fileAuthoritySubjectId,
             capabilitySettings,
             humanInputResume,
@@ -1449,13 +1876,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
+            workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             workspaceMemory,
             rigVersion,
             rigName,
             buildCompanyBrainContributionReceiptFor,
             promptCacheKey,
-            workspaceVariableSet,
             runtimeResources,
+            // Revoke a removed repository's dedicated token only when
+            // Opengeni's own GitHub App minted it, never a token a host
+            // credential callback supplied.
+            repositoryRemoval: repositoryRemoval
+              ? {
+                  ...repositoryRemoval,
+                  revokeDedicatedGitHubAppTokens: gitTokensMintedByOpengeni(connectionCredentials),
+                }
+              : null,
             sandboxEnvironment,
             sandboxArtifactRuntime,
             sandboxGitToken,
@@ -1468,9 +1905,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             trigger,
             preparationIndependentToolNames,
             codeSearchAvailable: toolRuntime.codeSearchAvailable,
+            promptToolAvailability: toolRuntime.promptToolAvailability,
+            toolRouterInHistory: toolRuntime.toolRouterInHistory,
+            toolRouterExpected: toolRuntime.toolRouterExpected,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
+            deferRepositorySkillIndex: shouldDeferRepositorySkillIndex({
+              lazyEnabled: lazyProvisionEnabled(settings),
+              machinePrimary,
+              groupBoxBackend,
+              hasRepositoryResources: turnResources.some(
+                (resource) => resource.kind === "repository",
+              ),
+            }),
             postToolPreparationStartedAt,
             codexContext,
           });
@@ -1482,6 +1930,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             settings,
             db,
             bus,
+            wakeSessionWorkflow,
             objectStorage,
             observability,
             cancellationSignal,
@@ -1573,13 +2022,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelUsageDispatchId,
             turn,
             session,
+            agentPrompt,
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
             workspaceAgentIdentity,
-            workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
+            lazyToolTransport,
             rigVersion,
             rigName,
             compactionModelHistoryProjector,
@@ -1587,6 +2037,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             withProviderRequestContext,
             withCodexRemoteCompaction,
             remotePrefix,
+            portableModelSwitchPending,
             remoteCompactionRequester,
             publishCompactionLiveEvents,
             publishCompactionOutcomeEvents,
@@ -1606,210 +2057,258 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             outcome: "completed",
             durationSeconds: (performance.now() - postAgentPreparationStartedAt) / 1_000,
           });
-          let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
-          let fileDownloadsMaterializedForRun = false;
-          if (
+          // Platform setup (rig setup, credential hooks, repository clones)
+          // needs nothing from file delivery or the model input, so it starts
+          // now and the first model stream joins it. When the runtime delivers
+          // files itself, setup must wait for the prepared input it annotates.
+          const workerDeliversFiles = Boolean(
             sandboxState.resolvedSandbox &&
             sandboxState.setupBoxSession &&
-            fileResourceDownloads.length > 0
-          ) {
-            const fileMaterializationStartedAt = performance.now();
-            let fileMaterializationOutcome: "completed" | "failed" = "completed";
-            let fileMaterializationCache: "hit" | "miss" = "miss";
-            try {
-              const boxInstanceId = sandboxState.resolvedSandbox.established.instanceId;
-              // A successful transfer is durable for this exact filesystem instance.
-              // Do not turn later model startup into an integrity scan. If an owner or
-              // agent removes the file, it can be restored explicitly through the
-              // existing Files MCP using the durable file id carried in model history.
-              const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: session.sandboxGroupId,
-                expectedEpoch: sandboxState.resolvedSandbox.leaseEpoch,
-                instanceId: boxInstanceId,
-              });
-              const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
-                fileResourceDownloads,
-                alreadyMaterialized,
-              );
-              if (downloadsToMaterialize.length === 0) {
-                fileMaterializationCache = "hit";
-              }
-              const runAs = sandboxRunAs(runSettings);
-              if (downloadsToMaterialize.length > 0) {
-                const materialized = await runWorkspaceMutationForSandbox(
-                  sandboxState.resolvedSandbox,
-                  "fileMaterialization",
-                  async () =>
-                    await materializeSandboxFileDownloads(
-                      sandboxState.setupBoxSession as CodemodeTokenWriterSession,
-                      downloadsToMaterialize,
-                      {
-                        onRuntimeEvent: async (event) => {
-                          await eventing.publish!(
-                            [{ type: event.type, payload: event.payload }],
-                            true,
-                          );
-                        },
-                        ...(runAs ? { runAs } : {}),
-                        ...(eventing.toolCancellationFenceRef.current
-                          ? {
-                              commandRunner:
-                                eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                                  eventing.toolCancellationFenceRef.current,
-                                ),
-                            }
-                          : {}),
-                      },
-                    ),
+            fileResourceDownloads.length > 0,
+          );
+          const eagerOwnedSandboxSetup = createEagerOwnedSandboxSetup(
+            {
+              input,
+              attempt,
+              db,
+              observability,
+              runtimeCancellationSignal,
+              sandboxState,
+              eventing: wiredEventing,
+              leases,
+              runWorkspaceMutationForSandbox,
+              attachGitCredentialRenewal,
+              prepareCodemodeTokenSeed,
+              attachCodemodeTokenRenewal,
+              attachRunCredentialRenewal,
+              activeSandboxBackend,
+              groupBoxBackend,
+              turnExecutionPolicy,
+              agent,
+              runSettings,
+              initialRunCredentialMaterial,
+              initialGitCredentials,
+              sandboxEnvironment,
+              fileResourceDownloads,
+            },
+            hasEagerOwnedSandboxSetup(sandboxState) &&
+              (workerDeliversFiles || fileResourceDownloads.length === 0)
+              ? { fileDownloadsMaterialized: workerDeliversFiles }
+              : undefined,
+          );
+          try {
+            let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
+            let fileDownloadsMaterializedForRun = false;
+            if (
+              sandboxState.resolvedSandbox &&
+              sandboxState.setupBoxSession &&
+              fileResourceDownloads.length > 0
+            ) {
+              const fileMaterializationStartedAt = performance.now();
+              let fileMaterializationOutcome: "completed" | "failed" = "completed";
+              let fileMaterializationCache: "hit" | "miss" = "miss";
+              try {
+                const boxInstanceId = sandboxState.resolvedSandbox.established.instanceId;
+                // A successful transfer is durable for this exact filesystem instance.
+                // Do not turn later model startup into an integrity scan. If an owner or
+                // agent removes the file, it can be restored explicitly through the
+                // existing Files MCP using the durable file id carried in model history.
+                const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sandboxGroupId: session.sandboxGroupId,
+                  expectedEpoch: sandboxState.resolvedSandbox.leaseEpoch,
+                  instanceId: boxInstanceId,
+                });
+                const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
+                  fileResourceDownloads,
+                  alreadyMaterialized,
                 );
-                fileMaterializationFailures = materialized.failures;
-                fileMaterializationOutcome = sandboxFileMaterializationOutcome(
-                  materialized.failures,
-                );
-                const failedFileIds = new Set(
-                  materialized.failures.map((failure) => failure.fileId),
-                );
-                const succeededFileIds = downloadsToMaterialize
-                  .map((download) => download.fileId)
-                  .filter((fileId) => !failedFileIds.has(fileId));
-                if (succeededFileIds.length > 0) {
-                  await markSandboxFileResourcesMaterialized(db, {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sandboxGroupId: session.sandboxGroupId,
-                    expectedEpoch: sandboxState.resolvedSandbox.leaseEpoch,
-                    instanceId: boxInstanceId,
-                    fileIds: succeededFileIds,
-                  });
+                if (downloadsToMaterialize.length === 0) {
+                  fileMaterializationCache = "hit";
                 }
+                if (downloadsToMaterialize.length > 0) {
+                  const materialized = await runWorkspaceMutationForSandbox(
+                    sandboxState.resolvedSandbox,
+                    "fileMaterialization",
+                    async () =>
+                      await materializeSandboxFileDownloads(
+                        sandboxState.setupBoxSession as CodemodeTokenWriterSession,
+                        downloadsToMaterialize,
+                        {
+                          sandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+                          onRuntimeEvent: async (event) => {
+                            await eventing.publish!(
+                              [{ type: event.type, payload: event.payload }],
+                              true,
+                            );
+                          },
+                          ...(eventing.toolCancellationFenceRef.current
+                            ? {
+                                commandRunner:
+                                  eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
+                                    eventing.toolCancellationFenceRef.current,
+                                  ),
+                              }
+                            : {}),
+                        },
+                      ),
+                  );
+                  fileMaterializationFailures = materialized.failures;
+                  fileMaterializationOutcome = sandboxFileMaterializationOutcome(
+                    materialized.failures,
+                  );
+                  const failedFileIds = new Set(
+                    materialized.failures.map((failure) => failure.fileId),
+                  );
+                  const succeededFileIds = downloadsToMaterialize
+                    .map((download) => download.fileId)
+                    .filter((fileId) => !failedFileIds.has(fileId));
+                  if (succeededFileIds.length > 0) {
+                    await markSandboxFileResourcesMaterialized(db, {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sandboxGroupId: session.sandboxGroupId,
+                      expectedEpoch: sandboxState.resolvedSandbox.leaseEpoch,
+                      instanceId: boxInstanceId,
+                      fileIds: succeededFileIds,
+                    });
+                  }
+                }
+                fileDownloadsMaterializedForRun = true;
+              } catch (error) {
+                fileMaterializationOutcome = "failed";
+                throw error;
+              } finally {
+                recordTurnStartupPhase(observability, {
+                  phase: "file_materialization",
+                  provider: turnExecutionPolicy.providerId,
+                  backend: activeSandboxBackend ?? groupBoxBackend,
+                  outcome: fileMaterializationOutcome,
+                  durationSeconds: (performance.now() - fileMaterializationStartedAt) / 1_000,
+                  count: fileResourceDownloads.length,
+                  cache: fileMaterializationCache,
+                });
               }
-              fileDownloadsMaterializedForRun = true;
-            } catch (error) {
-              fileMaterializationOutcome = "failed";
-              throw error;
-            } finally {
+            } else {
               recordTurnStartupPhase(observability, {
                 phase: "file_materialization",
                 provider: turnExecutionPolicy.providerId,
                 backend: activeSandboxBackend ?? groupBoxBackend,
-                outcome: fileMaterializationOutcome,
-                durationSeconds: (performance.now() - fileMaterializationStartedAt) / 1_000,
-                count: fileResourceDownloads.length,
-                cache: fileMaterializationCache,
+                outcome: "completed",
+                durationSeconds: 0,
+                count: 0,
               });
             }
-          } else {
-            recordTurnStartupPhase(observability, {
-              phase: "file_materialization",
-              provider: turnExecutionPolicy.providerId,
-              backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: "completed",
-              durationSeconds: 0,
-              count: 0,
+            const requiredVideoFileIds = new Set(
+              requiredGeneratedVideoFiles.map((file) => file.fileId),
+            );
+            const failedRequiredVideo = fileMaterializationFailures.find((failure) =>
+              requiredVideoFileIds.has(failure.fileId),
+            );
+            if (failedRequiredVideo) {
+              // Retention is already durable. A sandbox copy miss must not fail the
+              // turn or replay generation; the File remains retrievable via Files MCP.
+              observability.warn("Generated video sandbox materialization deferred", {
+                errorClass: "SandboxFileDownloadFailure",
+                errorCode: "generated_video_materialization_deferred",
+                origin: "worker",
+              });
+            }
+            const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
+              fileMaterializationFailures,
+            );
+            return await runTurnStreamAttempt({
+              input,
+              settings: capabilitySettings,
+              db,
+              bus,
+              runtime,
+              objectStorage,
+              observability,
+              entitlements,
+              startVideoGenerationWorkflow,
+              startSessionTitleWorkflow,
+              sessionTitleExpectedCurrent: { title: session.title, source: session.titleSource },
+              cancellationSignal,
+              runtimeCancellationSignal,
+              activityContext,
+              dispatchId,
+              control,
+              attempt,
+              billingState,
+              sandboxState,
+              eventing: wiredEventing,
+              providerTurn,
+              leases,
+              historySink,
+              checkpointBeforeProviderDispatch,
+              media,
+              toolResultSpill,
+              claimedResult,
+              flushRuntimeBatcher,
+              finalizeTurnOpStreamOps,
+              runWorkspaceMutationForSandbox,
+              throwIfWorkerShuttingDown,
+              throwIfTurnCancelled,
+              setLastInputTokensFenced,
+              attachGitCredentialRenewal,
+              prepareCodemodeTokenSeed,
+              attachCodemodeTokenRenewal,
+              attachRunCredentialRenewal,
+              withProviderRequestContext,
+              withSessionTitleProviderRequestContext,
+              publishCompactionLiveEvents,
+              publishCompactionOutcomeEvents,
+              recordCompanyBrainContributionReceiptOnce,
+              modelCheckpointMemoryCollector,
+              claimedModelUsageSourceKeys,
+              emittedModelUsageSourceKeys,
+              modelUsageDispatchId,
+              workerPreparationStartedAt,
+              fileDownloadsMaterializedForRun,
+              eagerOwnedSandboxSetup,
+              unavailableSandboxFilesNote,
+              runCredentialsNote,
+              mcpAvailabilityNote,
+              attendanceNote: attendanceChangeNote(session),
+              knowledgeSourcePreparationNote,
+              fileAuthoritySubjectId,
+              activeSandboxBackend,
+              groupBoxBackend,
+              turnExecutionPolicy,
+              turn,
+              trigger,
+              humanInputResume,
+              attachPendingUpdatesAfterOpenSuffix,
+              agent,
+              resolvedModel,
+              providerApi,
+              runSettings,
+              turnTools,
+              generateSessionTitleInParallel,
+              sessionTitlePrompt: sessionTitlePromptFor(session.initialMessage, turn.prompt),
+              compactSummarizer,
+              settleDeferredSteerAfterCompaction,
+              compactionModelHistoryProjector,
+              generatedImageHistoryProjector,
+              modelHistoryProjector,
+              searchRecords,
+              compactionModeOptions,
+              initialRunCredentialMaterial,
+              initialGitCredentials,
+              sandboxEnvironment,
+              sandboxCodemodeToken,
+              sandboxCodemodeTokenExpiresAt,
+              fileResourceDownloads,
+              runCredentialResolver,
+              videoGenerationAcceptancesByCallId,
             });
+          } finally {
+            // Never leave a started setup's workspace admission running past
+            // this attempt, including exits before the first model stream.
+            await eagerOwnedSandboxSetup.settled();
           }
-          const requiredVideoFileIds = new Set(
-            requiredGeneratedVideoFiles.map((file) => file.fileId),
-          );
-          const failedRequiredVideo = fileMaterializationFailures.find((failure) =>
-            requiredVideoFileIds.has(failure.fileId),
-          );
-          if (failedRequiredVideo) {
-            // Retention is already durable. A sandbox copy miss must not fail the
-            // turn or replay generation; the File remains retrievable via Files MCP.
-            observability.warn("Generated video sandbox materialization deferred", {
-              errorClass: "SandboxFileDownloadFailure",
-              errorCode: "generated_video_materialization_deferred",
-              origin: "worker",
-            });
-          }
-          const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
-            fileMaterializationFailures,
-          );
-          return await runTurnStreamAttempt({
-            input,
-            settings: capabilitySettings,
-            db,
-            bus,
-            runtime,
-            objectStorage,
-            observability,
-            entitlements,
-            startVideoGenerationWorkflow,
-            cancellationSignal,
-            runtimeCancellationSignal,
-            activityContext,
-            dispatchId,
-            control,
-            attempt,
-            billingState,
-            sandboxState,
-            eventing: wiredEventing,
-            providerTurn,
-            leases,
-            historySink,
-            checkpointBeforeProviderDispatch,
-            media,
-            toolResultSpill,
-            claimedResult,
-            flushRuntimeBatcher,
-            finalizeTurnOpStreamOps,
-            runWorkspaceMutationForSandbox,
-            throwIfWorkerShuttingDown,
-            throwIfTurnCancelled,
-            setLastInputTokensFenced,
-            attachGitCredentialRenewal,
-            attachCodemodeTokenRenewal,
-            attachRunCredentialRenewal,
-            withProviderRequestContext,
-            withSessionTitleProviderRequestContext,
-            publishCompactionLiveEvents,
-            publishCompactionOutcomeEvents,
-            recordCompanyBrainContributionReceiptOnce,
-            modelCheckpointMemoryCollector,
-            claimedModelUsageSourceKeys,
-            emittedModelUsageSourceKeys,
-            modelUsageDispatchId,
-            workerPreparationStartedAt,
-            fileDownloadsMaterializedForRun,
-            unavailableSandboxFilesNote,
-            runCredentialsNote,
-            mcpAvailabilityNote,
-            knowledgeSourcePreparationNote,
-            fileAuthoritySubjectId,
-            activeSandboxBackend,
-            groupBoxBackend,
-            turnExecutionPolicy,
-            turn,
-            trigger,
-            humanInputResume,
-            attachPendingUpdatesAfterOpenSuffix,
-            agent,
-            resolvedModel,
-            providerApi,
-            runSettings,
-            turnTools,
-            generateSessionTitleInParallel,
-            sessionTitlePrompt: session.initialMessage.trim()
-              ? session.initialMessage
-              : turn.prompt,
-            compactSummarizer,
-            settleDeferredSteerAfterCompaction,
-            compactionModelHistoryProjector,
-            generatedImageHistoryProjector,
-            modelHistoryProjector,
-            compactionModeOptions,
-            initialRunCredentialMaterial,
-            initialGitCredentials,
-            sandboxEnvironment,
-            sandboxCodemodeToken,
-            sandboxCodemodeTokenExpiresAt,
-            fileResourceDownloads,
-            runCredentialResolver,
-            videoGenerationAcceptancesByCallId,
-          });
         },
       );
     } catch (error) {
@@ -1825,6 +2324,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         bus,
         observability,
         wakeSessionWorkflow,
+        signalCodexCapacityWorkflow,
         cancellationSignal,
         sandboxRotationController,
         noteCancellationRequested,
@@ -1842,7 +2342,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         acknowledgeRecoveryQuiescence,
       });
     } finally {
+      if (codexEntitlementPreparation) await Promise.allSettled([codexEntitlementPreparation]);
       await finalizeTurnAttempt({
+        turnFinalizationTimeoutMs,
+        requestWorkerDrain,
         input,
         settings,
         db,
@@ -1876,7 +2379,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     }
   };
   return async (input: RunAgentTurnInput): Promise<RunAgentTurnResult> => {
+    const servicesStartedAt = performance.now();
     const resolvedServices = await services();
+    const servicesDurationSeconds = (performance.now() - servicesStartedAt) / 1_000;
     const correlationId = turnExecutionTelemetryKey(
       input.workspaceId,
       input.sessionId,
@@ -1894,11 +2399,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
         withTraceContext(span, () => {
           try {
+            recordTurnStartupPhase(resolvedServices.observability, {
+              phase: "services_initialization",
+              provider: "unresolved",
+              backend: "unresolved",
+              outcome: "completed",
+              durationSeconds: servicesDurationSeconds,
+            });
+          } catch {
+            // Service initialization telemetry never gates a claimed attempt.
+          }
+          try {
             resolvedServices.observability.info("worker execution started", { correlationId });
           } catch {
             // Correlation diagnostics never affect execution or admission.
           }
-          return runAgentTurn(input, resolvedServices, span);
+          // EU-only inference: model requests are refused until the claim
+          // binds this context to the turn's settings.
+          return withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span));
         }),
       );
     } catch (error) {

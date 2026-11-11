@@ -136,16 +136,16 @@ const MODEL_TOOL_OUTPUT_STRUCTURAL_STRING_BUDGET_TOKENS = 1_024;
 export const MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024;
 
 const DEPTH_OMISSION_MARKER =
-  "[OpenGeni omitted subtree: maximum structured tool-output depth exceeded]";
-const CYCLE_OMISSION_MARKER = "[OpenGeni omitted subtree: cyclic tool output]";
+  "[Opengeni omitted subtree: maximum structured tool-output depth exceeded]";
+const CYCLE_OMISSION_MARKER = "[Opengeni omitted subtree: cyclic tool output]";
 const STRUCTURAL_STRING_OMISSION_MARKER =
-  "[OpenGeni omitted structural string: structural budget exhausted]";
+  "[Opengeni omitted structural string: structural budget exhausted]";
 const TEXT_FIELD_OMISSION_MARKER = /^\[omitted text field \d+ \.\.\.\]$/u;
 const TEXT_ITEMS_OMISSION_MARKER = /^\[omitted \d+ text items \.\.\.\]$/u;
 const STRUCTURAL_ENTRIES_OMISSION_MARKER =
-  /^\[OpenGeni omitted \d+ structured (?:array items|object properties)\]$/u;
+  /^\[Opengeni omitted \d+ structured (?:array items|object properties)\]$/u;
 const OPAQUE_PAYLOAD_OMISSION_MARKER =
-  /^\[OpenGeni omitted (?:image|file|encrypted) payload: \d+ bytes exceeded the bounded model-input allowance\]$/u;
+  /^\[Opengeni omitted (?:image|file|encrypted) payload: \d+ bytes exceeded the bounded model-input allowance\]$/u;
 const STRUCTURAL_PROPERTIES_MARKER_KEY = "__opengeni_omitted_properties__";
 
 type OpaqueProtocolKind = "image" | "file" | "encrypted";
@@ -178,7 +178,7 @@ export function truncateMiddleWithTokenBudget(value: string, maxTokens: number):
   const valueBytes = Buffer.byteLength(value, "utf8");
   if (maxTokens > 0 && valueBytes <= maxBytes) return value;
   // Codex applies this transform once while recording history, so its marker
-  // sits just outside the content budget. OpenGeni deliberately enforces the
+  // sits just outside the content budget. Opengeni deliberately enforces the
   // same policy both at canonical persistence and at the final provider seam.
   // Recognize only an output whose excess is no larger than its own canonical
   // marker; this makes that repeated enforcement byte-idempotent without letting
@@ -376,7 +376,7 @@ function boundResponsesProtocolContentItem(
   if (item.type === "input_file" && state.opaqueOmissions > opaqueOmissionsBefore) {
     return typedProtocolTextMarker(
       state.lastOpaqueOmissionMarker ??
-        "[OpenGeni omitted file payload: 0 bytes exceeded the bounded model-input allowance]",
+        "[Opengeni omitted file payload: 0 bytes exceeded the bounded model-input allowance]",
     );
   }
   return bounded;
@@ -551,7 +551,7 @@ function boundOpaqueProtocolString(
     state.opaqueOmissions += 1;
     return MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL;
   }
-  const marker = `[OpenGeni omitted ${kind} payload: ${bytes} bytes exceeded the bounded model-input allowance]`;
+  const marker = `[Opengeni omitted ${kind} payload: ${bytes} bytes exceeded the bounded model-input allowance]`;
   state.opaqueOmissions += 1;
   state.lastOpaqueOmissionMarker = marker;
   return marker;
@@ -594,7 +594,7 @@ function opaqueKindForChild(
 }
 
 function structuredEntriesOmissionMarker(count: number, container: "array" | "object"): string {
-  return `[OpenGeni omitted ${count} structured ${container === "array" ? "array items" : "object properties"}]`;
+  return `[Opengeni omitted ${count} structured ${container === "array" ? "array items" : "object properties"}]`;
 }
 
 function typedProtocolTextMarker(text: string): Record<string, unknown> {

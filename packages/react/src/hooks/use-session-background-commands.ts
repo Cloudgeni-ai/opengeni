@@ -1,10 +1,11 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { SessionBackgroundCommand } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef } from "react";
 
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
-export type UseSessionBackgroundCommandsOptions = ClientOverride & {
+export type UseSessionBackgroundCommandsOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };
@@ -27,7 +28,7 @@ export function useSessionBackgroundCommands(
     async (signal?: AbortSignal) => {
       if (!sessionId) return { commands: [] };
       if (!client.listSessionBackgroundCommands) {
-        throw new Error("The configured OpenGeni client does not support background commands");
+        throw new Error("The configured Opengeni client does not support background commands");
       }
       return await client.listSessionBackgroundCommands(workspaceId, sessionId, { signal });
     },
@@ -49,7 +50,7 @@ export function useSessionBackgroundCommands(
     async (commandId: string): Promise<void> => {
       if (!sessionId) return;
       if (!client.cancelSessionBackgroundCommand) {
-        throw new Error("The configured OpenGeni client does not support background commands");
+        throw new Error("The configured Opengeni client does not support background commands");
       }
       const ticket = generation.current;
       await client.cancelSessionBackgroundCommand(workspaceId, sessionId, commandId);

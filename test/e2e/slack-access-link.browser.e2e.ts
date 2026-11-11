@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -290,8 +291,8 @@ describe("Slack access-link browser acceptance", () => {
       await page.reload({ waitUntil: "networkidle" });
       // A managed principal with no workspace access lands on organization
       // onboarding; the bare "No workspace access" panel is the unmanaged path.
-      await expectText(page.locator("main"), "Create your organization");
-      await expectVisible(page.getByLabel("Organization name"));
+      await expectText(page.locator("main"), "How do you want to use Opengeni?");
+      await expectVisible(page.getByRole("button", { name: /^Run agents in the cloud/ }));
       await expectSingleMainWithoutRail(page);
       expect(state.prepareBodies).toHaveLength(1);
       expect(await page.getByRole("button", { name: "Cancel" }).count()).toBe(0);
@@ -404,6 +405,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
         body: JSON.stringify(body),
       });
 
+    if (url.pathname === "/v1/inbox" && request.method() === "GET") {
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
+    }
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "slack-access-browser-test",
@@ -620,7 +624,19 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       return json({ invitations: [], nextCursor: null });
     }
     if (url.pathname.endsWith("/sessions")) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     return json({});
   });

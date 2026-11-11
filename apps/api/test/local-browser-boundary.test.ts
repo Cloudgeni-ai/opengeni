@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { getSettings, type Settings } from "@opengeni/config";
 import { createObservability } from "@opengeni/observability";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../src/app";
 import {
   createLocalBrowserBoundary,
+  createLocalCorsOriginPolicy,
   localBrowserBoundaryResponse,
   markLocalInternalDispatch,
   type LocalBrowserBoundarySettings,
@@ -56,6 +58,37 @@ describe("local browser boundary", () => {
     // their own environment names; the unit-test harness uses "test".
     for (const environment of ["production", "single-node", "local-kubernetes", "test"]) {
       expect(createLocalBrowserBoundary({ ...devStack, environment })).toBeNull();
+    }
+  });
+
+  test("limits CORS to configured origins in local access mode in every environment", () => {
+    for (const productAccessMode of ["managed", "configured"] as const) {
+      expect(createLocalCorsOriginPolicy({ ...devStack, productAccessMode }, null)).toBeNull();
+    }
+    for (const environment of ["production", "single-node", "local-kubernetes", "test"]) {
+      const settings = {
+        ...devStack,
+        environment,
+        webBaseUrl: undefined,
+        publicBaseUrl: "https://node.example.test",
+        localAllowedOrigins: "http://127.0.0.1:5173",
+      };
+      const allowed = createLocalCorsOriginPolicy(settings, createLocalBrowserBoundary(settings));
+      if (!allowed) throw new Error("expected a local CORS policy");
+      const host = "node.example.test";
+      expect(allowed("https://node.example.test", host)).toBe(true);
+      expect(allowed("http://127.0.0.1:5173", host)).toBe(true);
+      expect(allowed("http://localhost:5173", host)).toBe(true);
+      for (const origin of [
+        "https://attacker.example",
+        // The local development web default is not assumed for a deployment.
+        "http://127.0.0.1:3000",
+        "https://node.example.test/path",
+        "https://node.example.test:8443",
+        "null",
+      ]) {
+        expect(allowed(origin, host)).toBe(false);
+      }
     }
   });
 
@@ -588,12 +621,87 @@ describe("local API browser boundary", () => {
     ]);
   });
 
-  test("leaves CORS unchanged outside local development", async () => {
-    const api = app({ environment: "test", productAccessMode: "local" });
-    const response = await api.request("http://127.0.0.1:8000/healthz", {
-      headers: { host: "anything.example", origin: "https://embed.example.test" },
+  // Helm single-node and the default chart run local access mode under their
+  // own environment names, reached through names this computer does not know.
+  for (const environment of ["single-node", "production"]) {
+    describe(`local access mode in the ${environment} environment`, () => {
+      const deployed = () =>
+        app({
+          environment,
+          productAccessMode: "local",
+          publicBaseUrl: "https://node.example.test",
+          webBaseUrl: "https://web.example.test",
+          localAllowedOrigins: "https://tools.example.test",
+        });
+
+      test("never answers other sites with wildcard CORS", async () => {
+        const api = deployed();
+        for (const origin of [
+          "https://attacker.example",
+          // The cookie allowlist does not widen the unauthenticated local API.
+          "http://localhost:5173",
+          "https://node.example.test.attacker.example",
+        ]) {
+          const preflight = await api.request("https://node.example.test/v1/workspaces", {
+            method: "OPTIONS",
+            headers: {
+              host: "node.example.test",
+              origin,
+              "access-control-request-method": "POST",
+              "access-control-request-headers": "content-type",
+            },
+          });
+          expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+
+          const read = await api.request("https://node.example.test/healthz", {
+            headers: { host: "node.example.test", origin },
+          });
+          expect(read.status).toBe(200);
+          expect(read.headers.get("access-control-allow-origin")).toBeNull();
+        }
+      });
+
+      test("grants CORS to the configured web, public, and allowed origins", async () => {
+        const api = deployed();
+        for (const origin of [
+          "https://node.example.test",
+          "https://web.example.test",
+          "https://tools.example.test",
+        ]) {
+          const preflight = await api.request("https://node.example.test/v1/workspaces", {
+            method: "OPTIONS",
+            headers: {
+              host: "node.example.test",
+              origin,
+              "access-control-request-method": "POST",
+              "access-control-request-headers": "content-type",
+            },
+          });
+          expect(preflight.status).toBe(204);
+          expect(preflight.headers.get("access-control-allow-origin")).toBe(origin);
+          expect(preflight.headers.get("access-control-allow-credentials")).toBe("true");
+        }
+      });
+
+      test("keeps answering requests addressed to any name", async () => {
+        const api = deployed();
+        for (const host of ["node.example.test", "100.64.0.7:8000", "api.internal:8000"]) {
+          const response = await api.request(`http://${host}/healthz`, { headers: { host } });
+          expect(response.status).toBe(200);
+          expect(response.headers.get("access-control-allow-origin")).toBeNull();
+        }
+      });
     });
-    expect(response.status).toBe(200);
-    expect(response.headers.get("access-control-allow-origin")).toBe("*");
+  }
+
+  test("keeps the public wildcard policy for configured and managed access", async () => {
+    for (const productAccessMode of ["configured", "managed"] as const) {
+      const api = app({ environment: "single-node", productAccessMode });
+      const response = await api.request("http://127.0.0.1:8000/healthz", {
+        headers: { host: "anything.example", origin: "https://embed.example.test" },
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
+    }
   });
 });

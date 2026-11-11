@@ -1,5 +1,250 @@
 # @opengeni/jev
 
+## 6.14.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.14.0
+
+## 6.13.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- Updated dependencies [c0b9f88]
+  - @opengeni/decisions@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.9.0
+
+## 6.8.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.8.0
+
+## 6.7.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.7.0
+
+## 6.6.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.6.0
+
+## 6.5.1
+
+### Patch Changes
+
+- @opengeni/decisions@6.5.0
+
+## 6.4.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.4.0
+
+## 6.3.1
+
+### Patch Changes
+
+- @opengeni/decisions@6.3.0
+
+## 6.2.1
+
+### Patch Changes
+
+- @opengeni/decisions@6.2.0
+
+## 6.1.1
+
+### Patch Changes
+
+- @opengeni/decisions@6.1.0
+
+## 6.0.2
+
+### Patch Changes
+
+- Updated dependencies [86c3295]
+- Updated dependencies [7148073]
+  - @opengeni/decisions@6.0.0
+
+## 5.5.1
+
+### Patch Changes
+
+- @opengeni/decisions@5.5.0
+
+## 5.4.2
+
+### Patch Changes
+
+- @opengeni/decisions@5.4.0
+
+## 5.3.1
+
+### Patch Changes
+
+- @opengeni/decisions@5.3.0
+
+## 5.2.1
+
+### Patch Changes
+
+- @opengeni/decisions@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- @opengeni/decisions@5.1.0
+
+## 5.0.2
+
+### Patch Changes
+
+- @opengeni/decisions@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- @opengeni/decisions@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- @opengeni/decisions@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/decisions@4.7.1
+
+## 4.7.0
+
+### Patch Changes
+
+- @opengeni/decisions@4.7.0
+
+## 4.6.1
+
+### Patch Changes
+
+- @opengeni/decisions@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- @opengeni/decisions@4.5.0
+
+## 4.4.1
+
+### Patch Changes
+
+- @opengeni/decisions@4.4.0
+
+## 4.3.1
+
+### Minor Changes
+
+- 5e32e0f: Improve deferred tool discovery with field-aware retrieval, best-match-first schema
+  loading and compact alternatives, an optional generic decision model for ambiguous
+  queries, exact-name loading,
+  and a paginated tool-group directory. Freeze disclosures in append-only history and
+  keep the first-request tool block stable. Preserve native Responses search and direct
+  function loading. Add retrieval and live generic discovery evaluations.
+
+  Introduce a shared typed decision-model category for tool discovery and code search,
+  with the existing Jev client and OpenAI/OpenRouter Decisions adapters. Use explicit
+  deployment credentials, preserve legacy code-search configuration, and retain
+  provider usage provenance without customer-credit debits. Code-search stats, usage
+  events and metrics use decision rather than Jev names.
+
+### Patch Changes
+
+- Updated dependencies [5e32e0f]
+  - @opengeni/decisions@4.3.0
+
+## 4.2.0
+
+## 4.1.3
+
+## 4.1.1
+
+## 4.0.4
+
+## 3.4.0
+
+## 3.3.0
+
+## 3.2.2
+
+## 3.1.2
+
+## 3.0.0
+
+## 2.0.1
+
+## 2.0.0
+
+## 1.4.4
+
+## 1.4.3
+
+## 1.4.2
+
+## 1.4.1
+
+## 1.4.0
+
+## 1.3.0
+
+## 1.2.0
+
+## 1.1.0
+
+## 1.0.2
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.2.1
+
+### Patch Changes
+
+- 48f5d39: `code_search` packs "must change together" declarations after the passages that passed the relevance bar instead of before them, so they no longer push verified passages out of the token budget.
+
 ## 0.2.0
 
 ### Minor Changes

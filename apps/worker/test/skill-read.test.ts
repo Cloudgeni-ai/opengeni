@@ -1,6 +1,6 @@
 import { buildOpenGeniAgent, modelToolResultFits } from "@opengeni/runtime";
 import { SKILL_USE_META_KEY, skillUseFromToolOutput } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Capability, Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { describe, expect, test } from "bun:test";
 import {
@@ -24,7 +24,7 @@ const scope = {
 };
 
 describe("skill_read gateway definition", () => {
-  test("worker host catalog coexists with exact repository reader for real OpenGeni skills", async () => {
+  test("worker host catalog coexists with exact repository reader for real Opengeni skills", async () => {
     const names = ["opengeni", "opengeni-client"];
     const markdown = new Map(
       await Promise.all(
@@ -141,9 +141,10 @@ describe("skill_read gateway definition", () => {
   for (const [name, directory] of [
     ["opengeni-help", "bundled_default_skills"],
     ["opengeni-client", "bundled_default_skills"],
-    ["opengeni-projects", "bundled_project_skills"],
-    ["opengeni-visualize", "bundled_default_skills"],
+    ["projects", "bundled_project_skills"],
+    ["visualize", "bundled_default_skills"],
     ["document-parsing", "bundled_default_skills"],
+    ["sites", "bundled_site_skills"],
   ] as const)
     test(`selected ${name} reads exact packaged guidance without sandbox access; host [] excludes it`, async () => {
       const markdown = await Bun.file(
@@ -151,7 +152,13 @@ describe("skill_read gateway definition", () => {
       ).text();
       for (const bundledSkillIds of [undefined, [`builtin:${name}`] as const, []] as const) {
         const selected = loadConfiguredBundledSkills({
-          firstPartyTools: [],
+          // Tool-gated Skills need the tools they explain.
+          firstPartyTools:
+            name === "sites"
+              ? ["artifacts_create", "artifacts_publish"]
+              : name === "projects"
+                ? ["project_list"]
+                : [],
           videoGenerationEnabled: false,
           bundledSkillIds,
           get sandboxBackend(): never {
@@ -182,10 +189,43 @@ describe("skill_read gateway definition", () => {
           });
           if (bundledSkillIds?.length === 0)
             await expect(output).rejects.toThrow("excluded by source selection");
-          else
-            expect((await output).structuredContent).toEqual({
+          else {
+            const result = await output;
+            expect(result.structuredContent).toEqual({
               files: [{ path: "SKILL.md", content: markdown }],
             });
+            if (name === "sites") {
+              // Assert the actual model-facing tool text, not only the source file.
+              const text = result.content.find((part) => part.type === "text");
+              if (text?.type !== "text") throw new Error("missing Skill text");
+              const rendered = JSON.parse(text.text).files[0].content as string;
+              expect(rendered).toBe(markdown);
+              const start = rendered.indexOf("## Make new Sites readable by default");
+              const build = rendered.indexOf("## Edit an existing Site");
+              expect(start).toBeGreaterThan(-1);
+              expect(start).toBeLessThan(build);
+              const guidance = rendered.slice(start, build).replace(/\s+/gu, " ");
+              for (const rule of [
+                "16–18px",
+                "14–16px",
+                "genuinely secondary metadata",
+                "1.5–1.7 for prose",
+                "keep the browser's root font size",
+                "Do not shrink primary copy on mobile",
+                "Honor a user's deliberate design",
+                "retain an existing app's type system",
+                "SessionConversation",
+                "not a mandatory theme or runtime CSS override",
+                "frontend-design",
+                "text enlarged to 200%",
+              ])
+                expect(guidance).toContain(rule);
+              expect(guidance).toContain(".site-copy { font-size: 1.0625rem;");
+              expect(guidance).toContain(".site-control { font: inherit; font-size: 1rem;");
+              expect(guidance).toContain(".site-table { font-size: 0.9375rem;");
+              expect(guidance).toContain(".site-meta { font-size: 0.8125rem;");
+            }
+          }
         }
       }
     });
@@ -217,6 +257,29 @@ describe("skill_read gateway definition", () => {
     expect((await read({ listFiles: false, paths: [files[1]!.path] })).structuredContent).toEqual({
       files: [files[1]],
     });
+  });
+
+  test("explicit paths that are not in the Skill return beside the files that exist", async () => {
+    const identity = { skillId: "workspace-skill", revisionId: "revision", scopeVersion: 4 };
+    const read = reader(async () => ({ ...identity, files }));
+    const partial = await read({ paths: ["SKILL.md", "references/x.md"] });
+    expect(partial.isError).toBe(false);
+    const expected = {
+      ...identity,
+      files: [files[0]],
+      missing: ["references/x.md"],
+      availablePaths: ["SKILL.md", "references/a.md"],
+      note: "Each path in missing is not a file of this Skill, so reading it again will not help. Paths are relative to this Skill's folder; a file that another Skill names is read from that Skill. availablePaths lists every file of this Skill.",
+    };
+    expect(partial.structuredContent).toEqual(expected);
+    expect(partial.content).toEqual([{ type: "text", text: JSON.stringify(expected) }]);
+
+    // A read where no path exists is a normal result, not a retry-inviting error.
+    const none = await read({ paths: ["references/x.md"] });
+    expect(none.isError).toBe(false);
+    expect(none.structuredContent).toEqual({ ...expected, files: [] });
+    const text = none.content[0]?.type === "text" ? none.content[0].text : "";
+    expect(text).not.toContain("Please try again");
   });
 
   test("the default read indexes scripts; explicit paths and inventory do not", async () => {
@@ -271,10 +334,14 @@ describe("skill_read gateway definition", () => {
     for (const paths of [[], ["SKILL.md"]]) {
       await expect(read({ listFiles: true, paths })).rejects.toThrow();
     }
-    for (const listFiles of ["true", 1, null]) {
+    // The gateway repairs only the exact literals "true"/"false" at a boolean
+    // location; every other non-boolean flag is refused before loading.
+    for (const listFiles of ["yes", "True", 1, null]) {
       await expect(read({ listFiles })).rejects.toThrow();
     }
     expect(loads).toBe(0);
+    await expect(read({ listFiles: "true" })).resolves.toBeDefined();
+    expect(loads).toBe(1);
   });
 
   test("inventory permits 1024 files and rejects overflow, unsafe and duplicate paths", async () => {
@@ -561,7 +628,7 @@ describe("skill_read gateway definition", () => {
     await expect(
       environment.callModel({
         modelName: "skill_read",
-        arguments: { skill: "opengeni-skills" },
+        arguments: { skill: "skill-management" },
         subjectId: "agent:test",
       }),
     ).rejects.toThrow("excluded by source selection");
@@ -585,7 +652,7 @@ describe("skill_read gateway definition", () => {
     await expect(
       environment.callModel({
         modelName: "skill_read",
-        arguments: { skill: "opengeni-skills" },
+        arguments: { skill: "skill-management" },
         subjectId: "agent:test",
       }),
     ).rejects.toThrow("attempt no longer active");
@@ -760,6 +827,8 @@ describe("skill_read use telemetry", () => {
           authorize: async () => {},
           load: async (skill) => {
             if (skill === "missing") throw new Error("Skill is not available in this session.");
+            if (skill === "broken")
+              return { ...builtin, files: [{ path: "../outside.md", content: "" }] };
             return builtin;
           },
           telemetry: {
@@ -773,10 +842,15 @@ describe("skill_read use telemetry", () => {
     const read = (args: Record<string, unknown>) =>
       environment.callModel({ modelName: "skill_read", arguments: args, subjectId: "agent:test" });
     await expect(read({ skill: "missing" })).rejects.toThrow("not available");
-    await expect(read({ skill: "deploy", paths: ["nope.md"] })).rejects.toThrow();
+    await expect(read({ skill: "broken", paths: ["SKILL.md"] })).rejects.toThrow("safe relative");
+    // A path the Skill lacks is a normal result that names it, not a refusal.
+    const partial = await read({ skill: "deploy", paths: ["nope.md"] });
+    expect(partial.isError).toBe(false);
+    expect(partial.structuredContent).toMatchObject({ files: [], missing: ["nope.md"] });
     expect(observations).toEqual([
       { caller: "model", kind: "refused", source: null, skill: "missing" },
       { caller: "model", kind: "refused", source: "builtin", skill: "builtin:opengeni-help" },
+      { caller: "model", kind: "files", source: "builtin", skill: "builtin:opengeni-help" },
     ]);
   });
 

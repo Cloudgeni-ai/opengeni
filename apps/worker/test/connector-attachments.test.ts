@@ -2,10 +2,11 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   ChannelAPartialMutationError,
   RoutingMutationOutcomeUnknownError,
+  RoutingMutationOutputRejectedError,
   SandboxChannelAService,
   type ChannelASession,
 } from "@opengeni/runtime/sandbox";
@@ -324,11 +325,10 @@ describe("connector attachment sandbox materialization", () => {
     expect(imports).toBe(1);
   });
 
-  test("preserves routed mutation outcome-unknown", async () => {
-    const uncertain = new RoutingMutationOutcomeUnknownError(
-      "importWorkspaceFiles",
-      "synthetic uncertain connector attachment batch",
-    );
+  test.each([
+    new RoutingMutationOutcomeUnknownError("importWorkspaceFiles", "synthetic uncertainty"),
+    new RoutingMutationOutputRejectedError("importWorkspaceFiles", "holder_fenced"),
+  ])("preserves routed mutation rejection", async (uncertain) => {
     const request = {
       serverId: "example-connector",
       toolName: "download_attachment",

@@ -78,7 +78,11 @@ export interface JevAskResult<Q extends Record<string, JevQuestion>> {
   answers: { [K in keyof Q]: JevAnswerFor<Q[K]> };
   /** Versioned model id that answered (for example jev-1.13.0). */
   model: string;
-  usage: { inputTokens: number };
+  usage: {
+    inputTokens: number;
+    /** Whether every successful chunk reported a valid count; numeric field retains compatibility. */
+    inputTokensReported?: boolean;
+  };
   /** HTTP requests (chunks) that made up this ask. */
   requests: number;
   costUsd: number;
@@ -105,25 +109,13 @@ export function jevCostUsd(inputTokens: number): number {
 // Errors
 // ---------------------------------------------------------------------------
 
-export class JevError extends Error {
-  /** HTTP status of the failed response, when there was one. */
-  readonly status: number | undefined;
-  /** Machine-readable reason when known (for example "max_tokens_exceeded" or "state_too_large"). */
-  readonly code: string | undefined;
-
-  constructor(message: string, options: { status?: number; code?: string; cause?: unknown } = {}) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause });
-    this.name = new.target.name;
-    this.status = options.status;
-    this.code = options.code;
-  }
-}
-
-/** Jev cannot be used right now: network, timeout, 5xx, 429 after retries, or 401/402/403 auth and billing. */
-export class JevUnavailableError extends JevError {}
-
-/** Jev rejected the request itself (other 4xx), or the request cannot fit the limits. Never retried. */
-export class JevRequestError extends JevError {}
+// Preserve the public client names while sharing typed provider error categories.
+import {
+  DecisionError as JevError,
+  DecisionUnavailableError as JevUnavailableError,
+  DecisionRequestError as JevRequestError,
+} from "@opengeni/decisions";
+export { JevError, JevUnavailableError, JevRequestError };
 
 // ---------------------------------------------------------------------------
 // Limits and chunking
@@ -342,6 +334,7 @@ export class JevClient {
     );
     const answers: Record<string, JevAnswer> = {};
     let inputTokens = 0;
+    let inputTokensReported = true;
     let model = "";
     results.forEach((json, i) => {
       const got = isRecord(json.answers) ? json.answers : {};
@@ -352,13 +345,17 @@ export class JevClient {
         answers[id] = answer;
       }
       const usage = isRecord(json.usage) ? json.usage : {};
+      inputTokensReported &&=
+        typeof usage.input_tokens === "number" &&
+        Number.isSafeInteger(usage.input_tokens) &&
+        usage.input_tokens >= 0;
       inputTokens += Number(usage.input_tokens ?? 0) || 0;
       if (typeof json.model === "string" && json.model) model = json.model;
     });
     return {
       answers: answers as JevAskResult<Q>["answers"],
       model,
-      usage: { inputTokens },
+      usage: { inputTokens, inputTokensReported },
       requests: results.length,
       costUsd: jevCostUsd(inputTokens),
     };

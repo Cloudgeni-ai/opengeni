@@ -6,7 +6,7 @@
 > [Why Opengeni](https://docs.opengeni.ai/why-opengeni) and the
 > [conversation UI guide](https://docs.opengeni.ai/integrate/conversation-ui).
 
-React hooks and styled components for OpenGeni, built on
+React hooks and styled components for Opengeni, built on
 [`@opengeni/sdk`](../sdk): live session streaming, a chat composer, a message
 timeline that renders streaming deltas / tool calls / spawned-worker status,
 session status badges, and fleet tiles for workspace overviews. Two opt-in
@@ -25,12 +25,25 @@ island for back-compat, deprecated per #144.)
 
 Design-system-first: every visual decision routes through CSS-variable tokens
 (`styles/tokens.css`) — color, typography, radius, shadow, motion. Dark mode is
-the first-class default; light is an opt-in via `data-og-theme="light"` on any
-ancestor. Components are styled with Tailwind v4 utilities mapped onto the
+the first-class token default; light is an opt-in via `data-og-theme="light"` on
+any ancestor. The embedded chat roots (`OpenGeniChat`, `SessionConversation`)
+resolve light or dark from the host page instead; see
+[Conversation UI](#conversation-ui). Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
 ## Embedded connections and Sites
+
+For a child chat's capability selection, `prepareSessionCapabilityAccess` reads
+an ancestor-to-child access plan without writing. Show the parent chats whose
+`request` is non-null and obtain an explicit confirmation before calling
+`applySessionCapabilityAccess`. The plan preserves existing choices, applies
+version-fenced updates root first, and grants no authority: each ordinary API
+request still authorizes its caller. Invalidate the review on actor/workspace
+changes. A partial failure may leave approved parent changes saved; prepare a
+new plan for retry instead of rolling them back. Existing
+`attachSessionCapability` remains a single-chat operation and never changes
+parents implicitly.
 
 Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
 `ConnectSetup`, `ConnectAccounts`, and the composed `ConnectPanel`. Inject one
@@ -52,7 +65,7 @@ provider warnings are not hidden during migration.
 `PluginDiscovery` accepts `defaultProvider="openai"` or `"anthropic"` to choose
 the initial registry. Omitting it starts with All. Users can still switch among
 All, OpenAI, and Anthropic; changing the search preserves their selection. The
-OpenGeni Plugins page starts with OpenAI.
+Opengeni Plugins page starts with OpenAI.
 
 ```tsx
 import { ConnectPanel } from "@opengeni/react/connect";
@@ -69,7 +82,7 @@ The host owns synchronous popup/full-redirect navigation and pending-attempt
 recovery. Backend state, not a popup message or URL query, proves completion.
 Operation installation uses explicit selection; OAuth success alone is not
 installation. Account disconnect requires an observed version and confirmation,
-revokes local OpenGeni access only, and never silently retries an unknown outcome.
+revokes local Opengeni access only, and never silently retries an unknown outcome.
 Provider readiness is deployment-dependent; use the server catalog rather than
 assuming every OAuth application or operator-managed provider is configured.
 
@@ -89,17 +102,76 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
-`SessionConversation` is the default product integration for an existing
-session. Back it with `createSessionProxyHandler` from `@opengeni/sdk`, mounted
-on your server, and point an unmodified browser
-`new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it:
+For an account-aware header, `useLastStartedTurnPolicy(sessionId, { events,
+includeServingModel: true })` overlays the latest lease-backed serving receipt
+only when it belongs to the last started turn. This requires the optional
+`getSessionModelAccount` client method. Without the option, the hook continues
+to return the accepted turn policy. Neither mode changes the composer's
+preferred model. `useSessionModelAccount` reads authorized accounts and choices;
+pass `provider` so Automatic resets only that provider's choice. Its optional
+`choice.serving` is the last committed placement, not a queued next-turn choice.
+The timeline renders neutral account-switch events without exposing account
+identity or duplicating provider compatibility events.
+
+`OpenGeniChat` and `SessionConversation` are the default product integration.
+Back them with `createSessionProxyHandler` from `@opengeni/sdk`, mounted on your
+server, and pass its mount as `baseUrl`. No provider, client, or workspace id
+is needed: the component creates the browser client and uses the workspace the
+proxy resolved for the signed-in user (from the proxy's client config).
 
 ```tsx
 import "@opengeni/react/compiled.css";
 
-<OpenGeniProvider client={client} workspaceId={workspaceId}>
+<OpenGeniChat baseUrl="/api/opengeni" />;
+// or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
+```
+
+To give people one Send and nothing to learn, pass `busySend: "steer"`:
+
+```tsx
+<SessionConversation sessionId={sessionId} composerOptions={{ busySend: "steer" }} />
+// OpenGeniChat: conversationProps={{ composerOptions: { busySend: "steer" } }}
+```
+
+A message sent while the agent works is then read as soon as it can, usually
+within seconds. There is no Queue choice beside Send and no Queue or Steer
+words; a message sent while the workstream is paused waits and shows as a
+waiting message. Add `offerQueue: true` to offer Queue beside Send again.
+The server makes the steer-or-start choice when the message arrives
+(`delivery: "steer_or_send"`), so a message reaches the running turn even if
+the page's view of the session is a few seconds old.
+
+An open conversation marks itself read for the signed-in person while they can
+see it: its timeline is on screen, the page is visible, the window is focused,
+and it shows the live end of the conversation. Each delivered reply, question
+or failure is acknowledged once (never per streamed token) through
+`updateSessionAttention` with `acknowledgedThroughSequence`, so a late request
+never hides a newer reply. Unread state, and notifications your server derives
+from it (for example a `turn.completed` webhook that skips sessions where
+`session.unread` is false), then leave out replies the person already watched.
+A timeline your layout hides (for example a collapsed bar that keeps only the
+composer), a background tab, or an unfocused window acknowledges nothing. Pass
+`readAcknowledgement={false}` when viewing must not count as reading. Behind
+`createSessionProxyHandler` this uses its `PUT …/attention` route, which
+accepts only `{ unread: false }`. Custom layouts around
+`useSessionConversation` call `useSessionReadAcknowledgement` (from
+`@opengeni/react/session`) with their own `active` signal.
+
+Bearer-token apps pass `headers` (a function runs per request) or a custom
+`fetch`; a `client` passed with `baseUrl` replaces the one the component
+creates:
+
+```tsx
+<OpenGeniChat baseUrl="/api/opengeni" headers={() => ({ Authorization: `Bearer ${getToken()}` })} />
+```
+
+The provider form keeps working, for example for several components sharing one
+client or the headless hooks:
+
+```tsx
+<OpenGeniProvider client={new OpenGeniClient({ baseUrl: "/api/opengeni" })} workspaceId={workspaceId}>
   <SessionConversation sessionId={sessionId} />
-</OpenGeniProvider>;
+</OpenGeniProvider>
 ```
 
 Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
@@ -115,11 +187,76 @@ separately. Pass `conversationProps` for message rendering and tool renderers,
 `createSession` to create chats through your own endpoint, or `sessionId` /
 `onSessionChange` to control the selection (for example from the URL).
 
-`SessionConversation` hides its model picker when the client config reports
-`modelSelection: false` (a proxy that fixes the model policy); pass
-`modelPicker={false}` or `modelPicker` to override. Attachments appear when the
-deployment enables uploads (`attachments={false}` opts out), pending tool
-approvals render Approve/Reject, and `toolRegistry` customizes tool rendering.
+Live voice is opt-in, because a call spends your credits and asks the browser
+for the microphone. Turn it on with `realtimeVoice={true}` (via `OpenGeniChat`'s
+`conversationProps` too).
+The composer then shows a voice button when the workspace offers an available
+voice model (for example hosted GPT Live with credits): the user talks, the
+voice model answers and hands work to the agent in the same chat, and the
+transcript lands in the timeline. It stays hidden when no model is available
+or when you pass `realtimeVoice={false}`. The voice code loads lazily on first display.
+The voice button never names the voice model (the model menu does, when
+shown), and neither does the React Native call screen. To name the action
+after your assistant, set its text through `messages`: on the web,
+`"realtime.realtimeControl.startVoice": "Talk to Ava"`, with
+`"realtime.realtimeControl.tryVoiceAgain"` and
+`"realtime.realtimeControl.talkLiveWithTheAgent"` for the retry label and the
+idle hint; on React Native, `"native.timeline.messages.startACall"`.
+
+The working indicator before the first reply says "Thinking…". Pass
+`genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
+own copy or visual. File attachments follow the client config: a session proxy
+reports them off for anonymous visitors (`visitor: true` from `resolve`) unless
+it sets `visitorUploads: true`, and `attachments={false}` hides them.
+
+`SessionConversation` and `OpenGeniChat` are built to look native inside
+someone else's product with zero styling:
+
+- **Theme follows the host**, not the OS: an enclosing `data-og-theme`, then
+  `class="dark"`/`data-theme` (and similar) on `<html>`/`<body>`, the host's
+  `color-scheme`, then the luminance of the background the chat sits on. Pass
+  `theme="light" | "dark"` to force one.
+- **Surfaces blend into the host** (`surface="host"`, default): backgrounds and
+  cards are opaque mixes of the host background, so a navy app gets navy cards.
+  Host-customized `--og-color-*` tokens are kept; `surface="theme"` uses the
+  token surfaces as they are.
+- **Run control is Stop, not Pause**: a Stop control appears only while a
+  response runs, and the next message continues a stopped conversation. Opt
+  into the console's workstream Pause with `composerProps={{ runControl: "pause" }}`
+  (`"none"` hides both).
+- **No model picker by default**: end users rarely choose models. Pass
+  `modelPicker`, or report `modelSelection: true` from the proxy
+  (`createSessionProxyHandler({ modelSelection: true })`); `modelSelection: false`
+  also fixes the policy server-side.
+- **Agent signals can be hidden**: the goal pill (and any agents or commands
+  segments you pass in `chromeProps`) show how the agent works. For end users
+  to whom a paused goal or a helper-agent count means nothing, pass
+  `agentSignals={false}` (`conversationProps={{ agentSignals: false }}` on
+  `OpenGeniChat`). Queued messages, approvals and the agent's questions still
+  show, and the goal is not read at all. Turn rows then show only their status,
+  and an automation run shows as its one line and its answer.
+  To hide only some of it, pass an object of switches, each `true` unless set:
+  `agentSignals={{ goal: false }}` drops the goal pill and keeps queued
+  messages, helper agents and turn-row detail (your `turnSummary` facets and
+  the live step). The switches are `goal`, `agents`, `commands` and
+  `turnDetail`.
+- **The session row lines up with the composer**: queue, wait, goal and agents
+  chips sit in the composer's readable column in a wide panel; a
+  `chromeProps.className` is added to that row and isn't needed to center it.
+- **Automation runs read as what happened**: a run shows one line, the
+  automation's name and what the event that started it says, never its
+  instructions. A run whose answer is exactly `NO_REPLY` (nothing for the
+  person) is not drawn at all.
+
+Attachments appear when the deployment enables uploads (`attachments={false}`
+opts out), the microphone appears when it reports voice input available
+(`voiceInput={false}` opts out), generated images, video, published files and
+screenshots display through the conversation's session scope, Site previews
+are hidden when the client config reports `artifacts: false`, the session goal shows with Pause/Resume/Clear, sub-agent cards
+open the child through `onOpenSession` (`OpenGeniChat` opens it in place),
+pending tool approvals render Approve/Reject, a yes/no question
+renders as two buttons, a failed load offers Try again, and `toolRegistry`
+customizes tool rendering.
 
 The root keeps all existing exports, including workbench components, but never
 imports their optional peers. Conversation-only Next.js/Vite hosts do not need
@@ -139,10 +276,50 @@ enablePierreDiffs();
 
 Without it, diffs and file views render as plain text.
 
-`OpenGeniProvider` never blocks or reloads the host page when OpenGeni deploys
-a new API contract revision. The stock OpenGeni console opts into that
+`OpenGeniProvider` never blocks or reloads the host page when Opengeni deploys
+a new API contract revision. The stock Opengeni console opts into that
 stale-tab protection with `reloadOnApiContractChange`; embedded products
 should leave it off.
+
+Subscription account lists and their usage readings (`useCodexAccounts`,
+`useSuperGrokAccounts`) are shared per `client` object: readers mounted at the
+same time share one request and one result, and account changes made through
+these hooks re-read every mounted list (also when the component that made the
+change has already unmounted). By default nothing is kept after the last reader
+unmounts, so a host that reuses one `client` for different people never shows
+one person's accounts to the next, also when it re-keys its tree for the next
+person in a single render: the new reader and its children never render the
+previous rows, and a read still in flight for the previous person is
+discarded. (A reader joining one already on screen shows its rows before the
+browser paints, after one extra render.) Set `retainReadsAcrossMounts` on
+`OpenGeniProvider` to keep them across navigation instead: returning to a page
+renders the last accounts at once and re-reads them in the background once
+they are older than 10 seconds. Failed reads are never kept, and a
+401/403/404 drops what was kept. Retained reads are dropped when `client`
+changes or the provider unmounts.
+
+The same opt-in keeps the last view of each conversation a person leaves: its
+event tail, detail, prompt queue, pending questions, goal and lineage. Reopening
+it within 10 minutes draws that view in the first render, with no loading
+state, while every hook still reads its resource once in the background and the
+fresh tail replaces the kept one when it lands. It is held in memory only (never
+written to the device), and the kept event tails together stay within one open
+conversation's window budget, dropping the least recently left first. Hosts
+without `OpenGeniProvider` (for example a React Native app passing `client` to
+each hook) opt in with `useRetainedReads(client)` in a component that stays
+mounted while that person is signed in.
+
+> **Host action item:** only set `retainReadsAcrossMounts` (or call
+> `useRetainedReads`) when every signed-in person gets their own `client`
+> object (create a new client on sign-in, sign-out and account switch), as the
+> stock Opengeni console does. With a shared client, leave it off.
+
+Read hooks watching a shared event feed (`events` from `useSessionEvents`)
+re-read their projection only for an event after what their own read reflects.
+Current servers report that in the `X-OpenGeni-Session-Sequence` response header
+of the queue, pending questions, goal and lineage reads
+(`observedSessionSequence` in `@opengeni/sdk`); behind a server or proxy that
+does not report it, every matching event in the loaded tail re-reads as before.
 
 ### Exact conversation search navigation
 
@@ -275,6 +452,32 @@ import { EditablePresentationArtifactSurface } from "@opengeni/react/artifacts/p
 <EditablePresentationArtifactSurface session={presentationSession} title="Launch deck" />;
 ```
 
+The spreadsheet surface supports typing, formulas, rectangular paste, clear,
+and durable row/column resizing. Drag a header boundary for immediate visual
+feedback and one command on release. Focus a boundary and use arrows to resize
+(Shift for 1 px), Home to reset, or Escape to cancel. Pending saves do not block
+typing; the sync indicator remains pending until server acknowledgement. Failed
+independent edits stay visible, and retry cannot overwrite newer overlapping
+edits. The same component is used in the dock and full-page artifact view;
+dimensions and values remain authoritative in the SDK Worker.
+The console supplies a Download action for every editable artifact in both dock
+and full-page views: documents export DOCX, spreadsheets XLSX, and presentations
+PPTX. Custom hosts can supply `download(signal): Promise<Blob>` on the document,
+spreadsheet, or presentation surface, or `downloadArtifact(opened, signal):
+Promise<Blob>` on `EditableArtifactView` (the older spreadsheet-only
+`downloadSpreadsheet` still works). Use the authenticated artifact SDK to pin the
+saved native head, materialize the modality's Office format, poll its job, and
+download its bytes; never return the original imported file. Forward the abort
+signal through every request. The control waits for live sync with no pending or
+still-submitting edits, shows progress and retryable errors, and cancels on
+teardown or revoked access. Omit the callback when the host does not support
+export.
+Double-click a sheet tab or focus it and press F2 to rename it. Enter/Save submits
+the canonical `sheet.rename` command; Escape/Cancel discards an unsent name.
+Validation and failed submissions keep the name editor open. Pending cell edits
+show submitted input until the Worker projection catches up; pending formulas
+show their source, not an invented result.
+
 The durable document surface composes bounded summary, body, section, and
 review queries at one native revision. Text edits become UTF-16-correct minimal
 `paragraph.edit` commands; formatting becomes `paragraph.format`. Empty
@@ -296,7 +499,7 @@ or permissive fallback.
 
 `DocumentProjectionEditor`, `PresentationProjectionEditor`, and
 `SpreadsheetProjectionGrid` expose the same host-owned projection/async-command
-boundary without requiring the OpenGeni sync session. Pending, failure, retry,
+boundary without requiring the Opengeni sync session. Pending, failure, retry,
 read-only, focus, and reconciliation behavior stays inside the components.
 
 Projection editors use browser-safe structural views and do not load
@@ -367,22 +570,43 @@ Independent package defaults inherit without replacing host `--og-*` values;
 derived defaults use scoped effective values so changing a base accent, radius,
 motion, or surface token updates its dependents at runtime.
 
+`compiled.css` covers the documented embeddable components. The
+`@opengeni/react/ui/*` subpaths are first-party building blocks for the
+Opengeni web app, not a documented public API, and `compiled.css` does not
+style them. A host that imports them anyway must compile them through the
+Tailwind source bridge below. Some use Tailwind's `dark:` variant, which
+follows the host's own `dark` variant (Tailwind's default is the operating
+system's color scheme), not `data-og-theme`.
+
 The original Tailwind v4 bridge remains available for hosts that intentionally
-want OpenGeni utilities compiled into their own Tailwind entry:
+want Opengeni utilities compiled into their own Tailwind entry. It renders the
+components the same as `compiled.css` when the entry imports the same
+stylesheets:
 
 ```css
 @import "tailwindcss";
 @import "@opengeni/react/styles.css";
 @import "@opengeni/react/responsive.css";
+@import "@opengeni/react/app.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
 `@source` lets the host compiler discover utilities used inside the components.
+`styles.css` maps the `--og-*` tokens into Tailwind utility names and carries
+the scoped base for `.og-root` subtrees, layered so call-site utilities win.
 `responsive.css` is the small opt-in layout layer for
 `responsiveBasis="container"`; omit it when every composer keeps the historical
-viewport basis. `compiled.css` already contains that layer. Do not import both
-`compiled.css` and `styles.css`. Consuming only the tokens?
-Import `@opengeni/react/tokens.css` and use the `--og-*` variables directly.
+viewport basis. `app.css` is the session app's design system (its token bridge,
+base rules, glows, markdown and motion): `SessionApp` needs it, and without it
+the app renders without its design system. Unlike `compiled.css`, which scopes
+it to `.og-root`, the bridge applies its base rules to the whole page: subtle
+scrollbars, the selection colour, the keyboard focus ring, pointer cursors and
+reduced motion, plus a `dark` variant that follows a `.dark` class. `compiled.css`
+already contains both layers. Stylesheets the components import themselves
+(connect and setup cards, This computer) reach the page through the host's
+bundler in either path. Do not import both `compiled.css` and `styles.css`.
+Consuming only the tokens? Import `@opengeni/react/tokens.css` and use the
+`--og-*` variables directly.
 
 ### Product-compatible theming and density
 
@@ -507,9 +731,57 @@ export function App() {
 }
 ```
 
+## Your own labels and languages
+
+Every piece of text the components show, including user-facing error messages,
+comes from one message catalog. The built-in catalog is English; pass `locale`
+and `messages` to `OpenGeniProvider` to show your own words or a full translation.
+
+```tsx
+import { OpenGeniProvider, type OpenGeniMessages } from "@opengeni/react";
+
+const norwegian: OpenGeniMessages = {
+  "composer.stop": "Stopp",
+  "counts.items_one": "{count} element",
+  "counts.items_other": "{count} elementer",
+};
+
+<OpenGeniProvider client={client} workspaceId={workspaceId} locale="nb" messages={norwegian}>
+  {children}
+</OpenGeniProvider>;
+```
+
+- Keys are stable, typed identifiers. `englishMessages` is the complete default
+  catalog: export it to your translation tooling as is.
+- Templates use single-brace parameters (`"Move queued prompt {index} up"`); a
+  translation must keep the same parameters.
+- Text that names the product uses `{product}`, filled from `productName`
+  (default "Opengeni"). Pass `productName="Acme"` to `OpenGeniProvider` and the
+  components say Acme there; your own translations can use `{product}` too.
+- Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
+  `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
+  supplies the forms it needs. `_other` is always required. Where the runtime
+  has no `Intl.PluralRules` (Hermes on React Native), 1 uses `_one` and every
+  other count `_other`; no polyfill is needed.
+- `locale` also sets the language of the dates, times and numbers the
+  components format.
+- Missing keys fall back to an outer provider, then English, never to a raw key.
+  Declare a full translation as `OpenGeniMessageCatalog` and TypeScript reports
+  every key you have not translated yet, including keys added in later releases.
+- `OpenGeniMessagesProvider` scopes overrides to part of a tree (for example a
+  different label in one panel); `useOpenGeniText()` gives your own components
+  the same translator.
+- `@opengeni/react/messages` exports the catalog and runtime without any DOM
+  code, for React Native and server rendering.
+
+Component props that accept labels (for example `ChatComposer`'s `messages`)
+still win over the catalog; their defaults, such as `defaultChatComposerMessages(t)`,
+are functions of the translator. Internal diagnostics (developer invariants and
+protocol errors never meant for end users) stay in English.
+
 ## Realtime composer controls (`@opengeni/react/realtime`)
 
-The realtime subpath is the exact OpenGeni composer experience: model catalog
+The realtime subpath is the exact Opengeni composer experience: model catalog
 and selection, split-button motion, start/stop/retry states, microphone and
 audio mute controls, diagnostics, recovery, and the same copy, ARIA, classes,
 and styling used by the web console. It is deliberately separate from the root
@@ -571,11 +843,59 @@ wrappers remain the recommended path. Concurrent catalog reads are deduplicated
 per client and workspace, and successful results are reused for a short bounded
 window so embedded controls can remount without refetching.
 
+Until the catalog arrives, the model list holds Codex Live alone as a
+placeholder. Pass `useRealtimeModelSelection().loadState` as the control's
+`loadState` (the wrappers do this) so a not-yet-loaded or failed catalog reads as
+"Checking voice" or "Voice couldn't load" rather than a setup step. The control
+also checks the microphone before offering voice: where the page may not use it
+(an embedded frame without microphone permission) or the person blocked it for
+the site, it explains that instead of starting a call that would fail.
+
+Voice models that hold a conversation in one fixed language (catalog entries
+with `languages`, such as Eleven Realtime) listen and reply in the person's
+language. By default that is the `OpenGeniProvider` locale, else the browser's
+language; the model menu's Language page stores another choice on the device
+(`useRealtimeLanguagePreference`). Custom layouts pass
+`useRealtimeModelSelection().languageFor(model)` as `useSessionRealtime`'s
+`language` and `voiceSettingsFor(model, hostSettings)` as its `voiceSettings`
+(and both to `prestartSessionRealtime`).
+
+The voice, conversation language and turn eagerness are configurable wherever
+the selected model offers them (see the catalog entry's `voices`/`customVoice`,
+`languages` and `turnEagerness`; settings a model does not offer are ignored).
+To set them for every voice session in a workspace, save them once with the
+SDK; Settings > Models > Voice edits the same setting:
+
+```ts
+await client.updateWorkspaceSettings(workspaceId, {
+  realtimeVoice: {
+    "workspace-elevenlabs/eleven_realtime_v1_max": {
+      voice: "<ElevenLabs voice id>",
+      language: "no",
+      turnEagerness: "high",
+    },
+  },
+});
+```
+
+For Eleven Realtime, the voice is one of the built-in names in the catalog
+entry's `voices` or the id of a voice in the ElevenLabs account's My Voices. A
+voice from the ElevenLabs voice library must be added to My Voices first;
+otherwise ElevenLabs rejects it and voice fails to start with
+`ELEVENLABS_REALTIME_VOICE_UNAVAILABLE`.
+
+To set them per session instead, pass `voiceSettings` to the stock control,
+for example `<OpenGeniChat conversationProps={{ realtimeVoiceProps: {
+voiceSettings: { voice: "<ElevenLabs voice id>", language: "no" } } }} />`, or
+to `SessionRealtimeControl`, `useSessionRealtime` or `prestartSessionRealtime`
+(SDK controllers take `getVoiceSettings`). Each set field overrides the
+workspace's value; a language the person picks in the voice menu overrides both.
+
 The reference consumer is `demo/realtime.html`. Run `bun run demo` from
 `packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
 deterministic selection/start/mute/stop/reconnect/error testing. Use
 `?mode=live&workspaceId=…&sessionId=…` against the web server's same-origin
-`/demo-api` proxy for a real local OpenGeni environment. Configure
+`/demo-api` proxy for a real local Opengeni environment. Configure
 `OPENGENI_DEMO_API_URL` and, only on the server, optional demo API/access
 credentials; the browser receives neither credential. Prefer the deployment's
 normal browser authentication. If the proxy needs a server credential, create a
@@ -600,10 +920,25 @@ through published package APIs only.
 ## Browser and computer surfaces (`@opengeni/react/interaction`)
 
 The interaction subpath renders the same browser-native and semantic computer
-surfaces used by the OpenGeni web app. It consumes only the public SDK client:
+surfaces used by the Opengeni web app. It consumes only the public SDK client:
 workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
+
+Managed browser actions keep the foreground tab in place. Target-local Chromium
+focus emulation keeps animation callbacks running without an open preview;
+explicit activation brings a tab forward. The override ends when its controller
+detaches. Native **App controls** also work in the background where supported.
+Physical desktop mouse/keyboard input shares the foreground seat; **Bring to front**
+makes that change explicit.
+Computer frames fit the dock while preserving their proportions. Resizing or
+reopening the dock refits the visible image without changing capture resolution
+or the coordinates sent to the computer.
+Desktop opens a whole screen by default. Multiple screens use a compact screen
+selector; app controls and window views are available from **Advanced**. Explicit
+view choices survive refreshes while the target remains available.
+
+Desktop IME candidates and their selection keys stay local; only committed text is sent.
 
 A managed browser's attachment authority error keeps a same-browser **Reconnect**
 action available. It obtains a fresh server-authorized attachment without creating
@@ -650,6 +985,12 @@ returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
 
+`ComputerViewer` disables input when its control service is unavailable, even if
+frames keep arriving. Reconnect refreshes the selected desktop's controls and
+frames. App accessibility inspection failures leave independent live input
+available; `useComputerSession().controlError` reports service loss separately
+from the hook's general `error`.
+
 If the chat's latest browser was lost or failed, the viewer names it and explains
 why it is unavailable instead of showing the ordinary empty state. It offers the
 existing new-browser controls without reopening the lost controller or selecting
@@ -690,6 +1031,11 @@ input through its ref. Chrome calls it after a successful checkout and
 and pending/cancelled replacement do not request focus. The host retains
 ownership of the input and no DOM selector or global focus event is needed.
 
+Pass `wait={{ reason, deadlineAt }}` while an idle session waits for input
+(for example `session.inputWait`). Chrome shows it as the first chip of its
+row, with the reason and the next check time; tapping it opens the full reason.
+Leave it unset otherwise.
+
 When sharing `useSessionEvents().events` with `useGoal`, the hook still fetches
 the authoritative goal on mount and target changes, even when the supplied log
 already contains goal events. The shared log drives subsequent invalidations
@@ -700,6 +1046,15 @@ and `messages` props for small additions. For a different layout, import the
 headless controller and compound primitives as a namespace. The controller is
 the one behavior path for keyboard routing, guarded queue/steer submission,
 attachments, commands, pause/resume, focus, confirmations, and feedback.
+
+Pass `imageTags` (on `ChatComposer`, `useChatComposerController`, or
+`SessionConversation`'s `composerProps`) to keep each image next to the words
+about it. Pasting, dropping or attaching an image puts a plain-text
+`[Image N]` tag in the text where the person was writing, and the image's chip
+shows the same number. Removing an image removes its tag and renumbers the
+later ones. Image N is the Nth image the message carries, which is the order
+the agent receives them, so the message and API stay the same. It is off by
+default.
 
 ```tsx
 import * as Composer from "@opengeni/react/composer";
@@ -745,6 +1100,8 @@ function CustomComposer({ sessionComposer, attachments, effectiveControl }) {
               <Composer.Controls>
                 <Composer.AttachButton />
                 <InsertTranscript />
+                {/* Keeps Pause's room while nothing is working, so the row never jumps. */}
+                <Composer.PauseButtonSlot />
               </Composer.Controls>
               <Composer.Actions>
                 <Composer.PauseButton />
@@ -773,7 +1130,8 @@ state remains application-owned; durable draft and session state remain in
 
 - `useSessionEvents(sessionId)` — loads a compact, bounded tail window by
   default, then live-streams on the SDK's exactly-once/ordered event delivery.
-  Initial replay is capped at three 5000-row raw pages and `loadOlder` at two;
+  Initial replay reads one 1000-row raw page, with at most one extra page to
+  recover a dense turn's boundary; `loadOlder` is capped at two such pages;
   timeline group density is only an early stop. It returns the raw windowed
   `events`, projected `timeline`, latest `sessionStatus`, connection state, and
   older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
@@ -786,8 +1144,42 @@ state remains application-owned; durable draft and session state remain in
   callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
   and call `markCommitted` immediately before publishing their accepted older
   window.
+- History is conversation-first: windowed reads exclude a turn's steps
+  (`SESSION_EVENT_STEP_TYPES`: tool calls, tool outputs, reasoning and command
+  output deltas, and the model request and usage rows of each model call) but
+  keep presented tool results such as images and published files, and the
+  model request rows up to a turn's first model response (its startup phases).
+  Each turn with unloaded steps gets a `turn-steps` timeline item, which
+  readable work rows render when opened. Opening a turn reads its newest
+  `SESSION_TURN_STEP_PAGE_SIZE` steps, and "Show earlier steps" pages back.
+  Live steps go to per-turn stores outside the conversation window, so a long
+  turn never evicts the conversation. A collapsed live turn keeps its latest
+  `SESSION_TURN_LIVE_STEP_TAIL` steps, an opened turn keeps every step, and
+  steps of turns nobody has open are limited to
+  `SESSION_STEP_BROWSER_MAX_BYTES`. `replay: "full"` still reads everything.
+  Turnless step rows (PTY and background command output) are not part of the
+  conversation window either: the sandbox terminal reads its own newest
+  1,000 PTY and command-output rows by type the first time it is shown for a
+  session, and live output keeps streaming in. When `useSessionEvents` rejoins
+  the stream past unread terminal output (opening a chat, returning from a
+  hidden tab or from history) or a burst overflows its live tail, the terminal
+  reads its newest page again. That signal comes from this package's
+  `useSessionEvents`; a terminal fed with `events` from elsewhere reads its
+  history only when opened.
+- The package and the Opengeni server can be upgraded in either order. A
+  server that applies the conversation filter says so in the
+  `X-OpenGeni-Conversation-Filter` response header
+  (`SESSION_EVENT_CONVERSATION_FILTER_VERSION`). Without it, history reads keep
+  tool calls and model bookkeeping and drop non-presented calls in the browser,
+  so an older server that ignores `presentedToolCalls` loses no image,
+  published file or Skill card. The header is read through `listEventPage`:
+  a client without it (for example a host proxy exposing only `listEvents`)
+  always uses that fallback. `createEmbeddedSessionClient` keeps
+  `listEventPage` when the base client has it.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  The live working set is at most 16 MiB or 20,000 events. One event larger than
+  the byte target stays complete in a window of its own.
   Live appends reuse the retained window's byte total, measuring only incoming
   and evicted events. History still pages when either retention limit is reached.
 - Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
@@ -800,10 +1192,22 @@ state remains application-owned; durable draft and session state remain in
   or session change clears that failure. Loading older rows alone does not
   resolve a failed newer read. Late failures from a previous session are ignored.
   A host that discards the promise must handle its own rejected request.
-- `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
+- `useComposer(sessionId, { sendExtras, effectiveControl, busySend })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order (including while paused); `steer()` puts the new direction
-  directly in chat and supersedes the current direction. Resume is always an
+  directly in chat, and a running turn reads it as soon as it can, usually
+  within seconds, without cutting off running tools. With `busySend: "steer"`,
+  `send()` submits `delivery: "steer_or_send"` and the server steers the
+  running (or starting) turn or else starts one (it still queues while
+  paused), so a stale local view never queues the message; against a server
+  that predates `steer_or_send` it falls back to its own choice.
+  `sendToQueue()` always queues; the default `"queue"` keeps
+  Send queueing. `alternateSend` names the other choice while Send takes that
+  busy path (`null` otherwise) and `sendAlternate()` performs it; hosts show it
+  beside Send exactly when it is not `null`. Under `busySend: "steer"` there is
+  no other choice unless `offerQueue: true` is set (`singleSend` is then
+  false): `alternateSend` stays `null`, Cmd/Ctrl+Enter sends, and the stock
+  surfaces use `SingleSendWording` for queue-free copy. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
   `clientEventId` across retries so the server dedupes. Draft reads retry transient
@@ -841,14 +1245,24 @@ state remains application-owned; durable draft and session state remain in
   plus the `defaultModel` to preselect (from the client config) for a picker.
 - `useCodexAccounts()` — connected Codex (ChatGPT) accounts, the active/next-run
   pointer, and per-session account pinning for multi-account subscriptions.
+  `refreshUsage({ maxAgeMs })` reuses live usage readings only when every
+  listed account was read within `maxAgeMs`; concurrent refreshes share one
+  provider read. `liveUsageUpdatedAt` is the time of the oldest account
+  reading. See `retainReadsAcrossMounts` above for keeping the list and
+  readings across navigation.
 - `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
-  fleet/manager views (optional polling).
-- `useVariableSets()` — workspace variable sets with metadata-only generic
-  reads and create/update/remove/set/delete operations. Dedicated permissioned
-  exact-value reveal is part of the held React/UI train rather than an
-  implicit field on ordinary reads.
+  fleet/manager views (optional polling). `useWorkspaceSessions({ projection:
+  "summary" })` returns compact list entries; omit the option for full sessions.
+  Scripted clients can omit the summary method and the hook projects full pages
+  locally while retaining cancellation and causal read revisions.
+- `useVaults()` / `useVault()` / `useVaultItems()` / `useVaultItem()` /
+  `useVaultFieldVersions()` / `useSessionSecrets()` — vaults, items, field
+  history and a session's vault policy, metadata only. `useVaultsApi()` returns
+  the SDK's `client.vaults(workspaceId)` routes for writes and the one audited
+  `revealField` call; keep revealed values in component state, never in a
+  cache. Variable Sets and `useVariableSets()` were removed in 2.0.0.
 - `useWorkspaces()` — the caller's workspaces with create/update (client-only;
   not bound to the provider's workspace).
 - `useBillingUsage({ accountId?, workspaceId? })` — credit balance + recent
@@ -896,10 +1310,16 @@ intentional changes should regenerate those snapshots and review the diff.
 - `MessageTimeline` — the session timeline with stick-to-bottom scrolling, a
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
-  `renderMessageText` to plug a markdown renderer. Pass
+  `renderMessageText` to plug a markdown renderer. The default renderer shows a
+  single newline in a message as a line break, like other chat apps; a custom
+  renderer gets the same result with `<Markdown softLineBreaks>{text}</Markdown>`
+  (off by default for non-chat Markdown). Pass
   `loadRetainedArtifact` to render permanent generated-image receipts; a loader
   may return verified bytes or a short-lived signed URL. The stock web app uses
   the URL path to avoid copying multi-megabyte images into JavaScript memory.
+  `createWorkspaceRetainedArtifactLoader`, `createSessionRetainedScreenshotLoader`,
+  and `createWorkspaceRetainedVideoLoader` bind the SDK reads to a workspace
+  (and session); `SessionConversation` uses them by default.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.
@@ -916,7 +1336,7 @@ intentional changes should regenerate those snapshots and review the diff.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the
   host-exposed models by provider.
-- `ModelPolicyPicker` — the full model policy control used by the OpenGeni web
+- `ModelPolicyPicker` — the full model policy control used by the Opengeni web
   app: provider/billing rails, model availability, reasoning effort, and
   runnable latency modes such as Fast. It accepts either `ClientModel[]` or
   catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
@@ -989,6 +1409,23 @@ earlier prose and activity in chronological order, not a fold of multiple turns.
 An already expanded or actively read view is preserved through settlement.
 Routine machine inputs get one compact reason per resumed turn. Normal tip-follow
 continues through long answers, and manual scrolling never auto-repins on new work.
+
+A failure is shown once. If your host shows a session failure itself together
+with what to do about it (for example a banner with Retry), pass that failure's
+event ids as `presentedFailureEventIds`: the turn's row then says only "Failed"
+and the timeline leaves the text to you. Without it, the turn's row carries the
+failure text. An attempt that Retry replaced is always one quiet
+"Attempt failed · retried" step with its text behind the disclosure.
+
+`turnSummary.renderLiveMark` leads the live Working, Waiting or Paused row with
+the host's own mark, such as a small animated mascot. It receives the row's
+state (`{ kind: "working" | "waiting" | "paused", waitingOn?: "you" }`, where
+`waitingOn: "you"` marks an approval or question), is no longer called once
+the turn settles, and renders nothing by default. Draw it about 20 px tall; it
+is `aria-hidden` because the row's words carry the meaning.
+`SessionConversation` takes it as
+`timelineProps={{ turnSummary: { rolling: true, renderLiveMark } }}`.
+
 Expanded outer work headers stay reachable at the top of the timeline until
 their own details end; nested headers never stick. The contextual navigation
 pill stays below the sticky-header strip and avoids interactive controls. If
@@ -1185,6 +1622,22 @@ The conversation's "usage limit reached" row is customized on
 replaced with `renderAllowanceExhausted`. See
 [usage allowances](../../docs/usage-allowances.md#react-components-and-the-console).
 
+## Terminal startup input
+
+`SandboxTerminal` captures bounded early typing while attaching. Supported stock
+sandbox images negotiate explicit Bash Readline readiness; banners and first
+output do not release queued commands. Silent prompts work too. If a startup
+profile asks for input or disables line editing, **Use manual input** clears
+buffered typing before enabling unguaranteed input. Old images/running ttyd
+daemons retain labelled **legacy input** behavior; wait for their shell startup
+before typing. Relay PTYs retain their existing OPEN_ACK behavior.
+
+Custom consumers of `useTerminalStream` can inspect `inputReadiness` and expose
+`useLegacyInput()` for `waiting` states. That action discards queued typing; it
+is not an acknowledgement of shell readiness. A new React package alone cannot
+upgrade an old sandbox image. See the [native readiness contract](../../agent/native/terminal-ready/README.md)
+for compatibility, startup limits and coordinated release requirements.
+
 ## Optional peer dependencies
 
 The chat/timeline surface needs only the required React/React DOM peers. All
@@ -1250,10 +1703,19 @@ unsupported effort falls back to the new model's default, and unsupported speed
 returns to Standard. Thinking uses inline radio choices and is hidden when the
 model has no adjustable reasoning levels. Availability and Codex-only session restrictions still disable choices.
 
+Use `allowModelOptions={false}` for policies that save only a model identity,
+such as a fallback order. This hides effort and speed controls without changing
+the catalog, payment-source labels, or model eligibility.
+
 The trigger renders immediately; the searchable popover loads when opened. Hosts
 can translate its search, current-selection, empty-result, attachment-warning, and
 thinking labels through `messages`, and override payment descriptions through
 `messages.billingHints`.
+
+The stock deployment-provided group is labeled **Models**, with a generic model
+icon. It can contain both credit-backed and free models; the **Free** badge
+depends on the model's explicit cost, not its group. Genuine external-provider
+and subscription identities retain their own labels and marks.
 
 Hosts can rebrand the full picker without replacing its interaction logic:
 
@@ -1283,7 +1745,40 @@ are unchanged. The type `ModelPolicyPickerGroupPresentation` is exported from
 both `@opengeni/react` and `@opengeni/react/composer`. The native `ModelPicker`
 is a separate control; this API targets the full `ModelPolicyPicker` shown above.
 
+The complete conversation uses this same neutral picker. Customize its appearance
+without replacing composer controls through `SessionConversation.modelPickerProps`,
+or through `OpenGeniChat.conversationProps`:
+
+```tsx
+<OpenGeniChat
+  client={client}
+  workspaceId={workspaceId}
+  conversationProps={{
+    modelPickerProps: {
+      groupPresentation: {
+        opengeni_credits: { label: "Acme Assist", icon: <AcmeMark aria-hidden="true" /> },
+      },
+      messages: { label: "Choose a model" },
+    },
+  }}
+/>
+```
+
+`modelPickerProps` accepts only `groupPresentation` and `messages`; it does not
+enable a hidden picker or change policy, model availability or callbacks. Keep
+model-picker visibility controlled by `modelPicker` and the client configuration.
+
 For a rendered example, open the composer-responsive demo with `?branding=host`.
+
+Models always show their clean name and maker logo: picker rows carry
+`modelDisplayName(model)` (`claude-opus-4-8` and
+`organization-claude-subscription/claude-opus-5-5` read `Claude Opus 4.8` and
+`Claude Opus 5.5`) and a `ModelMark`. Organization- and workspace-connected API
+keys share one "API keys" group, and identical copies of one model in a
+connection group show once. Render a model anywhere else with
+`<ModelName model={id} />`, or `modelDisplayName` / `modelVendor` from
+`@opengeni/react` or `@opengeni/sdk/model-display`. The trigger keeps a host's
+explicit group icon; otherwise API-key models show the maker's logo.
 
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image
@@ -1294,3 +1789,31 @@ Copy and the timestamp for user messages and completed assistant messages.
 The host owns feedback, fork authorization, and mutations; streaming assistant
 messages omit this slot. Use the `group/copy` hover/focus state and preserve
 visible touch targets when styling actions.
+
+### Portable action reviews
+
+`ApprovalSurface` accepts `loadReview(approval)` and `onViewDetails(review, path)`;
+load the versioned facts with `client.getToolActionReview`. It shows one selected
+action, counts and bounded fields instead of raw argument JSON.
+A host may also return its own `ToolActionReview` (a plain title and consequence
+for a tool whose arguments are only identifiers), or `null` to keep the standard
+card for that approval. The React Native `ApprovalStrip` and
+`NativeSessionScreen` take the same `loadReview`.
+Keep
+`selectedApprovalId` and `onSelectedApprovalChange` in the host if a full-page
+detail route unmounts the surface, so returning cannot silently select a different
+action. The native `onApprove` / `onReject` identity is unchanged and duplicate
+submission is fenced until authoritative events remove the request.
+
+Render `ToolActionReviewDetails` on the host's normal page with
+`client.getToolReviewDetails`, passing the review's `actionDigest`, path and offset.
+Details are immutable, authenticated, paginated, and redact protected values.
+Restore focus to the original `data-review-path` button on return. No web-app
+imports, iframe, second confirmation, or nested scrolling pane is required.
+The standalone fallback retains bounded details for older SDK approvals.
+
+Wrap `MessageTimeline` in `ToolReviewHistoryProvider` with its visible events,
+authenticated `load(approvalId)` callback and `onViewDetails` to keep recorded
+reviews readable inside the corresponding tool activity. Historical receipts
+never render decision buttons. The same semantic tokens support light/dark
+embeds; `demo/approval-review.html` is the synthetic state gallery.

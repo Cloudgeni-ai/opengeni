@@ -1,4 +1,7 @@
+import { signupCreditModelIds } from "@opengeni/config";
 import {
+  ChangeSignupUseCaseRequest,
+  ChangeSignupUseCaseResponse,
   CompleteSelfServiceOrganizationSetupRequest,
   CompleteSelfServiceOrganizationSetupResponse,
   CompleteOrganizationUserSetupRequest,
@@ -9,12 +12,18 @@ import {
 } from "@opengeni/contracts";
 import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import {
-  completeSelfServiceOrganizationSetup,
+  completeSelfServiceOrganizationSetupWithSignupNetwork,
   completeOrganizationUserSetup,
+  evaluateSignupNetworkAccounts,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   getSelfServiceOrganizationOnboardingState,
   nestedPostgresSqlState,
   preflightOrganizationUserSetup,
   previewOrganizationUserSetup,
+  readOrganizationSignupUseCase,
+  recordOrganizationSignupUseCase,
+  setOrganizationSignupUseCase,
+  SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -25,12 +34,28 @@ import {
   selfServiceOrganizationSetupRequestFingerprint,
 } from "../auth/organization-user-setup";
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
+import {
+  requestSignupNetworkSource,
+  SIGNUP_NETWORK_RATE_LIMIT_CODE,
+  SIGNUP_NETWORK_RATE_LIMIT_MESSAGE,
+} from "../auth/signup-network";
+import { ApiHttpError } from "../http/api-error";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
+import {
+  MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
+  MANAGED_AUTH_PASSWORD_COMPROMISED_MESSAGE,
+  managedAuthBreachedPasswordCheckEnabled,
+  managedAuthPasswordBreached,
+  type PasswordBreachLookup,
+} from "../auth/password-breach";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
+import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
   hashPassword?: (password: string) => Promise<string>;
+  /** Breached-password lookup; Have I Been Pwned unless a test replaces it. */
+  passwordBreachLookup?: PasswordBreachLookup;
 };
 
 const completedSetupReplayPasswordHash = `completed-replay:${"0".repeat(64)}`;
@@ -42,6 +67,52 @@ export function registerManagedOnboardingRoutes(
 ): void {
   const accountSetupLimiter = options.accountSetupLimiter ?? new PublicSetupRateLimiter();
   const hashPassword = options.hashPassword ?? hashManagedAuthPassword;
+  // Back from a later onboarding step, after the organization exists: the
+  // person's new answer becomes their current one, only in an organization
+  // they actively belong to.
+  app.put("/v1/auth/organization-onboarding/use-case", async (context) => {
+    const session = await requireManagedHuman(context, deps);
+    const payload = await parseRequestJson(context, ChangeSignupUseCaseRequest, {
+      status: 422,
+      message: "invalid signup use case",
+    });
+    try {
+      const { organizationMemberships } =
+        await ensureManagedAccessForUserWithOrganizationMemberships(deps.db, {
+          userId: session.user.id,
+          email: session.user.email,
+          name: session.user.name,
+          emailVerified: session.user.emailVerified,
+          provisionFallbackOrganization: false,
+        });
+      if (
+        !organizationMemberships.some(
+          (membership) => membership.organizationId === payload.organizationId,
+        )
+      ) {
+        throw new HTTPException(403, { message: "organization membership is not active" });
+      }
+      return context.json(
+        ChangeSignupUseCaseResponse.parse({
+          useCase: await setOrganizationSignupUseCase(deps.db, {
+            organizationId: payload.organizationId,
+            subjectId: `user:${session.user.id}`,
+            useCase: payload.useCase,
+          }),
+        }),
+      );
+    } catch (error) {
+      const sqlState = nestedPostgresSqlState(error);
+      if (sqlState === "42501") {
+        throw new HTTPException(403, { message: "organization membership is not active" });
+      }
+      if (sqlState === "22023") {
+        throw new HTTPException(422, { message: "invalid signup use case" });
+      }
+      throw error;
+    }
+  });
+
   app.get("/v1/auth/organization-onboarding", async (context) => {
     const session = await requireManagedHuman(context, deps);
     return context.json(
@@ -62,7 +133,8 @@ export function registerManagedOnboardingRoutes(
     );
     if (!parsed.success) {
       recordOrganizationSetupOutcome(deps.observability, "failed");
-      throw new HTTPException(422, {
+      throw requestValidationError(parsed.error, "body", {
+        status: 422,
         message: "invalid organization setup request",
       });
     }
@@ -72,25 +144,75 @@ export function registerManagedOnboardingRoutes(
         authUserId: session.user.id,
         organizationName,
       });
-      const completed = CompleteSelfServiceOrganizationSetupResponse.parse(
-        await completeSelfServiceOrganizationSetup(deps.db, {
+      // Keyed hashes only; the receipt trigger records them for a new
+      // organization and applies the per-network rate limit (migration 1354).
+      const signupNetwork = requestSignupNetworkSource(context, deps.settings);
+      const { setup, evaluateAccountIds } =
+        await completeSelfServiceOrganizationSetupWithSignupNetwork(deps.db, {
           authUserId: session.user.id,
           actorSubjectId: `user:${session.user.id}`,
           organizationName,
           operationId: parsed.data.operationId,
           requestFingerprint,
+          trialCreditModelIds: signupCreditModelIds(deps.settings),
           trialCreditsEnabled:
             deps.settings.productAccessMode === "managed" &&
             deps.settings.verifiedSignupTrialCreditsEnabled,
-        }),
-      );
+          signupNetwork,
+        });
+      const completed = CompleteSelfServiceOrganizationSetupResponse.parse(setup);
+      // Committed. Evaluate this organization and recent same-network ones,
+      // each in its own account transaction, so reserve accounts of a burst
+      // are held before they spend. Best-effort: Free issuance and admission
+      // evaluate each account lazily anyway.
+      if (evaluateAccountIds.length > 0) {
+        await evaluateSignupNetworkAccounts(deps.db, evaluateAccountIds, (_accountId, error) => {
+          console.warn("[api] could not evaluate a signup network account", {
+            sqlState: nestedPostgresSqlState(error) ?? null,
+          });
+        });
+      }
       // An idempotent replay of the same operation returns the same committed
       // setup and is counted again; clients retry only on an ambiguous response.
       recordOrganizationSetupOutcome(deps.observability, "created");
+      if (parsed.data.useCase) {
+        // The organization is already committed, so a failure to keep the
+        // signup answer must not fail its setup. The first answer is kept
+        // for analytics; the current one is what the app follows.
+        const answer = {
+          organizationId: completed.organizationId,
+          subjectId: `user:${session.user.id}`,
+          useCase: parsed.data.useCase,
+        };
+        await recordOrganizationSignupUseCase(deps.db, answer).catch((error: unknown) => {
+          console.warn("[api] could not record the signup use case", {
+            sqlState: nestedPostgresSqlState(error) ?? null,
+          });
+        });
+        // An idempotent replay of setup keeps an answer changed since.
+        await readOrganizationSignupUseCase(deps.db, answer)
+          .then((current) => (current ? null : setOrganizationSignupUseCase(deps.db, answer)))
+          .catch((error: unknown) => {
+            console.warn("[api] could not keep the current signup use case", {
+              sqlState: nestedPostgresSqlState(error) ?? null,
+            });
+          });
+      }
       return context.json(completed);
     } catch (error) {
-      recordOrganizationSetupOutcome(deps.observability, "failed");
       const sqlState = nestedPostgresSqlState(error);
+      recordOrganizationSetupOutcome(
+        deps.observability,
+        sqlState === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE ? "rate_limited" : "failed",
+      );
+      if (sqlState === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
+        throw new ApiHttpError(429, {
+          code: "limit_exceeded",
+          message: SIGNUP_NETWORK_RATE_LIMIT_MESSAGE,
+          retryable: true,
+          details: { managedAuthCode: SIGNUP_NETWORK_RATE_LIMIT_CODE },
+        });
+      }
       if (sqlState === "22023") {
         throw new HTTPException(422, {
           message: "invalid organization setup request",
@@ -115,17 +237,16 @@ export function registerManagedOnboardingRoutes(
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
     enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
-    const parsed = PreviewOrganizationUserSetupRequest.safeParse(
+    const parsed = parseRequestBody(
+      PreviewOrganizationUserSetupRequest,
       await context.req.json().catch(() => null),
+      { status: 422, message: "invalid account setup preview request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid account setup preview request" });
-    }
     return context.json(
       OrganizationUserSetupPreview.parse(
         await previewOrganizationUserSetup(
           deps.db,
-          await organizationUserSetupTokenDigest(parsed.data.token),
+          await organizationUserSetupTokenDigest(parsed.token),
         ),
       ),
     );
@@ -136,16 +257,13 @@ export function registerManagedOnboardingRoutes(
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
     enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
-    const parsed = CompleteOrganizationUserSetupRequest.safeParse(
+    const parsed = parseRequestBody(
+      CompleteOrganizationUserSetupRequest,
       await context.req.json().catch(() => null),
+      { status: 422, message: "invalid account setup request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "invalid account setup request",
-      });
-    }
-    const name = parsed.data.name.trim();
-    const tokenDigest = await organizationUserSetupTokenDigest(parsed.data.token);
+    const name = parsed.name.trim();
+    const tokenDigest = await organizationUserSetupTokenDigest(parsed.token);
     const preflight = await preflightOrganizationUserSetup(deps.db, tokenDigest);
     if (preflight === "unavailable") {
       throw new HTTPException(404, {
@@ -155,18 +273,35 @@ export function registerManagedOnboardingRoutes(
     const requestFingerprint = await organizationUserSetupRequestFingerprint(deps.settings, {
       tokenDigest,
       name,
-      password: parsed.data.password,
+      password: parsed.password,
     });
+    if (
+      preflight !== "completed" &&
+      (await managedAuthPasswordBreached(parsed.password, {
+        enabled: managedAuthBreachedPasswordCheckEnabled(deps.settings),
+        ...(options.passwordBreachLookup ? { lookup: options.passwordBreachLookup } : {}),
+        onUnavailable: (reason) =>
+          deps.observability?.warn("Breached-password lookup unavailable", { reason }),
+      }))
+    ) {
+      return context.json(
+        {
+          code: MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
+          message: MANAGED_AUTH_PASSWORD_COMPROMISED_MESSAGE,
+        },
+        422,
+      );
+    }
     const passwordHash =
       preflight === "completed"
         ? completedSetupReplayPasswordHash
-        : await hashPassword(parsed.data.password);
+        : await hashPassword(parsed.password);
     try {
       return context.json(
         CompleteOrganizationUserSetupResponse.parse(
           await completeOrganizationUserSetup(deps.db, {
             tokenDigest,
-            operationId: parsed.data.operationId,
+            operationId: parsed.operationId,
             requestFingerprint,
             authUserId: crypto.randomUUID(),
             name,
@@ -218,6 +353,8 @@ function enforceAccountSetupRateLimit(
  * The global bucket prevents spoofed/high-cardinality client keys from
  * multiplying password-hash work, while the per-client bucket limits bursts.
  * A full key map rejects new clients until an idle bucket can be pruned.
+ * A request spends a token from both buckets only when both admit it, so a
+ * client its own bucket refuses never drains the capacity others share.
  */
 export class PublicSetupRateLimiter {
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
@@ -241,54 +378,32 @@ export class PublicSetupRateLimiter {
 
   take(key: string): boolean {
     const now = this.options.now?.() ?? Date.now();
-    const globalCapacity = this.options.globalCapacity ?? 50;
-    if (
-      !takeSetupRateLimitToken(
-        this.global,
-        globalCapacity,
-        this.options.globalRefillPerSecond ?? 5,
-        now,
-      )
-    ) {
-      return false;
-    }
     const clientCapacity = this.options.clientCapacity ?? 5;
+    const clientRefillPerSecond = this.options.clientRefillPerSecond ?? 0.1;
     const maxClientKeys = this.options.maxClientKeys ?? 2_048;
     let bucket = this.buckets.get(key);
     if (!bucket && this.buckets.size >= maxClientKeys) {
       for (const [candidateKey, candidate] of this.buckets) {
-        refillSetupRateLimitBucket(
-          candidate,
-          clientCapacity,
-          this.options.clientRefillPerSecond ?? 0.1,
-          now,
-        );
+        refillSetupRateLimitBucket(candidate, clientCapacity, clientRefillPerSecond, now);
         if (candidate.tokens >= clientCapacity) this.buckets.delete(candidateKey);
       }
       if (this.buckets.size >= maxClientKeys) return false;
     }
     bucket ??= { tokens: clientCapacity, updatedAt: now };
-    const allowed = takeSetupRateLimitToken(
-      bucket,
-      clientCapacity,
-      this.options.clientRefillPerSecond ?? 0.1,
+    refillSetupRateLimitBucket(bucket, clientCapacity, clientRefillPerSecond, now);
+    if (bucket.tokens < 1) return false;
+    refillSetupRateLimitBucket(
+      this.global,
+      this.options.globalCapacity ?? 50,
+      this.options.globalRefillPerSecond ?? 5,
       now,
     );
+    if (this.global.tokens < 1) return false;
+    bucket.tokens -= 1;
+    this.global.tokens -= 1;
     this.buckets.set(key, bucket);
-    return allowed;
+    return true;
   }
-}
-
-function takeSetupRateLimitToken(
-  bucket: { tokens: number; updatedAt: number },
-  capacity: number,
-  refillPerSecond: number,
-  now: number,
-): boolean {
-  refillSetupRateLimitBucket(bucket, capacity, refillPerSecond, now);
-  if (bucket.tokens < 1) return false;
-  bucket.tokens -= 1;
-  return true;
 }
 
 function refillSetupRateLimitBucket(

@@ -6,6 +6,10 @@ import { defineConfig } from "vite";
 const demoApiTarget = process.env.OPENGENI_REACT_DEMO_API_TARGET ?? "http://127.0.0.1:8000";
 const timelineScrollTestBuild = process.env.OPENGENI_TIMELINE_SCROLL_TEST_BUILD === "1";
 const demoInputs = {
+  agentSettings: resolve(__dirname, "agent-settings.html"),
+  agentRows: resolve(__dirname, "agent-rows.html"),
+  approvalReview: resolve(__dirname, "approval-review.html"),
+  siteToolConsent: resolve(__dirname, "site-tool-consent.html"),
   genieLoading: resolve(__dirname, "genie-loading.html"),
   exchangeFold: resolve(__dirname, "exchange-fold.html"),
   main: resolve(__dirname, "index.html"),
@@ -13,6 +17,9 @@ const demoInputs = {
   fleetPolicy: resolve(__dirname, "fleet-policy.html"),
   queue: resolve(__dirname, "queue.html"),
   machines: resolve(__dirname, "machines.html"),
+  memberMachines: resolve(__dirname, "member-machines.html"),
+  chromeSetupCard: resolve(__dirname, "chrome-setup-card.html"),
+  machineCard: resolve(__dirname, "machine-card.html"),
   workbench: resolve(__dirname, "workbench.html"),
   workbenchDock: resolve(__dirname, "workbench-dock.html"),
   workbenchEmbed: resolve(__dirname, "workbench-embed.html"),
@@ -23,14 +30,24 @@ const demoInputs = {
   artifactViewer: resolve(__dirname, "artifact-viewer.html"),
   browser: resolve(__dirname, "browser.html"),
   computer: resolve(__dirname, "computer.html"),
+  thisComputer: resolve(__dirname, "this-computer.html"),
   composerResponsive: resolve(__dirname, "composer-responsive.html"),
   commandUx: resolve(__dirname, "command-ux.html"),
   sessionHistoryImport: resolve(__dirname, "session-history-import.html"),
   embeddedChat: resolve(__dirname, "embedded-chat.html"),
+  embeddedMeeting: resolve(__dirname, "embedded-meeting.html"),
 };
 
 export default defineConfig({
   base: process.env.OPENGENI_REACT_DEMO_BASE ?? "/",
+  // Demo-only: the permission state board renders the web app's real settings
+  // component with a synthetic client in place of the app context.
+  resolve: {
+    alias: [
+      { find: /^@\/context$/, replacement: resolve(__dirname, "web-context-stub.ts") },
+      { find: /^@\//, replacement: `${resolve(__dirname, "../../../apps/web/src")}/` },
+    ],
+  },
   plugins: [viteReact(), tailwindcss()],
   server: {
     // Same-origin HTTP + WebSocket path used by the live reference consumers.

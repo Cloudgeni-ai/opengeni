@@ -1,14 +1,14 @@
 import { ChevronRightIcon, CpuIcon, StarIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { MetaChip } from "@/components/ui/meta-chip";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   UsageMeter,
   UsageMeterGroup,
   type UsageMeterVariant,
   type UsageWindowReading,
-} from "@/components/ui/usage-meter";
+} from "@opengeni/react/ui/usage-meter";
 import {
   codexOrganizationAccounts,
   codexWorkspaceAccounts,
@@ -332,7 +332,7 @@ export default function UsageMeterSection() {
 
       <UsageNotes
         use={[
-          "What's left of an account's quota: the Codex Weekly and 5-hour limits, with the reset time.",
+          "What's left of an account's quota: every window the account reports (5h, Week), with the reset time.",
           "Both windows on the account page; only the Weekly window in account rows, as text.",
           "Machine resources, counted as used: Memory 5.1 of 16 GB.",
         ]}

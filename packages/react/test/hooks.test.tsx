@@ -1,10 +1,11 @@
+import type { ChatClient } from "@opengeni/sdk";
 /* ----------------------------------------------------------------------------
    Rendered-hook tests for the workspace + queue + goal hooks, on the minimal
    happy-dom harness in ./render-hook. All hook tests live in this one file so
    DOM globals are registered exactly once for the bun test process slice that
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { act as reactAct } from "react";
 import { startTransition, Suspense, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
@@ -22,16 +23,21 @@ import type {
   SessionMcpServerMetadata,
   SessionTurn,
   SteerMessageResult,
-  WorkspaceEnvironment,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
-import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import {
+  fakeClient,
+  fakeGoal,
+  fakeTurn,
+  savedComposerPolicy,
+  SESSION_ID,
+  WORKSPACE_ID,
+} from "./fake-client";
 import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
 import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { useAvailableModels, useWorkspaceModelCatalog } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
-import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { useLastStartedTurnPolicy } from "../src/hooks/use-last-started-turn-policy";
 
@@ -42,8 +48,12 @@ import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approv
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 import { createEmbeddedSessionClient } from "../src/embedded-session-client";
+import { createOpenGeniText } from "../src/messages/runtime";
+import { SERVICE_UPDATING_CALM_WINDOW_MS } from "../src/lib/transient-retry";
 
-registerDom();
+const englishText = createOpenGeniText();
+
+registerDom({ clock: "virtual" });
 
 function makeEvent(
   sequence: number,
@@ -105,7 +115,7 @@ function gatewayError(status = 502): OpenGeniApiError {
     retryable: true,
     correlationId: `edge-${status}-safe`,
     outcomeUnknown: true,
-    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+    displayMessage: "Opengeni is temporarily unavailable — retry.",
   });
 }
 
@@ -116,7 +126,7 @@ function paymentRequiredError(): OpenGeniApiError {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient OpenGeni credits",
+        message: "insufficient Opengeni credits",
         retryable: false,
       },
     }),
@@ -165,6 +175,63 @@ function queueSnapshot(
 }
 
 describe("useWorkspaceSessions", () => {
+  test("compact reads use the optional summary transport and retain causal revisions", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      listSessionPage: async () => {
+        throw new Error("unexpected full read");
+      },
+      listSessionSummaryPage: async () => {
+        reads++;
+        return { projection: "summary", pinned: [], sessions: [], nextCursor: "next" };
+      },
+    });
+    const beginRead = () => 37;
+    const hook = await renderHook(
+      () =>
+        useWorkspaceSessions({
+          client,
+          workspaceId: WORKSPACE_ID,
+          projection: "summary",
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(reads).toBe(1);
+    expect(hook.result.current.nextCursor).toBe("next");
+    expect(hook.result.current.readGeneration).toBe(37);
+    expect(hook.result.current.readRevision).toBe(1);
+    await hook.unmount();
+  });
+
+  test("changing pin inclusion starts a fresh page and drops the previous pinned projection", async () => {
+    const pinned = { id: "shortcut", pinned: true } as never;
+    const seen: Array<boolean | undefined> = [];
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        seen.push(options?.includePinned);
+        return {
+          pinned: options?.includePinned === false ? [] : [pinned],
+          sessions: [],
+          nextCursor: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (includePinned: boolean) =>
+        useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, includePinned }),
+      true as boolean,
+    );
+    await flush();
+    expect(hook.result.current.pinned).toEqual([pinned]);
+    await hook.rerender(false);
+    await flush();
+    expect(hook.result.current.pinned).toEqual([]);
+    expect(seen).toEqual([undefined, false]);
+    await hook.unmount();
+  });
+
   test("forwards sorting and archive mode and reloads on either change", async () => {
     const seen: string[] = [];
     const client = fakeClient({
@@ -597,6 +664,64 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
+  test("a refresh for an observed event does not adopt a queue read that started before it", async () => {
+    const paused = {
+      ...queueSnapshot([]).effectiveControl,
+      state: "paused" as const,
+      directState: "paused" as const,
+      controlVersion: 4,
+      controlEtag: "control-4",
+    };
+    let requests = 0;
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        // The second read starts while the paused attempt is still stopping
+        // and answers only after the attempt has quiesced.
+        if (request === 2) await staleGate;
+        return new Response(
+          JSON.stringify(
+            queueSnapshot([], {
+              version: request,
+              effectiveControl: paused,
+              stoppingPreviousAttempt: request <= 2,
+            }),
+          ),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(requests).toBe(1);
+    expect(hook.result.current.stoppingPreviousAttempt).toBe(true);
+
+    // Another reader of the same session queue starts before quiescence.
+    const staleRead = client.getQueue(WORKSPACE_ID, SESSION_ID);
+    await flush();
+    expect(requests).toBe(2);
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "attempt_quiesced" })]);
+    await flush(250);
+    releaseStale();
+    await staleRead;
+    await flush();
+
+    expect(requests).toBe(3);
+    expect(hook.result.current.snapshot?.version).toBe(3);
+    expect(hook.result.current.stoppingPreviousAttempt).toBe(false);
+    await hook.unmount();
+  });
+
   test("without a shared log it tails the session stream from lastSequence", async () => {
     let listCalls = 0;
     const streamedAfter: { value: number | null } = { value: null };
@@ -873,48 +998,51 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
-  test("queue Steer stays bridged into chat until the replacement turn starts", async () => {
-    const turn = fakeTurn({ id: "steered-turn", prompt: "New direction" });
-    let current = queueSnapshot([turn], { version: 5 });
-    const client = fakeClient({
-      getQueue: async () => current,
-      steerQueueItem: async () => {
-        current = queueSnapshot([], { version: 6 });
-        return {
-          receipt: promptReceipt(turn.id, "queue.steer"),
-          snapshot: current,
-        };
-      },
-    });
-    const hook = await renderHook(
-      (events: SessionEvent[]) =>
-        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
-      [] as SessionEvent[],
-    );
-    await flush();
+  test.each(["turn.started", "turn.superseded"])(
+    "queue Steer stays bridged into chat until %s",
+    async (terminalType) => {
+      const turn = fakeTurn({ id: "steered-turn", prompt: "New direction" });
+      let current = queueSnapshot([turn], { version: 5 });
+      const client = fakeClient({
+        getQueue: async () => current,
+        steerQueueItem: async () => {
+          current = queueSnapshot([], { version: 6 });
+          return {
+            receipt: promptReceipt(turn.id, "queue.steer"),
+            snapshot: current,
+          };
+        },
+      });
+      const hook = await renderHook(
+        (events: SessionEvent[]) =>
+          useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        [] as SessionEvent[],
+      );
+      await flush();
 
-    await flushing(async () => expect(await hook.result.current.steerTurn(turn.id)).toBe(true));
-    expect(hook.result.current.acceptedSteers).toEqual([
-      expect.objectContaining({ turnId: turn.id, text: "New direction", state: "queued" }),
-    ]);
+      await flushing(async () => expect(await hook.result.current.steerTurn(turn.id)).toBe(true));
+      expect(hook.result.current.acceptedSteers).toEqual([
+        expect.objectContaining({ turnId: turn.id, text: "New direction", state: "queued" }),
+      ]);
 
-    await hook.rerender([
-      makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
-    ]);
-    await flush();
-    expect(hook.result.current.acceptedSteers).toHaveLength(1);
+      await hook.rerender([
+        makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
+      ]);
+      await flush();
+      expect(hook.result.current.acceptedSteers).toHaveLength(1);
 
-    await hook.rerender([
-      makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
-      {
-        ...makeEvent(11, "turn.started", { triggerEventId: turn.triggerEventId }),
-        turnId: turn.id,
-      },
-    ]);
-    await flush();
-    expect(hook.result.current.acceptedSteers).toEqual([]);
-    await hook.unmount();
-  });
+      await hook.rerender([
+        makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
+        {
+          ...makeEvent(11, terminalType, { triggerEventId: turn.triggerEventId }),
+          turnId: turn.id,
+        },
+      ]);
+      await flush();
+      expect(hook.result.current.acceptedSteers).toEqual([]);
+      await hook.unmount();
+    },
+  );
 
   test("a delayed older GET cannot overwrite a newer mutation snapshot", async () => {
     const old = queueSnapshot([fakeTurn({ id: "old" })], { version: 1 });
@@ -1210,8 +1338,9 @@ describe("useSessionLineage", () => {
           { headers: { "content-type": "application/json" } },
         );
       },
-    });
+    }).withSessionResponse("chat");
 
+    // Both readers use the same compact client, as the first-party app does.
     // A non-authority consumer keeps the pre-move shared lineage request alive
     // while the authority-bearing rail is collapsed.
     const collapsedRail = await renderHook(
@@ -1290,7 +1419,7 @@ describe("useSessionLineage", () => {
           { headers: { "content-type": "application/json" } },
         );
       },
-    });
+    }).withSessionResponse("chat");
 
     // A mounted route/header poll starts the shared request after B settles;
     // the authority-bearing rail joins only after that actual network start.
@@ -1633,6 +1762,187 @@ describe("useGoal", () => {
     await hook.unmount();
   });
 
+  test("a goal-less session refetches only on goal events, never on turn traffic", async () => {
+    let reads = 0;
+    let hasGoal = false;
+    const client = fakeClient({
+      getGoal: async () => {
+        reads += 1;
+        if (!hasGoal) throw new OpenGeniApiError(404, "session goal not found");
+        return fakeGoal();
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    const turnTraffic = [
+      makeEvent(1, "user.message"),
+      makeEvent(2, "turn.started"),
+      makeEvent(3, "session.status.changed"),
+      makeEvent(4, "turn.completed"),
+    ];
+    await hook.rerender(turnTraffic);
+    await flush(250);
+    expect(reads).toBe(1);
+    expect(hook.result.current.goal).toBeNull();
+
+    hasGoal = true;
+    await hook.rerender([...turnTraffic, makeEvent(5, "goal.set")]);
+    await flush(250);
+    expect(reads).toBe(2);
+    expect(hook.result.current.isActive).toBe(true);
+
+    // With a goal, turn traffic refreshes its continuation counters again.
+    await hook.rerender([...turnTraffic, makeEvent(5, "goal.set"), makeEvent(6, "turn.started")]);
+    await flush(250);
+    expect(reads).toBe(3);
+    await hook.unmount();
+  });
+
+  test.each(["findGoal null", "getGoal 404"] as const)(
+    "a fresh goal-less chat reads once, even when the opening burst races that read (%s)",
+    async (mode) => {
+      let reads = 0;
+      let getGoalReads = 0;
+      let hasGoal = false;
+      let releaseFirstRead: (() => void) | null = null;
+      const firstReadReleased = new Promise<void>((resolve) => {
+        releaseFirstRead = resolve;
+      });
+      const read = async () => {
+        reads += 1;
+        if (reads === 1) await firstReadReleased;
+        return hasGoal ? fakeGoal() : null;
+      };
+      const client =
+        mode === "findGoal null"
+          ? fakeClient({
+              getGoal: async () => {
+                getGoalReads += 1;
+                throw new Error("findGoal must replace getGoal");
+              },
+              findGoal: read,
+            })
+          : fakeClient({
+              getGoal: async () => {
+                const goal = await read();
+                if (!goal) throw new OpenGeniApiError(404, "session goal not found");
+                return goal;
+              },
+            });
+      const hook = await renderHook(
+        (events: SessionEvent[]) =>
+          useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        [] as SessionEvent[],
+      );
+      await flush();
+      expect(reads).toBe(1);
+
+      // The stream's opening tail lands while the mount read is still in flight.
+      const openingBurst = [
+        makeEvent(1, "session.created"),
+        makeEvent(2, "user.message"),
+        makeEvent(3, "turn.started"),
+      ];
+      await hook.rerender(openingBurst);
+      await flush(250);
+      expect(reads).toBe(1);
+
+      await flushing(async () => {
+        releaseFirstRead!();
+      });
+      await flush(250);
+      expect(reads).toBe(1);
+      expect(getGoalReads).toBe(0);
+      expect(hook.result.current.goal).toBeNull();
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.loading).toBe(false);
+
+      // Later turn traffic still never re-reads a goal-less session.
+      const turnDone = [...openingBurst, makeEvent(4, "turn.completed")];
+      await hook.rerender(turnDone);
+      await flush(250);
+      expect(reads).toBe(1);
+
+      // A goal set later arrives as a goal.* event and is fetched.
+      hasGoal = true;
+      await hook.rerender([...turnDone, makeEvent(5, "goal.set")]);
+      await flush(250);
+      expect(reads).toBe(2);
+      expect(hook.result.current.isActive).toBe(true);
+      await hook.unmount();
+    },
+  );
+
+  test("a goal.set behind newer turn traffic in the opening burst is still fetched", async () => {
+    let reads = 0;
+    let releaseFirstRead: (() => void) | null = null;
+    const firstReadReleased = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    const client = fakeClient({
+      // The mount read observed the session just before the agent set a goal.
+      findGoal: async () => {
+        reads += 1;
+        if (reads === 1) {
+          await firstReadReleased;
+          return null;
+        }
+        return fakeGoal();
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    // The shared feed's first batch reports only its latest match (turn.started).
+    await hook.rerender([
+      makeEvent(1, "user.message"),
+      makeEvent(2, "goal.set"),
+      makeEvent(3, "turn.started"),
+    ]);
+    await flushing(async () => {
+      releaseFirstRead!();
+    });
+    await flush(250);
+    expect(reads).toBe(2);
+    expect(hook.result.current.isActive).toBe(true);
+    await hook.unmount();
+  });
+
+  test("an older session's goal outside the loaded event window is shown", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      findGoal: async () => {
+        reads += 1;
+        return fakeGoal({ status: "paused", pausedReason: "api" });
+      },
+    });
+    // Only recent turn traffic is paged in; the goal.set is long gone from it.
+    const recentWindow = [makeEvent(900, "turn.started"), makeEvent(901, "turn.completed")];
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      recentWindow,
+    );
+    await flush(250);
+    expect(reads).toBe(1);
+    expect(hook.result.current.isPaused).toBe(true);
+
+    // With a goal, turn traffic keeps refreshing its continuation truth.
+    await hook.rerender([...recentWindow, makeEvent(902, "turn.started")]);
+    await flush(250);
+    expect(reads).toBe(2);
+    await hook.unmount();
+  });
+
   test("shared-feed goal refreshes are discarded after the session changes", async () => {
     const initialSessionId: string = SESSION_ID;
     const otherSessionId = "33333333-3333-4333-8333-333333333333";
@@ -1707,7 +2017,7 @@ describe("useSessionMcpApprovalPolicy", () => {
             effectiveFrom: "next_attempt",
           };
         },
-      } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+      } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
       const hook = await renderHook(
         (events: SessionEvent[]) =>
           useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -1805,7 +2115,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(["write_record"]),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       () =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -1885,7 +2195,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       () =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
@@ -1932,7 +2242,7 @@ describe("useSessionMcpApprovalPolicy", () => {
           }) as never,
       }),
       updateSessionMcpApprovalPolicy: async () => await mutation,
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
       (sessionId: string) =>
         useSessionMcpApprovalPolicy(sessionId, "external_tools", {
@@ -1993,7 +2303,7 @@ describe("useSessionMcpApprovalPolicy", () => {
           }) as never,
       }),
       updateSessionMcpApprovalPolicy: async () => await mutation,
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const nextClient = {
       ...fakeClient({
         getSession: async () =>
@@ -2007,9 +2317,9 @@ describe("useSessionMcpApprovalPolicy", () => {
         server: metadata(true),
         effectiveFrom: "next_attempt" as const,
       }),
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>;
     const hook = await renderHook(
-      (client: EmbeddedSessionMcpApprovalPolicyClientLike) =>
+      (client: EmbeddedSessionMcpApprovalPolicyClientLike<ChatClient>) =>
         useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
           client,
           workspaceId: WORKSPACE_ID,
@@ -2296,6 +2606,7 @@ describe("useComposer queue-vs-steer", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: request.expectedRevision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -2556,6 +2867,8 @@ describe("useComposer queue-vs-steer", () => {
       expect(await first.result.current.send("answer after reload")).toBe(true),
     );
     await flush();
+    // Held as an update first; reported once the failure outlasts one.
+    await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
     const failed = first.result.current.optimisticMessages?.[0];
     expect(failed).toMatchObject({ destination: "queue", state: "failed", outcomeUnknown: true });
     const clientEventId = sent.input?.clientEventId;
@@ -2619,6 +2932,8 @@ describe("useComposer queue-vs-steer", () => {
 
     await flushing(async () => expect(await hook.result.current.send("run later")).toBe(true));
     await flush();
+    // Held as an update first; reported once the failure outlasts one.
+    await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
     const failed = hook.result.current.optimisticMessages?.[0];
     expect(failed).toMatchObject({ state: "failed", outcomeUnknown: true });
     const clientEventId = sent.input?.clientEventId;
@@ -2714,6 +3029,342 @@ describe("useComposer queue-vs-steer", () => {
     const input = steered[0] as { text: string; clientEventId?: string };
     expect(input.text).toBe("do this immediately");
     expect(typeof input.clientEventId).toBe("string");
+    await hook.unmount();
+  });
+
+  test("busySend steer with offerQueue lets the server decide every Send and offers Queue; sendToQueue and Queue still queue", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        calls.push({
+          delivery: options?.delivery ?? "steer",
+          text: text(input),
+        });
+        return steerResult();
+      },
+    });
+    let destination: "chat" | "queue" = "queue";
+    let control = queueSnapshot([]).effectiveControl;
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: control,
+          sendDestination: () => destination,
+          busySend: "steer",
+          offerQueue: true,
+        }),
+      undefined,
+    );
+    expect(hook.result.current.busySend).toBe("steer");
+    expect(hook.result.current.singleSend).toBe(false);
+    expect(hook.result.current.alternateSend).toBe("queue");
+    expect(hook.result.current.working).toBe(true);
+
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    await flushing(async () =>
+      expect(await hook.result.current.sendToQueue?.("after the turn")).toBe(true),
+    );
+    await flushing(async () =>
+      expect(await hook.result.current.sendAlternate?.("alternate queues")).toBe(true),
+    );
+    destination = "chat";
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    // Nothing runs or waits: the composer just sends.
+    expect(hook.result.current.working).toBe(false);
+    await flushing(async () => expect(await hook.result.current.send("idle")).toBe(true));
+    destination = "queue";
+    control = { ...control, state: "paused", directState: "paused" };
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    expect(hook.result.current.working).toBe(false);
+    await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
+
+    // Every Send asks the server to steer or send (a paused chat keeps it
+    // waiting there); the explicit Queue choices stay plain Sends.
+    expect(calls).toEqual([
+      { delivery: "steer_or_send", text: "busy" },
+      { delivery: "send", text: "after the turn" },
+      { delivery: "send", text: "alternate queues" },
+      { delivery: "steer_or_send", text: "idle" },
+      { delivery: "steer_or_send", text: "paused" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("busySend steer alone is one Send: no alternate, and the server decides every Send", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        calls.push({
+          delivery: options?.delivery ?? "steer",
+          text: text(input),
+        });
+        return steerResult();
+      },
+    });
+    let control = queueSnapshot([]).effectiveControl;
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: control,
+          sendDestination: () => "queue",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.singleSend).toBe(true);
+    expect(hook.result.current.alternateSend).toBeNull();
+    expect(hook.result.current.sendAlternate).toBeUndefined();
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    control = { ...control, state: "paused", directState: "paused" };
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
+    expect(calls).toEqual([
+      { delivery: "steer_or_send", text: "busy" },
+      { delivery: "steer_or_send", text: "paused" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("one Send from a stale idle view still reaches the running turn, because the server decides", async () => {
+    // The composer's copy of the session says nothing runs, but the turn
+    // started on the server seconds ago. Choosing from that copy used to send
+    // a plain Send, which waited behind the turn and ran as its own turn.
+    const steers: Array<
+      Exclude<Parameters<OpenGeniClient["steerMessage"]>[2], string> & {
+        delivery?: string | undefined;
+      }
+    > = [];
+    const sends: unknown[] = [];
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        sends.push(input);
+        return makeEvent(1, "user.message");
+      },
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        if (typeof input !== "string") steers.push({ ...input, delivery: options?.delivery });
+        // The server resolves it against the turn that really runs.
+        return steerResult();
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          events: noEvents,
+          sendDestination: () => "chat",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.working).toBe(false);
+    await flushing(async () =>
+      expect(await hook.result.current.send("short follow-up")).toBe(true),
+    );
+    expect(sends).toEqual([]);
+    expect(steers).toMatchObject([{ text: "short follow-up", delivery: "steer_or_send" }]);
+    expect(steers[0]?.clientEventId).toBeString();
+    // Shown in the chat with the turn it reached, never in a queue.
+    expect(hook.result.current.optimisticMessages).toMatchObject([
+      { text: "short follow-up", destination: "chat", state: "queued" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("an uncertain one-Send retries the exact steer_or_send request", async () => {
+    const steers: Array<
+      Exclude<Parameters<OpenGeniClient["steerMessage"]>[2], string> & {
+        delivery?: string | undefined;
+      }
+    > = [];
+    const client = fakeClient({
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        if (typeof input !== "string") steers.push({ ...input, delivery: options?.delivery });
+        if (steers.length === 1) throw gatewayError(503);
+        return steerResult();
+      },
+      listEvents: async () => [],
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          events: noEvents,
+          sendDestination: () => "chat",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    await flushing(async () => expect(await hook.result.current.send("are you there")).toBe(true));
+    await flush();
+    await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
+    // The uncertain attempt is retried with the same operation key and the
+    // same delivery, so the server replays its first decision instead of
+    // deciding again.
+    const key = steers[0]?.clientEventId;
+    expect(key).toBeString();
+    expect(steers.map((input) => [input.clientEventId, input.delivery])).toEqual([
+      [key, "steer_or_send"],
+      [key, "steer_or_send"],
+    ]);
+    expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({
+      destination: "chat",
+      state: "queued",
+    });
+    await hook.unmount();
+  });
+
+  test("a busy-looking one-Send the server resolves to a Send leaves no Steer showing", async () => {
+    const client = fakeClient({
+      steerMessage: async () =>
+        steerResult(undefined, undefined, { routing: "accepted_for_execution" }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          events: noEvents,
+          // Stale the other way: the turn already finished on the server.
+          sendDestination: () => "queue",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.setValue("new question"));
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(hook.result.current.steering).toBeNull();
+    expect(hook.result.current.value).toBe("");
+    await hook.unmount();
+  });
+
+  test("against a server without steer_or_send, one-Send falls back to the composer's own choice", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return makeEvent(calls.length, "user.message");
+      },
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        const delivery = options?.delivery ?? "steer";
+        calls.push({ delivery, text: text(input) });
+        if (delivery === "steer_or_send") {
+          throw new OpenGeniApiError(
+            422,
+            JSON.stringify({ message: 'invalid steer request: Unrecognized key: "delivery"' }),
+          );
+        }
+        return steerResult();
+      },
+    });
+    let destination: "chat" | "queue" = "chat";
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          events: noEvents,
+          sendDestination: () => destination,
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    await flushing(async () => expect(await hook.result.current.send("idle")).toBe(true));
+    destination = "queue";
+    await hook.rerender(undefined);
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    expect(calls).toEqual([
+      { delivery: "steer_or_send", text: "idle" },
+      { delivery: "send", text: "idle" },
+      // Remembered: the next Send does not ask again.
+      { delivery: "steer", text: "busy" },
+    ]);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("in queue mode the alternate beside Send is Steer and steers", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          sendDestination: () => "queue",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.alternateSend).toBe("steer");
+    await flushing(async () => expect(await hook.result.current.send("queued")).toBe(true));
+    await flushing(async () =>
+      expect(await hook.result.current.sendAlternate?.("steered")).toBe(true),
+    );
+    expect(calls).toEqual([
+      { delivery: "send", text: "queued" },
+      { delivery: "steer", text: "steered" },
+    ]);
     await hook.unmount();
   });
 
@@ -2879,13 +3530,22 @@ describe("useComposer queue-vs-steer", () => {
     await flush();
 
     await flushing(async () => await hook.result.current.pause());
-    expect(hook.result.current.stoppingAttempt).toBeNull();
+    // The receipt still reports physical settlement, so the current attempt is
+    // shown stopping before any queue snapshot refresh arrives.
+    expect(hook.result.current.stoppingAttempt).toBe("current");
     expect(hook.result.current.effectiveControl).toMatchObject({
       state: "paused",
       controlVersion: 4,
     });
 
+    // A snapshot that is still behind the receipt does not end the projection.
+    await hook.rerender({ ...queueSnapshot([]).effectiveControl, controlVersion: 3 });
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+
+    // Once the authoritative control catches up, the queue snapshot owns the
+    // stopping projection, in the same render.
     await hook.rerender({ ...pendingControl, settlement: null });
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     expect(hook.result.current.effectiveControl?.state).toBe("paused");
     await hook.unmount();
   });
@@ -2939,10 +3599,13 @@ describe("useComposer queue-vs-steer", () => {
 
     await flushing(async () => await hook.result.current.pause());
     expect(hook.result.current.effectiveControl?.controlEtag).toBe("control-4");
+    // Nothing was interrupted, so nothing is shown stopping.
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await flushing(async () => await hook.result.current.resume());
 
     expect(resumeEtags).toEqual(["control-4"]);
     expect(hook.result.current.effectiveControl?.controlEtag).toBe("control-5");
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await hook.unmount();
   });
 
@@ -3448,9 +4111,10 @@ describe("useComposer durable draft and control binding", () => {
           text: request.text,
           resources: request.resources,
           annotations: request.annotations ?? [],
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
-          latencyMode: request.latencyMode,
+          ...savedComposerPolicy(
+            { model: "model-x", reasoningEffort: "medium", latencyMode: "standard" },
+            request,
+          ),
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -3488,7 +4152,7 @@ describe("useComposer durable draft and control binding", () => {
 
   test("typing before first hydrate still autosaves against the fetched OCC base", async () => {
     let resolveDraft!: (draft: ComposerDraft) => void;
-    const saved: Array<{ text: string; model: string; expectedRevision: number }> = [];
+    const saved: Array<{ text: string; model: string | undefined; expectedRevision: number }> = [];
     const client = fakeClient({
       getComposerDraft: async () =>
         await new Promise<ComposerDraft>((resolve) => {
@@ -3505,9 +4169,10 @@ describe("useComposer durable draft and control binding", () => {
           text: request.text,
           resources: request.resources,
           annotations: request.annotations ?? [],
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
-          latencyMode: request.latencyMode,
+          ...savedComposerPolicy(
+            { model: "model-x", reasoningEffort: "medium", latencyMode: "standard" },
+            request,
+          ),
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -3760,6 +4425,7 @@ describe("useComposer durable draft and control binding", () => {
         return {
           ...initial,
           ...request,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },
@@ -3819,6 +4485,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: serverDraft.revision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -3959,6 +4626,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: serverDraft.revision + 1,
           resources: canonicalizeResources(request.resources),
           updatedAt: new Date().toISOString(),
@@ -4052,8 +4720,7 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         }),
         sendMessage: async (_ws, _session, input) => {
@@ -4137,12 +4804,12 @@ describe("useComposer durable draft and control binding", () => {
       await flush();
       connectionAccounts = [{ ...original[0]!, connectionId: crypto.randomUUID() }];
       if (delivery === "send") {
-        const failed = hook.result.current.optimisticMessages?.find(
-          (message) => message.outcomeUnknown,
-        );
-        expect(failed).toBeDefined();
-        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
-        await flush();
+        // A gateway failure is held as an update and retried by itself.
+        expect(
+          hook.result.current.optimisticMessages?.find((message) => message.outcomeUnknown),
+        ).toMatchObject({ state: "sending" });
+        expect(hook.result.current.reconnecting).toBe(true);
+        await flush(10_000);
       } else {
         await flushing(async () => expect(await hook.result.current.steer()).toBe(true));
       }
@@ -4178,6 +4845,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: request.expectedRevision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -4268,8 +4936,7 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },
@@ -4292,8 +4959,8 @@ describe("useComposer durable draft and control binding", () => {
     await flush();
     await flushing(async () => hook.result.current.setValue(" \n"));
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
-    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT);
-    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT]);
+    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT(englishText)]);
     await hook.unmount();
   });
 
@@ -4336,7 +5003,7 @@ describe("useComposer durable draft and control binding", () => {
       outcomeUnknown: true,
     });
     expect(hook.result.current.error?.message).toBe(
-      "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
+      "Opengeni is temporarily unavailable — retry. Reference: edge-503-safe.",
     );
     await hook.unmount();
   });
@@ -4439,6 +5106,7 @@ describe("useComposer durable draft and control binding", () => {
           serverDraft = {
             ...serverDraft,
             ...request,
+            ...savedComposerPolicy(serverDraft, request),
             revision: request.expectedRevision + 1,
             updatedAt: new Date().toISOString(),
           };
@@ -4526,6 +5194,52 @@ describe("useComposer durable draft and control binding", () => {
     });
   }
 
+  test("a member's own-key refused send says to ask an organization owner", async () => {
+    const client = fakeClient({
+      sendMessage: async () => {
+        throw new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: {
+              status: 402,
+              code: "payment_required",
+              message: "Add credits to use your own key.",
+              retryable: false,
+              details: {
+                code: "byok_paid_credit_required",
+                action: { type: "add_credits", href: "/billing" },
+              },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    });
+    // Its own session, so the refused operation it keeps doesn't reach other tests.
+    const hook = await renderHook(
+      () =>
+        useComposer("66666666-6666-4666-8666-666666666666", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          canBuyCredits: false,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.canBuyCredits).toBe(false);
+    await flushing(async () => {
+      await hook.result.current.send("use my key");
+    });
+    await flush();
+    const failed = hook.result.current.optimisticMessages?.find(
+      (message) => message.state === "failed",
+    );
+    expect(failed?.error).toBe("Ask an organization owner to add credits to use your own key.");
+    await hook.unmount();
+  });
+
   for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} retries an outcome-unknown gateway failure with one idempotency key`, async () => {
       const resource = {
@@ -4566,12 +5280,15 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
       if (delivery === "send") {
-        const failed = hook.result.current.optimisticMessages?.find(
+        // A gateway failure is held as an update and retried by itself.
+        const held = hook.result.current.optimisticMessages?.find(
           (message) => message.outcomeUnknown,
         );
-        expect(failed).toMatchObject({ state: "failed", outcomeUnknown: true });
-        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
-        await flush();
+        expect(held).toMatchObject({ state: "sending", outcomeUnknown: true });
+        expect(hook.result.current.reconnecting).toBe(true);
+        expect(hook.result.current.error).toBeNull();
+        await flush(10_000);
+        expect(hook.result.current.reconnecting).toBe(false);
       } else {
         expect(hook.result.current.value).toBe(initial.text);
         expect(hook.result.current.restoredResources).toEqual([resource]);
@@ -4638,8 +5355,9 @@ describe("useComposer durable draft and control binding", () => {
     expect(uncertain).toBeDefined();
     const originalClientEventId = uncertain!.clientEventId;
 
-    await flushing(() => hook.result.current.retryOptimisticMessage?.(originalClientEventId));
-    await flush();
+    // The gateway failure is held and retried by itself; that retry
+    // reconciles first, and its failing read stops it without a resend.
+    await flush(10_000);
     expect({ reconciliationReads, mutationAttempts: attempts.length }).toEqual({
       reconciliationReads: 1,
       mutationAttempts: 1,
@@ -4722,14 +5440,11 @@ describe("useComposer durable draft and control binding", () => {
       await flush();
       const firstId = attempts[0]!.clientEventId;
       if (delivery === "send") {
-        const uncertain = hook.result.current.optimisticMessages?.find(
-          (message) => message.outcomeUnknown,
-        );
-        expect(uncertain).toBeDefined();
-        await flushing(() =>
-          hook.result.current.retryOptimisticMessage?.(uncertain!.clientEventId),
-        );
-        await flush();
+        // The gateway failure is held as an update and retried by itself.
+        expect(
+          hook.result.current.optimisticMessages?.find((message) => message.outcomeUnknown),
+        ).toMatchObject({ state: "sending" });
+        await flush(10_000);
       } else {
         await flushing(async () => expect(await hook.result.current.steer()).toBe(false));
       }
@@ -4818,9 +5533,15 @@ describe("useComposer durable draft and control binding", () => {
         clientEventId: attempts[0]!.clientEventId,
       };
       if (delivery === "send") {
-        const failed = hook.result.current.optimisticMessages?.[0];
-        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
-        await flush();
+        // Held as an update; its automatic retry reconciles first and finds
+        // the message already accepted.
+        expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({ state: "sending" });
+        await flush(10_000);
+        expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({
+          state: "queued",
+          outcomeUnknown: false,
+        });
+        expect(hook.result.current.reconnecting).toBe(false);
       } else {
         await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
       }
@@ -4853,18 +5574,19 @@ describe("useComposer durable draft and control binding", () => {
         updatedAt: new Date().toISOString(),
       };
       const attempts: SendMessageInput[] = [];
+      let outage = true;
       const client = fakeClient({
         getComposerDraft: async () => initial,
         sendMessage: async (_workspaceId, _sessionId, input) => {
           const typed = typeof input === "string" ? { text: input } : input;
           attempts.push(typed);
-          if (attempts.length === 1) throw gatewayError(502);
+          if (outage) throw gatewayError(502);
           return makeEvent(2, "user.message");
         },
         steerMessage: async (_workspaceId, _sessionId, input) => {
           const typed = typeof input === "string" ? { text: input } : input;
           attempts.push(typed);
-          if (attempts.length === 1) throw gatewayError(502);
+          if (outage) throw gatewayError(502);
           return steerResult(makeEvent(2, "user.message"));
         },
       });
@@ -4878,6 +5600,10 @@ describe("useComposer durable draft and control binding", () => {
         expect(await first.result.current[delivery]()).toBe(delivery === "send"),
       );
       await flush();
+      // A Send is held as an update first; this outage outlasts one, so it is
+      // reported for the person to retry.
+      await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
+      outage = false;
       await first.unmount();
 
       const second = await renderHook(
@@ -4920,10 +5646,12 @@ describe("useComposer durable draft and control binding", () => {
         await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
       }
 
-      expect(attempts).toHaveLength(2);
-      expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);
-      expect(attempts[1]!.text).toBe("original uncertain prompt");
-      expect(attempts[1]!.resources).toEqual([originalResource]);
+      if (delivery === "steer") expect(attempts).toHaveLength(2);
+      else expect(attempts.length).toBeGreaterThan(2);
+      const retried = attempts.at(-1)!;
+      expect(new Set(attempts.map((attempt) => attempt.clientEventId)).size).toBe(1);
+      expect(retried.text).toBe("original uncertain prompt");
+      expect(retried.resources).toEqual([originalResource]);
       expect(second.result.current.value).toBe("edited after timeout");
       expect(second.result.current.restoredResources).toEqual([newerResource]);
       await second.unmount();
@@ -4968,7 +5696,7 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("autosave never overwrites another tab after a stale-revision conflict", async () => {
+  test("autosave after a stale-revision conflict saves the latest typing on top", async () => {
     const initial = {
       revision: 1,
       text: "remote one",
@@ -5016,9 +5744,10 @@ describe("useComposer durable draft and control binding", () => {
     await flushing(async () => hook.result.current.setValue("mine remains"));
     await flush(600);
     expect(hook.result.current.value).toBe("mine remains");
-    expect(hook.result.current.draftConflict?.message).toContain("Composer draft changed");
-    expect(hook.result.current.draft?.revision).toBe(1);
-    expect(saves).toBe(1);
+    // The latest typing wins: the save re-reads and lands on the newer revision.
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.draft).toMatchObject({ revision: 3, text: "mine remains" });
+    expect(saves).toBe(2);
     await hook.unmount();
   });
 
@@ -5165,6 +5894,8 @@ describe("useComposer durable draft and control binding", () => {
 
 describe("session hook concurrent target ownership", () => {
   test("a suspended target transition leaves the committed session fully interactive", async () => {
+    // Preserve the native React scheduling window this test observes.
+    jest.useRealTimers();
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const turn = fakeTurn({
@@ -5270,6 +6001,8 @@ describe("session hook concurrent target ownership", () => {
   });
 
   test("a suspended target render cannot retarget a committed draft callback", async () => {
+    // Preserve the native React scheduling window this test observes.
+    jest.useRealTimers();
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const draftA: ComposerDraft = {
@@ -5541,6 +6274,7 @@ describe("useComposer file-only send", () => {
         return {
           ...initial,
           ...request,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },
@@ -5566,99 +6300,8 @@ describe("useComposer file-only send", () => {
 
     expect(saved).toHaveLength(1);
     expect(sent).toHaveLength(1);
-    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
-    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
-    await hook.unmount();
-  });
-});
-
-describe("useEnvironments", () => {
-  test("lists environments and refreshes after each mutation", async () => {
-    const log: string[] = [];
-    let environments: WorkspaceEnvironment[] = [];
-    const client = fakeClient({
-      listEnvironments: async () => {
-        log.push("list");
-        return environments;
-      },
-      createEnvironment: async (_ws, request) => {
-        log.push(`create:${request.name}`);
-        const created: WorkspaceEnvironment = {
-          id: "env-1",
-          accountId: "acc",
-          workspaceId: WORKSPACE_ID,
-          scope: "workspace",
-          generation: 1,
-          status: "active",
-          name: request.name,
-          description: null,
-          variables: [],
-          createdAt: "",
-          updatedAt: "",
-        };
-        environments = [created];
-        return created;
-      },
-      setEnvironmentVariable: async (_ws, environmentId, name) => {
-        log.push(`set:${environmentId}:${name}`);
-        return { name, version: 1, createdAt: "", updatedAt: "" };
-      },
-      getVariableSetVariable: async (_ws, environmentId, name) => {
-        log.push(`read:${environmentId}:${name}`);
-        return {
-          variableSetId: environmentId,
-          name,
-          version: 1,
-          value: `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`,
-        };
-      },
-      deleteEnvironmentVariable: async (_ws, environmentId, name) => {
-        log.push(`unset:${environmentId}:${name}`);
-      },
-      deleteEnvironment: async (_ws, environmentId) => {
-        log.push(`delete:${environmentId}`);
-        environments = [];
-      },
-    });
-    const hook = await renderHook(
-      () => useEnvironments({ client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
-    await flush();
-    expect(hook.result.current.environments).toEqual([]);
-    await flushing(async () => {
-      await hook.result.current.create({
-        name: "staging",
-        variables: [{ name: "EXAMPLE_TOKEN", value: "v" }],
-      });
-    });
-    expect(hook.result.current.environments.map((environment) => environment.name)).toEqual([
-      "staging",
-    ]);
-    await flushing(async () => {
-      const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
-      expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
-    });
-    // Plaintext is returned directly to the caller and never triggers a
-    // metadata-cache refresh that could retain it.
-    expect(log.at(-1)).toBe("read:env-1:EXAMPLE_TOKEN");
-    await flushing(async () => {
-      await hook.result.current.setVariable("env-1", "EXAMPLE_TOKEN", "v2");
-      await hook.result.current.deleteVariable("env-1", "EXAMPLE_TOKEN");
-      await hook.result.current.remove("env-1");
-    });
-    expect(log).toEqual([
-      "list",
-      "create:staging",
-      "list",
-      "read:env-1:EXAMPLE_TOKEN",
-      "set:env-1:EXAMPLE_TOKEN",
-      "list",
-      "unset:env-1:EXAMPLE_TOKEN",
-      "list",
-      "delete:env-1",
-      "list",
-    ]);
+    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
     await hook.unmount();
   });
 });
@@ -5744,6 +6387,53 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.defaultModel).toBe("workspace-default");
     await hook.unmount();
   });
+  test("readers of one workspace catalog share one catalog and config read", async () => {
+    const calls: string[] = [];
+    const client = fakeClient({
+      getWorkspaceModelCatalog: async (workspaceId) => {
+        calls.push(`catalog:${workspaceId}`);
+        return { models: [] } as never;
+      },
+      getClientConfig: async (options) => {
+        calls.push(`config:${options?.workspaceId}`);
+        return { models: [], defaultModel: "workspace-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => [
+        useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+        useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+      ],
+      undefined,
+    );
+    await flush();
+    expect(calls).toEqual([`catalog:${WORKSPACE_ID}`, `config:${WORKSPACE_ID}`]);
+    expect(hook.result.current.map((catalog) => catalog.defaultModel)).toEqual([
+      "workspace-default",
+      "workspace-default",
+    ]);
+    await hook.unmount();
+  });
+  test("readers of the deployment model list share one config read", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      getClientConfig: async () => {
+        calls += 1;
+        return { models: [], defaultModel: "deployment-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => [useAvailableModels({ client }), useAvailableModels({ client })],
+      undefined,
+    );
+    await flush();
+    expect(calls).toBe(1);
+    expect(hook.result.current.map((models) => models.defaultModel)).toEqual([
+      "deployment-default",
+      "deployment-default",
+    ]);
+    await hook.unmount();
+  });
   test("returns the host-exposed models and the default model from getClientConfig", async () => {
     let calls = 0;
     const client = fakeClient({
@@ -5813,6 +6503,8 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.models).toEqual([]);
     expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
+    // The shared read is released one task after its last reader leaves.
+    await flush(0);
     expect(nativeSignal?.aborted).toBe(true);
   });
 });

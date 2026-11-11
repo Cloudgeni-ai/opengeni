@@ -34,6 +34,8 @@
 
 import { blake3 } from "@noble/hashes/blake3";
 import { bytesToHex } from "@noble/hashes/utils";
+import { currentOpToolCallId } from "../op-correlation";
+import { CONTROL_REPLY_RECOVERY_MS } from "./control-replay";
 import {
   ControlRequest,
   ErrorCode,
@@ -50,8 +52,13 @@ import {
 } from "@opengeni/agent-proto";
 import {
   agentErrorToControlError,
+  commandOutcomeUnknownAfterReplacementAgentError,
+  isAgentNotAnswered,
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  NEVER_SENT_DETAIL_KEY,
   SelfhostedControlError,
   timeoutAgentError,
+  withoutWaking,
   type ControlRpc,
 } from "./control-rpc";
 import { selfhostedRetryBackoffMs, type SelfhostedRetryClock } from "./retry-policy";
@@ -77,10 +84,20 @@ export const OP_STREAM_SILENCE_TIMEOUT_MS = 30_000;
  *  the client fails it typed (PROTOCOL liveness rule: hold ≤120s, then only a
  *  definitive answer fails the op). */
 export const OP_STREAM_RECONNECT_HOLD_MS = 120_000;
-/** A detached background consumer grants the runner the complete uint64 credit
- * range. Retention remains bounded by the runner's ring/spool quotas, so a noisy
- * command reaches the existing typed OP_OVERFLOW terminal instead of stalling
- * forever merely because the turn that launched it finished. */
+/** How long a command's start may go without any answer from the agent
+ *  before the client stops waiting for it and fails it typed
+ *  (`AGENT_UNRESPONSIVE_DETAIL_KEY`). Every answer, a DRAINING refusal included,
+ *  starts the wait again, so a busy agent is never cut off. It covers a compute
+ *  host's 120 s hold of a request to a waking or restarting sandbox, plus a
+ *  reply-recovery round, and stops the start's retries long before their
+ *  15-minute resend horizon. */
+export const OP_START_UNANSWERED_MS = 180_000;
+/** A consumer that stops following a retained op detaches it (`OpAck.detach`):
+ * the runner stops sending frames nobody receives and keeps draining the child
+ * into retention, bounded by its ring/spool quotas, so a noisy command reaches
+ * the existing typed OP_OVERFLOW terminal instead of stalling forever merely
+ * because the turn that launched it finished. Runners without the field read
+ * this complete uint64 credit range instead and keep draining by streaming. */
 const OP_STREAM_BACKGROUND_CREDIT_BYTES = "18446744073709551615";
 /** The out-of-order stash is a disposable replay optimization, never retained
  *  command output. Bound it in bytes to two live-flow windows per op: a gap that
@@ -94,6 +111,14 @@ const OP_STREAM_STASH_WINDOW_MULTIPLIER = 2;
  *  re-issue with the same small bounded budget. */
 const OP_START_DRAINING_MAX_RETRIES = 10;
 const OP_START_BLIP_MAX_RETRIES = 3;
+
+/** No OpStart for an op reaches an agent later than this after its first
+ *  start attempt: attempts stop early enough that each one's reply recovery
+ *  ends within it, and the agent refuses a delivery past its recovery
+ *  deadline. An agent keeps the id of every op it started for longer than
+ *  this after the op is gone (released, final-acked or evicted), so a late
+ *  start answers that op and never runs it again. */
+export const OP_START_RESEND_HORIZON_MS = 15 * 60 * 1000;
 
 /**
  * The durable-resume journal the worker adapts onto Temporal (design delta Δ1:
@@ -134,19 +159,37 @@ export interface OpStreamExecClientDeps {
   ackIntervalMs?: number;
   silenceTimeoutMs?: number;
   reconnectHoldMs?: number;
+  /** See `OP_START_UNANSWERED_MS`; overridable for tests. 0 turns it off. */
+  startUnansweredMs?: number;
   /** Per-connection policy snapshot attached only to OpStart. Lifecycle controls
    * identify an already-admitted operation and must not imply a policy change. */
   resourcePolicy?: OperationResourcePolicy;
   /** Revalidate the exact live route/authority immediately before every
    * physical OpStart dispatch. An already-accepted or outcome-ambiguous
-   * operation never calls this hook again. */
-  revalidateBeforeStartRetry?: () => void | Promise<void>;
+   * operation never calls this hook again. It returns the connection
+   * generation the route holds now, when known: the connection may have
+   * changed hands and come back to this same process (A, then B, then A). */
+  revalidateBeforeStartRetry?: () => string | undefined | void | Promise<string | undefined | void>;
+  /** Whether the pinned connection instance is still the agent's live one;
+   * see ControlRpc. Once it is not, another agent process holds the
+   * connection, and the op's outcome is unknown to this client. */
+  connectionCurrent?: () => Promise<boolean>;
+  /** The runner serves `OpRelease` (`capabilities.op_release`; every compute
+   * agent does): a durably stored op is released in one answered exchange.
+   * Without it the op is released by a final ACK. */
+  outputReleaseSupported?: boolean;
+  /** The connection generation of the pinned connection instance, from the
+   * same enrollment snapshot. Sent in every OpStart: the runner stores it
+   * with the op and reports it in its operation inventory. */
+  connectionGeneration?: string;
 }
 
 /** A completed op-stream exec: the SDK-facing response plus the healing
  *  telemetry the session folds into its op observation. */
 export interface OpStreamExecOutcome {
   response: ExecResponse;
+  /** Verified retained exit, for collectors; never projected into shell output. */
+  terminalExit?: OpExit;
   /** Runner transport failure is independent of the process exit code. */
   failure?: Pick<OpExit, "failureCode" | "failureDetail">;
   /** Attach/query heals that occurred after streaming began (gap replays,
@@ -170,11 +213,28 @@ export type OpStreamExecResult =
       replyBytes: number;
       /** Terminal proof may race durable adoption. The caller must settle the
        * adopted command but still return only its background receipt. */
-      terminal?: { outcome: OpStreamExecOutcome; exitSeq: string };
+      terminal?: {
+        outcome: OpStreamExecOutcome;
+        exitSeq: string;
+        outputReceipt?: OpStreamOutputReceipt;
+      };
     };
+
+/** Produced only after contiguous replay, byte verification and awaited capture.
+ * The caller must persist this under its exact command before releasing output. */
+export type OpStreamOutputReceipt = { exitSeq: string; attachGeneration: string };
+
+/**
+ * The shortest foreground wait before an early yield (`yieldSignal`) returns a
+ * background handle, counted from when the op is running: about one model
+ * round trip of Steer latency, while a quick command still returns inline.
+ */
+export const OP_STREAM_EARLY_YIELD_GRACE_MS = 1_000;
 
 export type OpStreamYieldOptions = {
   yieldMs: number;
+  /** Ends the yield window early (a Steer is waiting); the op keeps running. */
+  yieldSignal?: AbortSignal;
   /** Durable ownership transfer. It runs while the exact consumer is still
    * attached; returning a running result is forbidden until this resolves. */
   onYield: () => void | Promise<void>;
@@ -188,12 +248,15 @@ export type ExactSelfhostedOpControlInput = {
   rpcSubject: string;
   opId: string;
   controlTimeoutMs: number;
+  /** Stops waiting once the subject's connection was replaced; see ControlRpc. */
+  connectionCurrent?: () => Promise<boolean>;
 };
 
 async function exactSelfhostedOpControl(
   input: ExactSelfhostedOpControlInput,
-  operation: "query" | "cancel",
+  operation: "query" | "cancel" | { release: string },
 ): Promise<OpStatus> {
+  const name = typeof operation === "string" ? operation : "release";
   const requestId = crypto.randomUUID();
   const response = await input.controlRpc.request(
     input.rpcSubject,
@@ -207,15 +270,20 @@ async function exactSelfhostedOpControl(
       op:
         operation === "query"
           ? { $case: "opQuery", opQuery: { opId: input.opId } }
-          : { $case: "opCancel", opCancel: { opId: input.opId } },
+          : operation === "cancel"
+            ? { $case: "opCancel", opCancel: { opId: input.opId } }
+            : { $case: "opRelease", opRelease: { opId: input.opId, exitSeq: operation.release } },
     },
-    { timeoutMs: input.controlTimeoutMs },
+    {
+      timeoutMs: input.controlTimeoutMs,
+      ...(input.connectionCurrent ? { connectionCurrent: input.connectionCurrent } : {}),
+    },
   );
   if (response.error || !response.result) {
     throw agentErrorToControlError(
       response.error ?? {
         code: ErrorCode.ERROR_CODE_PROTOCOL,
-        message: `op-stream ${operation} returned an empty result`,
+        message: `op-stream ${name} returned an empty result`,
         retryable: false,
         detail: {},
       },
@@ -223,10 +291,10 @@ async function exactSelfhostedOpControl(
     );
   }
   if (response.result.$case !== "opStatus") {
-    throw protocolError(`op-stream ${operation}: unexpected result ${response.result.$case}`);
+    throw protocolError(`op-stream ${name}: unexpected result ${response.result.$case}`);
   }
   if (response.result.opStatus.opId !== input.opId) {
-    throw protocolError(`op-stream ${operation}: status identity mismatch for ${input.opId}`);
+    throw protocolError(`op-stream ${name}: status identity mismatch for ${input.opId}`);
   }
   return response.result.opStatus;
 }
@@ -241,11 +309,44 @@ export async function cancelSelfhostedOp(input: ExactSelfhostedOpControlInput): 
   return await exactSelfhostedOpControl(input, "cancel");
 }
 
-/** One op settled but not yet final-acked (awaiting the turn's durable point). */
+/** Release one adopted operation's retained output in one answered exchange
+ * (`OpRelease`, for runners advertising `capabilities.op_release`), once the
+ * caller has durably stored all of it through the terminal frame `exitSeq`.
+ * The runner drops the op at once and confirms it in its answer: "released"
+ * when it dropped the op (now, or on an earlier duplicate release), and
+ * "not_retained" when it no longer kept the op for another reason. Either way
+ * nothing is left on the runner for a later pass to observe. Any other answer
+ * (still running, or a different terminal frame) released nothing and throws.
+ * It is housekeeping, sent without waking (`requestWithoutWaking`):
+ * "not_answered" when the agent did not answer, which records nothing; the
+ * agent's own operation inventory releases it later, while it is talking.
+ * Never starts, cancels or replays anything. */
+export async function releaseSelfhostedOpOutput(
+  input: ExactSelfhostedOpControlInput & { exitSeq: string },
+): Promise<"released" | "not_retained" | "not_answered"> {
+  if (!/^[1-9][0-9]{0,19}$/.test(input.exitSeq) || BigInt(input.exitSeq) > 18446744073709551615n)
+    throw protocolError("op-stream release: invalid retained frontier");
+  let status: OpStatus;
+  try {
+    status = await exactSelfhostedOpControl(
+      { ...input, controlRpc: withoutWaking(input.controlRpc) },
+      { release: input.exitSeq },
+    );
+  } catch (error) {
+    if (isAgentNotAnswered(error)) return "not_answered";
+    throw error;
+  }
+  if (status.state !== OpState.OP_STATE_LOST)
+    throw protocolError("op-stream release: durable exit frontier disagrees with runner");
+  return status.lostReason === OpLostReason.OP_LOST_REASON_RELEASED ? "released" : "not_retained";
+}
+
+/** One op settled but not yet final-acked (awaiting its result's durable point). */
 interface SettledOp {
   opId: string;
   exitSeq: string;
   generation: string;
+  toolCallId: string | null;
 }
 
 const OP_CHANNEL_NAMES: Partial<Record<OpChannel, "stdout" | "stderr">> = {
@@ -255,7 +356,7 @@ const OP_CHANNEL_NAMES: Partial<Record<OpChannel, "stdout" | "stderr">> = {
 
 /**
  * The per-session op-stream exec client. One instance per `SelfhostedSession`;
- * `exec()` runs one op end-to-end; `finalizeSettledOps()` is the turn-end hook
+ * `exec()` runs one op end-to-end; `finalizeSettledOps()` is the durability hook
  * that advances the acked frontier durably (journal) and then on the wire.
  */
 export class OpStreamExecClient {
@@ -263,6 +364,11 @@ export class OpStreamExecClient {
   private readonly settled: SettledOp[] = [];
   private readonly inFlight = new Set<string>();
   private readonly readCheckpoints = new Map<string, OpReadCheckpoint>();
+  /** Ops an agent has acknowledged through this client: it accepted the
+   *  start, or reported the op's status. Carried into recovery reads so a
+   *  replacement during one says what is known about the start. */
+  private readonly acknowledgedOps = new Set<string>();
+  private finalization: Promise<void> = Promise.resolve();
   private lastReadGeneration = 0n;
 
   constructor(deps: OpStreamExecClientDeps) {
@@ -271,6 +377,13 @@ export class OpStreamExecClient {
 
   private generation(): string {
     return this.deps.journal?.attachGeneration() ?? "1";
+  }
+
+  private acknowledgement(opId: string): OpAcknowledgement {
+    return {
+      known: this.acknowledgedOps.has(opId),
+      record: () => this.acknowledgedOps.add(opId),
+    };
   }
 
   /** Adopted-command reads are new consumers, not recovery of the launching
@@ -303,7 +416,10 @@ export class OpStreamExecClient {
         resourcePolicy: undefined,
         op: { $case: "opCancel", opCancel: { opId } },
       },
-      { timeoutMs: this.deps.controlTimeoutMs },
+      {
+        timeoutMs: this.deps.controlTimeoutMs,
+        ...(this.deps.connectionCurrent ? { connectionCurrent: this.deps.connectionCurrent } : {}),
+      },
     );
     if (response.error || !response.result) {
       throw agentErrorToControlError(
@@ -318,6 +434,16 @@ export class OpStreamExecClient {
     if (response.result.$case !== "opStatus") {
       throw protocolError(`op-stream cancel: unexpected result ${response.result.$case}`);
     }
+  }
+
+  /** Read terminal custody proof from this operation's pinned runner. */
+  async query(opId: string): Promise<OpStatus> {
+    return await querySelfhostedOp({
+      controlRpc: this.deps.controlRpc,
+      rpcSubject: this.deps.rpcSubject,
+      opId,
+      controlTimeoutMs: this.deps.controlTimeoutMs,
+    });
   }
 
   /**
@@ -360,15 +486,24 @@ export class OpStreamExecClient {
       });
     }
     this.inFlight.add(opId);
+    const toolCallId = currentOpToolCallId();
     try {
-      const consumer = new OpConsumer(this.deps, opId, this.generation());
+      const consumer = new OpConsumer(
+        this.deps,
+        opId,
+        this.generation(),
+        undefined,
+        this.acknowledgement(opId),
+      );
       try {
         const result = await consumer.run(exec, deadlineMs, wallMs, yieldOptions);
         if (result.status === "completed") {
+          this.acknowledgedOps.delete(opId);
           this.settled.push({
             opId,
             exitSeq: result.exitSeq,
             generation: consumer.generation,
+            toolCallId,
           });
           return { status: "completed", outcome: result.outcome };
         }
@@ -389,27 +524,39 @@ export class OpStreamExecClient {
     opId: string,
     yieldMs: number,
     captureOutput: (frames: OpStreamOutputFrame[]) => Promise<void>,
-  ): Promise<OpStreamExecResult & { replaySequence: string }> {
+  ): Promise<
+    OpStreamExecResult & { replaySequence: string; outputReceipt?: OpStreamOutputReceipt }
+  > {
     if (this.inFlight.has(opId)) throw protocolError("op-stream read: duplicate concurrent op id");
     const consumer = new OpConsumer(
       this.deps,
       opId,
       this.readGeneration(),
       this.readCheckpoints.get(opId),
+      this.acknowledgement(opId),
     );
     this.inFlight.add(opId);
     this.readCheckpoints.delete(opId);
     try {
-      const result = await consumer.run(
-        null,
-        0,
-        Math.max(yieldMs + this.deps.controlTimeoutMs, 1000),
-        {
+      let result: Awaited<ReturnType<OpConsumer["run"]>>;
+      try {
+        result = await consumer.run(null, 0, Math.max(yieldMs + this.deps.controlTimeoutMs, 1000), {
           yieldMs: Math.max(1, yieldMs),
           onYield: () => {},
           captureOutput,
-        },
-      );
+        });
+      } catch (error) {
+        // The runner's own terminal record: the op was cancelled before it
+        // ever began on this connection, so there is no output to read.
+        if (error instanceof OpTombstonedError) {
+          return {
+            status: "completed",
+            outcome: tombstonedOutcome(error.exit),
+            replaySequence: "0",
+          };
+        }
+        throw error;
+      }
       // Only a successful capture may advance this local replay optimization.
       // A fresh client or failed persistence always replays retained truth.
       consumer.teardown();
@@ -421,7 +568,12 @@ export class OpStreamExecClient {
       // frontier only after capture succeeds, never the provider high watermark.
       const replaySequence = consumer.readCheckpoint().lastApplied.toString();
       return result.status === "completed"
-        ? { status: "completed", outcome: result.outcome, replaySequence }
+        ? {
+            status: "completed",
+            outcome: result.outcome,
+            replaySequence,
+            outputReceipt: { exitSeq: result.exitSeq, attachGeneration: consumer.generation },
+          }
         : { ...result, replaySequence };
     } finally {
       consumer.teardown();
@@ -429,43 +581,168 @@ export class OpStreamExecClient {
     }
   }
 
+  /** Release only an independently persisted, fully captured background exit,
+   * on a runner without `OpRelease` (see `releaseSelfhostedOpOutput`).
+   * Re-attach under a fresh generation before ACK so an intervening reader cannot
+   * strand a stale ACK. Never starts, cancels, replays output or observes a model
+   * result. A publish is not native delivery proof: retry until an exact control
+   * observation establishes that the operation is no longer retained. */
+  async releaseCapturedOutput(
+    opId: string,
+    receipt: OpStreamOutputReceipt,
+  ): Promise<"published" | "not_retained"> {
+    const u64 = (value: string): bigint => {
+      if (!/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > 18446744073709551615n)
+        throw protocolError("op-stream output release: invalid retained frontier");
+      return BigInt(value);
+    };
+    const exitSeq = u64(receipt.exitSeq);
+    const previousGeneration = u64(receipt.attachGeneration);
+    const currentGeneration = u64(this.readGeneration());
+    const generation = (
+      currentGeneration > previousGeneration ? currentGeneration : previousGeneration + 1n
+    ).toString();
+    u64(generation);
+    const requestId = crypto.randomUUID();
+    const response = await this.deps.controlRpc.request(
+      this.deps.rpcSubject,
+      {
+        requestId,
+        epoch: 0,
+        resourcePolicy: undefined,
+        op: {
+          $case: "opAttach",
+          opAttach: {
+            opId,
+            fromSeq: receipt.exitSeq,
+            attachGeneration: generation,
+            windowBytes: "1",
+          },
+        },
+      },
+      { timeoutMs: this.deps.controlTimeoutMs },
+    );
+    if (response.error || !response.result)
+      throw agentErrorToControlError(
+        response.error ?? {
+          code: ErrorCode.ERROR_CODE_PROTOCOL,
+          message: "op-stream output release returned an empty result",
+          retryable: false,
+          detail: {},
+        },
+      );
+    if (response.result.$case !== "opStatus" || response.result.opStatus.opId !== opId)
+      throw protocolError("op-stream output release: status identity mismatch");
+    const status = response.result.opStatus;
+    if (status.state === OpState.OP_STATE_LOST) return "not_retained";
+    if (
+      status.state !== OpState.OP_STATE_COMPLETE ||
+      !status.exit ||
+      !/^[0-9]+$/.test(status.nextSeq) ||
+      BigInt(status.nextSeq) !== exitSeq + 1n
+    )
+      throw protocolError("op-stream output release: durable exit frontier disagrees with runner");
+    await this.deps.transport.publish(
+      opAckSubject(this.deps.workspaceId, this.deps.agentId, this.deps.connectionInstanceId),
+      OpAck.encode({
+        opId,
+        ackedSeq: receipt.exitSeq,
+        creditBytes: "0",
+        final: true,
+        attachGeneration: generation,
+        detach: false,
+      }).finish(),
+    );
+    return "published";
+  }
+
   /**
-   * The turn-end durability hook (the hard gate's ordering): for every op whose
-   * result the turn has durably consumed — (1) already true when this runs —
+   * The result durability hook (the hard gate's ordering): for every op whose
+   * result the caller has durably consumed — (1) already true when this runs —
    * (2) persist the settled frontier to the journal, then (3) publish the wire
    * final ack (`acked_seq = exit_seq, final = true`), which licenses the runner
    * to GC the op. A kill between (2) and (3) is safe: the re-dispatched turn
    * does not re-execute a durably-recorded call, and the runner's retention TTL
-   * reaps the never-final-acked op — no loss, bounded residue. Publish failures
-   * are swallowed for the same reason.
+   * reaps the never-final-acked op — no loss, bounded residue. A supplied call
+   * list selects only those exact result owners; omitted means the complete
+   * turn/API boundary. Snapshot before I/O so later completions cannot become
+   * eligible accidentally. Failed persistence/publish leaves the op retryable.
    */
-  async finalizeSettledOps(): Promise<void> {
+  async finalizeSettledOps(toolCallIds?: readonly string[]): Promise<void> {
+    const selected = toolCallIds === undefined ? null : new Set(toolCallIds);
+    const eligible = this.settled.filter(
+      (op) => selected === null || (op.toolCallId !== null && selected.has(op.toolCallId)),
+    );
+    const finalization = this.finalization.then(() => this.finalizeOps(eligible));
+    // Serialize overlapping durability hooks without letting one failed
+    // journal poison later attempts to finalize the same retained frontier.
+    this.finalization = finalization.catch(() => undefined);
+    await finalization;
+  }
+
+  private async finalizeOps(eligible: readonly SettledOp[]): Promise<void> {
     const ackSubject = opAckSubject(
       this.deps.workspaceId,
       this.deps.agentId,
       this.deps.connectionInstanceId,
     );
-    while (this.settled.length > 0) {
-      // Non-null: length checked above (single-threaded event loop).
-      const op = this.settled.shift() as SettledOp;
+    const releasing: Promise<void>[] = [];
+    for (const op of eligible) {
+      // A preceding queued hook may already have acknowledged this object.
+      if (!this.settled.includes(op)) continue;
       await this.deps.journal?.persistSettled(op.opId, op.exitSeq);
+      if (this.deps.outputReleaseSupported === true) {
+        // One answered exchange: the runner drops the op and confirms it.
+        releasing.push(this.releaseSettled(op));
+        continue;
+      }
       const ack = OpAck.encode({
         opId: op.opId,
         ackedSeq: op.exitSeq,
         creditBytes: "0",
         final: true,
         attachGeneration: op.generation,
+        detach: false,
       }).finish();
       try {
         await this.deps.transport.publish(ackSubject, ack);
       } catch {
-        // Best-effort: the runner's retention TTL owns the fallback.
+        // Retry at a later durability hook; the runner's TTL is the backstop.
+        continue;
       }
+      this.settled.splice(this.settled.indexOf(op), 1);
     }
+    await Promise.all(releasing);
+  }
+
+  /** Release one durably stored op on its runner (`OpRelease`, sent without
+   *  waking). An unanswered, failed or disagreeing release keeps it for this
+   *  client's next durability hook, which only real work reaches; the
+   *  runner's own inventory covers it otherwise. */
+  private async releaseSettled(op: SettledOp): Promise<void> {
+    try {
+      const outcome = await releaseSelfhostedOpOutput({
+        controlRpc: this.deps.controlRpc,
+        rpcSubject: this.deps.rpcSubject,
+        opId: op.opId,
+        exitSeq: op.exitSeq,
+        controlTimeoutMs: this.deps.controlTimeoutMs,
+        ...(this.deps.connectionCurrent ? { connectionCurrent: this.deps.connectionCurrent } : {}),
+      });
+      if (outcome === "not_answered") return;
+    } catch {
+      return;
+    }
+    const index = this.settled.indexOf(op);
+    if (index >= 0) this.settled.splice(index, 1);
   }
 }
 
 /** In-memory only: never licenses runner GC or substitutes for durable output. */
+/** What a client knows of an op an agent has acknowledged, and how a
+ *  consumer records a new acknowledgement. */
+type OpAcknowledgement = { known: boolean; record: () => void };
+
 type OpReadCheckpoint = {
   lastApplied: bigint;
   hashes: { stdout: ReturnType<typeof blake3.create>; stderr: ReturnType<typeof blake3.create> };
@@ -501,21 +778,41 @@ class OpConsumer {
   private lastFrameAt: number;
   private silenceSince: number | undefined;
   private attachInFlight = false;
+  private attachHealRequested = false;
   private subscription: OpStreamSubscription | undefined;
   private ackTimer: ReturnType<typeof setInterval> | undefined;
   private settleResolve: (() => void) | undefined;
   private settleReject: ((error: unknown) => void) | undefined;
   private torn = false;
+  /** The command's wall passed before its start was answered: send no more. */
+  private startAbandoned = false;
+  /** An OpStart is awaiting its answer. */
+  private startInFlight = false;
+  /** An OpStart may have reached an agent (an attempt was answered, or failed
+   *  in a way that does not prove it undelivered), or the op is already
+   *  known. Until then, every failure proves no OpStart reached any agent. */
+  private startMaybeDelivered = false;
+  /** An agent acknowledged this op: it accepted the start or reported the
+   *  op's status, through this consumer or an earlier one of its client. */
+  private startConfirmed: boolean;
+  /** When the agent last answered this run's start, or refused it as
+   *  DRAINING (or the run began): the start's unanswered wait counts from
+   *  here. */
+  private lastStartAnswerAt = Date.now();
+  private readonly acknowledgement: OpAcknowledgement | undefined;
 
   constructor(
     deps: OpStreamExecClientDeps,
     opId: string,
     generation: string,
     checkpoint?: OpReadCheckpoint,
+    acknowledgement?: OpAcknowledgement,
   ) {
     this.deps = deps;
     this.opId = opId;
     this.generation = generation;
+    this.acknowledgement = acknowledgement;
+    this.startConfirmed = acknowledgement?.known ?? false;
     this.windowBytes = deps.windowBytes ?? OP_STREAM_DEFAULT_WINDOW_BYTES;
     this.lastFrameAt = Date.now();
     if (checkpoint) {
@@ -524,6 +821,44 @@ class OpConsumer {
       this.totals = checkpoint.totals;
       this.outputDecoders = checkpoint.decoders;
     }
+  }
+
+  private markAcknowledged(): void {
+    this.startConfirmed = true;
+    this.acknowledgement?.record();
+  }
+
+  /** The timeout for a start the wall or the deadline ended. It is never-sent
+   *  when no OpStart can have reached an agent, so nothing needs custody. */
+  private startTimeoutError(): SelfhostedControlError {
+    const timeout = agentErrorToControlError(timeoutAgentError());
+    if (this.startInFlight || this.startMaybeDelivered) return timeout;
+    return new SelfhostedControlError({
+      message: timeout.message,
+      code: timeout.code,
+      reason: timeout.reason,
+      retryable: timeout.retryable,
+      neverSent: true,
+      detail: { ...timeout.detail, [NEVER_SENT_DETAIL_KEY]: "1" },
+    });
+  }
+
+  /** The error of a start the agent left unanswered for `waitedMs`: the agent
+   *  is offline. Never-sent only when no OpStart can have reached an agent. */
+  private startUnansweredError(waitedMs: number): SelfhostedControlError {
+    const neverSent = !(this.startInFlight || this.startMaybeDelivered);
+    return new SelfhostedControlError({
+      message: `the agent did not answer for ${Math.round(waitedMs / 1000)}s`,
+      code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      reason: "agent_offline",
+      retryable: false,
+      agentOffline: true,
+      neverSent,
+      detail: {
+        [AGENT_UNRESPONSIVE_DETAIL_KEY]: String(waitedMs),
+        ...(neverSent ? { [NEVER_SENT_DETAIL_KEY]: "1" } : {}),
+      },
+    });
   }
 
   readCheckpoint(): OpReadCheckpoint {
@@ -543,6 +878,9 @@ class OpConsumer {
   }
   private get reconnectHoldMs(): number {
     return this.deps.reconnectHoldMs ?? OP_STREAM_RECONNECT_HOLD_MS;
+  }
+  private get startUnansweredMs(): number {
+    return this.deps.startUnansweredMs ?? OP_START_UNANSWERED_MS;
   }
 
   teardown(): void {
@@ -569,6 +907,8 @@ class OpConsumer {
     | Extract<OpStreamExecResult, { status: "running" }>
   > {
     this.captureOnly = exec === null;
+    // Reading a known op: it may exist, so no failure proves it never started.
+    if (exec === null) this.startMaybeDelivered = true;
     // Arm the settle promise FIRST: frames can start applying the moment the
     // attach below returns (replay is asynchronous), and a completion that
     // fires before the resolver exists would strand the op on its wall.
@@ -577,31 +917,69 @@ class OpConsumer {
       this.settleReject = reject;
     });
 
-    // Subscription BEFORE OpStart (protocol invariant): no frame can be
-    // published before the consumer exists on a healthy path.
-    this.subscription = await this.deps.transport.subscribe(
-      opFrameSubject(
-        this.deps.workspaceId,
-        this.deps.agentId,
-        this.opId,
-        this.deps.connectionInstanceId,
-      ),
-      (payload) => this.onFramePayload(payload),
-    );
+    // The op's one absolute deadline and its wall start here, before
+    // subscription setup, so no setup time extends either. The wall covers the
+    // start too: a start whose agent cannot be reached ends with the op's
+    // timeout, never after it.
+    const runStartedAt = Date.now();
+    const deadlineAt = deadlineMs > 0 ? runStartedAt + deadlineMs : 0;
+    // A new command's start, and its first attach, also end once its agent has
+    // answered nothing for the unanswered bound since the start's last answer,
+    // however long its own wall (none by default). Attach answers do not reset
+    // it: an agent that accepts a start and then answers nothing for the bound
+    // is unresponsive.
+    this.lastStartAnswerAt = runStartedAt;
+    const startWall = this.startWall(wallMs, exec === null ? 0 : this.startUnansweredMs);
+    let startRetries: number;
+    try {
+      // Subscription BEFORE OpStart (protocol invariant): no frame can be
+      // published before the consumer exists on a healthy path.
+      let attached = false;
+      let readyDuringStart = false;
+      const subscribing = this.deps.transport.subscribe(
+        opFrameSubject(
+          this.deps.workspaceId,
+          this.deps.agentId,
+          this.opId,
+          this.deps.connectionInstanceId,
+        ),
+        (payload) => this.onFramePayload(payload),
+        () => {
+          if (attached) this.requestAttachHeal();
+          else readyDuringStart = true;
+        },
+      );
+      try {
+        this.subscription = await startWall.race(subscribing);
+      } catch (error) {
+        void subscribing.then(
+          (subscription) => subscription.unsubscribe(),
+          () => {},
+        );
+        throw error;
+      }
+      startRetries = exec === null ? 0 : await startWall.race(this.startOp(exec, deadlineAt));
 
-    const startRetries = exec === null ? 0 : await this.startOp(exec, deadlineMs);
-
-    // The universal begin (B2): attach from our contiguous frontier under the
-    // initial window — for a FRESH op that is seq 0 (replay nothing, start live
-    // flow); for a KNOWN op (re-dispatch) it replays everything we do not hold.
-    await this.attach(this.windowBytes);
+      // The universal begin (B2): attach from our contiguous frontier under the
+      // initial window — for a FRESH op that is seq 0 (replay nothing, start live
+      // flow); for a KNOWN op (re-dispatch) it replays everything we do not hold.
+      // The op exists from here on, so no failure may say it did not run.
+      await startWall.race(this.attach(this.windowBytes)).catch((error: unknown) => {
+        throw startedOpError(error, this.startConfirmed);
+      });
+      attached = true;
+      if (readyDuringStart) this.requestAttachHeal();
+    } finally {
+      startWall.clear();
+    }
 
     // Cumulative-ack repetition (M1) — the periodic leg.
     this.ackTimer = setInterval(() => {
       void this.sendAck();
     }, this.ackIntervalMs);
-    const liveness = this.watchLiveness(wallMs);
+    const liveness = this.watchLiveness(wallMs, runStartedAt);
     let yieldTimer: ReturnType<typeof setTimeout> | undefined;
+    let stopYieldSignal: (() => void) | undefined;
     let adopted = false;
     try {
       if (yieldOptions && yieldOptions.yieldMs > 0) {
@@ -610,6 +988,24 @@ class OpConsumer {
           liveness.wall,
           new Promise<"yield">((resolve) => {
             yieldTimer = setTimeout(() => resolve("yield"), yieldOptions.yieldMs);
+            // An early yield takes the same path as the window ending. It waits
+            // out a short grace first, so a quick command started while a
+            // Steer waits still returns its result instead of a handle.
+            const signal = yieldOptions.yieldSignal;
+            if (!signal) return;
+            const raceStartedAt = Date.now();
+            let graceTimer: ReturnType<typeof setTimeout> | undefined;
+            const onYield = () => {
+              const remainingMs = OP_STREAM_EARLY_YIELD_GRACE_MS - (Date.now() - raceStartedAt);
+              if (remainingMs <= 0) return resolve("yield");
+              graceTimer = setTimeout(() => resolve("yield"), remainingMs);
+            };
+            stopYieldSignal = () => {
+              signal.removeEventListener("abort", onYield);
+              if (graceTimer) clearTimeout(graceTimer);
+            };
+            if (signal.aborted) onYield();
+            else signal.addEventListener("abort", onYield, { once: true });
           }),
         ]);
         if (phase === "yield" && this.exitSeq === undefined) {
@@ -633,7 +1029,7 @@ class OpConsumer {
             // The runner retains later output; do not accumulate it while the
             // database is slow. Foreground/adoption receipt behavior is unchanged.
             if (this.captureOnly) this.teardown();
-            await this.sendBackgroundCredit();
+            await this.sendDetach();
             const partial = this.snapshotOutput();
             await yieldOptions.captureOutput?.(this.outputFrames.splice(0));
             return {
@@ -654,6 +1050,7 @@ class OpConsumer {
       if (yieldTimer) {
         clearTimeout(yieldTimer);
       }
+      stopYieldSignal?.();
       liveness.stop();
     }
 
@@ -666,6 +1063,7 @@ class OpConsumer {
     const { stdout, stderr } = this.assembleAndVerify(exit);
     if (adopted || exec === null) await yieldOptions?.captureOutput?.(this.outputFrames.splice(0));
     const outcome: OpStreamExecOutcome = {
+      terminalExit: exit,
       ...(exit.failureCode
         ? { failure: { failureCode: exit.failureCode, failureDetail: exit.failureDetail } }
         : {}),
@@ -675,6 +1073,7 @@ class OpConsumer {
         stderr,
         timedOut: exit.timedOut,
         durationMs: exit.durationMs,
+        backgroundChildrenStopped: exit.backgroundChildrenStopped,
       },
       heals: this.heals,
       startRetries,
@@ -689,7 +1088,15 @@ class OpConsumer {
         heals: this.heals,
         startRetries,
         replyBytes: outcome.replyBytes,
-        terminal: { outcome, exitSeq: exitSeq.toString() },
+        terminal: {
+          outcome,
+          exitSeq: exitSeq.toString(),
+          ...(yieldOptions?.captureOutput
+            ? {
+                outputReceipt: { exitSeq: exitSeq.toString(), attachGeneration: this.generation },
+              }
+            : {}),
+        },
       };
     }
     return {
@@ -715,6 +1122,11 @@ class OpConsumer {
         await this.attach(0);
         return;
       } catch (error) {
+        // Another agent process holds the connection: this client stops
+        // waiting, and the op's outcome is unknown.
+        if (error instanceof SelfhostedControlError && error.connectionReplaced) {
+          throw agentReplacedOutcomeUnknownError(this.startConfirmed);
+        }
         if (
           error instanceof SelfhostedControlError &&
           (error.retryable || error.agentOffline || error.reason === "agent_reconnecting")
@@ -729,13 +1141,18 @@ class OpConsumer {
     }
   }
 
-  private async sendBackgroundCredit(): Promise<void> {
+  /** Leave the op retained without a follower: nothing is listening on its
+   * frame subject once this consumer returns, so the runner must not spend the
+   * machine's shared bulk connection replaying or streaming output to nobody
+   * (that backlog delays every other command's frames and completion). */
+  private async sendDetach(): Promise<void> {
     const ack = OpAck.encode({
       opId: this.opId,
       ackedSeq: "0",
       creditBytes: OP_STREAM_BACKGROUND_CREDIT_BYTES,
       final: false,
       attachGeneration: this.generation,
+      detach: true,
     }).finish();
     try {
       await this.deps.transport.publish(
@@ -760,29 +1177,73 @@ class OpConsumer {
    *  is IDEMPOTENT BY OP ID (the request id), so a timed-out/never-sent start
    *  is safe to re-issue even though exec mutates — the runner either never saw
    *  it or answers the SAME op. The stable request id is what makes that true. */
-  private async startOp(exec: ExecRequest, deadlineMs: number): Promise<number> {
+  private async startOp(exec: ExecRequest, deadlineAt: number): Promise<number> {
     let drainingRetries = 0;
     let blipRetries = 0;
+    // One absolute deadline (epoch ms, 0: none), fixed when the run began, for
+    // every attempt: neither subscription setup nor a retry extends it.
+    const absoluteDeadline = deadlineAt > 0 ? String(deadlineAt) : "0";
+    // Every attempt, reply recovery included, ends within the resend horizon
+    // of the first one.
+    const lastAttemptAt =
+      Date.now() +
+      OP_START_RESEND_HORIZON_MS -
+      this.deps.controlTimeoutMs -
+      CONTROL_REPLY_RECOVERY_MS;
+    // A start is never sent once the op's wall has ended the call, its
+    // deadline has passed, or the horizon would be exceeded.
+    const refused = () =>
+      this.startAbandoned ||
+      (deadlineAt > 0 && Date.now() >= deadlineAt) ||
+      Date.now() > lastAttemptAt;
+    // The generation this op is started under, sent in every attempt.
+    let startGeneration = this.deps.connectionGeneration ?? "0";
     for (;;) {
+      if (refused()) throw this.startTimeoutError();
       // Subscription setup can yield after the caller's initial admission.
       // Close that window, and the equivalent proven-unstarted retry windows,
       // at the last boundary before bytes can reach the provider.
-      await this.deps.revalidateBeforeStartRetry?.();
+      const generation = await this.deps.revalidateBeforeStartRetry?.();
+      if (typeof generation === "string" && generation !== startGeneration) {
+        // The connection changed hands since admission and this process holds
+        // it again under a new generation. A start no attempt delivered is
+        // admitted again under it. One an attempt may have delivered went out
+        // under the old generation and its outcome is unknown: it is not sent
+        // again under another.
+        if (this.startMaybeDelivered) throw agentReplacedOutcomeUnknownError(this.startConfirmed);
+        startGeneration = generation;
+      }
+      // The wall or the deadline may have ended the call meanwhile: a caller
+      // told that it timed out never has its command started afterwards.
+      if (refused()) throw this.startTimeoutError();
+      this.startInFlight = true;
       try {
         const result = await this.controlOp(
           {
             $case: "opStart",
             opStart: {
-              op: { $case: "exec", exec },
+              // The remaining budget to the run's one fixed deadline, measured on
+              // this process's own clock: a retry never extends it.
+              op: {
+                $case: "exec",
+                exec: {
+                  ...exec,
+                  timeoutMs: deadlineAt > 0 ? Math.max(1, deadlineAt - Date.now()) : 0,
+                },
+              },
               windowBytes: String(this.windowBytes),
-              // Absolute epoch deadline (the runner's clock decides the actual
-              // budget; host clock skew shifts it — a known wire caveat).
-              deadlineMs: deadlineMs > 0 ? String(Date.now() + deadlineMs) : "0",
+              // Legacy peers use the absolute field. A v2 delivery uses the
+              // relative exec budget from receiver token issuance instead.
+              deadlineMs: absoluteDeadline,
               originId: this.deps.rpcSubject,
+              connectionGeneration: startGeneration,
             },
           },
           this.opId,
         );
+        this.startInFlight = false;
+        this.startMaybeDelivered = true;
+        this.lastStartAnswerAt = Date.now();
         if (result.$case !== "opStart") {
           throw protocolError(`op-stream start: unexpected result ${result.$case}`);
         }
@@ -793,11 +1254,21 @@ class OpConsumer {
         if (status?.state === OpState.OP_STATE_LOST) {
           throw lostToControlError(status);
         }
+        this.markAcknowledged();
         return drainingRetries + blipRetries;
       } catch (error) {
+        // Whether any earlier attempt may have reached an agent.
+        const earlierMaybeDelivered = this.startMaybeDelivered;
+        if (this.startInFlight) {
+          this.startInFlight = false;
+          if (!(error instanceof SelfhostedControlError && error.neverSent)) {
+            this.startMaybeDelivered = true;
+          }
+        }
         if (!(error instanceof SelfhostedControlError)) {
           throw error;
         }
+        if (error.detail.outcome_unknown === "true") throw error;
         // A PROTOCOL/UNSUPPORTED refusal of the START ITSELF means the runner
         // does not speak the required op-stream protocol. The op provably
         // never started, so surface a typed availability error without trying
@@ -811,7 +1282,17 @@ class OpConsumer {
             "runner",
           );
         }
+        // The connection it was admitted to was replaced. A start no attempt
+        // delivered did not run; one any attempt may have delivered has an
+        // unknown outcome.
+        if (error.connectionReplaced) {
+          throw error.neverSent && !earlierMaybeDelivered
+            ? error
+            : agentReplacedOutcomeUnknownError(this.startConfirmed);
+        }
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
+        // A DRAINING refusal is the agent's answer: it is there, only busy.
+        if (error.draining) this.lastStartAnswerAt = Date.now();
         if (error.draining && drainingRetries < OP_START_DRAINING_MAX_RETRIES) {
           await this.deps.retryClock.sleep(
             selfhostedRetryBackoffMs(drainingRetries, this.deps.retryClock.jitter()),
@@ -826,12 +1307,16 @@ class OpConsumer {
           blipRetries += 1;
           continue;
         }
-        throw error;
+        // A never-sent failure of this attempt proves nothing once an earlier
+        // one may have reached an agent.
+        throw this.startMaybeDelivered ? withoutNeverSent(error) : error;
       }
     }
   }
 
   private refusedStart(status: OpStatus | undefined): SelfhostedControlError {
+    // The runner's tombstone: this op was cancelled before it ever began.
+    if (status && isOpTombstone(status, this.opId)) return new OpTombstonedError(status.exit!);
     if (status?.exit?.cancelled) {
       return new SelfhostedControlError({
         message: "The command was cancelled before the machine admitted it.",
@@ -864,7 +1349,12 @@ class OpConsumer {
         resourcePolicy,
         op,
       },
-      { timeoutMs: this.deps.controlTimeoutMs },
+      {
+        timeoutMs: this.deps.controlTimeoutMs,
+        // A start the op's wall abandoned stops retrying in the background.
+        connectionCurrent: async () =>
+          !this.startAbandoned && ((await this.deps.connectionCurrent?.()) ?? true),
+      },
     );
     if (res.error || !res.result) {
       throw agentErrorToControlError(
@@ -897,6 +1387,11 @@ class OpConsumer {
     if (result.opStatus.state === OpState.OP_STATE_LOST) {
       throw lostToControlError(result.opStatus);
     }
+    // Cancelled before it ever began: no frames will come, and it never ran.
+    if (isOpTombstone(result.opStatus, this.opId)) {
+      throw new OpTombstonedError(result.opStatus.exit!);
+    }
+    this.markAcknowledged();
     return result.opStatus;
   }
 
@@ -904,7 +1399,11 @@ class OpConsumer {
    *  as a heal (the observer's `healed` breadcrumb). Failures are left to the
    *  liveness watcher — a dead link fails typed there, not here. */
   private requestAttachHeal(): void {
-    if (this.attachInFlight || this.torn) {
+    if (this.torn) {
+      return;
+    }
+    if (this.attachInFlight) {
+      this.attachHealRequested = true;
       return;
     }
     this.attachInFlight = true;
@@ -913,12 +1412,22 @@ class OpConsumer {
         this.heals += 1;
       })
       .catch((error) => {
-        if (error instanceof SelfhostedControlError && !error.retryable && !error.agentOffline) {
+        if (error instanceof SelfhostedControlError && error.connectionReplaced) {
+          this.settleReject?.(agentReplacedOutcomeUnknownError(this.startConfirmed));
+        } else if (
+          error instanceof SelfhostedControlError &&
+          !error.retryable &&
+          !error.agentOffline
+        ) {
           this.settleReject?.(error);
         }
       })
       .finally(() => {
         this.attachInFlight = false;
+        if (this.attachHealRequested) {
+          this.attachHealRequested = false;
+          this.requestAttachHeal();
+        }
       });
   }
 
@@ -1039,6 +1548,7 @@ class OpConsumer {
       creditBytes: (this.receivedPayloadBytes + BigInt(this.windowBytes)).toString(),
       final: false,
       attachGeneration: this.generation,
+      detach: false,
     }).finish();
     try {
       await this.deps.transport.publish(
@@ -1056,11 +1566,23 @@ class OpConsumer {
    * open through the reconnect window, and enforces an explicit client-side wall.
    * Resolves only by rejection (typed failure) or by `stop()` at settle.
    */
-  private watchLiveness(wallMs: number): { wall: Promise<never>; stop: () => void } {
+  private watchLiveness(
+    wallMs: number,
+    startedAt: number,
+  ): { wall: Promise<never>; stop: () => void } {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let wallTimer: ReturnType<typeof setTimeout> | undefined;
     const wall = new Promise<never>((_, reject) => {
-      const startedAt = Date.now();
+      // The wall holds whatever a probe is waiting on.
+      if (wallMs > 0) {
+        wallTimer = setTimeout(
+          () => {
+            if (!stopped) reject(agentErrorToControlError(timeoutAgentError()));
+          },
+          Math.max(0, startedAt + wallMs - Date.now()),
+        );
+      }
       const tick = async () => {
         if (stopped) {
           return;
@@ -1091,6 +1613,53 @@ class OpConsumer {
         if (timer) {
           clearTimeout(timer);
         }
+        if (wallTimer) {
+          clearTimeout(wallTimer);
+        }
+      },
+    };
+  }
+
+  /** The op's wall while its start and first attach are in flight, and the
+   *  start's unanswered bound (`unansweredMs`, 0: none): once the agent has
+   *  answered nothing for that long, the start is abandoned as the wall
+   *  abandons it, and the call fails with the agent offline. */
+  private startWall(
+    wallMs: number,
+    unansweredMs: number,
+  ): {
+    race: <T>(work: Promise<T>) => Promise<T>;
+    clear: () => void;
+  } {
+    if (wallMs <= 0 && unansweredMs <= 0) return { race: (work) => work, clear: () => {} };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let unansweredTimer: ReturnType<typeof setTimeout> | undefined;
+    const wall = new Promise<never>((_, reject) => {
+      if (wallMs > 0) {
+        timer = setTimeout(() => {
+          this.startAbandoned = true;
+          reject(this.startTimeoutError());
+        }, wallMs);
+      }
+      if (unansweredMs > 0) {
+        const check = () => {
+          const waitedMs = Date.now() - this.lastStartAnswerAt;
+          if (waitedMs < unansweredMs) {
+            unansweredTimer = setTimeout(check, unansweredMs - waitedMs);
+            return;
+          }
+          this.startAbandoned = true;
+          reject(this.startUnansweredError(waitedMs));
+        };
+        unansweredTimer = setTimeout(check, unansweredMs);
+      }
+    });
+    void wall.catch(() => {});
+    return {
+      race: async (work) => await Promise.race([work, wall]),
+      clear: () => {
+        clearTimeout(timer);
+        clearTimeout(unansweredTimer);
       },
     };
   }
@@ -1109,6 +1678,11 @@ class OpConsumer {
         reject(lostToControlError(status));
         return;
       }
+      if (isOpTombstone(status, this.opId)) {
+        reject(new OpTombstonedError(status.exit!));
+        return;
+      }
+      this.markAcknowledged();
       // Alive on the runner. If it is ahead of our frontier, frames were lost
       // in flight — re-attach to replay them (this also restores live flow
       // after a reconnect). A quiet-but-current op just keeps holding.
@@ -1118,6 +1692,12 @@ class OpConsumer {
     } catch (error) {
       if (!(error instanceof SelfhostedControlError)) {
         throw error;
+      }
+      // Another agent process holds the connection: stop waiting here; the
+      // op's outcome is unknown and its stop is handed over.
+      if (error.connectionReplaced) {
+        reject(agentReplacedOutcomeUnknownError(this.startConfirmed));
+        return;
       }
       const transient =
         error.agentOffline || error.reason === "agent_reconnecting" || error.draining;
@@ -1146,25 +1726,31 @@ class OpConsumer {
     };
     for (const channel of ["stdout", "stderr"] as const) {
       const bytes = assembled[channel];
-      const declaredTotal = exit.totals[channel];
+      // A terminal result can license collection of retained native output.
+      // Both channels, including empty ones, must carry verifiable metadata.
+      const declaredTotal = exit.totals?.[channel];
+      if (typeof declaredTotal !== "string" || !/^[0-9]+$/.test(declaredTotal)) {
+        throw protocolError(`op-stream reassembly: ${channel} total missing or invalid`);
+      }
       const total = this.captureOnly ? this.totals[channel] : BigInt(bytes.byteLength);
-      if (declaredTotal !== undefined && BigInt(declaredTotal) !== total) {
+      if (BigInt(declaredTotal) !== total) {
         throw protocolError(
           `op-stream reassembly: ${channel} total mismatch (got ${total}, ` +
             `runner declared ${declaredTotal})`,
         );
       }
-      const declaredDigest = exit.digests[channel];
-      if (declaredDigest) {
-        const digest = bytesToHex(
-          this.captureOnly ? this.hashes[channel].clone().digest() : blake3(bytes),
+      const declaredDigest = exit.digests?.[channel];
+      if (typeof declaredDigest !== "string" || declaredDigest.length === 0) {
+        throw protocolError(`op-stream reassembly: ${channel} digest missing`);
+      }
+      const digest = bytesToHex(
+        this.captureOnly ? this.hashes[channel].clone().digest() : blake3(bytes),
+      );
+      if (digest !== declaredDigest) {
+        throw protocolError(
+          `op-stream reassembly: ${channel} digest mismatch (got ${digest}, ` +
+            `runner declared ${declaredDigest})`,
         );
-        if (digest !== declaredDigest) {
-          throw protocolError(
-            `op-stream reassembly: ${channel} digest mismatch (got ${digest}, ` +
-              `runner declared ${declaredDigest})`,
-          );
-        }
       }
       this.chunks[channel].length = 0;
     }
@@ -1195,7 +1781,7 @@ function protocolError(message: string): SelfhostedControlError {
 /** A definitive `lost` status → a typed op-level failure. The result was
  *  bounded-retention collateral (LRU eviction / a runner restart predating the
  *  persistence milestone) — honest, never silent. */
-function lostToControlError(status: OpStatus): SelfhostedControlError {
+function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedControlError {
   const reason =
     status.lostReason === OpLostReason.OP_LOST_REASON_EVICTED
       ? "its retained result was evicted before collection"
@@ -1210,6 +1796,114 @@ function lostToControlError(status: OpStatus): SelfhostedControlError {
     reason: null,
     retryable: false,
     detail: { lost_reason: String(status.lostReason) },
+  });
+}
+
+/** Whether a read failed only because Opengeni already released the op's
+ *  output. A runner releases output only after Opengeni durably stored all of
+ *  it, so the stored command record holds the result, not the runner. */
+export function isReleasedOpError(error: unknown): boolean {
+  return (
+    error instanceof SelfhostedControlError &&
+    error.detail.lost_reason === String(OpLostReason.OP_LOST_REASON_RELEASED)
+  );
+}
+
+/** The runner's answer for op `opId` cancelled before it ever began (its
+ *  tombstone): complete and cancelled, with no frame ever sent and no output
+ *  record. A real exit always declares its output totals and digests and
+ *  follows at least one frame, so nothing else matches. It proves the op never
+ *  ran on that connection and never can, so a status for any other op (or
+ *  with no identity) is never taken as this proof. */
+export function isOpTombstone(status: OpStatus, opId: string): boolean {
+  const exit = status.exit;
+  return (
+    opId !== "" &&
+    status.opId === opId &&
+    status.state === OpState.OP_STATE_COMPLETE &&
+    status.lostReason === OpLostReason.OP_LOST_REASON_UNSPECIFIED &&
+    exit?.cancelled === true &&
+    !exit.failureCode &&
+    !exit.timedOut &&
+    BigInt(status.nextSeq || "0") === 0n &&
+    Object.keys(exit.totals ?? {}).length === 0 &&
+    Object.keys(exit.digests ?? {}).length === 0
+  );
+}
+
+/** A start, attach or read met the op's tombstone (see isOpTombstone). For a
+ *  caller that ran the command it reads as the start refusal it is. */
+export class OpTombstonedError extends SelfhostedControlError {
+  constructor(readonly exit: OpExit) {
+    super({
+      message: "The command was cancelled before the machine admitted it.",
+      code: ErrorCode.ERROR_CODE_TIMEOUT,
+      reason: null,
+      retryable: false,
+      detail: { cancelled: "true" },
+    });
+  }
+}
+
+/** The outcome a read reports for a tombstoned op: the runner's own record,
+ *  with no output. */
+function tombstonedOutcome(exit: OpExit): OpStreamExecOutcome {
+  return {
+    terminalExit: exit,
+    response: {
+      exitCode: exit.exitCode,
+      stdout: new Uint8Array(0),
+      stderr: new Uint8Array(0),
+      timedOut: exit.timedOut,
+      durationMs: exit.durationMs,
+      backgroundChildrenStopped: exit.backgroundChildrenStopped,
+    },
+    heals: 0,
+    startRetries: 0,
+    replyBytes: 0,
+  };
+}
+
+/** The op's agent connection was replaced by a new one while the op existed
+ *  or may have. That does not prove the old process is gone (an expired claim
+ *  can be taken over while it still runs), so the outcome is unknown.
+ *  `startConfirmed`: the agent had accepted the start. Marked
+ *  connection-replaced so the session hands the op to its command ledger with
+ *  a stop request bound to the old connection; the session adds that a stop
+ *  was requested only once one is recorded. */
+function agentReplacedOutcomeUnknownError(startConfirmed: boolean): SelfhostedControlError {
+  return agentErrorToControlError(
+    commandOutcomeUnknownAfterReplacementAgentError({ startConfirmed, stopRequested: false }),
+  );
+}
+
+/** A failure once the op exists (its start was accepted, may have been, or it
+ *  was already known) never says it did not run: after a replaced connection
+ *  its outcome is unknown, and any other never-sent failure proves only that this one request was
+ *  not delivered. */
+function startedOpError(error: unknown, startConfirmed: boolean): unknown {
+  if (!(error instanceof SelfhostedControlError)) return error;
+  if (error.connectionReplaced) return agentReplacedOutcomeUnknownError(startConfirmed);
+  return withoutNeverSent(error);
+}
+
+/** The same error without its never-sent mark. */
+function withoutNeverSent(error: SelfhostedControlError): SelfhostedControlError {
+  if (!error.neverSent) return error;
+  return new SelfhostedControlError({
+    message: error.message,
+    code: error.code,
+    reason: error.reason,
+    retryable: error.retryable,
+    fenced: error.fenced,
+    draining: error.draining,
+    agentOffline: error.agentOffline,
+    osNotFound: error.osNotFound,
+    payloadTooLarge: error.payloadTooLarge,
+    controlRequestId: error.controlRequestId,
+    detail: Object.fromEntries(
+      Object.entries(error.detail).filter(([key]) => key !== NEVER_SENT_DETAIL_KEY),
+    ),
   });
 }
 

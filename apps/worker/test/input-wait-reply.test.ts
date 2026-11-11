@@ -1,6 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionTurn } from "@opengeni/contracts";
-import { inputWaitReply } from "../src/activities/agent-turn/input-wait-reply";
+import { modelResponseClientToolCallCount } from "@opengeni/runtime";
+import {
+  GOAL_COMPLETE_REPLY_MESSAGE_ID,
+  GOAL_COMPLETE_SIBLING_REFUSAL,
+  INPUT_WAIT_PROGRESS_UPDATE_REFUSAL,
+  INPUT_WAIT_REPLY_REFUSAL,
+  MAX_INPUT_WAIT_REPLY_REFUSALS,
+  WAIT_REPLY_MESSAGE_ID,
+  goalCompleteReplyMessage,
+  goalCompleteReplyDecision,
+  inputWaitReply,
+  inputWaitReplyMessage,
+  inputWaitReplyRefusal,
+} from "../src/activities/agent-turn/input-wait-reply";
 
 const status = "Two of the ten reviews are done; the rest are still running.";
 
@@ -101,5 +114,226 @@ describe("reply recorded when a turn ends waiting for input", () => {
       },
     });
     expect(read).toBe(false);
+  });
+});
+
+describe("a wait cannot end a person's turn without a visible reply", () => {
+  const refusal = async (turn: Turn, hasVisibleReply: boolean, refusalsSoFar = 0) =>
+    await inputWaitReplyRefusal({
+      turn,
+      refusalsSoFar,
+      hasVisibleReply: async () => hasVisibleReply,
+    });
+
+  test("a person's question with no reply yet is refused until the model answers", async () => {
+    for (const source of ["user", "api"] as const) {
+      expect(await refusal({ ...human, source }, false)).toBe(INPUT_WAIT_REPLY_REFUSAL);
+      expect(await refusal({ ...human, source }, true)).toBeNull();
+    }
+    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("reasoning is not shown");
+  });
+
+  test("the refusal says a reply drafted in thinking does not count and names the reply argument", () => {
+    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("thinking or reasoning block does not count");
+    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("note written before a tool call");
+    for (const text of [INPUT_WAIT_REPLY_REFUSAL, INPUT_WAIT_PROGRESS_UPDATE_REFUSAL]) {
+      expect(text).toContain("in its `reply` argument");
+      expect(text).toContain("exactly as written");
+      expect(text).toContain("time remaining on its deadline");
+    }
+  });
+
+  test("a wait that carries its own reply always proceeds", async () => {
+    for (const hasProgressUpdate of [false, true]) {
+      expect(
+        await inputWaitReplyRefusal({
+          turn: human,
+          refusalsSoFar: 0,
+          reply: "Here are the pictures.",
+          hasVisibleReply: async () => false,
+          hasProgressUpdate: () => hasProgressUpdate,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  test("a summarized progress update before the wait asks for the reply argument, even beside text", async () => {
+    for (const hasVisibleReply of [false, true]) {
+      expect(
+        await inputWaitReplyRefusal({
+          turn: human,
+          refusalsSoFar: 0,
+          reply: null,
+          hasVisibleReply: async () => hasVisibleReply,
+          hasProgressUpdate: () => true,
+        }),
+      ).toBe(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
+    }
+    // An empty reply is no reply.
+    expect(
+      await inputWaitReplyRefusal({
+        turn: human,
+        refusalsSoFar: 0,
+        reply: "  \n",
+        hasVisibleReply: async () => true,
+        hasProgressUpdate: () => true,
+      }),
+    ).toBe(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
+    // Machine-started turns and the refusal bound are unchanged.
+    for (const [turn, refusalsSoFar] of [
+      [{ ...human, source: "goal" } as Turn, 0],
+      [human, MAX_INPUT_WAIT_REPLY_REFUSALS],
+    ] as const) {
+      expect(
+        await inputWaitReplyRefusal({
+          turn,
+          refusalsSoFar,
+          reply: null,
+          hasVisibleReply: async () => false,
+          hasProgressUpdate: () => true,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  test("machine-started and agent-relayed turns may wait silently", async () => {
+    for (const source of ["goal", "system", "scheduled_task", "compaction"] as const) {
+      expect(await refusal({ ...human, source }, false)).toBeNull();
+    }
+    expect(
+      await refusal({ ...human, initiatorContext: { via: [agentHop] } } as Turn, false),
+    ).toBeNull();
+    expect(
+      await refusal(
+        { ...human, initiator: { kind: "service", subjectId: "scheduler" } } as Turn,
+        false,
+      ),
+    ).toBeNull();
+  });
+
+  test("refusal is bounded so a model that never answers still waits", async () => {
+    expect(await refusal(human, false, MAX_INPUT_WAIT_REPLY_REFUSALS - 1)).toBe(
+      INPUT_WAIT_REPLY_REFUSAL,
+    );
+    expect(await refusal(human, false, MAX_INPUT_WAIT_REPLY_REFUSALS)).toBeNull();
+  });
+});
+
+describe("a wait's reply argument is the verbatim answer", () => {
+  const verbatim = "Here they are:\n\n![Phone](artifact:a3dba521-b585-4f43-9cf6-46cbac6c25a9)";
+
+  test("it is recorded as the person's reply ahead of any earlier message", async () => {
+    expect(
+      await inputWaitReply({
+        inputWaitYielded: true,
+        waitReply: verbatim,
+        turn: human,
+        latestAssistantMessageText: "Here are the pictures.",
+        readLatestDurableTurnMessage: async () => null,
+      }),
+    ).toBe(verbatim);
+    // Machine-started turns still record none.
+    expect(
+      await inputWaitReply({
+        inputWaitYielded: true,
+        waitReply: verbatim,
+        turn: { ...human, source: "goal" },
+        latestAssistantMessageText: null,
+        readLatestDurableTurnMessage: async () => null,
+      }),
+    ).toBeNull();
+  });
+
+  test("it becomes its own final message, unless that text was already shown", () => {
+    expect(
+      inputWaitReplyMessage({
+        waitAccepted: true,
+        waitReply: verbatim,
+        latestAssistantMessageText: "Here are the pictures.",
+        attemptId: "attempt-1",
+      }),
+    ).toEqual({
+      text: verbatim,
+      messageId: `${WAIT_REPLY_MESSAGE_ID}:attempt-1`,
+      phase: "final_answer",
+    });
+    expect(
+      inputWaitReplyMessage({
+        waitAccepted: true,
+        waitReply: verbatim,
+        latestAssistantMessageText: `${verbatim}\n`,
+        attemptId: "attempt-1",
+      }),
+    ).toBeNull();
+    for (const waitReply of [null, "", " \n"]) {
+      expect(
+        inputWaitReplyMessage({
+          waitAccepted: true,
+          waitReply,
+          latestAssistantMessageText: null,
+          attemptId: "attempt-1",
+        }),
+      ).toBeNull();
+    }
+    expect(
+      inputWaitReplyMessage({
+        waitAccepted: false,
+        waitReply: verbatim,
+        latestAssistantMessageText: null,
+        attemptId: "attempt-1",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("a goal completion's reply is the turn's final answer", () => {
+  test("beside other client tool calls it is refused twice, then never ends the turn", () => {
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 0, toolCallCount: 1 })).toBeNull();
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 0, toolCallCount: 2 })).toBe(
+      GOAL_COMPLETE_SIBLING_REFUSAL,
+    );
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 1, toolCallCount: 3 })).toBe(
+      GOAL_COMPLETE_SIBLING_REFUSAL,
+    );
+    // Refusals run out: the completion runs, but its reply keeps the turn open
+    // so the model sees the sibling results and answers afterwards.
+    expect(
+      goalCompleteReplyDecision({
+        refusalsSoFar: MAX_INPUT_WAIT_REPLY_REFUSALS,
+        toolCallCount: 2,
+      }),
+    ).toEqual({ endTurn: false });
+    expect(
+      goalCompleteReplyDecision({ refusalsSoFar: MAX_INPUT_WAIT_REPLY_REFUSALS, toolCallCount: 1 }),
+    ).toBeNull();
+    expect(GOAL_COMPLETE_SIBLING_REFUSAL).toContain("was not run");
+  });
+
+  test("only calls whose results return to the model count as siblings", () => {
+    const response = (types: string[]) => ({
+      output: types.map((type) => ({ type })),
+    });
+    expect(modelResponseClientToolCallCount(response(["function_call"]))).toBe(1);
+    expect(
+      modelResponseClientToolCallCount(
+        response(["reasoning", "message", "function_call", "web_search_call", "hosted_tool_call"]),
+      ),
+    ).toBe(1);
+    expect(
+      modelResponseClientToolCallCount(
+        response(["function_call", "shell_call", "apply_patch_call", "computer_call"]),
+      ),
+    ).toBe(4);
+    for (const unknown of [undefined, null, {}, { output: "x" }])
+      expect(modelResponseClientToolCallCount(unknown)).toBe(0);
+  });
+
+  test("it becomes one final-answer message with its own id per attempt", () => {
+    expect(goalCompleteReplyMessage("Done.", "attempt-1")).toEqual({
+      text: "Done.",
+      messageId: `${GOAL_COMPLETE_REPLY_MESSAGE_ID}:attempt-1`,
+      phase: "final_answer",
+    });
+    expect(GOAL_COMPLETE_REPLY_MESSAGE_ID).not.toBe(WAIT_REPLY_MESSAGE_ID);
   });
 });

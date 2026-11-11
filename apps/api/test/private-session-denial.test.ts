@@ -10,12 +10,9 @@ import {
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 
 let shared: SharedTestDatabase;
@@ -161,6 +158,8 @@ test("another member's private session is indistinguishable from a missing one",
     ["POST", "/control", { action: "pause", clientEventId: crypto.randomUUID() }],
     ["PUT", "/composer-draft", { text: "draft" }],
     ["GET", "/model-context"],
+    ["GET", "/tool-reviews/synthetic-approval"],
+    ["GET", "/tool-reviews/synthetic-approval/details?actionDigest=" + "a".repeat(64)],
     ["GET", "/background-commands"],
     ["GET", "/codex-accounts"],
     ["GET", "/stream-capabilities"],

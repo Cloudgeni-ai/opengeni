@@ -3,7 +3,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const fixturePath = "/test/session-capability-cards.html";
@@ -120,11 +121,11 @@ describe("session capability preview parity in Chromium", () => {
             const action = (await card
               .getByRole("button", { name: scenario.open, exact: true })
               .boundingBox())!;
-            // The shared shell wraps only when content requires it, rather than
-            // imposing the old console-only viewport breakpoint.
+            // A wide card keeps the note and its action on one row; a narrow
+            // one stacks the full-width action above the note.
             const sameRow = Math.abs(note.y + note.height / 2 - action.y - action.height / 2) <= 1;
             if (sameRow) expect(action.x).toBeGreaterThanOrEqual(note.x + note.width);
-            else expect(action.y).toBeGreaterThanOrEqual(note.y + note.height + 6);
+            else expect(note.y).toBeGreaterThanOrEqual(action.y + action.height + 6);
             if (scenario.id === "skill") {
               expect(
                 await card
@@ -133,7 +134,7 @@ describe("session capability preview parity in Chromium", () => {
                   .locator('[aria-hidden="true"]')
                   .first()
                   .innerText(),
-              ).toBe("WR");
+              ).toBe("WS");
               expect(await card.locator("img").count()).toBe(0);
             }
           }

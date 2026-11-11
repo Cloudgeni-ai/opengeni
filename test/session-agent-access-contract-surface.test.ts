@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionAuthorizationOperationForHttp } from "../apps/api/src/routes/sessions";
-import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-tool-permissions";
+import { FIRST_PARTY_TOOL_AUTHORIZATION } from "@opengeni/contracts";
+import { withFirstPartyToolClient } from "../apps/api/test/helpers/first-party-tool-client";
 
 // ---------------------------------------------------------------------------
 // Agent-access scope contract surface (migration 0427).
@@ -61,7 +62,13 @@ const MIDDLEWARE_EXEMPT_OPERATIONS = {
   "session.stream.read": { handlerMarker: "requireSessionAuthorization(" },
   // Managed-human-only product mutations: core runs the target-free gates
   // first and then the seam exactly once (packages/core/src/application/session-tenancy.ts).
-  "session.visibility.write": { handlerMarker: "updateManagedHumanSessionVisibility(" },
+  // The owner-only preview of the same change runs the identical gates.
+  "session.visibility.write": {
+    handlerMarker: [
+      "updateManagedHumanSessionVisibility(",
+      "previewManagedHumanSessionVisibilityChange(",
+    ],
+  },
   "session.fork.create": { handlerMarker: "forkManagedHumanSession(" },
 } as const;
 
@@ -70,6 +77,7 @@ const MIDDLEWARE_EXEMPT_OPERATIONS = {
 const OUT_OF_MODULE_HANDLER_MARKERS = [
   "requireSessionAuthorization(",
   "requireAgentSessionAccess(",
+  "sessionReadDenied(",
 ];
 
 /**
@@ -151,6 +159,46 @@ function samplePathname(path: string): string {
     .replace(/:[A-Za-z]+/gu, "x");
 }
 
+const TARGET_SESSION_INPUT_NAMES = new Set([
+  "sessionId",
+  "session_id",
+  "sourceSessionId",
+  "targetSessionId",
+  "targets",
+]);
+
+function schemaTakesTargetSession(
+  schema: unknown,
+  root: unknown = schema,
+  seen = new Set<object>(),
+): boolean {
+  if (schema === null || typeof schema !== "object" || seen.has(schema)) return false;
+  seen.add(schema);
+  const node = schema as Record<string, unknown>;
+  const properties = node.properties as Record<string, unknown> | undefined;
+  if (properties && Object.keys(properties).some((name) => TARGET_SESSION_INPUT_NAMES.has(name))) {
+    return true;
+  }
+  if (typeof node.$ref === "string" && node.$ref.startsWith("#/")) {
+    const referenced = node.$ref
+      .slice(2)
+      .split("/")
+      .reduce<unknown>((value, token) => {
+        if (value === null || typeof value !== "object") return undefined;
+        return (value as Record<string, unknown>)[token.replace(/~1/gu, "/").replace(/~0/gu, "~")];
+      }, root);
+    if (schemaTakesTargetSession(referenced, root, seen)) return true;
+  }
+  // Nested evidence/provenance labels are not target-session operations.
+  return ["allOf", "anyOf", "oneOf"].some((keyword) => {
+    const branches = node[keyword];
+    return (
+      Array.isArray(branches) &&
+      branches.some((branch) => schemaTakesTargetSession(branch, root, seen))
+    );
+  });
+}
+
 describe("agent-access scope stays enforced at every session entry point", () => {
   test("import-ID appends resolve the importer before using the canonical target-session seam", async () => {
     const routes = await read("apps/api/src/routes/session-history-imports.ts");
@@ -182,7 +230,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       "requireAccessGrantAuthorization(",
       '"sessions:read"',
       "requireSessionAuthorizationListScope(",
-      "SessionMessageSearchRequest.safeParse(",
+      "parseRequestQuery(\n      SessionMessageSearchRequest,",
       "searchSessionMessagesForSubject(",
       "subjectId: grant.subjectId",
       "authorizationScope",
@@ -240,8 +288,8 @@ describe("agent-access scope stays enforced at every session entry point", () =>
         MIDDLEWARE_EXEMPT_OPERATIONS[operation as keyof typeof MIDDLEWARE_EXEMPT_OPERATIONS];
       if (exemption) {
         expect(
-          route.body.includes(exemption.handlerMarker),
-          `${route.method} ${route.path} bypasses the middleware and must reach the seam through ${exemption.handlerMarker}`,
+          [exemption.handlerMarker].flat().some((marker) => route.body.includes(marker)),
+          `${route.method} ${route.path} bypasses the middleware and must reach the seam through ${[exemption.handlerMarker].flat().join(" or ")}`,
         ).toBe(true);
       }
     }
@@ -273,6 +321,15 @@ describe("agent-access scope stays enforced at every session entry point", () =>
 
   test("every first-party MCP tool that names a target session reaches the seam", async () => {
     const catalogued = new Set(Object.keys(FIRST_PARTY_TOOL_AUTHORIZATION));
+    // Discovery includes reused native contracts, spreads and referenced schemas;
+    // the source scan also covers registrations gated out of this agent catalog.
+    const advertisedTargetTools = await withFirstPartyToolClient(async (client) => {
+      const { tools } = await client.listTools();
+      return tools
+        .filter((tool) => schemaTakesTargetSession(tool.inputSchema))
+        .map((tool) => tool.name);
+    });
+    const advertisedTargetToolNames = new Set(advertisedTargetTools);
     const seen = new Set<string>();
     for (const file of await sourceFiles("apps/api/src/mcp")) {
       const source = await read(file);
@@ -282,6 +339,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
         const name = chunk.match(/^\s*"([^"]+)"/u)?.[1];
         if (!name || !catalogued.has(name)) continue;
         const takesTargetSession =
+          advertisedTargetToolNames.has(name) ||
           /\b(sessionId|session_id|sourceSessionId|targetSessionId)\s*:\s*z4?\s*\./u.test(chunk) ||
           /\btargets\s*:\s*z4?\s*\./u.test(chunk);
         if (!takesTargetSession) continue;
@@ -303,6 +361,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       }
     }
     for (const name of [
+      ...advertisedTargetTools,
       "session_get",
       "session_events",
       "session_wait",

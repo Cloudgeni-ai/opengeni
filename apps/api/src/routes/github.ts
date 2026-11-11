@@ -47,6 +47,7 @@ import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
+  eventRouteSecret,
   githubAppActionPolicyActor,
   hasPermission,
   listGitHubActionPolicyActors,
@@ -55,6 +56,7 @@ import {
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
   updateGitHubActionPolicyGroup,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -67,6 +69,7 @@ import {
 import {
   githubBindingStatus,
   GitHubRepositoryBranchAuthorityError,
+  isTransientGitHubRepositoryListFailure,
   listWorkspaceGitHubInstallationBindings,
   listWorkspaceGitHubRepositoryBranches,
   listWorkspaceGitHubRepositories,
@@ -89,6 +92,7 @@ import {
   githubConnectFailureHtml,
   githubInstallationChooserHtml,
   githubSetupPendingHtml,
+  githubOwnerApprovedHtml,
   githubSetupSuccessHtml,
   githubSuccessHtml,
   type GitHubConnectFailure,
@@ -97,7 +101,10 @@ import {
   completeGitHubAppConnect,
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { requestGitHubInstallationRepositorySync } from "../github-installation-sync";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -299,7 +306,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Start with user authorization, not GitHub's install/configure selector.
   // This lets an owner link an already-installed App without relying on
-  // GitHub's Configure page to preserve or return OpenGeni state.
+  // GitHub's Configure page to preserve or return Opengeni state.
   app.get("/v1/workspaces/:workspaceId/github/connect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const state = c.req.query("state");
@@ -347,14 +354,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
     } catch (error) {
-      if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, {
-          message: JSON.stringify({ message: error.message, missing: error.missing }),
-        });
-      }
-      throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : String(error),
-      });
+      throw githubRepositoryListRouteError(error);
     }
   });
 
@@ -362,16 +362,11 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "github:use");
     try {
-      return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
-    } catch (error) {
-      if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, {
-          message: JSON.stringify({ message: error.message, missing: error.missing }),
-        });
-      }
-      throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : String(error),
+      return c.json({
+        repositories: await listWorkspaceGitHubRepositories(deps, workspaceId, { fresh: true }),
       });
+    } catch (error) {
+      throw githubRepositoryListRouteError(error);
     }
   });
 
@@ -417,7 +412,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (installationId === null || repositoryId === null) {
         throw new HTTPException(400, { message: "invalid GitHub repository identity" });
       }
-      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      const query = parseRequestQuery(ListGitHubRepositoryBranchesQuery, c.req.query());
       try {
         return c.json(
           await listWorkspaceGitHubRepositoryBranches(deps, {
@@ -445,6 +440,8 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       installationId,
+      eventRouteSecret: eventRouteSecret(settings),
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
     return c.body(null, 204);
   });
@@ -512,13 +509,14 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
     });
     setGitHubStateCookie(c, deps, state);
-    const appName = payload.appName?.trim() || "OpenGeni";
+    const appName = payload.appName?.trim() || "Opengeni";
     const manifest = buildGitHubAppManifest({
       appName,
       baseUrl,
       public: payload.public,
       includeCiPermissions: payload.includeCiPermissions,
       setupUrl: `${baseUrl}/v1/github/setup`,
+      webhookBaseUrl: settings.webhookBaseUrl,
     });
     const organization = payload.organization?.trim();
     return c.json({
@@ -569,6 +567,16 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
       });
     if (!state) {
+      // An organization owner approving a member's request (or installing
+      // straight from GitHub) arrives with no Opengeni state. Nothing names a
+      // workspace, so nothing is connected: explain the remaining step instead
+      // of an "expired link" error. No provider or database call happens here.
+      if (
+        c.req.query("setup_action") === "install" &&
+        parsePositiveInteger(c.req.query("installation_id")) !== null
+      ) {
+        return c.html(githubOwnerApprovedHtml(githubFailureReturnUrl(deps, c)));
+      }
       throw new HTTPException(400, { message: "missing GitHub installation state" });
     }
     const statePayload = readSignedState(state, githubStateSecret);
@@ -590,7 +598,17 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const setupAction = c.req.query("setup_action");
     if (setupAction === "request") {
-      return c.html(githubSetupPendingHtml());
+      return c.html(
+        githubSetupPendingHtml(
+          openGeniReturnUrl(
+            settings,
+            c,
+            grant.workspaceId,
+            typeof statePayload.returnPath === "string" ? statePayload.returnPath : null,
+            "requested",
+          ),
+        ),
+      );
     }
     if (setupAction !== "install" && setupAction !== "update") {
       throw new HTTPException(400, { message: "unsupported GitHub setup action" });
@@ -778,6 +796,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
             authorityExpiresAt: expiresAt,
             authorityNonce: statePayload.nonce,
             repositoryIds,
+            eventRouteSecret: eventRouteSecret(settings),
           });
         },
       );
@@ -792,6 +811,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "GitHub installation authorization was already used",
       });
     }
+    // The owner's proof read GitHub's list before the bind; catch up on any
+    // change GitHub made since.
+    void requestGitHubInstallationRepositorySync(deps, installationId);
     deleteCookie(c, githubStateCookie, { path: "/v1" });
     return c.html(
       githubSetupSuccessHtml(
@@ -1068,6 +1090,25 @@ function githubAuthorityHttpError(error: unknown): HTTPException {
   return new HTTPException(502, { message: "GitHub authority verification failed" });
 }
 
+/**
+ * A GitHub outage (5xx, rate limit, timeout, network) stays a 502 that clients
+ * may retry. GitHub refusing the installation (401, 403, 404) is not an outage:
+ * it is a 409 that asks for a reconnect, so background reads stop retrying it.
+ */
+function githubRepositoryListRouteError(error: unknown): HTTPException {
+  if (error instanceof GitHubAppConfigurationError) {
+    return new HTTPException(409, {
+      message: JSON.stringify({ message: error.message, missing: error.missing }),
+    });
+  }
+  if (error instanceof GitHubAppApiError && !isTransientGitHubRepositoryListFailure(error)) {
+    return new HTTPException(409, {
+      message: "GitHub no longer grants access to this installation; reconnect GitHub",
+    });
+  }
+  return new HTTPException(502, { message: errorMessage(error) });
+}
+
 function githubRepositoryBranchesRouteError(error: unknown): Error {
   if (error instanceof HTTPException) {
     return error;
@@ -1107,9 +1148,7 @@ export function requirePublicGitHubRepositoryVerificationPermission(
   ) {
     return;
   }
-  throw new HTTPException(403, {
-    message: "missing permission: sessions:create or sessions:control",
-  });
+  throw new MissingPermissionRefusal("sessions:create");
 }
 
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {
@@ -1138,13 +1177,14 @@ function openGeniReturnUrl(
   c: Context,
   workspaceId: string,
   returnPath: string | null = null,
+  outcome: "connected" | "requested" = "connected",
 ): string {
   const baseUrl = openGeniBaseUrl(settings, c) || new URL(c.req.url).origin;
   const safeReturnPath = githubSessionReturnPath(returnPath, workspaceId);
   const url = safeReturnPath ? new URL(safeReturnPath, `${baseUrl}/`) : new URL(baseUrl);
   if (safeReturnPath) {
     url.searchParams.delete("capability_auth");
-    url.searchParams.set("github", "connected");
+    url.searchParams.set("github", outcome);
     return url.toString();
   }
   url.searchParams.set("workspaceId", workspaceId);
@@ -1192,7 +1232,7 @@ function githubBrowserFailureDetail(error: unknown): string | null {
 /**
  * The failure page links back to the workspace integrations page when the
  * request names a workspace (its path, or a correctly signed state even if it
- * aged out); otherwise to the OpenGeni home. This is only a link target, so an
+ * aged out); otherwise to the Opengeni home. This is only a link target, so an
  * expired state is acceptable evidence of where the user came from.
  */
 function githubFailureReturnUrl(deps: ApiRouteDeps, c: Context): string {

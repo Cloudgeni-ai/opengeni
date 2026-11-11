@@ -1,5 +1,6 @@
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { AlertTriangleIcon, CheckIcon, Loader2Icon, PlusIcon } from "lucide-react";
+import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 export type CapabilityCatalogStatus =
   | "available"
@@ -22,13 +23,13 @@ export type CapabilityCatalogRowProps = Omit<
   onOpen: () => void;
 };
 
-const labels: Record<CapabilityCatalogStatus, string> = {
-  available: "Available to add",
-  added: "Added",
-  attention: "Needs attention",
-  unavailable: "Unavailable",
-  loading: "Working",
-};
+const labels = (t: OpenGeniText): Record<CapabilityCatalogStatus, string> => ({
+  available: t("capabilityCatalogRow.availableToAdd"),
+  added: t("capabilityCatalogRow.added"),
+  attention: t("capabilityCatalogRow.needsAttention"),
+  unavailable: t("capabilityCatalogRow.unavailable"),
+  loading: t("capabilityCatalogRow.working"),
+});
 
 /** A display-only state. The entire catalog row is the action, never this glyph. */
 export function CapabilityCatalogIndicator({
@@ -40,6 +41,7 @@ export function CapabilityCatalogIndicator({
   label?: string | undefined;
   showLabel?: boolean;
 }) {
+  const t = useOpenGeniText();
   const Icon =
     status === "added"
       ? CheckIcon
@@ -58,7 +60,7 @@ export function CapabilityCatalogIndicator({
             : "og-capability-catalog-sr-only"
         }
       >
-        {label ?? labels[status]}
+        {label ?? labels(t)[status]}
       </span>
     </span>
   );

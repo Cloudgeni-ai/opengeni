@@ -16,11 +16,13 @@ mock.module("@tanstack/react-router", () => ({
     select({ location: { pathname } }),
 }));
 
-mock.module("@/components/rail/rail-context", () => ({
+mock.module("@opengeni/react/app/components/rail/rail-context", () => ({
   useRail: () => rail,
 }));
 
-mock.module("@/components/rail/session-list", () => ({
+mock.module("@opengeni/react/app/components/rail/session-list", () => ({
+  CollapsedSessionsButton: () => null,
+  SessionList: () => null,
   NewSessionLink: ({ children, ...props }: { children: ReactNode }) => (
     <a href="#new-session" {...props}>
       {children}
@@ -36,25 +38,60 @@ mock.module("@/components/rail/workspace-config-link", () => ({
   ),
 }));
 
+mock.module("@/components/rail/inbox-link", () => ({
+  InboxLink: () => <a href="#inbox">Inbox</a>,
+}));
+
 const client = { listKnowledgeEntries: async () => ({ entries: [] }) };
-mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({ client }) }));
 
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const { PrimaryNav, WorkspaceShortcutLinks } = await import("./primary-nav");
+await import("@/navigation-host");
+const { PrimaryNavExtras, WorkspaceShortcutLinks } = await import("./primary-nav");
+const { PrimaryNav: SharedPrimaryNav, SessionShellSlotsProvider } =
+  await import("@opengeni/react/app/components/rail/rail-sections");
+/** The rail's primary navigation as the web shell composes it. */
+function PrimaryNav() {
+  return (
+    <SessionShellSlotsProvider slots={{ primaryNav: <PrimaryNavExtras /> }}>
+      <SharedPrimaryNav />
+    </SessionShellSlotsProvider>
+  );
+}
 const originalMatchMedia = window.matchMedia;
 window.matchMedia = (query) => {
   const media = originalMatchMedia.call(window, query);
   Object.defineProperty(media, "matches", { get: () => window.innerHeight < 720 });
   return media;
 };
-const railHeader = await Bun.file(new URL("./rail-header.tsx", import.meta.url)).text();
-const railShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
+// The shared shell owns the rail layout; the web shell fills its slots.
+const railShell = await Bun.file(
+  new URL(
+    "../../../../../packages/react/src/app/components/rail/session-shell.tsx",
+    import.meta.url,
+  ),
+).text();
+const railHeader = await Bun.file(
+  new URL(
+    "../../../../../packages/react/src/app/components/rail/rail-sections.tsx",
+    import.meta.url,
+  ),
+).text();
+const railSurface = await Bun.file(
+  new URL(
+    "../../../../../packages/react/src/app/components/rail/rail-surface.tsx",
+    import.meta.url,
+  ),
+).text();
+const webRailShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
 
 describe("rail overflow boundaries", () => {
   test("contains scrolling session controls above a non-shrinking footer on the rail glow", () => {
-    expect(railShell).toContain(
+    // The rail body sits on the shared rail surface, the clipped glow column.
+    expect(railShell).toContain("<RailSurface data-rail>");
+    expect(railSurface).toContain(
       "og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden",
     );
     expect(railShell).toMatch(
@@ -65,6 +102,15 @@ describe("rail overflow boundaries", () => {
     expect(railShell).toMatch(
       /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border"/,
     );
+  });
+
+  test("keeps one rail header in the scrolling list on every platform", () => {
+    // The desktop app's window bar holds the window controls above the page,
+    // so the rail reserves no row of its own for them.
+    expect(railShell).not.toContain("data-rail-window-controls");
+    expect(railShell).toMatch(/data-rail-scroll-viewport[\s\S]*?<RailHeader \/>/);
+    expect(railShell).toContain("{rail.collapsed ? switcher : null}");
+    expect(webRailShell).toContain("switcher: <SwitcherBlock />,");
   });
 });
 
@@ -116,7 +162,7 @@ describe("session-first rail density", () => {
       expect(rendered.container.textContent).not.toContain("For you");
       expect(rendered.container.textContent).toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        4,
+        6,
       );
       expect(rendered.container.querySelector("button[aria-expanded]")).toBeNull();
     } finally {
@@ -131,7 +177,7 @@ describe("session-first rail density", () => {
       expect(moreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
       expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
       await act(async () => moreDisclosure(first.container).click());
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(4);
+      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(6);
       expect(lessButton(first.container).getAttribute("aria-expanded")).toBe("true");
       await act(async () => lessButton(first.container).click());
       expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
@@ -163,12 +209,15 @@ describe("session-first rail density", () => {
     const workspace = await render(<WorkspaceShortcutLinks />);
     try {
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        4,
+        6,
       );
       expect(railShell).toMatch(
-        /id="mobile-nav-panel-workspace"[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
+        /id=\{`\$\{mobileNavId\}-panel-workspace`\}[\s\S]*?\{mobileWorkspacePanel\}/,
       );
-      expect(railHeader).toMatch(/\{!rail\.collapsed \? <SwitcherBlock \/> : null\}/);
+      expect(webRailShell).toMatch(
+        /mobileWorkspacePanel: \([\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
+      );
+      expect(railHeader).toContain("{showSwitcher && !rail.collapsed ? switcher : null}");
     } finally {
       await act(async () => workspace.root.unmount());
       workspace.container.remove();

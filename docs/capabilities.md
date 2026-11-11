@@ -1,12 +1,53 @@
 # Capability Catalog
 
-OpenGeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
+Opengeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, Skill, API Integration, and Integration Facet mutations
-require the narrow `capabilities:manage` permission. Shared-workspace admins
+Adding integrations is member work: installing and removing Plugins and API
+Integrations, adding custom MCP catalog entries, turning on any catalog
+integration that is not on yet (with a personal or a shared account), and
+configuring an installed integration's facets and sources need
+`connections:write`, which ordinary Members hold, or `capabilities:manage`
+(`INTEGRATION_SETUP_PERMISSION` and `canAddIntegrations` in
+`packages/contracts/src/personal-integration-setup.ts`). A member's add is
+create-only: it never changes an installation that is already on, turns back
+on one an admin turned off, rewrites or shadows an existing catalog entry, or
+picks a server's tool ID, and the organization's integration policy (its
+allowlist, and `personalIntegrationSetup: "admins"`) still decides.
+What stays integration administration (`capabilities:manage`): connector and
+session-MCP tool permissions (Allow/Ask/Block), `autoApprovedTools` and any
+explicit MCP `requireApproval` other than `true`, changing an integration that
+is already set up (updating a plugin or a custom API to a new revision,
+reconnecting or rebinding a shared account, or turning a server back on), and
+turning one off for everyone.
+A member removes only what they added themselves: a plugin
+(`capability_plugin_installations.installed_by_subject_id`, which an update
+hands to whoever updated it), an API integration account, or a source or
+setting (`integration_facet_bindings.created_by_subject_id`, which adding a
+removed one back hands to whoever adds it). Anything an admin, another person
+or no recorded installer added is removed only by integration admins, who
+remove anything (`canRemoveIntegration` in `packages/core/src/access`); a
+member's other removal gets the usual `capabilities:manage` 403. The plugin,
+API integration and facet lists return `canRemove` for the caller, and the UI
+offers Remove from it; an API integration the organization serves here is
+`canRemove: false`, since it is managed in the organization's settings. A
+custom MCP server added in the workspace is removed with
+`DELETE …/capabilities/:id/installation`, which deletes its installation and
+keeps its catalog entry, connected accounts and tool rules. A member removes
+one they turned on, while it is on
+(`capability_installations.installed_by_subject_id`, which turning it on again
+or changing it hands to whoever did so); one an admin or another person turned
+on, one with no recorded installer and one an admin turned off stay with
+admins. `GET …/capabilities` returns `canRemove` on each item for the caller.
+Turning a server off for everyone (`POST …/capabilities/:id/disable`) stays
+with admins; servers a plugin brings go with their plugin, a server the
+organization serves here is turned off here instead (`canRemove: false`), and
+servers configured in settings aren't removable. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.
+Workspace Skill authoring, review, install, import and removal instead require
+`documents:manage`, which ordinary Members hold: workspace Skills are shared
+team content.
 
 The catalog merges:
 
@@ -16,13 +57,29 @@ The catalog merges:
 - reviewed integrations.sh snapshot imports stored as global `source: "registry"` catalog rows
 - public remote MCP servers discovered from the official MCP Registry
 
-Native OpenGeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Sandbox Environments, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
+Native Opengeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Sandbox Environments, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
 
 Every catalog item includes a typed `lifecycle` projection and a bounded list of supported `actions` (`install`, `connect`, `configure`, `update`, `repair`, `disconnect`, `uninstall`, or `inspect`). The legacy `enabled` fields remain a compatibility projection while clients migrate; provenance such as `built_in` never implies lifecycle state. External configured MCPs are reported as deployment-managed and inspect-only.
 
+1Password is a built-in connection, not an imported registry row. It appears in
+the default Connections list and agent search even before an account is connected.
+Its catalog and chat setup actions open Secrets, where a person enters a service
+account token, selects ownership, and chooses vaults and their access modes.
+Chat setup opens in a new tab to preserve the conversation. It never uses generic
+MCP enablement; catalog imports and production data repairs are not required.
+
 ## Runtime Behavior
 
-Remote MCP capabilities with a streamable HTTP endpoint are executable. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, OpenGeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks. A workspace may store `sessionToolDefaults` for sessions and scheduled sessions created without an explicit `tools` key. Workspaces without that override include available configured and enabled capability MCP servers by default. An existing exact override remains exact; `inheritConnectedMcpServers: true` additionally includes current and future connected MCP servers while preserving the selected built-in `files`/`docs` defaults. The web editor preserves built-in overrides when changing connector defaults. An explicit tools list (even an empty one) is taken verbatim. If the probe fails, the API returns `422` and the capability stays disabled, so a stale, down, or auth-only endpoint never breaks agent turns at runtime.
+Fresh native connection setup uses the current actor's Connect catalog readiness
+for the deployment and workspace. Pending or failed checks do not offer setup;
+existing account management remains available. The stock Figma remote connector
+is withheld until Opengeni receives approved-client access: Figma permits only
+clients in its [MCP catalog](https://www.figma.com/mcp-catalog/), as described in
+its [access documentation](https://developers.figma.com/docs/figma-mcp-server/rate-limits-access/).
+Existing enabled connections and manually configured endpoints retain their
+ordinary management and authority boundaries.
+
+Remote MCP capabilities with a streamable HTTP endpoint are executable. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, Opengeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks. A workspace may store `sessionToolDefaults` for sessions and scheduled sessions created without an explicit `tools` key. Workspaces without that override include available configured and enabled capability MCP servers by default. An existing exact override remains exact; `inheritConnectedMcpServers: true` additionally includes current and future connected MCP servers while preserving the selected built-in `files`/`docs` defaults. The web editor preserves built-in overrides when changing connector defaults. An explicit tools list (even an empty one) is taken verbatim. If the probe fails, the API returns `422` and the capability stays disabled, so a stale, down, or auth-only endpoint never breaks agent turns at runtime.
 
 Tool selection is durable session state. The composer’s **+ → Connectors** menu
 contains connected apps, with available connections on by default. A normal
@@ -34,7 +91,7 @@ do not carry a private one-turn tool list.
 
 Built-in runtime tools are not exposed as granular workspace preferences. They
 follow the existing deployment and workspace policy; removing the settings UI
-does not rewrite stored restrictions. **Knowledge → Learning** owns scoped
+does not rewrite stored restrictions. **Settings → Agent learning** owns scoped
 knowledge retention and instruction/skill improvement defaults, independently of
 tool availability and action approvals.
 **Settings → General → New session defaults** controls whether workspace defaults automatically
@@ -51,11 +108,11 @@ Its search, open-page, and find-in-page response items settle from their own
 provider status and render before the answer they informed; they do not wait for
 a separate function-tool output event.
 
-MCP tool refs are strict by default. A newly submitted bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails closed when the turn demands that server's catalog or a tool. Startup eagerness is independent: only an exact session ref with `"eager": true` makes connection and schema admission a first-model-request barrier. A client can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning. Persisted refs have a separate turn-time safety rule: if a previously valid server is later disconnected, disabled, or removed from the runtime registry, OpenGeni preserves that selection in the session's effective-policy audit projection but omits it from executable tools for the turn. The model receives a bounded system notice naming the unavailable server and must not claim to have read or updated it, so one disappearing integration cannot trap every later chat turn in an `Unknown MCP server id` failure loop.
+MCP tool refs are strict by default. A newly submitted bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails closed when the turn demands that server's catalog or a tool. Startup eagerness is independent: only an exact session ref with `"eager": true` makes connection and schema admission a first-model-request barrier. A client can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning. Persisted refs have a separate turn-time safety rule: if a previously valid server is later disconnected, disabled, or removed from the runtime registry, Opengeni preserves that selection in the session's effective-policy audit projection but omits it from executable tools for the turn. The model receives a bounded system notice naming the unavailable server and must not claim to have read or updated it, so one disappearing integration cannot trap every later chat turn in an `Unknown MCP server id` failure loop.
 
 An optional connection-backed MCP whose credential is unavailable during
 `initialize` or `tools/list` is setup availability, not proof that the user
-asked to use that integration. OpenGeni skips it without emitting a
+asked to use that integration. Opengeni skips it without emitting a
 conversational `tool.auth_needed` card. A concrete `tools/call` authentication
 failure still emits the actionable event with its tool name, and historical
 tool-less setup events remain available to debug/audit projections rather than
@@ -72,6 +129,193 @@ widens the model-visible tool policy. Runtime authorization is rechecked before
 each Apps request; ownership and mutation rules are detailed in
 [`mcp-surfaces.md`](mcp-surfaces.md).
 
+### Personal workspace extension
+
+A Personal workspace extends its owner's organization for that one person. In
+the owner's Personal workspace, agents and the Connections page also get the
+MCP connectors behind the owner's own active **Only me** (subject-scoped)
+connections made in other workspaces of the same organization. Nothing is
+copied: `personalWorkspaceExtensionMcpServers`
+(`packages/core/src/domain/personal-workspace-connectors.ts`) derives them on
+every catalog read, session create, approval-policy read and worker claim.
+
+- A curated catalog connector uses its catalog definition; the origin
+  workspace's installation config does not follow. A custom MCP uses the
+  origin workspace's enabled capability whose connection reference matches the
+  connection, including that workspace's tool settings for it (allowed tools,
+  timeout, caching and approvals). Workspace-held credential headers and
+  host-authority references never follow; the carried server always binds the
+  owner's own subject-scoped account.
+- It applies only in the subject's canonical Personal workspace, only to that
+  subject's own active subject-scoped connections in the same account, and only
+  while the owner is still a live member of the origin workspace (rechecked
+  each time, so removing the connection or the membership leaves nothing).
+  Workspace-scoped connections and other people's connections never follow.
+- Personal's own installation of the same capability, enabled or disabled,
+  wins. The organization integration policy must allow each connector under
+  the key the owner's own setup of it in Personal would check: a dedicated
+  adapter's key (`gmail`, `google-drive`, `google-calendar`, `slack-personal`)
+  for those curated connectors, `custom:mcp` for other catalog connectors, and
+  `custom:mcp` (plus any dedicated key) for workspace-defined custom servers.
+  Shared workspaces are unchanged.
+- The Connections page lists a carried connector as connected, labelled
+  **From <workspace>**; it is managed in the origin workspace. Its owner can
+  still set its approvals in Personal, stored for the Personal workspace like
+  any of its own connectors.
+
+API Integrations follow the same rules
+(`personalWorkspaceExtensionApiIntegrations`): a curated definition (for
+example Outlook, OneDrive or Teams) or a workspace's own OpenAPI or GraphQL
+service installed in the origin workspace is carried when its instance is
+bound to one of the owner's own active **Only me** accounts there. An API
+Integration holds one instance per account, so Personal's own instances sit
+beside carried ones; only an instance Personal already has for the same
+account, or a server id it already serves, wins. The policy key is the curated
+definition's id, or `custom:<protocol>` for a workspace-authored one. The
+integrations list (`GET /v1/workspaces/:id/integrations`) marks a carried
+instance with `personalExtension`; the Connections page labels its account
+**From <workspace>** and leaves Reconnect, Remove and its settings to that
+workspace.
+
+MCP event sources are not carried yet.
+
+### Organization connectors
+
+An organization owner or admin can add an MCP connector once for the whole
+organization and choose where it works, instead of each workspace setting it
+up. Each organization connector is either a reviewed catalog connector or a
+custom remote MCP server (name and streamable HTTP endpoint), and stores how
+turns sign in to it:
+
+- `each_person`: everyone connects their own account to the server's OAuth,
+  as with a workspace connector enabled for personal accounts. Google's MCP
+  servers only allow this.
+- `auto_connect`: everyone has their own account, but Opengeni connects them
+  the first time they use it, with no sign-in screen: the organization's
+  Opengeni issuer signs an ID-JAG for them and the app, which trusts that
+  issuer, issues their token. Only for MCP servers whose authorization server
+  accepts the JWT bearer grant, checked before adding
+  (`checkOrganizationConnectorAutoConnect`) and tested with
+  `testOrganizationConnectorAutoConnect`. See
+  [Integrations design § 5.5](integrations-design.md#55-auto-connect-opengeni-as-the-id-jag-issuer).
+- `organization_key`: request headers held by the organization, probed and
+  then stored encrypted exactly like
+  [credential headers](#credential-headers). The API returns header names only.
+- `none`: a server that needs no credentials, probed when added.
+
+The sign-in mode is fixed once added; remove the connector and add it again to
+change it. Availability uses the same reach as organization model keys:
+`allowedWorkspaceIds: null` means every shared workspace, a list means only
+those shared workspaces, and `allowPersonalWorkspaces` separately decides
+whether members' Personal workspaces get it. A list may only name this
+organization's shared workspaces (`422` otherwise).
+
+In a workspace it reaches, an organization connector behaves like an enabled
+connector of the workspace's own. It appears once in the catalog with
+`lifecycle.managedBy: "organization"`, the detail **From your organization**
+and `metadata.organizationConnector` (`id`, `generation`, `login`, `source`).
+Agents get it in name order among the workspace's own connectors, with the
+same server ID a workspace setup of the same connector would have, so tool
+names don't change when a connector moves between the two. A catalog connector
+keeps its catalog approval floor; a custom one has none, as for a workspace's
+own custom server. When a person shares their own login made through it, that
+login carries into their Personal workspace like any other
+([Personal workspace extension](#personal-workspace-extension)).
+
+The workspace's own installation of the same capability, on or off, always
+wins:
+
+- A workspace manager (`capabilities:manage`) can turn it off for that
+  workspace with the ordinary disable action. That stores a turned-off
+  installation marked as the override; the catalog then shows the connector as
+  available, **Turned off in this workspace**. An enable request with an empty
+  body turns it back on by removing the override.
+- An admin's enable request that brings its own setup (connection reference,
+  headers, config or metadata) for a catalog connector creates the workspace's
+  own installation, which then replaces the organization's in that workspace.
+  A custom organization server has no definition outside the organization's,
+  so that is refused with `409`.
+- Anyone connecting their own account to an `each_person` connector (a
+  subject-scoped OAuth reference to the same provider, with no pinned account
+  or resources) uses the organization's setup; an admin doing so creates no
+  workspace installation either.
+- A member's personal setup (`connections:personal`) never adds a workspace
+  installation over the organization's and never turns back on one an admin
+  turned off here.
+
+Administration is organization-level and needs no workspace:
+
+| Route | SDK method |
+| --- | --- |
+| `GET /v1/organizations/:organizationId/connectors` | `listOrganizationConnectors` |
+| `POST /v1/organizations/:organizationId/connectors` | `createOrganizationConnector` |
+| `PATCH /v1/organizations/:organizationId/connectors/:connectorId` | `updateOrganizationConnector` |
+| `DELETE /v1/organizations/:organizationId/connectors/:connectorId` | `deleteOrganizationConnector` |
+| `POST /v1/organizations/:organizationId/connectors/api-integrations/preview` | `previewOrganizationApiIntegration` |
+| `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/organization` | `setOrganizationApiIntegrationHere` |
+
+A create request names exactly one of `capabilityId` (catalog), `custom` or
+`apiIntegration` (below), plus `login`, `headers` (only with an MCP
+`organization_key`), optional `allowedTools` and `availability`. A change sends
+`expectedGeneration` with any of `availability`, `allowedTools`, `status`
+(`active` or `disabled`), `headers` (MCP organization key only, probed again)
+and `apiKey` (API integration organization key only); a stale generation
+returns `409`. Removing a connector stops it in every workspace at once.
+
+#### Organization API integrations
+
+An organization connector can also be an
+[API integration](#protocol-neutral-api-integrations) (`kind: "api"`): a custom OpenAPI or
+GraphQL API, or a reviewed definition the organization's policy allows. The
+admin previews it first with the same sources a workspace previews
+(`previewOrganizationApiIntegration`, which may take an `apiKey` used only to
+read an API that needs one to describe itself), then adds it with
+`apiIntegration: { source, expectedRevisionId, expectedContentSha256 }`. The
+source is compiled again and must still be the previewed revision (`409`
+otherwise); the compiled revision is stored, so every workspace it reaches runs
+exactly what was reviewed. How turns sign in must fit how the API
+authenticates: an API with no authentication takes `none`, an OAuth API takes
+`each_person`, and a key or HTTP API takes `each_person` or `organization_key`
+(`422` otherwise). An organization key is `apiKey`: placements (header, query
+parameter or cookie, with an optional prefix such as `Bearer `) stored
+encrypted, decrypted per request and sent only to that API, never refreshed or
+retried when rejected. With `each_person`, a turn runs it through the
+person's own active Only me connection to the API's provider, of the kind its
+authentication takes; without one, the person's turns don't get its tools.
+The connector's `apiIntegration` summary returns the protocol, how the API
+authenticates and its tools; keys are never returned.
+
+In a workspace it reaches, it lists among the workspace's API integrations
+under the instance key `organization` (reserved: a workspace install,
+uninstall or uninstall preview with that key returns `409`), marked with
+`organizationConnector` (`connectorId`, `login`, `auth`, `enabledHere`). A
+workspace manager turns it off for that workspace, or back on, with
+`setOrganizationApiIntegrationHere`; one turned off still lists, with
+`enabledHere: false`. A workspace's own instance of the same capability wins
+there. Adding one checks the organization integration policy with the
+definition's key for a reviewed definition, or `custom:openapi` /
+`custom:graphql`; a restricted policy narrows an `auto` source to the custom
+protocols it allows. Storage is the same `organization_connectors` table
+(migration `1199_organization_api_integrations.sql` adds `kind`, and `1200_validate_organization_connector_kind.sql` validates its check).
+
+Only signed-in organization owners and admins, and agents acting for one,
+manage organization connectors; the database checks the person's live
+organization role in every change. Organization API keys are refused (`403`).
+Adding one, or saving one that stays on, is an acquisition under the
+[organization integration policy](organization-integration-policy.md) with
+the `custom:mcp` key, as for a workspace's own MCP setup; an organization key's
+headers also follow the EU-only content-flow rules. Storage is
+`organization_connectors` (migration `1175_organization_connectors.sql`), with
+row security serving each workspace exactly the connectors that reach it.
+
+In the app, owners and admins manage them under **Organization settings >
+Integrations > Connectors**: add one from the catalog or by server address,
+choose how people sign in and where it works, turn it off everywhere, change
+where it works, replace its organization key or remove it. In a workspace, the
+connector's page shows **Turn on for this workspace** when a workspace manager
+turned it off there; members without `capabilities:manage` are told to ask a
+workspace admin.
+
 ### Credential headers
 
 MCP servers that require request headers (for example an `Authorization` bearer token) are enabled by passing the headers in the enable request:
@@ -82,7 +326,7 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/capabilities/mcp
   -d '{"headers":{"Authorization":"Bearer <token>"}}'
 ```
 
-The probe runs with those headers, and on success the values are stored encrypted (AES-256-GCM under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like workspace variable set values) on the installation. At runtime the worker decrypts them and sends them only to that MCP server. The API never returns header values - installation responses expose the stored header names only. Re-enabling without a `headers` field reuses the stored credentials; passing `headers` replaces them.
+The probe runs with those headers, and on success the values are stored encrypted (AES-256-GCM under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like hosted vault values) on the installation. At runtime the worker decrypts them and sends them only to that MCP server. The API never returns header values - installation responses expose the stored header names only. Re-enabling without a `headers` field reuses the stored credentials; passing `headers` replaces them.
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
@@ -102,15 +346,18 @@ The descriptor identifies catalog identity, actual complete Connection/host/no
 credential authority, tool-surface class, destinations, and safe-read-only
 replay policy, but grants no authority. Generic static-adapter selection rejects
 ambiguous matches and keeps provider matching out of the catalog importer,
-OAuth client/profiles, and web row/page components. OpenAPI and GraphQL
-Integrations, including Google Drive, keep their existing local MCP adapters and
-do not claim this reviewed static bridge descriptor. Compiler-wide OpenAPI
-destination governance remains separate work. See
+OAuth client/profiles, and web row/page components. Google Drive uses a reviewed
+hybrid descriptor: official remote MCP tools plus
+Opengeni REST extensions under one selected personal Connection. OpenAPI and
+GraphQL Integrations retain their local MCP adapters and do not claim this
+reviewed bridge descriptor. Compiler-wide OpenAPI destination governance remains
+separate work. See
 [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md).
 
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
-flow. Curated Integration Definitions cover Google Drive/Gmail and Microsoft
-Outlook Mail/Calendar/Contacts/OneDrive; a general OpenAPI URL, GraphQL endpoint,
+flow. Curated Integration Definitions cover Microsoft
+Outlook Mail/Calendar/Contacts, OneDrive, SharePoint and Teams; Gmail and Google Drive use catalog MCP
+connections. For other APIs, a general OpenAPI URL, GraphQL endpoint,
 or auto-detected URL creates a workspace Definition through the same contracts. Preview performs
 bounded, pinned source discovery, compiles stable tool identities and safety
 metadata, reports the required authentication without returning credentials,
@@ -156,7 +403,7 @@ remote MCP transport. Duplicate destinations, forbidden transport headers,
 cookie injection, control characters, and oversized values are rejected before
 the request URL or headers are mutated.
 
-Curated Google and Microsoft Definitions use one signed PKCE flow:
+Curated API Definitions use one signed PKCE flow:
 
 - `POST /v1/workspaces/:workspaceId/integrations/oauth/start`
 - `GET /v1/integrations/provider-oauth/callback`
@@ -169,14 +416,17 @@ omitted value is a 422 rather than a silent choice, because defaulting to
 share a newly connected mailbox with the whole workspace. A reconnect keeps the
 existing Connection's ownership. Requesting `personal` requires an authenticated
 human — an API key, the `configured:` key, a service principal, or an agent
-attempt is refused with a 422 rather than owning a personal Connection. Google can reuse the deployment's
-Google Drive OAuth app; Microsoft and alternate Google clients are selected
-from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL.
-The Google callback keeps the existing registered URI and verifies the signed
-state before dispatching either the legacy read-only Drive connector or a named
-provider instance. A Google Web application client must include its client
+attempt is refused with a 422 rather than owning a personal Connection. Clients
+are selected from
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL. The
+retired native Drive source callback cannot establish new connections. Gmail
+and Drive MCP use the separate `/v1/integrations/oauth/callback` flow and
+the Google issuer entry; their scopes require their own applicable verification.
+A Google Web application client must include its client
 secret; a public client may explicitly use `tokenEndpointAuthMethod: "none"`.
-Callbacks consume single-use state, recheck `connections:write`, verify the
+Callbacks consume single-use state, recheck the start's Connect permission
+(`connections:personal` for your own account of a reviewed definition,
+otherwise `connections:write`), verify the
 provider principal, require every Definition scope, preserve an existing refresh
 token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
@@ -207,7 +457,7 @@ and auth-needed paths without sending MCP traffic to the provider API.
 
 Safe OpenAPI reads and GraphQL queries may refresh an OAuth credential and retry
 exactly once after a provider `401`. A mutation is never replayed after the
-provider accepted the request path: OpenGeni refreshes only for a future call
+provider accepted the request path: Opengeni refreshes only for a future call
 and reports the current outcome as unknown. Credential-bearing redirects remain
 disabled and provider response bodies remain bounded.
 
@@ -239,14 +489,14 @@ exact instance; the underlying Connection and shared definition survive unless
 separately removed.
 
 Provider adapters may also publish immutable generic facet definitions for
-Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
-Google Drive and OneDrive expose drive-content Knowledge Sources; Gmail and
+Inbound Triggers, Delivery Destinations, and Identity Links. Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
-identity. In the web app these live in
+identity. Integrations give agents tools and access; they never import provider
+content into Knowledge. Recurring work is an ordinary agent schedule that uses
+the integration's tools. In the web app these live in
 `apps/web/src/components/capabilities/integration-facets-panel.tsx`, mounted
 per account entry inside the integration page's **Connected accounts** section
-through the lazy `integration-account-facets.tsx` boundary (which also carries
-the provider-specific Google Drive knowledge-source dialog). The panel is
+through the lazy `integration-account-facets.tsx` boundary. The panel is
 scoped to exactly one `capabilityId`/`instanceKey`/`instanceVersion` and is
 omitted entirely for a definition that publishes no facets. These definitions
 are adapter-owned and cannot be invented or
@@ -266,20 +516,16 @@ Integration definition upgrades migrate same-key facets without losing
 configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
 and reject an upgrade that would silently remove a configured facet.
 
-Google Drive's `drive-content` facet uses a provider-specific editor because
-its required schema contains a bounded array of verified folders/Shared Drives
-plus a bound document destination. Browse and save resolve the exact named
-Integration instance before loading its Connection. Save re-reads every source
-from Google, rejects stale client labels/types/drive identities, binds the
-organization/workspace/personal destination authority, and writes only the
-facet binding. The generic facet `PUT` rejects this provider-owned facet;
-only the provider-specific `/source` route may persist its config, so a
-schema-valid payload cannot bypass Google metadata checks or forge destination
-authority. A sibling Google Drive instance-whether it uses another Google
-account or another ownership scope-is never selected by provider/domain
-fallback and is not mutated. Generic browser editing refuses required object or
-array fields unless a provider-specific flow owns them, so OneDrive and future
-rich schemas cannot be submitted as silently incomplete primitive config.
+The Knowledge Source facet kind (`knowledge_source`, for example the former
+Drive and OneDrive `drive-content` facets) was removed with integration
+Knowledge sync; migration 1275 deleted its stored definitions and bindings. The
+kind stays in the public SDK enum until the next major, and the facet browse
+and source routes answer 410. Recurring Drive or OneDrive work uses an ordinary
+agent schedule with the account's tools. See [Google Drive](google-drive.md) for the
+Drive MCP connection and its access limits.
+Generic browser editing refuses required object or array fields unless a
+provider-specific flow owns them, so OneDrive and future rich schemas cannot be
+submitted as silently incomplete primitive config.
 
 The Definition inventory returns only safe public metadata (id, label, provider
 family/domain, protocol, summary, requested scope names, and immutable facet
@@ -319,7 +565,7 @@ and workspace it was requested for, so switching workspaces mid-flight can never
 populate the new workspace with the previous one's connections, definitions, or
 installed instances. Browse renders at most 48 catalog tiles initially and
 advances in bounded windows near the scroll edge. Logos stay lazy, the custom-API
-wizard, the Drive folder picker, and the per-account facets panel are code-split,
+wizard and the per-account facets panel are code-split,
 and filtering/searching remains client-local and deterministic after the single
 catalog projection arrives - including the Custom APIs list, which answers the
 same query as every other connector instead of ignoring it. Browser acceptance
@@ -431,7 +677,7 @@ Uninstalled entries are not advertised in Skill search: `skill_search` returns n
 - `id` is stable (`skill:azure-verified-modules` in the catalog).
 - `metadata.libraryId`, `metadata.version`, `metadata.contentSha256`, `metadata.sourceCommit`, `metadata.sourceUrl`, `metadata.provenance`, `metadata.license`, `metadata.documentationUrl`, `metadata.compatibility`, and `metadata.upgrade` make provenance inspectable. `contentSha256` is a canonical whole-artifact digest over sorted normalized relative paths and the exact bytes of every recursively materialized regular file, not only `SKILL.md`.
 - Entries are immutable. A changed artifact is a new version and hash. The human install endpoint requires the exact reviewed version and whole-artifact hash and returns `409` if the reviewed artifact changed; the agent `library:<id>` source installs the entry's current reviewed version.
-- Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach a Variable Set, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The installed Skill joins the workspace Skill index like any other workspace Skill and is read server-side through `skill_read`.
+- Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach vault items, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The installed Skill joins the workspace Skill index like any other workspace Skill and is read server-side through `skill_read`.
 - Installation loads the library artifact and verifies its whole-artifact hash; a missing entry, unavailable artifact, or hash mismatch fails closed and never substitutes a different version. Turns then read the installed revision's exact files from the Skill ledger, not from the runtime library.
 
 Install the exact reviewed catalog version and hash:
@@ -566,23 +812,23 @@ APIs**, and **Browse** all render *inside* the Connectors `<section>` element,
 and Enabled and Browse are `<h3>`s under it - they are views of Connectors, not
 surfaces of their own.
 
-**Integrations** are built and run by OpenGeni: Slack, GitHub, Google Drive,
-Jira & Confluence, Outlook Mail, Outlook Calendar, Outlook Contacts, and
-OneDrive. They receive events, post as OpenGeni, and hold their own identity in
-the other product. Every integration's page renders through the same component
+**Integrations** are built and run by Opengeni: Slack, GitHub, Outlook Mail,
+Outlook Calendar, Outlook Contacts, OneDrive, SharePoint, and Microsoft Teams. These integrations receive
+events, post as Opengeni, or hold their own identity in the other product.
+Google Drive and Atlassian connect only through their hosted MCP servers; the
+removed native source connections are not shown. Every integration's page renders through the same component
 (`apps/web/src/components/capabilities/integration-page.tsx`) fed by one plain view-model
 (`integration-view-model.ts`); one adapter hook per provider
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
-`use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`,
 `use-outlook-mail-integration.tsx`, `use-outlook-calendar-integration.tsx`,
-`use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`) maps
+`use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`,
+`use-sharepoint-integration.tsx`) maps
 that provider's data onto the view-model and picks the content for the
 viewer's role. There is exactly one row per provider, never one row per
 account and never a separate control center: the shared multi-account layer
 (`use-api-integration-accounts.tsx`) folds every curated `IntegrationDefinition`
-instance a provider has (Outlook Mail/Calendar/Contacts, OneDrive, and extra
-Google Drive accounts beyond the primary knowledge connection) into that one
-row's rolled-up state. The page contains no provider-specific
+instance a provider has (Outlook Mail/Calendar/Contacts, OneDrive and SharePoint) into that
+one row's rolled-up state. The page contains no provider-specific
 branch; every account/provider difference lives in the adapters.
 
 GitHub's Options block includes the attempt-frozen action approval policy for
@@ -600,7 +846,7 @@ it does not mutate connector-policy rows directly.
   available to assistive technology; warnings, pending review, and unavailable
   states remain visible. Type, provenance, and component counts belong in
   details, not in the catalog description. A provider with several modes
-  (Slack bot or personal account; Jira & Confluence sync or agent tools) opens
+  (for example, Slack bot or personal account) opens
   a provider page listing each mode, and each mode opens its own page. Hosts provide explicit health state;
   display labels never determine credential authority.
 - The integration page (`integration-page.tsx`, rendering the same view-model
@@ -615,9 +861,7 @@ it does not mutate connector-policy rows directly.
   per-item actions (`Reconnect` only when that account is unhealthy,
   `Remove` always, confirmed before it destroys anything), and its
   per-instance **Facets** panel (below) expanded in place under the entry.
-  Google Drive's primary knowledge connection is one such entry, and the
-  folders it contributes stay visible as its sub-entries rather than
-  disappearing when a second Drive account exists. A `+ Add account`
+  A `+ Add account`
   edit-link sits in the block header;
   **Settings** holds the options as switches (and, where a setting is a choice, a compact
   select); tool names are a flat, purely informational, monospace list inside
@@ -639,21 +883,19 @@ it does not mutate connector-policy rows directly.
   `aria-describedby`.
 - Role changes content, never layout. Anyone with connection management
   permission (`connections:write` or workspace admin) sees the Slack bot
-  (installation facts, what OpenGeni can see, and install/reconnect/disconnect);
+  (installation facts, what Opengeni can see, and install/reconnect/disconnect);
   the reaction shortcut, knowledge destination, and decision publication options
   stay admin-gated on that page. Everyone else sees their own personal
-  Slack account. Nobody is offered both. Deep provider dialogs (the Drive
-  folder picker, the Jira/Confluence source picker, the reaction conversation
-  picker, the Slack decision-publication settings) open from the Access block's
+  Slack account. Nobody is offered both. Deep provider dialogs (the reaction conversation
+  picker and the Slack decision-publication settings) open from the Access block's
   single edit affordance or an option's action link.
-- Adding an account to a multi-account provider (Outlook, OneDrive, extra
-  Google Drive accounts) is a zero-dialog, straight OAuth redirect - every
+- Adding an account to a multi-account provider (Outlook or OneDrive) is a zero-dialog, straight OAuth redirect - every
   curated `IntegrationDefinition` today is oauth2-only and already reviewed,
   so there is no account-naming form first. The one shared
   `quick-connect-dialog.tsx` component exists for the two authKind cases that
   do need a screen (`api_key`: one field, no scope bullet list; unreviewed
   `oauth2`: one line naming the domain), and is reused by account actions.
-  Gmail uses a catalog Connector rather than an API integration definition (see the Gmail section below).
+  Gmail and Google Drive use catalog Connectors rather than API integration definitions.
 
 **Connectors** are MCP servers from the catalog, plus workspace-defined Custom
 APIs (OpenAPI/GraphQL) - there is no third bucket. The existing `authKind`
@@ -662,7 +904,8 @@ behavioral difference the connect flow needs, so Custom API connectors use the
 same single-row setup treatment as any other Connector.
 Connection setup defaults to workspace ownership, with personal defaults for
 mail, calendar, contacts and drive integrations. Both **This workspace** and
-**Only me** remain selectable. The shared setup dialog explains that workspace
+**Only me** remain selectable when the provider supports both. Gmail and
+official Drive MCP connections are personal-only. The shared setup dialog explains that workspace
 sharing uses the account or credentials the human authorizes. It stores
 API-key credentials under each field's **wire header name**, never its human
 label. Connecting does not silently install bundled Skills.
@@ -675,7 +918,7 @@ enabled strip carries only `mcp`/`api` rows, so its one remove affordance is
 
 The Connectors search and kind filters are scoped to Connectors. The catalog is
 narrowed to `kind: "mcp"` and `kind: "api"` items once
-(`isConnectorCatalogItem` in `apps/web/src/lib/capabilities.ts`) before the
+(`isConnectorCatalogItem` in `packages/react/src/app/lib/capabilities.tsx`) before the
 Featured, Enabled, Browse, and count projections are derived, so no Skill,
 or Plugin row can appear in any of them and the chip counts describe what
 that grid can actually show. `CAPABILITY_FILTERS` therefore offers exactly
@@ -726,13 +969,20 @@ The official MCP Registry is public metadata. Evaluate any server and its endpoi
 
 ## Agent discovery and in-session authorization
 
-Ordinary new sessions include two first-party OpenGeni tools:
+Ordinary new sessions include two first-party Opengeni tools:
 
 - `capability_catalog_search` searches the same merged workspace catalog as the
   Capabilities page. It returns bounded, secret-free descriptors and a live
   setup state; it never returns credential instructions, tokens, or raw catalog
   metadata. Search is deterministic, excludes untrusted registry rows, and
-  prefers exact, enabled, verified, and built-in matches. Agents should search
+  prefers exact, enabled, verified, and built-in matches. It tolerates near
+  spellings with a bounded edit-distance tier on names, provider domains, and
+  tags (ranked below exact, prefix, and substring hits and flagged
+  `approximate`), and matches workspace or operator entries without a provider
+  domain by their endpoint's registrable domain. A miss never returns a bare
+  empty result while the catalog has entries: `suggestions` lists the closest
+  names so the agent checks them before saying an integration does not exist.
+  Agents should search
   by the outcome they need (for example, `GitHub repositories`, `product
   analytics`, or `Slack notifications`) rather than guessing an MCP endpoint.
 - `capability_authorization_request` posts one `tool.auth_needed`-style card to
@@ -743,7 +993,7 @@ Ordinary new sessions include two first-party OpenGeni tools:
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human
   reviews/edits the address and creates a catalog entry with the ordinary
-  `capabilities:manage` permission; credential setup, enablement, and session
+  `connections:write` permission; credential setup, enablement, and session
   tool selection then use the existing protected flows. Search the catalog
   first; API/GraphQL definition import remains its separate preview wizard.
 
@@ -759,6 +1009,58 @@ return to the same session, enabling the capability against the exact new
 connection. API-key values go only to the protected connection API, never into
 the event or model-visible tool result. Provider-specific prerequisites retain
 their existing protected setup paths and permission checks.
+
+The GitHub App card is the one card that can also add something to the chat:
+after the workspace binding exists it lists the shared repositories, and **Use**
+sends an ordinary human message carrying the composer picker's repository
+resource through the same Send endpoint and validation. See [GitHub App workspace bindings](github-app.md#using-a-repository-from-the-conversation-card).
+
+The deployment's reviewed API integrations (Outlook Mail, Outlook Calendar,
+Outlook Contacts, OneDrive, SharePoint and, where the Teams rollout allows it,
+Microsoft Teams) are also search results for agents, as `api:integration:<definition id>`
+entries tagged only with names that mean Microsoft (Outlook, Hotmail, MSN,
+Exchange, OneDrive, SharePoint, Teams), so generic requests such as "send an email" or
+"schedule a meeting" keep finding Gmail or Google Calendar. They are offered
+only when the definition is available in the workspace and the deployment's
+OAuth client and encryption are configured. Their setup state is per person:
+`ready` when one of the person's signed-in accounts has tools in the current
+turn, `unavailable` when it is signed in but its tools load in the next turn
+(or, in a chat with a fixed tool list that does not include it, until the
+person adds it to the chat's tools), otherwise `authorization_required`,
+including when the account's sign-in expired or was revoked. The card
+(`SessionIntegrationCapabilityCard`, the same component in the console and in
+`SessionConversation` / `OpenGeniChat` embeds, including session-proxy embeds)
+always connects the viewer's own personal account, never a workspace account.
+It starts a personal Connect attempt for a new account, or reconnects the
+viewer's expired or revoked account (the most recently used one when there are
+several), opens the provider sign-in in a popup from the same click, and lets
+the shared setup view install the definition's reviewed tools for that
+account. It then selects them for the chat and asks the chat to
+continue (`continueAfterCapabilitySetup`), so the agent resumes the request
+without the person typing anything. The card shows the viewer's own state; in
+a shared chat a teammate connects their own account, and the agent continues
+only for the person whose request it was. When Microsoft reports that an
+administrator must approve the app, the card shows the administrator approval
+link with a copy button and a **Try again** action.
+
+Installing a reviewed definition's tools for your own personal account counts
+as connecting your own account, so it needs only `connections:personal`
+(included in `connections:write`), not `capabilities:manage`: the instance
+resolves credentials for that person alone. The card itself also needs
+`sessions:control` to add the tools to the chat and continue it. A
+workspace-owned account, a custom source, or binding an instance that is not
+already bound to the same account needs `connections:write`. Where this client
+cannot connect a personal account
+(for example a shared service identity), the card says so instead of offering
+Connect.
+
+In `GET /v1/workspaces/:workspaceId/integrations`, `connected` is true only
+while the instance is bound to a connection whose status is active. An
+instance whose account sign-in expired or was revoked reports
+`connected: false` but keeps its `connectionId` and `ownership`, so clients
+can reconnect that account. `connectionLastUsedAt` is when the bound
+connection was last used (null when never used or unbound); clients use it to
+pick which of several disconnected accounts to reconnect.
 
 Reviewed library Skills install for the workspace. Their source/version review
 is available in the setup dialog; personal and conversation-only library
@@ -778,22 +1080,60 @@ or a repository outside the durable allowlist. On success the browser returns
 to the originating session and subsequent tool calls use the existing
 host-owned GitHub authority.
 
-## Official Gmail MCP
+## Google Drive MCP connection
 
-The reviewed catalog includes Google's official hosted Gmail MCP at
-`https://gmailmcp.googleapis.com/mcp/v1`. It is currently a Google Developer
-Preview. OpenGeni requests only the three scopes used by the reviewed tool
-surface:
+Google Drive appears as one personal catalog MCP connection. Its reads, search,
+downloads, copies and uploads use Google's official
+`https://drivemcp.googleapis.com/mcp/v1` server. The same selected connection
+also exposes reviewed REST extensions for file metadata updates, binary
+content overwrites, moves, trash/restore/deletion, sharing and change-feed
+checkpoints. It does not expose a separate publishing connection or native
+source-sync toggle. Recurring work uses normal agent schedules.
 
-- `https://www.googleapis.com/auth/gmail.readonly`
-- `https://www.googleapis.com/auth/gmail.compose`
-- `https://www.googleapis.com/auth/gmail.modify`
+`drive.readonly` and `drive.file` are required. Writes remain limited to files
+authorized for the app; this is not permission to modify every readable file.
+Native Docs/Sheets editing and ownership transfer are outside the extensions.
+Mutation approval and the current selected-account checks apply to every tool.
 
-Those scopes support search/read, draft creation, approval-gated sending
-(`send_message`, `send_draft`), and the reviewed label and unlabel operations.
-The Google scope is broader than the exposed tools, but the reviewed surface
-does not expose a delete tool, and every send requires durable human approval
-first - not a workspace setting. Gmail OAuth is handled by the ordinary
+Drive setup is off by default behind `OPENGENI_GOOGLE_DRIVE_MCP_ENABLED` until
+Google preview enrollment, API/client configuration, applicable scope verification
+and authenticated acceptance are complete. The common
+`OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED=false` gate pauses new Gmail/Drive
+setup without changing sign-in, existing token refresh or ordinary schedules.
+Gmail review and branding verification do not establish Drive data-access
+approval. Setup verifies an authenticated read as well as tool discovery; the
+public `tools/list` response alone is not evidence of working access.
+
+Previous native Drive connections have a removal surface only. Existing source
+jobs are blocked from new execution, while imported documents and run history
+are retained. See [Google Drive](google-drive.md) for operator setup, supported
+tools, limits and explicit replacement of old source schedules.
+
+## Gmail MCP bridge
+
+The reviewed Gmail connector uses Opengeni's REST-backed MCP bridge. Its
+historical `https://gmailmcp.googleapis.com/mcp/v1` connection identity remains
+stable, but setup, tool discovery, and execution do not contact Google's
+Developer Preview MCP server. The reviewed tool surface uses three scopes,
+asked for one step at a time (incremental consent):
+
+- `https://www.googleapis.com/auth/gmail.readonly`, the only scope a first
+  connection asks for (search and read);
+- `https://www.googleapis.com/auth/gmail.compose`, asked for in the chat the
+  first time a tool drafts or sends;
+- `https://www.googleapis.com/auth/gmail.modify`, asked for in the chat the
+  first time a tool organizes, trashes or imports mail.
+
+All tools stay listed for the model. A tool whose scope the account lacks stops
+before any provider request or approval, publishes an `insufficient_scope` auth
+notice and returns a not-run error; the chat card's Allow reconnects the same
+account for the base scope, the account's current Gmail grants and the missing
+scope, never more than the three above. A plain reconnect keeps exactly the
+grants the account already holds. Accounts connected before incremental consent
+keep all three scopes.
+Permanent message deletion requires a broader scope and remains unavailable.
+Tool permissions use the selected account’s Allow / Ask first / Block choices;
+connector recommendations are defaults. Gmail OAuth is handled by the ordinary
 encrypted connection broker,
 with a narrow Google
 compatibility path: authorization requests ask for offline consent, Google
@@ -802,15 +1142,16 @@ is omitted from Google's authorization, token, and refresh requests. The MCP
 resource remains stored in the encrypted bundle and bound to the runtime
 connection.
 
-Gmail defaults to personal ownership; users may instead connect it for the workspace.
+Gmail connections are personal-only; every member connects their own mailbox.
 Personal account selection is frozen for the initiating user's accepted work,
-and another participant cannot borrow that account. A workspace connection
-uses the explicitly shared mailbox. Gmail content added to a conversation
+and another participant cannot borrow that account. Historical workspace-owned
+Gmail grants remain available for cleanup but cannot be reconnected or enabled.
+Gmail content added to a conversation
 follows that conversation's visibility; account ownership does not change it.
 
 Gmail is the single connector path for the provider: the catalog row's
 `gmailmcp.googleapis.com/mcp/v1` resource is the connection and consent
-identity, but every tool call executes against a first-party OpenGeni bridge
+identity, but every tool call executes against a first-party Opengeni bridge
 over Gmail's REST API (`packages/runtime/src/gmail-rest-mcp.ts`), never
 against Google's Developer Preview MCP endpoint directly. There is no
 per-deployment toggle: the bridge is unconditional. This is also why Gmail has
@@ -818,13 +1159,11 @@ no separate OpenAPI API-integration definition and no REST-adapter fallback
 mode - both existed only while the bridge coexisted with a direct-passthrough
 option; consolidated onto one path, they were removed rather than deprecated.
 
-The catalog pins the exact twelve tools in the reviewed surface (the
-Developer Preview's ten plus `send_message`/`send_draft`, which the real
-Developer Preview server does not offer at all). A newly added tool is
-unavailable until the catalog contract is reviewed and updated. Draft
-creation, both send tools, and label/unlabel tools require the ordinary
-durable human approval - mandatory, not a workspace setting; search,
-message/thread reads, draft lists, and label lists do not. The bridge's
+The catalog pins 37 tools in the reviewed surface, including original-message
+and attachment downloads, draft editing/deletion, label management, inbox
+organization, history, imports and settings reads. See [Gmail](gmail.md) for the
+complete tool list, file receipts and watch setup. Sending and other mutations
+ask by default, and explicit tool choices control whether they run or ask. The bridge's
 credential broker binding permits only
 `https://gmail.googleapis.com/gmail/v1/users/me/...`: it cannot call another
 Google API or address another mailbox. Read-only calls may refresh after one
@@ -832,37 +1171,82 @@ Google API or address another mailbox. Read-only calls may refresh after one
 after an ambiguous provider response - it fails closed with an explicit
 "outcome is uncertain" error instead of risking a duplicate send.
 
+OAuth discovery reads Google's pinned OpenID metadata with PKCE S256 and uses
+the deployment's registered client. After exchanging the authorization code,
+setup requires a fresh refresh token, the reported `gmail.readonly` scope, and a
+successful `GET https://gmail.googleapis.com/gmail/v1/users/me/profile`. Only
+the verified mailbox email label is stored; counts and history identifiers are
+discarded. The label does not replace the signed Opengeni owner authority.
+Tool permissions use the bridge's static reviewed catalog. A failed grant or
+verification settles the Connect attempt as failed without changing any
+previous connection. Google does not guarantee a new refresh token on every
+consent prompt; a response without offline access must be retried rather than
+combined with a previous account's token.
+
 Before importing/enabling the capability in a deployment:
 
-1. Join the [Google Workspace Developer Preview
-   Program](https://developers.google.com/workspace/preview) with the Google
-   Workspace account that will authorize Gmail. Include the deployment's exact
-   Google Cloud project in the application and wait for Google to confirm that
-   both the account and project are registered. Enabling the APIs and granting
-   OAuth scopes alone is not sufficient for the hosted MCP preview.
-2. In that registered Google Cloud project, enable both the Gmail API and Gmail
-   MCP API, configure the OAuth consent screen, and create a **Web application**
-   OAuth client.
-3. Register
+1. Enable the Gmail API in the deployment's Google Cloud project, configure the
+   OAuth consent screen, and create a **Web application** OAuth client. The
+   hosted MCP preview and Gmail MCP API are not prerequisites for this bridge.
+2. Register
    `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/oauth/callback` as an authorized
    redirect URI.
-4. Set `OPENGENI_INTEGRATIONS_ENABLED=true`, configure the normal integration
+3. Set `OPENGENI_INTEGRATIONS_ENABLED=true`, configure the normal integration
    state/encryption secrets, and add the deployment-owned client:
 
    ```dotenv
    OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON='{"https://accounts.google.com":{"clientId":"...","clientSecret":"...","tokenEndpointAuthMethod":"client_secret_post"}}'
    ```
 
+4. Before public launch, complete Google's required restricted-scope OAuth
+   verification and any applicable security assessment. A Google project left
+   in Testing can expire refresh tokens after seven days; reauthorization is
+   then required even when the bridge is working correctly.
+   All three Gmail scopes are restricted, including `gmail.readonly`, so
+   incremental consent does not change this requirement; list all three in the
+   consent screen's data access settings.
 5. Run the normal reviewed catalog import, open **Capabilities**, search for
    **Gmail**, and select **Connect only for me**. The ownership choice is fixed:
    every member connects their own mailbox, and other workspace members cannot
    see or use it.
 
-The fixed tool allowlist and approval defaults are defense in depth for the
-provider's Developer Preview behavior. See Google's [configuration
-guide](https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server)
-and [MCP tool
-reference](https://developers.google.com/workspace/gmail/api/reference/mcp).
+The fixed tool allowlist and approval defaults limit the broader Google grant.
+See Google's [OAuth web-server guide](https://developers.google.com/identity/protocols/oauth2/web-server),
+[Gmail REST reference](https://developers.google.com/workspace/gmail/api/reference/rest),
+and [restricted-scope verification requirements](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
+
+## Google Calendar bridge
+
+Google Calendar uses the same reviewed REST-bridge design as Gmail. The catalog
+row's `https://calendarmcp.googleapis.com/mcp/v1` resource (Google's hosted
+Calendar MCP URL) is the connection and consent identity, but setup, tool
+discovery and execution run against Opengeni's bridge over the Calendar v3 REST
+API (`packages/runtime/src/google-calendar-rest-mcp.ts`); the hosted server is
+never contacted. OAuth discovery uses Google's pinned OpenID metadata, the
+deployment's existing Google client, offline consent and no RFC 8707
+`resource` parameter, exactly as for Gmail.
+
+Opengeni requests three scopes and requires all of them to be granted:
+
+- `https://www.googleapis.com/auth/calendar.calendarlist.readonly`
+- `https://www.googleapis.com/auth/calendar.events`
+- `https://www.googleapis.com/auth/calendar.freebusy`
+
+Connections are personal-only; every member connects their own calendar, and
+another participant cannot borrow the selected account. Setup requires a fresh
+refresh token and a successful read of the primary calendar, whose email becomes
+the account label. The broker binding permits only the calendar list, events
+and free/busy paths under `https://www.googleapis.com/calendar/v3/`.
+
+The catalog pins seven tools: `list_calendars`, `list_events`, `get_event` and
+`find_free_busy` are allowed by default; `create_event`, `update_event` and
+`delete_event` ask first. Writes are never replayed after an ambiguous provider
+response, and updates are guarded by the event's ETag. Setup is off by default
+behind `OPENGENI_GOOGLE_CALENDAR_ENABLED` and also respects
+`OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED`. Calendar scopes are sensitive rather
+than restricted, so production use needs Google's sensitive-scope verification
+but no security assessment. See [Google Calendar](google-calendar.md) for the
+tool behavior, time-zone handling and operator setup.
 
 ## integrations.sh Snapshot Imports
 
@@ -895,6 +1279,14 @@ malformed committed snapshot or committed row fails the refresh loudly instead
 of silently disabling retention. `--input <raw.json>` accepts either an
 already-hydrated upstream document or a precomputed `importRows` snapshot for
 offline reruns.
+Every refresh also screens logos: it fetches each row's `logoSourceUrl` and
+clears it when the image is only a generated letter placeholder (an SVG of
+rectangles and one or two text characters), so the product's own monogram
+shows instead of a hotlinked letter. The header's `logoScreen` lists
+the cleared rows and counts unreachable logos, which are left unchanged.
+`bun run catalog:screen-logos` reruns the screen on the committed snapshot;
+run `bun run format` on the snapshot afterwards. The importer and the vendoring
+script reject such a placeholder too (`generated_letter_placeholder`).
 Standard Helm installs and upgrades import that committed snapshot by
 default through the `catalogImport` hook Job; set `catalogImport.enabled=false`
 to opt out. The default `catalogImport.skipLogos=true` keeps deployment success
@@ -947,6 +1339,22 @@ the import fails loudly on an unknown key, a non-canonical URL, or a curated
 entry that matches nothing, because each of those would otherwise silently
 ship the raw aggregator row.
 
+The overlay's `identities` list is a narrower fix for well-known services
+the snapshot names only by hostname or marks only with a generated letter
+(integrations.sh serves a letter-on-a-square SVG for every domain it has no
+mark for). An identity, keyed by canonical MCP URL like an entry, sets just the
+display `name`, an optional `logoSourceUrl` from a licensed source (Simple
+Icons, CC0-1.0, for the Google API rows, komoot, Netlify and Meta) and an
+optional `homepageUrl`, with `notes` recording the evidence. It never curates,
+features, marks official or
+changes tier, auth, scopes or tools, so the row keeps its Community label and
+long-tail ordering; an mcpUrl may not be both an entry and an identity. The
+importer resolves a row's name as official, then identity, then snapshot, and
+its logo source the same way. Identity rows are vendored like curated ones, so
+their marks render under the default `--skip-logos` install. The setup card,
+the connector browser and every other surface read the same catalog row, so a
+fixed name also fixes the "Connect <name>" button.
+
 Every overlay match also records `metadata.curation.curated: true`. That fact
 is presentation provenance, not a badge or a security review. The web browser
 uses it to place synthesized first-party rows and the reviewed connector set
@@ -962,7 +1370,7 @@ map in the web app. The API retains its stable `kind`, `category`, `name`
 ordering; the connector browser applies the presentation-only stable grouping
 above after search and filtering.
 
-Imported logos are validated as images below 512KB and stored through OpenGeni
+Imported logos are validated as images below 512KB and stored through Opengeni
 object storage under `catalog-assets/...`; catalog rows store only the
 self-hosted `logoAssetPath`, never the third-party logo URL, and record where
 the bytes came from in `metadata.logoSource` (`vendored`, `integrations.sh`, or
@@ -971,19 +1379,57 @@ control characters from string fields, collapses duplicate `(domain, name)`
 clusters to the best deterministic row, skips known-dead demo domains, and
 quarantines flagged suspicious URLs in the batch details for manual review.
 
+### OAuth client requirements
+
+Some providers' authorization servers cannot be reached by OAuth
+self-registration from a hosted deployment: their metadata advertises neither
+dynamic client registration nor Client ID Metadata Documents, their
+registration endpoint refuses unknown clients, or they reject a deployment
+callback the provider has not allowlisted. `data/catalog/oauth-client-requirements.json`
+records those rows by canonical MCP URL with the authorization-server issuer,
+a reason, and the evidence. Listing a row there neither curates nor features
+it. The importer stamps `metadata.oauthClientRequirement = { issuer, reason }`,
+and the requirement facts are part of the `--if-changed` fingerprint.
+
+The capability catalog projects deployment connectability as
+`runtime.operatorOAuthClient.configured`, using the same issuer matcher the
+OAuth start uses to find an operator client in
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` (`findIntegrationsOauthClient` in
+`@opengeni/config`). When it is `false`, the web Connectors page (Featured,
+Popular, Browse) and the embedded `ConnectionDiscovery` do not offer the row.
+A row stays reachable when it is already enabled, the workspace has a
+connection for it, or the connection list could not be read. The agent
+follows the same rule (`deploymentCannotConnect` in
+`@opengeni/contracts/personal-integration-setup`, also set by the Google
+connector setup gate): for a row that is not enabled, `capability_catalog_search`
+reports `setup.status: "unavailable"` with no `nextAction` and the catalog note,
+`capability_authorization_request` posts no card, tool search does not name it
+as connectable, and a card already in a chat says it can't be connected here.
+To offer such a connector, register an OAuth client with the provider using the
+redirect URI
+`<OPENGENI_PUBLIC_BASE_URL>/v1/integrations/oauth/callback`, then add it to
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` under the listed issuer. No catalog
+change is needed. Gmail and the hosted Slack MCP are not listed because their
+native Connect readiness already gates them.
+`bun scripts/catalog-oauth-client-requirements-probe.ts` reads public metadata
+and reports unlisted rows that advertise no self-registration. Registration
+refusals and redirect allowlists only appear when registration is attempted,
+so record those from a reviewed attempt.
+
 ### Vendored logos
 
 A default deployment must not depend on integrations.sh or any other logo host
 being reachable at deploy time, yet the curated connectors should still render
 their logos rather than monograms. `data/catalog/logos/` therefore holds one
-committed asset per curated row whose effective logo source is published,
+committed asset per curated or identity row whose effective logo source is published,
 plus `manifest.json` recording provenance for each (capability id, domain,
 canonical MCP URL, source URL, SHA-256, content type, byte size, fetch time).
 The importer copies a vendored asset into object storage under the same
 `catalog-assets/...` key a fetched logo would use, in every mode: `--skip-logos`
 suppresses only network fetches for the uncurated long tail, because a
 vendored copy adds no third-party dependency. A curated `logoSourceUrl: null`
-(currently Gmail and Mobbin, which publish no reusable logo licence) always
+(currently Gmail, Google Drive and Google Calendar, whose marks ship with the
+product UI instead) always
 wins: no asset is vendored for such a row and a stray vendored file for it is
 ignored. A vendored entry whose recorded source no longer matches the row's
 effective source, or whose bytes no longer match its digest, is not served;
@@ -993,12 +1439,12 @@ part of the `--if-changed` import fingerprint, so adding or replacing a
 vendored asset lands on the next deploy.
 
 Regenerate the directory with `bun run catalog:vendor-logos` (add `--dry-run`
-to preview). It fetches each curated row's logo once, applies the same
+to preview). It fetches each curated or identity row's logo once, applies the same
 image-content-type and size validation the importer applies, refuses to write
 an invalid response, keeps a still-valid prior asset when a refetch fails, and
-removes files no curated row references. Review the diff and commit it like a
+removes files no curated or identity row references. Review the diff and commit it like a
 snapshot or overlay change; the committed manifest is checked in tests to cover
-exactly the curated rows that permit a logo, byte for byte.
+exactly the curated and identity rows that permit a logo, byte for byte.
 
 Fiken, X, and Reddit are synthesized first-party catalog rows rather than
 integrations.sh imports, so they cannot receive an importer-owned
@@ -1008,3 +1454,24 @@ browser prefers those local marks for the exact built-in ids and otherwise uses
 the normal self-hosted catalog asset URL. Missing or invalid bytes still fall
 back to the same monogram. Keep this exception limited to first-party rows;
 registry marks continue to belong in the reviewed vendoring pipeline above.
+
+### Icons from connected MCP servers
+
+A workspace's own MCP server (a custom item, `source: "manual"`) takes its logo
+from the server itself. MCP 2025-11-25 lets a server list `icons` in the
+`serverInfo` of its `initialize` reply. When the server is connected through
+Connect or enabled, the verification handshake keeps that `serverInfo`, ranks
+the icons for one theme-neutral tile (no theme, then light, then dark; SVG,
+then a raster of 64 px or more, then smaller or unsized rasters, then `.ico`),
+and tries at most three. A `data:` icon is decoded in place; an `https` icon
+is fetched through the deployment's outbound network policy with a 5 second
+timeout, a 512 KB cap and at most three `https` redirects. Each candidate goes
+through the same validation as vendored logos, including the SVG active-content
+check, and the first that passes is stored digest-keyed under
+`catalog-assets/mcp-icons/<server host>/` and recorded as the item's
+`logoAssetPath`. The browser therefore never loads an icon from the server's
+host. A server without a usable icon keeps the monogram, and icon problems
+never fail the connection. Shared registry rows keep their curated logo, and
+editing a custom item keeps the logo its server supplied. An existing
+connection picks up its server's icon the next time it is connected or
+enabled.

@@ -1,6 +1,14 @@
-import type { Session, SessionEvent } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type {
+  ChatSession as Session,
+  Session as FullSession,
+  OpenGeniClient,
+  SessionEvent,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { readFreshSessionDetail } from "../lib/session-detail-read";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
   useMutationRunner,
   usePolledValue,
@@ -8,16 +16,17 @@ import {
   type SessionEventFeedOptions,
 } from "./internal";
 
-export type UseSessionOptions = EmbeddedSessionReadClientOverride &
-  SessionEventFeedOptions & {
-    /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
-    pollIntervalMs?: number | undefined;
-    /** Optional shared causal clock invoked when each network read starts. */
-    beginRead?: (() => number) | undefined;
-  };
+export type UseSessionOptions<Client extends ChatClient = OpenGeniClient> =
+  EmbeddedSessionReadClientOverride<Client> &
+    SessionEventFeedOptions & {
+      /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
+      pollIntervalMs?: number | undefined;
+      /** Optional shared causal clock invoked when each network read starts. */
+      beginRead?: (() => number) | undefined;
+    };
 
-export type UseSessionResult = {
-  session: Session | null;
+export type UseSessionResult<S extends Session = FullSession> = {
+  session: S | null;
   loading: boolean;
   error: Error | null;
   /** Monotonic revision of accepted authoritative detail reads. */
@@ -26,7 +35,7 @@ export type UseSessionResult = {
   readGeneration: number;
   refresh: () => Promise<void>;
   /** Manually rename the session (PATCH, source='user'). Returns the updated session, or null on failure. */
-  updateTitle: (title: string) => Promise<Session | null>;
+  updateTitle: (title: string) => Promise<S | null>;
   /** True while a rename is in flight. */
   updating: boolean;
   mutationError: Error | null;
@@ -41,6 +50,10 @@ export function isTitleEvent(event: Pick<SessionEvent, "type">): boolean {
 function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
   return (
     isTitleEvent(event) ||
+    // Description or avatar edits (by a person or the agent) refresh the header.
+    event.type === "session.profile_set" ||
+    // The chat's model, effort or speed changed (for example by the agent).
+    event.type === "session.model_settings.updated" ||
     event.type.startsWith("session.command.") ||
     event.type.startsWith("session.wait.") ||
     event.type === "session.status.changed" ||
@@ -51,8 +64,16 @@ function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
 /** Fetch one session (with optional polling), live-patching its title on `session.title_set`. */
 export function useSession(
   sessionId: string | null | undefined,
-  options: UseSessionOptions = {},
-): UseSessionResult {
+  options?: UseSessionOptions,
+): UseSessionResult;
+export function useSession(
+  sessionId: string | null | undefined,
+  options: UseSessionOptions<ChatClient>,
+): UseSessionResult<Session>;
+export function useSession(
+  sessionId: string | null | undefined,
+  options: UseSessionOptions<ChatClient> = {},
+): UseSessionResult<Session> {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionRead(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
@@ -67,8 +88,8 @@ export function useSession(
         return null;
       }
       let readGeneration = 0;
-      const fetched = await client.getSession(workspaceId, sessionId, {
-        fresh: true,
+      // The live stream's head read joins this read (see session-detail-read).
+      const fetched = await readFreshSessionDetail(client, workspaceId, sessionId, {
         signal,
         onRequestStart: () => {
           readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
@@ -96,6 +117,16 @@ export function useSession(
     return registerSessionReconciler(sessionId, "session", refresh);
   }, [enabled, refresh, registerSessionReconciler, sessionId]);
 
+  // Until this conversation's first read lands, show what was left when the
+  // person last had it open (only when the host retains reads for `client`).
+  const retained = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "detail",
+    data?.session ?? null,
+    { enabled, discard: deniesRetainedView(error) },
+  );
   const base = data?.session ?? null;
   const readRevision = data?.revision ?? 0;
   const readGeneration = data?.readGeneration ?? 0;
@@ -105,11 +136,12 @@ export function useSession(
     () =>
       base && override && override.id === base.id
         ? { ...base, title: override.title, titleSource: override.titleSource }
-        : base,
-    [base, override],
+        : (base ?? retained),
+    [base, override, retained],
   );
 
   const sharedEvents = options.events;
+  const refreshDetail = useCallback(() => void refresh(), [refresh]);
 
   // Live-patch the title on auto (agent) + cross-client (user/agent) renames so
   // the UI reflects the new title without polling or a full re-fetch.
@@ -155,6 +187,10 @@ export function useSession(
   useSessionEventTrigger(client, workspaceId, sessionId, isSessionDetailEvent, onTitleEvent, {
     enabled,
     ...(options.events !== undefined ? { events: options.events } : {}),
+    // The detail row is authoritative through its lastSequence: only a later
+    // event can make it stale, and one that arrives first waits for the read.
+    readThrough: base ? base.lastSequence : loading ? "reading" : null,
+    refresh: refreshDetail,
   });
 
   const updateTitle = useCallback(
@@ -173,7 +209,7 @@ export function useSession(
 
   return {
     session,
-    loading,
+    loading: loading && retained === null,
     error,
     readRevision,
     readGeneration,

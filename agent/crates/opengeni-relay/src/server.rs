@@ -42,13 +42,26 @@ use crate::registry::ChannelRegistry;
 pub struct RelayState {
     pub(crate) registry: Arc<ChannelRegistry>,
     pub(crate) config: Arc<RelayConfig>,
+    pub(crate) routing: Option<Arc<crate::routing::Routing>>,
 }
 
 /// Build the public (wss) relay router over a registry + config. It routes
 /// `GET /metrics` only when no dedicated metrics listener is configured.
 pub fn router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) -> Router {
+    routed_router(registry, config, None)
+}
+
+fn routed_router(
+    registry: Arc<ChannelRegistry>,
+    config: Arc<RelayConfig>,
+    routing: Option<Arc<crate::routing::Routing>>,
+) -> Router {
     let serves_metrics = config.metrics_listener_bind().is_none();
-    let state = RelayState { registry, config };
+    let state = RelayState {
+        registry,
+        config,
+        routing,
+    };
     let router = Router::new()
         .route("/stream", get(stream_upgrade))
         .route("/healthz", get(healthz));
@@ -65,13 +78,15 @@ pub fn router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) -> Route
 pub fn metrics_router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) -> Router {
     Router::new()
         .route("/metrics", get(metrics_handler))
-        .with_state(RelayState { registry, config })
+        .with_state(RelayState {
+            registry,
+            config,
+            routing: None,
+        })
 }
 
-/// Serve the relay on `config.bind` until `shutdown` resolves. Spawns a background
-/// reaper that bounds half-open channel state, and the dedicated metrics listener
-/// when [`RelayConfig::metrics_bind`] is set. Returns the bound wss address
-/// (useful when binding to port 0 in tests).
+/// Serve the relay on `config.bind` until `shutdown` resolves: [`BoundRelay::bind`]
+/// then [`BoundRelay::serve`]. Returns the bound wss address.
 ///
 /// # Errors
 ///
@@ -82,56 +97,125 @@ pub async fn serve(
     metrics: RelayMetrics,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> crate::error::RelayResult<SocketAddr> {
-    let registry = Arc::new(ChannelRegistry::new(&config, metrics));
-    let config = Arc::new(config);
-    let listener = TcpListener::bind(&config.bind)
+    BoundRelay::bind(config, metrics)
+        .await?
+        .serve(shutdown)
         .await
-        .map_err(|e| crate::error::RelayError::Server(format!("bind {}: {e}", config.bind)))?;
-    let addr = listener
-        .local_addr()
-        .map_err(|e| crate::error::RelayError::Server(format!("local_addr: {e}")))?;
-    let metrics_listener = bind_metrics_listener(&config, addr).await?;
-    let metrics_addr = metrics_listener
-        .as_ref()
-        .map(|(_, metrics_addr)| *metrics_addr);
-    tracing::info!(%addr, metrics_addr = ?metrics_addr, "relay listening");
+}
 
-    // The dedicated metrics listener outlives the wss drain (scrapes keep working
-    // while in-flight streams finish) and stops after it.
-    let metrics_server = metrics_listener.map(|(metrics_listener, _)| {
-        let app = metrics_router(registry.clone(), config.clone());
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(metrics_listener, app).await {
-                tracing::error!(error = %e, "relay metrics listener failed");
-            }
+/// A relay whose listeners are bound but which does not serve yet. Binding first
+/// gives the caller the bound address (port 0 picks one) while the relay holds the
+/// port, so nothing else can take it between choosing and serving.
+pub struct BoundRelay {
+    registry: Arc<ChannelRegistry>,
+    config: Arc<RelayConfig>,
+    listener: TcpListener,
+    addr: SocketAddr,
+    metrics_listener: Option<(TcpListener, SocketAddr)>,
+}
+
+impl BoundRelay {
+    /// Bind the wss listener on `config.bind`, and the dedicated metrics listener
+    /// when [`RelayConfig::metrics_bind`] is set.
+    ///
+    /// # Errors
+    ///
+    /// [`RelayError::Server`](crate::error::RelayError::Server) if either listener
+    /// cannot bind, or if the metrics listener would share the wss listener's port.
+    pub async fn bind(
+        config: RelayConfig,
+        metrics: RelayMetrics,
+    ) -> crate::error::RelayResult<Self> {
+        let registry = Arc::new(ChannelRegistry::new(&config, metrics));
+        let config = Arc::new(config);
+        let listener = TcpListener::bind(&config.bind)
+            .await
+            .map_err(|e| crate::error::RelayError::Server(format!("bind {}: {e}", config.bind)))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| crate::error::RelayError::Server(format!("local_addr: {e}")))?;
+        let metrics_listener = bind_metrics_listener(&config, addr).await?;
+        Ok(Self {
+            registry,
+            config,
+            listener,
+            addr,
+            metrics_listener,
         })
-    });
-
-    // The half-open reaper bounds transient state (a side that dialed but whose peer
-    // never arrived). Cheap; runs every few seconds.
-    let reaper_registry = registry.clone();
-    let reaper = tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(5));
-        loop {
-            ticker.tick().await;
-            let reaped = reaper_registry.reap_half_open(Instant::now());
-            if reaped > 0 {
-                tracing::debug!(reaped, "reaped half-open relay channels");
-            }
-        }
-    });
-
-    let app = router(registry, config);
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown);
-    let result = server
-        .await
-        .map_err(|e| crate::error::RelayError::Server(format!("serve: {e}")));
-    reaper.abort();
-    if let Some(metrics_server) = metrics_server {
-        metrics_server.abort();
     }
-    result?;
-    Ok(addr)
+
+    /// The bound wss address.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Serve until `shutdown` resolves. Spawns a background reaper that bounds
+    /// half-open channel state, and serves the dedicated metrics listener when one
+    /// is bound. Returns the bound wss address.
+    ///
+    /// # Errors
+    ///
+    /// [`RelayError::Server`](crate::error::RelayError::Server) if serving fails.
+    pub async fn serve(
+        self,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> crate::error::RelayResult<SocketAddr> {
+        let Self {
+            registry,
+            config,
+            listener,
+            addr,
+            metrics_listener,
+        } = self;
+        let metrics_addr = metrics_listener
+            .as_ref()
+            .map(|(_, metrics_addr)| *metrics_addr);
+        tracing::info!(%addr, metrics_addr = ?metrics_addr, "relay listening");
+
+        // The dedicated metrics listener outlives the wss drain (scrapes keep working
+        // while in-flight streams finish) and stops after it.
+        let metrics_server = metrics_listener.map(|(metrics_listener, _)| {
+            let app = metrics_router(registry.clone(), config.clone());
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(metrics_listener, app).await {
+                    tracing::error!(error = %e, "relay metrics listener failed");
+                }
+            })
+        });
+
+        // The half-open reaper bounds transient state (a side that dialed but whose
+        // peer never arrived). Cheap; runs every few seconds.
+        let reaper_registry = registry.clone();
+        let reaper = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                ticker.tick().await;
+                let reaped = reaper_registry.reap_half_open(Instant::now());
+                if reaped > 0 {
+                    tracing::debug!(reaped, "reaped half-open relay channels");
+                }
+            }
+        });
+
+        let routing = config.advertise_ip.map(|ip| {
+            Arc::new(crate::routing::Routing::new(SocketAddr::new(
+                ip,
+                addr.port(),
+            )))
+        });
+        let app = routed_router(registry, config, routing);
+        let server = axum::serve(listener, app).with_graceful_shutdown(shutdown);
+        let result = server
+            .await
+            .map_err(|e| crate::error::RelayError::Server(format!("serve: {e}")));
+        reaper.abort();
+        if let Some(metrics_server) = metrics_server {
+            metrics_server.abort();
+        }
+        result?;
+        Ok(addr)
+    }
 }
 
 /// Bind the dedicated metrics listener when one is configured. It must not share
@@ -176,12 +260,15 @@ async fn metrics_handler(State(state): State<RelayState>) -> impl IntoResponse {
 /// The dial query (`?ws=&agent=&port=&channel=`). All four coordinates form the
 /// routing key. `channel` distinguishes concurrent stream instances on the same
 /// machine and logical port.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct DialQuery {
     pub ws: String,
     pub agent: String,
     pub port: u32,
     pub channel: String,
+    pub route: Option<String>,
+    #[serde(default)]
+    pub forwarded: bool,
 }
 
 /// `GET /stream` — upgrade to a WebSocket then run the per-connection handshake +
@@ -202,7 +289,7 @@ pub(crate) mod conn {
     use futures_util::{SinkExt as _, StreamExt as _};
     use opengeni_agent_proto::v1;
     use opengeni_agent_stream::codec::RelayMessage;
-    use opengeni_agent_stream::ChannelKey;
+    use opengeni_agent_stream::{ChannelKey, DESKTOP_STREAM_PORT, PTY_STREAM_PORT};
 
     use crate::registry::{AttachError, Role, ViewerEpochs};
     use crate::token::{self, TokenError};
@@ -235,6 +322,9 @@ pub(crate) mod conn {
         key: ChannelKey,
         role: Role,
         conn_gen: crate::registry::ConnGen,
+        /// Whether the verified viewer token granted input (`mode: "control"`).
+        /// Always false for the agent side, whose sends are never viewer input.
+        input_granted: bool,
         peer_rx: tokio::sync::mpsc::Receiver<RelayMessage>,
     }
 
@@ -259,7 +349,9 @@ pub(crate) mod conn {
 
         // 2. Resolve + authorize the key (token + channel-key scope). A client's
         // fence claims come from this exact token verification.
-        let (key, role, resume_from_seq, viewer) = match authorize(&open, query, state) {
+        let (key, role, resume_from_seq, viewer, input_granted) = match authorize(
+            &open, query, state,
+        ) {
             Ok(parts) => parts,
             Err(reason) => {
                 tracing::warn!(reason = %reason, ws = %query.ws, agent = %query.agent, port = query.port, "relay open rejected");
@@ -270,6 +362,35 @@ pub(crate) mod conn {
         };
 
         // 3. Attach (the epoch fences are applied for a client), ack, replay.
+        // Authenticate before opening ANY private connection. A route is not a
+        // stream credential and cannot be used as an unauthenticated proxy.
+        if let Some(route) = query.route.as_deref() {
+            let Ok(owner) =
+                crate::routing::verify(route, &key, state.config.effective_relay_token_secret())
+            else {
+                let _ = send_ack(ws_tx, false, 0, "invalid relay owner route").await;
+                return None;
+            };
+            if !state
+                .routing
+                .as_ref()
+                .is_some_and(|routing| routing.owns(&owner))
+            {
+                // Exactly one hop. A recycled pod address must reject an old
+                // incarnation, not recursively forward back to itself.
+                if query.forwarded
+                    || state
+                        .routing
+                        .as_ref()
+                        .is_some_and(|routing| routing.addr == owner.addr)
+                {
+                    owner_unavailable(ws_tx).await;
+                } else {
+                    proxy(ws_tx, ws_rx, &open, query, &owner).await;
+                }
+                return None;
+            }
+        }
         let now = Instant::now();
         let (peer_tx, peer_rx) = tokio::sync::mpsc::channel::<RelayMessage>(OUTBOUND_QUEUE);
         let attached =
@@ -289,9 +410,22 @@ pub(crate) mod conn {
             channel = %query.channel, role = ?role,
             resume_from_seq, "relay channel attached"
         );
-        if send_ack(ws_tx, true, attached.resume_from_seq, "")
-            .await
-            .is_err()
+        let relay_route = state.routing.as_ref().and_then(|routing| {
+            routing
+                .mint(&key, state.config.effective_relay_token_secret())
+                .ok()
+        });
+        if write_msg(
+            ws_tx,
+            &RelayMessage::OpenAck(v1::StreamOpenAck {
+                accepted: true,
+                error: None,
+                resume_from_seq: attached.resume_from_seq,
+                relay_route,
+            }),
+        )
+        .await
+        .is_err()
         {
             state.registry.detach(&key, role, conn_gen);
             return None;
@@ -307,6 +441,7 @@ pub(crate) mod conn {
             key,
             role,
             conn_gen,
+            input_granted,
             peer_rx,
         })
     }
@@ -320,6 +455,9 @@ pub(crate) mod conn {
         mut est: Established,
         state: &RelayState,
     ) {
+        // Warn once per connection on the first unauthorized message; the rest are
+        // counted in `opengeni_relay_unauthorized_drops_total` only.
+        let mut warned_unauthorized = false;
         loop {
             tokio::select! {
                 outbound = est.peer_rx.recv() => {
@@ -336,7 +474,7 @@ pub(crate) mod conn {
                     }
                 }
                 inbound = ws_rx.next() => {
-                    if !handle_inbound(inbound, &est, state) {
+                    if !handle_inbound(inbound, &est, state, &mut warned_unauthorized) {
                         break;
                     }
                 }
@@ -350,22 +488,43 @@ pub(crate) mod conn {
         inbound: Option<Result<WsMessage, axum::Error>>,
         est: &Established,
         state: &RelayState,
+        warned_unauthorized: &mut bool,
     ) -> bool {
         match inbound {
             Some(Ok(WsMessage::Binary(bytes))) => match RelayMessage::decode(&bytes) {
+                Ok(msg) if !may_forward(est, &msg) => {
+                    state.registry.metrics().record_unauthorized_drop();
+                    if *warned_unauthorized {
+                        tracing::debug!(port = est.key.port, role = ?est.role, kind = ?msg.tag(), "relay: dropping unauthorized message");
+                    } else {
+                        *warned_unauthorized = true;
+                        tracing::warn!(
+                            port = est.key.port,
+                            role = ?est.role,
+                            input_granted = est.input_granted,
+                            kind = ?msg.tag(),
+                            "relay: dropping a message the connection's token does not authorize (further drops on this connection are counted only)"
+                        );
+                    }
+                    true
+                }
                 Ok(RelayMessage::Frame(frame)) => {
                     state
                         .registry
-                        .forward(&est.key, est.role, frame, Instant::now());
+                        .forward(&est.key, est.role, est.conn_gen, frame, Instant::now());
                     true
                 }
                 Ok(msg @ RelayMessage::DesktopInput(_)) => {
                     // Typed computer-use input → forward verbatim.
-                    state.registry.forward_message(&est.key, est.role, msg);
+                    state
+                        .registry
+                        .forward_message(&est.key, est.role, est.conn_gen, msg);
                     true
                 }
                 Ok(close @ RelayMessage::Close(_)) => {
-                    state.registry.close(&est.key, est.role, close);
+                    state
+                        .registry
+                        .close(&est.key, est.role, est.conn_gen, close);
                     false // channel torn down; this side is done.
                 }
                 // A duplicate Open/OpenAck mid-stream is ignored (already attached).
@@ -409,7 +568,7 @@ pub(crate) mod conn {
         open: &v1::StreamOpen,
         query: &DialQuery,
         state: &RelayState,
-    ) -> Result<(ChannelKey, Role, u64, ViewerEpochs), String> {
+    ) -> Result<(ChannelKey, Role, u64, ViewerEpochs, bool), String> {
         let channel = open
             .channel
             .as_ref()
@@ -470,6 +629,28 @@ pub(crate) mod conn {
                 if claims.port != key.port {
                     return Err("viewer token port does not match the channel key".to_string());
                 }
+                // A token bound to one machine's exact stream only opens that one.
+                // Every relay mint carries the binding, so an unbound token is
+                // never a valid relay viewer.
+                match (&claims.agent_id, &claims.channel_id) {
+                    (Some(agent), _) if *agent != key.agent_id => {
+                        return Err(
+                            "viewer token machine does not match the channel key".to_string()
+                        );
+                    }
+                    (_, Some(channel)) if *channel != key.channel_id => {
+                        return Err(
+                            "viewer token stream does not match the channel key".to_string()
+                        );
+                    }
+                    (Some(_), Some(_)) => {}
+                    _ => return Err("viewer token is not bound to a relay stream".to_string()),
+                }
+                let input_granted = match claims.mode.as_str() {
+                    "view" => false,
+                    "control" => true,
+                    _ => return Err("viewer token has an unsupported mode".to_string()),
+                };
                 // The epoch fences are applied at attach (the floors), from the
                 // claims of THIS exact verification — no re-verify, no window
                 // where an expiring token attaches unfenced.
@@ -481,11 +662,64 @@ pub(crate) mod conn {
                         lease: Some(claims.lease_epoch),
                         authority: claims.authority_epoch,
                     },
+                    input_granted,
                 ));
             }
         }
 
-        Ok((key, role, open.resume_from_seq, ViewerEpochs::default()))
+        Ok((
+            key,
+            role,
+            open.resume_from_seq,
+            ViewerEpochs::default(),
+            false,
+        ))
+    }
+
+    /// Whether one inbound message may reach the registry. Every channel-addressed
+    /// message must name this connection's own channel. Viewer input is classified
+    /// by the token-bound port: terminal keystrokes (client `Frame`s on the PTY
+    /// port) and a PTY `Close` (which ends the shell) need a `control` token, and
+    /// typed desktop input needs a `control` token on the desktop port. A `view`
+    /// token can only watch and close its own non-PTY stream. The agent still
+    /// applies its own screen-control consent to desktop input.
+    fn may_forward(est: &Established, message: &RelayMessage) -> bool {
+        may_forward_message(
+            &est.key.channel_id,
+            est.key.port,
+            est.role,
+            est.input_granted,
+            message,
+        )
+    }
+
+    fn may_forward_message(
+        channel_id: &str,
+        port: u32,
+        role: Role,
+        input_granted: bool,
+        message: &RelayMessage,
+    ) -> bool {
+        match message {
+            RelayMessage::Frame(frame) => {
+                frame.channel_id == channel_id
+                    && match role {
+                        Role::Agent => true,
+                        Role::Client => port == PTY_STREAM_PORT && input_granted,
+                    }
+            }
+            RelayMessage::DesktopInput(input) => {
+                input.channel_id == channel_id
+                    && role == Role::Client
+                    && port == DESKTOP_STREAM_PORT
+                    && input_granted
+            }
+            RelayMessage::Close(close) => {
+                close.channel_id == channel_id
+                    && (role == Role::Agent || port != PTY_STREAM_PORT || input_granted)
+            }
+            RelayMessage::Open(_) | RelayMessage::OpenAck(_) => true,
+        }
     }
 
     /// Write a `StreamOpenAck` over the socket.
@@ -508,8 +742,109 @@ pub(crate) mod conn {
                 })
             },
             resume_from_seq,
+            relay_route: None,
         });
         write_msg(ws_tx, &ack).await
+    }
+
+    async fn owner_unavailable(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>) {
+        let _ = write_msg(
+            ws_tx,
+            &RelayMessage::OpenAck(v1::StreamOpenAck {
+                accepted: false,
+                error: Some(v1::AgentError {
+                    code: v1::ErrorCode::Stream as i32,
+                    message: "relay owner unavailable".into(),
+                    retryable: true,
+                    detail: [("relay_owner_unavailable".into(), "true".into())].into(),
+                }),
+                resume_from_seq: 0,
+                relay_route: None,
+            }),
+        )
+        .await;
+    }
+
+    /// A transparent, backpressured WebSocket hop. The owner still performs the
+    /// original authorization, epoch checks, replay and rate accounting. Bytes
+    /// never traverse the database or control-plane broker.
+    #[allow(clippy::collapsible_match)] // Move owned frame buffers into send; guards cannot move them.
+    async fn proxy(
+        ws_tx: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
+        ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+        open: &v1::StreamOpen,
+        query: &DialQuery,
+        owner: &crate::routing::Owner,
+    ) {
+        use tokio_tungstenite::tungstenite::Message;
+        let Ok(query) = serde_urlencoded::to_string(DialQuery {
+            forwarded: true,
+            ..query.clone()
+        }) else {
+            return;
+        };
+        let url = format!("ws://{}/stream?{query}", owner.addr);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let socket = tokio::time::timeout_at(deadline, tokio_tungstenite::connect_async(url)).await;
+        let Ok(Ok((socket, _))) = socket else {
+            owner_unavailable(ws_tx).await;
+            return;
+        };
+        let (mut peer_tx, mut peer_rx) = socket.split();
+        if !matches!(
+            tokio::time::timeout_at(
+                deadline,
+                peer_tx.send(Message::Binary(RelayMessage::Open(open.clone()).encode()))
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            owner_unavailable(ws_tx).await;
+            return;
+        }
+        // Reachability includes the authenticated stream handshake, not merely
+        // a TCP/HTTP upgrade. A stalled/replaced endpoint cannot pin a producer
+        // forever to a dead owner route.
+        let first = tokio::time::timeout_at(deadline, async {
+            loop {
+                match peer_rx.next().await {
+                    Some(Ok(Message::Binary(bytes))) => return Some(bytes),
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => return None,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        let Ok(Some(bytes)) = first else {
+            owner_unavailable(ws_tx).await;
+            return;
+        };
+        let Ok(RelayMessage::OpenAck(ack)) = RelayMessage::decode(&bytes) else {
+            owner_unavailable(ws_tx).await;
+            return;
+        };
+        if ws_tx.send(WsMessage::Binary(bytes)).await.is_err() || !ack.accepted {
+            return;
+        }
+        loop {
+            tokio::select! {
+                inbound = ws_rx.next() => match inbound {
+                    Some(Ok(WsMessage::Binary(bytes))) => {
+                        if peer_tx.send(Message::Binary(bytes)).await.is_err() { break; }
+                    }
+                    Some(Ok(WsMessage::Close(_)) | Err(_)) | None => break,
+                    _ => {}
+                },
+                outbound = peer_rx.next() => match outbound {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if ws_tx.send(WsMessage::Binary(bytes)).await.is_err() { break; }
+                    }
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    _ => {}
+                },
+            }
+        }
+        let _ = peer_tx.close().await;
     }
 
     /// Encode + write one relay message as a binary WebSocket frame.
@@ -528,5 +863,73 @@ pub(crate) mod conn {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const CHANNEL: &str = "channel-a";
+
+        fn frame(channel: &str) -> RelayMessage {
+            RelayMessage::Frame(v1::StreamFrame {
+                channel_id: channel.to_string(),
+                ..Default::default()
+            })
+        }
+
+        fn desktop_input(channel: &str) -> RelayMessage {
+            RelayMessage::DesktopInput(v1::DesktopInput {
+                channel_id: channel.to_string(),
+                ..Default::default()
+            })
+        }
+
+        fn close(channel: &str) -> RelayMessage {
+            RelayMessage::Close(v1::StreamClose {
+                channel_id: channel.to_string(),
+                ..Default::default()
+            })
+        }
+
+        #[test]
+        fn forwarding_respects_port_role_mode_and_channel() {
+            for port in [PTY_STREAM_PORT, DESKTOP_STREAM_PORT, 40_001] {
+                for role in [Role::Client, Role::Agent] {
+                    for granted in [false, true] {
+                        let allowed = |message: &RelayMessage| {
+                            may_forward_message(CHANNEL, port, role, granted, message)
+                        };
+                        let case = format!("port {port}, role {role:?}, control {granted}");
+                        assert_eq!(
+                            allowed(&frame(CHANNEL)),
+                            role == Role::Agent || (port == PTY_STREAM_PORT && granted),
+                            "Frame on {case}"
+                        );
+                        assert_eq!(
+                            allowed(&desktop_input(CHANNEL)),
+                            role == Role::Client && port == DESKTOP_STREAM_PORT && granted,
+                            "DesktopInput on {case}"
+                        );
+                        assert_eq!(
+                            allowed(&close(CHANNEL)),
+                            role == Role::Agent || port != PTY_STREAM_PORT || granted,
+                            "Close on {case}"
+                        );
+                        // A message naming another channel is never forwarded.
+                        assert!(!allowed(&frame("channel-b")), "foreign Frame on {case}");
+                        assert!(
+                            !allowed(&desktop_input("channel-b")),
+                            "foreign DesktopInput on {case}"
+                        );
+                        assert!(!allowed(&close("channel-b")), "foreign Close on {case}");
+                        assert!(allowed(&RelayMessage::Open(v1::StreamOpen::default())));
+                        assert!(allowed(
+                            &RelayMessage::OpenAck(v1::StreamOpenAck::default())
+                        ));
+                    }
+                }
+            }
+        }
     }
 }

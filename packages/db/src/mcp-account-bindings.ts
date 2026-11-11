@@ -1,7 +1,9 @@
 import {
+  ConnectionAccountIntent,
   McpConnectionAccountBindings,
   type McpConnectionAccountBinding,
 } from "@opengeni/contracts";
+import { nestedErrorRecords } from "./persistence-errors";
 
 /** Raised only after session-create storage has rolled back a known account
  * admission refusal. It does not refresh, remove or replace accepted identity. */
@@ -23,13 +25,7 @@ export class SessionCreateConnectionSelectionUnavailableError extends Error {
 export function sessionCreateConnectionSelectionFailure(
   error: unknown,
 ): SessionCreateConnectionSelectionUnavailableError | null {
-  const pending: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (pending.length > 0 && seen.size < 64) {
-    const current = pending.shift();
-    if (!current || typeof current !== "object" || seen.has(current)) continue;
-    seen.add(current);
-    const record = current as Record<string, unknown>;
+  for (const record of nestedErrorRecords(error)) {
     if (
       [record.code, record.sqlState, record.sqlstate].includes("42501") &&
       typeof record.where === "string" &&
@@ -41,12 +37,6 @@ export function sessionCreateConnectionSelectionFailure(
     ) {
       return new SessionCreateConnectionSelectionUnavailableError(error);
     }
-    for (const key of ["cause", "original", "driverError", "error", "errors"]) {
-      const nested = record[key];
-      const remaining = Math.max(0, 64 - seen.size - pending.length);
-      if (Array.isArray(nested)) pending.push(...nested.slice(0, remaining));
-      else if (nested !== undefined && remaining > 0) pending.push(nested);
-    }
   }
   return null;
 }
@@ -57,4 +47,10 @@ export function parseAcceptedMcpAccountBindings(
   value: unknown,
 ): McpConnectionAccountBinding[] | null {
   return value == null ? null : McpConnectionAccountBindings.parse(value);
+}
+
+/** NULL marks a turn accepted before account intent existed. Its
+ * continuations copy its exact accounts; it is never read as an empty intent. */
+export function parseConnectionAccountIntent(value: unknown): ConnectionAccountIntent | null {
+  return value == null ? null : ConnectionAccountIntent.parse(value);
 }

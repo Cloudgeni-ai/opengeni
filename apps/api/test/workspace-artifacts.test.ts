@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  SiteOpenedResponse,
+  SiteProjectResponse,
+  SiteSidebarStateResponse,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
@@ -11,9 +15,14 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import { digestAttemptToolCatalog } from "@opengeni/codemode";
-import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
+import {
+  withSiteSessionOrigin,
+  type ApiRouteDeps,
+  type ObjectStorageDependency,
+} from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  createChannel,
   createDb,
   createSession,
   createWorkspaceArtifact,
@@ -22,18 +31,16 @@ import {
   publishWorkspaceArtifactVersion,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Hono } from "hono";
 import postgres from "postgres";
 
 import { registerWorkspaceArtifactRoutes } from "../src/routes/workspace-artifacts";
+import { registerArtifactCatalogRoutes } from "../src/routes/artifact-catalog";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 const SIGNING_SECRET = "workspace-artifacts-test-signing-secret";
@@ -166,6 +173,10 @@ beforeAll(async () => {
     },
   } as unknown as ObjectStorageDependency;
   app = new Hono();
+  registerArtifactCatalogRoutes(app, {
+    settings: testSettings({ productAccessMode: "local", delegationSecret: SIGNING_SECRET }),
+    db: client.db,
+  } as ApiRouteDeps);
   registerWorkspaceArtifactRoutes(app, {
     settings: testSettings({
       productAccessMode: "local",
@@ -204,6 +215,39 @@ async function request(
   if (init.body) headers.set("content-type", "application/json");
   return await app.request(`http://x${path}`, { ...init, headers });
 }
+
+test("UUID link lookup uses real visibility and file precedence across artifact domains", async () => {
+  const base = `/v1/workspaces/${grant.workspaceId}`;
+  const created = await request(grant, ["artifacts:publish"], `${base}/published-artifacts`, {
+    method: "POST",
+    body: JSON.stringify({
+      title: "Link resolution",
+      html: "<!doctype html><h1>Site</h1>",
+      idempotencyKey: crypto.randomUUID(),
+    }),
+  });
+  expect(created.status, await created.clone().text()).toBe(201);
+  const { artifact } = WorkspaceArtifactMutationResponse.parse(await created.json());
+  const path = `${base}/artifact-catalog/${artifact.id}/resolve`;
+  const read = () => request(grant, ["artifacts:read", "files:read"], path);
+  expect(await (await read()).json()).toEqual({ artifactId: artifact.id, kind: "site" });
+  await shared.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key)
+    VALUES(${artifact.id},${grant.accountId},${grant.workspaceId},'ready','link.txt','link.txt','text/plain',10,${"a".repeat(64)},'fixture',${artifact.id})`;
+  expect(await (await read()).json()).toEqual({ artifactId: artifact.id, kind: "file" });
+  // Another workspace cannot discover either half of the collision.
+  const foreign = await request(
+    otherGrant,
+    ["artifacts:read", "files:read"],
+    `/v1/workspaces/${otherGrant.workspaceId}/artifact-catalog/${artifact.id}/resolve`,
+  );
+  expect(foreign.status).toBe(404);
+  const missing = await request(
+    grant,
+    ["artifacts:read", "files:read"],
+    `${base}/artifact-catalog/${crypto.randomUUID()}/resolve`,
+  );
+  expect(missing.status).toBe(404);
+});
 
 test("direct uploads publish large HTML with optional downloadable source and immutable retries", async () => {
   const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
@@ -345,6 +389,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       slug: `ambiguous-create-${suffix}`,
       title: "Ambiguously committed Site",
       description: null,
+      visibility: "workspace_shared",
+      ownerSubjectId: null,
       contentKey: createContentKey,
       contentSha256: "1".repeat(64),
       sizeBytes: 128,
@@ -387,6 +433,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         artifactId: created.artifact.id,
+        viewer: { subjectId: null },
         expectedCurrentVersionId: created.version.id,
         contentKey: publishContentKey,
         contentSha256: "3".repeat(64),
@@ -725,6 +772,379 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(String(immutableError)).toContain("workspace artifact history is immutable");
   }, 60_000);
 
+  test("duplicates a Site's current version into a new Site, idempotently", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const publishPermissions: Permission[] = ["artifacts:publish", "documents:search"];
+    const original = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Duplicable board",
+            description: "Copied with its source",
+            html: "<!doctype html><h1>Original</h1>",
+            source: {
+              entrypoint: "src/index.tsx",
+              files: [{ path: "src/index.tsx", content: "export const original = true;" }],
+            },
+            requestedTools: [{ serverId: "docs", toolName: "search_documents" }],
+            idempotencyKey: "duplicate-original",
+          }),
+        })
+      ).json(),
+    );
+    const path = `${base}/${original.artifact.id}/duplicate`;
+    const body = JSON.stringify({ idempotencyKey: "duplicate-once" });
+
+    expect((await request(grant, ["artifacts:read"], path, { method: "POST", body })).status).toBe(
+      403,
+    );
+    expect(
+      (
+        await request(
+          otherGrant,
+          publishPermissions,
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${original.artifact.id}/duplicate`,
+          {
+            method: "POST",
+            body,
+          },
+        )
+      ).status,
+    ).toBe(404);
+
+    const response = await requestAsCanonicalLocalHuman(path, { method: "POST", body });
+    expect(response.status).toBe(201);
+    const copy = WorkspaceArtifactMutationResponse.parse(await response.json());
+    expect(copy.artifact.id).not.toBe(original.artifact.id);
+    expect(copy.artifact.title).toBe("Duplicable board (copy)");
+    expect(copy.artifact.description).toBe("Copied with its source");
+    expect(copy.artifact.visibility).toBe(original.artifact.visibility);
+    expect(copy.artifact.currentVersion?.revision).toBe(1);
+    expect(copy.version.requestedTools).toEqual(original.version.requestedTools);
+
+    const copied = WorkspaceArtifactContentResponse.parse(
+      await (await requestAsCanonicalLocalHuman(`${base}/${copy.artifact.id}/content`)).json(),
+    );
+    expect(copied.html).toBe("<!doctype html><h1>Original</h1>");
+    expect(copied.source.files).toEqual([
+      { path: "src/index.tsx", content: "export const original = true;" },
+    ]);
+
+    const replay = WorkspaceArtifactMutationResponse.parse(
+      await (await requestAsCanonicalLocalHuman(path, { method: "POST", body })).json(),
+    );
+    expect(replay.replayed).toBe(true);
+    expect(replay.artifact.id).toBe(copy.artifact.id);
+
+    const titled = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(path, {
+          method: "POST",
+          body: JSON.stringify({ title: "Second board", idempotencyKey: "duplicate-titled" }),
+        })
+      ).json(),
+    );
+    expect(titled.artifact.title).toBe("Second board");
+
+    // The key belongs to this Site's copy: another Site with the same metadata
+    // and key gets its own copy instead of replaying this one.
+    const twin = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Duplicable board",
+            description: "Copied with its source",
+            html: "<!doctype html><h1>Twin</h1>",
+            idempotencyKey: "duplicate-twin",
+          }),
+        })
+      ).json(),
+    );
+    const twinCopyResponse = await requestAsCanonicalLocalHuman(
+      `${base}/${twin.artifact.id}/duplicate`,
+      { method: "POST", body },
+    );
+    expect(twinCopyResponse.status).toBe(201);
+    const twinCopy = WorkspaceArtifactMutationResponse.parse(await twinCopyResponse.json());
+    expect(twinCopy.replayed).toBe(false);
+    expect(twinCopy.artifact.id).not.toBe(copy.artifact.id);
+    // An HTML-only Site's copy stays HTML-only and shares the stored content.
+    expect(twinCopy.version.sourceSha256).toBe(twin.version.sourceSha256);
+    expect(twinCopy.version.sizeBytes).toBe(twin.version.sizeBytes);
+
+    // A committed copy replays even after the original changes.
+    const renamed = await requestAsCanonicalLocalHuman(`${base}/${original.artifact.id}/versions`, {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Renamed board",
+        html: "<!doctype html><h1>Changed</h1>",
+        expectedCurrentVersionId: original.version.id,
+        idempotencyKey: "duplicate-original-rename",
+      }),
+    });
+    expect(renamed.status).toBe(200);
+    const afterRename = await requestAsCanonicalLocalHuman(path, { method: "POST", body });
+    expect(afterRename.status).toBe(201);
+    const replayAfterRename = WorkspaceArtifactMutationResponse.parse(await afterRename.json());
+    expect(replayAfterRename.replayed).toBe(true);
+    expect(replayAfterRename.artifact.id).toBe(copy.artifact.id);
+    expect(replayAfterRename.artifact.title).toBe("Duplicable board (copy)");
+
+    // The same key with a different request is a conflict, not a silent replay.
+    expect(
+      (
+        await requestAsCanonicalLocalHuman(path, {
+          method: "POST",
+          body: JSON.stringify({ title: "Other title", idempotencyKey: "duplicate-once" }),
+        })
+      ).status,
+    ).toBe(409);
+  }, 60_000);
+
+  test("records a person opening a Site, which orders its sidebar row", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Opened board",
+            html: "<!doctype html><h1>Opened</h1>",
+            idempotencyKey: "opened-board",
+          }),
+        })
+      ).json(),
+    );
+    const path = `${base}/${site.artifact.id}/opened`;
+    const first = await requestAsCanonicalLocalHuman(path, { method: "POST" });
+    expect(first.status).toBe(200);
+    const opened = SiteOpenedResponse.parse(await first.json());
+    const again = SiteOpenedResponse.parse(
+      await (await requestAsCanonicalLocalHuman(path, { method: "POST" })).json(),
+    );
+    expect(Date.parse(again.openedAt)).toBeGreaterThanOrEqual(Date.parse(opened.openedAt));
+
+    // A Site page (a request inside a Site origin) cannot record an open.
+    const fromSite = await withSiteSessionOrigin(
+      { siteId: site.artifact.id, title: "Opened board" },
+      () => requestAsCanonicalLocalHuman(path, { method: "POST" }),
+    );
+    expect(fromSite.status).toBe(403);
+
+    // Reading is enough; without it, or from another workspace, nothing is recorded.
+    expect((await request(grant, ["sessions:read"], path, { method: "POST" })).status).toBe(403);
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["artifacts:read"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/opened`,
+          { method: "POST" },
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (await request(grant, ["artifacts:read"], `${base}/not-a-site/opened`, { method: "POST" }))
+        .status,
+    ).toBe(422);
+  }, 60_000);
+
+  test("pins and archives a Site row in this person's sidebar without changing the Site", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Sidebar board",
+            html: "<!doctype html><h1>Sidebar</h1>",
+            idempotencyKey: "sidebar-board",
+          }),
+        })
+      ).json(),
+    );
+    const path = `${base}/${site.artifact.id}/sidebar`;
+    const put = (body: unknown) =>
+      requestAsCanonicalLocalHuman(path, { method: "PUT", body: JSON.stringify(body) });
+    const pinned = SiteSidebarStateResponse.parse(await (await put({ pinned: true })).json());
+    expect(pinned).toMatchObject({ siteId: site.artifact.id, pinned: true, archived: false });
+    const archived = SiteSidebarStateResponse.parse(await (await put({ archived: true })).json());
+    expect(archived).toMatchObject({ pinned: true, archived: true });
+    // Archive only hides the row: the Site stays published.
+    const detail = WorkspaceArtifactDetailResponse.parse(
+      await (await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}`)).json(),
+    );
+    expect(detail.artifact.status).toBe("active");
+    // Opening the Site again restores the row.
+    expect(
+      (await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}/opened`, { method: "POST" }))
+        .status,
+    ).toBe(200);
+    expect(
+      SiteSidebarStateResponse.parse(await (await put({ pinned: false })).json()),
+    ).toMatchObject({ pinned: false, archived: false });
+
+    expect((await put({})).status).toBe(422);
+    expect((await put({ pinned: "yes" })).status).toBe(422);
+    const fromSite = await withSiteSessionOrigin(
+      { siteId: site.artifact.id, title: "Sidebar board" },
+      () => put({ pinned: true }),
+    );
+    expect(fromSite.status).toBe(403);
+    const body = JSON.stringify({ pinned: true });
+    expect((await request(grant, ["sessions:read"], path, { method: "PUT", body })).status).toBe(
+      403,
+    );
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["artifacts:read"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/sidebar`,
+          { method: "PUT", body },
+        )
+      ).status,
+    ).toBe(404);
+  }, 60_000);
+
+  test("moves a Site row to another project like a chat, without changing the Site", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Project board",
+            html: "<!doctype html><h1>Project</h1>",
+            idempotencyKey: "project-board",
+          }),
+        })
+      ).json(),
+    );
+    const project = await createChannel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: `Research ${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const path = `${base}/${site.artifact.id}/channel`;
+    const put = (body: unknown) =>
+      requestAsCanonicalLocalHuman(path, { method: "PUT", body: JSON.stringify(body) });
+    // Made outside a chat, the Site sits in Default; its row is the Site itself.
+    const moved = await put({ fromChannelId: null, channelId: project.id });
+    expect(moved.status).toBe(200);
+    expect(SiteProjectResponse.parse(await moved.json())).toEqual({
+      siteId: site.artifact.id,
+      channelId: project.id,
+      siteMoved: true,
+      movedSessionIds: [],
+    });
+    // Back to Default: removed from the project, still published.
+    expect(
+      SiteProjectResponse.parse(
+        await (await put({ fromChannelId: project.id, channelId: null })).json(),
+      ),
+    ).toMatchObject({ channelId: null, siteMoved: true });
+    const detail = WorkspaceArtifactDetailResponse.parse(
+      await (await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}`)).json(),
+    );
+    expect(detail.artifact.status).toBe("active");
+
+    expect((await put({ channelId: project.id })).status).toBe(422);
+    expect((await put({ fromChannelId: null, channelId: crypto.randomUUID() })).status).toBe(422);
+    const fromSite = await withSiteSessionOrigin(
+      { siteId: site.artifact.id, title: "Project board" },
+      () => put({ fromChannelId: null, channelId: project.id }),
+    );
+    expect(fromSite.status).toBe(403);
+    // Projects are shared: moving needs sessions:control, as for a chat.
+    const body = JSON.stringify({ fromChannelId: null, channelId: project.id });
+    expect(
+      (await request(grant, ["artifacts:read", "sessions:read"], path, { method: "PUT", body }))
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["sessions:control"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/channel`,
+          { method: "PUT", body },
+        )
+      ).status,
+    ).toBe(404);
+  }, 60_000);
+
+  test("reads a Site's current version alone, for an open Site view's checks", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Watched board",
+            html: "<!doctype html><h1>One</h1>",
+            idempotencyKey: "watched-board",
+          }),
+        })
+      ).json(),
+    );
+    const path = `${base}/${site.artifact.id}/current`;
+    const read = async () => {
+      const response = await request(grant, ["artifacts:read"], path);
+      expect(response.status).toBe(200);
+      return WorkspaceArtifactCurrentResponse.parse(await response.json());
+    };
+    const first = await read();
+    expect(first).not.toHaveProperty("versions");
+    expect(first.artifact.currentVersion?.id).toBe(site.version.id);
+    expect(first.artifact.currentVersion?.revision).toBe(1);
+
+    // A new version is what the next check sees.
+    const published = await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}/versions`, {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Watched board",
+        html: "<!doctype html><h1>Two</h1>",
+        expectedCurrentVersionId: site.version.id,
+        idempotencyKey: "watched-board-2",
+      }),
+    });
+    expect(published.status).toBe(200);
+    const second = await read();
+    expect(second.artifact.currentVersion?.revision).toBe(2);
+    expect(second.artifact.currentVersion?.id).not.toBe(site.version.id);
+    // As in lists, who made the version is left out, so a check reads no sessions.
+    expect(second.artifact.currentVersion).toMatchObject({
+      sourceSessionId: null,
+      sourceTurnId: null,
+      sourceAttemptId: null,
+      sourceExecutionGeneration: null,
+    });
+    // It agrees with the full read.
+    const detail = WorkspaceArtifactDetailResponse.parse(
+      await (await request(grant, ["artifacts:read"], `${base}/${site.artifact.id}`)).json(),
+    );
+    expect(second.artifact.currentVersion?.id).toBe(detail.artifact.currentVersion?.id);
+    expect(second.artifact.updatedAt).toBe(detail.artifact.updatedAt);
+
+    // Reading permission, the workspace and a real id are required.
+    expect((await request(grant, ["sessions:read"], path)).status).toBe(403);
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["artifacts:read"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/current`,
+        )
+      ).status,
+    ).toBe(404);
+    expect((await request(grant, ["artifacts:read"], `${base}/not-a-site/current`)).status).toBe(
+      422,
+    );
+  }, 60_000);
+
   test("carries exact attempt provenance through create, publish, rollback, and replay", async () => {
     const attempt = await seedAttempt(grant);
     const server = buildOpenGeniMcpServer(
@@ -780,7 +1200,10 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!preparedText || preparedText.type !== "text") throw new Error("Missing upload result");
       const upload = JSON.parse(preparedText.text);
       objects.set(new URL(upload.html.putUrl).pathname.slice(1), {
-        bytes: new TextEncoder().encode("<!doctype html><main>Created through MCP</main>"),
+        // A heavy page (media embedded in the HTML): published, with a warning.
+        bytes: new TextEncoder().encode(
+          `<!doctype html><main>Created through MCP</main><!--${"x".repeat(6 * 1024 * 1024)}-->`,
+        ),
         contentType: "text/html",
       });
       const createdResult = await mcp.callTool({
@@ -795,6 +1218,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!createdText || createdText.type !== "text") throw new Error("missing MCP text result");
       if (createdResult.isError) throw new Error(createdText.text);
       const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(createdText.text));
+      expect(
+        JSON.parse(createdText.text).warnings.map((warning: { code: string }) => warning.code),
+      ).toEqual(["page_heavy"]);
       expect(created.version.sourceSessionId).toBe(attempt.sessionId);
       expect(created.version.sourceTurnId).toBe(attempt.turnId);
       expect(created.version.sourceAttemptId).toBe(attempt.attemptId);
@@ -843,6 +1269,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!replayText || replayText.type !== "text") throw new Error("missing MCP replay result");
       const replayed = WorkspaceArtifactMutationResponse.parse(JSON.parse(replayText.text));
       expect(replayed.replayed).toBe(true);
+      expect(
+        JSON.parse(replayText.text).warnings.map((warning: { code: string }) => warning.code),
+      ).toEqual(["page_heavy"]);
       expect(replayed.artifact.id).toBe(created.artifact.id);
       expect(objectPutCount).toBe(putsAfterCreate);
 
@@ -871,6 +1300,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!publishedText || publishedText.type !== "text")
         throw new Error("missing MCP publish result");
       const published = WorkspaceArtifactMutationResponse.parse(JSON.parse(publishedText.text));
+      expect(JSON.parse(publishedText.text)).not.toHaveProperty("warnings");
       expect(published.version.sourceAttemptId).toBe(attempt.attemptId);
       expect(published.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);
 
@@ -928,6 +1358,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         artifactId: created.artifact.id,
+        viewer: { subjectId: null },
         expectedCurrentVersionId: created.version.id,
         contentKey: `workspace-artifacts/${grant.workspaceId}/later.html`,
         contentSha256: "1".repeat(64),
@@ -1079,6 +1510,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         slug: `${normalizeWorkspaceArtifactSlug(title)}-${artifactId.slice(0, 8)}`,
         title,
         description: null,
+        visibility: "workspace_shared",
+        ownerSubjectId: null,
         contentKey: `workspace-artifacts/${grant.workspaceId}/${artifactId}/index.html`,
         contentSha256: "d".repeat(64),
         sizeBytes: 64,

@@ -1,14 +1,26 @@
 import type { ConnectionOwnership } from "@opengeni/contracts";
 import {
   externalActorContinuationForAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
+
+/** Signing in to a third-party provider is the person's own step in the
+ * browser; an agent acting as them through the organization MCP server is told
+ * to finish it there. */
+export function requireProviderConsentInBrowser(access: AccessGrantAuthorization): void {
+  if (isVerifiedDelegatedHumanAuthorization(access))
+    throw new HTTPException(403, {
+      message: "Signing in to a provider has to be done by the person in the app in a browser.",
+    });
+}
 
 /** A verified external actor must not enter a native callback that has no
  * corresponding key/identity reauthorization proof. Remove at an entry point
  * only when that provider's signed continuation and commit fence are wired. */
 export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void {
+  requireProviderConsentInBrowser(access);
   if (externalActorContinuationForAuthorization(access))
     throw new HTTPException(422, {
       message: "This provider does not yet support external-user OAuth continuation",
@@ -37,9 +49,9 @@ export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void 
  */
 
 /**
- * Subject namespaces OpenGeni itself mints for machines. This is deliberately
+ * Subject namespaces Opengeni itself mints for machines. This is deliberately
  * NOT an allow-list of human subjects: `docs/embedding.md` states that
- * `subjectId` "remains opaque to OpenGeni" and that the kind must not be
+ * `subjectId` "remains opaque to Opengeni" and that the kind must not be
  * inferred from a subject-id prefix "because the host owns that namespace", so
  * a trusted embedding host legitimately signs `human_session` over an opaque
  * subject that is not `user:`-prefixed. Restricting personal ownership to
@@ -49,7 +61,7 @@ export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void 
  * The allow-list that actually decides is `principalKind === "human_session"`.
  * This list is defence-in-depth against exactly one residual threat: a holder
  * of the first-party delegation secret signing a human claim over an
- * OpenGeni-minted machine subject.
+ * Opengeni-minted machine subject.
  *
  * `connection-ownership.test.ts` asserts that every machine subject named in
  * its list is rejected. Note what that does and does not buy: it catches a
@@ -95,7 +107,7 @@ export function isPersonalConnectionOwnerPrincipal(access: AccessGrantAuthorizat
   );
 }
 
-/** Rejects an OpenGeni-minted machine subject; see the namespace list's rationale. */
+/** Rejects an Opengeni-minted machine subject; see the namespace list's rationale. */
 export function isPersonalConnectionOwnerSubject(subjectId: string): boolean {
   const separator = subjectId.indexOf(":");
   if (separator < 0) {
@@ -168,6 +180,31 @@ export const PERSONAL_OWNER_VERIFIED_STATE_CLAIM = "personalOwnerVerified" as co
 /** True only for an explicit boolean `true` claim; absent or malformed fails closed. */
 export function personalOwnerVerifiedInState(payload: Record<string, unknown>): boolean {
   return payload[PERSONAL_OWNER_VERIFIED_STATE_CLAIM] === true;
+}
+
+/**
+ * The owner fields every owner-bound OAuth/install state signs. Its callback
+ * re-checks this owner through `requireConnectOwnerAuthority`, and the claim is
+ * also what finds a managed human's authority in their own Personal workspace
+ * (no membership row). The claim is a required argument so a start path cannot
+ * leave it out; `connect-owner-state-surface.test.ts` keeps every owner-bound
+ * state on this helper.
+ */
+export function connectOwnerStateFields(
+  owner: { accountId: string; workspaceId: string; subjectId: string },
+  personalOwnerVerified: boolean,
+): {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: boolean;
+} {
+  return {
+    accountId: owner.accountId,
+    workspaceId: owner.workspaceId,
+    subjectId: owner.subjectId,
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: personalOwnerVerified,
+  };
 }
 
 /**

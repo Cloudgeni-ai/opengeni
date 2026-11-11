@@ -15,7 +15,7 @@ import {
   type ChatResolve,
 } from "./http";
 import { isUuid } from "./ids";
-import type { Chat, OpenGeni } from "./opengeni";
+import type { Chat, Opengeni } from "./opengeni";
 import { OpenGeniChatError, type ChatChunk, type ChatReply } from "./types";
 
 /**
@@ -146,7 +146,7 @@ export function chatCompletionObject(reply: ChatReply, model: string): Record<st
  * request creates the session.
  */
 export async function handleChatCompletionsRequest(
-  og: OpenGeni,
+  og: Opengeni,
   request: Request,
   resolve: ChatResolve,
 ): Promise<Response> {
@@ -359,7 +359,7 @@ export function responsesInputText(input: unknown): string | null {
  * when this request creates the session.
  */
 export async function handleResponsesRequest(
-  og: OpenGeni,
+  og: Opengeni,
   request: Request,
   resolve: ChatResolve,
 ): Promise<Response> {

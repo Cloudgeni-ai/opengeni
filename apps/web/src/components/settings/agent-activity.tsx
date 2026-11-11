@@ -4,13 +4,13 @@ import { Loader2Icon, PauseIcon, PlayIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Field, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { DisabledReasonTooltip, SettingRow } from "@/components/ui/setting-row";
-import { StatusDot } from "@/components/ui/status-dot";
-import { cn } from "@/lib/utils";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { DisabledReasonTooltip, SettingRow } from "@opengeni/react/ui/setting-row";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { durationLabel, useWorkspaceTimerClock, workspaceTimerLabel } from "@/lib/workspace-timer";
 
 type Control = Workspace["inferenceControl"];
@@ -112,11 +112,11 @@ export function AgentActivityRow(props: AgentActivityProps) {
 
   const description = paused
     ? timerLabel && control.timer?.action === "resume"
-      ? `New sessions and scheduled runs wait. ${timerLabel}.`
-      : "New sessions and scheduled runs wait until someone resumes."
+      ? `New sessions and automation runs wait. ${timerLabel}.`
+      : "New sessions and automation runs wait until someone resumes."
     : timerLabel
-      ? `Agents can start new sessions and scheduled runs. ${timerLabel}.`
-      : "Agents can start new sessions and scheduled runs.";
+      ? `Agents can start new sessions and automation runs. ${timerLabel}.`
+      : "Agents can start new sessions and automation runs.";
 
   const coarse = "pointer-coarse:h-11";
   let controls: ReactNode;
@@ -314,7 +314,7 @@ function PauseDialog({
       description={
         paused
           ? "Pick when agent work resumes."
-          : "New sessions and scheduled runs wait until agent work resumes, and running work stops after its current step."
+          : "New sessions and automation runs wait until agent work resumes, and running work stops after its current step."
       }
       submitLabel={paused ? "Save" : "Pause"}
       pendingLabel={paused ? "Saving…" : "Pausing…"}

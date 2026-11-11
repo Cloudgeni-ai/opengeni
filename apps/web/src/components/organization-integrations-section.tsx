@@ -7,18 +7,18 @@ import {
   type UpdateOrganizationIntegrationPolicyRequest,
 } from "@opengeni/sdk/organization-integration-policy";
 import { useEffect, useRef, useState } from "react";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import {
   beginOrganizationAdminOperation,
   ownsOrganizationAdminOperation,
@@ -26,8 +26,8 @@ import {
   isOrganizationConflict,
   type OrganizationAdminIdentity,
   type OrganizationAdminOperation,
-} from "@/lib/organization-admin";
-import type { OrganizationMembershipRole } from "@/types";
+} from "@opengeni/react/app/lib/organization-admin";
+import type { OrganizationMembershipRole } from "@opengeni/react/app/types";
 
 type Props = {
   client: Parameters<typeof getOrganizationIntegrationPolicy>[0];
@@ -54,6 +54,8 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
   const [catalog, setCatalog] = useState<OrganizationIntegrationCatalog | null>(null);
   const [mode, setMode] = useState<OrganizationIntegrationPolicy["mode"]>("unrestricted");
   const [selected, setSelected] = useState<string[]>([]);
+  const [personalSetup, setPersonalSetup] =
+    useState<OrganizationIntegrationPolicy["personalIntegrationSetup"]>("members");
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +88,7 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
     setPolicy(value);
     setMode(value.mode);
     setSelected(value.allowedIntegrationKeys);
+    setPersonalSetup(value.personalIntegrationSetup);
   };
   async function load() {
     const accepted = claim("read");
@@ -125,6 +128,7 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
     const request = pending ?? {
       mode,
       allowedIntegrationKeys: mode === "restricted" ? [...selected].sort() : [],
+      personalIntegrationSetup: personalSetup,
       expectedRevision: policy.revision,
       operationId: crypto.randomUUID(),
     };
@@ -180,6 +184,7 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
   const dirty =
     policy &&
     (mode !== policy.mode ||
+      personalSetup !== policy.personalIntegrationSetup ||
       (mode === "restricted" &&
         JSON.stringify([...selected].sort()) !==
           JSON.stringify([...policy.allowedIntegrationKeys].sort())));
@@ -204,6 +209,7 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
     if (!policy) return;
     setMode(policy.mode);
     setSelected(policy.allowedIntegrationKeys);
+    setPersonalSetup(policy.personalIntegrationSetup);
     setMessage("");
   };
   const toggle = (key: string, allowed: boolean) => {
@@ -269,6 +275,25 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
                     { value: "unrestricted", label: "All integrations" },
                     { value: "restricted", label: "Only selected" },
                   ]}
+                />
+              }
+            />
+            <SettingRow
+              label="Members can turn on integrations"
+              description={
+                personalSetup === "members"
+                  ? "Members can turn on allowed integrations, add MCP servers and install plugins. Admins still choose which tools run without asking."
+                  : "Only admins can turn integrations on. Members can still connect their own accounts to integrations that are already on."
+              }
+              control={
+                <Switch
+                  checked={personalSetup === "members"}
+                  disabled={locked}
+                  aria-label="Members can turn on integrations"
+                  onCheckedChange={(next) => {
+                    setPersonalSetup(next ? "members" : "admins");
+                    setMessage("");
+                  }}
                 />
               }
             />

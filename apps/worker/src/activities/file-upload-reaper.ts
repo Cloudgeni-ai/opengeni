@@ -1,10 +1,8 @@
 import {
-  claimDueTranscriptionRecordingObjectCleanup,
   claimExpiredFileUploadCleanup,
-  completeDueTranscriptionRecordingObjectCleanup,
   completeExpiredFileUploadCleanup,
   claimVideoGenerationOperations,
-  purgeExpiredTranscriptionRecordings,
+  claimSessionTitleWorkflows,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { ControlActivityServices } from "./types";
@@ -63,9 +61,6 @@ export type FileUploadReaperActivityOptions = {
   deleteObject?: (storage: ObjectStorage, key: string) => Promise<void>;
   claimFileUploads?: typeof claimExpiredFileUploadCleanup;
   completeFileUpload?: typeof completeExpiredFileUploadCleanup;
-  claimTranscriptionObjects?: typeof claimDueTranscriptionRecordingObjectCleanup;
-  completeTranscriptionObject?: typeof completeDueTranscriptionRecordingObjectCleanup;
-  purgeTranscriptionRecordings?: typeof purgeExpiredTranscriptionRecordings;
 };
 
 /**
@@ -83,25 +78,10 @@ export function createFileUploadReaperActivities(
   const deleteObject = options.deleteObject ?? (async (storage, key) => storage.deleteObject(key));
   const claimFileUploads = options.claimFileUploads ?? claimExpiredFileUploadCleanup;
   const completeFileUpload = options.completeFileUpload ?? completeExpiredFileUploadCleanup;
-  const claimTranscriptionObjects =
-    options.claimTranscriptionObjects ?? claimDueTranscriptionRecordingObjectCleanup;
-  const completeTranscriptionObject =
-    options.completeTranscriptionObject ?? completeDueTranscriptionRecordingObjectCleanup;
-  const purgeTranscriptionRecordings =
-    options.purgeTranscriptionRecordings ?? purgeExpiredTranscriptionRecordings;
 
   async function reapExpiredFileUploads(): Promise<ReapExpiredFileUploadsResult> {
     const { db, objectStorage, observability } = await services();
-    if (!objectStorage) {
-      try {
-        await purgeTranscriptionRecordings(db, { graceMs, limit: batchSize });
-      } catch (error) {
-        observability.warn("expired transcription recording metadata purge failed", {
-          ...cleanupErrorAttributes(error),
-        });
-      }
-      return { claimed: 0, deleted: 0, failed: 0 };
-    }
+    if (!objectStorage) return { claimed: 0, deleted: 0, failed: 0 };
 
     const claims = await claimFileUploads(db, {
       graceMs,
@@ -128,52 +108,9 @@ export function createFileUploadReaperActivities(
         });
       }
     }
-    const recordingClaims = await claimTranscriptionObjects(db, {
-      graceMs,
-      claimTimeoutMs,
-      limit: batchSize,
-    });
-    for (const claim of recordingClaims) {
-      try {
-        await deleteObject(objectStorage, claim.objectKey);
-        const settled = await completeTranscriptionObject(db, claim);
-        if (!settled) {
-          throw new Error("cleanup claim no longer owns a transcription recording object");
-        }
-        deleted += 1;
-      } catch (error) {
-        failed += 1;
-        observability.warn(
-          "expired transcription recording object cleanup failed; claim remains reclaimable",
-          {
-            workspaceId: claim.workspaceId,
-            recordingId: claim.recordingId,
-            ...cleanupErrorAttributes(error),
-          },
-        );
-      }
-    }
-    let transcriptionRecordingsPurged = 0;
-    try {
-      transcriptionRecordingsPurged = await purgeTranscriptionRecordings(db, {
-        graceMs,
-        limit: batchSize,
-      });
-    } catch (error) {
-      observability.warn("expired transcription recording metadata purge failed", {
-        ...cleanupErrorAttributes(error),
-      });
-    }
-    const claimed = claims.length + recordingClaims.length;
-    if (claimed > 0 || transcriptionRecordingsPurged > 0) {
-      observability.info("expired file upload cleanup swept", {
-        claimed,
-        deleted,
-        failed,
-        fileUploads: claims.length,
-        transcriptionRecordingObjects: recordingClaims.length,
-        transcriptionRecordingsPurged,
-      });
+    const claimed = claims.length;
+    if (claimed > 0) {
+      observability.info("expired file upload cleanup swept", { claimed, deleted, failed });
     }
     return { claimed, deleted, failed };
   }
@@ -207,5 +144,52 @@ export function createFileUploadReaperActivities(
     return { claimed: claims.length, started, failed };
   }
 
-  return { reapExpiredFileUploads, recoverVideoGenerationWorkflows };
+  async function recoverSessionTitleWorkflows(): Promise<{
+    claimed: number;
+    started: number;
+    failed: number;
+  }> {
+    const { db, startSessionTitleWorkflow, observability } = await services();
+    if (!startSessionTitleWorkflow) return { claimed: 0, started: 0, failed: 0 };
+    const claims = await claimSessionTitleWorkflows(db);
+    let started = 0;
+    let failed = 0;
+    for (const claim of claims) {
+      try {
+        await startSessionTitleWorkflow(claim);
+        started++;
+      } catch (error) {
+        failed++;
+        observability.warn("Session title workflow recovery start failed", {
+          operationId: claim.operationId,
+          errorClass: error instanceof Error ? error.name : "UnknownError",
+        });
+      }
+    }
+    return { claimed: claims.length, started, failed };
+  }
+
+  /** Deletes staged transient objects once their deferred deadline arrives.
+   * Deleting an object that is already gone succeeds, so a request that
+   * finished and removed its own objects early makes this a no-op. */
+  async function deleteTransientObjects(input: {
+    workspaceId: string;
+    objectKeys: string[];
+  }): Promise<{ deleted: number }> {
+    const { objectStorage } = await services();
+    if (!objectStorage) return { deleted: 0 };
+    const prefix = `workspaces/${input.workspaceId}/`;
+    const keys = input.objectKeys.filter((key) => key.startsWith(prefix));
+    for (const key of keys) {
+      await deleteObject(objectStorage, key);
+    }
+    return { deleted: keys.length };
+  }
+
+  return {
+    reapExpiredFileUploads,
+    recoverVideoGenerationWorkflows,
+    recoverSessionTitleWorkflows,
+    deleteTransientObjects,
+  };
 }

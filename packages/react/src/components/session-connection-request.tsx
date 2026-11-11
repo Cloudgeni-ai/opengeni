@@ -5,6 +5,7 @@ import {
   SessionMcpCapabilityCard,
   type SessionMcpCapabilityCardProps,
 } from "./session-mcp-capability-card";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type SessionConnectionRequestProps = Omit<
   SessionMcpCapabilityCardProps,
@@ -31,6 +32,7 @@ export function SessionConnectionRequest(props: SessionConnectionRequestProps) {
 }
 
 function ScopedRequest({ request, ...props }: SessionConnectionRequestProps) {
+  const t = useOpenGeniText();
   const [resolved, setResolved] = useState<AuthNeededItem | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
@@ -45,21 +47,18 @@ function ScopedRequest({ request, ...props }: SessionConnectionRequestProps) {
       .listCapabilities(props.workspaceId)
       .then((catalog) => {
         if (!current) return;
-        const recommendation = sessionAuthRecommendation(event, catalog.items);
+        const recommendation = sessionAuthRecommendation(t, event, catalog.items);
         const candidate = catalog.items.find(
           (entry) => entry.id === recommendation?.capability?.id,
         );
         if (!recommendation || candidate?.kind !== "mcp" || candidate.authKind !== "oauth2") {
-          setError(
-            "This request could not be matched to one available OAuth integration. Review its connection settings before continuing.",
-          );
+          setError(t("sessionConnectionRequest.thisRequestCouldNotBe"));
           return;
         }
         setResolved(recommendation);
       })
       .catch(() => {
-        if (current)
-          setError("Couldn't load connection details. Retry to check the current integration.");
+        if (current) setError(t("sessionConnectionRequest.couldnTLoadConnectionDetails"));
       });
     return () => {
       current = false;
@@ -74,14 +73,17 @@ function ScopedRequest({ request, ...props }: SessionConnectionRequestProps) {
     request.reason,
     request.capability?.id,
     retry,
+    t,
   ]);
   if (!resolved?.capability)
     return (
       <div className="og-session-capability-setup">
-        <p role={error ? "alert" : "status"}>{error ?? "Loading connection details…"}</p>
+        <p role={error ? "alert" : "status"}>
+          {error ?? t("sessionConnectionRequest.loadingConnectionDetails")}
+        </p>
         {error ? (
           <button type="button" onClick={() => setRetry((value) => value + 1)}>
-            Retry
+            {t("sessionConnectionRequest.retry")}
           </button>
         ) : null}
       </div>

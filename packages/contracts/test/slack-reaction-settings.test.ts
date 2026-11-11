@@ -14,6 +14,7 @@ import {
   OPENGENI_MANAGED_PUBLIC_BASE_URL,
   OPENGENI_SLACK_BOT_EVENTS,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  openGeniSlackBotRequestedScopes,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_SEARCH_SCOPES,
   OPENGENI_SLACK_MCP_USER_SCOPES,
@@ -67,18 +68,21 @@ describe("Slack reaction summon workspace settings", () => {
     expect(hasOpenGeniSlackReactionScope([])).toBe(false);
   });
 
-  test("requests bot-token public search scopes without widening beyond Slack's bot-scope surface", () => {
+  test("limited installs omit search scopes while full grants remain eligible", () => {
     expect(OPENGENI_SLACK_BOT_SEARCH_SCOPES).toEqual([
       "search:read.public",
       "search:read.files",
       "search:read.users",
     ]);
     for (const scope of OPENGENI_SLACK_BOT_SEARCH_SCOPES) {
-      expect(OPENGENI_SLACK_BOT_REQUESTED_SCOPES).toContain(scope);
+      expect(openGeniSlackBotRequestedScopes("full")).toContain(scope);
+      expect(openGeniSlackBotRequestedScopes("limited")).not.toContain(scope);
       // Existing installations without the search grant remain eligible.
       expect(OPENGENI_SLACK_BOT_REQUIRED_SCOPES).not.toContain(scope);
     }
-    expect(hasOpenGeniSlackBotSearchScopes(OPENGENI_SLACK_BOT_REQUESTED_SCOPES)).toBe(true);
+    expect(hasOpenGeniSlackBotSearchScopes(OPENGENI_SLACK_BOT_REQUESTED_SCOPES)).toBe(false);
+    expect(hasOpenGeniSlackBotSearchScopes(openGeniSlackBotRequestedScopes("full"))).toBe(true);
+    expect(areOpenGeniSlackBotScopesAccepted(openGeniSlackBotRequestedScopes("full"))).toBe(true);
     expect(hasOpenGeniSlackBotSearchScopes(OPENGENI_SLACK_BOT_REQUIRED_SCOPES)).toBe(false);
     expect(areOpenGeniSlackBotScopesAccepted(OPENGENI_SLACK_BOT_REQUIRED_SCOPES)).toBe(true);
     expect(areOpenGeniSlackBotScopesAccepted(OPENGENI_SLACK_BOT_REQUESTED_SCOPES)).toBe(true);
@@ -101,6 +105,8 @@ describe("Slack reaction summon workspace settings", () => {
 
   test("generates one managed or self-hosted manifest with the exact read scope and reaction event", () => {
     const managed = buildOpenGeniSlackBotManifest(OPENGENI_MANAGED_PUBLIC_BASE_URL);
+    expect(managed.display_information.name).toBe("Opengeni");
+    expect(managed.features.bot_user.display_name).toBe("Opengeni");
     expect(managed.oauth_config.scopes.bot).toEqual([...OPENGENI_SLACK_BOT_REQUESTED_SCOPES]);
     expect(managed.features.app_home).toEqual({
       home_tab_enabled: true,
@@ -110,21 +116,25 @@ describe("Slack reaction summon workspace settings", () => {
     expect(managed.oauth_config.scopes.bot).not.toContain("reactions:write");
     expect(managed.oauth_config.scopes.user).toEqual([...OPENGENI_SLACK_MCP_USER_SCOPES]);
     expect(managed.settings.is_mcp_enabled).toBe(true);
+    expect(
+      buildOpenGeniSlackBotManifest(OPENGENI_MANAGED_PUBLIC_BASE_URL, { accessMode: "full" })
+        .oauth_config.scopes.bot,
+    ).toEqual(openGeniSlackBotRequestedScopes("full"));
     expect(managed.settings.event_subscriptions.bot_events).toEqual([...OPENGENI_SLACK_BOT_EVENTS]);
     expect(managed.settings.event_subscriptions.request_url).toBe(
       "https://app.opengeni.ai/v1/integrations/slack/events",
     );
 
     const staging = buildOpenGeniSlackBotManifest("https://staging.app.opengeni.ai", {
-      appName: "OpenGeni Staging",
-      botDisplayName: "OpenGeni Staging",
+      appName: "Opengeni Staging",
+      botDisplayName: "Opengeni Staging",
       slashCommand: "/opengeni-staging",
-      shortcutName: "Open in OpenGeni Staging",
+      shortcutName: "Ask Opengeni Staging",
     });
-    expect(staging.display_information.name).toBe("OpenGeni Staging");
-    expect(staging.features.bot_user.display_name).toBe("OpenGeni Staging");
+    expect(staging.display_information.name).toBe("Opengeni Staging");
+    expect(staging.features.bot_user.display_name).toBe("Opengeni Staging");
     expect(staging.features.slash_commands[0]!.command).toBe("/opengeni-staging");
-    expect(staging.features.shortcuts[0]!.name).toBe("Open in OpenGeni Staging");
+    expect(staging.features.shortcuts[0]!.name).toBe("Ask Opengeni Staging");
     expect(staging.settings.interactivity.request_url).toBe(
       "https://staging.app.opengeni.ai/v1/integrations/slack/interactions",
     );
@@ -142,7 +152,7 @@ describe("Slack reaction summon workspace settings", () => {
     );
     expect(() =>
       buildOpenGeniSlackBotManifest("https://opengeni.example.test", {
-        slashCommand: "/OpenGeni",
+        slashCommand: "/Opengeni",
       }),
     ).toThrow("slash command");
   });

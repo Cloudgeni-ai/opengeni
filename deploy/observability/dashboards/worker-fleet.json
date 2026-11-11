@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-worker-fleet",
-  "title": "OpenGeni · Worker Fleet",
+  "title": "Opengeni · Worker Fleet",
   "description": "Eligible turn backlog, hard-reserved slot saturation, continuous worker memory headroom, node pressure, HPA replicas, sandbox leases, and compaction pressure.",
   "schemaVersion": 39,
   "version": 1,
@@ -277,7 +277,7 @@
     {
       "type": "timeseries",
       "title": "Oldest eligible turn backlog age",
-      "description": "Temporal schedule-to-start pressure. Sustained age means runnable work is waiting for admission; paused human prompts never enter this series. Backlog is shown only when freshness and last-success age come from the same scrape instance.",
+      "description": "Temporal schedule-to-start pressure. Sustained age means runnable work is waiting for admission; paused human prompts never enter this series. Backlog is shown only when freshness and last-success age come from the same scrape instance. \"oldest ready prompt\" is the oldest durable prompt nothing in its session holds back, wherever it waits: an old ready prompt without an eligible backlog is waiting before dispatch, in the session's control activities, not for turn capacity.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -310,6 +310,17 @@
           "refId": "A",
           "expr": "max(opengeni_turn_eligible_backlog_oldest_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} and on(namespace, release, environment, component, instance) opengeni_turn_capacity_monitor_fresh{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} == 1 and on(namespace, release, environment, component, instance) time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} < 45)",
           "legendFormat": "oldest eligible",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "max(opengeni_turns_queued_oldest_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",hold=\"ready\"})",
+          "legendFormat": "oldest ready prompt",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1042,7 +1053,7 @@
     },
     {
       "type": "row",
-      "title": "Node pressure — OpenGeni-hosting nodes only",
+      "title": "Node pressure — Opengeni-hosting nodes only",
       "collapsed": false,
       "panels": [],
       "id": 20,
@@ -1171,7 +1182,7 @@
     {
       "type": "timeseries",
       "title": "Kubelet runtime errors and node readiness loss",
-      "description": "Runtime-operation errors and NotReady state on nodes hosting OpenGeni. Correlated service failures during pressure should be treated as one node incident.",
+      "description": "Runtime-operation errors and NotReady state on nodes hosting Opengeni. Correlated service failures during pressure should be treated as one node incident.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

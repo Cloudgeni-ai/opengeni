@@ -1,6 +1,10 @@
 import { hasPermission } from "@opengeni/core";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import { isManagedOpenRouterFreeRoute, type ModelCapabilitiesV1 } from "@opengeni/config";
+import {
+  claudeNativeModelProfile,
+  isManagedOpenRouterFreeRoute,
+  type ModelCapabilitiesV1,
+} from "@opengeni/config";
 import type {
   GeneratedSessionTitle,
   GenerateSessionTitleOptions,
@@ -15,11 +19,31 @@ import {
   type ResolvedAgentConfig,
   type ToolRef,
 } from "@opengeni/contracts";
+import {
+  CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX,
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  isClaudeSubscriptionProviderId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 
 export const SESSION_TITLE_MODEL_TOOL_NAME = "opengeni__set_session_title";
 
 const SESSION_TITLE_DESCRIPTION =
-  "Set this session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once on a new session, then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.";
+  "Set this session's display title to a concise 3-7 word topic label in the language the person writes in. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once the session has a task, question or subject (not while it holds only a greeting or small talk), then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.";
+
+/**
+ * What a still-untitled session's automatic title is generated from: its
+ * first message and, on a later turn, that turn's message too, so a session
+ * that opened with only a greeting gets its title once a request arrives.
+ * A turn whose message holds the first message (the first turn) adds
+ * nothing.
+ */
+export function sessionTitlePromptFor(initialMessage: string, turnPrompt: string): string {
+  const opener = initialMessage.trim();
+  const latest = turnPrompt.trim();
+  if (!opener) return turnPrompt;
+  if (!latest || latest.includes(opener)) return initialMessage;
+  return `${opener}\n\n${latest}`;
+}
 
 export function shouldRequestMissingSessionTitle(input: {
   title: string | null;
@@ -85,6 +109,85 @@ export function sessionTitleToolPlan(input: {
 
 export const PARALLEL_SESSION_TITLE_TIMEOUT_MS = 15_000;
 
+/** Codex subscription turns title on this fast model of the same account. */
+export const CODEX_SESSION_TITLE_MODEL_ID = "codex/gpt-6-luna";
+/** Claude subscription turns title on this fast model of the same account. */
+export const CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID = "claude-haiku-5-5";
+
+type ResolvedTitleModel = NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>;
+
+export type SessionTitleRoute = {
+  resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
+  /** Upstream model name sent to the provider. */
+  modelName: string;
+  /** Product model id the title usage is recorded under, when it differs from the turn's. */
+  usageModelId: string | null;
+};
+
+/**
+ * The model for the auxiliary title request. A subscription turn titles on a
+ * fast model of the same subscription account and request context, so the
+ * title costs the subscription little and never another rail: Codex turns use
+ * Luna and Claude subscription turns use Haiku. Other turns, and a
+ * subscription whose catalog lacks the title model, title on the turn's model.
+ */
+export function sessionTitleRoute(input: {
+  resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
+  modelName: string;
+  resolveTurnModel: (modelId: string) => ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
+}): SessionTitleRoute {
+  const turnRoute = {
+    resolvedModel: input.resolvedModel,
+    modelName: input.modelName,
+    usageModelId: null,
+  };
+  const turn = input.resolvedModel;
+  if (!turn) return turnRoute;
+  const sameAccount = (title: ResolvedTitleModel): SessionTitleRoute => ({
+    // The turn's client and provider carry its account and credential binding.
+    resolvedModel: { ...title, client: turn.client, provider: turn.provider },
+    modelName: title.configured.upstreamModelId,
+    usageModelId: title.configured.id,
+  });
+  if (turn.provider.kind === "codex-subscription") {
+    if (turn.configured.id === CODEX_SESSION_TITLE_MODEL_ID) return turnRoute;
+    const title = input.resolveTurnModel(CODEX_SESSION_TITLE_MODEL_ID);
+    return title && title.provider.id === turn.provider.id ? sameAccount(title) : turnRoute;
+  }
+  if (isClaudeSubscriptionProviderId(turn.provider.id)) {
+    if (turn.configured.upstreamModelId === CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID)
+      return turnRoute;
+    const titleModelId =
+      turn.provider.id === CLAUDE_SUBSCRIPTION_PROVIDER_ID
+        ? `${CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX}${CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID}`
+        : `${turn.provider.id}/${CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID}`;
+    const listed = input.resolveTurnModel(titleModelId);
+    if (listed && listed.provider.id === turn.provider.id) return sameAccount(listed);
+    // Every Claude subscription can serve Haiku even when the connection's
+    // picker list omits it; the native profile supplies its reasoning range.
+    const profile = claudeNativeModelProfile(CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID);
+    if (!profile) return turnRoute;
+    return sameAccount({
+      ...turn,
+      configured: {
+        ...turn.configured,
+        id: titleModelId,
+        upstreamModelId: CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID,
+        capabilities: {
+          ...turn.configured.capabilities,
+          reasoning: {
+            ...turn.configured.capabilities.reasoning,
+            runnable: profile.efforts.length > 0,
+            efforts: [...profile.efforts],
+            defaultEffort: profile.defaultEffort,
+          },
+        },
+      },
+    });
+  }
+  return turnRoute;
+}
+
 /**
  * The lowest reasoning effort the resolved model can run, for the auxiliary
  * title request only. A title needs no deliberation, and a provider default
@@ -143,13 +246,15 @@ export type ParallelSessionTitleGeneration = {
  * stream. finish() waits for the already-running bounded request, so a quick
  * main response does not discard a valid title merely because it completed
  * first. cancel() aborts and joins exceptional/cancelled exits so no provider
- * work escapes the owning runAgentTurn activity.
+ * work escapes the owning runAgentTurn activity. Both exits settle an already
+ * completed result before returning, including its separate request custody.
  */
 export function startParallelSessionTitleGeneration(input: {
   generate: (signal: AbortSignal) => Promise<GeneratedSessionTitle>;
   signal?: AbortSignal;
   timeoutMs?: number;
   onError?: (error: unknown) => void;
+  onFinish?: (result: GeneratedSessionTitle | null) => Promise<void>;
 }): ParallelSessionTitleGeneration {
   const cancellationController = new AbortController();
   const timeoutSignal = AbortSignal.timeout(input.timeoutMs ?? PARALLEL_SESSION_TITLE_TIMEOUT_MS);
@@ -165,15 +270,22 @@ export function startParallelSessionTitleGeneration(input: {
     });
   let finished: Promise<GeneratedSessionTitle | null> | null = null;
 
+  const finish = (): Promise<GeneratedSessionTitle | null> => {
+    finished ??= generation.then(async (result) => {
+      await input.onFinish?.(result);
+      return result;
+    });
+    return finished;
+  };
+
   return {
-    finish: () => {
-      if (finished) return finished;
-      finished = generation;
-      return finished;
-    },
+    finish,
     cancel: async () => {
+      // Let an already-resolved generation deliver its queued result before
+      // aborting. A request still pending at this boundary remains cancelled.
+      await Promise.resolve();
       cancellationController.abort();
-      await generation;
+      await finish();
     },
   };
 }

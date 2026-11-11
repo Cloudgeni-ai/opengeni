@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import type { IntegrationFacetBindingSummary, IntegrationFacetDefinitionSummary } from "@/types";
+import type {
+  IntegrationFacetBindingSummary,
+  IntegrationFacetDefinitionSummary,
+} from "@opengeni/react/app/types";
 
 import {
   facetConfigFromForm,
@@ -11,7 +14,7 @@ import {
 
 const driveDefinition: IntegrationFacetDefinitionSummary = {
   facetKey: "drive-content",
-  kind: "knowledge_source",
+  kind: "inbound_trigger",
   configSchema: {
     type: "object",
     required: ["sourceId", "sourceKind"],
@@ -91,7 +94,7 @@ describe("Integration facet schema forms", () => {
     const binding: IntegrationFacetBindingSummary = {
       id: "00000000-0000-4000-8000-000000000701",
       facetKey: "drive-content",
-      kind: "knowledge_source",
+      kind: "inbound_trigger",
       bindingKey: "finance",
       displayName: "Finance source",
       connectionId: "00000000-0000-4000-8000-000000000702",
@@ -122,7 +125,7 @@ describe("Integration facet schema forms", () => {
   test("refuses required nested configuration that the generic editor cannot represent", () => {
     const richDriveDefinition: IntegrationFacetDefinitionSummary = {
       facetKey: "drive-content",
-      kind: "knowledge_source",
+      kind: "inbound_trigger",
       configSchema: {
         type: "object",
         required: ["sources", "destination", "syncCadence", "readPolicy"],

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ExternalIdentityLink, ExternalIdentityLinkPage } from "@opengeni/sdk";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type IdentityLinkAccountsClient = {
   listIdentityLinks(workspaceId: string, cursor?: string): Promise<ExternalIdentityLinkPage>;
@@ -19,6 +20,7 @@ export function IdentityLinkAccounts({
   client: IdentityLinkAccountsClient;
   workspaceId: string;
 }) {
+  const t = useOpenGeniText();
   const [links, setLinks] = useState<ExternalIdentityLink[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
@@ -92,46 +94,45 @@ export function IdentityLinkAccounts({
   return (
     <section
       className="og-connect og-identity-link"
-      aria-label="Linked product access"
+      aria-label={t("identityLinkAccounts.linkedProductAccess")}
       aria-busy={busy}
     >
-      <h2>Linked product access</h2>
-      <p>
-        Manage products allowed to act as your account in this organization. Revoking a link stops
-        future linked access; it does not delete your work or undo an operation already started.
-      </p>
+      <h2>{t("identityLinkAccounts.linkedProductAccess")}</h2>
+      <p>{t("identityLinkAccounts.manageProductsAllowedToAct")}</p>
       {/* The links sit in one card under the heading, like a settings section;
           the empty and loading lines are rows of that card. */}
       <div className="og-identity-link-card">
         {error && (
           <div role="alert">
-            Could not update account links. Reload to see current access.
+            {t("identityLinkAccounts.couldNotUpdateAccountLinks")}
             <button type="button" disabled={busy} onClick={() => setRevision((value) => value + 1)}>
-              Reload links
+              {t("identityLinkAccounts.reloadLinks")}
             </button>
           </div>
         )}
-        {busy && <p role="status">Loading account links…</p>}
+        {busy && <p role="status">{t("identityLinkAccounts.loadingAccountLinks")}</p>}
         {!busy && !error && links.length === 0 && (
-          <p>No products have linked access to this account.</p>
+          <p>{t("identityLinkAccounts.noProductsHaveLinkedAccess")}</p>
         )}
         <ul>
           {links.map((link) => (
             <li key={link.id}>
               <p>
-                {link.externalIdentity?.source || "Product identity"}{" "}
+                {link.externalIdentity?.source || t("identityLinkAccounts.productIdentity")}{" "}
                 <code>{link.externalIdentity?.externalId ?? link.externalIdentityId}</code>
               </p>
               <p>
-                Status: {link.status}.{" "}
+                {t("identityLinkAccounts.statusStatus", { status: link.status })}{" "}
                 {link.expiresAt
-                  ? `Expires ${new Date(link.expiresAt).toLocaleString()}.`
-                  : "No automatic expiry."}
+                  ? t("identityLinkAccounts.expiresLocalestring", {
+                      localeString: new Date(link.expiresAt).toLocaleString(t.locale),
+                    })
+                  : t("identityLinkAccounts.noAutomaticExpiry")}
               </p>
               <p>{link.permissions.join(", ")}</p>
               {(link.status === "active" || link.status === "pending") && (
                 <button type="button" disabled={busy} onClick={() => void act(link)}>
-                  Revoke access
+                  {t("identityLinkAccounts.revokeAccess")}
                 </button>
               )}
             </li>
@@ -139,7 +140,7 @@ export function IdentityLinkAccounts({
         </ul>
         {cursor && (
           <button type="button" disabled={busy} onClick={() => void act()}>
-            Load more links
+            {t("identityLinkAccounts.loadMoreLinks")}
           </button>
         )}
       </div>

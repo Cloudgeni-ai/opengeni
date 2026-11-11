@@ -47,6 +47,12 @@ export async function verifyBunVersionContract(
   if (!rootTypes || rootTypes !== extensionTypes) {
     throw new Error("root and browser-extension @types/bun ranges must be identical");
   }
+  const gatewayManifest = JSON.parse(
+    await readFile(join(root, "apps/site-gateway/package.json"), "utf8"),
+  ) as PackageManifest;
+  if (gatewayManifest.devDependencies?.["@types/bun"] !== rootTypes) {
+    throw new Error("site-gateway @types/bun must mirror the root range");
+  }
   const typeVersion = /^\^(\d+\.\d+\.\d+)$/u.exec(rootTypes)?.[1];
   if (!typeVersion || majorMinor(typeVersion) !== majorMinor(version)) {
     throw new Error(
@@ -63,6 +69,7 @@ export async function verifyBunVersionContract(
     "docker/opengeni.Dockerfile",
     "docker/sandbox.Dockerfile",
     "docker/desktop.Dockerfile",
+    "docker/backup.Dockerfile",
   ]) {
     const source = await readFile(join(root, path), "utf8");
     if (!source.includes(`ARG BUN_VERSION=${version}`)) {
@@ -74,7 +81,11 @@ export async function verifyBunVersionContract(
     if (
       bunBases.length === 0 ||
       bunBases.some(
-        (line) => !/^FROM\s+(?:--platform=\S+\s+)?oven\/bun:\$\{BUN_VERSION\}(?:\s|$)/u.test(line),
+        // An official variant (`-slim`, `-alpine`, ...) still derives from BUN_VERSION.
+        (line) =>
+          !/^FROM\s+(?:--platform=\S+\s+)?oven\/bun:\$\{BUN_VERSION\}(?:-[a-z]+)?(?:\s|$)/u.test(
+            line,
+          ),
       )
     ) {
       throw new Error(`${path} must derive every Bun base from BUN_VERSION`);
@@ -147,7 +158,11 @@ function majorMinor(version: string): string {
 }
 
 export function verifyWorkflowBunSetup(name: string, source: string): void {
-  const canonicalVersionFiles = [".bun-version", ".release/controller/.bun-version"];
+  const canonicalVersionFiles = [
+    ".bun-version",
+    ".release/controller/.bun-version",
+    ".ci/registry-export-guard/.bun-version",
+  ];
   const lines = source.split("\n");
   for (const [index, line] of lines.entries()) {
     if (!line.includes("oven-sh/setup-bun@")) continue;
@@ -163,7 +178,7 @@ export function verifyWorkflowBunSetup(name: string, source: string): void {
       .find((candidate) => candidate !== undefined);
     if (!versionFile || !canonicalVersionFiles.includes(versionFile)) {
       throw new Error(
-        `${name} setup-bun step must read the canonical source or retained-controller .bun-version file`,
+        `${name} setup-bun step must read the canonical source, retained-controller, or registry-guard .bun-version file`,
       );
     }
   }

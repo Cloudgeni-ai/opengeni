@@ -9,7 +9,7 @@
  * Keep these in lock-step with the Rust corpus.
  */
 
-import { Arch, ControlRequest, ControlResponse, Hello, Os } from "../src/index";
+import { Arch, ControlRequest, ControlResponse, FsEntryKind, Hello, Os } from "../src/index";
 
 const textEncoder = new TextEncoder();
 
@@ -19,30 +19,34 @@ function bytes(s: string): Uint8Array {
 }
 
 /**
- * A map-free `ControlResponse` carrying a structured git status — used for the
- * strict byte-equality cross-stack check.
+ * A map-free `ControlResponse` carrying a directory listing (strings, an enum,
+ * and 64/32-bit integers) — used for the strict byte-equality cross-stack check.
  */
 export function canonicalControlResponse(): ControlResponse {
   return {
     requestId: "req-0001",
     error: undefined,
     result: {
-      $case: "git",
-      git: {
-        exitCode: 0,
-        stdout: bytes("on branch main\n"),
-        stderr: new Uint8Array(0),
-        status: {
-          branch: "main",
-          upstream: "origin/main",
-          ahead: 2,
-          behind: 0,
-          files: [
-            { path: "src/lib.rs", code: " M", staged: false },
-            { path: "README.md", code: "??", staged: false },
-          ],
-          clean: false,
-        },
+      $case: "fsList",
+      fsList: {
+        entries: [
+          {
+            name: "lib.rs",
+            path: "src/lib.rs",
+            kind: FsEntryKind.FS_ENTRY_KIND_FILE,
+            size: "4096",
+            modifiedMs: "1767225600000",
+            mode: 0o644,
+          },
+          {
+            name: "docs",
+            path: "docs",
+            kind: FsEntryKind.FS_ENTRY_KIND_DIRECTORY,
+            size: "0",
+            modifiedMs: "1767225660000",
+            mode: 0o755,
+          },
+        ],
       },
     },
   };
@@ -69,11 +73,13 @@ export function canonicalControlRequest(): ControlRequest {
             env: { OPENGENI_AGENT: "1" },
             stdin: bytes("piped-input"),
             timeoutMs: 5000,
+            runAs: "",
           },
         },
         windowBytes: "65536",
         deadlineMs: "1800000000000",
         originId: "session-abc",
+        connectionGeneration: "0",
       },
     },
   };
@@ -116,6 +122,12 @@ export function canonicalHello(): Hello {
       operationResourcePolicy: false,
       operationCpuQuota: false,
       transactionalFsWrite: false,
+      transactionalFsWriteMachine: false,
+      credentialRenew: false,
+      macPermissions: undefined,
+      browserControlHttp: false,
+      runAs: false,
+      opRelease: false,
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",

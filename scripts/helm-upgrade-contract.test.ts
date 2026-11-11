@@ -9,6 +9,24 @@ async function source(path: string): Promise<string> {
 }
 
 describe("Helm database upgrade contract", () => {
+  test("private integration hosts use the shared API and worker config map", async () => {
+    const name = "OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS";
+    const values = Bun.YAML.parse(await source("deploy/helm/opengeni/values.yaml")) as {
+      config: Record<string, unknown>;
+    };
+    expect(values.config[name]).toBe("");
+    expect(await source("deploy/helm/opengeni/templates/configmap.yaml")).toContain(
+      "range $key, $value := .Values.config",
+    );
+    for (const template of [
+      "api-deployment.yaml",
+      "worker-deployment.yaml",
+      "worker-turns-deployment.yaml",
+    ]) {
+      expect(await source(`deploy/helm/opengeni/templates/${template}`)).toContain("configMapRef:");
+    }
+  });
+
   test("gates workload replacement on schema, role, and runtime-posture convergence", async () => {
     const values = await source("deploy/helm/opengeni/values.yaml");
 
@@ -31,7 +49,9 @@ describe("Helm database upgrade contract", () => {
       "deploy/helm/opengeni/templates/worker-turns-deployment.yaml",
     );
 
-    expect(migrationJob).toContain('name: {{ include "opengeni.secretName" . }}');
+    expect(migrationJob).toContain(
+      'name: {{ include "opengeni.jobRuntimeSecretName" $settingsScope }}',
+    );
     expect(migrationJob).toContain(
       '{{- if ne (include "opengeni.migrationSecretName" .) (include "opengeni.secretName" .) }}',
     );
@@ -81,7 +101,9 @@ describe("Helm database upgrade contract", () => {
     }
 
     const migrationJob = workloads[3]!;
-    const runtimeSecret = migrationJob.indexOf('name: {{ include "opengeni.secretName" . }}');
+    const runtimeSecret = migrationJob.indexOf(
+      'name: {{ include "opengeni.jobRuntimeSecretName" $settingsScope }}',
+    );
     const migrationSecret = migrationJob.indexOf(
       'name: {{ include "opengeni.migrationSecretName" . }}',
     );

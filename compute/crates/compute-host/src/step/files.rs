@@ -1,0 +1,311 @@
+//! Where a sandbox's step files live, and the small file operations steps
+//! share: markers, links, and moving or clearing snapshot files.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use compute_engine::EngineError;
+use compute_engine::{GuestMemory, Region, SnapshotFiles};
+use compute_pager::control::Finished;
+
+#[cfg(target_os = "linux")]
+use super::Reconnected;
+use super::{Archived, blocking};
+use crate::image::{Generation, Images};
+use crate::layout::{Paths, remove_if_present, write_atomic};
+#[cfg(target_os = "linux")]
+use crate::lazy::Fetcher;
+#[cfg(target_os = "linux")]
+use crate::paging::Paging;
+use crate::store::Receipt;
+
+/// The directory of a sandbox's memory images, in its own.
+const IMAGES: &str = "images";
+
+/// The sandbox's memory images.
+pub(crate) fn images_of(paths: &Paths) -> Images {
+    Images::new(paths.dir.join(IMAGES))
+}
+
+/// The learned order the guest touches memory after a wake.
+pub(super) fn wake_profile(paths: &Paths) -> PathBuf {
+    paths.dir.join("wake-profile.json")
+}
+
+/// The clone of the disk a checkpoint takes while its VM is paused, which
+/// it archives once the VM runs again. Outside the jail: only the host
+/// writes or reads it.
+pub(crate) fn checkpoint_disk(paths: &Paths) -> PathBuf {
+    paths.dir.join("checkpoint.disk")
+}
+
+/// Removes the clone a checkpoint cut short by a crash left behind: as
+/// the disk moves on it would take up to the disk's whole size. Blocks.
+pub(crate) fn clear_checkpoint(paths: &Paths) -> io::Result<()> {
+    remove_if_present(&checkpoint_disk(paths))
+}
+
+/// Names the stored copy the record's `archived` flag refers to.
+pub(super) fn archive_receipt(paths: &Paths) -> PathBuf {
+    paths.dir.join("archive.json")
+}
+
+/// Notes, durably, that the stored copy `receipt` names matches the
+/// sandbox's files, holding a memory image if `memory`: as an archive
+/// does, for a sandbox adopted from the store. Blocks.
+pub(crate) fn mark_archived(paths: &Paths, receipt: Receipt, memory: bool) -> io::Result<()> {
+    let marker = Archived { receipt, memory };
+    let bytes = serde_json::to_vec(&marker).map_err(io::Error::other)?;
+    write_atomic(&archive_receipt(paths), &bytes)
+}
+
+/// Present while the sandbox's VM may have its memory served by a pager,
+/// naming that pager's launch (see [`crate::paging::tag`]).
+pub(super) fn paged_marker(paths: &Paths) -> PathBuf {
+    paths.dir.join("paged")
+}
+
+/// The directory the sandbox's pager writes in, as its VM's user.
+pub(super) fn pager_dir(paths: &Paths) -> PathBuf {
+    paths.dir.join("pager")
+}
+
+/// Where the sandbox's pager listens for the agent.
+pub(super) fn pager_control(paths: &Paths) -> PathBuf {
+    pager_dir(paths).join("sock")
+}
+
+/// Where the sandbox's pager writes the order it learned, until the agent
+/// takes it into [`wake_profile`].
+pub(super) fn pager_learned(paths: &Paths) -> PathBuf {
+    pager_dir(paths).join("learned.json")
+}
+
+/// Whether the sandbox's last VM may have had its memory served by a
+/// pager.
+pub(crate) fn paged(paths: &Paths) -> bool {
+    paged_marker(paths).exists()
+}
+
+/// Where the sandbox's running VM holds its guest memory, for naming what
+/// its guest gave back; `None` where nothing can say. A VM restored from a
+/// local image maps the image's file. A VM a pager served holds anonymous
+/// memory, whose regions only the VMM's handshake with the pager named:
+/// known once that pager finished and wrote them down, for the launch the
+/// sandbox's paged marker names, and not before, while missing pages may
+/// still hold image bytes the pager has yet to supply. A VM booted fresh
+/// has neither.
+pub(super) fn guest_memory(paths: &Paths) -> Option<GuestMemory> {
+    let tag = match fs::read_to_string(paged_marker(paths)) {
+        Ok(tag) => tag,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return paths
+                .snapshot
+                .memory
+                .exists()
+                .then(|| GuestMemory::File(paths.snapshot.memory.clone()));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "paged marker unreadable; no memory named as given back");
+            return None;
+        }
+    };
+    // Written by the pager as the VM's user: trusted no more than the VM.
+    let done = pager_control(paths).with_extension("done");
+    let finished = super::learned::read_untrusted(&done)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Finished>(&bytes).ok())
+        .filter(|finished| finished.tag == tag.trim())?;
+    Some(GuestMemory::Unbacked(
+        finished
+            .regions
+            .into_iter()
+            .map(|region| Region {
+                address: region.address,
+                size: region.size,
+                offset: region.offset,
+            })
+            .collect(),
+    ))
+}
+
+/// Reconnects to the pager of a VM found running after an agent restart;
+/// see [`Paging::reconnect`]. What the VM's memory was based on is not
+/// known any more.
+#[cfg(target_os = "linux")]
+pub(crate) async fn reconnect_paging(
+    paths: &Paths,
+    fetcher: Option<&Arc<Fetcher>>,
+) -> Result<Option<Reconnected>, EngineError> {
+    let paging = Paging::reconnect(
+        &paged_marker(paths),
+        &pager_control(paths),
+        images_of(paths),
+        fetcher.cloned(),
+    )
+    .await?;
+    Ok(paging.map(|paging| Reconnected { paging }))
+}
+
+/// The files a diff snapshot is written to, inside the jail.
+pub(super) fn diff_files(paths: &Paths) -> SnapshotFiles {
+    SnapshotFiles {
+        state: paths.in_jail("save.state"),
+        memory: paths.in_jail("save.mem"),
+    }
+}
+
+/// A snapshot moved out of the jail, with the disk durable as it needs:
+/// everything a memory image is made from, none of which changes when the
+/// guest runs again.
+pub(super) struct Taken {
+    pub(super) files: SnapshotFiles,
+    /// The image a diff was taken against; `None` when the snapshot is whole.
+    pub(super) over: Option<Generation>,
+    /// The memory the guest gave back, which reads as zeros, as ranges of
+    /// the image (see [`compute_engine::Engine::freed_memory`]): a diff
+    /// leaves it out. Empty for a whole snapshot, which holds it as zeros.
+    pub(super) freed: Vec<std::ops::Range<u64>>,
+    /// The runtime of the VMM that wrote it, which after an upgrade can be
+    /// older than the engine's own.
+    pub(super) runtime: String,
+    /// The VMM process that wrote it, as the engine names it, if it does:
+    /// whose base the image becomes.
+    pub(super) process: Option<String>,
+}
+
+/// Makes the sandbox's images consistent after a host restart and reports
+/// whether a good current image exists, or why not. An error means they
+/// could not be checked, which proves nothing about them.
+pub(crate) fn recover_images(paths: &Paths) -> io::Result<crate::image::Recovered> {
+    images_of(paths).recover()
+}
+
+/// Points `link` at `target` with a hard link, replacing what was there.
+pub(super) fn link(target: &Path, link: &Path) -> io::Result<()> {
+    remove_if_present(link)?;
+    fs::hard_link(target, link)
+}
+
+/// Moves the snapshot files a VMM wrote in its jail into `scratch`, a
+/// directory only the host can reach, and checks each is a plain file of
+/// its own. A renamed link stays a link, so the check sees what the VMM
+/// left, and nothing jailed can swap it afterwards.
+pub(crate) fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<SnapshotFiles> {
+    match fs::remove_dir_all(scratch) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::create_dir(scratch)?;
+    let taken = SnapshotFiles {
+        state: scratch.join("save.state"),
+        memory: scratch.join("save.mem"),
+    };
+    for (written, moved) in [(&files.state, &taken.state), (&files.memory, &taken.memory)] {
+        fs::rename(written, moved)?;
+        compute_engine::confined::check_written(moved)?;
+    }
+    Ok(taken)
+}
+
+/// The files and directories that hold the sandbox's local copy, which
+/// [`clear_local`] deletes: what giving the copy up frees.
+pub(crate) fn local_copy(paths: &Paths) -> [PathBuf; 5] {
+    [
+        paths.disk.clone(),
+        checkpoint_disk(paths),
+        paths.snapshot.state.clone(),
+        paths.snapshot.memory.clone(),
+        paths.dir.join(IMAGES),
+    ]
+}
+
+/// Deletes the sandbox's local disk, memory images and snapshot files.
+pub(crate) async fn clear_local(paths: &Paths) -> io::Result<()> {
+    let paths = paths.clone();
+    blocking(move || {
+        remove_if_present(&paths.disk)?;
+        clear_checkpoint(&paths)?;
+        remove_if_present(&paths.snapshot.state)?;
+        remove_if_present(&paths.snapshot.memory)?;
+        remove_if_present(&paged_marker(&paths))?;
+        images_of(&paths).clear()
+    })
+    .await
+    .and_then(|removed| removed)
+}
+
+pub(super) fn drop_snapshot(paths: &Paths) {
+    let _ = remove_if_present(&paths.snapshot.state);
+    let _ = remove_if_present(&paths.snapshot.memory);
+    let _ = remove_if_present(&paged_marker(paths));
+    let _ = remove_if_present(&pager_control(paths).with_extension("done"));
+    let _ = remove_if_present(&archive_receipt(paths));
+    let files = diff_files(paths);
+    let _ = remove_if_present(&files.state);
+    let _ = remove_if_present(&files.memory);
+    let _ = images_of(paths).clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Id;
+    use compute_core::SandboxId;
+    use compute_pager::control;
+
+    fn finished(tag: &str) -> Vec<u8> {
+        serde_json::to_vec(&Finished {
+            tag: tag.into(),
+            regions: vec![control::Region {
+                address: 0x7f00_0000_0000,
+                size: 1 << 30,
+                offset: 0,
+            }],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn guest_memory_is_named_only_where_something_says_where_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::new(root.path(), Id(SandboxId(1)));
+        fs::create_dir_all(paths.snapshot.memory.parent().unwrap()).unwrap();
+        fs::create_dir_all(pager_dir(&paths)).unwrap();
+        let done = pager_control(&paths).with_extension("done");
+        assert_eq!(guest_memory(&paths), None, "a VM booted fresh");
+
+        fs::write(&paths.snapshot.memory, b"").unwrap();
+        assert_eq!(
+            guest_memory(&paths),
+            Some(GuestMemory::File(paths.snapshot.memory.clone())),
+            "a VM restored from a local image maps it"
+        );
+
+        // A pager serves this launch; the file left from an earlier one
+        // is not the VM's memory.
+        write_atomic(&paged_marker(&paths), b"7-1f.0").unwrap();
+        assert_eq!(guest_memory(&paths), None, "the pager has not finished");
+        fs::write(&done, b"").unwrap();
+        assert_eq!(guest_memory(&paths), None, "a pager that wrote no layout");
+        fs::write(&done, finished("7-1e.0")).unwrap();
+        assert_eq!(guest_memory(&paths), None, "an earlier launch's pager");
+        fs::write(&done, b"{\"tag\":").unwrap();
+        assert_eq!(guest_memory(&paths), None, "an unreadable layout");
+
+        fs::write(&done, finished("7-1f.0")).unwrap();
+        assert_eq!(
+            guest_memory(&paths),
+            Some(GuestMemory::Unbacked(vec![Region {
+                address: 0x7f00_0000_0000,
+                size: 1 << 30,
+                offset: 0,
+            }])),
+            "this launch's pager finished and said where the memory is"
+        );
+    }
+}

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   recordSandboxCheckpointArtifactGauges,
   recordSandboxCheckpointArtifactOutcome,
@@ -12,8 +12,10 @@ import {
   sandboxAutomaticRecoveryOutcome,
   recordSandboxProviderMissingBeforeCapture,
   recordSandboxRotationBacklogGauges,
+  recordSandboxCheckpointStalenessGauges,
   runtimeMetricsHooksForObservability,
 } from "../src/observability-metrics";
+import { recordWorkspaceCaptureCompleted } from "../src/activities/workspace-capture";
 
 function workerObservability() {
   return createObservability(testSettings(), { component: "worker" });
@@ -37,6 +39,79 @@ describe("sandbox checkpoint and deadline metrics", () => {
     expect(metrics).not.toContain("private-provider");
     expect(metrics).not.toContain("NaN");
     await observability.flush();
+  });
+  test("skipped warm checkpoints use bounded backend and reason labels", async () => {
+    const observability = workerObservability();
+    const hooks = runtimeMetricsHooksForObservability(observability);
+    hooks.onWorkspaceCaptureSkipped?.({ backend: "modal", reason: "holder_in_progress" });
+    hooks.onWorkspaceCaptureSkipped?.({ backend: "modal", reason: "holder_in_progress" });
+    hooks.onWorkspaceCaptureSkipped?.({
+      backend: "private-provider",
+      reason: "secret-reason" as never,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_workspace_capture_skipped_total\{[^}]*backend="modal"[^}]*reason="holder_in_progress"[^}]*\} 2/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_workspace_capture_skipped_total\{[^}]*backend="unknown"[^}]*reason="unknown"[^}]*\} 1/,
+    );
+    expect(metrics).not.toContain("private-provider");
+    expect(metrics).not.toContain("secret-reason");
+    await observability.flush();
+  });
+  test("checkpoint staleness publishes fixed buckets and a bounded max age", async () => {
+    const observability = workerObservability();
+    recordSandboxCheckpointStalenessGauges(observability, {
+      dirty: 3,
+      stale4h: 2,
+      stale12h: 1,
+      maxAgeSeconds: 47_000,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_sandbox_checkpoint_staleness\{[^}]*kind="dirty"[^}]*\} 3/);
+    expect(metrics).toMatch(
+      /opengeni_sandbox_checkpoint_staleness\{[^}]*kind="stale_12h"[^}]*\} 1/,
+    );
+    expect(metrics).toMatch(/opengeni_sandbox_checkpoint_age_max_seconds(\{[^}]*\})? 47000/);
+    recordSandboxCheckpointStalenessGauges(observability, {
+      dirty: 0,
+      stale4h: 0,
+      stale12h: 0,
+      maxAgeSeconds: Number.NaN,
+    });
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_checkpoint_age_max_seconds(\{[^}]*\})? 0/,
+    );
+    await observability.flush();
+  });
+  test("physical and logical capture timings coexist in one worker registry", async () => {
+    // The runtime hook (physical warm capture) and the turn-end logical capture
+    // share the worker's Observability. Each histogram keeps its own label set,
+    // so recording both in either order must not fail the registry.
+    for (const physicalFirst of [true, false]) {
+      const observability = workerObservability();
+      const hooks = runtimeMetricsHooksForObservability(observability);
+      const physical = () =>
+        hooks.onWorkspaceCapture?.({ backend: "modal", outcome: "completed", durationSeconds: 3 });
+      const logical = () => recordWorkspaceCaptureCompleted(observability, 1_500);
+      if (physicalFirst) {
+        physical();
+        logical();
+      } else {
+        logical();
+        physical();
+      }
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).toMatch(
+        /opengeni_workspace_capture_duration_seconds_count\{[^}]*backend="modal"[^}]*\} 1/,
+      );
+      expect(metrics).toMatch(
+        /opengeni_workspace_capture_revision_duration_seconds_count\{[^}]*\} 1/,
+      );
+      expect(metrics).toContain("opengeni_workspace_capture_total{");
+      await observability.flush();
+    }
   });
   test("publishes every bounded lifecycle/backlog series, including zeroes", async () => {
     const observability = workerObservability();

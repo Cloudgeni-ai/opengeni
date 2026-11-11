@@ -1,4 +1,5 @@
 import { rememberPreparedModelRequest } from "./prepared-compaction-request";
+import { streamWithPreemption } from "./model-preemption";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
@@ -14,11 +15,24 @@ export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<voi
 const modelRequestCapture = new AsyncLocalStorage<ModelRequestCapture>();
 const captureIndices = new WeakMap<object, number>();
 
+/**
+ * Where an admission check is requested. The model wrapper asks once when the
+ * SDK enters a model call (`model_entry`); transport layers ask again right
+ * before the wire (`transport`). An entry always revalidates; a transport check
+ * may reuse the admission its own call already received.
+ */
+export type ModelCallAdmissionPoint = "model_entry" | "transport";
+
 /** Awaited producer-side authority, separate from observational request capture. */
 export type ModelCallLifecycle = {
-  beforeModelRequest?: () => Promise<void>;
+  beforeModelRequest?: (point: ModelCallAdmissionPoint) => Promise<void>;
   /** Register before yielding so the next model entry waits for consumer settlement. */
   onModelResponse?: (event: StreamEvent) => Promise<void>;
+  /**
+   * Fires when new user input (a Steer) should cut the in-flight model request
+   * short. Read once per request, when it starts streaming.
+   */
+  modelPreemption?: () => AbortSignal | undefined;
 };
 const modelCallLifecycle = new AsyncLocalStorage<ModelCallLifecycle>();
 
@@ -26,13 +40,23 @@ export function withModelCallLifecycle<T>(lifecycle: ModelCallLifecycle, fn: () 
   return modelCallLifecycle.run(lifecycle, fn);
 }
 
-export async function beforeModelRequest(): Promise<void> {
-  await modelCallLifecycle.getStore()?.beforeModelRequest?.();
+export async function beforeModelRequest(
+  point: ModelCallAdmissionPoint = "transport",
+): Promise<void> {
+  await modelCallLifecycle.getStore()?.beforeModelRequest?.(point);
 }
 
 export function modelResponseSettlement(event: StreamEvent): Promise<void> | undefined {
   if (event.type !== "response_done") return undefined;
   return modelCallLifecycle.getStore()?.onModelResponse?.(event);
+}
+
+/** Stream one model request so that a Steer can preempt it (see streamWithPreemption). */
+export function streamPreemptibleModelRequest(
+  request: ModelRequest,
+  open: (request: ModelRequest) => AsyncIterable<StreamEvent>,
+): AsyncIterable<StreamEvent> {
+  return streamWithPreemption(request, modelCallLifecycle.getStore()?.modelPreemption?.(), open);
 }
 
 /** The same agent can re-enter runAgentStream after in-activity compaction. */
@@ -154,17 +178,19 @@ export class ModelRequestCaptureModel implements Model {
   constructor(private readonly inner: Model) {}
 
   async getResponse(request: ModelRequest) {
-    await beforeModelRequest();
+    await beforeModelRequest("model_entry");
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     return this.inner.getResponse(request);
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
-    await beforeModelRequest();
+    await beforeModelRequest("model_entry");
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
-    for await (const event of this.inner.getStreamedResponse(request)) {
+    for await (const event of streamPreemptibleModelRequest(request, (prepared) =>
+      this.inner.getStreamedResponse(prepared),
+    )) {
       const settlement = modelResponseSettlement(event);
       void settlement?.catch(() => undefined);
       yield event;
@@ -178,7 +204,7 @@ export class ModelRequestCaptureModel implements Model {
 
 /**
  * Wrap every name-resolved model so Debug capture sees the ModelRequest the
- * provider client actually receives. OpenGeni agents almost always set
+ * provider client actually receives. Opengeni agents almost always set
  * `agent.model` to a string; wrapping only `agent.model` is a no-op there.
  */
 export class ModelRequestCaptureProvider implements ModelProvider {

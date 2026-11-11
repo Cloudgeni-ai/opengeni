@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
 import { LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
@@ -17,12 +17,15 @@ export type MirrorSessionRealtimeContextInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  /** Lifecycle facts target their own mode; ordinary updates reach every ringing phone. */
+  realtimeId?: string | undefined;
   sourceKind:
     | "human_input"
     | "human_input_request"
     | "human_input_response"
     | "assistant_progress"
-    | "assistant_terminal";
+    | "assistant_terminal"
+    | "agent_call";
   sourceId: string;
   text: string;
   channel: SessionRealtimeMirrorChannel;
@@ -86,18 +89,31 @@ export async function mirrorSessionRealtimeContextInTransaction(
         eq(schema.sessionRealtimeModes.accountId, input.accountId),
         eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
         eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
-        eq(schema.sessionRealtimeModes.state, "active"),
+        inArray(schema.sessionRealtimeModes.state, ["active", "preparing"]),
+        input.realtimeId ? eq(schema.sessionRealtimeModes.id, input.realtimeId) : undefined,
         gt(schema.sessionRealtimeModes.leaseExpiresAt, now),
       ),
     )
     .orderBy(desc(schema.sessionRealtimeModes.startedAt))
-    .for("update")
-    .limit(2);
+    .for("update");
   if (modes.length === 0) return null;
-  if (modes.length !== 1) {
+  if (modes.filter((mode) => mode.state === "active").length > 1) {
     throw new Error(`Session ${input.sessionId} has multiple active realtime modes`);
   }
-  const mode = modes[0]!;
+  let result: MirrorSessionRealtimeContextResult = null;
+  for (const mode of modes) {
+    const mirrored = await mirrorToMode(db, input, mode, now);
+    if (result === null || mode.state === "active") result = mirrored;
+  }
+  return result;
+}
+
+async function mirrorToMode(
+  db: Database,
+  input: MirrorSessionRealtimeContextInput,
+  mode: typeof schema.sessionRealtimeModes.$inferSelect,
+  now: Date,
+): Promise<MirrorSessionRealtimeContextResult> {
   const operationId = deterministicUuid(
     `opengeni:session-realtime-mirror:${mode.id}:${input.sourceKind}:${input.sourceId}`,
   );
@@ -133,7 +149,12 @@ export async function mirrorSessionRealtimeContextInTransaction(
       realtimeId: mode.id,
       operationId,
       connectionEpoch: mode.connectionEpoch,
-      sequence: Number(sequenceRow?.next ?? 1),
+      // Reserving the first slot puts the accepted opening before facts that
+      // arrived while ringing, without sending or acknowledging any early.
+      sequence:
+        input.sourceKind === "agent_call" && mode.incomingCallId
+          ? 1
+          : Math.max(mode.state === "preparing" ? 2 : 1, Number(sequenceRow?.next ?? 1)),
       direction: "provider_out",
       kind: "session_update",
       text: boundedText(input.text),
@@ -158,8 +179,22 @@ export function renderRealtimeHumanInputContext(input: {
     `  <status>${input.routing}</status>`,
     `  <delivery>${input.delivery}</delivery>`,
     `  <text>${escapeXmlText(input.text)}</text>`,
-    "  <instruction>Already routed by OpenGeni; do not delegate this message again.</instruction>",
+    "  <instruction>Already routed by Opengeni; do not delegate this message again.</instruction>",
     "</session_user_message>",
+  ].join("\n");
+}
+
+/**
+ * The opening of a call the agent placed (call_user) and the person answered:
+ * the voice side speaks first and says why it called.
+ */
+export function renderRealtimeAgentCallContext(input: { reason: string }): string {
+  return [
+    "<agent_call>",
+    "  <status>answered</status>",
+    `  <reason>${escapeXmlText(input.reason)}</reason>`,
+    "  <instruction>You phoned the person about this and they just picked up. Speak first, right away: greet them briefly, say in one sentence why you called, then talk it through. If they already said hello, answer them that way instead. What they ask for goes to the agent in this chat as usual.</instruction>",
+    "</agent_call>",
   ].join("\n");
 }
 
@@ -188,6 +223,18 @@ export function renderRealtimeHumanInputRequestContext(input: {
       `    <expires_at>${escapeXmlText(renderExpiry(request.expiresAt))}</expires_at>`,
     );
     for (const question of request.questions) {
+      if (question.kind === "secret") {
+        // Secrets are never spoken or delegated (AC-5): point to the app.
+        lines.push(
+          "    <question>",
+          `      <id>${escapeXmlText(question.id)}</id>`,
+          "      <kind>secret</kind>",
+          `      <prompt>${escapeXmlText(question.prompt)}</prompt>`,
+          "      <answer_in_app>true</answer_in_app>",
+          "    </question>",
+        );
+        continue;
+      }
       lines.push(
         "    <question>",
         `      <id>${escapeXmlText(question.id)}</id>`,
@@ -222,7 +269,7 @@ export function renderRealtimeHumanInputRequestContext(input: {
     lines.push("  </request>");
   }
   lines.push(
-    "  <instruction>The current work is waiting for the user's input. Ask the questions naturally, one at a time when useful, without changing their meaning or answering for the user. The user may answer in the visible form or answer conversationally here. If the user answers here, delegate exactly once with a complete message containing the relevant question and the user's answer. If the user changes direction instead, delegate that new direction normally. Do not claim the work resumed until a later session update confirms it.</instruction>",
+    "  <instruction>The current work is waiting for the user's input. Ask the questions naturally, one at a time when useful, without changing their meaning or answering for the user. The user may answer in the visible form or answer conversationally here. If the user answers here, delegate exactly once with a complete message containing the relevant question and the user's answer. If the user changes direction instead, delegate that new direction normally. Do not claim the work resumed until a later session update confirms it. A question of kind secret (a password, key or code) is answered only in the app: tell the user to answer it in the app, never ask for it aloud, and never delegate a spoken secret.</instruction>",
     "</session_human_input_request>",
   );
   return lines.join("\n");

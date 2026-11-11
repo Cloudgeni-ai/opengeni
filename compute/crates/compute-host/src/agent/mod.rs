@@ -1,0 +1,1357 @@
+//! The host agent: one task owns the decision core and every VM, and
+//! carries out the core's decisions.
+//!
+//! Requests arrive through a [`Handle`]. Steps run as their own tasks and
+//! report back as events, so the owning task never waits on a VM and a slow
+//! save never delays a wake. Everything that changes a sandbox's state goes
+//! through this one task, in order, which is what makes it safe without
+//! locks.
+//!
+//! VM processes are not the agent's children and outlive it. A new agent
+//! reads every sandbox's [record](crate::state) and takes back the VMs
+//! still running, so restarting, upgrading or killing the agent costs the
+//! guests nothing.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
+
+use compute_core::{
+    Action, At, BalloonRequest, HoldId, Host, Input, Level, LoanId, MemoryPolicy, OpId, Outcome,
+    Priority, Resource, SandboxId, ShrinkRequest, State, Step,
+};
+use compute_engine::{CancellationToken, Engine, MemoryStats, PageSize, VmSpec};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep_until};
+
+use crate::fleet::{Admission, Freezes, LeaseGate};
+use crate::guest_ports::{self, Activity, GuestPort, Listeners};
+use crate::layout::{Images, Paths};
+use crate::net::Networks;
+use crate::observe::{Observer, TraceContext};
+use crate::pool::{Built, Held, Lender, Loaning, Pool, Shape, Sources, Template, Uses};
+
+use crate::protocol::{About, HostStatus, Id, ImageId, SandboxConfig, StepStats};
+use crate::rootfs::{Cache, Missing};
+use crate::state::{Record, Records, StateError, Stray, unix_ms_now};
+use crate::step::{After, Live, Reading, Report};
+use crate::store::{Claimed, OwnerEpoch, Store};
+use compute_protocol::fleet::Ruling;
+
+mod capture;
+mod check;
+mod config;
+mod disk;
+mod fetch;
+mod handle;
+mod holds;
+mod link;
+mod lost;
+mod observe;
+mod open;
+mod owners;
+mod ready;
+mod recover;
+mod relief;
+mod remove;
+mod requests;
+mod restart;
+mod sample;
+mod size;
+mod steps;
+mod usage;
+mod warm;
+
+pub use config::{BusyRule, GuestChecks, HostConfig, PagerConfig};
+use open::{open_root, open_rootfs, prepare_network};
+pub use sample::DiskGauge;
+use sample::ShareCheck;
+
+/// How long a starting agent waits for the previous one to let go of the
+/// state root.
+const HANDOVER: Duration = Duration::from_secs(10);
+
+/// Longest pause between attempts to release what a dead VM left.
+const TEARDOWN_RETRY: Duration = Duration::from_secs(30);
+
+/// Bytes a save writes besides guest memory at most: the device state, the
+/// chunk map (32 bytes per 256 KiB) and the record, with room to spare.
+const SAVE_EXTRA: u64 = 64 << 20;
+/// Where the agent's clock for the decision core starts, so a sandbox found
+/// on disk can have been idle since long before this agent started.
+const CLOCK_BASE: Duration = Duration::from_secs(10 * 365 * 86_400);
+
+/// A request the host could not carry out.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum HostError {
+    /// No such sandbox.
+    #[error("no sandbox {0}")]
+    NotFound(Id),
+    /// The id is taken.
+    #[error("sandbox {0} already exists")]
+    Exists(Id),
+    /// The sandbox is still being created.
+    #[error("sandbox {0} is still being created")]
+    Busy(Id),
+    /// The sandbox failed in a way this host cannot retry.
+    #[error("sandbox {0} is broken")]
+    Broken(Id),
+    /// The host does not manage the sandbox until someone resolves why,
+    /// such as a record it cannot read or a VM it could not take back.
+    #[error("sandbox {id} is not managed on this host: {reason}")]
+    Blocked {
+        /// The sandbox.
+        id: Id,
+        /// Why.
+        reason: String,
+    },
+    /// The sandbox was removed while the request waited.
+    #[error("sandbox {0} was removed")]
+    Removed(Id),
+    /// The request is malformed.
+    #[error("invalid request: {0}")]
+    Invalid(String),
+    /// The request names an execution of the sandbox that has since been
+    /// replaced by a fresh boot.
+    #[error("sandbox {id} is at generation {found}, not {expected}")]
+    Stale {
+        /// The sandbox.
+        id: Id,
+        /// The generation the request names.
+        expected: u64,
+        /// The sandbox's generation now.
+        found: u64,
+    },
+    /// A guest port did not answer.
+    #[error("guest port {port} unreachable: {message}")]
+    Unreachable {
+        /// The port.
+        port: u32,
+        /// Why.
+        message: String,
+    },
+    /// Host storage failed.
+    #[error("host I/O failed: {0}")]
+    Io(String),
+    /// The host cannot take on the sandbox's memory, or the local disk it
+    /// may write (its next save, its disk's growth, its first files), now:
+    /// even ending every idle VM already saved would not free enough.
+    /// Retryable.
+    #[error(
+        "host full: sandbox {id} needs {needed} {what} and only {free} are free",
+        what = shortage(*.resource)
+    )]
+    HostFull {
+        /// The sandbox.
+        id: Id,
+        /// What the host is short of.
+        resource: Resource,
+        /// Bytes, or inodes, its wake needs.
+        needed: u64,
+        /// Bytes, or inodes, free when it was refused.
+        free: u64,
+    },
+    /// The host agent has shut down.
+    #[error("the host agent stopped")]
+    Stopped,
+    /// The request names an earlier ownership of the sandbox than the one
+    /// this host holds.
+    #[error("sandbox {id} is held under owner epoch {held}, not {asked}")]
+    Superseded {
+        /// The sandbox.
+        id: Id,
+        /// The owner epoch held.
+        held: u64,
+        /// The owner epoch the request names.
+        asked: u64,
+    },
+    /// An adopt found no copy of the sandbox in the store.
+    #[error("the store holds no copy of sandbox {0}")]
+    NoCopy(Id),
+    /// A hand-off was asked of a sandbox that is awake or held awake.
+    #[error("sandbox {0} is awake; it is handed off only while it sleeps")]
+    Awake(Id),
+    /// The sandbox is being handed off and takes no wake yet.
+    #[error(
+        "sandbox {0} is being handed off; it takes wakes again once that is done, or once the \
+         hand-off has taken long enough for a wake to cancel it"
+    )]
+    HandingOff(Id),
+    /// A wake cancelled the hand-off, which was still storing the
+    /// sandbox's copy: it stays on this host and runs from its local copy.
+    #[error(
+        "the hand-off of sandbox {0} was cancelled: a wake came while it was still storing the \
+         sandbox's copy, so the sandbox stays on this host"
+    )]
+    HandOffCancelled(Id),
+    /// This host cannot store sandboxes' disks as images.
+    #[error("this host cannot capture sandboxes: {0}")]
+    CannotCapture(String),
+    /// The host's lease from the control service has run out: it runs
+    /// nothing until it is renewed.
+    #[error("this host's lease from the control service has run out")]
+    LeaseLapsed,
+    /// A request from the control service waited in the agent until the
+    /// lease no longer admitted it: it was sent under a registration this
+    /// host no longer holds or too many renewals ago, or the lease ran
+    /// out.
+    #[error("the request is no longer admitted under this host's lease")]
+    NotAdmitted,
+}
+
+impl From<StateError> for HostError {
+    fn from(error: StateError) -> Self {
+        match error {
+            StateError::Generation {
+                id,
+                expected,
+                found,
+            } => Self::Stale {
+                id,
+                expected,
+                found,
+            },
+            StateError::NotFound(id) => Self::NotFound(id),
+            StateError::Exists(id) => Self::Exists(id),
+            StateError::Superseded { id, held, asked } => Self::Superseded { id, held, asked },
+            other => Self::Io(other.to_string()),
+        }
+    }
+}
+
+impl From<Missing> for HostError {
+    /// An image nowhere to be had is the caller's mistake; a failed fetch
+    /// may succeed when retried.
+    fn from(missing: Missing) -> Self {
+        match missing {
+            Missing::Unknown(_) => Self::Invalid(missing.to_string()),
+            Missing::Failed { .. } => Self::Io(missing.to_string()),
+        }
+    }
+}
+
+type Reply<T> = oneshot::Sender<Result<T, HostError>>;
+
+/// Copies of guest memory one save may write at most on the filesystem
+/// holding `root`: one where files share extents, otherwise two, since
+/// the merged image is then a whole new copy.
+fn save_copies(root: &std::path::Path) -> Result<u64, HostError> {
+    match crate::layout::shares_extents(root) {
+        Ok(true) => Ok(1),
+        Ok(false) => Ok(2),
+        Err(error) => Err(HostError::Io(format!("probing the state root: {error}"))),
+    }
+}
+
+/// The bytes the filesystem holding `root` allocates at a time, which
+/// sparse copies onto it are booked in; refused on a filesystem where
+/// that bounds nothing.
+fn allocation_unit(root: &std::path::Path) -> Result<u64, HostError> {
+    crate::layout::allocation_unit(root)
+        .map_err(|error| HostError::Io(format!("state root {}: {error}", root.display())))
+}
+
+/// What a host-full refusal counts.
+fn shortage(resource: Resource) -> &'static str {
+    match resource {
+        Resource::Memory => "bytes of memory reserved",
+        Resource::Disk => "bytes of local disk booked",
+        Resource::Inodes => "local disk inodes booked",
+        Resource::Cpu => "millicores of processor time reserved",
+    }
+}
+
+#[derive(Debug)]
+enum Command {
+    Create {
+        id: Id,
+        config: SandboxConfig,
+        /// The ownership it is created under.
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::Adopt`].
+    Adopt {
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        from_files: bool,
+        reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::HandOff`].
+    HandOff {
+        id: Id,
+        owner: OwnerEpoch,
+        awake: bool,
+        reply: Reply<()>,
+    },
+    /// The control service's rulings on the sandboxes the host listed when
+    /// it registered.
+    Reconcile {
+        rulings: Vec<Ruling>,
+        reply: Reply<()>,
+    },
+    /// `command`, sent for the ownership of its sandbox under `owner`, and
+    /// carried out only while `admission` still holds.
+    Owned {
+        owner: OwnerEpoch,
+        admission: Option<Admission>,
+        command: Box<Command>,
+    },
+    /// What the host holds, for a registration: answered once no create,
+    /// adopt or change of owner is under way, or with how many are.
+    Inventory {
+        reply: oneshot::Sender<Result<HostStatus, usize>>,
+    },
+    Remove {
+        id: Id,
+        generation: Option<u64>,
+        reply: Reply<()>,
+    },
+    Touch {
+        id: Id,
+        generation: Option<u64>,
+        priority: Priority,
+        /// What asked.
+        by: observe::By,
+        /// Told whether the request was accepted; guest activity needs no
+        /// answer.
+        reply: Option<Reply<()>>,
+    },
+    Sleep {
+        id: Id,
+        generation: Option<u64>,
+        level: Level,
+        reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::Restart`].
+    Restart {
+        id: Id,
+        reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::Capture`]: copies the disk of the
+    /// saved sandbox to `into`, answering its length.
+    Capture {
+        id: Id,
+        generation: Option<u64>,
+        into: std::path::PathBuf,
+        reply: Reply<u64>,
+    },
+    /// A named hold from the API, with an optional expiry.
+    Hold {
+        id: Id,
+        generation: Option<u64>,
+        name: String,
+        ttl: Option<Duration>,
+        priority: Priority,
+        /// Told whether the hold was already there.
+        reply: Reply<bool>,
+    },
+    /// Ends a named hold from the API.
+    Unhold {
+        id: Id,
+        generation: Option<u64>,
+        name: String,
+        reply: Reply<()>,
+    },
+    Acquire {
+        id: Id,
+        generation: Option<u64>,
+        hold: HoldId,
+        priority: Priority,
+        reply: Reply<Woke>,
+    },
+    /// Whether the sandbox is still at `generation`.
+    Check {
+        id: Id,
+        generation: u64,
+        reply: Reply<()>,
+    },
+    Release {
+        id: Id,
+        hold: HoldId,
+    },
+    Status {
+        reply: oneshot::Sender<HostStatus>,
+    },
+    /// One sandbox's level and the step under way, if it has one: for the
+    /// canary.
+    Inspect {
+        id: Id,
+        reply: oneshot::Sender<Option<(Level, Option<Step>)>>,
+    },
+    /// A command from a caller that sent trace context.
+    Traced(TraceContext, Box<Command>),
+}
+
+#[derive(Debug)]
+enum Event<V> {
+    /// A change of owner of `id` landed or failed; `reply` waits for it.
+    OwnerTaken {
+        id: Id,
+        result: Result<(), HostError>,
+        reply: Reply<()>,
+    },
+    Prepared {
+        id: Id,
+        ordinal: u32,
+        result: Result<Box<Record>, HostError>,
+        reply: Reply<()>,
+        /// The template the sandbox could not start from because it no
+        /// longer fits today's inputs.
+        stale: Option<Arc<Template>>,
+        /// Why a create or adopt that failed could not delete all it had
+        /// made (see [`remove::unmake`]): its id stays blocked, and its
+        /// ordinal taken, until removing it again deletes the rest.
+        left: Option<String>,
+    },
+    /// An adopt claimed the store's copy of `record`'s sandbox, as
+    /// `claimed`; its files and record are made only once its first wake
+    /// is admitted with the copy's disk (see [`HostAgent::copy_claimed`]).
+    CopyClaimed {
+        record: Box<Record>,
+        claimed: Box<Claimed>,
+        reply: Reply<()>,
+    },
+    /// A sandbox about to sleep only for being idle told whether it stays
+    /// awake: a command started through its guest's helper still runs (see
+    /// [`crate::restore_notice::ask_commands`]), or its guest took no
+    /// connection, so that it may have stopped (see [`check`]).
+    Asked {
+        id: Id,
+        op: OpId,
+        step: Step,
+        stays: bool,
+    },
+    /// A check of whether a guest still takes connections ended (see
+    /// [`check`]).
+    Checked(check::Checked),
+    /// The check of a template found on disk ended.
+    TemplateChecked {
+        shape: Shape,
+        result: Box<Result<Template, String>>,
+    },
+    /// A template build ended; `ordinal` is free again if its VM is gone.
+    TemplateBuilt {
+        shape: Shape,
+        ordinal: u32,
+        built: Built,
+    },
+    StepDone {
+        id: Id,
+        op: OpId,
+        outcome: Outcome,
+        after: After<V>,
+        report: Box<Report>,
+    },
+    /// Work outside any sandbox asks for or gives back a place under a
+    /// step limit.
+    Loan(Loaning),
+    /// Step `op` of `id` no longer does the work its kind's limit protects.
+    Unthrottled {
+        id: Id,
+        op: OpId,
+    },
+    /// A step that holds `id`'s running VM read its activity; see
+    /// [`crate::step::Meter`].
+    Reading {
+        id: Id,
+        reading: Reading,
+    },
+    Exited(Exit),
+    /// The VM of `id`, under removal, is known to have ended; the rest of
+    /// the removal may still be under way, or stop part way.
+    VmEnded {
+        id: Id,
+        /// The name its directory and network were made under.
+        host: Id,
+    },
+    Destroyed {
+        id: Id,
+        /// The name its directory and network were made under.
+        host: Id,
+        /// The ordinal it held, when known.
+        ordinal: Option<u32>,
+        result: Result<(), HostError>,
+    },
+    /// Everything a VM process of `id` left behind is released.
+    TornDown {
+        id: Id,
+    },
+    /// The VM of `id` did not take the balloon setting of `request`, or
+    /// was not asked.
+    BalloonFailed {
+        id: Id,
+        request: BalloonRequest,
+    },
+    /// The VM of `id` took the balloon setting of `request`.
+    BalloonSet {
+        id: Id,
+        request: BalloonRequest,
+    },
+    /// The guest of `id` answered the shrink of `request` (ADR 24), or
+    /// could not be asked or did not answer: `None`. `cause` is why it was
+    /// asked.
+    Shrunk {
+        id: Id,
+        request: ShrinkRequest,
+        cause: compute_core::ShrinkCause,
+        answer: Option<crate::restore_notice::Shrunk>,
+    },
+    /// A ready sandbox's fill ended.
+    Filled {
+        host: Id,
+        filled: Box<ready::Filled<V>>,
+    },
+    /// The store told the length of an image creates wait for.
+    ImageSized {
+        image: ImageId,
+        length: Result<Option<u64>, compute_engine::EngineError>,
+    },
+    /// The fetch of an image creates wait for ended.
+    ImageFetched {
+        image: ImageId,
+        result: Result<(), HostError>,
+    },
+    /// A measurement of what disk relief may free ended (see [`relief`]).
+    ReliefMeasured(Box<relief::Measured>),
+    /// The removal disk relief asked for of `cache` ended, having
+    /// `removed` it or not.
+    CacheGone {
+        cache: compute_core::CacheId,
+        removed: bool,
+    },
+    /// A create's claim of a ready sandbox ended.
+    Claimed {
+        id: Id,
+        config: SandboxConfig,
+        reply: Reply<()>,
+        claimed: Box<ready::Claimed<V>>,
+    },
+}
+
+/// What a removal that stopped part way left of a sandbox whose record is
+/// gone.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Leftover {
+    /// The name its directory and network were made under.
+    host: Id,
+    /// The ordinal it still holds, if known.
+    ordinal: Option<u32>,
+}
+
+#[derive(Debug)]
+struct Running {
+    op: OpId,
+    step: Step,
+    cancel: CancellationToken,
+    started: Instant,
+    /// Why it runs.
+    why: observe::Why,
+    /// Where the sandbox's state was when it started.
+    before: Option<State>,
+}
+
+#[derive(Debug)]
+struct Slot<V> {
+    paths: Arc<Paths>,
+    spec: Arc<VmSpec>,
+    /// The VM, when one exists and no step holds it.
+    vm: Option<Live<V>>,
+    /// Incarnation of the VM that exists, wherever it is.
+    incarnation: Option<u64>,
+    /// VM processes started for it (boots and restores) since the agent
+    /// started.
+    launches: u64,
+    /// A VM that died while a step held it: its incarnation, and how.
+    dead: Option<(u64, End)>,
+    /// Listeners for connections the guest opens to the host.
+    _ports: Option<Listeners>,
+    /// The listener for its agent's connections, on a host with links.
+    _link: Option<Listeners>,
+    /// Whether its guest can run, for its agent-link streams; see
+    /// [`HostAgent::tell_clocks`].
+    link_clock: crate::resume::RunClock,
+    /// Since when its guest can run, if it can: its VM runs, with no step
+    /// that pauses it, and the lease lets VMs run. A check counts only what
+    /// a guest did not take while it could run all along (see [`check`]);
+    /// see [`HostAgent::tell_clocks`].
+    runs_since: Option<Instant>,
+    op: Option<Running>,
+    destroy: bool,
+    removers: Vec<Reply<()>>,
+    /// Requests waiting for the sandbox to run.
+    waiters: Vec<Waiter>,
+    /// A step the core started that waits for a dead VM's teardown.
+    deferred: Option<Step>,
+    /// Processor use and traffic measured so far, while its guest runs.
+    usage: usage::Usage,
+    /// Whether its running guest still takes connections (see [`check`]).
+    check: Option<check::Check>,
+    /// The incarnation of the running VM and its memory statistics when
+    /// last sampled running; see [`HostAgent::memory_use`].
+    stats: Option<(u64, MemoryStats)>,
+    /// The most memory its running VM used since its last summary, what it
+    /// compressed or swapped at its original size: what it would hold in
+    /// RAM were it all touched again.
+    peak: u64,
+    /// The reading the last event about the sandbox's pressure counted up
+    /// to.
+    reported: Option<(u64, MemoryStats)>,
+    /// When the sandbox last reported what it went through awake.
+    summarized: Instant,
+    /// The latest request to wake or hold it since its last sleep step
+    /// began.
+    asked: Option<observe::Why>,
+    /// The latest request to sleep since its last wake step began: every
+    /// step down to the level it asked for carries its trace.
+    sleep_asked: Option<observe::Why>,
+    /// The wake step started since its last sleep step began, if any.
+    woke_by: Option<OpId>,
+    /// The last step that failed and has not succeeded since, with its
+    /// error, such as a save that could not be written.
+    failed: Option<(Step, String)>,
+    /// Its named holds, kept on disk.
+    holds: holds::Holds,
+    /// Its removal hands it off: it keeps the store's copy.
+    hand_off: bool,
+    /// Its removal, a hand-off, sets this host's copy aside rather than
+    /// deleting it (see [`crate::state::Record::set_aside`]).
+    set_aside: bool,
+}
+
+/// A request waiting for a sandbox to run.
+#[derive(Debug)]
+struct Waiter {
+    /// The generation it names, if any.
+    generation: Option<u64>,
+    /// The step under way when it arrived.
+    during: Option<Step>,
+    /// Whether it had to wait for a step: then the wake step that ran, if
+    /// any, is the one it joined.
+    queued: bool,
+    reply: Reply<Woke>,
+}
+
+/// A sandbox that runs, as a waiter learns of it.
+#[derive(Debug)]
+struct Woke {
+    vsock: PathBuf,
+    during: Option<Step>,
+    /// The execution that is running.
+    generation: u64,
+    /// The wake step it waited for, if one ran.
+    op: Option<OpId>,
+}
+
+/// Talks to a running host agent. Cheap to clone.
+#[derive(Clone, Debug)]
+pub struct Handle {
+    commands: mpsc::UnboundedSender<Command>,
+    holds: Arc<AtomicU64>,
+    stream_idle: Duration,
+    /// Who sends through it; see [`Handle::owned`] and
+    /// [`Handle::local_to_fleet`].
+    origin: Origin,
+    /// The host's lease in a fleet, which the host's own tools wait on.
+    lease: Option<LeaseGate>,
+    observer: Observer,
+    /// Trace context every command carries, if any.
+    trace: Option<TraceContext>,
+    /// What builds the sandbox images asked for, if this host does.
+    preparer: Option<Arc<crate::rootfs::Preparer>>,
+    /// What stores saved sandboxes' disks as images, if this host does.
+    captures: Option<Arc<crate::capture::Captures>>,
+}
+
+/// Who sends requests through a [`Handle`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The host's own tools, on a host outside a fleet.
+    Local,
+    /// The host's own tools, on a host in a fleet: they create, adopt and
+    /// hand off nothing, since only the control service tracks sandboxes.
+    LocalToFleet,
+    /// The control service, for the ownership under this owner epoch of the
+    /// sandbox each request is about, under the admission its listener
+    /// gave the request, if it came through one.
+    Fleet(OwnerEpoch, Option<Admission>),
+}
+
+/// A watched VM process went without the agent ending it (see
+/// [`HostAgent::own`]).
+#[derive(Debug)]
+struct Exit {
+    id: Id,
+    incarnation: u64,
+    end: End,
+    /// When the agent took the VM process on, on the boot clock the guard
+    /// records its kills by: a kill before then was of an earlier VM.
+    owned: compute_core::At,
+}
+
+/// How a sandbox's VM was lost: it went without the agent ending it, or
+/// the agent ended it because it could not go on. Its running programs
+/// are lost either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum End {
+    /// Its VM process ended on its own: its guest rebooted (as its kernel
+    /// does on a panic, and a reboot ends a Firecracker VM), its VMM
+    /// failed, or something killed it.
+    Exited,
+    /// Its memory could no longer be served, so its next page fault would
+    /// wait forever.
+    MemoryLost,
+    /// Its guest stopped taking connections: it halted, powered off or
+    /// hung.
+    Stopped,
+    /// The host ended it for memory (ADR 24).
+    ForMemory,
+    /// The host ended it for a restart, its programs with it.
+    ForRestart,
+    /// The host's guard ended it: the host's lease with the control
+    /// service ran out before the VM froze (ADR 18).
+    Fenced,
+}
+
+impl End {
+    /// Its name on events.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Exited => "vm_exited",
+            Self::MemoryLost => "memory_lost",
+            Self::Stopped => "guest_stopped",
+            Self::ForMemory => "ended_for_memory",
+            Self::ForRestart => "ended_for_restart",
+            Self::Fenced => "fenced",
+        }
+    }
+}
+
+/// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
+/// idle again.
+#[derive(Debug)]
+pub struct Lease {
+    id: Id,
+    hold: HoldId,
+    vsock: PathBuf,
+    waited: Duration,
+    /// The step under way when the wake arrived.
+    during: Option<Step>,
+    /// The wake step it waited for, if one ran.
+    op: Option<OpId>,
+    /// The execution the lease reaches: the one asked for, if any.
+    generation: u64,
+    /// Whether the caller asked for that execution. A lease that was not
+    /// asked for one follows the sandbox to a fresh boot.
+    pinned: bool,
+    commands: mpsc::UnboundedSender<Command>,
+}
+
+struct ReleaseOnDrop {
+    id: Id,
+    hold: HoldId,
+    commands: mpsc::UnboundedSender<Command>,
+    armed: bool,
+}
+
+/// The host agent. Start it with [`HostAgent::start`].
+#[derive(Debug)]
+pub struct HostAgent<E: Engine, S: Store> {
+    engine: Arc<E>,
+    store: Arc<S>,
+    records: Arc<Records>,
+    net: Option<Arc<Networks>>,
+    root: PathBuf,
+    base_image: PathBuf,
+    /// The sandbox images creates name (ADR 19).
+    rootfs: Arc<Cache>,
+    /// Images being fetched for the creates that wait for them.
+    fetching: HashMap<ImageId, fetch::Fetch>,
+    /// Work waiting for the next disk reading to say whether it fits.
+    after_reading: Vec<disk::AfterReading>,
+    /// What disk relief may free besides local copies (see [`relief`]).
+    relief: relief::Relief,
+    images: Images,
+    warm: Option<Warm>,
+    core: Host,
+    origin: Instant,
+    slots: HashMap<SandboxId, Slot<E::Vm>>,
+    preparing: HashSet<SandboxId>,
+    /// Changes of owner under way, by sandbox (see [`owners`]).
+    owning: HashMap<SandboxId, usize>,
+    ordinals: BTreeSet<u32>,
+    /// Sandboxes on disk the host does not manage, with why: their ids are
+    /// refused and their files and VMs left alone.
+    blocked: BTreeMap<SandboxId, String>,
+    /// Blocked sandboxes an agent restart could not take back for a reason
+    /// that may pass, with when they are tried again (see
+    /// [`HostAgent::retry_recovery`]), and whether their VM was found held
+    /// frozen (see [`HostAgent::frozen_owner`]).
+    retrying: BTreeMap<SandboxId, recover::Retry>,
+    /// The first wait before trying a recovery again; see
+    /// [`HostConfig::recovery_retry`].
+    recovery_retry: Duration,
+    /// The tasks serving the pagers of VMs found running but not taken
+    /// back, by sandbox: until one ends, recovery does not connect to that
+    /// pager again.
+    detached: std::sync::Mutex<HashMap<SandboxId, JoinHandle<()>>>,
+    destroying: HashMap<SandboxId, Vec<Reply<()>>>,
+    /// Those of `destroying` that hand their sandbox off, keeping the
+    /// store's copy for its next owner.
+    handing_away: HashSet<SandboxId>,
+    /// Blocked sandboxes whose record is gone but whose files a removal
+    /// could not finish deleting, with the ordinal they still hold if
+    /// known. Removing one again retries.
+    leftovers: HashMap<SandboxId, Leftover>,
+    /// The host names of claimed ready sandboxes (see [`ready`]), with the
+    /// id each answers to. No new sandbox may take one as its id.
+    hosts: HashMap<SandboxId, SandboxId>,
+    /// Blocked sandboxes with an unreadable record whose ordinal is
+    /// unknown. Any new sandbox could clash with one, so none is created
+    /// while there are any.
+    unknown_ordinals: BTreeSet<SandboxId>,
+    /// Template builds an earlier agent left whose VM may still run, as
+    /// the user of an ordinal nothing records. No sandbox is created while
+    /// there are any.
+    unknown_builds: BTreeSet<String>,
+    /// Asks this agent for places under its step limits.
+    lender: Lender,
+    /// Loans waiting for their place, with whom to tell.
+    loans: HashMap<LoanId, oneshot::Sender<()>>,
+    /// Dead VM processes of each sandbox still being torn down. Nothing new
+    /// starts for a sandbox until its count is back to zero, so no teardown
+    /// ever removes files of a newer VM.
+    tearing_down: HashMap<SandboxId, u32>,
+    /// The teardown tasks, which the agent waits for before it lets go.
+    teardowns: tokio::task::JoinSet<()>,
+    /// Stops teardowns retrying once the agent ends; the next agent
+    /// finishes them.
+    shutdown: CancellationToken,
+    commands: mpsc::UnboundedReceiver<Command>,
+    events: mpsc::UnboundedReceiver<Event<E::Vm>>,
+    events_tx: mpsc::UnboundedSender<Event<E::Vm>>,
+    actions: Vec<Action>,
+    next_incarnation: u64,
+    stats: [StepStats; Step::COUNT],
+    available_memory: Option<u64>,
+    /// Running sandboxes whose activity could not be read over their last
+    /// window, so they count as busy; see [`HostAgent::sample_busy`].
+    unseen_activity: usize,
+    /// How many VM processes the kernel's out-of-memory killer had ended
+    /// at the last sample; see [`HostAgent::check_oom_kills`].
+    oom_kills: Option<u64>,
+    sample_every: Duration,
+    /// See [`HostConfig::first_wake_within`].
+    first_wake_within: Duration,
+    /// Readings given in place of the agent's own; see
+    /// [`HostConfig::disk_reading`].
+    disk_gauge: Option<DiskGauge>,
+    /// The VMs' processor share, read again every few seconds; see
+    /// [`HostConfig::processor_share`].
+    processor_share: Option<ShareCheck>,
+    /// When memory pressure frees memory, if it does.
+    memory_policy: Option<MemoryPolicy>,
+    /// Ready sandboxes, kept for creates to claim (see [`ready`]).
+    ready: ready::Ready<E::Vm>,
+    /// Hand-offs under way (see [`owners`]).
+    handing_off: owners::HandOffs,
+    /// [`HostConfig::hand_off_unwakeable`].
+    hand_off_unwakeable: Duration,
+    /// Restarts under way, with who waits for each (see [`restart`]).
+    restarting: restart::Restarts,
+    /// Adopts that wait for an earlier ownership's copy to go.
+    then_adopt: owners::Adopts,
+    guest_ports: Arc<[GuestPort]>,
+    restore_notice_port: Option<u32>,
+    guest_checks: GuestChecks,
+    link: Option<compute_link::Hub>,
+    #[cfg(target_os = "linux")]
+    fetcher: Option<Arc<crate::lazy::Fetcher>>,
+    busy: Option<BusyRule>,
+    can_compress: bool,
+    /// Whether guest memory is huge pages, which a guest never gives back:
+    /// every sandbox then reserves its whole size.
+    reserve_whole: bool,
+    /// Copies of guest memory a save may write at most: one where files
+    /// share extents, otherwise also the merged image.
+    save_copies: u64,
+    /// The base image's length when the agent started, for when it
+    /// cannot be read later; see [`HostAgent::disk_bound`].
+    base_length: u64,
+    /// The bytes the state root's filesystem allocates at a time.
+    allocation_unit: u64,
+    pager: PagerConfig,
+    /// What the host runs, as status reports it.
+    about: About,
+    /// The lease this host holds in a fleet; see [`HostConfig::lease`].
+    lease: Option<LeaseGate>,
+    /// The guard's freeze count; see [`HostConfig::guard_freezes`].
+    guard_freezes: Option<Freezes>,
+    /// Lets guest connections report activity without keeping the agent
+    /// alive once every [`Handle`] is gone.
+    commands_tx: mpsc::WeakUnboundedSender<Command>,
+    observer: Observer,
+    summary_every: Duration,
+    /// Whether the agent is still taking over its state root: steps it
+    /// starts meanwhile are for recovery.
+    recovering: bool,
+    /// The trace context of the command being handled, if it carried one.
+    trace: Option<TraceContext>,
+}
+
+/// Lends step slots to the pool, reporting each loan as an event.
+fn lender<V: Send + 'static>(events: mpsc::UnboundedSender<Event<V>>) -> Lender {
+    Lender::new(move |loaning| {
+        let _ = events.send(Event::Loan(loaning));
+    })
+}
+
+/// The host's warm templates and how to build them.
+#[derive(Debug)]
+struct Warm {
+    pool: Pool,
+    /// Templates found on disk, until their check starts.
+    found: Vec<Template>,
+    sources: Arc<Sources>,
+    ready_port: u32,
+    ready_timeout: Duration,
+    /// When each shape was last used.
+    uses: Uses,
+}
+
+/// Wakes a sandbox when data arrives for it on a guest port, or a request
+/// for its agent on its agent link: `by` says which.
+#[derive(Clone, Debug)]
+struct Toucher {
+    id: Id,
+    commands: mpsc::WeakUnboundedSender<Command>,
+    by: observe::By,
+}
+
+impl Activity for Toucher {
+    fn wake(&self) {
+        if let Some(commands) = self.commands.upgrade() {
+            let _ = commands.send(Command::Touch {
+                id: self.id,
+                generation: None,
+                priority: Priority::Interactive,
+                by: self.by,
+                reply: None,
+            });
+        }
+    }
+}
+
+impl<E: Engine, S: Store> HostAgent<E, S> {
+    /// Takes over the state root, recovers every sandbox recorded under it,
+    /// then runs the agent until every [`Handle`] is dropped.
+    ///
+    /// VMs an earlier run left running are taken back as they are, running
+    /// or paused, with their programs intact. Every other sandbox comes back
+    /// at the level its record shows, and removals that were under way
+    /// finish.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one line for each field of the agent"
+    )]
+    pub async fn start(
+        config: HostConfig,
+        engine: E,
+        store: S,
+    ) -> Result<(Handle, JoinHandle<()>), HostError> {
+        // On a host in a fleet requests wait until it has started; it logs
+        // how long that took.
+        let began = Instant::now();
+        let (core, records, strays, images) = open_root(&config).await?;
+        let net = prepare_network(config.network.clone()).await?;
+        let (commands_tx, commands) = mpsc::unbounded_channel();
+        let (events_tx, events) = mpsc::unbounded_channel();
+        // Huge-page profiles cannot compress, whatever the host says.
+        let profile = engine.memory_profile();
+        let allocation_unit = allocation_unit(&config.root)?;
+        let save_copies = save_copies(&config.root)?;
+        let rootfs = open_rootfs(&config, records.ownership()).await?;
+        // Template VMs an earlier agent left are ended before any sandbox
+        // can be given the user one of them ran as.
+        let warm::Started {
+            warm,
+            shapes: warm_shapes,
+            held,
+            ready,
+        } = Warm::start(&engine, &config, &rootfs, &images).await;
+        let about = About {
+            runtime: engine.runtime().to_owned(),
+            checkpoints: store.is_configured() && save_copies == 1,
+            ..config.about
+        };
+        let mut agent = Self {
+            engine: Arc::new(engine),
+            #[cfg(target_os = "linux")]
+            fetcher: (store.chunks()).map(|(chunks, lanes)| {
+                Arc::new(crate::lazy::Fetcher::new(chunks.clone(), Arc::clone(lanes)))
+            }),
+            store: Arc::new(store),
+            records: Arc::new(records),
+            net,
+            images,
+            root: config.root,
+            base_length: std::fs::metadata(&config.base_image).map_or(0, |found| found.len()),
+            base_image: config.base_image,
+            rootfs,
+            fetching: HashMap::new(),
+            warm,
+            memory_policy: config.policy.memory,
+            ready: ready::Ready::new(ready),
+            handing_off: HashMap::new(),
+            restarting: HashMap::new(),
+            then_adopt: HashMap::new(),
+            pager: config.pager,
+            core,
+            origin: Instant::now(),
+            slots: HashMap::new(),
+            preparing: HashSet::new(),
+            after_reading: Vec::new(),
+            relief: relief::Relief::default(),
+            owning: HashMap::new(),
+            ordinals: BTreeSet::new(),
+            blocked: BTreeMap::new(),
+            retrying: BTreeMap::new(),
+            // A zero wait would try again on every turn of the loop.
+            recovery_retry: config.recovery_retry.max(Duration::from_millis(1)),
+            detached: std::sync::Mutex::default(),
+            destroying: HashMap::new(),
+            handing_away: HashSet::new(),
+            leftovers: HashMap::new(),
+            hosts: HashMap::new(),
+            unknown_ordinals: BTreeSet::new(),
+            unknown_builds: BTreeSet::new(),
+            lender: lender(events_tx.clone()),
+            loans: HashMap::new(),
+            tearing_down: HashMap::new(),
+            teardowns: tokio::task::JoinSet::new(),
+            shutdown: CancellationToken::new(),
+            commands,
+            events,
+            events_tx,
+            actions: Vec::new(),
+            next_incarnation: 1,
+            stats: [StepStats::default(); Step::COUNT],
+            available_memory: None,
+            unseen_activity: 0,
+            oom_kills: None,
+            sample_every: config.sample_every,
+            first_wake_within: config.first_wake_within,
+            disk_gauge: config.disk_reading,
+            processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
+            guest_ports: config.guest_ports.into(),
+            restore_notice_port: config.restore_notice_port,
+            guest_checks: config.guest_checks,
+            link: config.agent_link,
+            busy: config.busy,
+            can_compress: config.can_compress && profile.compress,
+            reserve_whole: profile.pages == PageSize::Huge,
+            save_copies,
+            allocation_unit,
+            about,
+            lease: config.lease,
+            guard_freezes: config.guard_freezes,
+            commands_tx: commands_tx.downgrade(),
+            observer: config.observer,
+            summary_every: config.summary_every,
+            hand_off_unwakeable: config.hand_off_unwakeable,
+            recovering: true,
+            trace: None,
+        };
+        // Boxed: recovery's future is large, and every caller awaits this one.
+        Box::pin(agent.begin(held, strays, warm_shapes, began)).await;
+        let handle = agent.handle(commands_tx, config.stream_idle, config.prepare)?;
+        Ok((handle, tokio::spawn(agent.run())))
+    }
+
+    /// A handle sending commands on `commands`, that builds the images the
+    /// control service asks for as `prepare` says and stores captures if
+    /// this host's store keeps images. Deletes the copies captures an
+    /// earlier agent made left.
+    fn handle(
+        &self,
+        commands: mpsc::UnboundedSender<Command>,
+        stream_idle: Duration,
+        prepare: Option<crate::rootfs::PrepareConfig>,
+    ) -> Result<Handle, HostError> {
+        let captures = crate::capture::Captures::of(&self.root, &self.store).map_err(|error| {
+            HostError::Io(format!(
+                "emptying the directory captures are copied to: {error}"
+            ))
+        })?;
+        Ok(Handle::new(
+            commands,
+            stream_idle,
+            self.lease.clone(),
+            self.observer.clone(),
+            crate::rootfs::Preparer::of(prepare, &self.store, &self.rootfs),
+            captures,
+        ))
+    }
+
+    /// Takes back what an earlier agent left, then takes a first reading
+    /// and starts the templates; then logs how long the start that `began`
+    /// then took, and its recovery.
+    async fn begin(
+        &mut self,
+        held: Vec<Held>,
+        strays: Vec<Stray>,
+        shapes: Vec<Shape>,
+        began: Instant,
+    ) {
+        let recovering = Instant::now();
+        // Before any VM starts or is adopted, so no group being set up
+        // looks left behind.
+        if let Err(error) = self.engine.clean_up_left_behind() {
+            tracing::warn!(%error, "could not release what VMs that ended unmanaged left behind");
+        }
+        self.hold_builds(held);
+        self.recover(strays).await;
+        // Admission refuses what needs disk until it has a reading, and
+        // spare VMs wait for a memory reading too, so one is taken before
+        // any build starts or request is served.
+        self.sample().await;
+        self.recovering = false;
+        self.start_templates(shapes);
+        tracing::info!(
+            ms = began.elapsed().as_millis(),
+            recovery_ms = recovering.elapsed().as_millis(),
+            "started"
+        );
+    }
+
+    /// Refuses while some ordinal is unknown: any ordinal that looks free
+    /// could then belong to a VM that still runs as its user.
+    fn ordinals_known(&self) -> Result<(), String> {
+        if let Some(unknown) = self.unknown_ordinals.first() {
+            return Err(format!(
+                "sandbox {}'s record is unreadable and the user and network it holds unknown; \
+                 no sandbox is created until it is resolved",
+                Id(*unknown)
+            ));
+        }
+        if let Some(build) = self.unknown_builds.first() {
+            return Err(format!(
+                "template build {build} may still run as a user nothing records; \
+                 no sandbox is created until a restart of the agent ends it"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The lowest ordinal no sandbox holds, unless some ordinal is unknown.
+    fn take_ordinal(&mut self) -> Result<u32, String> {
+        self.ordinals_known()?;
+        let mut free = 0;
+        for taken in &self.ordinals {
+            if *taken != free {
+                break;
+            }
+            free += 1;
+        }
+        self.ordinals.insert(free);
+        Ok(free)
+    }
+
+    fn insert(&mut self, id: Id, paths: Paths, spec: VmSpec) {
+        let toucher = Toucher {
+            id,
+            commands: self.commands_tx.clone(),
+            by: observe::By::GuestPort,
+        };
+        let owner = (spec.uid, spec.gid);
+        let ports =
+            match guest_ports::listen(&spec.vsock_path(), owner, &self.guest_ports, &toucher) {
+                Ok(listeners) => Some(listeners),
+                Err(error) => {
+                    tracing::error!(%id, %error, "could not listen for guest connections");
+                    None
+                }
+            };
+        let holds = holds::Holds::new(paths.holds.clone(), self.records.ownership());
+        let link_clock = crate::resume::RunClock::default();
+        let link = self.listen_link(id, &spec, &link_clock);
+        self.slots.insert(
+            id.0,
+            Slot {
+                paths: Arc::new(paths),
+                spec: Arc::new(spec),
+                vm: None,
+                incarnation: None,
+                launches: 0,
+                dead: None,
+                _ports: ports,
+                _link: link,
+                link_clock,
+                runs_since: None,
+                op: None,
+                destroy: false,
+                removers: Vec::new(),
+                waiters: Vec::new(),
+                hand_off: false,
+                set_aside: false,
+                deferred: None,
+                usage: usage::Usage::default(),
+                check: None,
+                stats: None,
+                peak: 0,
+                reported: None,
+                summarized: Instant::now(),
+                asked: None,
+                sleep_asked: None,
+                woke_by: None,
+                failed: None,
+                holds,
+            },
+        );
+        self.link_as_recorded(id);
+    }
+
+    async fn run(mut self) {
+        let mut sample = tokio::time::interval(self.sample_every);
+        sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(target_os = "linux")]
+        let trimming = tokio::spawn(crate::logs::keep_trimmed(
+            self.root.clone(),
+            self.shutdown.clone(),
+        ));
+        let lease = self.lease.clone();
+        loop {
+            let deadline = self
+                .core
+                .next_deadline()
+                .map(|at| self.origin + at.since_origin().saturating_sub(CLOCK_BASE));
+            // While the lease has run out, time decides nothing: the VMs
+            // are frozen, and the service may be giving their sandboxes to
+            // other hosts. Events and requests still come in, so the
+            // service's rulings can be carried out; the core decides
+            // nothing of its own on them either (see `inputs`).
+            let acting = self.may_act();
+            let retry_at = self.next_recovery_retry();
+            tokio::select! {
+                biased;
+                // First, so a steady stream of events and requests cannot
+                // starve it: it is ready at most once per interval.
+                _ = sample.tick(), if acting => self.sample().await,
+                Some(event) = self.events.recv() => self.on_event(event),
+                command = self.commands.recv() => match command {
+                    Some(command) => self.on_command(command),
+                    None => break,
+                },
+                () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
+                // Also while the lease has run out, as at start: a VM the
+                // guard froze then fails again, but one it killed is found
+                // gone. The host registers again listing the frozen ones
+                // (see `frozen_owner`), and no other blocked sandbox.
+                () = sleep_until_some(retry_at) => self.retry_recovery().await,
+                // Renewed, the core reconsiders every sandbox, and the
+                // frozen ones the service kept are taken back as the guard
+                // thaws them.
+                () = lease_changed(lease.as_ref()) => {
+                    self.thawing();
+                    self.input(Input::Tick);
+                }
+            }
+        }
+        tracing::info!("every handle dropped; host agent stopping, VMs keep running");
+        // Teardowns under way finish their current attempt; the next agent
+        // retries any that failed.
+        self.shutdown.cancel();
+        #[cfg(target_os = "linux")]
+        let _ = trimming.await;
+        while self.teardowns.join_next().await.is_some() {}
+        // The agent links' sessions are on disk before the next agent
+        // reads them.
+        if let Some(hub) = &self.link {
+            hub.shutdown().await;
+        }
+    }
+
+    fn now(&self) -> At {
+        At::from_duration(CLOCK_BASE + self.origin.elapsed())
+    }
+
+    /// Whether the agent may decide anything of its own now: always, except
+    /// on a host in a fleet whose lease has run out.
+    fn may_act(&self) -> bool {
+        self.lease.as_ref().is_none_or(LeaseGate::is_open)
+    }
+
+    /// `at` in milliseconds since the Unix epoch.
+    fn unix_ms(&self, at: At) -> u64 {
+        let ago = self.now().saturating_since(at);
+        unix_ms_now().saturating_sub(u64::try_from(ago.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    /// The time `unix_ms` milliseconds after the Unix epoch on the agent's
+    /// clock; one before the clock's start counts as its start.
+    fn at_unix_ms(&self, unix_ms: u64) -> At {
+        let ago = Duration::from_millis(unix_ms_now().saturating_sub(unix_ms));
+        At::from_duration(self.now().since_origin().saturating_sub(ago))
+    }
+
+    fn input(&mut self, input: Input) {
+        self.inputs([input]);
+    }
+
+    /// Feeds inputs observed together to the core, which decides once after
+    /// all of them.
+    /// On a host in a fleet whose lease has run out the core is suspended
+    /// ([`Host::suspend`]): it takes the inputs in and carries out removals,
+    /// but nothing it would decide of its own, such as pausing a sandbox
+    /// that went idle, starts until the lease is renewed.
+    fn inputs(&mut self, inputs: impl IntoIterator<Item = Input>) {
+        let acting = self.may_act();
+        if acting == self.core.is_suspended() {
+            self.core.suspend(!acting);
+        }
+        let now = self.now();
+        let mut actions = std::mem::take(&mut self.actions);
+        // The inputs after which a sandbox may be at another level.
+        let mut moved = Vec::new();
+        let inputs = self
+            .disk_inputs(inputs)
+            .into_iter()
+            .inspect(|input| match input {
+                Input::Add { sandbox, .. }
+                | Input::Finished { sandbox, .. }
+                | Input::Lost { sandbox } => {
+                    moved.push(*sandbox);
+                }
+                _ => {}
+            });
+        self.core.handle_all(now, inputs, &mut actions);
+        for sandbox in moved {
+            self.tell_link(Id(sandbox));
+            self.continue_restart(Id(sandbox));
+        }
+        for action in actions.drain(..) {
+            self.execute(action);
+        }
+        self.actions = actions;
+        self.tell_clocks();
+    }
+}
+
+/// Returns when `lease` may have opened or closed; never without one.
+async fn lease_changed(lease: Option<&LeaseGate>) {
+    match lease {
+        Some(lease) => lease.changed().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn sleep_until_some(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}

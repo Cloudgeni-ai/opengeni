@@ -15,7 +15,7 @@ export {
   type SkillDiscoveryItem,
   type SkillDiscoveryPage,
 } from "./skill-discovery";
-export { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
+export { ConnectSetup, isOwnerApprovalPending, type ConnectSetupProps } from "./connect-setup";
 export { ConnectChooser, type ConnectChooserProps } from "./connect-chooser";
 export { ConnectAccounts, type ConnectAccountsProps } from "./connect-accounts";
 export { ConnectPanel, type ConnectPanelProps } from "./connect-panel";
@@ -45,7 +45,9 @@ export type {
 } from "@opengeni/connect";
 
 export {
+  attentionFirst,
   ConnectionCatalog,
+  connectionOptionNeedsAttention,
   ConnectionServiceRow,
   ConnectionOptionRow,
   type ConnectionCatalogProps,

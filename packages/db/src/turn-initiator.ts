@@ -1,5 +1,6 @@
 import {
   UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
+  readTurnExecutionPolicyV1,
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
@@ -20,7 +21,9 @@ export type FrozenTurnInitiator = {
   initiatingHumanSubjectId?: string | null;
 };
 
-/** A legacy task has no asserted service identity. Its occurrence is still
+/** The scheduler label is frozen authority proof shared with migrations 0275/0414,
+ * not presentation copy. Preserve its exact historical bytes.
+ * A legacy task has no asserted service identity. Its occurrence is still
  * initiated by the scheduler, not by the missing-attribution sentinel. */
 export function frozenScheduledOccurrenceInitiator(
   task: { createdBy: TurnInitiator; createdByContext: TurnInitiatorContext },
@@ -44,6 +47,28 @@ export function frozenScheduledOccurrenceInitiator(
 }
 
 const MAX_AGENT_PROVENANCE_HOPS = 32;
+
+/** Read only private, server-frozen lineage/context, never request JSON. */
+export function frozenCredentialRestriction(
+  context: Readonly<Record<string, unknown>> | null | undefined,
+): "developer_setup" | undefined {
+  if (!context || !Object.hasOwn(context, "credentialRestriction")) return undefined;
+  if (context.credentialRestriction !== "developer_setup") {
+    throw new Error("Malformed frozen credential restriction");
+  }
+  return "developer_setup";
+}
+
+/** Every coalesced causal source retains its ceiling, not only the first one. */
+export function contextWithFrozenCredentialRestrictions(
+  context: TurnInitiatorContext,
+  sources: readonly (Readonly<Record<string, unknown>> | null | undefined)[],
+): TurnInitiatorContext {
+  const restrictions = [context, ...sources].map(frozenCredentialRestriction);
+  return restrictions.includes("developer_setup")
+    ? { ...context, credentialRestriction: "developer_setup" }
+    : context;
+}
 
 /**
  * Bound agent provenance without discarding its causal authority. Once the
@@ -77,6 +102,46 @@ export function initiatorFromStorage(
     subjectId,
     ...(label ? { label } : {}),
   };
+}
+
+/**
+ * Who sent a person's message, for the model: the label frozen with the turn
+ * at acceptance (never re-read). Service, key, agent and scheduler turns have
+ * no person behind the prompt, so they get none.
+ */
+export function humanTurnSenderLabel(row: {
+  initiatorKind: string;
+  initiatorContext: unknown;
+}): string | null {
+  if (row.initiatorKind !== "subject") return null;
+  const context = row.initiatorContext;
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return null;
+  const label = (context as Record<string, unknown>).label;
+  return typeof label === "string" && label.trim() ? label : null;
+}
+
+/**
+ * Whether two messages come from the same sender: the same person, or for a
+ * message without a person behind it (a workspace key, a service), the same
+ * exact sender. A queue edit keeps its message's authority, including the
+ * sender's own (Only me) accounts, only when its own sender resubmits it;
+ * anyone else's edit is their own new message.
+ */
+export function sameTurnSender(
+  left: Pick<FrozenTurnInitiator, "initiator" | "initiatingHumanSubjectId">,
+  right: Pick<FrozenTurnInitiator, "initiator" | "initiatingHumanSubjectId">,
+): boolean {
+  const person = (value: typeof left) =>
+    value.initiatingHumanSubjectId?.trim() ||
+    (value.initiator.kind === "subject" ? value.initiator.subjectId.trim() : "") ||
+    null;
+  const leftPerson = person(left);
+  const rightPerson = person(right);
+  if (leftPerson !== null || rightPerson !== null) return leftPerson === rightPerson;
+  return (
+    left.initiator.kind === right.initiator.kind &&
+    left.initiator.subjectId === right.initiator.subjectId
+  );
 }
 
 export function initiatorColumns(value: FrozenTurnInitiator): {
@@ -130,6 +195,9 @@ export function contextForCausalTurn(
   const clipped = clipAgentProvenanceHops(hops);
   return {
     ...current,
+    ...(frozenCredentialRestriction(causal.context)
+      ? { credentialRestriction: "developer_setup" }
+      : {}),
     via: clipped,
     ...(viaTruncated === true || hops.length > clipped.length ? { viaTruncated: true } : {}),
   };
@@ -170,8 +238,17 @@ export async function frozenInitiatorForCommandActor(
       initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
       initiatorContext: schema.sessionTurns.initiatorContext,
       initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      metadata: schema.sessionTurns.metadata,
+      sessionMetadata: schema.sessions.metadata,
     })
     .from(schema.sessionTurns)
+    .innerJoin(
+      schema.sessions,
+      and(
+        eq(schema.sessions.workspaceId, schema.sessionTurns.workspaceId),
+        eq(schema.sessions.id, schema.sessionTurns.sessionId),
+      ),
+    )
     .where(
       and(
         eq(schema.sessionTurns.workspaceId, workspaceId),
@@ -184,6 +261,16 @@ export async function frozenInitiatorForCommandActor(
     throw new Error(`Agent initiator turn not found: ${actor.turnId}`);
   }
   const storedContext = turn.initiatorContext ?? {};
+  const executionPolicy = readTurnExecutionPolicyV1(turn.metadata);
+  const initialPolicy = readTurnExecutionPolicyV1(turn.sessionMetadata);
+  const restricted =
+    frozenCredentialRestriction(storedContext) === "developer_setup" ||
+    (executionPolicy.kind === "valid" &&
+      executionPolicy.policy.credentialRestriction === "developer_setup");
+  const inheritedRestriction =
+    restricted ||
+    (initialPolicy.kind === "valid" &&
+      initialPolicy.policy.credentialRestriction === "developer_setup");
   const inheritedHops = validAgentHops(storedContext.via);
   const hops = [
     ...inheritedHops,
@@ -200,6 +287,7 @@ export async function frozenInitiatorForCommandActor(
     initiator: initiatorFromStorage(turn.initiatorKind, turn.initiatorSubjectId, storedContext),
     context: {
       ...storedContext,
+      ...(inheritedRestriction ? { credentialRestriction: "developer_setup" } : {}),
       via: clipped,
       ...(hops.length > clipped.length ? { viaTruncated: true } : {}),
     },

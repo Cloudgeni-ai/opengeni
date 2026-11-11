@@ -1,15 +1,21 @@
-# `opengeni-agent` — the Connected Machine agent (Rust workspace)
+# Opengeni Runner (`opengeni-agent`, Rust workspace)
 
-The Rust agent that turns a user's own machine into a **Connected Machine** — a
-first-class, co-equal PRIMARY OpenGeni compute target (the `selfhosted` backend,
+Opengeni Runner is the Rust program that turns a user's own machine into a **Connected Machine** — a
+first-class, co-equal PRIMARY Opengeni compute target (the `selfhosted` backend,
 internally). This is a standalone Cargo workspace — it is **not** part of the bun
 monorepo (the bun workspaces glob excludes it, and Cargo build output is gitignored).
+
+The product name is Opengeni Runner, so it is not confused with the AI agents
+that use the machine. The command, crates, service names, macOS bundle
+identifier and wire protocol keep their `opengeni-agent` / `agent` identifiers,
+which installed machines and release tooling depend on. Older text in this
+directory that says "the agent" means the Runner.
 
 **How the control plane treats a Connected Machine** (canonical:
 [`../docs/architecture.md`](../docs/architecture.md) §3.8 and [`../AGENTS.md`](../AGENTS.md)):
 a machine-targeted turn runs on this agent **directly** — the control plane
 establishes the session on the machine and does **not** create, lease, or bill a
-cloud box for it. It ships no durable OpenGeni credential or platform Git setup,
+cloud box for it. It ships no durable Opengeni credential or platform Git setup,
 so this agent authenticates Git with the machine's **own** credentials. The sole
 transient exception is a renewable exact-attempt Codemode bearer placed only in
 each authorized child exec; this binary exposes `codemode list|call|doctor` there and
@@ -31,6 +37,22 @@ never `git clone`s a repo onto the machine.
 | `opengeni-agent-stream`   | Relay-edge stream transport + pty/framebuffer pumps.                                                                         |
 | `opengeni-agent-update`   | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback.                                    |
 | `opengeni-relay`          | The stateless stream-relay edge image.                                                                                       |
+
+## Large Codemode arguments
+
+The native client accepts one JSON object inline, from stdin (`-`), or from a
+UTF-8 file (`@path`). Stdin and files avoid the operating system's argv-size
+limit without changing the authorized tool, approval, or operation journal.
+File paths are relative to the command's working directory unless absolute.
+
+```sh
+opengeni-agent codemode call server.tool - < arguments.json
+opengeni-agent codemode call server.tool '@arguments with spaces.json'
+```
+
+Arguments default to `{}`; stdin is never read implicitly. Invalid or unreadable
+input fails before any network call, without printing the contents. Server and
+tool payload limits still apply. This requires a native agent release/update.
 
 ## Offline document IDs
 
@@ -75,6 +97,16 @@ pages or guarantee graceful completion for a permanently stuck controller.
   dir or the direct GitHub-Releases URL). A script served by a deployment also
   defaults `OPENGENI_API_URL` to that deployment's public origin; the committed
   managed-cloud fallback is `https://app.opengeni.ai`.
+  For Windows, the managed-cloud one-liner is
+  `irm https://app.opengeni.ai/install.ps1 | iex`; self-hosted installations use
+  their own deployment origin instead. That same origin serves the promoted
+  release assets, so installation does not require a separate download hostname.
+  Linux/macOS use an installed minisign/rsign or a capability-tested OpenSSL.
+  Otherwise the installer downloads a temporary upstream minisign 0.11 verifier,
+  authenticates its archive against a SHA-256 pinned in the script before execution,
+  then verifies the agent with the existing signing key. No verifier is installed
+  on the host. `OPENGENI_MINISIGN_BOOTSTRAP_BASE_URL` may point to a mirror of those
+  exact archives; it cannot override their checksum pins.
   [`install/uninstall.sh`](install/uninstall.sh)
   removes it (`--purge` also deletes credentials + deactivates the enrollment).
 - **Signing key** — the minisign **public** key is committed at
@@ -95,21 +127,36 @@ pages or guarantee graceful completion for a permanently stuck controller.
   connection, operation, and epoch may continue or cancel. Uploads retain their
   existing reconnect behavior and have no invented expiry. Completion, failure,
   cancellation, or removal of the owning link releases the upload reservation.
+  Failed command setup and cancelled commands retain cleanup until their children
+  exit. Transient exit-observation failures recover per producer rather than
+  permanently disabling updates. Unconfirmed cleanup reports its producer and
+  recovery steps in the response and agent log; no blanket reset bypasses it.
+  A controller that cannot hand over browser/computer sessions reports
+  `update_busy_interactions`, distinct from uploads and other work. Unix streamed
+  commands, including one-off commands, already participate in update handover;
+  Windows waits rather than interrupting live commands.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
-  systemd user/system unit, macOS LaunchAgent, or Windows Service. Repeated `start`
+  systemd user/system unit, a macOS LaunchAgent, or a per-user Windows logon task
+  that runs in the user's desktop session (so computer use works). Repeated `start`
   repairs the definition without disrupting a running same-version process;
   `start --restart` activates a real binary upgrade once. The generated service
   preserves the installer's command `PATH`; agent commands retain that normal
   machine environment, while the lifecycle CLI resolves the operating system's
   real systemd tools ahead of unrelated user shims. `service install --print` is the dry run.
+  `stop` pauses automatic login startup as well as the current process;
+  `service start` resumes the installed definition without replacing it.
+  `service status --json` reports versioned installed/enabled/running state for
+  desktop service-backed management. Desktop launch never uninstalls a working
+  agent or resets its privacy grants.
   `opengeni-agent run` remains the explicit foreground mode.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
-  (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows
-  Authenticode are guarded creds-drop-ins that skip cleanly when absent).
+  (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize and Windows
+  Authenticode through Azure Artifact Signing, signed in with GitHub OIDC, are guarded
+  drop-ins that skip cleanly when their credentials or `AZURE_SIGNING_*` variables are absent).
 
-## One agent, many OpenGeni deployments
+## One agent, many Opengeni deployments
 
 Install the binary once, then run the one-liner from every workspace you want
 this machine to serve. `opengeni-agent connect` adds or refreshes only that exact
@@ -138,16 +185,31 @@ bearer; established op-stream commands detach, keep running, and replay any
 missed output after re-attachment. Full-jitter backoff is reserved for actual
 transport failures.
 
+An authentication refusal pauses that connection's transport until credentials
+are renewed or the person reconnects. Failed renewal never re-enables the same
+rejected credentials. If the rejected connection has no verified renewal origin,
+no install identity, or its renewal endpoint refuses or does not support renewal,
+it stays `reconnect_required` without further network attempts. Temporary network
+failures, server outages and clock skew can still recover through renewal, without
+redialing the rejected transport or repeating an unchanged warning each minute.
+`opengeni-agent connections` shows the saved authentication status and how to
+reconnect or remove the connection. Other connections keep serving independently.
+
 On Linux each accepted host operation gets a separate cgroup-v2 memory/lifecycle
 leaf while the generated systemd fragment requests an unlimited aggregate. Admin
 drop-ins and ancestor constraints remain authoritative. The
 generated unit uses systemd's `DelegateSubgroup=supervisor`, so the first and every
 replacement control process starts in the same supervisor leaf while the delegated
 root remains empty and restart-safe. Startup verifies this topology and stamps that
-leaf with systemd-oomd's avoid marker. A custom/older unit that cannot provide the
+leaf with systemd-oomd's avoid marker. In-place updates preserve infrastructure
+children in the supervisor leaf and adopt handed-over commands in their existing
+operation leaves; the supervisor need not be its leaf's only process. Commands
+already running without an operation leaf remain on process-group containment
+until they finish; new commands use the restored operation-cgroup manager.
+A custom/older unit that cannot provide the
 subgroup is reported as incapable and stays on unrestricted ambient execution;
 an explicit resource policy then fails closed. Optional per-enrollment memory and
-exact integer-millicore CPU limits arrive on each newly admitted exec/Git request;
+exact integer-millicore CPU limits arrive on each newly admitted exec request;
 an in-flight command keeps its admitted snapshot. Limits compose with stricter local
 `OPENGENI_AGENT_OP_MEMORY_{MAX,HIGH}` / `OPENGENI_AGENT_OP_CPU_MAX_MILLICORES`
 or ancestor policy. Memory and CPU enforcement are separately advertised. Startup
@@ -174,12 +236,69 @@ deployment/workspace connection with the force flag shown in the agent log:
 opengeni-agent connect --force --api-url https://<deployment> --workspace-id <workspace-uuid>
 ```
 
+An authentication handshake timeout is a transient connection failure, not proof
+that the enrollment bearer was rejected. The agent retries the connection without
+recommending re-enrollment for that timeout.
+
+## In an Opengeni compute sandbox (`run --compute`)
+
+The same agent runs inside each sandbox of Opengeni compute. The
+sandbox's guest init starts it as `opengeni-agent run --compute <link file>`; the
+contract is `compute/docs/agent-link.md`.
+
+- The link file names the enrollment (`workspace_id`, `agent_id`), the
+  `workspace_root` and a loopback `nats_url`. The agent dials that address with
+  no credential: the guest forwards it to the sandbox's host, which speaks for
+  the sandbox to Opengeni over its own authenticated link.
+- The relay producer token arrives from the host on `_compute.relay`, and a
+  fresh one before it expires. It is kept in memory only; every stream
+  registration, the first and each reconnect, presents the latest one.
+- The guest carries each of the agent's connections as a stream that outlives
+  sleep, wake and checkpoints on the same host. When the host has no stream to
+  go on with (after a move, a recovery on another host or a restart of the host
+  agent), the guest sends `SIGUSR1`: the agent drops its connection and dials
+  again at once, without the outage back-off.
+- The agent writes what it has in use to `/run/compute/activity/agent.<pid>`,
+  so compute sleeps the sandbox only when the agent is idle too: running or
+  waiting host operations, plus open streams that carried traffic within the
+  stream silence limit (ten minutes unless the link file says otherwise).
+  Anything a viewer sends counts on every stream; what the agent sends counts
+  on terminal, browser and computer streams, but not desktop frames, which are
+  captured at a fixed rate whether or not anything changed. A browser
+  controller that is merely running does not count: each use of it is a
+  request, and requests keep the sandbox awake on the host's side.
+- Enrollment, credential renewal and service installation do not happen in
+  this mode; a renewal request is refused with `renewal_unsupported`.
+- The agent does update itself, through the same signed self-update as a
+  connected machine: a sandbox keeps its disk for as long as it lives, so the
+  agent its image carried would otherwise run for good. The verified release
+  replaces `/usr/local/bin/opengeni-agent` on the sandbox's disk, and the
+  process execs it with its commands handed over, so the guest init that
+  supervises it sees the same process carry on, under the same connection
+  instance. The download and the swap count as work in the activity file, so
+  the sandbox does not sleep in the middle of them; waiting for idle does not.
+  A checkpoint or a guest reboot can still come at any moment, so the release
+  passes its startup check beside the installed binary before it replaces it:
+  any copy of the disk holds either the old agent or a checked new one. The
+  reconnect signal the guest init sends stays blocked across the exec, so one
+  that arrives while the new image starts reconnects it instead of ending it;
+  the new image catches it from the start of its `main` and unblocks it
+  before it starts any thread, so the commands it runs do not inherit the
+  block.
+  A sandbox heartbeats only while it runs, so Opengeni asks one that sleeps
+  when it next wakes. Agents from before this refuse with `update_unsupported`.
+
 ## Wire protocol — single source of truth
 
 For native large-file editor writes, see [transactional uploads](TRANSACTIONAL-WRITES.md):
 the independent capability gate, exact upload lifecycle, supported Linux file
 semantics, and restart/lost-ack restrictions. `op_stream` alone does not imply
 transactional filesystem support.
+
+Per-request `run_as` (exec, PTY and file operations as another local user)
+is gated by `Capabilities.run_as`, advertised only on Linux by a root agent; see
+[Run as another local user](../docs/connected-machines.md#run-as-another-local-user).
+The credential switches live in `opengeni-agent-linux-ffi`.
 
 The protocol is defined **once** in [`proto/opengeni_agent.proto`](proto/opengeni_agent.proto)
 (proto3, package `opengeni.agent.v1`) and code-generated to **both** stacks so the

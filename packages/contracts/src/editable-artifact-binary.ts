@@ -1,7 +1,10 @@
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
-const FNV_OFFSET = 0xcbf29ce484222325n;
-const FNV_PRIME = 0x100000001b3n;
+const FNV_OFFSET_LOW = 0x8422_2325;
+const FNV_OFFSET_HIGH = 0xcbf2_9ce4;
+// The 64-bit FNV prime is 2^40 + 0x1b3: multiply the low limb by 0x1b3 and
+// carry `low << 40` into the high limb as `low * 2^8`.
+const FNV_PRIME_LOW = 0x01b3;
 const SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 const STABLE_ID = /^[0-9a-f]{32}$/u;
 
@@ -76,13 +79,31 @@ export function canonicalNumber(value: number, label: string): number {
   return value;
 }
 
-export function fnv1a64(bytes: Uint8Array): bigint {
-  let hash = FNV_OFFSET;
-  for (const byte of bytes) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * FNV_PRIME);
+/**
+ * FNV-1a-64 over `bytes[0, end)` using 32-bit integer limbs, with the low
+ * limb's product split into 16-bit halves so every step stays in int32
+ * arithmetic. Bit-identical to the BigInt definition without allocating a
+ * BigInt per byte (which made checksumming stored history a dominant CPU cost).
+ */
+export function fnv1a64Limbs(
+  bytes: Uint8Array,
+  end: number = bytes.byteLength,
+): readonly [low: number, high: number] {
+  let low = FNV_OFFSET_LOW | 0;
+  let high = FNV_OFFSET_HIGH | 0;
+  for (let index = 0; index < end; index += 1) {
+    low ^= bytes[index]!;
+    const lowHalf = (low & 0xffff) * FNV_PRIME_LOW;
+    const highHalf = (low >>> 16) * FNV_PRIME_LOW + (lowHalf >>> 16);
+    high = (Math.imul(high, FNV_PRIME_LOW) + (highHalf >>> 16) + (low << 8)) | 0;
+    low = (highHalf << 16) | (lowHalf & 0xffff);
   }
-  return hash;
+  return [low >>> 0, high >>> 0];
+}
+
+export function fnv1a64(bytes: Uint8Array): bigint {
+  const [low, high] = fnv1a64Limbs(bytes);
+  return (BigInt(high) << 32n) | BigInt(low);
 }
 
 export function equalBytes(left: Uint8Array, right: Uint8Array): boolean {

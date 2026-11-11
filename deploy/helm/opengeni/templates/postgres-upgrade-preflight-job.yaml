@@ -1,0 +1,111 @@
+{{- if and .Values.postgres.enabled .Values.postgres.majorUpgrade.enabled }}
+{{- $upgrade := .Values.postgres.majorUpgrade }}
+{{- $name := printf "%s-postgres-upgrade-preflight" (include "opengeni.fullname" .) }}
+{{- /*
+Rehearses the major-version upgrade before Helm changes anything: copies the
+running server's schema into a scratch cluster of the old major and runs the
+new pg_upgrade --check against it. A failing check fails this pre-upgrade hook,
+so the release stops while the running server keeps serving, instead of the
+upgrade init container failing after the server has been stopped.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-upgrade-preflight
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+  postgres-upgrade-preflight.sh: |-
+    {{- .Files.Get "files/postgres-upgrade-preflight.sh" | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-upgrade-preflight
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ $upgrade.preflight.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres-upgrade-preflight
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.postgres.podSecurityContext | nindent 8 }}
+      initContainers:
+        # The old major's binaries and extension files. The share directory is
+        # copied with symlinks resolved because the image links its sample
+        # configuration from outside the versioned directory.
+        - name: postgres-old-binaries
+          image: {{ printf "%s:%s" $upgrade.fromImage.repository $upgrade.fromImage.tag | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              major="${PG_MAJOR%%.*}"
+              mkdir -p /opengeni-postgres-old/usr/lib/postgresql /opengeni-postgres-old/usr/share/postgresql
+              cp -a "/usr/lib/postgresql/$major" /opengeni-postgres-old/usr/lib/postgresql/
+              cp -aL "/usr/share/postgresql/$major" /opengeni-postgres-old/usr/share/postgresql/
+          volumeMounts:
+            - name: postgres-old
+              mountPath: /opengeni-postgres-old
+      containers:
+        - name: preflight
+          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command: ["/bin/bash", "/opengeni-postgres-preflight-script/postgres-upgrade-preflight.sh"]
+          env:
+            - name: PGHOST
+              value: {{ include "opengeni.postgresHost" . | quote }}
+            - name: PGPORT
+              value: {{ .Values.postgres.service.port | quote }}
+            - name: PGUSER
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.postgresSecretName" . }}
+                  key: {{ .Values.postgres.auth.passwordKey }}
+          {{- with $upgrade.preflight.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: postgres-old
+              mountPath: /opengeni-postgres-old
+              readOnly: true
+            - name: work
+              mountPath: /opengeni-postgres-preflight
+            - name: script
+              mountPath: /opengeni-postgres-preflight-script
+              readOnly: true
+      volumes:
+        - name: postgres-old
+          emptyDir: {}
+        - name: work
+          emptyDir: {}
+        - name: script
+          configMap:
+            name: {{ $name }}
+{{- end }}

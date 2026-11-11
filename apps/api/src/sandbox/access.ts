@@ -32,6 +32,7 @@ import type {
   ResumeBoxByIdInput,
   ResumedSandboxSession,
 } from "@opengeni/core";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export class SandboxResumeError extends Error {
   constructor(
@@ -88,7 +89,7 @@ export function makeResumeBoxById(
       session = await client.resume({ ...state, ownsSandbox: false });
     } catch (error) {
       throw new SandboxResumeError(
-        `Failed to resume sandbox box by id on backend "${backend}": ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to resume sandbox box by id on backend "${backend}": ${errorMessage(error)}`,
         error,
       );
     }

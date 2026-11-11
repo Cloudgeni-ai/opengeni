@@ -5,9 +5,11 @@ import { currentSiteSessionOrigin } from "./site-session-origin";
 /**
  * Resolve the content-free product surface a request entered through.
  *
- * The result is an analytics label frozen on the accepted turn. It never
- * authorizes anything, so it reads trusted provenance only where it already
- * exists: an explicit entry-point choice (Slack, automations, maintenance), the
+ * The result is a label frozen on the accepted turn, mainly for analytics. It
+ * never grants access; the one place it affects authority is Site Data, where a
+ * `site` surface only narrows an agent to viewer reach
+ * (apps/api/src/site-data/service.ts). It reads trusted provenance only where
+ * it already exists: an explicit entry-point choice (Slack, automations, maintenance), the
  * API-validated Site scope, and the access path the grant was resolved from.
  * A grant whose path this function cannot place yields null rather than a
  * guess.

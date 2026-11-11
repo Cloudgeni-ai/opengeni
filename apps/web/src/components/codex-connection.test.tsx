@@ -5,8 +5,13 @@ import type { CodexAccountOverview } from "@opengeni/sdk";
 import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 
-import { CodexDeviceCodePanel, ResetCreditInventory, codexUsageReadings } from "./codex-connection";
-import { UsageMeter } from "./ui/usage-meter";
+import {
+  CodexDeviceCodePanel,
+  ResetCreditInventory,
+  codexUsageReadings,
+  planReportsNoResets,
+} from "./codex-connection";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -38,7 +43,7 @@ function setClipboard(writeText: (value: string) => Promise<void>): void {
 }
 
 describe("Codex remaining allowance meters", () => {
-  test("reads percent left, weekly first, and never invents a missing window", () => {
+  test("reads percent left and shows only the windows the plan reports", () => {
     const now = Date.parse("2026-09-27T10:00:00Z");
     const readings = codexUsageReadings(
       {
@@ -55,11 +60,11 @@ describe("Codex remaining allowance meters", () => {
       },
       now,
     );
-    expect(readings.map((reading) => reading.label)).toEqual(["Weekly", "5-hour"]);
+    // A Pro account reports no 5-hour window: none is invented.
+    expect(readings.map((reading) => reading.label)).toEqual(["Week"]);
     expect(readings[0]!.percent).toBe(78);
     expect(readings[0]!.resetsLabel).toMatch(/Oct/);
-    expect(readings[1]!.percent).toBeNull();
-    expect(codexUsageReadings(null, now).every((reading) => reading.percent === null)).toBe(true);
+    expect(codexUsageReadings(null, now)).toEqual([]);
   });
 
   for (const remaining of [100, 90, 10, 0]) {
@@ -73,7 +78,7 @@ describe("Codex remaining allowance meters", () => {
         resetAfterSeconds: null,
         limitWindowSeconds: 18000,
       };
-      const reading = codexUsageReadings({ fiveHour: window, weekly: null }, 0)[1]!;
+      const reading = codexUsageReadings({ fiveHour: window, weekly: null }, 0)[0]!;
       const container = document.createElement("div");
       document.body.append(container);
       const root = createRoot(container);
@@ -112,6 +117,51 @@ async function renderPanel(props: ComponentProps<typeof CodexDeviceCodePanel> = 
 }
 
 describe("CodexDeviceCodePanel", () => {
+  test("a long wait names the ChatGPT setting that refuses device codes", async () => {
+    // ChatGPT refuses the code on its own page and the poll just keeps
+    // waiting, so the Models page must say what blocks it once the wait is long.
+    const hintTimers: Array<() => void> = [];
+    const priorSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((handler: () => void, delay?: number, ...rest: unknown[]) => {
+      if (delay === 60_000) {
+        hintTimers.push(handler);
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return priorSetTimeout(handler, delay, ...rest);
+    }) as typeof setTimeout;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<CodexDeviceCodePanel {...defaultPanelProps} />);
+      });
+      expect(container.textContent).not.toContain("Still waiting?");
+      expect(hintTimers.length).toBeGreaterThan(0);
+
+      await act(async () => hintTimers.at(-1)!());
+      expect(container.textContent).toContain("Still waiting?");
+      expect(container.textContent).toContain("“Enable device code sign-in for Codex”");
+      expect(container.textContent).toContain("Security and login");
+      const settings = Array.from(container.querySelectorAll<HTMLAnchorElement>("a")).filter(
+        (link) => link.textContent === "Open ChatGPT settings",
+      );
+      expect(settings).toHaveLength(1);
+      expect(settings[0]!.href).toBe("https://chatgpt.com/#settings/Security");
+      expect(settings[0]!.target).toBe("_blank");
+
+      // A fresh code starts a fresh wait.
+      await act(async () => {
+        root.render(<CodexDeviceCodePanel {...defaultPanelProps} userCode="WXYZ-9876" />);
+      });
+      expect(container.textContent).not.toContain("Still waiting?");
+    } finally {
+      globalThis.setTimeout = priorSetTimeout;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("copies the exact device code and confirms the action", async () => {
     const copies: string[] = [];
     let copied!: () => void;
@@ -363,5 +413,36 @@ describe("ResetCreditInventory", () => {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+});
+
+describe("planReportsNoResets", () => {
+  const overview = (
+    detailState: CodexAccountOverview["resetCredits"]["detailState"],
+    availableCount: number | null,
+  ): CodexAccountOverview => ({
+    accountId: "account-plan",
+    usage: { source: "none", fetchedAt: null, stale: false, error: null, value: null },
+    resetCredits: {
+      source: "provider",
+      fetchedAt: null,
+      stale: false,
+      error: null,
+      detailState,
+      detailsComplete: true,
+      availableCount,
+      credits: [],
+    },
+    canRedeem: false,
+    redemptionAccess: { ownership: "current_human", canClaimUnownedViaReconnect: false },
+    canResumeRedemption: false,
+    redemptions: [],
+  });
+
+  test("only a loaded plan that doesn't report resets has no reset section", () => {
+    expect(planReportsNoResets(undefined, [])).toBe(false);
+    expect(planReportsNoResets(overview("unsupported", null), [])).toBe(true);
+    expect(planReportsNoResets(overview("detailed", 0), [])).toBe(false);
+    expect(planReportsNoResets(overview("unsupported", 1), [])).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { CatalogHeader } from "./catalog-header";
+import type { ChatClient } from "@opengeni/sdk";
 import { PluginDiscovery } from "./plugin-discovery";
 import { SkillDiscovery } from "./skill-discovery";
 
@@ -12,6 +13,8 @@ import {
   filterBundleRows,
   importedSkillBundleRow,
   pluginBundleRow,
+  pluginRemovable,
+  pluginUpdateUnavailable,
   sortBundleRows,
   type BundleRow,
 } from "@/components/capabilities/bundles";
@@ -24,11 +27,11 @@ import { InstalledPackagePage } from "@/components/capabilities/package-page";
 
 import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
 import { useSourcePackages } from "@/components/capabilities/use-source-packages";
-import { LoadErrorState } from "@/components/common";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Skeleton } from "@/components/ui/skeleton";
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import { LoadErrorState } from "@opengeni/react/app/components/common";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/react/app/types";
 
 /** Stable identity for the bundle search result count. */
 const BUNDLE_COUNT_ID = "bundles-visible-count";
@@ -46,6 +49,9 @@ export function BundlesSection({
   workspaceId,
   connections,
   canManage,
+  canManagePlugins = canManage,
+  canInstallPlugins = canManagePlugins,
+  canUpdatePlugins = canManagePlugins,
   items,
   logoUrl,
   busyCatalogId,
@@ -68,11 +74,17 @@ export function BundlesSection({
   onShowCategory?: (category: "skills" | "plugins") => void;
   onSearchSkills?: (() => void) | undefined;
   section?: "skills" | "plugins" | "all";
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
-  /** Workspace administrator authority: install, update, remove, register. */
+  /** Skill authority: install, update and remove imported Skills (documents:manage). */
   canManage: boolean;
+  /** Remove plugins (members, connections:write); defaults to canManage. */
+  canManagePlugins?: boolean;
+  /** Install a plugin that is not installed yet; defaults to canManagePlugins. */
+  canInstallPlugins?: boolean;
+  /** Update an installed plugin (integration admins); defaults to canManagePlugins. */
+  canUpdatePlugins?: boolean;
 
   items: CapabilityCatalogItem[];
   logoUrl: (item: CapabilityCatalogItem) => string | null;
@@ -89,6 +101,7 @@ export function BundlesSection({
     workspaceId,
     connections,
     canManage,
+    canManagePlugins: canInstallPlugins,
     onChanged,
     restoreFocusRef: openerRef,
     restoreFocusFallbackRef: removalFallbackRef,
@@ -126,7 +139,8 @@ export function BundlesSection({
     const collected: BundleRow[] = [
       ...source.plugins.map((plugin) =>
         pluginBundleRow(plugin, {
-          canManage,
+          canManage: canManagePlugins,
+          canUpdate: canUpdatePlugins,
           busy: source.busyKey === `plugin:${plugin.pluginKey}`,
           onUpdate: () => leaveSheet(() => source.updatePlugin(plugin)),
           onRemove: () => leaveSheet(() => source.removePlugin(plugin)),
@@ -162,7 +176,18 @@ export function BundlesSection({
     logoUrl,
     busyCatalogId,
     canManage,
+    canManagePlugins,
+    canUpdatePlugins,
   ]);
+
+  // Skills are team content (documents:manage); plugins are added by members too.
+  const lacksPlugins = section !== "skills" && !canInstallPlugins;
+  const restrictionNote =
+    !canManage && (lacksPlugins || section === "skills")
+      ? "Ask a workspace admin to install or update these items."
+      : lacksPlugins
+        ? "Ask a workspace admin to install plugins."
+        : null;
 
   const visible = useMemo(
     () =>
@@ -288,10 +313,8 @@ export function BundlesSection({
                 ? "Manage imported skills and their updates."
                 : "Skills and connections installed together."}
             </p>
-            {!canManage ? (
-              <p className="mt-1 text-2xs leading-4 text-fg-subtle">
-                Workspace administrators can install, update, and remove these items.
-              </p>
+            {restrictionNote ? (
+              <p className="mt-1 text-2xs leading-4 text-fg-subtle">{restrictionNote}</p>
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -299,7 +322,7 @@ export function BundlesSection({
               type="button"
               variant="outline"
               size="sm"
-              disabled={!canManage}
+              disabled={!canInstallPlugins}
               hidden={section !== "plugins"}
               onClick={source.installPlugin}
             >
@@ -373,7 +396,7 @@ export function BundlesSection({
           <CatalogHeader
             title="Plugins"
             action={
-              <Button disabled={!canManage} onClick={source.installPlugin}>
+              <Button disabled={!canInstallPlugins} onClick={source.installPlugin}>
                 <PlusIcon />
                 Import plugin
               </Button>
@@ -393,9 +416,8 @@ export function BundlesSection({
                 busy: source.busyKey === `plugin:${plugin.pluginKey}`,
                 onUpdate: () => source.updatePlugin(plugin),
                 onRemove: () => source.removePlugin(plugin),
-                ...(plugin.sourceUrl
-                  ? {}
-                  : { updateUnavailableReason: "This plugin didn't keep its source link." }),
+                canRemove: pluginRemovable(plugin, canManagePlugins),
+                ...pluginUpdateUnavailable(plugin, canUpdatePlugins),
               })}
               onManageInstalled={(plugin, element) => {
                 const row = rows.find((candidate) => candidate.id === `plugin:${plugin.pluginKey}`);
@@ -405,7 +427,7 @@ export function BundlesSection({
               client={client}
               workspaceId={workspaceId}
               query={query}
-              canManage={canManage}
+              canManage={canInstallPlugins}
               onChanged={() => {
                 source.reload();
                 onChanged();
@@ -423,15 +445,14 @@ export function BundlesSection({
             busy: source.busyKey === `plugin:${plugin.pluginKey}`,
             onUpdate: () => source.updatePlugin(plugin),
             onRemove: () => source.removePlugin(plugin),
-            ...(plugin.sourceUrl
-              ? {}
-              : { updateUnavailableReason: "This plugin didn't keep its source link." }),
+            canRemove: pluginRemovable(plugin, canManagePlugins),
+            ...pluginUpdateUnavailable(plugin, canUpdatePlugins),
           })}
           onOpenConnection={onOpenCatalogItem}
           client={client}
           workspaceId={workspaceId}
           query={query}
-          canManage={canManage}
+          canManage={canInstallPlugins}
           onChanged={() => {
             source.reload();
             onChanged();

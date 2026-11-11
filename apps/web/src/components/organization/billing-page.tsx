@@ -3,22 +3,26 @@ import { ArrowUpRightIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/ui/page-actions";
+import { RowButton } from "@opengeni/react/ui/page-actions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { TextInput } from "@/components/ui/field";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { useAppContext } from "@/context";
-import { analyticsAction } from "@/lib/analytics-actions";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { billingCheckoutReturnUrl } from "@opengeni/react/app/lib/credit-checkout";
+import {
+  CREDIT_BALANCE_CHANGED,
+  notifyCreditBalanceChanged,
+} from "@opengeni/react/app/lib/credit-balance-events";
 import {
   apiErrorAdvice,
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
-} from "@/lib/api-error";
-import { entitlementEntries, validTopupAmount } from "@/lib/format";
+} from "@opengeni/react/ui/api-error";
+import { entitlementEntries } from "@opengeni/react/app/lib/format";
+import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import {
   beginOrganizationAdminOperation,
   organizationAdminIdentityKey,
@@ -28,13 +32,31 @@ import {
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
   type OrganizationAdminOperationSlot,
-} from "@/lib/organization-admin";
-import type { BillingEntitlementsResponse, BillingSummary } from "@/types";
+} from "@opengeni/react/app/lib/organization-admin";
+import type { BillingEntitlementsResponse, BillingSummary } from "@opengeni/react/app/types";
+import type { BillingCheckoutStatus } from "@opengeni/sdk";
+import { SubscriptionPlans } from "./subscription-plans";
+import { useSubscriptionCatalog } from "./use-subscription-catalog";
 
 // Budgets load only on this page: they never join the session or rail graphs.
+const CreditsCelebrationDialog = lazy(() =>
+  import("@opengeni/react/app/components/credits/checkout-credits-celebration").then((module) => ({
+    default: module.CreditsCelebrationDialog,
+  })),
+);
 const WorkspaceBudgetsSection = lazy(() =>
   import("@/components/usage/workspace-budgets-section").then((module) => ({
     default: module.WorkspaceBudgetsSection,
+  })),
+);
+const CreditProtectionSettings = lazy(() =>
+  import("./credit-protection-settings").then((module) => ({
+    default: module.CreditProtectionSettings,
+  })),
+);
+const PersonalWorkspaceLimitSection = lazy(() =>
+  import("@/components/usage/personal-workspace-limit-section").then((module) => ({
+    default: module.PersonalWorkspaceLimitSection,
   })),
 );
 const WorkspaceBudgetPage = lazy(() =>
@@ -44,7 +66,7 @@ const WorkspaceBudgetPage = lazy(() =>
 );
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Billing & usage: the credit balance and top-ups,
+   Organization settings > Billing: the credit balance and top-ups,
    plan limits, workspace budgets, and usage by workspace. A workspace's budget
    page (`?section=billing&workspace=<id>`) opens from the budgets list.
    -------------------------------------------------------------------------- */
@@ -56,6 +78,7 @@ export function OrganizationBillingPage({
   identity: OrganizationAdminIdentity;
   canReadBilling: boolean;
   canManageBilling: boolean;
+  canManageAutomaticTopUp: boolean;
   /** The workspace whose budget page is open. */
   budgetWorkspaceId?: string | undefined;
 }) {
@@ -88,14 +111,17 @@ function BillingOverview({
   identity,
   canReadBilling,
   canManageBilling,
+  canManageAutomaticTopUp,
   onOpenBudget,
 }: {
   identity: OrganizationAdminIdentity;
   canReadBilling: boolean;
   canManageBilling: boolean;
+  canManageAutomaticTopUp: boolean;
   onOpenBudget: (workspaceId: string) => void;
 }) {
-  const client = useAppContext().client;
+  const { client, clientConfig } = useAppContext();
+  const navigate = useNavigate();
   const accountId = identity.organizationId;
   const workspaceId = identity.workspaceId;
   const identityKey = organizationAdminIdentityKey(identity);
@@ -108,6 +134,8 @@ function BillingOverview({
   const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [busy, setBusy] = useState(false);
+  // A coupon just redeemed here, celebrated with its real amount.
+  const [redeemed, setRedeemed] = useState<BillingCheckoutStatus | null>(null);
   const [busyOwnerKey, setBusyOwnerKey] = useState("");
   const identityRef = useRef<OrganizationAdminIdentity | null>(identity);
   identityRef.current = identity;
@@ -159,7 +187,6 @@ function BillingOverview({
     }
     const operation = claimBillingOperation("billing", "read");
     setBillingOwnerKey(identityKey);
-    setBilling(null);
     setBillingLoading(true);
     try {
       const result = await client.getBilling({ accountId });
@@ -208,6 +235,15 @@ function BillingOverview({
     void refresh();
   }, [workspaceId, refresh]);
 
+  useEffect(() => {
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ accountId: string }>).detail.accountId === accountId)
+        void refreshBilling();
+    };
+    window.addEventListener(CREDIT_BALANCE_CHANGED, changed);
+    return () => window.removeEventListener(CREDIT_BALANCE_CHANGED, changed);
+  }, [accountId, refreshBilling]);
+
   async function startCheckout(amountUsd: number) {
     const operation = claimBillingOperation("billing", "mutation");
     setBusyOwnerKey(identityKey);
@@ -216,6 +252,8 @@ function BillingOverview({
       const session = await client.createBillingCheckout({
         amountUsd,
         ...(accountId ? { accountId } : {}),
+        successUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
+        cancelUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
       });
       if (!ownsBillingOperation(operation)) return;
       window.location.assign(session.url);
@@ -246,18 +284,61 @@ function BillingOverview({
     }
   }
 
-  const visibleBilling = billingOwnerKey === identityKey ? billing : null;
+  const visibleBilling = canReadBilling && billingOwnerKey === identityKey ? billing : null;
   const visibleBillingError = billingOwnerKey === identityKey ? billingError : null;
   const visibleBillingLoading = billingOwnerKey === identityKey ? billingLoading : true;
   const visibleEntitlements = entitlementsOwnerKey === identityKey ? entitlements : null;
   const visibleEntitlementsError = entitlementsOwnerKey === identityKey ? entitlementsError : null;
   const visibleBusy = busyOwnerKey === identityKey && busy;
+  const subscriptions = useSubscriptionCatalog(
+    client,
+    accountId,
+    identityKey,
+    visibleBilling?.balance.plan,
+  );
+  const showPlans = Boolean(subscriptions.catalog && visibleBilling?.balance.plan);
 
   const stripe = visibleBilling?.mode === "stripe";
   return (
     <SectionStack>
+      {redeemed ? (
+        <Suspense fallback={null}>
+          <CreditsCelebrationDialog
+            status={redeemed}
+            open
+            onOpenChange={(open) => {
+              if (!open) setRedeemed(null);
+            }}
+          />
+        </Suspense>
+      ) : null}
+      {subscriptions.catalog && visibleBilling?.balance.plan ? (
+        <SubscriptionPlans
+          key={identityKey}
+          client={client}
+          accountId={accountId}
+          returnUrl={`${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`}
+          catalog={subscriptions.catalog}
+          plan={visibleBilling.balance.plan}
+          canManage={canManageBilling}
+          supportEmail={clientConfig.supportEmail}
+          onChanged={() => notifyCreditBalanceChanged(accountId)}
+        />
+      ) : null}
+      {subscriptions.error ? (
+        <BillingLoadFailure
+          title="Couldn't load subscription options"
+          denied="Ask an organization owner to manage subscriptions."
+          error={
+            subscriptions.error instanceof Error
+              ? subscriptions.error
+              : new Error(String(subscriptions.error))
+          }
+          onRetry={subscriptions.retry}
+        />
+      ) : null}
       <section aria-label="Credits and payments" className="min-w-0">
-        <Section title="Credits">
+        <Section title={showPlans ? "Credit balance and top-ups" : "Credits"}>
           <div className="mt-1 flex min-w-0 flex-col gap-4">
             <OrganizationCreditBalance
               billing={visibleBilling}
@@ -265,6 +346,8 @@ function BillingOverview({
               hasAccount={Boolean(accountId)}
               loading={visibleBillingLoading}
               hasError={Boolean(visibleBillingError)}
+              showPlanCredit={showPlans}
+              supportEmail={clientConfig.supportEmail}
             />
             {visibleBillingError ? (
               <BillingLoadFailure
@@ -276,54 +359,44 @@ function BillingOverview({
             ) : null}
             {stripe && canManageBilling ? (
               <SettingRowGroup>
-                <SettingRow
-                  label="Add credits"
-                  description="Minimum $5.00. You pay in Stripe."
-                  controlWidth="auto"
-                  control={
-                    <div className="flex items-center gap-2">
-                      <div className="relative">
-                        <span
-                          aria-hidden="true"
-                          className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-fg-subtle"
-                        >
-                          $
-                        </span>
-                        <TextInput
-                          aria-label="Amount to add (USD)"
-                          type="number"
-                          name="credit-amount"
-                          autoComplete="off"
-                          inputMode="decimal"
-                          min="5"
-                          max="10000"
-                          step="0.01"
-                          value={topupAmount}
-                          onChange={(event) => setTopupAmount(event.target.value)}
-                          className="h-8 w-28 pl-6 tabular-nums pointer-coarse:h-11"
-                        />
-                      </div>
-                      <RowButton
-                        variant="default"
-                        {...analyticsAction("buy_credits")}
-                        disabled={visibleBusy || !validTopupAmount(topupAmount)}
-                        onClick={() => void startCheckout(Number(topupAmount))}
-                      >
-                        Add credits
+                <CreditTopupRow
+                  amount={topupAmount}
+                  onAmountChange={setTopupAmount}
+                  onCheckout={(amount) => void startCheckout(amount)}
+                  busy={visibleBusy}
+                  hasPlan={showPlans}
+                />
+                {accountId ? (
+                  <SettingRow
+                    label="Promo code"
+                    description="Opens Stripe to confirm your code."
+                    controlWidth="auto"
+                    control={
+                      <CouponRedeem
+                        variant="inline"
+                        client={client}
+                        accountId={accountId}
+                        workspaceId={workspaceId}
+                        disabled={visibleBusy}
+                        onGranted={(status) => {
+                          setRedeemed(status);
+                        }}
+                      />
+                    }
+                  />
+                ) : null}
+                {!showPlans ? (
+                  <SettingRow
+                    label="Invoices and payment details"
+                    controlWidth="auto"
+                    control={
+                      <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
+                        Open Stripe billing
+                        <ArrowUpRightIcon aria-hidden="true" />
                       </RowButton>
-                    </div>
-                  }
-                />
-                <SettingRow
-                  label="Invoices and payment details"
-                  controlWidth="auto"
-                  control={
-                    <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
-                      Open Stripe billing
-                      <ArrowUpRightIcon aria-hidden="true" />
-                    </RowButton>
-                  }
-                />
+                    }
+                  />
+                ) : null}
               </SettingRowGroup>
             ) : stripe ? (
               <p className="text-xs leading-[18px] text-fg-muted">
@@ -338,6 +411,19 @@ function BillingOverview({
         </Section>
       </section>
 
+      {canReadBilling && accountId ? (
+        <Suspense fallback={null}>
+          <CreditProtectionSettings
+            key={identityKey}
+            client={client}
+            accountId={accountId}
+            canManageAlerts={canManageBilling}
+            canManageAutoTopUp={canManageAutomaticTopUp}
+            returnUrl={`${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`}
+          />
+        </Suspense>
+      ) : null}
+
       <EntitlementsSection
         enabled={canReadBilling && Boolean(accountId)}
         entitlements={visibleEntitlements}
@@ -349,11 +435,36 @@ function BillingOverview({
         <WorkspaceBudgetsSection onOpenWorkspace={onOpenBudget} />
       </Suspense>
 
-      <OrganizationUsageDashboard
-        key={identityKey}
-        accountId={accountId}
-        enabled={canReadBilling && Boolean(accountId)}
-      />
+      {accountId ? (
+        <Suspense fallback={null}>
+          <PersonalWorkspaceLimitSection key={accountId} organizationId={accountId} />
+        </Suspense>
+      ) : null}
+
+      {canReadBilling && accountId ? (
+        <Section title="Usage">
+          <SettingRowGroup>
+            <SettingRow
+              label="Insights"
+              description="Spend, tokens and model calls across every workspace, by model, workspace, person and more."
+              controlWidth="auto"
+              control={
+                <RowButton
+                  onClick={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/organization",
+                      params: { workspaceId },
+                      search: { section: "insights" },
+                    })
+                  }
+                >
+                  Open Insights
+                </RowButton>
+              }
+            />
+          </SettingRowGroup>
+        </Section>
+      ) : null}
     </SectionStack>
   );
 }
@@ -386,8 +497,21 @@ function BillingLoadFailure(props: {
 
 /** "max_concurrent_sessions" as "Max concurrent sessions". */
 function entitlementLabel(name: string): string {
-  const words = name.replace(/[_.-]+/g, " ").trim();
+  const words = name
+    .replace(/^limits?\./, "")
+    .replace(/[_.-]+/g, " ")
+    .trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Only limits a customer can run into: numbers. Feature switches
+ * ("managed.api_keys": true) are how the deployment is built, not a limit.
+ */
+function customerLimits(entitlements: BillingEntitlementsResponse["entitlements"]) {
+  return entitlementEntries(entitlements).filter(
+    (row) => !row.name.startsWith("managed.") && /^[\d,.]+$/.test(row.value),
+  );
 }
 
 /**
@@ -400,19 +524,11 @@ function EntitlementsSection(props: {
   error: Error | null;
   onRetry: () => void;
 }) {
-  const rows = props.entitlements ? entitlementEntries(props.entitlements.entitlements) : [];
+  const rows = props.entitlements ? customerLimits(props.entitlements.entitlements) : [];
   if (!props.enabled) return null;
   if (props.error) {
-    return (
-      <Section title="Plan limits">
-        <BillingLoadFailure
-          title="Couldn't load the plan's limits"
-          denied="You can't see the plan's limits. Ask an organization owner for access."
-          error={props.error}
-          onRetry={props.onRetry}
-        />
-      </Section>
-    );
+    // Limits are rare; a failed read of them is not worth a red box on Billing.
+    return null;
   }
   if (rows.length === 0) return null;
   return (

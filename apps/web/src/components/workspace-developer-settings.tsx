@@ -3,6 +3,7 @@
 // settings cards; every webhook, the provider and both forms are pages with
 // their own URL (lib/developer-route.ts).
 import type { WorkspaceInheritedIntegrationsResponse } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useMemo, type ReactNode } from "react";
 
@@ -20,7 +21,7 @@ import {
 import { IdLine, useLoad } from "@/components/developer/shared";
 import { DEVELOPER_GUIDE_URL } from "@/components/developer/test-result";
 import { WebhookFormPage, WebhookPage, WebhooksSection } from "@/components/developer/webhooks";
-import { SectionStack } from "@/components/ui/section";
+import { SectionStack } from "@opengeni/react/ui/section";
 import { developerSearch, type DeveloperLocation } from "@/lib/developer-route";
 
 const LIST: DeveloperLocation = {};
@@ -211,7 +212,7 @@ export function WorkspaceDeveloperSettings({
   );
 }
 
-/** Organization settings > Developer: registrations for every matching shared workspace. */
+/** Organization settings > Developer: registrations for the workspaces each one picks. */
 export function OrganizationDeveloperIntegrations({
   client,
   organizationId,
@@ -219,7 +220,7 @@ export function OrganizationDeveloperIntegrations({
   location = LIST,
   onNavigate,
 }: {
-  client: Pick<OpenGeniBrowserClient, "requestJson">;
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "requestJson">;
   organizationId: string;
   canManage: boolean;
   location?: DeveloperLocation;

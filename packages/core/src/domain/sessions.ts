@@ -1,25 +1,71 @@
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
+import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
+import type { TeamsConversationProof } from "@opengeni/db";
+import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
+import {
+  isDirectModelId,
+  MESSAGE_TIME_ZONE_METADATA_KEY,
+  messageSentByPerson,
+  ModelPolicyRefusedError,
+  ModelUnavailableError,
+  normalizeMessageTimeZone,
+} from "@opengeni/contracts";
+import {
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  isClaudeSubscriptionModelId,
+  isClaudeSubscriptionProviderId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
+import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
+import { unattendedRequestGoal } from "./unattended-request-goal";
 import {
   getSessionEvent,
   getSessionRetryReceiptInTransaction,
+  meetingSummarySessionScope,
   setSessionModelInTransaction,
   withWorkspaceSessionActivityRls,
   retryFailedSessionInTransaction,
   SessionRetryConflictError,
 } from "@opengeni/db";
 import type {
+  SessionAvatar,
   SessionRetryRequest,
   SessionRetryResponse,
   SessionTurnSurface,
 } from "@opengeni/contracts";
 import { resolveTurnSurface } from "../turn-surface";
+import { resolveTurnBillingOrigin } from "../billing-origin";
+import { turnAppActionGrant } from "../app-action-turn-grant";
+import { recordTurnAppActionGrant } from "@opengeni/db";
+import {
+  recordSessionCreated,
+  recordUserMessageAccepted,
+  type ProductUsageMetricsSink,
+} from "../product-usage-metrics";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
-import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
+import {
+  fileOwnerContextForAccess,
+  fileOwnerContextForAgent,
+  inProcessFileOwnerContext,
+} from "./file-owner";
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
-import { sessionCreationMetadata } from "../site-session-origin";
+import {
+  currentSiteSessionOrigin,
+  sessionCreationMetadata,
+  SITE_ORIGIN_METADATA_KEY,
+} from "../site-session-origin";
+
+import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
+import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
+import {
+  requireDeveloperSetupDelegatedPermissions,
+  requireDeveloperSetupDelegatablePermissions,
+  developerSetupCredentialRestricted,
+  withDeveloperSetupCredentialRestriction,
+} from "../developer-setup-credential-ceiling";
 
 import {
   CLAUDE_CONNECTION_KINDS,
@@ -29,8 +75,19 @@ import {
   withCodexCatalogProvider,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
+  ORGANIZATION_OPPER_MODEL_ID_PREFIX,
+  ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
+  ORGANIZATION_OPENAI_PROVIDER_ID,
+  organizationDirectModelProviderOf,
+  organizationCompatibleConnectionIdOf,
+  WORKSPACE_OPPER_MODEL_ID_PREFIX,
   allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
+  deploymentUnavailableFirstPartyMcpTools,
+  sandboxBackendServed,
+  unservedSandboxBackendMessage,
   resolveFirstPartyMcpToolPolicy,
+  policyChargesCreditsForModel,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -43,11 +100,14 @@ import {
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import {
   agentConfigAddedFirstPartyMcpTools,
+  intersectVaultPolicies,
   resolveAgentConfigUpdate,
+  VAULT_POLICY_ALL,
   type AgentConfigCreator,
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
   type UpdateSessionAgentRequest,
+  type VaultPolicy,
 } from "@opengeni/contracts";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -60,12 +120,15 @@ import {
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSkills,
   resolveBundledSkillSelection,
+  bundledSkillSelectionForAgentConfig,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
   normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
+  resolveWorkspaceDefaultExecutionTarget,
+  machineCanBeWorkspaceDefault,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   stableJson,
@@ -76,6 +139,7 @@ import {
   type FirstPartyMcpToolName,
   type McpPersonalConnectionDelegation,
   type McpConnectionAccountBinding,
+  type ConnectionAccountIntent,
   type McpConnectionAccountSelection,
   type Permission,
   type PersonalResourceAttachmentIntent,
@@ -98,6 +162,7 @@ import {
   type TimelineAnnotation,
   type UpdateSessionMcpApprovalPolicyResponse,
   type UpdateSessionToolPolicyRequest,
+  type UpdateSessionSkillsRequest,
   type SessionAuthorizationPort,
   type SessionAuthorizationSurface,
   type SessionToolPolicy,
@@ -108,29 +173,28 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
   type TurnExecutionPolicyV1,
-  type VariableSet,
   type XaiProviderAccountAuthoritySnapshotV1,
+  type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
-  assertExactNewSessionDraftInTransaction,
   createSession,
   createSessionWithIdempotencyKeyResult,
   canonicalSessionCommandHash,
   frozenInitiatorForCommandActor,
   getComposerDraftInTransaction,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getAnySessionInGroup,
   getEnrollment,
   getChannel,
   getRig,
   getWorkspaceDefaultRigId,
-  listDistinctVariableSetSelectionsInGroup,
   listDistinctRigVersionIdsInGroup,
   listInstalledPortableSkills,
   listEnabledMcpCapabilityServers,
-  requireApprovalWithFloor,
+  resolveMcpApprovalRecommendation,
   getSandbox,
   getSession,
+  getSessionModelGate,
   getInitializedSessionCreateReplay,
   getSessionGoal,
   getSessionAuthorityProjection,
@@ -140,27 +204,37 @@ import {
   getSessionLineage,
   getSessionTurn,
   getSessionTurnInitiatingHumanSubjectId,
+  sameTurnSender,
+  readTurnBillingOrigin,
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
+  getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getWorkspaceModelPolicy,
   requireWorkspace,
   initializeSessionStartAtomically,
+  discardUninitializedSessionShell,
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
   requireSession,
   setActiveSandbox,
-  setSubjectRlsContext,
   replaySubmittedHumanPromptFromBoundaryReceipt,
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitleWithEvent,
+  updateSessionProfileWithEvent,
+  setSessionKeepLive,
+  type SetSessionKeepLiveResult,
+  setSessionUnattendedSetting,
+  endSessionUnattendedDefault,
+  type SetSessionUnattendedResult,
   withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
   type FrozenTurnInitiator,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
+  SessionRepositoryRemovedError,
   AgentCommandAuthorityError,
   runIdempotentPersistenceTransaction,
   SessionSpawnDeniedDbError,
@@ -168,11 +242,11 @@ import {
   SessionToolPolicyVersionConflictError,
   SessionCreateIdempotencyConflictError,
   PersonalResourceAttachmentAcceptanceError,
-  sessionTenancyProductActivated,
   workspaceControlRequestLockTimeoutMs,
   WorkspaceControlBusyError,
   type SessionCommandActor,
   type NewSessionDraftSnapshot,
+  comparableNewSessionDraftOptions,
 } from "@opengeni/db";
 import {
   publishDurableSessionEvents,
@@ -180,12 +254,26 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import {
+  hasPermission,
+  requirePermission,
+  workspaceSettingsAuthorized,
+  type AccessGrantAuthorization,
+} from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
+import { resolveMemberExecutionDefault } from "./member-execution-defaults";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
 
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
+import {
+  applyInitialSessionUsageLimit,
+  requireSessionUsageLimitAllows,
+  SessionUsageLimitHttpError,
+  sessionUsageLimitsProducerEnabled,
+  sessionUsageLimitWriteActorForAccess,
+} from "../session-usage-limits";
+import { recordSessionUsageLimitEvent } from "../session-usage-limit-metrics";
 import type {
   AcceptSessionUserMessageDependencies,
   ApiRouteDeps,
@@ -209,6 +297,7 @@ import {
   lockActiveCustomModelForAdmission,
   resolveWorkspaceCatalogSettings,
   workspaceCustomModelReference,
+  type WorkspaceCustomModelReference,
 } from "../model-catalog";
 import {
   resolveDefaultSessionModel,
@@ -217,7 +306,13 @@ import {
 } from "../default-session-model";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
+  personalWorkspaceExtensionMcpServers,
+  personalWorkspaceExtensionSubject,
+} from "./personal-workspace-connectors";
+import {
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
+  newSessionOpeningTools,
   legacySessionAgentCapabilities,
   resolveSessionAgentConfigForCreate,
   withAgentConfigHttpErrors,
@@ -227,12 +322,13 @@ import {
   workspaceSessionToolPolicyDefaultServerIdsFor,
 } from "./session-tool-policy";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
-import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
+import { requireEnvironmentEncryption } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
+import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import {
   requireVerifiedOwningUser,
   requireManagedHumanPrivateSessionCreate,
@@ -240,13 +336,19 @@ import {
 import {
   assertToolRefsSubset,
   availableToolRefs,
+  isOptionalGitHubAppRepositoryResource,
   mergeToolRefs,
+  mergeToolRefEager,
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
   withWorkspaceDefaultMcpTools,
 } from "./resources";
+import {
+  agentPersonalGitHubRepositoryServices,
+  resolveAgentPersonalGitHubRepositoryResources,
+} from "./agent-personal-github-resources";
 
 const reservedSessionMcpServerIds = new Set(["opengeni", "files", "docs", "codex_apps"]);
 const maxSessionMcpCredentialHeaders = 16;
@@ -277,10 +379,16 @@ function defaultPolicyExclusions(
 
 function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
   return (
+    (modelId != null && isDirectModelId(modelId)) ||
     modelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX) === true ||
+    modelId?.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX) === true ||
+    modelId?.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX) === true ||
+    organizationDirectModelProviderOf(modelId) !== null ||
+    organizationCompatibleConnectionIdOf(modelId) !== null ||
+    (modelId != null && isClaudeSubscriptionModelId(modelId)) ||
     CLAUDE_CONNECTION_KINDS.some((kind) =>
       ["workspace", "organization"].some((scope) =>
         modelId?.startsWith(claudeProviderId(kind, scope as "workspace" | "organization") + "/"),
@@ -310,11 +418,6 @@ async function requireAtomicPersonalResourceAttachment(
     throw new HTTPException(403, {
       message: "Personal resources require the owning managed-human session.",
       cause: error,
-    });
-  }
-  if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
-    throw new HTTPException(409, {
-      message: "Session tenancy is not activated for this organization.",
     });
   }
   if (existingSession && intent.expectedAuthorityEpoch === undefined) {
@@ -378,6 +481,13 @@ export function resolveFirstPartyMcpToolsForCreate(
   },
 ): FirstPartyMcpToolName[] {
   if (requested !== undefined) {
+    // Check the caller's own names, before legacy aliases expand them.
+    requireDeploymentFirstPartyMcpTools(
+      requested,
+      policy.allowed,
+      [],
+      "Omit firstPartyMcpTools to inherit the effective selection.",
+    );
     requested = currentAgentLearningToolSelection(requested);
     if (parentStored !== undefined) {
       const parentCeiling = effectiveFirstPartyMcpToolCeiling(parentStored, policy);
@@ -395,9 +505,32 @@ export function resolveFirstPartyMcpToolsForCreate(
   return currentAgentLearningToolSelection(inherited).filter((tool) => allowed.has(tool));
 }
 
+/**
+ * An explicit first-party tool selection is a promise, not a best-effort
+ * default: a tool the deployment disables fails the request, naming every such
+ * tool and the allowed set, instead of silently shrinking the selection.
+ * `retained` names tools the caller may echo from its stored selection; those
+ * stay deployment-filtered like any default, so a later policy change never
+ * blocks an unrelated edit.
+ */
+export function requireDeploymentFirstPartyMcpTools(
+  requested: readonly FirstPartyMcpToolName[],
+  allowed: readonly FirstPartyMcpToolName[],
+  retained: Iterable<FirstPartyMcpToolName> = [],
+  hint = "",
+): void {
+  const permitted = new Set([...allowed, ...retained]);
+  const disallowed = [...new Set(requested.filter((tool) => !permitted.has(tool)))];
+  if (disallowed.length > 0) {
+    throw new HTTPException(422, {
+      message: `first-party MCP tools are disabled by deployment policy: ${disallowed.join(", ")}. Allowed tools: ${allowed.join(", ") || "(none)"}.${hint ? ` ${hint}` : ""}`,
+    });
+  }
+}
+
 function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
   if (denial.code === "nested_agent_depth_override_forbidden") {
-    return `requested nested-agent depth limit ${denial.requestedMaxNestedAgentDepthOverride ?? "unknown"} exceeds inherited limit ${denial.effectiveMaxNestedAgentDepth}; workspace:admin is required to increase it`;
+    return `requested nested-agent depth limit ${denial.requestedMaxNestedAgentDepthOverride ?? "unknown"} exceeds inherited limit ${denial.effectiveMaxNestedAgentDepth}; only a workspace admin can raise it`;
   }
   return `nested-agent depth ${denial.attemptedDepth} exceeds effective limit ${denial.effectiveMaxNestedAgentDepth} (current parent depth ${denial.currentDepth})`;
 }
@@ -648,7 +781,19 @@ export function settingsWithSessionMcpServerMetadata(
   return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
 }
 
-function validateSessionMcpServersForCreate(
+/**
+ * Settings that include the servers a chat will attach, so its tool selection
+ * may name them, as a session create's does. Validate the servers separately.
+ */
+export function settingsWithSessionMcpServerInputs(
+  settings: Settings,
+  servers: Array<Omit<SessionMcpServerInput, "headers">>,
+): Settings {
+  return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromInput));
+}
+
+/** Session-create MCP server validation, shared by automations that start chats. */
+export function validateSessionMcpServersForCreate(
   settings: Settings,
   grant: AccessGrant,
   servers: SessionMcpServerInput[],
@@ -658,7 +803,7 @@ function validateSessionMcpServersForCreate(
   }
   requirePermission(grant, "mcp_servers:attach");
   const encryptionKey = servers.some((server) => Object.keys(server.headers ?? {}).length > 0)
-    ? requireVariableSetEncryption(settings)
+    ? requireEnvironmentEncryption(settings)
     : null;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
@@ -682,7 +827,7 @@ function validateSessionMcpServersForCreate(
     const headersEncrypted = Object.fromEntries(
       Object.entries(headers).map(([name, value]) => [
         name,
-        encryptVariableSetValue(encryptionKey!, value),
+        encryptEnvironmentValue(encryptionKey!, value),
       ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
@@ -753,7 +898,7 @@ function validateInheritedSessionMcpServersForCreate(
   };
 }
 
-function validateSessionMcpCredentialUpdates(input: {
+export function validateSessionMcpCredentialUpdates(input: {
   settings: Settings;
   grant: AccessGrant;
   session: Session;
@@ -763,7 +908,7 @@ function validateSessionMcpCredentialUpdates(input: {
     return [];
   }
   requirePermission(input.grant, "mcp_servers:attach");
-  const encryptionKey = requireVariableSetEncryption(input.settings);
+  const encryptionKey = requireEnvironmentEncryption(input.settings);
   const knownIds = new Set(input.session.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
   const encryptedUpdates = input.updates.map((update) => {
@@ -784,7 +929,7 @@ function validateSessionMcpCredentialUpdates(input: {
       headersEncrypted: Object.fromEntries(
         Object.entries(headers).map(([name, value]) => [
           name,
-          encryptVariableSetValue(encryptionKey, value),
+          encryptEnvironmentValue(encryptionKey, value),
         ]),
       ),
     };
@@ -815,16 +960,30 @@ type AgentChildSessionCreatePresentation = {
 
 /** Trusted entry-point options for creating a session outside the REST body. */
 export type SessionCreateRequestOptions = {
+  /** Internal durable Teams inbox proof; never accepted from a REST request body. */
+  teamsConversation?: TeamsConversationProof;
   /**
    * Product surface when the entry point knows it (for example Slack or an
    * in-process embedding host). Omitted derives it from the grant.
    */
   surface?: SessionTurnSurface;
   /**
+   * Who pays (`BillingOrigin`) when the entry point knows it, for example a
+   * schedule's frozen origin. Omitted derives it (see resolveTurnBillingOrigin).
+   */
+  billingOrigin?: BillingOrigin;
+  /**
    * Agent-configuration creator kind (renderer default and default-config
    * policy). Omitted derives `slack` from a Slack surface, else the public API.
    */
   agentConfigCreator?: AgentConfigCreator;
+  /**
+   * Built-in tools to guarantee on top of the defaults a new session follows,
+   * for an entry point whose sessions need their own tools (a chat surface's
+   * read tools). Ignored when the request names an explicit built-in list.
+   * Trusted entry points only; not part of the public create request.
+   */
+  firstPartyMcpToolAdditions?: readonly FirstPartyMcpToolName[];
 };
 
 const AGENT_CHILD_AUTOMATIC_TITLE_CONTEXT_KEY = "agentChildAutomaticTitle" as const;
@@ -859,6 +1018,13 @@ function automaticTitleForAgentChildCreate(
   return null;
 }
 
+/** Vault IDs are compared as lowercase text in SQL. */
+function lowercaseVaultPolicy(policy: VaultPolicy): VaultPolicy {
+  return policy.mode === "all"
+    ? { mode: "all" }
+    : { mode: "selected", vaultIds: [...new Set(policy.vaultIds.map((id) => id.toLowerCase()))] };
+}
+
 export async function createAndStartSessionWithOutcome(input: {
   initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   requestedSessionId?: string;
@@ -888,12 +1054,30 @@ export async function createAndStartSessionWithOutcome(input: {
   accountId: string;
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
+  /** Internal proof for the built-in meeting summary; see `@opengeni/db` createSession. */
+  meetingSummary?: { recordingId: string; ownerSubjectId: string };
   initialMessage: string;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the initial turn (`BillingOrigin`). */
+  billingOrigin?: BillingOrigin | null;
+  /**
+   * Live product usage counters: a newly created session (never a replay)
+   * counts once, and its initial user message once unless deferred.
+   */
+  metrics?: ProductUsageMetricsSink | null;
+  /** Optional content-free child spans; never a lifecycle dependency. */
+  startupObservability?: SessionStartObservability | null;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
   modelContext?: string | null;
+  /** The IANA zone of the person sending the initial message; unresolvable names are ignored. */
+  timeZone?: string | null;
+  /**
+   * Tools the opening context is for, already narrowed to the session's own
+   * selection; frozen in the initial turn's metadata (see newSessionOpeningTools).
+   */
+  openingTools?: readonly string[];
   resources: ResourceRef[];
   skills?: SessionSkill[];
   bundledSkillIds?: import("@opengeni/contracts").BundledSkillId[] | undefined;
@@ -906,20 +1090,17 @@ export async function createAndStartSessionWithOutcome(input: {
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
   /** Session default Fast/standard; mirrored into metadata when set. */
-  latencyMode?: "standard" | "priority" | "fast";
+  latencyMode?: "standard" | "priority" | "fast" | "ultrafast";
+  /** No person answers during the task; frozen in the session metadata. */
+  unattended?: boolean;
+  /** The agent (agents.id) the chat starts with, at its current revision. */
+  boundAgentId?: string;
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
   createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
-  // Ordered low-to-high precedence. Names/ids only; session.created never
-  // carries variable values.
-  variableSets?: Array<{
-    id: string;
-    name: string;
-    scope: VariableSet["scope"];
-  }>;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
   // rig-less session (byte-for-byte today's behavior). Frozen here so a later
   // rig promote never moves an existing session's version.
@@ -948,6 +1129,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // Frozen agent configuration (migration 0559), already resolved and written
   // through to tools/firstPartyMcpTools by the caller. Omitted/null = legacy.
   agentConfig?: ResolvedAgentConfig | null;
+  // Vault narrowing for this session (0739), already intersected with the
+  // agent configuration's policy. Omitted = no narrowing.
+  vaultPolicy?: VaultPolicy;
   // Agent-access scope, opaque end-user label, and typed Memory selector
   // (migration 0427), already resolved against the parent by the caller.
   // Omitted keeps the workspace defaults for internal lifecycle callers.
@@ -961,8 +1145,11 @@ export async function createAndStartSessionWithOutcome(input: {
   sessionMcpServers?: SessionMcpServerMetadata[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+  /** The creator's account intent, carried by work that continues the first turn. */
+  connectionAccountIntent?: ConnectionAccountIntent | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
@@ -1028,6 +1215,13 @@ export async function createAndStartSessionWithOutcome(input: {
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
 }): Promise<CreateSessionOutcome> {
+  const frozenBundledSkillIds = bundledSkillSelectionForAgentConfig(
+    input.bundledSkillIds,
+    input.agentConfig,
+  );
+  if (frozenBundledSkillIds !== input.bundledSkillIds) {
+    input = { ...input, bundledSkillIds: frozenBundledSkillIds };
+  }
   const sessionMetadata = metadataWithTurnExecutionPolicyV1(
     {
       ...input.metadata,
@@ -1071,7 +1265,6 @@ export async function createAndStartSessionWithOutcome(input: {
   let targetSeededBeforeCreateCommit = false;
   const beforeCreateCommit =
     requiresActiveWorkspaceCustomModel ||
-    input.consumeNewSessionDraft ||
     input.beforeCreateCommit ||
     preflightTarget ||
     targetPreflightFailureMessage
@@ -1085,43 +1278,51 @@ export async function createAndStartSessionWithOutcome(input: {
             });
           }
           if (requiresActiveWorkspaceCustomModel && context?.created !== false) {
-            const reference = {
-              scope: input.turnExecutionPolicy.providerId.startsWith("organization-")
-                ? ("organization" as const)
-                : ("workspace" as const),
-              providerKind:
-                CLAUDE_CONNECTION_KINDS.find(
-                  (kind) =>
-                    claudeProviderId(kind) === input.turnExecutionPolicy.providerId ||
-                    claudeProviderId(kind, "workspace") === input.turnExecutionPolicy.providerId,
-                ) ??
-                (input.turnExecutionPolicy.providerId.includes("openrouter")
-                  ? ("openrouter" as const)
-                  : ("vercel_gateway" as const)),
-              upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
-            };
+            const reference: WorkspaceCustomModelReference =
+              input.turnExecutionPolicy.providerId === ORGANIZATION_AZURE_OPENAI_PROVIDER_ID ||
+              input.turnExecutionPolicy.providerId === ORGANIZATION_OPENAI_PROVIDER_ID
+                ? {
+                    scope: "organization",
+                    providerKind:
+                      input.turnExecutionPolicy.providerId === ORGANIZATION_OPENAI_PROVIDER_ID
+                        ? "openai"
+                        : "azure_openai",
+                    upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
+                  }
+                : {
+                    // The canonical Claude subscription provider admits like
+                    // the organization list (its admission reads every
+                    // connection serving the workspace).
+                    scope:
+                      input.turnExecutionPolicy.providerId.startsWith("organization-") ||
+                      input.turnExecutionPolicy.providerId === CLAUDE_SUBSCRIPTION_PROVIDER_ID
+                        ? ("organization" as const)
+                        : ("workspace" as const),
+                    providerKind:
+                      (isClaudeSubscriptionProviderId(input.turnExecutionPolicy.providerId)
+                        ? ("claude_subscription" as const)
+                        : CLAUDE_CONNECTION_KINDS.find(
+                            (kind) =>
+                              claudeProviderId(kind) === input.turnExecutionPolicy.providerId ||
+                              claudeProviderId(kind, "workspace") ===
+                                input.turnExecutionPolicy.providerId,
+                          )) ??
+                      (input.turnExecutionPolicy.providerId.includes("openrouter")
+                        ? ("openrouter" as const)
+                        : input.turnExecutionPolicy.providerId.endsWith("-opper")
+                          ? ("opper" as const)
+                          : ("vercel_gateway" as const)),
+                    upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
+                  };
             const active = await lockActiveCustomModelForAdmission(tx, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               reference,
+              claudeAuthority: { sessionId },
             });
             if (!active) {
-              throw new HTTPException(422, {
-                message: `model is not available: ${input.model}`,
-              });
+              throw modelUnavailableHttpException(input.model);
             }
-          }
-          // Reject an already-stale browser draft before the newly inserted
-          // shell can commit. The initializer repeats this exact check while
-          // consuming the draft after it installs the first runnable unit.
-          if (input.consumeNewSessionDraft && context?.created !== false) {
-            await setSubjectRlsContext(tx, input.consumeNewSessionDraft.subjectId);
-            await assertExactNewSessionDraftInTransaction(tx, {
-              workspaceId: input.workspaceId,
-              subjectId: input.consumeNewSessionDraft.subjectId,
-              expectedRevision: input.consumeNewSessionDraft.expectedRevision,
-              expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
-            });
           }
           if (preflightTarget?.ok && context?.created !== false) {
             const seeded = await setActiveSandbox(tx, {
@@ -1150,61 +1351,78 @@ export async function createAndStartSessionWithOutcome(input: {
   // session or the committed denial atomically; an application-side lookup
   // cannot serialize those two source tables against an older writer.
   if (input.createIdempotencyKey) {
-    const keyedResult = await createSessionWithIdempotencyKeyResult(input.db, {
-      ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      visibility: input.visibility ?? "workspace_shared",
-      initialMessage: input.initialMessage,
-      initialModelContext: input.modelContext ?? null,
-      resources: input.resources,
-      skills: input.skills ?? [],
-      bundledSkillIds: input.bundledSkillIds,
-      tools: input.tools,
-      toolPolicy: input.toolPolicy,
-      metadata: sessionMetadata,
-      initialAgentLearning: input.initialAgentLearning,
+    const keyedResult = await measureSessionStartPhase(
+      input.startupObservability,
+      "shell_insert",
+      () =>
+        createSessionWithIdempotencyKeyResult(input.db, {
+          ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          visibility: input.visibility ?? "workspace_shared",
+          ...(input.meetingSummary ? { meetingSummary: input.meetingSummary } : {}),
+          initialMessage: input.initialMessage,
+          initialModelContext: input.modelContext ?? null,
+          resources: input.resources,
+          skills: input.skills ?? [],
+          bundledSkillIds: input.bundledSkillIds,
+          tools: input.tools,
+          toolPolicy: input.toolPolicy,
+          metadata: sessionMetadata,
+          initialAgentLearning: input.initialAgentLearning,
 
-      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-      ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
-      createdByActor: input.createdByActor ?? null,
-      model: input.model,
-      reasoningEffort: input.reasoningEffort,
-      latencyMode: input.latencyMode ?? "standard",
-      sandboxBackend: input.sandboxBackend,
-      variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-      variableSetId: input.variableSets?.at(-1)?.id ?? null,
-      rigId: input.rigId ?? null,
-      rigVersionId: input.rigVersionId ?? null,
-      channelId: input.channelId ?? null,
-      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-      firstPartyMcpTools: input.firstPartyMcpTools,
-      ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
-      instructions: input.instructions ?? null,
-      policyRole: input.policyRole ?? null,
-      ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
-      ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
-      ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
-      parentSessionId: input.parentSessionId ?? null,
-      createIdempotencyKey: input.createIdempotencyKey,
-      selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
-      sandboxGroupId: input.sandboxGroupId ?? null,
-      ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
-      mcpServers: input.mcpServers ?? [],
-      mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
-      personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-      mcpAccountBindings: input.mcpAccountBindings ?? null,
-      initialPersonalResourceAttachmentIntent:
-        input.initialPersonalResourceAttachmentIntent ?? null,
-      ...(input.xaiProviderAccountAuthoritySnapshot
-        ? {
-            initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
-          }
-        : {}),
-      maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
-      allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
-      subjectId: input.subjectId ?? null,
-      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+          ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+          ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
+          createdByActor: input.createdByActor ?? null,
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          latencyMode: input.latencyMode ?? "standard",
+          sandboxBackend: input.sandboxBackend,
+          rigId: input.rigId ?? null,
+          rigVersionId: input.rigVersionId ?? null,
+          channelId: input.channelId ?? null,
+          firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+          firstPartyMcpTools: input.firstPartyMcpTools,
+          ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+          instructions: input.instructions ?? null,
+          ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
+          ...(input.unattended ? { unattended: true } : {}),
+          ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
+          policyRole: input.policyRole ?? null,
+          ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
+          ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
+          ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
+          parentSessionId: input.parentSessionId ?? null,
+          createIdempotencyKey: input.createIdempotencyKey!,
+          selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
+          sandboxGroupId: input.sandboxGroupId ?? null,
+          ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
+          mcpServers: input.mcpServers ?? [],
+          mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
+          personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+          mcpAccountBindings: input.mcpAccountBindings ?? null,
+          connectionAccountIntent: input.connectionAccountIntent ?? null,
+          initialPersonalResourceAttachmentIntent:
+            input.initialPersonalResourceAttachmentIntent ?? null,
+          ...(input.xaiProviderAccountAuthoritySnapshot
+            ? {
+                initialXaiProviderAccountAuthoritySnapshot:
+                  input.xaiProviderAccountAuthoritySnapshot,
+              }
+            : {}),
+          ...(input.claudeProviderAccountAuthoritySnapshot
+            ? {
+                initialClaudeProviderAccountAuthoritySnapshot:
+                  input.claudeProviderAccountAuthoritySnapshot,
+              }
+            : {}),
+          maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
+          allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
+          subjectId: input.subjectId ?? null,
+          ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+        }),
+    ).catch((error: unknown) => {
+      throw repositoryRemovedHttpError(error);
     });
     if (keyedResult.denied) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(keyedResult.denial));
@@ -1236,10 +1454,13 @@ export async function createAndStartSessionWithOutcome(input: {
         changed: finished.changed,
       };
     }
+    // A keyed shell whose start fails stays durable: a retry with the same key
+    // repairs it with the parameters it was first accepted with.
     const finished = await finishStartSession(
       targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
       keyed,
     );
+    recordCreatedSessionUsage(input);
     return {
       session: finished.session,
       outcome: "created",
@@ -1249,79 +1470,136 @@ export async function createAndStartSessionWithOutcome(input: {
   }
   let session: Session;
   try {
-    session = await createSession(input.db, {
-      ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      visibility: input.visibility ?? "workspace_shared",
-      initialMessage: input.initialMessage,
-      initialModelContext: input.modelContext ?? null,
-      resources: input.resources,
-      skills: input.skills ?? [],
-      bundledSkillIds: input.bundledSkillIds,
-      tools: input.tools,
-      toolPolicy: input.toolPolicy,
-      metadata: sessionMetadata,
-      initialAgentLearning: input.initialAgentLearning,
-      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+    session = await measureSessionStartPhase(input.startupObservability, "shell_insert", () =>
+      createSession(input.db, {
+        ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        visibility: input.visibility ?? "workspace_shared",
+        ...(input.meetingSummary ? { meetingSummary: input.meetingSummary } : {}),
+        initialMessage: input.initialMessage,
+        initialModelContext: input.modelContext ?? null,
+        resources: input.resources,
+        skills: input.skills ?? [],
+        bundledSkillIds: input.bundledSkillIds,
+        tools: input.tools,
+        toolPolicy: input.toolPolicy,
+        metadata: sessionMetadata,
+        initialAgentLearning: input.initialAgentLearning,
+        ...(input.createdBy ? { createdBy: input.createdBy } : {}),
 
-      ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
-      createdByActor: input.createdByActor ?? null,
-      model: input.model,
-      reasoningEffort: input.reasoningEffort,
-      latencyMode: input.latencyMode ?? "standard",
-      sandboxBackend: input.sandboxBackend,
-      variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-      variableSetId: input.variableSets?.at(-1)?.id ?? null,
-      rigId: input.rigId ?? null,
-      rigVersionId: input.rigVersionId ?? null,
-      channelId: input.channelId ?? null,
-      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-      firstPartyMcpTools: input.firstPartyMcpTools,
-      ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
-      instructions: input.instructions ?? null,
-      policyRole: input.policyRole ?? null,
-      ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
-      ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
-      ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
-      parentSessionId: input.parentSessionId ?? null,
-      ...(input.codeSearchDeploymentPolicy
-        ? { codeSearchDeploymentPolicy: input.codeSearchDeploymentPolicy }
-        : {}),
-      sandboxGroupId: input.sandboxGroupId ?? null,
-      ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
-      mcpServers: input.mcpServers ?? [],
-      mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
-      personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-      mcpAccountBindings: input.mcpAccountBindings ?? null,
-      initialPersonalResourceAttachmentIntent:
-        input.initialPersonalResourceAttachmentIntent ?? null,
-      ...(input.xaiProviderAccountAuthoritySnapshot
-        ? {
-            initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
-          }
-        : {}),
-      maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
-      allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
-      subjectId: input.subjectId ?? null,
-      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
-    });
+        ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
+        createdByActor: input.createdByActor ?? null,
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
+        latencyMode: input.latencyMode ?? "standard",
+        sandboxBackend: input.sandboxBackend,
+        rigId: input.rigId ?? null,
+        rigVersionId: input.rigVersionId ?? null,
+        channelId: input.channelId ?? null,
+        firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+        firstPartyMcpTools: input.firstPartyMcpTools,
+        ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+        instructions: input.instructions ?? null,
+        ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
+        ...(input.unattended ? { unattended: true } : {}),
+        ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
+        policyRole: input.policyRole ?? null,
+        ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
+        ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
+        ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
+        parentSessionId: input.parentSessionId ?? null,
+        ...(input.codeSearchDeploymentPolicy
+          ? { codeSearchDeploymentPolicy: input.codeSearchDeploymentPolicy }
+          : {}),
+        sandboxGroupId: input.sandboxGroupId ?? null,
+        ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
+        mcpServers: input.mcpServers ?? [],
+        mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
+        personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+        mcpAccountBindings: input.mcpAccountBindings ?? null,
+        connectionAccountIntent: input.connectionAccountIntent ?? null,
+        initialPersonalResourceAttachmentIntent:
+          input.initialPersonalResourceAttachmentIntent ?? null,
+        ...(input.xaiProviderAccountAuthoritySnapshot
+          ? {
+              initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
+            }
+          : {}),
+        ...(input.claudeProviderAccountAuthoritySnapshot
+          ? {
+              initialClaudeProviderAccountAuthoritySnapshot:
+                input.claudeProviderAccountAuthoritySnapshot,
+            }
+          : {}),
+        maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
+        allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
+        subjectId: input.subjectId ?? null,
+        ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+      }),
+    );
   } catch (error) {
     if (error instanceof SessionSpawnDeniedDbError) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(error.denial));
     }
-    throw error;
+    throw repositoryRemovedHttpError(error);
   }
-  const finished = await finishStartSession(
+  const finished = await finishNewlyCreatedSession(
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
     session,
   );
+  recordCreatedSessionUsage(input);
   return {
     session: finished.session,
     outcome: "created",
     replay: false,
     changed: true,
   };
+}
+
+/**
+ * Start an unkeyed shell this call just inserted. If the start fails before
+ * the first event or turn commits, the caller gets the error and has no way to
+ * resume that session, so the bare shell is discarded instead of lingering as
+ * a queued session nothing runs. A shell that did initialize (including an
+ * outcome-unknown commit) is kept.
+ */
+async function finishNewlyCreatedSession(
+  input: Parameters<typeof finishStartSession>[0],
+  session: Session,
+): Promise<Awaited<ReturnType<typeof finishStartSession>>> {
+  try {
+    return await finishStartSession(input, session);
+  } catch (error) {
+    try {
+      await discardUninitializedSessionShell(input.db, {
+        accountId: session.accountId,
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+      });
+    } catch {
+      // The original start failure is the actionable error; a shell that
+      // cannot be discarded now is no worse than before this cleanup ran.
+    }
+    throw error;
+  }
+}
+
+function recordCreatedSessionUsage(input: {
+  metrics?: ProductUsageMetricsSink | null;
+  surface?: SessionTurnSurface | null;
+  createdBy?: TurnInitiator;
+  parentSessionId?: string | null;
+  deferInitialTurn?: boolean;
+}): void {
+  recordSessionCreated(input.metrics, {
+    surface: input.surface,
+    createdByKind: input.createdBy?.kind ?? "service",
+    parentSessionId: input.parentSessionId,
+  });
+  if (!input.deferInitialTurn) {
+    recordUserMessageAccepted(input.metrics, { surface: input.surface });
+  }
 }
 
 /** Backward-compatible entity-returning create path used by existing callers. */
@@ -1342,6 +1620,7 @@ async function finishStartSession(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+    startupObservability?: SessionStartObservability | null;
     initialMessage: string;
     captureInitialTurnAuthority?: (
       tx: Database,
@@ -1350,7 +1629,10 @@ async function finishStartSession(
     ) => Promise<void>;
     deferInitialTurn?: boolean;
     surface?: SessionTurnSurface | null;
+    billingOrigin?: BillingOrigin | null;
     modelContext?: string | null;
+    timeZone?: string | null;
+    openingTools?: readonly string[];
     resources: ResourceRef[];
     tools: ToolRef[];
     toolPolicy: SessionToolPolicy;
@@ -1359,11 +1641,6 @@ async function finishStartSession(
     reasoningEffort: Settings["openaiReasoningEffort"];
     turnExecutionPolicy: TurnExecutionPolicyV1;
     sandboxBackend: Settings["sandboxBackend"];
-    variableSets?: Array<{
-      id: string;
-      name: string;
-      scope: VariableSet["scope"];
-    }>;
     goal?: GoalSpec | null;
     initialAutomaticTitle?: string | null;
     sessionMcpServers?: SessionMcpServerMetadata[];
@@ -1430,84 +1707,115 @@ async function finishStartSession(
       });
     }
   }
-  const started = await initializeSessionStartAtomically(input.db, {
-    accountId: session.accountId,
-    workspaceId: session.workspaceId,
-    sessionId: session.id,
-    ...(input.captureInitialTurnAuthority
-      ? {
-          captureInitialTurnAuthority: (tx: Database, turnId: string) =>
-            input.captureInitialTurnAuthority!(tx, session.id, turnId),
-        }
-      : {}),
-    ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-    reasoningEffortFallback: input.reasoningEffort,
-    turnExecutionPolicy: input.turnExecutionPolicy,
-    surface: input.surface ?? null,
-    createdEventPayload: {
-      toolPolicy: input.toolPolicy,
-      ...(input.variableSets?.length
-        ? {
-            variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
-            variableSets: input.variableSets,
-            // Legacy highest-precedence aliases.
-            variableSetId: input.variableSets.at(-1)!.id,
-            variableSetName: input.variableSets.at(-1)!.name,
-          }
-        : {}),
-      ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
-    },
-    goal: input.goal
-      ? {
-          text: input.goal.text,
-          ...(input.goal.successCriteria !== undefined
-            ? { successCriteria: input.goal.successCriteria }
-            : {}),
-          ...(input.goal.rootConstraints !== undefined
-            ? { rootConstraints: input.goal.rootConstraints }
-            : {}),
-          ...(input.goal.reportRequirements !== undefined
-            ? { reportRequirements: input.goal.reportRequirements }
-            : {}),
-          ...(input.goal.maxAutoContinuations !== undefined
-            ? { maxAutoContinuations: input.goal.maxAutoContinuations }
-            : {}),
-          ...(input.goal.mutationPolicy !== undefined
-            ? { mutationPolicy: input.goal.mutationPolicy }
-            : {}),
-        }
-      : null,
-    initialAutomaticTitle: initialAutomaticTitleForSessionStart(
-      session,
-      input.initialAutomaticTitle,
-    ),
-    consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
-    rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
-    deferInitialTurn: input.deferInitialTurn === true,
-  });
-  await publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events);
-  if (started.workflowWakeRevision !== null) {
-    await input.workflowClient.wakeSessionWorkflow({
+  const initialTimeZone = normalizeMessageTimeZone(input.timeZone);
+  const started = await measureSessionStartPhase(input.startupObservability, "initialize", () =>
+    initializeSessionStartAtomically(input.db, {
       accountId: session.accountId,
       workspaceId: session.workspaceId,
       sessionId: session.id,
-      workflowId: started.temporalWorkflowId,
-      wakeRevision: started.workflowWakeRevision,
-    });
-  }
-  const persisted = await requireSession(input.db, session.workspaceId, session.id);
-  const initialTurnId =
-    started.turn?.id ??
-    (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
-    null;
+      ...(input.captureInitialTurnAuthority
+        ? {
+            captureInitialTurnAuthority: (tx: Database, turnId: string) =>
+              input.captureInitialTurnAuthority!(tx, session.id, turnId),
+          }
+        : {}),
+      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+      reasoningEffortFallback: input.reasoningEffort,
+      turnExecutionPolicy: input.turnExecutionPolicy,
+      ...(initialTimeZone ? { initialTimeZone } : {}),
+      ...(input.openingTools?.length ? { initialOpeningTools: [...input.openingTools] } : {}),
+      surface: input.surface ?? null,
+      billingOrigin: input.billingOrigin ?? null,
+      createdEventPayload: {
+        toolPolicy: input.toolPolicy,
+        ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
+      },
+      goal: input.goal
+        ? {
+            text: input.goal.text,
+            ...(input.goal.successCriteria !== undefined
+              ? { successCriteria: input.goal.successCriteria }
+              : {}),
+            ...(input.goal.rootConstraints !== undefined
+              ? { rootConstraints: input.goal.rootConstraints }
+              : {}),
+            ...(input.goal.reportRequirements !== undefined
+              ? { reportRequirements: input.goal.reportRequirements }
+              : {}),
+            ...(input.goal.maxAutoContinuations !== undefined
+              ? { maxAutoContinuations: input.goal.maxAutoContinuations }
+              : {}),
+            ...(input.goal.mutationPolicy !== undefined
+              ? { mutationPolicy: input.goal.mutationPolicy }
+              : {}),
+          }
+        : null,
+      initialAutomaticTitle: initialAutomaticTitleForSessionStart(
+        session,
+        input.initialAutomaticTitle,
+      ),
+      consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
+      rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
+      deferInitialTurn: input.deferInitialTurn === true,
+    }),
+  );
+  // Initialization committed the initial turn, events and wake outbox together.
+  // Notifications and the response read depend on that commit, not on one
+  // another. Read authoritative state while the immediate delivery attempts run;
+  // retain and fully join all work before returning (including on failure).
+  const wakeRevision = started.workflowWakeRevision;
+  const [fanout, wake, response] = await Promise.allSettled([
+    measureSessionStartPhase(input.startupObservability, "event_fanout", () =>
+      publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events),
+    ),
+    wakeRevision === null
+      ? Promise.resolve()
+      : measureSessionStartPhase(input.startupObservability, "workflow_wake", () =>
+          input.workflowClient.wakeSessionWorkflow({
+            accountId: session.accountId,
+            workspaceId: session.workspaceId,
+            sessionId: session.id,
+            workflowId: started.temporalWorkflowId,
+            wakeRevision,
+          }),
+        ),
+    (async () => {
+      const persisted = await measureSessionStartPhase(
+        input.startupObservability,
+        "session_reload",
+        () => requireSession(input.db, session.workspaceId, session.id),
+      );
+      const initialTurnId =
+        started.turn?.id ??
+        (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
+        null;
+      return { ...persisted, initialTurnId };
+    })(),
+  ]);
+  // Keep the prior serial error priority without detaching attempt work. Normal
+  // transport failure remains best-effort inside publishDurableSessionEvents.
+  if (fanout.status === "rejected") throw fanout.reason;
+  if (wake.status === "rejected") throw wake.reason;
+  if (response.status === "rejected") throw response.reason;
   return {
-    session: { ...persisted, initialTurnId },
+    session: response.value,
     changed: started.changed,
   };
 }
 
 export function workflowIdForSession(sessionId: string): string {
   return `session-${sessionId}`;
+}
+
+/**
+ * The one 422 for a model that is not selectable in the live catalog (retired,
+ * removed, or never offered). The message keeps its historical text; the typed
+ * cause lets the API envelope add `details.code: "model_unavailable"` so
+ * clients can ask for another model instead of offering a futile retry.
+ */
+export function modelUnavailableHttpException(model: string): HTTPException {
+  const cause = new ModelUnavailableError(model);
+  return new HTTPException(422, { message: cause.message, cause });
 }
 
 /**
@@ -1545,7 +1853,7 @@ export function canonicalConfiguredModel(
     ) {
       return canonicalModel;
     }
-    throw new HTTPException(422, { message: `model is not available: ${model}` });
+    throw modelUnavailableHttpException(model);
   }
   if (configuredAllowedModels(settings).includes(canonicalModel)) {
     return canonicalModel;
@@ -1569,41 +1877,26 @@ export function canonicalConfiguredModel(
   ) {
     return canonicalModel;
   }
-  throw new HTTPException(422, { message: `model is not available: ${model}` });
+  throw modelUnavailableHttpException(model);
 }
 
 export function assertConfiguredModel(settings: Settings, model: string | null | undefined): void {
   canonicalConfiguredModel(settings, model);
 }
 
-export const CODEX_COMPACTION_V2_PROVIDER_LOCKED = "codex_compaction_v2_provider_locked" as const;
-
-/** Session is frozen on Codex remote compaction v2; non-Codex models are refused. */
-export class CodexCompactionV2ProviderLockedError extends Error {
-  readonly code = CODEX_COMPACTION_V2_PROVIDER_LOCKED;
-  readonly productModelId: string;
-
-  constructor(productModelId: string) {
-    super(
-      `session is locked to Codex remote compaction v2; model "${productModelId}" is not a Codex subscription model`,
-    );
-    this.name = "CodexCompactionV2ProviderLockedError";
-    this.productModelId = productModelId;
-  }
-}
-
 /**
- * Fail closed when a remote_v2 session would run a non-Codex product model.
- * Portable sessions and non-Codex sessions keep free mid-session provider swap.
+ * True when running `productModelId` on this session must first convert its
+ * Codex remote_v2 context to portable form. Any model may run on any session:
+ * the worker rebuilds portable context from stored history before the first
+ * non-Codex turn and keeps the session portable from then on.
  */
-export function assertSessionAllowsProductModel(
+export function sessionNeedsPortableModelSwitch(
   session: Pick<Session, "codexCompactionMode">,
   productModelId: string | null | undefined,
-): void {
-  if (productModelId === null || productModelId === undefined) return;
-  if (session.codexCompactionMode !== "remote_v2") return;
-  if (isCodexBilledModel(productModelId)) return;
-  throw new CodexCompactionV2ProviderLockedError(productModelId);
+): boolean {
+  if (productModelId === null || productModelId === undefined) return false;
+  if (session.codexCompactionMode !== "remote_v2") return false;
+  return !isCodexBilledModel(productModelId);
 }
 
 /**
@@ -1638,13 +1931,19 @@ export async function assertWorkspaceModelPolicyAllows(
   const verdict = evaluateWorkspaceModelPolicy(policy, {
     providerId,
     modelId: canonicalModel,
+    chargesCredits: policyChargesCreditsForModel(settings, canonicalModel),
   });
   if (!verdict.allowed) {
-    throw new HTTPException(422, {
-      message:
-        verdict.reason === "provider"
+    const message =
+      verdict.reason === "credits"
+        ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
+        : verdict.reason === "provider"
           ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
-          : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
+          : `model "${canonicalModel}" is not allowed by this workspace's model policy`;
+    // Typed, so a refused new chat can say which rule in words a person reads.
+    throw new HTTPException(422, {
+      message,
+      cause: new ModelPolicyRefusedError(canonicalModel, verdict.reason, message),
     });
   }
 }
@@ -1681,6 +1980,8 @@ type PostUserMessageTurnResult = {
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  /** It waits for the owner of the personal machine the chat runs on. */
+  waitsForMachineOwner: boolean;
   replay: boolean;
 };
 
@@ -1695,23 +1996,29 @@ type PostUserMessageTurnInput = {
   text: string;
   annotations?: TimelineAnnotation[];
   modelContext?: string | null;
+  /** The sender's IANA zone, frozen in the accepted turn's metadata. */
+  timeZone?: string | null;
   resources: ResourceRef[];
   /** Actor-owned resources used only for the exact durable-draft fence. */
   composerDraftResources?: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
-  latencyMode?: "standard" | "priority" | "fast" | null;
+  latencyMode?: "standard" | "priority" | "fast" | "ultrafast" | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+  /** The sender's account intent, carried by work that continues this turn. */
+  connectionAccountIntent?: ConnectionAccountIntent | null;
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
-  delivery?: "send" | "steer";
+  delivery?: SessionPromptDelivery;
   origin?: "human" | "operator";
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin of the sender, frozen on the turn (`BillingOrigin`). */
+  billingOrigin?: BillingOrigin | null;
   actor?: string;
   actorLabel?: string;
   commandActor?: SessionCommandActor;
@@ -1773,7 +2080,11 @@ function finalizePostUserMessageTurn(
             sessionId,
             workflowId: result.turn.temporalWorkflowId,
             wakeRevision: result.wakeRevision,
-            ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
+            // `steer_or_send` asks for the interruption only when the server
+            // resolved it to a Steer.
+            ...((input.delivery ?? "send") === "steer" ||
+            (input.delivery === "steer_or_send" && result.routing === "accepted_for_steering") ||
+            result.interruptionCount > 0
               ? { interruptionRequested: true }
               : {}),
           });
@@ -1826,12 +2137,14 @@ function finalizePostUserMessageTurn(
           model: result.draft.model,
           reasoningEffort: result.draft.reasoningEffort as ReasoningEffort,
           latencyMode: result.draft.latencyMode as ComposerDraft["latencyMode"],
+          policyFollowsSession: result.draft.policyFollowsSession,
           sourceTurnId: result.draft.sourceTurnId,
           sourceTurnVersion: result.draft.sourceTurnVersion,
           updatedAt: result.draft.updatedAt.toISOString(),
         }
       : null,
     interruptionCount: result.interruptionCount,
+    waitsForMachineOwner: result.waitsForMachineOwner,
     replay: result.replay,
   };
 }
@@ -1842,10 +2155,20 @@ export async function postUserMessageTurn(
   const { db, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
+  // A message sent from a Site page records which Site (and version) on its turn.
+  const siteOrigin = currentSiteSessionOrigin();
+  // The sender's zone is frozen with the turn so claim renders its local time
+  // once, from durable data, and history replays it byte for byte.
+  const timeZone = normalizeMessageTimeZone(input.timeZone);
+  const turnMetadata = {
+    ...(siteOrigin ? { [SITE_ORIGIN_METADATA_KEY]: siteOrigin } : {}),
+    ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
+  };
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
-  const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
+  const sessionForModelGate = await getSessionModelGate(db, workspaceId, sessionId);
+  if (!sessionForModelGate) throw new Error(`Session not found: ${sessionId}`);
   // Acceptance already froze this policy before resource/credential validation.
   // A different turn starting meanwhile must not change the model we gate here.
   const effectiveModelForGate =
@@ -1857,14 +2180,6 @@ export async function postUserMessageTurn(
       ? requestedModel
       : null;
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, effectiveModelForGate);
-  try {
-    assertSessionAllowsProductModel(sessionForModelGate, effectiveModelForGate);
-  } catch (error) {
-    if (error instanceof CodexCompactionV2ProviderLockedError) {
-      throw new HTTPException(422, { message: error.message, cause: error });
-    }
-    throw error;
-  }
   const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
@@ -1912,11 +2227,14 @@ export async function postUserMessageTurn(
               turnExecutionPolicy: input.turnExecutionPolicy,
               source: input.origin === "operator" ? "api" : "user",
               surface: input.surface ?? null,
+              billingOrigin: input.billingOrigin ?? null,
               ...(input.recordAgentRunUsage !== undefined
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
               mcpAccountBindings: input.mcpAccountBindings ?? null,
+              connectionAccountIntent: input.connectionAccountIntent ?? null,
+              ...(Object.keys(turnMetadata).length > 0 ? { turnMetadata } : {}),
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
@@ -1929,7 +2247,10 @@ export async function postUserMessageTurn(
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
               ...(freshWorkspaceCustomModel
                 ? {
-                    beforeFreshPromptCommit: async (tx: Database): Promise<void> => {
+                    beforeFreshPromptCommit: async (
+                      tx: Database,
+                      { claudeProviderAccountAuthoritySnapshot, claudeAcceptedSource },
+                    ): Promise<void> => {
                       const reference = workspaceCustomModelReference(
                         settings,
                         freshWorkspaceCustomModel,
@@ -1941,17 +2262,24 @@ export async function postUserMessageTurn(
                         accountId,
                         workspaceId,
                         reference,
+                        claudeAuthority: {
+                          authoritySnapshot: claudeProviderAccountAuthoritySnapshot,
+                          ...(claudeAcceptedSource ? { acceptedSource: claudeAcceptedSource } : {}),
+                        },
                       });
                       if (!active) {
-                        throw new HTTPException(422, {
-                          message: `model is not available: ${freshWorkspaceCustomModel}`,
-                        });
+                        throw modelUnavailableHttpException(freshWorkspaceCustomModel);
                       }
                     },
                   }
                 : {}),
               controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
             }),
+          undefined,
+          "shared",
+          // Linked-actor capture reauthorizes under the organization-membership
+          // lock; take it before the tenancy fence and the canonical prefix.
+          Boolean(input.captureTurnAuthority),
         ),
     );
   } catch (error) {
@@ -1966,6 +2294,7 @@ export async function postUserMessageTurn(
         { message: error.message, cause: error },
       );
     }
+    if (error instanceof SessionRepositoryRemovedError) throw repositoryRemovedHttpError(error);
     if (
       error instanceof QueueCommandConflictError ||
       error instanceof SessionControlConflictError
@@ -1984,8 +2313,18 @@ export async function postUserMessageTurn(
 }
 
 /**
+ * A person removed the repository from the chat; an agent cannot attach it
+ * again (to the chat or to a child it creates). Other errors pass through.
+ */
+function repositoryRemovedHttpError(error: unknown): unknown {
+  return error instanceof SessionRepositoryRemovedError
+    ? new HTTPException(403, { message: error.message, cause: error })
+    : error;
+}
+
+/**
  * Full create-session flow shared by `POST /sessions` and the first-party MCP
- * `session_create` tool: payload validation, resource/tool/variableSet
+ * `session_create` tool: payload validation, resource/tool
  * checks, usage limits, session start, and usage recording. `rawPayload` is
  * the unparsed request body so absent-vs-empty execution-context fields keep
  * their meaning: a child inherits repositories (never files), tools, and MCP
@@ -2169,6 +2508,12 @@ export async function retryFailedSession(
   );
   if (replay) return replay;
   const session = await requireSession(deps.db, workspaceId, sessionId);
+  // A retry is a new model request: a reached task usage limit refuses it.
+  await requireSessionUsageLimitAllows(
+    deps.db,
+    { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
+    { sink: deps.observability, boundary: "send" },
+  );
   const failure = await getSessionEvent(deps.db, workspaceId, request.failureEventId);
   if (!failure || failure.sessionId !== sessionId)
     throw new SessionRetryConflictError("RETRY_STALE_FAILURE", "The failure event is unavailable");
@@ -2182,23 +2527,19 @@ export async function retryFailedSession(
     retainedModel,
   );
   const model = canonicalConfiguredModel(settings, request.model ?? retainedModel)!;
-  try {
-    assertSessionAllowsProductModel(session, model);
-  } catch (error) {
-    if (error instanceof CodexCompactionV2ProviderLockedError)
-      throw new HTTPException(422, { message: error.message, cause: error });
-    throw error;
-  }
   await assertWorkspaceModelPolicyAllows(deps.db, settings, workspaceId, model);
-  const executionPolicy = resolveTurnExecutionPolicyV1(settings, {
-    modelId: model,
-    requestedModelId: request.model ?? null,
-    modelSource: request.model === undefined ? "session" : "explicit",
-    reasoningEffort: request.reasoningEffort ?? turn?.reasoningEffort ?? session.reasoningEffort,
-    reasoningSource: request.reasoningEffort === undefined ? "session" : "explicit",
-    latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
-    latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
-  });
+  const executionPolicy = withDeveloperSetupCredentialRestriction(
+    resolveTurnExecutionPolicyV1(settings, {
+      modelId: model,
+      requestedModelId: request.model ?? null,
+      modelSource: request.model === undefined ? "session" : "explicit",
+      reasoningEffort: request.reasoningEffort ?? turn?.reasoningEffort ?? session.reasoningEffort,
+      reasoningSource: request.reasoningEffort === undefined ? "session" : "explicit",
+      latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
+      latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
+    }),
+    { grant, trustedMetadata: [session.metadata, turn?.metadata] },
+  );
   await requireLimit(
     { ...deps, settings },
     {
@@ -2217,6 +2558,18 @@ export async function retryFailedSession(
       action: "agent_run:create",
       quantity: 1,
       model,
+      // A retry runs the failed turn again, billed as that turn was.
+      ...(turn
+        ? {
+            acceptedTurn: { sessionId: session.id, turnId: turn.id },
+            billingOrigin:
+              (await readTurnBillingOrigin(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                turnId: turn.id,
+              })) ?? "app",
+          }
+        : {}),
     },
   );
   const result = await runIdempotentPersistenceTransaction(
@@ -2268,7 +2621,7 @@ async function withSessionCreateUsageRecording(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   workspaceId: string;
-  startMode: "realtime" | undefined;
+  startMode: "realtime" | "standard" | undefined;
   origin: "system" | "user";
   createOutcome: CreateSessionOutcome;
 }): Promise<CreateSessionRequestOutcome> {
@@ -2308,35 +2661,88 @@ async function createSessionForRequestInFileScope(
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+
+  // A tool whose backing workload this deployment does not run is dropped, not
+  // rejected: a client echoing a full catalog must not fail on a deployment fact.
+  if (payload.firstPartyMcpTools) {
+    const unavailable = deploymentUnavailableFirstPartyMcpTools(unresolvedDeps.settings);
+    payload.firstPartyMcpTools = payload.firstPartyMcpTools.filter(
+      (tool) => !unavailable.has(tool),
+    );
+  }
   // Read before any await: the Site scope is request-local provenance.
   const surface = resolveTurnSurface({
     grant,
     authorization,
     requested: requestOptions.surface,
   });
+  // Who pays for this chat's work: frozen on its first turn, inherited after.
+  const billingOrigin = await resolveTurnBillingOrigin(unresolvedDeps.db, {
+    grant,
+    authorization,
+    // A Teams conversation is a bot set up in the app.
+    requestedOrigin:
+      requestOptions.billingOrigin ?? (requestOptions.teamsConversation ? "app" : undefined),
+    requestedSurface: requestOptions.surface,
+  });
   payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
-  const externalBeforeCreateCommit = externalContinuationCommitAuthorizer(authorization);
+  const externalCommitAuthorizer = externalContinuationCommitAuthorizer(authorization);
+  const teamsProof = requestOptions.teamsConversation;
+  if (teamsProof && grant.metadata?.["sessionId"]) {
+    throw new HTTPException(403, { message: "teams_private_session_proof_invalid" });
+  }
+  const teamsCommitAuthorizer = teamsProof
+    ? await authorizeTeamsConversationAdmission(unresolvedDeps, grant, {
+        workspaceId,
+        sessionId: payload.requestedSessionId,
+        initialMessage: payload.initialMessage ?? "",
+        creating: true,
+        privateCreate: payload.visibility === "private",
+        personal: payload.visibility === "private",
+        proof: teamsProof,
+      })
+    : undefined;
+  const externalBeforeCreateCommit = teamsCommitAuthorizer
+    ? async (tx: Database) => {
+        await teamsCommitAuthorizer(tx);
+        await externalCommitAuthorizer?.(tx);
+      }
+    : externalCommitAuthorizer;
 
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
     throw new HTTPException(422, {
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
     });
   }
+  // What the first message may do through app actions, frozen with its turn.
+  // Computed from the request's own grant once it is valid.
+  const initialAppActionGrant = turnAppActionGrant({
+    grant,
+    authorization,
+    delegatedSignInChangesEnabled:
+      unresolvedDeps.settings.delegatedSignInAppActionChangesEnabled === true,
+    workspaceSettings:
+      authorization !== undefined &&
+      (await workspaceSettingsAuthorized(unresolvedDeps, authorization, workspaceId)),
+  });
   const db = unresolvedDeps.db;
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
-  if (payload.visibility === "private" && !grant.metadata?.["sessionId"]) {
+  if (
+    payload.visibility === "private" &&
+    !grant.metadata?.["sessionId"] &&
+    !teamsCommitAuthorizer
+  ) {
     if (!authorization) {
       throw new HTTPException(403, {
         message: "managed human session required",
       });
     }
     await requireManagedHumanPrivateSessionCreate(unresolvedDeps, authorization, workspaceId);
-    if (payload.sandbox === "shared" || typeof payload.sandbox === "object") {
-      throw new HTTPException(422, {
-        message: "Only-me sessions require their own sandbox",
-      });
-    }
+    // Who can read a session and who can use a sandbox are separate: an
+    // Only-me session may join a sandbox group the creator can already see.
+    // Its own records stay scoped to its audience; files on the box are as
+    // shared as the box.
   }
   // Parent linkage and execution-context inheritance come ONLY from the
   // worker-signed sessionId claim. A caller cannot nominate a parent in the
@@ -2360,13 +2766,85 @@ async function createSessionForRequestInFileScope(
       throw error;
     }
   }
+  // A new root chat needs the workspace open to new work: once the
+  // organization turned Personal workspaces off, nobody starts one there.
+  // Workers of an existing chat still start, so existing chats keep working.
+  if (!parentSessionId) {
+    await requirePersonalWorkspaceOpenToNewWork(unresolvedDeps, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
+  }
+  // a create-time usage limit belongs to a new ROOT task and only a
+  // person or the trusted host may set it. Agents (including children, which
+  // always share their root's limit) are rejected even when the value is null.
+  let initialUsageLimitActor: ReturnType<typeof sessionUsageLimitWriteActorForAccess> | null = null;
+  if (payload.usageLimitMicros !== undefined) {
+    try {
+      if (parentSessionId || !authorization) {
+        throw new SessionUsageLimitHttpError(
+          403,
+          "session_usage_limit_forbidden",
+          "Only a person or the application's server can set a task usage limit.",
+        );
+      }
+      initialUsageLimitActor = sessionUsageLimitWriteActorForAccess(authorization);
+    } catch (error) {
+      recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "forbidden");
+      throw error;
+    }
+  }
+  if (
+    payload.usageLimitMicros !== undefined &&
+    payload.usageLimitMicros !== null &&
+    !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)
+  ) {
+    recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
+    throw new SessionUsageLimitHttpError(
+      422,
+      "session_usage_limit_disabled",
+      "Usage limits are not enabled on this server.",
+    );
+  }
+  // The trusted server in this process (published Site runtime) may attach a
+  // limit to a root session it creates as its own service principal, so the
+  // limit is in place before the first model call. Requests cannot set it.
+  const hostUsageLimit = currentHostSessionUsageLimit();
+  const hostInitialUsageLimit =
+    payload.usageLimitMicros === undefined &&
+    !parentSessionId &&
+    hostUsageLimit !== undefined &&
+    hostUsageLimit.subjectId === grant.subjectId
+      ? hostUsageLimit
+      : null;
+  if (hostInitialUsageLimit && !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)) {
+    recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
+    throw new SessionUsageLimitHttpError(
+      422,
+      "session_usage_limit_disabled",
+      "Usage limits are not enabled on this server.",
+    );
+  }
+  // A task whose usage limit is reached cannot start more inference by
+  // spawning another agent.
+  if (parentSessionId) {
+    await requireSessionUsageLimitAllows(
+      db,
+      { accountId: grant.accountId, workspaceId, sessionId: parentSessionId },
+      { sink: unresolvedDeps.observability, boundary: "child_create" },
+    );
+  }
   const parentSession = parentSessionId ? await getSession(db, workspaceId, parentSessionId) : null;
   if (parentSessionId && !parentSession) {
     throw new HTTPException(404, {
       message: `parent session not found in workspace: ${parentSessionId}`,
     });
   }
-  const workspace = await requireWorkspace(db, workspaceId);
+  const workspace = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "workspace_read",
+    () => requireWorkspace(db, workspaceId),
+  );
   const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
   const parentAuthority = parentSession
     ? await getSessionAuthorityProjection(db, workspaceId, parentSession.id)
@@ -2435,12 +2913,15 @@ async function createSessionForRequestInFileScope(
     instructions: payload.instructions,
     workspaceSettings: workspace.settings,
     parent: parentSession,
-    goal: payload.goal !== undefined,
+    goal: payload.goal != null,
   });
   const agentConfig = agentResolution.config;
   if (agentResolution.instructions !== undefined) {
     payload.instructions = agentResolution.instructions;
   }
+  // Freeze what the agent configuration implies before keyed replay compares
+  // it: a `"none"` agent omits the bundled guides unless the request lists them.
+  bundledSkillIds = bundledSkillSelectionForAgentConfig(bundledSkillIds, agentConfig);
   const parentCallingTurn =
     parentSession && creationInitiator.actor
       ? await getSessionTurnForAttempt(
@@ -2468,31 +2949,42 @@ async function createSessionForRequestInFileScope(
       : null;
   let retainedKeyedShellModel: string | null = null;
   let retainedKeyedShellReasoningEffort: Session["reasoningEffort"] | null = null;
+  let retainedKeyedShellExecution: Session | null = null;
   if (
     payload.idempotencyKey &&
     (effectiveVisibility !== "user_private" || replayManagedHumanSubjectId !== null)
   ) {
+    const createIdempotencyKey = payload.idempotencyKey;
     try {
-      const initializedReplay = await getInitializedSessionCreateReplay(db, {
-        bundledSkillIds,
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: replayManagedHumanSubjectId ?? grant.subjectId,
-        ...(replayManagedHumanSubjectId
-          ? { activeManagedHumanSubjectId: replayManagedHumanSubjectId }
-          : {}),
-        createIdempotencyKey: payload.idempotencyKey,
-        selectedInstalledSkillIds: payload.installedSkillIds ?? [],
-        initialAgentLearning: payload.agentLearning,
-        ...sessionScope,
+      const initializedReplay = await measureSessionStartPhase(
+        unresolvedDeps.observability,
+        "idempotent_replay",
+        () =>
+          getInitializedSessionCreateReplay(db, {
+            bundledSkillIds,
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: replayManagedHumanSubjectId ?? grant.subjectId,
+            ...(replayManagedHumanSubjectId
+              ? { activeManagedHumanSubjectId: replayManagedHumanSubjectId }
+              : {}),
+            createIdempotencyKey,
+            selectedInstalledSkillIds: payload.installedSkillIds ?? [],
+            initialAgentLearning: payload.agentLearning,
+            ...sessionScope,
 
-        ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
-        visibility: effectiveVisibility,
-        variableSetIds: payload.variableSetIds ?? [],
-        initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
-        deferInitialTurn: payload.startMode === "realtime",
-        agentConfig,
-      });
+            ...(payload.requestedSessionId
+              ? { requestedSessionId: payload.requestedSessionId }
+              : {}),
+            visibility: effectiveVisibility,
+            initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
+            deferInitialTurn: payload.startMode === "realtime",
+            agentConfig,
+            // The replay compares whether anyone answers the agent, so it
+            // needs the retry's own setting.
+            ...(payload.unattended === true ? { unattended: true } : {}),
+          }),
+      );
       if (initializedReplay) {
         if (initializedReplay.outcome === "denied") {
           throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(initializedReplay.denial));
@@ -2500,6 +2992,7 @@ async function createSessionForRequestInFileScope(
         if (initializedReplay.outcome === "pending") {
           retainedKeyedShellModel = initializedReplay.session.model;
           retainedKeyedShellReasoningEffort = initializedReplay.session.reasoningEffort;
+          retainedKeyedShellExecution = initializedReplay.session;
         } else {
           if (initializedReplay.workflowWakeRevision !== null) {
             await unresolvedDeps.workflowClient.wakeSessionWorkflow({
@@ -2537,12 +3030,112 @@ async function createSessionForRequestInFileScope(
       throw error;
     }
   }
-  let settings = await resolveWorkspaceModelBoundarySettings(
-    unresolvedDeps,
-    grant,
-    workspaceId,
-    [payload.model],
-    retainedKeyedShellModel,
+  // An explicitly requested backend must be one this deployment serves. The
+  // worker builds whatever provider the session row names, so accepting an
+  // unserved value (for example `local` on a cloud deployment) would run the
+  // box as processes on the worker host. Checked after keyed replay so a
+  // retry of an already-initialized create still returns its session, and
+  // before anything is inserted. A retry that finds its pending keyed shell
+  // already storing the same backend passed this check when that row was
+  // inserted, so it finishes that row rather than failing on a later config
+  // change. Inherited/shared placements and the server-chosen defaults below
+  // never read the caller's value unchecked.
+  if (
+    payload.sandboxBackend !== undefined &&
+    retainedKeyedShellExecution?.sandboxBackend !== payload.sandboxBackend &&
+    !sandboxBackendServed(unresolvedDeps.settings, payload.sandboxBackend)
+  ) {
+    throw new HTTPException(422, {
+      message: unservedSandboxBackendMessage(unresolvedDeps.settings, payload.sandboxBackend),
+    });
+  }
+  // A default applies only to a new root's own box. Explicit targets, explicit
+  // backends, children, and shared groups retain their chosen placement. A
+  // keyed shell already froze its route in the insert transaction: recovery
+  // must keep that route even when a default has since changed. A person's own
+  // default ("Your default machine") places the chats they start themselves
+  // ahead of the workspace default; automations and agent-created chats follow
+  // the workspace default, and an unusable personal choice falls back to it.
+  if (
+    !parentSession &&
+    !payload.targetSandboxId &&
+    payload.sandboxBackend === undefined &&
+    (payload.sandbox === undefined || payload.sandbox === "new")
+  ) {
+    const memberDefault =
+      !retainedKeyedShellExecution && !creationInitiator.actor && replayManagedHumanSubjectId
+        ? await resolveMemberExecutionDefault(db, unresolvedDeps.settings, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: replayManagedHumanSubjectId,
+          })
+        : null;
+    if (retainedKeyedShellExecution) {
+      payload.sandboxBackend = retainedKeyedShellExecution.sandboxBackend;
+      if (retainedKeyedShellExecution.activeSandboxId) {
+        payload.targetSandboxId = retainedKeyedShellExecution.activeSandboxId;
+        if (retainedKeyedShellExecution.workingDir) {
+          payload.workingDir = retainedKeyedShellExecution.workingDir;
+        }
+      }
+    } else if (memberDefault?.usable && memberDefault.target) {
+      if (memberDefault.target.kind === "machine") {
+        payload.targetSandboxId = memberDefault.target.targetSandboxId;
+        // A machine brings its own environment; see the workspace default below.
+        if (payload.rigId === undefined) payload.rigId = null;
+      } else {
+        payload.sandboxBackend = unresolvedDeps.settings.sandboxBackend;
+      }
+    } else {
+      let target: ReturnType<typeof resolveWorkspaceDefaultExecutionTarget>;
+      try {
+        target = resolveWorkspaceDefaultExecutionTarget(workspace.settings);
+      } catch {
+        throw new HTTPException(422, {
+          message:
+            "The workspace default machine setting is invalid. Choose it again in workspace settings.",
+        });
+      }
+      if (target?.kind === "machine") {
+        const machine = await getSandbox(db, grant, target.targetSandboxId);
+        if (
+          !unresolvedDeps.settings.sandboxOwnershipEnabled ||
+          !unresolvedDeps.settings.sandboxSelfhostedEnabled ||
+          !machine ||
+          machine.kind !== "selfhosted" ||
+          !machineCanBeWorkspaceDefault(machine, workspace)
+        ) {
+          throw new HTTPException(422, {
+            message:
+              "Workspace default machine is unavailable. Choose another machine in workspace settings.",
+          });
+        }
+        payload.targetSandboxId = target.targetSandboxId;
+        // A machine brings its own environment. Do not also bind the implicit
+        // managed-sandbox image/rig when the workspace chooses a machine.
+        if (payload.rigId === undefined) payload.rigId = null;
+      } else if (target?.kind === "managed") {
+        if (["selfhosted", "none"].includes(unresolvedDeps.settings.sandboxBackend)) {
+          throw new HTTPException(422, {
+            message:
+              "The workspace default requires a managed sandbox, which this deployment does not provide.",
+          });
+        }
+        payload.sandboxBackend = unresolvedDeps.settings.sandboxBackend;
+      }
+    }
+  }
+  let settings = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "model_catalog_initial",
+    () =>
+      resolveWorkspaceModelBoundarySettings(
+        unresolvedDeps,
+        grant,
+        workspaceId,
+        [payload.model],
+        retainedKeyedShellModel,
+      ),
   );
   let deps =
     settings === unresolvedDeps.settings
@@ -2571,24 +3164,32 @@ async function createSessionForRequestInFileScope(
       ? null
       : retainedKeyedShellModel !== null && retainedKeyedShellReasoningEffort !== null
         ? { model: retainedKeyedShellModel, reasoningEffort: retainedKeyedShellReasoningEffort }
-        : await resolveDefaultSessionModel(db, settings, {
-            accountId: grant.accountId,
-            workspaceId,
-            subjectId: grant.subjectId,
-            workspaceSettings: workspace.settings,
-          });
+        : await measureSessionStartPhase(unresolvedDeps.observability, "default_model", () =>
+            resolveDefaultSessionModel(db, settings, {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: grant.subjectId,
+              workspaceSettings: workspace.settings,
+              billingOrigin,
+            }),
+          );
   const inheritedModel =
     parentCallingTurn?.model ??
     parentSession?.model ??
     resolvedDefault?.model ??
     settings.openaiModel;
   const effectiveModelId = payload.model ?? inheritedModel;
-  const effectiveCatalogSettings = await resolveWorkspaceModelBoundarySettings(
-    deps,
-    grant,
-    workspaceId,
-    [effectiveModelId],
-    parentSession ? inheritedModel : null,
+  const effectiveCatalogSettings = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "model_catalog_effective",
+    () =>
+      resolveWorkspaceModelBoundarySettings(
+        deps,
+        grant,
+        workspaceId,
+        [effectiveModelId],
+        parentSession ? inheritedModel : null,
+      ),
   );
   if (effectiveCatalogSettings !== settings) {
     deps = {
@@ -2598,7 +3199,18 @@ async function createSessionForRequestInFileScope(
     };
     settings = effectiveCatalogSettings;
   }
-  let effectiveGoal = payload.goal;
+  // A headless single request gets its goal here, from the create itself,
+  // instead of a model call. It is dropped below, never rejected, when the
+  // session cannot carry a goal.
+  const automaticGoal = unattendedRequestGoal({
+    unattended: payload.unattended,
+    goal: payload.goal,
+    initialMessage: payload.initialMessage,
+    hasParent: parentSession !== null,
+    creator: agentConfigCreator,
+    agentConfig,
+  });
+  let effectiveGoal = payload.goal ?? automaticGoal;
   if (parentSession && payload.goal) {
     try {
       effectiveGoal = resolveChildGoalFromAcceptedSnapshot(
@@ -2635,6 +3247,15 @@ async function createSessionForRequestInFileScope(
           creationInitiator.actor.turnId,
         )
       : undefined;
+  const claudeProviderAccountAuthoritySnapshot =
+    parentSession && creationInitiator.actor
+      ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+          db,
+          workspaceId,
+          parentSession.id,
+          creationInitiator.actor.turnId,
+        )
+      : undefined;
   const connectionDelegationSource = personalConnectionDelegationSourceForGrant(grant);
   const inheritedPersonalConnectionDelegations =
     connectionDelegationSource.kind === "turn"
@@ -2645,15 +3266,20 @@ async function createSessionForRequestInFileScope(
           connectionDelegationSource.turnId,
         )
       : null;
-  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
-    db,
-    workspaceId,
-    settings,
-    inheritedPersonalConnectionDelegations
-      ? {
-          personalConnectionDelegations: inheritedPersonalConnectionDelegations,
-        }
-      : { subjectId: grant.subjectId },
+  const capabilityRuntimeSettings = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "capability_settings",
+    () =>
+      settingsWithEnabledCapabilityMcpServers(
+        db,
+        workspaceId,
+        settings,
+        inheritedPersonalConnectionDelegations
+          ? {
+              personalConnectionDelegations: inheritedPersonalConnectionDelegations,
+            }
+          : { subjectId: grant.subjectId },
+      ),
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
     ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
@@ -2662,6 +3288,17 @@ async function createSessionForRequestInFileScope(
           await listSessionMcpServersForChildInheritance(db, workspaceId, parentSession.id),
         )
       : validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers);
+  if (hasOwnProperty(rawPayload, "mcpServers")) {
+    // An Opengeni API key reads its organization: EU-only content stays in
+    // EU-only workspaces.
+    for (const server of payload.mcpServers) {
+      await assertMcpCredentialContentFlowAllowed(db, {
+        target: { accountId: grant.accountId, workspaceId },
+        url: server.url,
+        headers: server.headers,
+      });
+    }
+  }
   const runtimeSettings = settingsWithSessionMcpServerConfigs(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,
@@ -2671,7 +3308,22 @@ async function createSessionForRequestInFileScope(
   const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = {};
   if (Object.keys(requestedMcpPolicies).length > 0) {
     requirePermission(grant, "sessions:control");
-    const inheritedServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    const ownServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    // Include any connectors a Personal workspace carries for its owner: the
+    // same enabled set the session runs with.
+    const inheritedServers = [
+      ...ownServers,
+      ...(await personalWorkspaceExtensionMcpServers(db, {
+        workspaceId,
+        accountId: grant.accountId,
+        subjectId: personalWorkspaceExtensionSubject(
+          inheritedPersonalConnectionDelegations
+            ? { personalConnectionDelegations: inheritedPersonalConnectionDelegations }
+            : { subjectId: grant.subjectId },
+        ),
+        ownServers: [...settings.mcpServers, ...ownServers],
+      })),
+    ];
     for (const [id, policy] of Object.entries(requestedMcpPolicies)) {
       const inherited = inheritedServers.find((server) => server.id === id);
       if (!inherited || sessionMcpServers.runtimeServers.some((server) => server.id === id)) {
@@ -2684,14 +3336,29 @@ async function createSessionForRequestInFileScope(
         });
       }
       mcpApprovalPolicies[id] =
-        requireApprovalWithFloor(policy, inherited.approvalFloor, true) ?? false;
+        resolveMcpApprovalRecommendation(policy, inherited.approvalFloor) ?? false;
     }
   }
   const resources = normalizeResources(
-    hasOwnProperty(rawPayload, "resources")
-      ? payload.resources
-      : (parentSession?.resources.filter((resource) => resource.kind === "repository") ??
+    // An agent may name a repository as the person with just uri, ref and
+    // connectionType; its own turn's Your GitHub delegation fills in the rest.
+    await resolveAgentPersonalGitHubRepositoryResources({
+      grant,
+      workspaceId,
+      settings,
+      resources: hasOwnProperty(rawPayload, "resources")
+        ? payload.resources
+        : (parentSession?.resources.filter((resource) => resource.kind === "repository") ??
           payload.resources),
+      turnDelegations: inheritedPersonalConnectionDelegations,
+      services: agentPersonalGitHubRepositoryServices({
+        db,
+        settings,
+        workspaceId,
+        accountId: grant.accountId,
+        githubPersonalFetch: unresolvedDeps.githubPersonalFetch,
+      }),
+    }),
   );
   const inheritedOrSubmittedSkills = hasOwnProperty(rawPayload, "skills")
     ? payload.skills
@@ -2796,7 +3463,10 @@ async function createSessionForRequestInFileScope(
   if (!parentSession) {
     selectedTools = withSameRequestSessionMcpServerTools(
       selectedTools,
-      sessionMcpServers.runtimeServers,
+      sessionMcpServers.runtimeServers.map((server) => ({
+        id: server.id,
+        eager: payload.mcpServers.find((input) => input.id === server.id)?.eager,
+      })),
     );
   }
   if (payload.excludedMcpServerIds !== undefined) {
@@ -2841,39 +3511,41 @@ async function createSessionForRequestInFileScope(
   // independently intersected with the exact model-visible selection and the
   // tool's permission/target authorization predicate, so attachment alone
   // exposes nothing.
-  const tools = withFirstPartyTools(selectedTools, runtimeSettings);
+  let tools = withFirstPartyTools(selectedTools, runtimeSettings);
 
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
-  await validateGitHubRepositorySelection(db, workspaceId, resources);
-  if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
-    throw new HTTPException(503, {
-      message: "object storage is not configured",
-    });
-  }
-  const attachmentOwnerContext = authorization
-    ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
-    : grant.principalKind === "agent_attempt"
-      ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-      : undefined;
+  const attachmentOwnerContext = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "resource_validation",
+    async () => {
+      await validateGitHubRepositorySelection(db, workspaceId, resources);
+      if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
+        throw new HTTPException(503, {
+          message: "object storage is not configured",
+        });
+      }
+      // The outer creation scope already established the caller's file actor.
+      // Only attached files need a second live ownership read at validation.
+      const ownerContext = !resources.some((resource) => resource.kind === "file")
+        ? undefined
+        : authorization
+          ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
+          : grant.principalKind === "agent_attempt"
+            ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
+            : await inProcessFileOwnerContext({ db }, grant, payload.requestedSessionId, resources);
+      await validateFileResources(
+        db,
+        grant.accountId,
+        workspaceId,
+        personalResourceSubjectId ?? grant.subjectId,
+        resources,
+        ownerContext,
+      );
+      return ownerContext;
+    },
+  );
   const attachmentOwner =
     attachmentOwnerContext?.privateFileOwnerSubjectId === grant.subjectId ? grant.subjectId : null;
-  await validateFileResources(
-    db,
-    grant.accountId,
-    workspaceId,
-    personalResourceSubjectId ?? grant.subjectId,
-    resources,
-    attachmentOwnerContext,
-  );
-  // Every selected Variable Set is independently authorized. Scope does not
-  // affect precedence: explicit order is low-to-high and later sets win name
-  // collisions.
-  const variableSets: VariableSet[] = [];
-  for (const variableSetId of payload.variableSetIds ?? []) {
-    variableSets.push(
-      await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId),
-    );
-  }
   // RIG BINDING (M3). Resolve the rig this session rides — a UUID binds that
   // rig, null explicitly opts out, and omission inherits the workspace default
   // (workspaces.default_rig_id) — then FREEZE both the rig id and its currently-
@@ -2885,36 +3557,36 @@ async function createSessionForRequestInFileScope(
   //   - A stale workspace-default rig (deleted → FK-nulled, or somehow with no
   //     active version) degrades SILENTLY to rig-less: an operator-side default
   //     must never brick every create in the workspace.
-  const requestedRigId =
-    payload.rigId === undefined ? await getWorkspaceDefaultRigId(db, workspaceId) : payload.rigId;
-  let frozenRigId: string | null = null;
-  let frozenRigVersionId: string | null = null;
-  if (requestedRigId) {
-    const rig = await getRig(db, grant, requestedRigId);
-    if (!rig || !rig.activeVersion) {
-      if (payload.rigId) {
-        throw new HTTPException(422, {
-          message: rig
-            ? `sandbox environment ${payload.rigId} has no active version to bind`
-            : `unknown rigId: ${payload.rigId}`,
-        });
+  const { frozenRigId, frozenRigVersionId } = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "rig_binding",
+    async () => {
+      const requestedRigId =
+        payload.rigId === undefined
+          ? await getWorkspaceDefaultRigId(db, workspaceId)
+          : payload.rigId;
+      if (!requestedRigId) return { frozenRigId: null, frozenRigVersionId: null };
+      const rig = await getRig(db, grant, requestedRigId);
+      if (!rig || !rig.activeVersion) {
+        if (payload.rigId) {
+          throw new HTTPException(422, {
+            message: rig
+              ? `sandbox environment ${payload.rigId} has no active version to bind`
+              : `unknown rigId: ${payload.rigId}`,
+          });
+        }
+        // else: workspace-default fallback that no longer resolves → rig-less.
+        return { frozenRigId: null, frozenRigVersionId: null };
       }
-      // else: workspace-default fallback that no longer resolves → rig-less.
-    } else {
-      for (const defaultVariableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
-        await validateVariableSetAttachment(
-          { settings, db },
-          grant,
-          workspaceId,
-          defaultVariableSetId,
-        );
-      }
-      frozenRigId = rig.id;
-      frozenRigVersionId = rig.activeVersion.id;
-    }
-  }
+      return {
+        frozenRigId: rig.id as string | null,
+        frozenRigVersionId: rig.activeVersion.id as string | null,
+      };
+    },
+  );
   // CHANNEL FILING. Pure rail organization: a UUID files the session into that
-  // workspace channel, omission/null leaves it unfiled (inbox). Resolved
+  // workspace channel, omission/null leaves it unfiled (inbox), or files a Site
+  // conversation in its Site's project (the database decides). Resolved
   // workspace-scoped so a foreign channel id can never attach; an explicit
   // unknown channelId is a caller error → 422.
   let channelId: string | null = null;
@@ -2925,13 +3597,20 @@ async function createSessionForRequestInFileScope(
         message: `unknown channelId: ${payload.channelId}`,
       });
     }
+    // Only its owner sees an Only me project, and it holds only their own
+    // Only me chats; the database leaves any other chat out of it.
+    if (channel.visibility === "private" && effectiveVisibility !== "user_private") {
+      throw new HTTPException(422, {
+        message: "An Only me project holds only your own Only me chats.",
+      });
+    }
     channelId = channel.id;
   }
   // A spawned worker is causally part of the exact turn that created it. Omitted
-  // execution policy fields therefore inherit that calling turn rather than the
+  // model and reasoning fields therefore inherit that calling turn rather than the
   // deployment defaults. This is especially important for Codex subscription
   // managers: falling back to the deployment model would silently move a child
-  // onto the OpenGeni-credits billing path. Legacy session-bound grants without
+  // onto the Opengeni-credits billing path. Legacy session-bound grants without
   // exact attempt claims fall back to the parent session's persisted defaults.
   const model = canonicalConfiguredModel(settings, effectiveModelId);
   if (model === null || model === undefined) {
@@ -2941,36 +3620,39 @@ async function createSessionForRequestInFileScope(
   // inherited calling-turn model, or deployment default — so the policy must
   // vet that effective value, not just explicit ones (a restricted workspace's
   // inherited/default-model session would otherwise be born blocked).
-  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
-  // Direct creation is a fresh model selection. Child inheritance and keyed
-  // repair preserve the existing accepted-model/authority rules.
-  if (retainedKeyedShellModel === null && !parentSession) {
-    const selections = await resolveCallerWorkspaceModelSelections(db, settings, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: personalResourceSubjectId ?? grant.subjectId,
-      ...(xaiProviderAccountAuthoritySnapshot
-        ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
-        : {}),
-    });
-    if (!admissibleWorkspaceModel(selections, model)) {
-      throw new HTTPException(422, { message: `model is not selectable: ${model}` });
+  await measureSessionStartPhase(unresolvedDeps.observability, "model_admission", async () => {
+    await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
+    // Direct creation is a fresh model selection. Child inheritance and keyed
+    // repair preserve the existing accepted-model/authority rules.
+    if (retainedKeyedShellModel === null && !parentSession) {
+      const selections = await resolveCallerWorkspaceModelSelections(db, settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: personalResourceSubjectId ?? grant.subjectId,
+        ...(claudeProviderAccountAuthoritySnapshot
+          ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
+          : {}),
+      });
+      if (!admissibleWorkspaceModel(selections, model)) {
+        // Typed as unavailable (it is not selectable for this caller), so the
+        // composer names it instead of showing this developer text.
+        throw new HTTPException(422, {
+          message: `model is not selectable: ${model}`,
+          cause: new ModelUnavailableError(model),
+        });
+      }
     }
-  }
+  });
   const inheritedReasoningEffort =
     parentCallingTurn?.reasoningEffort ??
     parentSession?.reasoningEffort ??
     resolvedDefault?.reasoningEffort ??
     settings.openaiReasoningEffort;
-  const inheritedLatencyMode =
-    parentCallingTurn?.latencyMode ?? parentSession?.latencyMode ?? "standard";
   const reasoningEffort = payload.reasoningEffort ?? inheritedReasoningEffort;
-  const latencyMode = payload.latencyMode ?? inheritedLatencyMode;
-  if (payload.expectedNewSessionDraftRevision !== undefined && payload.rigId === null) {
-    throw new HTTPException(409, {
-      message: "The submitted session options are not represented by the new-session draft",
-    });
-  }
+  // A fresh session never implicitly opts into a faster, higher-cost tier.
+  // This is a fresh-creation default only: replay/repair preserves persisted
+  // policy, and follow-ups use the recipient session's own frozen settings.
+  const latencyMode = payload.latencyMode ?? "standard";
   const expectedNewSessionDraftSnapshot: NewSessionDraftSnapshot | null =
     payload.expectedNewSessionDraftRevision !== undefined
       ? {
@@ -2981,57 +3663,40 @@ async function createSessionForRequestInFileScope(
           model,
           reasoningEffort,
           latencyMode,
-          options: {
-            ...(payload.excludedMcpServerIds !== undefined
-              ? { excludedMcpServerIds: payload.excludedMcpServerIds }
-              : {}),
-            ...(visibilityProvided ? { visibility: payload.visibility } : {}),
-            ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
-            ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
-            ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),
-            ...(variableSets.length
-              ? {
-                  variableSetIds: variableSets.map((variableSet) => variableSet.id),
-                  variableSetId: variableSets.at(-1)!.id,
-                }
-              : {}),
-            ...(payload.rigId ? { rigId: payload.rigId } : {}),
-            ...(payload.goal ? { goal: payload.goal } : {}),
-            ...(payload.firstPartyMcpPermissions
-              ? { firstPartyMcpPermissions: payload.firstPartyMcpPermissions }
-              : {}),
-            ...(payload.firstPartyMcpTools
-              ? { firstPartyMcpTools: payload.firstPartyMcpTools }
-              : {}),
-            ...(payload.agent ? { agent: payload.agent } : {}),
-          },
+          // What this Send carried. After the create is accepted, the draft is
+          // cleared only while it still holds this (or is still at the
+          // revision the sender saw). Every draft option is also a create
+          // field with the same name, so the request supplies the whole
+          // comparable set without a hand-written entry per option.
+          options: comparableNewSessionDraftOptions({
+            ...payload,
+            visibility: visibilityProvided ? payload.visibility : undefined,
+          }),
         }
       : null;
   const inheritedFromParent = parentSession !== null;
-  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-    modelId: model,
-    requestedModelId: payload.model ?? null,
-    modelSource:
-      payload.model === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-    reasoningEffort,
-    reasoningSource:
-      payload.reasoningEffort === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-    latencyMode,
-    latencyModeSource:
-      payload.latencyMode === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-  });
+  const turnExecutionPolicy = withDeveloperSetupCredentialRestriction(
+    resolveTurnExecutionPolicyV1(settings, {
+      modelId: model,
+      requestedModelId: payload.model ?? null,
+      modelSource:
+        payload.model === undefined
+          ? inheritedFromParent
+            ? "continuation"
+            : "deployment"
+          : "explicit",
+      reasoningEffort,
+      reasoningSource:
+        payload.reasoningEffort === undefined
+          ? inheritedFromParent
+            ? "continuation"
+            : "deployment"
+          : "explicit",
+      latencyMode,
+      latencyModeSource: payload.latencyMode === undefined ? "deployment" : "explicit",
+    }),
+    { grant, authorization, trustedMetadata: [parentSession?.metadata] },
+  );
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
   // grant instead of silently expanding to standalone worker defaults.
@@ -3045,6 +3710,7 @@ async function createSessionForRequestInFileScope(
   const parentFirstPartyMcpPermissions = parentSession
     ? [...(parentSession.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)]
     : null;
+  requireDeveloperSetupDelegatedPermissions(turnExecutionPolicy, payload.firstPartyMcpPermissions);
   if (
     parentFirstPartyMcpPermissions &&
     payload.firstPartyMcpPermissions?.some(
@@ -3065,7 +3731,11 @@ async function createSessionForRequestInFileScope(
       ? parentFirstPartyMcpPermissions.filter((permission) =>
           hasPermission(grant.permissions, permission),
         )
-      : null);
+      : grant.permissionMode === "explicit"
+        ? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
+            hasPermission(grant.permissions, permission),
+          )
+        : null);
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
@@ -3074,6 +3744,7 @@ async function createSessionForRequestInFileScope(
         "firstPartyMcpPermissions must not be empty; omit it for the default worker permission set",
     });
   }
+  requireExplicitPermissionDelegation(grant, firstPartyMcpPermissions ?? []);
   for (const permission of firstPartyMcpPermissions ?? []) {
     if (!hasPermission(grant.permissions, permission)) {
       throw new HTTPException(403, {
@@ -3092,30 +3763,26 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpPermissions &&
     !firstPartyMcpPermissions.includes("goals:manage")
   ) {
-    throw new HTTPException(422, {
-      message:
-        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
-    });
+    if (effectiveGoal === automaticGoal) effectiveGoal = undefined;
+    else
+      throw new HTTPException(422, {
+        message:
+          "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+      });
   }
   // Tool visibility is independent from permission authority. A child that
   // omits the field inherits the parent's exact effective selection; a
   // top-level omission selects the workspace's exact default catalog (or the
   // deployment default when the workspace has not configured one).
   const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(settings);
-  const disallowedFirstPartyMcpTool = payload.firstPartyMcpTools?.find(
-    (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
-  );
-  if (disallowedFirstPartyMcpTool) {
-    throw new HTTPException(422, {
-      message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
-    });
-  }
   const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools?.filter(
     (tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
   );
-  const creatorFirstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
+  const resolvedCreatorFirstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
     payload.firstPartyMcpTools,
-    parentSession ? parentSession.firstPartyMcpTools : undefined,
+    parentSession
+      ? resolveSessionFirstPartyMcpTools(settings, parentSession, workspace.settings)
+      : undefined,
     workspaceFirstPartyDefaults && !parentSession
       ? {
           ...deploymentFirstPartyMcpToolPolicy,
@@ -3124,26 +3791,53 @@ async function createSessionForRequestInFileScope(
       : deploymentFirstPartyMcpToolPolicy,
   );
   // Capabilities only narrow the creator's exact legacy selection; "all" keeps it.
+  const followsFirstPartyDefaults =
+    payload.firstPartyMcpTools === undefined &&
+    (!parentSession || parentSession.toolPolicy.firstPartyMode === "workspace_default");
+  // A child following defaults keeps its parent's guaranteed additions; a
+  // top-level session takes them from its trusted entry point.
+  const firstPartyAdditions = followsFirstPartyDefaults
+    ? (parentSession
+        ? (parentSession.toolPolicy.firstPartyAdditions ?? [])
+        : (requestOptions.firstPartyMcpToolAdditions ?? [])
+      ).filter((tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool))
+    : [];
+  if (followsFirstPartyDefaults) {
+    toolPolicy = {
+      ...toolPolicy,
+      firstPartyMode: "workspace_default",
+      ...(firstPartyAdditions.length
+        ? { firstPartyAdditions: [...new Set(firstPartyAdditions)] }
+        : {}),
+    };
+  }
+  const creatorFirstPartyMcpTools = firstPartyAdditions.length
+    ? [...new Set([...resolvedCreatorFirstPartyMcpTools, ...firstPartyAdditions])]
+    : resolvedCreatorFirstPartyMcpTools;
   const firstPartyMcpTools = applySessionAgentConfigWriteThrough({
     config: agentConfig,
     firstPartyMcpTools: creatorFirstPartyMcpTools,
-    // Slack computes its own baseline selection; only a caller's own explicit
-    // list is checked strictly against the capabilities.
+    // Only an agent's own explicit list is checked strictly against the
+    // capabilities: it reads the live tool catalog, so a conflict is its
+    // mistake. An API or SDK client was built against a capability map that
+    // grows (a tool can move under a capability it turns off), so its list is
+    // narrowed to the capabilities like the default selection, never refused.
+    // Slack computes its own baseline selection.
     explicitFirstPartyMcpTools:
-      agentConfigCreator === "slack" ? undefined : payload.firstPartyMcpTools,
+      agentConfigCreator === "slack" || grant.principalKind !== "agent_attempt"
+        ? undefined
+        : payload.firstPartyMcpTools,
     tools: [],
     toolPolicy,
     productServerIds: [],
   }).firstPartyMcpTools;
-  const googleDrivePublicationEnabled =
-    firstPartyMcpTools.includes("editable_artifact_export") &&
-    firstPartyMcpTools.includes("editable_artifact_export_status") &&
-    (!firstPartyMcpPermissions?.length ||
-      (firstPartyMcpPermissions.includes("artifacts:read") &&
-        firstPartyMcpPermissions.includes("artifacts:publish")));
-  const atlassianEnabled =
-    firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-    (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
+  tools = newSessionKnowledgeSearchTools(
+    tools,
+    agentConfig,
+    firstPartyMcpTools,
+    settings.mcpServers,
+  );
+  const openingTools = newSessionOpeningTools(tools, firstPartyMcpTools, payload.modelContextTools);
   // Creation's stored tool snapshot can omit configured workspace defaults.
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.
@@ -3155,23 +3849,27 @@ async function createSessionForRequestInFileScope(
       workspace.settings,
     ),
   });
-  const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
-    db,
-    accountId: grant.accountId,
-    workspaceId,
-    settings: runtimeSettings,
-    tools: connectionAccountTools,
-    resources,
-    source: connectionDelegationSource,
-    authoritySelections: payload.connectionAccounts,
-    googleDrivePublicationEnabled,
-    atlassianEnabled,
-  });
+  const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
+    await measureSessionStartPhase(unresolvedDeps.observability, "connection_freeze", () =>
+      freezeConnectionAccounts({
+        db,
+        accountId: grant.accountId,
+        workspaceId,
+        settings: runtimeSettings,
+        tools: connectionAccountTools,
+        resources,
+        source: connectionDelegationSource,
+        authoritySelections: payload.connectionAccounts,
+        autoConnect: { settings: unresolvedDeps.settings },
+      }),
+    );
   if (effectiveGoal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
     );
-    if (missingGoalTools.length > 0) {
+    if (missingGoalTools.length > 0 && effectiveGoal === automaticGoal) {
+      effectiveGoal = undefined;
+    } else if (missingGoalTools.length > 0) {
       throw new HTTPException(422, {
         message: `goal-bearing sessions require first-party MCP tools: ${missingGoalTools.join(", ")}`,
       });
@@ -3224,27 +3922,10 @@ async function createSessionForRequestInFileScope(
     sandboxId: string;
     workingDir: string | null;
   } | null = null;
-  // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace VariableSet is
-  // creation-time box state — the box's manifest env is fixed when it is cold-
-  // created, and the SDK's provided-session guard rejects any manifest-env delta
-  // at attach. A session carrying a DIFFERENT VariableSet than the box it joins
-  // is therefore a genuine shared-state conflict TODAY: its first turn on a warm
-  // box dies with "Live sandbox sessions cannot change manifest variableSet
-  // variables" (proven live, sessions 5aee77e9 + 63d18823). Until the VariableSet
-  // is evicted from the manifest (per-exec, like the git token), grouping must be
-  // env-aware: the INHERITED default falls back to an own box on mismatch (a
-  // credentialed worker spawned from a credential-less manager just works), and
-  // an EXPLICIT shared/{groupId} request with a mismatched VariableSet fails
-  // fast at create (422) instead of poisoning the session's first turn.
-  // The env conflict is a BOX property, so a boxless group is exempt: a
-  // backend:"none" session runs in-process with no sandbox, no manifest, and no
-  // provided-session attach — no shared box state exists to conflict, and
-  // env-differing spawns from such parents shared safely before the env-aware
-  // check. They keep sharing (and keep inheriting "none").
-  const requestedVariableSetIds = variableSets.map((variableSet) => variableSet.id);
-  const variableSetsMatchGroup = (memberVariableSetIds: readonly string[]): boolean =>
-    stableJson(memberVariableSetIds) === stableJson(requestedVariableSetIds);
-  // RIG-AWARE GROUPING (M3), the exact sibling of the env-aware gate above: the
+  // Variable Sets no longer split boxes (W1 secrets delivery): user secrets are
+  // resolved per command from `{{secret:…}}` references and never ride the box
+  // manifest, so sessions with different selections share a box safely.
+  // RIG-AWARE GROUPING (M3): the
   // box's rig-baked setup/tooling is fixed at cold-create, so a session joining a
   // shared box must ride the SAME frozen rig_version_id. A mismatch is a genuine
   // shared-state conflict (the box was set up for a different rig) — the INHERITED
@@ -3267,7 +3948,6 @@ async function createSessionForRequestInFileScope(
     }
     const parent = parentSession;
     const parentBoxed = parent.sandboxBackend !== "none";
-    const variableSetMismatch = parentBoxed && !variableSetsMatchGroup(parent.variableSetIds);
     let rigMismatch = parentBoxed && !rigVersionMatchesGroup(parent.rigVersionId ?? null);
     if (parentBoxed && !rigMismatch) {
       const memberRigVersionIds = await listDistinctRigVersionIdsInGroup(
@@ -3279,16 +3959,13 @@ async function createSessionForRequestInFileScope(
         rigVersionMatchesGroup(memberRigVersionId),
       );
     }
-    if (variableSetMismatch || rigMismatch) {
+    if (rigMismatch) {
       if (payload.sandbox === "shared") {
-        // The caller explicitly asked to share while carrying a different
-        // VariableSet / rig — surface the conflict at create time, not turn time.
-        // VariableSet is checked first so its (pre-rig) message is unchanged for
-        // the env-only mismatch the existing gate already covered.
+        // The caller explicitly asked to share while carrying a different rig —
+        // surface the conflict at create time, not turn time.
         throw new HTTPException(422, {
-          message: variableSetMismatch
-            ? "sandbox:'shared' requires the same variableSet / same environment as the creator's box (the box variable set/environment is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet/environment."
-            : "sandbox:'shared' requires the same sandbox environment as the creator's box (setup is fixed at creation); omit sandbox or pass 'new' when selecting a different sandbox environment.",
+          message:
+            "sandbox:'shared' requires the same sandbox environment as the creator's box (setup is fixed at creation); omit sandbox or pass 'new' when selecting a different sandbox environment.",
         });
       }
       // Inherited default: deterministic separation on the genuine shared-state
@@ -3318,26 +3995,7 @@ async function createSessionForRequestInFileScope(
       });
     }
     if (member.sandboxBackend !== "none") {
-      // Compare against EVERY member, not one arbitrary row: a legacy env-blind
-      // group can carry mixed variableSetIds, and an any-member read would make
-      // the join verdict nondeterministic. Post-env-aware groups are homogeneous
-      // (both join paths enforce equality), so this reads one distinct value in
-      // the common case; a mixed legacy group deterministically rejects.
-      const memberVariableSetSelections = await listDistinctVariableSetSelectionsInGroup(
-        db,
-        workspaceId,
-        sandboxChoice.groupId,
-      );
-      if (
-        !memberVariableSetSelections.every((memberVariableSetIds) =>
-          variableSetsMatchGroup(memberVariableSetIds),
-        )
-      ) {
-        throw new HTTPException(422, {
-          message: `sandbox group ${sandboxChoice.groupId} runs a different variableSet / different environment (the box variable set/environment is fixed at creation); create with the group's variableSet/environment or omit sandbox for an own box.`,
-        });
-      }
-      // Same deterministic all-members check for the frozen rig version (M3): the
+      // Deterministic all-members check for the frozen rig version (M3): the
       // box's rig setup is fixed at creation, so every member must ride the rig
       // this create resolved (or the group is rig-less and so is this create).
       const memberRigVersionIds = await listDistinctRigVersionIdsInGroup(
@@ -3358,6 +4016,18 @@ async function createSessionForRequestInFileScope(
     sandboxGroupId = sandboxChoice.groupId;
     inheritedBackend = member.sandboxBackend;
     inheritedSandboxOs = member.sandboxOs;
+    // Naming the creator's own group is the explicit spelling of "shared".
+    // The machine route is session-local, so copy the trusted parent's exact
+    // route as the omitted default does; otherwise the child lands on the
+    // group's managed box, a different filesystem from the creator's machine.
+    if (parentSession && parentSession.sandboxGroupId === sandboxChoice.groupId) {
+      inheritedActiveTarget = parentSession.activeSandboxId
+        ? {
+            sandboxId: parentSession.activeSandboxId,
+            workingDir: parentSession.workingDir,
+          }
+        : null;
+    }
   }
   // else "new": leave sandboxGroupId null → own singleton group (group ≡ id).
   // A working dir is only meaningful for a TARGETED machine (it is the chosen
@@ -3460,33 +4130,38 @@ async function createSessionForRequestInFileScope(
         "self-hosted execution runs on a Connected Machine, but no machine was selected or inherited; connect the parent session to a machine or provide machineTarget",
     });
   }
-  if (payload.startMode !== "realtime") {
-    const frozenCreationInitiator = await withWorkspaceSessionActivityRls(
-      db,
-      workspaceId,
-      (scopedDb) =>
-        frozenInitiatorForCommandActor(
-          scopedDb,
-          workspaceId,
-          creationInitiator.actor ??
-            (creationInitiator.initiator?.kind === "service"
-              ? {
-                  type: "service",
-                  subjectId: creationInitiator.initiator.subjectId,
-                  ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
-                }
-              : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
-          grant.subjectLabel,
+  if (payload.startMode !== "realtime" && !model.startsWith("codex/")) {
+    const frozenCreationInitiator = await measureSessionStartPhase(
+      unresolvedDeps.observability,
+      "initiator_freeze",
+      () =>
+        withWorkspaceSessionActivityRls(db, workspaceId, (scopedDb) =>
+          frozenInitiatorForCommandActor(
+            scopedDb,
+            workspaceId,
+            creationInitiator.actor ??
+              (creationInitiator.initiator?.kind === "service"
+                ? {
+                    type: "service",
+                    subjectId: creationInitiator.initiator.subjectId,
+                    ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
+                  }
+                : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
+            grant.subjectLabel,
+          ),
         ),
     );
-    await requireLimit(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      initiatingHumanSubjectId: initiatingHumanForAllowance(frozenCreationInitiator),
-      action: "agent_run:create",
-      quantity: 1,
-      model,
-    });
+    await measureSessionStartPhase(unresolvedDeps.observability, "allowance", () =>
+      requireLimit(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        initiatingHumanSubjectId: initiatingHumanForAllowance(frozenCreationInitiator),
+        action: "agent_run:create",
+        quantity: 1,
+        model,
+        billingOrigin,
+      }),
+    );
   }
   const initialLearning =
     payload.agentLearning && Object.keys(payload.agentLearning).length
@@ -3502,16 +4177,35 @@ async function createSessionForRequestInFileScope(
     });
   }
   const initialLearningScope =
-    effectiveVisibility === "user_private" ||
-    sessionScope.memoryScope === "user" ||
-    workspace.kind === "personal"
+    effectiveVisibility === "user_private" || sessionScope.memoryScope === "user"
       ? ("personal" as const)
       : ("workspace" as const);
   const initialLearningActor = initialLearningContext?.actor;
+  const initialUsageLimit =
+    initialUsageLimitActor && payload.usageLimitMicros != null
+      ? { actor: initialUsageLimitActor, limitMicros: payload.usageLimitMicros }
+      : hostInitialUsageLimit
+        ? {
+            actor: { type: "host" as const, subjectId: hostInitialUsageLimit.subjectId },
+            limitMicros: hostInitialUsageLimit.limitMicros,
+          }
+        : null;
+  const applyInitialUsageLimit = initialUsageLimit
+    ? async (tx: Database, sessionId: string) =>
+        await applyInitialSessionUsageLimit(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          limitMicros: initialUsageLimit.limitMicros,
+          actor: initialUsageLimit.actor,
+          producerEnabled: sessionUsageLimitsProducerEnabled(unresolvedDeps.settings),
+        })
+    : null;
   const beforeCreateCommit =
     initialLearning && initialLearningContext && initialLearningActor?.kind === "human"
       ? async (tx: Database, sessionId: string) => {
           await externalBeforeCreateCommit?.(tx);
+          await applyInitialUsageLimit?.(tx, sessionId);
           await saveAgentLearningSettings(
             tx,
             {
@@ -3527,7 +4221,12 @@ async function createSessionForRequestInFileScope(
             },
           );
         }
-      : externalBeforeCreateCommit;
+      : applyInitialUsageLimit
+        ? async (tx: Database, sessionId: string) => {
+            await externalBeforeCreateCommit?.(tx);
+            await applyInitialUsageLimit(tx, sessionId);
+          }
+        : externalBeforeCreateCommit;
   let createOutcome: CreateSessionOutcome;
   try {
     createOutcome = await createAndStartSessionWithOutcome({
@@ -3541,8 +4240,15 @@ async function createSessionForRequestInFileScope(
       visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
       surface,
+      billingOrigin,
+      metrics: unresolvedDeps.observability ?? null,
+      ...(unresolvedDeps.observability
+        ? { startupObservability: unresolvedDeps.observability }
+        : {}),
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
+      timeZone: payload.timeZone ?? null,
+      ...(openingTools.length ? { openingTools } : {}),
       resources,
       skills,
       bundledSkillIds,
@@ -3574,6 +4280,32 @@ async function createSessionForRequestInFileScope(
               turnId: string,
             ) => {
               await captureLinkedAuthority?.(tx, sessionId, turnId);
+              if (initialAppActionGrant)
+                await recordTurnAppActionGrant(tx, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  turnId,
+                  grant: initialAppActionGrant,
+                });
+              if (model.startsWith("codex/")) {
+                await requireLimit(
+                  { ...deps, db: tx },
+                  {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
+                      tx,
+                      workspaceId,
+                      turnId,
+                    ),
+                    action: "agent_run:create",
+                    quantity: 1,
+                    model,
+                    billingOrigin,
+                    acceptedTurn: { sessionId, turnId },
+                  },
+                );
+              }
               if (attachmentOwner)
                 await acceptSessionFileAttachments(tx, {
                   accountId: grant.accountId,
@@ -3589,11 +4321,6 @@ async function createSessionForRequestInFileScope(
       ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
       ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
       createdByActor: creationInitiator.actor ?? null,
-      variableSets: variableSets.map((variableSet) => ({
-        id: variableSet.id,
-        name: variableSet.name,
-        scope: variableSet.scope,
-      })),
       // Frozen rig binding (M3): both null for a rig-less session (today's path).
       rigId: frozenRigId,
       rigVersionId: frozenRigVersionId,
@@ -3604,6 +4331,17 @@ async function createSessionForRequestInFileScope(
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
+      // The agent the chat starts with: its Instructions are a prompt layer
+      // of their own, never copied into `instructions`.
+      ...(payload.agentId ? { boundAgentId: payload.agentId } : {}),
+      // No person answers during the task. Never inherited by a child.
+      ...(payload.unattended === true ? { unattended: true } : {}),
+      // Session and agent-config vault narrowing, intersected (AX-2). Ancestor
+      // policies apply again whenever this session resolves a reference.
+      vaultPolicy: intersectVaultPolicies(
+        lowercaseVaultPolicy(payload.vaultPolicy ?? VAULT_POLICY_ALL),
+        lowercaseVaultPolicy(payload.agent?.vaultPolicy ?? VAULT_POLICY_ALL),
+      ),
       policyRole: payload.policyRole ?? null,
       agentAccess: sessionScope.agentAccess,
       scopeSubjectId: sessionScope.scopeSubjectId,
@@ -3616,10 +4354,12 @@ async function createSessionForRequestInFileScope(
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
       mcpAccountBindings,
+      connectionAccountIntent,
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
+      ...(claudeProviderAccountAuthoritySnapshot ? { claudeProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
       selectedInstalledSkillIds,
@@ -3736,7 +4476,7 @@ export async function createSessionForRequest(
 }
 
 function sessionPromptBoundaryRequestHash(input: {
-  delivery: "send" | "steer";
+  delivery: SessionPromptDelivery;
   controlEtag: string | null;
   expectedDraftRevision: number | null;
   text: string;
@@ -3746,7 +4486,7 @@ function sessionPromptBoundaryRequestHash(input: {
   composerDraftResources?: ResourceRef[];
   model: string | null;
   reasoningEffort: ReasoningEffort | null;
-  latencyMode: "standard" | "priority" | "fast" | null;
+  latencyMode: "standard" | "priority" | "fast" | "ultrafast" | null;
   source: "user" | "api";
   mcpCredentialUpdates: SessionMcpCredentialUpdateInput[];
   connectionAccounts?: McpConnectionAccountSelection[];
@@ -3803,21 +4543,27 @@ async function acceptSessionUserMessageInFileScope(
     composerDraftResources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
-    latencyMode?: "standard" | "priority" | "fast" | null;
+    latencyMode?: "standard" | "priority" | "fast" | "ultrafast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAccounts?: McpConnectionAccountSelection[];
-    delivery?: "send" | "steer";
+    delivery?: SessionPromptDelivery;
+    /** The sender's IANA zone as the client reported it; unresolvable names are ignored. */
+    timeZone?: string | null;
     origin?: "human" | "operator";
     /**
      * Product surface when the entry point knows it (for example Slack or an
      * in-process embedding host). Omitted derives it from the grant.
      */
     surface?: SessionTurnSurface;
+    /** Who pays, when the entry point knows it (see resolveTurnBillingOrigin). */
+    billingOrigin?: BillingOrigin;
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     authorization?: AccessGrantAuthorization;
+    /** Trusted Teams inbox reference; never populated from public JSON. */
+    teamsConversation?: TeamsConversationProof;
   },
 ): Promise<{
   accepted: SessionEvent;
@@ -3826,10 +4572,27 @@ async function acceptSessionUserMessageInFileScope(
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  waitsForMachineOwner: boolean;
   replay: boolean;
 }> {
   const { db, bus, workflowClient, objectStorage } = deps;
+  const teamsCommitAuthorizer = input.teamsConversation
+    ? await authorizeTeamsConversationAdmission(deps, grant, {
+        workspaceId,
+        sessionId,
+        initialMessage: input.text,
+        proof: input.teamsConversation,
+      })
+    : undefined;
 
+  // Who pays for this message's work, frozen on its turn.
+  const billingOrigin = await resolveTurnBillingOrigin(db, {
+    grant,
+    authorization: input.authorization,
+    // A Teams conversation is a bot set up in the app.
+    requestedOrigin: input.billingOrigin ?? (input.teamsConversation ? "app" : undefined),
+    requestedSurface: input.surface,
+  });
   const promptInitiator = creationInitiatorForGrant(grant);
   const delegatedServiceInitiator =
     promptInitiator.initiator?.kind === "service"
@@ -3847,15 +4610,17 @@ async function acceptSessionUserMessageInFileScope(
         context: delegatedServiceInitiator.context,
       }
     : (promptInitiator.actor ?? { type: "human", subjectId: grant.subjectId });
+  // `steer_or_send` may steer, so it needs Steer authority.
   await requireSessionAuthorization(deps, grant, {
     sessionId,
-    operation: delivery === "steer" ? "session.steer" : "session.append",
+    operation: delivery === "send" ? "session.append" : "session.steer",
     surface: "core",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
   const composerDraftResources = input.composerDraftResources
     ? normalizeResources(input.composerDraftResources)
     : undefined;
+  const timeZone = normalizeMessageTimeZone(input.timeZone);
   const boundaryRequestHash = input.clientEventId
     ? sessionPromptBoundaryRequestHash({
         delivery,
@@ -3875,6 +4640,8 @@ async function acceptSessionUserMessageInFileScope(
         ...(input.personalResourceAttachment
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),
+        // The sender's zone is deliberately not part of the request identity:
+        // a retry that names another zone (or none) replays the original turn.
         commandActor,
       })
     : null;
@@ -3926,6 +4693,13 @@ async function acceptSessionUserMessageInFileScope(
     // pure read with no side effects.
     const existingSession = await requireSession(db, workspaceId, sessionId);
     assertSessionIsNotImported(existingSession);
+    // a reached task usage limit refuses a fresh Send/Steer here,
+    // after exact replays returned above and before any queue/interrupt write.
+    await requireSessionUsageLimitAllows(
+      db,
+      { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
+      { sink: deps.observability, boundary: delivery === "send" ? "send" : "steer" },
+    );
     const settings = await resolveWorkspaceModelBoundarySettings(
       deps,
       grant,
@@ -3947,27 +4721,22 @@ async function acceptSessionUserMessageInFileScope(
       throw new Error("effective follow-up model unexpectedly resolved to null");
     }
     await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
-    try {
-      assertSessionAllowsProductModel(existingSession, effectiveModel);
-    } catch (error) {
-      if (error instanceof CodexCompactionV2ProviderLockedError) {
-        throw new HTTPException(422, { message: error.message, cause: error });
-      }
-      throw error;
-    }
     const sessionReasoningEffort = existingSession.reasoningEffort;
     const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
     const sessionLatencyMode = existingSession.latencyMode;
     const effectiveLatencyMode = input.latencyMode ?? sessionLatencyMode;
-    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: effectiveModel,
-      requestedModelId: input.model ?? null,
-      modelSource: input.model == null ? "session" : "explicit",
-      reasoningEffort: effectiveReasoningEffort,
-      reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
-      latencyMode: effectiveLatencyMode,
-      latencyModeSource: input.latencyMode == null ? "session" : "explicit",
-    });
+    const turnExecutionPolicy = withDeveloperSetupCredentialRestriction(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: effectiveModel,
+        requestedModelId: input.model ?? null,
+        modelSource: input.model == null ? "session" : "explicit",
+        reasoningEffort: effectiveReasoningEffort,
+        reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+        latencyMode: effectiveLatencyMode,
+        latencyModeSource: input.latencyMode == null ? "session" : "explicit",
+      }),
+      { grant, authorization: input.authorization, trustedMetadata: [existingSession.metadata] },
+    );
     if (composerDraftResources) {
       const acceptedResources = new Set(requestedResources.map((resource) => stableJson(resource)));
       const unacceptedDraftResource = composerDraftResources.find(
@@ -3993,8 +4762,10 @@ async function acceptSessionUserMessageInFileScope(
         frozenInitiatorForCommandActor(scopedDb, workspaceId, admissionActor, grant.subjectLabel),
     );
     // Re-submitting a checked-out queue edit retains the original turn's
-    // causal human, just as the locked prompt transaction does.
-    if (delivery === "send" && input.expectedDraftRevision != null) {
+    // causal human when its own sender resubmits it, just as the locked
+    // prompt transaction does. Anyone else's edit is their own message.
+    // A queue edit resubmitted with `steer_or_send` is always a Send.
+    if (delivery !== "steer" && input.expectedDraftRevision != null) {
       const draft = await withWorkspaceSubjectSessionActivityRls(
         db,
         workspaceId,
@@ -4009,7 +4780,7 @@ async function acceptSessionUserMessageInFileScope(
       if (draft?.revision === input.expectedDraftRevision && draft.sourceTurnId) {
         const sourceTurn = await getSessionTurn(db, workspaceId, draft.sourceTurnId);
         if (sourceTurn?.sessionId === sessionId) {
-          frozenAdmissionInitiator = {
+          const sourceInitiator = {
             initiator: sourceTurn.initiator,
             context: sourceTurn.initiatorContext,
             initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
@@ -4018,17 +4789,23 @@ async function acceptSessionUserMessageInFileScope(
               sourceTurn.id,
             ),
           };
+          if (sameTurnSender(sourceInitiator, frozenAdmissionInitiator)) {
+            frozenAdmissionInitiator = sourceInitiator;
+          }
         }
       }
     }
-    await requireLimit(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
-      action: "agent_run:create",
-      quantity: 1,
-      model: effectiveModel,
-    });
+    if (!effectiveModel.startsWith("codex/")) {
+      await requireLimit(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
+        action: "agent_run:create",
+        quantity: 1,
+        model: effectiveModel,
+        billingOrigin,
+      });
+    }
     if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, {
         message: "object storage is not configured",
@@ -4038,7 +4815,7 @@ async function acceptSessionUserMessageInFileScope(
       ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
       : grant.principalKind === "agent_attempt"
         ? await fileOwnerContextForAgent({ db }, grant, "sessions:control")
-        : undefined;
+        : await inProcessFileOwnerContext({ db }, grant, sessionId, requestedResources);
     await validateFileResources(
       db,
       grant.accountId,
@@ -4047,8 +4824,15 @@ async function acceptSessionUserMessageInFileScope(
       requestedResources,
       attachmentOwnerContext,
     );
+    // The chat's automatically attached repositories that later lose access
+    // (the installation is removed, or the repository is taken out of it)
+    // must not refuse every later message: the worker drops each one for
+    // the turn and reports it as skipped. Repositories this message adds and
+    // ones the person attached explicitly are still checked here.
     await validateGitHubRepositorySelection(db, workspaceId, [
-      ...existingSession.resources,
+      ...existingSession.resources.filter(
+        (resource) => !isOptionalGitHubAppRepositoryResource(resource),
+      ),
       ...requestedResources,
     ]);
     const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
@@ -4086,90 +4870,132 @@ async function acceptSessionUserMessageInFileScope(
     // raw column is not the connector allow-list this follow-up executes with.
     // Freeze accounts against the same resolved list the composer and the
     // worker see.
+    const connectionWorkspace = await requireWorkspace(db, workspaceId);
     const connectionAccountTools = sessionToolsForConnectionAccounts({
       session: existingSession,
       runtimeMcpServers: runtimeSettings.mcpServers,
       defaultMcpServerIds: workspaceSessionToolPolicyDefaultServerIdsFor(
         capabilityRuntimeSettings.mcpServers,
-        (await requireWorkspace(db, workspaceId)).settings,
+        connectionWorkspace.settings,
       ),
     });
-    const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
-      db,
-      accountId: grant.accountId,
-      workspaceId,
-      settings: runtimeSettings,
-      tools: connectionAccountTools,
-      resources: [...existingSession.resources, ...requestedResources],
-      source: connectionDelegationSource,
-      targetSessionId: sessionId,
-      googleDrivePublicationEnabled:
-        existingSession.firstPartyMcpTools.includes("editable_artifact_export") &&
-        existingSession.firstPartyMcpTools.includes("editable_artifact_export_status") &&
-        (!existingSession.firstPartyMcpPermissions?.length ||
-          (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
-            existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),
-      atlassianEnabled:
-        existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-        (!existingSession.firstPartyMcpPermissions?.length ||
-          existingSession.firstPartyMcpPermissions.includes("connections:read")),
-      ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
-    });
-
-    const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
-    const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
-      await postUserMessageTurn({
+    const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
+      await freezeConnectionAccounts({
         db,
-        bus,
-        workflowClient,
-        settings,
         accountId: grant.accountId,
         workspaceId,
-        sessionId,
-        text: input.text,
-        annotations,
-        modelContext: input.modelContext ?? null,
-        resources: requestedResources,
-        ...(composerDraftResources ? { composerDraftResources } : {}),
-        model: input.model ?? null,
-        reasoningEffort: input.reasoningEffort ?? null,
-        latencyMode: input.latencyMode ?? null,
-        reasoningEffortFallback: sessionReasoningEffort,
-        turnExecutionPolicy,
-        mcpCredentialUpdates,
-        personalConnectionDelegations,
-        mcpAccountBindings,
-
-        ...(captureLinkedAuthority
-          ? {
-              captureTurnAuthority: (tx: Database, turnId: string) =>
-                captureLinkedAuthority(tx, sessionId, turnId),
-            }
-          : {}),
-        ...(input.personalResourceAttachment
-          ? { personalResourceAttachment: input.personalResourceAttachment }
-          : {}),
-        delivery,
-        origin: source === "api" ? "operator" : "human",
-        surface: resolveTurnSurface({
-          grant,
-          authorization: input.authorization,
-          requested: input.surface,
-        }),
-        actor: grant.subjectId,
-        ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
-        commandActor,
-        ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
-        ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
-        ...(input.expectedDraftRevision !== undefined
-          ? { expectedDraftRevision: input.expectedDraftRevision }
-          : {}),
-        ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-        recordAgentRunUsage: true,
-        ...(deps.schedulePromptPostCommit
-          ? { schedulePostCommit: deps.schedulePromptPostCommit }
-          : {}),
+        settings: runtimeSettings,
+        tools: connectionAccountTools,
+        resources: [...existingSession.resources, ...requestedResources],
+        source: connectionDelegationSource,
+        targetSessionId: sessionId,
+        ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
+        autoConnect: { settings: deps.settings },
       });
+
+    const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
+    const surface = resolveTurnSurface({
+      grant,
+      authorization: input.authorization,
+      requested: input.surface,
+    });
+    // What this message may do through app actions, frozen with its turn.
+    const appActionGrant = turnAppActionGrant({
+      grant,
+      authorization: input.authorization,
+      delegatedSignInChangesEnabled: deps.settings.delegatedSignInAppActionChangesEnabled === true,
+      workspaceSettings:
+        input.authorization !== undefined &&
+        (await workspaceSettingsAuthorized(deps, input.authorization, workspaceId)),
+    });
+    // A person writing in a chat an automation started is there to answer:
+    // its unattended default ends before this turn can be claimed. An
+    // explicit choice (the chat's switch or the API) stays.
+    if (existingSession.unattended === true && messageSentByPerson({ source, surface })) {
+      await endSessionUnattendedDefault(db, { workspaceId, sessionId: existingSession.id });
+    }
+    const {
+      accepted,
+      turn,
+      draft,
+      receipt,
+      routing,
+      interruptionCount,
+      waitsForMachineOwner,
+      replay,
+    } = await postUserMessageTurn({
+      db,
+      bus,
+      workflowClient,
+      settings,
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+      text: input.text,
+      annotations,
+      modelContext: input.modelContext ?? null,
+      resources: requestedResources,
+      ...(composerDraftResources ? { composerDraftResources } : {}),
+      model: input.model ?? null,
+      reasoningEffort: input.reasoningEffort ?? null,
+      latencyMode: input.latencyMode ?? null,
+      reasoningEffortFallback: sessionReasoningEffort,
+      turnExecutionPolicy,
+      mcpCredentialUpdates,
+      personalConnectionDelegations,
+      mcpAccountBindings,
+      connectionAccountIntent,
+      ...(timeZone ? { timeZone } : {}),
+
+      captureTurnAuthority: async (tx: Database, turnId: string) => {
+        await teamsCommitAuthorizer?.(tx);
+        await captureLinkedAuthority?.(tx, sessionId, turnId);
+        if (appActionGrant)
+          await recordTurnAppActionGrant(tx, {
+            accountId: grant.accountId,
+            workspaceId,
+            turnId,
+            grant: appActionGrant,
+          });
+        // The prompt transaction has frozen the exact authority at this
+        // point. A refusal rolls back both prompt and receipt atomically.
+        if (effectiveModel.startsWith("codex/"))
+          await requireLimit(
+            { ...deps, db: tx },
+            {
+              accountId: grant.accountId,
+              workspaceId,
+              initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
+              action: "agent_run:create",
+              quantity: 1,
+              model: effectiveModel,
+              billingOrigin,
+              acceptedTurn: { sessionId, turnId },
+            },
+          );
+      },
+      ...(input.personalResourceAttachment
+        ? { personalResourceAttachment: input.personalResourceAttachment }
+        : {}),
+      delivery,
+      origin: source === "api" ? "operator" : "human",
+      surface,
+      billingOrigin,
+      actor: grant.subjectId,
+      ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
+      commandActor,
+      ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
+      ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
+      ...(input.expectedDraftRevision !== undefined
+        ? { expectedDraftRevision: input.expectedDraftRevision }
+        : {}),
+      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+      recordAgentRunUsage: true,
+      ...(deps.schedulePromptPostCommit
+        ? { schedulePostCommit: deps.schedulePromptPostCommit }
+        : {}),
+    });
+    if (!replay) recordUserMessageAccepted(deps.observability, { surface });
     return {
       accepted,
       turn,
@@ -4177,6 +5003,7 @@ async function acceptSessionUserMessageInFileScope(
       receipt,
       routing,
       interruptionCount,
+      waitsForMachineOwner,
       replay,
     };
   } catch (error) {
@@ -4233,11 +5060,12 @@ export async function acceptSessionUserMessage(
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  waitsForMachineOwner: boolean;
   replay: boolean;
 }> {
-  const { accepted, turn, receipt, routing, interruptionCount, replay } =
+  const { accepted, turn, receipt, routing, interruptionCount, waitsForMachineOwner, replay } =
     await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, input);
-  return { accepted, turn, receipt, routing, interruptionCount, replay };
+  return { accepted, turn, receipt, routing, interruptionCount, waitsForMachineOwner, replay };
 }
 
 /**
@@ -4287,12 +5115,160 @@ export async function updateSessionTitle(
   };
 }
 
-/** Change future defaults without accepting a prompt or touching accepted work. */
+/**
+ * Rename a chat and change its description or avatar: the shared path for the
+ * PATCH route and the agent's title tools. Only what is named changes.
+ *
+ * A rename through this path is a deliberate name, whoever makes it: the
+ * agent's title is cleaned like any model-written title, then stored as a
+ * chosen name, so automatic titling never replaces it. Only automatic titling
+ * (which writes through `updateSessionTitle` directly) is kept off a chosen
+ * name. An image avatar must already have been checked by the caller.
+ */
+export async function updateSessionProfile(
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  change: {
+    title?: string | undefined;
+    description?: string | null | undefined;
+    avatar?: SessionAvatar | null | undefined;
+  },
+  source: "user" | "agent",
+): Promise<{
+  titleUpdated: boolean;
+  profileUpdated: boolean;
+  title: string | null;
+  description: string | null;
+  avatar: SessionAvatar | null;
+  relatedSessionAccess: "target" | "root";
+}> {
+  let title: string | null = null;
+  let titleUpdated = false;
+  let relatedSessionAccess: "target" | "root" = "root";
+  if (change.title !== undefined) {
+    const name = source === "agent" ? normalizeAutomaticSessionTitle(change.title) : change.title;
+    if (name !== null) {
+      const result = await updateSessionTitle(deps, grant, sessionId, name, "user");
+      title = result.title;
+      titleUpdated = result.updated;
+      relatedSessionAccess = result.relatedSessionAccess;
+    }
+  }
+  if (change.description === undefined && change.avatar === undefined) {
+    const current = await getSession(deps.db, grant.workspaceId, sessionId);
+    return {
+      titleUpdated,
+      profileUpdated: false,
+      title: title ?? current?.title ?? null,
+      description: current?.description ?? null,
+      avatar: current?.avatar ?? null,
+      relatedSessionAccess,
+    };
+  }
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.title.write",
+    surface: "core",
+  });
+  relatedSessionAccess = authorization?.relatedSessionAccess ?? relatedSessionAccess;
+  const result = await updateSessionProfileWithEvent(deps.db, {
+    workspaceId: grant.workspaceId,
+    sessionId,
+    ...(change.description !== undefined ? { description: change.description } : {}),
+    ...(change.avatar !== undefined ? { avatar: change.avatar } : {}),
+    source,
+  });
+  if (result.events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, result.events);
+  }
+  if (title === null) {
+    title = (await getSession(deps.db, grant.workspaceId, sessionId))?.title ?? null;
+  }
+  return {
+    titleUpdated,
+    profileUpdated: result.updated,
+    title,
+    description: result.description,
+    avatar: result.avatar,
+    relatedSessionAccess,
+  };
+}
+
+/**
+ * Set or clear the session's keep-live exemption from the idle-session archive.
+ * Archived sessions are read-only and reject the change.
+ */
+export async function setSessionRetention(
+  deps: {
+    db: Database;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  keepLive: boolean,
+): Promise<{
+  result: SetSessionKeepLiveResult;
+  relatedSessionAccess: "target" | "root";
+}> {
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.retention.write",
+    surface: "core",
+  });
+  const result = await setSessionKeepLive(deps.db, {
+    workspaceId: grant.workspaceId,
+    sessionId,
+    keepLive,
+  });
+  return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
+}
+
+/**
+ * Turn a chat's unattended mode on or off ("work without me") from its next
+ * turn. An explicit choice: a person's later message does not change it.
+ */
+export async function setSessionUnattended(
+  deps: {
+    db: Database;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  unattended: boolean,
+): Promise<{
+  result: SetSessionUnattendedResult;
+  relatedSessionAccess: "target" | "root";
+}> {
+  requirePermission(grant, "sessions:control");
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.tool_policy.write",
+    surface: "core",
+  });
+  const result = await setSessionUnattendedSetting(deps.db, {
+    workspaceId: grant.workspaceId,
+    sessionId,
+    unattended,
+  });
+  return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
+}
+
+/**
+ * Change the chat's model for future turns. A turn that is waiting for
+ * subscription capacity moves onto the new model too and continues, because
+ * switching away from a model without capacity is how the wait ends sooner.
+ */
 export async function setSessionModel(
   deps: Pick<
     ApiRouteDeps,
     "db" | "bus" | "settings" | "catalogSourceSettings" | "sessionAuthorization"
-  >,
+  > &
+    Partial<Pick<ApiRouteDeps, "workflowClient">>,
   grant: AccessGrant,
   sessionId: string,
   request: SetSessionModelRequest,
@@ -4324,10 +5300,20 @@ export async function setSessionModel(
       : service
         ? { type: "service", subjectId: service.initiator.subjectId, context: service.context }
         : { type: "human", subjectId: grant.subjectId };
+  const capacityRelease = await capacityWaitReleaseForModelSwitch(deps, grant, settings, {
+    sessionId,
+    model,
+    requestedModel: input.model,
+    reasoningEffort: input.reasoningEffort,
+  });
   const result = await runIdempotentPersistenceTransaction(
     {
       stage: "session.model_settings",
-      eventTypes: ["session.model_settings.updated"],
+      eventTypes: [
+        "session.model_settings.updated",
+        "turn.recovery.requested",
+        "session.status.changed",
+      ],
       maxAttempts: 3,
     },
     async () => {
@@ -4340,15 +5326,9 @@ export async function setSessionModel(
           operationKey: input.idempotencyKey,
           model,
           reasoningEffort: input.reasoningEffort,
+          ...(capacityRelease ? { capacityRelease } : {}),
           validate: (session) => {
             try {
-              assertSessionAllowsProductModel(
-                {
-                  codexCompactionMode:
-                    session.codexCompactionMode as Session["codexCompactionMode"],
-                },
-                model,
-              );
               // Validate fresh selection/provider and preserved latency exactly as
               // prompt admission does; never silently clamp requested settings.
               resolveTurnExecutionPolicyV1(settings, {
@@ -4378,9 +5358,98 @@ export async function setSessionModel(
           );
     },
   );
-  const event = await getSessionEvent(deps.db, grant.workspaceId, result.eventId);
-  if (event) await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [event]);
+  const events = (
+    await Promise.all(
+      [result.eventId, ...result.releaseEventIds].map((id) =>
+        getSessionEvent(deps.db, grant.workspaceId, id),
+      ),
+    )
+  ).filter((event): event is SessionEvent => event !== null);
+  if (events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+  }
+  if (result.releaseEventIds.length > 0) {
+    // The durable wake is committed; this only skips the dispatcher's tick.
+    void deps.workflowClient?.requestSessionWorkflowWakeDispatch?.()?.catch(() => {
+      console.warn("[sessions] capacity release wake dispatch failed; durable wake remains", {
+        errorCode: "session_capacity_release_wake_dispatch_failed",
+      });
+    });
+  }
   return { sessionId, ...result, effectiveFrom: "future_turns" as const };
+}
+
+/**
+ * The policy a capacity-waiting turn would run with on the new model, or null
+ * when there is no such turn, the model is unchanged, or the new model is not
+ * admissible for it now (then only future turns change).
+ */
+async function capacityWaitReleaseForModelSwitch(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  grant: AccessGrant,
+  settings: Settings,
+  input: {
+    sessionId: string;
+    model: string;
+    requestedModel: string;
+    reasoningEffort: SetSessionModelRequest["reasoningEffort"];
+  },
+): Promise<{ turnId: string; executionPolicy: TurnExecutionPolicyV1 } | null> {
+  const session = await requireSession(deps.db, grant.workspaceId, input.sessionId);
+  if (!session.activeTurnId) return null;
+  const turn = await getSessionTurn(deps.db, grant.workspaceId, session.activeTurnId);
+  if (
+    !turn ||
+    turn.activeAttemptId !== null ||
+    (turn.status !== "waiting_capacity" && turn.status !== "recovering") ||
+    turn.model === input.model
+  ) {
+    return null;
+  }
+  try {
+    const executionPolicy = withDeveloperSetupCredentialRestriction(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: input.model,
+        requestedModelId: input.requestedModel,
+        modelSource: "explicit",
+        reasoningEffort: input.reasoningEffort,
+        reasoningSource: "explicit",
+        latencyMode: turn.latencyMode,
+        latencyModeSource: "session",
+      }),
+      { grant, trustedMetadata: [session.metadata, turn.metadata] },
+    );
+    // Moving the turn is a new model request, billed as that turn was.
+    await requireLimit(
+      { ...deps, settings },
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initiatingHumanSubjectId: initiatingHumanForAllowance({
+          initiator: turn.initiator,
+          initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
+            deps.db,
+            grant.workspaceId,
+            turn.id,
+          ),
+        }),
+        action: "agent_run:create",
+        quantity: 1,
+        model: input.model,
+        acceptedTurn: { sessionId: session.id, turnId: turn.id },
+        billingOrigin:
+          (await readTurnBillingOrigin(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            turnId: turn.id,
+          })) ?? "app",
+      },
+    );
+    return { turnId: turn.id, executionPolicy };
+  } catch (error) {
+    if (error instanceof HTTPException) return null;
+    throw error;
+  }
 }
 
 /**
@@ -4453,6 +5522,7 @@ function toolPolicyAuditSnapshot(
   tools: ToolRef[],
   firstPartyMcpTools: FirstPartyMcpToolName[],
   policy = session.toolPolicy,
+  firstPartyMcpPermissions?: readonly Permission[],
 ) {
   // Tool policy refs contain only public server ids and the optional/strict
   // execution mode; they never carry URLs, names, headers, credentials,
@@ -4478,6 +5548,10 @@ function toolPolicyAuditSnapshot(
   const toolRefs = allToolRefs.slice(0, maxToolPolicyAuditRefs);
   return {
     mode: policy.mode,
+    ...(policy.firstPartyMode ? { firstPartyMode: policy.firstPartyMode } : {}),
+    ...(policy.firstPartyAdditions?.length
+      ? { firstPartyAdditions: [...policy.firstPartyAdditions] }
+      : {}),
     inheritedFromSessionId: policy.inheritedFromSessionId,
     ...(policy.excludedMcpServerIds?.length
       ? {
@@ -4493,6 +5567,9 @@ function toolPolicyAuditSnapshot(
     toolCount: allToolRefs.length,
     firstPartyMcpTools: [...firstPartyMcpTools].sort(),
     firstPartyMcpToolCount: firstPartyMcpTools.length,
+    ...(firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: [...firstPartyMcpPermissions].sort() }
+      : {}),
     truncated:
       allToolRefs.length > toolRefs.length ||
       (policy.excludedMcpServerIds?.length ?? 0) > maxToolPolicyAuditRefs,
@@ -4506,8 +5583,6 @@ function sessionToolPolicyCeiling(
   runtimeSettings: Settings,
   workspaceDefaults: ReturnType<typeof resolveWorkspaceSessionToolDefaults>,
 ): { tools: ToolRef[]; firstPartyMcpTools: FirstPartyMcpToolName[] } {
-  const policy = resolveFirstPartyMcpToolPolicy(settings);
-  const allowed = new Set(policy.allowed);
   return {
     tools: withFirstPartyTools(
       session.toolPolicy.mode === "workspace_default"
@@ -4523,10 +5598,27 @@ function sessionToolPolicyCeiling(
       (tool) =>
         tool.id === "opengeni" || !session.toolPolicy.excludedMcpServerIds?.includes(tool.id),
     ),
-    firstPartyMcpTools: [...(session.firstPartyMcpTools ?? policy.default)].filter((tool) =>
-      allowed.has(tool),
-    ),
+    firstPartyMcpTools: resolveSessionFirstPartyMcpTools(settings, session, {
+      sessionToolDefaults: workspaceDefaults,
+    }),
   };
+}
+
+/**
+ * A built-in meeting-summary chat keeps exactly its meeting tools for its
+ * whole life (docs/recordings.md, "Built-in summary"); the database refuses
+ * the same change.
+ */
+async function refuseMeetingSummaryToolChange(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  if (await meetingSummarySessionScope(db, { workspaceId, sessionId })) {
+    throw new HTTPException(409, {
+      message: "A meeting notes chat keeps only its meeting tools.",
+    });
+  }
 }
 
 /**
@@ -4552,9 +5644,47 @@ export async function updateSessionToolPolicy(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
 
   const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
+  // A new permission set never out-ranks the caller: the same delegation
+  // rules as creating a session with that set. Parent, agent-narrowing and
+  // goal checks run under the session lock below.
+  const requestedFirstPartyMcpPermissions = request.firstPartyMcpPermissions
+    ? [...new Set(request.firstPartyMcpPermissions)]
+    : null;
+  if (requestedFirstPartyMcpPermissions) {
+    requireDeveloperSetupDelegatablePermissions(
+      developerSetupCredentialRestricted({
+        grant,
+        trustedMetadata: [existingSession.metadata],
+      }),
+      requestedFirstPartyMcpPermissions,
+    );
+    requireExplicitPermissionDelegation(grant, requestedFirstPartyMcpPermissions);
+    for (const permission of requestedFirstPartyMcpPermissions) {
+      if (!hasPermission(grant.permissions, permission)) {
+        throw new HTTPException(403, {
+          message: `cannot grant first-party MCP permission beyond the calling grant: ${permission}`,
+        });
+      }
+    }
+  }
+  const sessionGoal = requestedFirstPartyMcpPermissions
+    ? await getSessionGoal(deps.db, grant.workspaceId, sessionId)
+    : null;
+  if (
+    requestedFirstPartyMcpPermissions &&
+    sessionGoal !== null &&
+    sessionGoal.status !== "completed" &&
+    !hasPermission(requestedFirstPartyMcpPermissions, "goals:manage")
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+    });
+  }
   const workspace = await requireWorkspace(deps.db, grant.workspaceId);
   const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -4609,7 +5739,22 @@ export async function updateSessionToolPolicy(
   const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(deps.settings);
   // Echoing the session's stored catalog (or create defaults) can include a
   // tool the deployment later removed. Runtime already strips those; failing
-  // the whole connector save would block unrelated MCP toggles.
+  // the whole connector save would block unrelated MCP toggles. A newly added
+  // disabled tool, however, is explicit intent and fails rather than vanishing.
+  if (explicitRequest) {
+    requireDeploymentFirstPartyMcpTools(
+      explicitRequest.firstPartyMcpTools,
+      deploymentFirstPartyMcpToolPolicy.allowed,
+      [
+        // A session without a stored selection was shown the unfiltered defaults.
+        ...(existingSession.firstPartyMcpTools ??
+          deps.settings.defaultFirstPartyMcpTools ??
+          DEFAULT_FIRST_PARTY_MCP_TOOLS),
+        ...(workspaceSessionToolDefaults?.firstPartyMcpTools ?? []),
+        ...(existingSession.toolPolicy.firstPartyAdditions ?? []),
+      ],
+    );
+  }
   const explicitRequestedFirstPartyTools = explicitRequest
     ? allowedFirstPartyMcpToolsForSession(deps.settings, explicitRequest.firstPartyMcpTools)
     : null;
@@ -4640,6 +5785,11 @@ export async function updateSessionToolPolicy(
       let nextTools: ToolRef[];
       let nextFirstPartyMcpTools: FirstPartyMcpToolName[];
       let nextPolicy: SessionToolPolicy;
+      // Guaranteed additions belong to the session, not to one tool choice: an
+      // explicit edit stops applying them and a reset to defaults restores them.
+      const sessionFirstPartyAdditions = session.toolPolicy.firstPartyAdditions?.length
+        ? { firstPartyAdditions: [...session.toolPolicy.firstPartyAdditions] }
+        : {};
       if (session.parentSessionId) {
         const parent = await context.getLockedSession(session.parentSessionId);
         if (!parent) {
@@ -4667,6 +5817,14 @@ export async function updateSessionToolPolicy(
           nextPolicy = {
             mode: "workspace_default",
             inheritedFromSessionId: parent.id,
+            ...(parent.toolPolicy.firstPartyMode === "workspace_default"
+              ? {
+                  firstPartyMode: "workspace_default" as const,
+                  ...(parent.toolPolicy.firstPartyAdditions?.length
+                    ? { firstPartyAdditions: [...parent.toolPolicy.firstPartyAdditions] }
+                    : {}),
+                }
+              : {}),
             ...defaultPolicyExclusions([
               ...(parent.toolPolicy.excludedMcpServerIds ?? []),
               ...requestedExclusions,
@@ -4685,7 +5843,7 @@ export async function updateSessionToolPolicy(
           );
           if (widenedFirstPartyTool) {
             throw new HTTPException(403, {
-              message: `session OpenGeni tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
+              message: `session first-party tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
             });
           }
           nextFirstPartyMcpTools = explicitRequestedFirstPartyTools!;
@@ -4699,13 +5857,24 @@ export async function updateSessionToolPolicy(
           requestedMode === "workspace_default" ? workspaceDefaultTools : explicitRequestedTools!;
         nextFirstPartyMcpTools =
           requestedMode === "workspace_default"
-            ? workspaceDefaultFirstPartyTools
+            ? [
+                ...new Set([
+                  ...workspaceDefaultFirstPartyTools,
+                  ...(session.toolPolicy.firstPartyAdditions ?? []).filter((tool) =>
+                    deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
+                  ),
+                ]),
+              ]
             : explicitRequestedFirstPartyTools!;
         nextPolicy = {
           mode: requestedMode,
           inheritedFromSessionId: null,
+          ...sessionFirstPartyAdditions,
           ...(requestedMode === "workspace_default"
-            ? defaultPolicyExclusions(requestedExclusions)
+            ? {
+                firstPartyMode: "workspace_default" as const,
+                ...defaultPolicyExclusions(requestedExclusions),
+              }
             : {}),
         };
       }
@@ -4720,6 +5889,10 @@ export async function updateSessionToolPolicy(
         nextFirstPartyMcpTools = [
           ...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default),
         ];
+        delete nextPolicy.firstPartyMode;
+        if (session.toolPolicy.firstPartyMode) {
+          nextPolicy.firstPartyMode = session.toolPolicy.firstPartyMode;
+        }
       }
       if (!connectorOnlyEdit) {
         nextTools = withoutExcludedMcpServers(nextTools, nextPolicy.excludedMcpServerIds);
@@ -4743,6 +5916,14 @@ export async function updateSessionToolPolicy(
         nextPolicy = clamped.toolPolicy;
       }
       if (agentAttemptCaller && !session.parentSessionId) {
+        if (
+          nextPolicy.firstPartyMode === "workspace_default" &&
+          session.toolPolicy.firstPartyMode !== "workspace_default"
+        ) {
+          throw new HTTPException(403, {
+            message: "an agent may not replace a pinned built-in selection with future defaults",
+          });
+        }
         // A human or API key may widen a top-level session; a live agent
         // attempt may only narrow relative to the session's CURRENT
         // effective policy, in either mode. Adopting workspace defaults is a
@@ -4791,7 +5972,7 @@ export async function updateSessionToolPolicy(
           "an agent may only narrow its session tool policy",
         );
         const currentFirstPartyCeiling = effectiveFirstPartyMcpToolCeiling(
-          session.firstPartyMcpTools,
+          resolveSessionFirstPartyMcpTools(deps.settings, session, workspace.settings),
           deploymentFirstPartyMcpToolPolicy,
         );
         const widenedFirstPartyTool = nextFirstPartyMcpTools.find(
@@ -4799,10 +5980,49 @@ export async function updateSessionToolPolicy(
         );
         if (widenedFirstPartyTool) {
           throw new HTTPException(403, {
-            message: `an agent may only narrow its session OpenGeni tools: ${widenedFirstPartyTool}`,
+            message: `an agent may only narrow its session first-party tools: ${widenedFirstPartyTool}`,
           });
         }
       }
+
+      const currentFirstPartyMcpPermissions = [
+        ...(session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS),
+      ];
+      if (requestedFirstPartyMcpPermissions && session.parentSessionId) {
+        const parent = await context.getLockedSession(session.parentSessionId);
+        if (!parent) {
+          throw new HTTPException(409, { message: "parent session is no longer available" });
+        }
+        const parentPermissions =
+          parent.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+        const widened = requestedFirstPartyMcpPermissions.find(
+          (permission) => !hasPermission(parentPermissions, permission),
+        );
+        if (widened) {
+          throw new HTTPException(403, {
+            message: `child first-party MCP permissions may only narrow the parent session grant: ${widened}`,
+          });
+        }
+      }
+      if (requestedFirstPartyMcpPermissions && agentAttemptCaller) {
+        const widened = requestedFirstPartyMcpPermissions.find(
+          (permission) => !hasPermission(currentFirstPartyMcpPermissions, permission),
+        );
+        if (widened) {
+          throw new HTTPException(403, {
+            message: `an agent may only narrow its session first-party permissions: ${widened}`,
+          });
+        }
+      }
+      // An equal set (in any order) keeps the stored value, so restating the
+      // default never pins it.
+      const permissionsChanged =
+        requestedFirstPartyMcpPermissions !== null &&
+        stableJson([...requestedFirstPartyMcpPermissions].sort()) !==
+          stableJson([...currentFirstPartyMcpPermissions].sort());
+      const nextFirstPartyMcpPermissions = permissionsChanged
+        ? requestedFirstPartyMcpPermissions!
+        : currentFirstPartyMcpPermissions;
 
       const currentPolicy = session.toolPolicy;
       // JSONB normalizes object-key order on the round trip, so plain
@@ -4821,7 +6041,7 @@ export async function updateSessionToolPolicy(
           firstPartyMcpTools: nextFirstPartyMcpTools,
           policy: nextPolicy,
         });
-      if (unchanged) {
+      if (unchanged && !permissionsChanged) {
         return { events: [] };
       }
 
@@ -4836,12 +6056,14 @@ export async function updateSessionToolPolicy(
                 session.tools,
                 [...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default)],
                 currentPolicy,
+                currentFirstPartyMcpPermissions,
               ),
               after: toolPolicyAuditSnapshot(
                 session,
                 nextTools,
                 nextFirstPartyMcpTools,
                 nextPolicy,
+                nextFirstPartyMcpPermissions,
               ),
               version: nextVersion,
               effectiveFrom: "next_attempt",
@@ -4854,6 +6076,7 @@ export async function updateSessionToolPolicy(
           toolPolicy: nextPolicy,
           toolPolicyVersion: nextVersion,
           expectedToolPolicyVersion: request.expectedVersion,
+          ...(permissionsChanged ? { firstPartyMcpPermissions: nextFirstPartyMcpPermissions } : {}),
         },
       };
     },
@@ -4891,6 +6114,7 @@ export async function updateSessionAgent(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
   const workspace = await requireWorkspace(deps.db, grant.workspaceId);
   const goal = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -4963,9 +6187,11 @@ export async function updateSessionAgent(
           goal: goalOpen,
         }),
       );
-      const currentFirstPartyMcpTools = [
-        ...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default),
-      ];
+      const currentFirstPartyMcpTools = resolveSessionFirstPartyMcpTools(
+        deps.settings,
+        session,
+        workspace.settings,
+      );
       const added = agentAttemptCaller
         ? []
         : agentConfigAddedFirstPartyMcpTools(
@@ -5004,7 +6230,7 @@ export async function updateSessionAgent(
           !session.parentSessionId &&
           toolPolicy.mode === "explicit"
         ) {
-          toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
+          toolPolicy = { ...toolPolicy, mode: "workspace_default", inheritedFromSessionId: null };
         }
       }
       let firstPartyMcpTools = [...new Set([...currentFirstPartyMcpTools, ...added])];
@@ -5134,6 +6360,83 @@ export async function updateSessionAgent(
   return await requireSession(deps.db, grant.workspaceId, sessionId);
 }
 
+/**
+ * Replace the Skills a session carries itself. The worker reads them at the
+ * start of every attempt, so the change applies from the next attempt; work
+ * already running keeps the Skill index it started with. Shares the
+ * tool-policy version (409 when stale) with the other agent-configuration
+ * writes. An agent may only remove Skills, never add or change one.
+ */
+export async function updateSessionSkills(
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  request: UpdateSessionSkillsRequest,
+): Promise<Session> {
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.tool_policy.write",
+    surface: "core",
+  });
+  requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
+  let skills: SessionSkill[];
+  try {
+    skills = SessionSkills.parse(request.skills);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "invalid session Skill selection",
+    });
+  }
+  const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
+  const events = await appendSessionEventsWithLockedSessionUpdate(
+    deps.db,
+    grant.workspaceId,
+    sessionId,
+    (session) => {
+      const currentVersion = session.toolPolicyVersion ?? 1;
+      if (request.expectedVersion !== currentVersion) {
+        throw new SessionToolPolicyVersionConflictError(currentVersion);
+      }
+      const current = new Set(session.skills.map((skill) => stableJson(skill)));
+      if (agentAttemptCaller && skills.some((skill) => !current.has(stableJson(skill)))) {
+        throw new HTTPException(403, {
+          message: "An agent can only remove Skills from a session.",
+        });
+      }
+      if (stableJson(session.skills) === stableJson(skills)) return { events: [] };
+      const nextVersion = currentVersion + 1;
+      return {
+        events: [
+          {
+            type: "session.skills.updated" as const,
+            payload: {
+              before: session.skills.map((skill) => skill.name),
+              after: skills.map((skill) => skill.name),
+              version: nextVersion,
+              effectiveFrom: "next_attempt",
+            },
+          },
+        ],
+        update: {
+          skills,
+          toolPolicyVersion: nextVersion,
+          expectedToolPolicyVersion: request.expectedVersion,
+        },
+      };
+    },
+    { activity: "semantic" },
+  );
+  if (events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+  }
+  return await requireSession(deps.db, grant.workspaceId, sessionId);
+}
+
 export async function readSessionLineage(
   deps: Pick<ApiRouteDeps, "db" | "sessionAuthorization">,
   grant: AccessGrant,
@@ -5173,13 +6476,31 @@ export async function readSessionLineage(
  */
 export function withSameRequestSessionMcpServerTools(
   tools: ToolRef[],
-  attachedServers: ReadonlyArray<{ id: string }>,
+  attachedServers: ReadonlyArray<{ id: string; eager?: ToolRef["eager"] }>,
 ): ToolRef[] {
-  const selectedIds = new Set(tools.map((tool) => tool.id));
+  const attachedEager = new Map(
+    attachedServers.flatMap((server) => {
+      const eager = mergeToolRefEager(server.eager, undefined);
+      return eager === undefined ? [] : [[server.id, eager] as const];
+    }),
+  );
+  // An attachment's eager marker joins an explicit ref's own marker; every
+  // other explicit marker (optional, allowedTools) is kept exactly.
+  const selected = attachedEager.size
+    ? tools.map((tool) => {
+        const eager = attachedEager.get(tool.id);
+        if (eager === undefined) return tool;
+        return { ...tool, eager: mergeToolRefEager(tool.eager, eager)! };
+      })
+    : tools;
+  const selectedIds = new Set(selected.map((tool) => tool.id));
   const missing = attachedServers
     .filter((server) => !selectedIds.has(server.id))
-    .map((server) => ({ kind: "mcp" as const, id: server.id }));
-  return missing.length === 0 ? tools : mergeToolRefs(tools, missing);
+    .map((server) => {
+      const eager = attachedEager.get(server.id);
+      return { kind: "mcp" as const, id: server.id, ...(eager !== undefined ? { eager } : {}) };
+    });
+  return missing.length === 0 ? selected : mergeToolRefs(selected, missing);
 }
 
 function withFirstPartyTools(
@@ -5230,23 +6551,49 @@ function hasOwnProperty(value: unknown, key: string): boolean {
 export async function createSessionForRequestWithOutcome(
   ...args: Parameters<typeof createSessionForRequestInFileScope>
 ): Promise<CreateSessionRequestOutcome> {
-  const [deps, grant, , , authorization] = args;
+  const [deps, grant, , rawPayload, authorization] = args;
   const actor = authorization
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
     : grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, grant, "sessions:create")
-      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+      : ((await inProcessFileOwnerContext(
+          deps,
+          grant,
+          requestedSessionIdOf(rawPayload),
+          rawPayloadField(rawPayload, "resources"),
+        )) ?? {
+          subjectId: grant.subjectId,
+          privateFileOwnerSubjectId: null,
+        });
   return withSessionRlsActorContext(actor, () => createSessionForRequestInFileScope(...args));
+}
+
+function rawPayloadField(rawPayload: unknown, field: string): unknown {
+  return typeof rawPayload === "object" && rawPayload !== null
+    ? (rawPayload as Record<string, unknown>)[field]
+    : undefined;
+}
+
+/** The requested session id of a not-yet-parsed create payload, when it is a UUID. */
+function requestedSessionIdOf(rawPayload: unknown): string | null {
+  const requested = rawPayloadField(rawPayload, "requestedSessionId");
+  return typeof requested === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(requested)
+    ? requested
+    : null;
 }
 
 export async function acceptSessionUserMessageWithOutcome(
   ...args: Parameters<typeof acceptSessionUserMessageInFileScope>
 ): ReturnType<typeof acceptSessionUserMessageInFileScope> {
-  const [deps, grant, , , input] = args;
+  const [deps, grant, , sessionId, input] = args;
   const actor = input.authorization
     ? await fileOwnerContextForAccess(deps, input.authorization, "sessions:control")
     : grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, grant, "sessions:control")
-      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+      : ((await inProcessFileOwnerContext(deps, grant, sessionId, input.resources)) ?? {
+          subjectId: grant.subjectId,
+          privateFileOwnerSubjectId: null,
+        });
   return withSessionRlsActorContext(actor, () => acceptSessionUserMessageInFileScope(...args));
 }

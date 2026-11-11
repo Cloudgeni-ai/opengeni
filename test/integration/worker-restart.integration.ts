@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
+import postgres from "postgres";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
   applySessionTurnSettlement,
@@ -15,17 +16,21 @@ import {
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
-import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { createObservability } from "@opengeni/observability";
+import { createWorkerServiceLifecycle } from "../../apps/worker/src/worker-service-lifecycle";
+import { createWorkerWorkflowSignaler } from "../../apps/worker/src/index";
 import {
-  functionCall,
-  latestStatus,
-  ScriptedModel,
-  startTestMcpServer,
-  startTestServices,
-  testSettings,
-  waitFor,
-  type TestServices,
-} from "@opengeni/testing";
+  resolveWorkerShutdownTiming,
+  temporalWorkerShutdownOptions,
+} from "../../apps/worker/src/worker-shutdown";
+import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { createTurnToolCancellationController } from "../../packages/runtime/src/sandbox/turn-tool-cancellation";
+import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { latestStatus } from "@opengeni/testing/assertions";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { postUserMessageTurn } from "@opengeni/core";
 import type { SessionWorkflowClient } from "../../apps/api/src/app";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
@@ -68,7 +73,7 @@ describe("worker restart resilience", () => {
     await services?.down();
   }, 60_000);
 
-  test("graceful worker shutdown mid-turn recovers the same turn on a healthy worker", async () => {
+  test("stalled cleanup hands a concurrent checkpointed turn to a healthy worker", async () => {
     const grant = await testGrant();
     const mcp = startTestMcpServer();
     const taskQueue = `worker-restart-${crypto.randomUUID()}`;
@@ -142,7 +147,47 @@ describe("worker restart resilience", () => {
       reasoningEffortFallback: settings.openaiReasoningEffort,
     });
 
-    const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const cleanupModel = new ScriptedModel([
+      { id: "cleanup-completed", outputText: "done", chunks: ["done"] },
+    ]);
+    let releaseCleanup!: () => void;
+    const blockedCleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    let cleanupEntered = false;
+    let lifecycle!: ReturnType<typeof createWorkerServiceLifecycle>;
+    const cleanupRuntime = createProductionAgentRuntime({ model: cleanupModel });
+    const cleanupFence = createTurnToolCancellationController();
+    cleanupFence.waitForQuiescence = async () => {
+      cleanupEntered = true;
+      await blockedCleanup;
+    };
+    const cleanupActivities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      turnFinalizationTimeoutMs: 25,
+      requestWorkerDrain: () => {
+        expect(cleanupEntered).toBe(true);
+        expect(lifecycle.drain("stalled turn finalization")).toBe(true);
+      },
+      runtime: {
+        ...cleanupRuntime,
+        buildAgent: (...args) => {
+          const agent = cleanupRuntime.buildAgent(...args);
+          args[2]?.onToolCancellationFence?.(cleanupFence);
+          return agent;
+        },
+      },
+    });
+    const selectedActivities = {
+      ...activities,
+      runAgentTurn: (input: Parameters<typeof activities.runAgentTurn>[0]) =>
+        input.sessionId === session.id
+          ? activities.runAgentTurn(input)
+          : cleanupActivities.runAgentTurn(input),
+    };
+    const firstWorker = await restartTestWorker(nativeConnection, taskQueue, selectedActivities);
     const firstRun = firstWorker.run();
     const client = new Client({ connection });
     const handle = await client.workflow.start("sessionWorkflow", {
@@ -165,8 +210,62 @@ describe("worker restart resilience", () => {
         (await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).length > 0,
     );
     await waitFor(() => model.calls === 2);
-    firstWorker.shutdown();
+    const observability = createObservability(settings, { component: "worker-turn" });
+    lifecycle = createWorkerServiceLifecycle({
+      role: "turn",
+      worker: firstWorker,
+      observability,
+      closeOwnedResources: async () => {},
+    });
+    // A second session finishes its work and then holds its cleanup open. Use
+    // the production stage monitor and host lifecycle with a shorter test clock.
+    const cleanupSession = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "cleanup peer",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: cleanupSession.id,
+      subjectId: grant.subjectId,
+      text: "cleanup peer",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+    const cleanupHandle = await client.workflow.start("sessionWorkflow", {
+      taskQueue,
+      workflowId: `session-${cleanupSession.id}`,
+      args: [
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: cleanupSession.id,
+        },
+      ],
+    });
+    await waitFor(() => cleanupEntered);
+    await waitFor(() => lifecycle.state() === "draining");
+    // The ordinary peer must checkpoint before the stalled writer is released.
+    await waitFor(
+      async () =>
+        (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "recovering",
+    );
+    expect(cleanupModel.calls).toBe(1);
+    releaseCleanup();
     await firstRun;
+    expect((await getSession(dbClient.db, grant.workspaceId, cleanupSession.id))?.status).toBe(
+      "idle",
+    );
 
     // Between workers the same logical turn is recoverable, not converted into
     // queue work and not failed.
@@ -190,7 +289,7 @@ describe("worker restart resilience", () => {
     const secondWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
     const secondRun = secondWorker.run();
     try {
-      await handle.result();
+      await Promise.all([handle.result(), cleanupHandle.result()]);
     } finally {
       secondWorker.shutdown();
       await secondRun;
@@ -201,6 +300,7 @@ describe("worker restart resilience", () => {
     expect(resumed?.status).toBe("idle");
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     expect(turns.map((turn) => turn.status)).toEqual(["completed"]);
+    expect(turns[0]?.metadata?.workerDeathRedispatches ?? 0).toBe(0);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
@@ -222,6 +322,233 @@ describe("worker restart resilience", () => {
           JSON.stringify(event.payload).includes("resumed and finished"),
       ),
     ).toBe(true);
+  }, 180_000);
+
+  test("physical database loss during a streamed write resumes the same turn without repeating its completed tool", async () => {
+    const grant = await testGrant();
+    const mcp = startTestMcpServer();
+    const taskQueue = `database-loss-${crypto.randomUUID()}`;
+    const model = new ScriptedModel([
+      {
+        id: "db-tool",
+        output: [functionCall("docs__search_documents", { query: "retained" }, "db-tool-call")],
+      },
+      {
+        id: "db-interrupted",
+        chunks: Array.from({ length: 10_000 }, () => "dropped "),
+        delayMs: 50,
+      },
+      { id: "db-resumed", outputText: "recovered database write", chunks: ["recovered"] },
+    ]);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+      mcpServers: [
+        {
+          id: "docs",
+          name: "Documents",
+          url: mcp.url,
+          allowedTools: ["search_documents"],
+          cacheToolsList: false,
+        },
+      ],
+    });
+    const signaler = await createWorkerWorkflowSignaler(settings, dbClient.db);
+    const activities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+      wakeSessionWorkflow: signaler.wakeSessionWorkflow,
+      signalSessionAttemptQuiesced: signaler.signalSessionAttemptQuiesced,
+      inspectSessionAttemptActivity: signaler.inspectSessionAttemptActivity,
+    });
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "retain progress after database loss",
+      resources: [],
+      tools: [{ kind: "mcp", id: "docs" }],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const accepted = await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "retain progress after database loss",
+      resources: [],
+      tools: [{ kind: "mcp", id: "docs" }],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+    const admin = postgres(services.databaseUrl, { max: 1 });
+    const lockKey = Math.floor(Math.random() * 0x3fffffff);
+    const functionName = `test_db_loss_${lockKey}`;
+    const triggerName = `test_db_loss_${lockKey}`;
+    let worker: Awaited<ReturnType<typeof restartTestWorker>> | undefined;
+    let run: Promise<void> | undefined;
+    try {
+      // Identify the exact session's in-flight INSERT through a transaction
+      // advisory lock, then terminate its real backend while it is sleeping.
+      // This never fabricates a transport error or retries an INSERT directly.
+      await admin.unsafe(`CREATE FUNCTION ${functionName}() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.session_id = '${session.id}'::uuid AND NEW.type = 'agent.message.delta' THEN
+          PERFORM pg_advisory_xact_lock(6789, ${lockKey});
+          PERFORM pg_sleep(30);
+        END IF; RETURN NEW; END $$;
+        CREATE TRIGGER ${triggerName} BEFORE INSERT ON session_events
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}();`);
+      worker = await restartTestWorker(nativeConnection, taskQueue, activities);
+      run = worker.run();
+      const handle = await new Client({ connection }).workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `session-${session.id}`,
+        args: [
+          { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+        ],
+      });
+      let pid: number | undefined;
+      await waitFor(
+        async () => {
+          const [owner] = await admin`
+          select activity.pid from pg_locks lock join pg_stat_activity activity on activity.pid = lock.pid
+          where lock.locktype = 'advisory' and lock.classid = 6789 and lock.objid = ${lockKey}
+            and lock.granted and activity.datname = current_database() and activity.wait_event = 'PgSleep'
+        `;
+          pid = owner?.pid;
+          return pid !== undefined;
+        },
+        { timeoutMs: 15_000, intervalMs: 10 },
+      );
+      expect(model.calls).toBe(2);
+      expect((await admin`select pg_terminate_backend(${pid!}) as terminated`)[0]?.terminated).toBe(
+        true,
+      );
+      await admin.unsafe(
+        `DROP TRIGGER ${triggerName} ON session_events; DROP FUNCTION ${functionName}();`,
+      );
+      await handle.result();
+      // Workflow runs can close while waiting for a physical exit receipt.
+      // Exercise the ordinary durable wake dispatcher, not a fabricated prompt.
+      await waitFor(
+        async () => {
+          await activities.dispatchSessionWorkflowWakes();
+          const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+          return turns[0]?.status === "completed" || turns[0]?.status === "failed";
+        },
+        { timeoutMs: 30_000, intervalMs: 50 },
+      );
+      const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+      expect(turns).toHaveLength(1);
+      expect(turns[0]).toMatchObject({
+        id: accepted.turn.id,
+        triggerEventId: accepted.accepted.id,
+        status: "completed",
+        executionGeneration: 2,
+      });
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
+      expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+      expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
+      expect(model.calls).toBe(3);
+      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "retained" } }]);
+      expect(JSON.stringify(model.requests.at(-1)?.input)).toContain("db-tool-call");
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    } finally {
+      await admin.unsafe(
+        `DROP TRIGGER IF EXISTS ${triggerName} ON session_events; DROP FUNCTION IF EXISTS ${functionName}();`,
+      );
+      worker?.shutdown();
+      await run;
+      await admin.end({ timeout: 1 });
+      await signaler.close();
+      mcp.close();
+    }
+  }, 180_000);
+
+  test("a draining worker completes a streamed turn naturally beyond the old five-second grace", async () => {
+    const grant = await testGrant();
+    const taskQueue = `natural-drain-${crypto.randomUUID()}`;
+    const model = new ScriptedModel([
+      {
+        id: "natural",
+        outputText: "finished normally",
+        chunks: Array.from({ length: 16 }, () => "tick "),
+        delayMs: 500,
+      },
+    ]);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+    });
+    const activities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "finish naturally",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "finish naturally",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+    const worker = await restartTestWorker(nativeConnection, taskQueue, activities, 90_000);
+    const running = worker.run();
+    const client = new Client({ connection });
+    const handle = await client.workflow.start("sessionWorkflow", {
+      taskQueue,
+      workflowId: `session-${session.id}`,
+      args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+    });
+    await waitFor(() => model.calls === 1);
+    worker.shutdown();
+    await running;
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(0);
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).map(
+        (turn) => turn.status,
+      ),
+    ).toEqual(["completed"]);
+    expect(model.calls).toBe(1);
+    // A replacement control poller consumes the activity completion after the
+    // original control poller has stopped; no second model call is necessary.
+    const replacement = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const replacementRun = replacement.run();
+    try {
+      await handle.result();
+    } finally {
+      replacement.shutdown();
+      await replacementRun;
+    }
+    expect(model.calls).toBe(1);
   }, 180_000);
 
   test("graceful worker shutdown before model progress recovers the same turn untouched", async () => {
@@ -730,6 +1057,7 @@ async function restartTestWorker(
   nativeConnection: NativeConnection,
   taskQueue: string,
   activities: ReturnType<typeof createActivityTestHarness>,
+  graceMs = 5_000,
 ): Promise<{ run: () => Promise<void>; shutdown: () => void }> {
   const { runAgentTurn, ...controlActivities } = activities;
   const [control, turns] = await Promise.all([
@@ -746,6 +1074,16 @@ async function restartTestWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
+      // A short configured natural-drain grace, as with
+      // OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS=5000: these restart tests must
+      // reach the WORKER_SHUTDOWN checkpoint and recovery path, which the
+      // 90-second production default reserves for turns outlasting the drain.
+      ...temporalWorkerShutdownOptions(
+        resolveWorkerShutdownTiming("turn", {
+          turnWorkerShutdownGraceMs: graceMs,
+          turnWorkerShutdownForceMs: graceMs + 15_000,
+        }),
+      ),
       tuner: integrationTurnTuner(),
     }),
   ]);

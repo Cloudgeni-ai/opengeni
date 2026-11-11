@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   findOrdinalCollisions,
+  findProtectedOrdinalCollisions,
   nextFreeOrdinal,
-  parseHashMismatch,
   parseLsTree,
   parseMigrationFile,
   planRenumber,
@@ -47,7 +47,7 @@ async function git(cwd: string, ...args: string[]) {
 }
 
 /**
- * A miniature repository shaped like OpenGeni: a `main` ledger, then a branch
+ * A miniature repository shaped like Opengeni: a `main` ledger, then a branch
  * that adds a migration whose ordinal main has meanwhile taken. Returns the
  * branch worktree path.
  */
@@ -104,12 +104,6 @@ async function fixtureRepo(): Promise<{ root: string; upstream: string }> {
     join(root, "docs/other.md"),
     "Migration 0003 applies the fallback (unrelated feature).\n",
   );
-  // A miniature release contract: one per-file pin and one chain pin computed
-  // like the real one (sorted names + bytes), so the re-pin loop is exercised
-  // end to end against real `bun test` failure output.
-  await mkdir(join(root, "scripts"), { recursive: true });
-  await writeFile(join(root, "scripts/release-schema-contract.test.ts"), MINI_CONTRACT_TEST);
-  await pinMiniContract(root);
   await git(root, "add", "-A");
   await git(root, "commit", "-q", "-m", "feature");
   // Main advances with a different 0003 and a companion test sharing the digits.
@@ -129,59 +123,6 @@ async function fixtureRepo(): Promise<{ root: string; upstream: string }> {
   await git(root, "checkout", "-q", "feature");
   await git(root, "fetch", "-q", "origin");
   return { root, upstream };
-}
-
-const MINI_CONTRACT_TEST = [
-  'import { expect, test } from "bun:test";',
-  'import { createHash } from "node:crypto";',
-  'import { readdirSync, readFileSync } from "node:fs";',
-  'import { join } from "node:path";',
-  "",
-  'const dir = join(import.meta.dir, "../packages/db/drizzle");',
-  'const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();',
-  "const perFile = new Map(",
-  '  files.map((f) => [f, createHash("sha256").update(readFileSync(join(dir, f))).digest("hex")]),',
-  ");",
-  'const chain = createHash("sha256")',
-  '  .update(files.map((f) => `${f}:${perFile.get(f)}`).join("\\n"))',
-  '  .digest("hex");',
-  "",
-  'test("pins the newest migration and the chain", () => {',
-  "  const newest = files.at(-1)!;",
-  "  expect({ path: newest, sha256: perFile.get(newest) }).toMatchObject({",
-  '    path: "0003_scheduled_authority.sql",',
-  '    sha256: "PERFILE",',
-  "  });",
-  '  expect(chain).toBe("CHAIN");',
-  "});",
-  "",
-].join("\n");
-
-/** Pin the mini contract to the current migration bytes (like a maintainer would). */
-async function pinMiniContract(root: string): Promise<void> {
-  const dir = join(root, "packages/db/drizzle");
-  const files = readdirSync(dir)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-  const perFile = new Map(
-    files.map((f) => [
-      f,
-      createHash("sha256")
-        .update(readFileSync(join(dir, f)))
-        .digest("hex"),
-    ]),
-  );
-  const chain = createHash("sha256")
-    .update(files.map((f) => `${f}:${perFile.get(f)}`).join("\n"))
-    .digest("hex");
-  const path = join(root, "scripts/release-schema-contract.test.ts");
-  const text = await readFile(path, "utf8");
-  await writeFile(
-    path,
-    text
-      .replace(/sha256: "[0-9a-fA-Z_]+"/, `sha256: "${perFile.get(files.at(-1)!)}"`)
-      .replace(/toBe\("[0-9a-fA-Z_]+"\)/, `toBe("${chain}")`),
-  );
 }
 
 describe("migration ordinal helpers", () => {
@@ -235,6 +176,193 @@ describe("migration ordinal helpers", () => {
       collisions: [],
       duplicates: [],
     });
+  });
+
+  test("preserves a published pair across lagging protected bases, but rejects new collisions", () => {
+    const pair = [
+      name("0730_maintenance_work_probes.sql"),
+      name("0730_subscription_core_personal_connection_versions.sql"),
+    ];
+    for (const lagging of [[], [pair[0]!], [pair[1]!]]) {
+      for (const bases of [
+        [
+          { ref: "origin/main", files: pair },
+          { ref: "origin/production", files: lagging },
+        ],
+        [
+          { ref: "origin/production", files: lagging },
+          { ref: "origin/main", files: pair },
+        ],
+      ]) {
+        expect(findProtectedOrdinalCollisions([...pair, name("0731_next.sql")], bases)).toEqual({
+          collisions: [],
+          duplicates: [],
+        });
+        expect(
+          findProtectedOrdinalCollisions([...pair, name("0730_new.sql")], bases).collisions.length,
+        ).toBeGreaterThan(0);
+        expect(
+          findProtectedOrdinalCollisions([...pair, name("0731_a.sql"), name("0731_b.sql")], bases)
+            .duplicates,
+        ).toEqual([["0731_a.sql", "0731_b.sql"]]);
+      }
+    }
+    // Two individually published allocations are still a cross-branch conflict.
+    const split = [
+      { ref: "origin/main", files: [pair[0]!] },
+      { ref: "origin/production", files: [pair[1]!] },
+    ];
+    expect(findProtectedOrdinalCollisions(pair, split).collisions).toHaveLength(2);
+    expect(
+      findProtectedOrdinalCollisions(pair, [{ ref: "origin/main", files: [] }]).duplicates,
+    ).toEqual([pair.map((migration) => migration.file)]);
+    expect(nextFreeOrdinal(pair)).toBe("0731");
+  });
+
+  test("treats the schema baseline parts as one group that retires the names it replaces", () => {
+    const baseline = {
+      parts: ["0977_baseline_01.sql", "0977_baseline_02.sql"],
+      replaces: ["0976_old.sql", "0977_old.sql"],
+    };
+    const parts = baseline.parts.map(name);
+    const old = baseline.replaces.map(name);
+    const later = name("0978_next.sql");
+    for (const bases of [
+      // The baseline PR: neither protected base has the parts yet.
+      [
+        { ref: "origin/main", files: [...old, later] },
+        { ref: "origin/production", files: old },
+      ],
+      // Main has the baseline; production still has the replaced names.
+      [
+        { ref: "origin/main", files: [...parts, later] },
+        { ref: "origin/production", files: old },
+      ],
+    ]) {
+      expect(findProtectedOrdinalCollisions([...parts, later], bases, baseline)).toEqual({
+        collisions: [],
+        duplicates: [],
+      });
+      // A new file still may not join the baseline's ordinal.
+      const joined = findProtectedOrdinalCollisions(
+        [...parts, name("0977_new.sql"), later],
+        bases,
+        baseline,
+      );
+      expect(joined.duplicates).toEqual([[...baseline.parts, "0977_new.sql"]]);
+    }
+    // Without the baseline declaration the same ledgers are reported.
+    const undeclared = findProtectedOrdinalCollisions(
+      [...parts, later],
+      [{ ref: "origin/production", files: old }],
+    );
+    expect(undeclared.duplicates).toEqual([baseline.parts]);
+    expect(undeclared.collisions.length).toBeGreaterThan(0);
+    // A head that lacks a part does not retire anything.
+    expect(
+      findProtectedOrdinalCollisions(
+        [parts[0]!, later],
+        [{ ref: "origin/production", files: old }],
+        baseline,
+      ).collisions.length,
+    ).toBeGreaterThan(0);
+  });
+
+  test("requires one protected witness for the complete group, never overlapping or custom bases", () => {
+    const a = name("0730_a.sql"),
+      b = name("0730_b.sql"),
+      z = name("0730_z.sql");
+    const head = [a, b, z];
+    for (const bases of [
+      [
+        { ref: "origin/main", files: [a, z] },
+        { ref: "origin/production", files: [b, z] },
+      ],
+      [
+        { ref: "origin/production", files: [b, z] },
+        { ref: "origin/main", files: [a, z] },
+      ],
+    ]) {
+      const result = findProtectedOrdinalCollisions(head, bases);
+      expect(result.collisions).toHaveLength(4);
+      expect(result.duplicates).toEqual([[a.file, b.file, z.file]]);
+    }
+    const custom = findProtectedOrdinalCollisions(
+      [a, b],
+      [
+        { ref: "HEAD", files: [a, b] },
+        { ref: "origin/main", files: [a] },
+      ],
+    );
+    expect(custom.collisions).toHaveLength(1);
+    expect(custom.duplicates).toEqual([[a.file, b.file]]);
+    // Custom refs remain comparison inputs, even though they cannot authorize
+    // a publication exemption for themselves.
+    expect(
+      findProtectedOrdinalCollisions(
+        [a],
+        [
+          { ref: "custom", files: [b] },
+          { ref: "origin/main", files: [a] },
+        ],
+      ).collisions,
+    ).toHaveLength(1);
+  });
+
+  test("checks every base member, independently of ordering or partial overlap", () => {
+    const a = name("0730_a.sql"),
+      b = name("0730_b.sql"),
+      z = name("0730_z.sql");
+    for (const production of [
+      [b, z],
+      [z, b],
+    ]) {
+      const result = findProtectedOrdinalCollisions(
+        [a, z],
+        [
+          { ref: "origin/main", files: [a, z] },
+          { ref: "origin/production", files: production },
+        ],
+      );
+      expect(result.duplicates).toEqual([]);
+      expect(result.collisions).toContainEqual({
+        ref: "origin/production",
+        ordinal: "0730",
+        headFile: a.file,
+        baseFile: b.file,
+      });
+    }
+  });
+
+  test("exhausts three-name head, protected-base and custom-base allocations", () => {
+    const names = [name("0730_a.sql"), name("0730_b.sql"), name("0730_z.sql")];
+    const subsets = Array.from({ length: 8 }, (_value, mask) =>
+      names.filter((_entry, i) => mask & (1 << i)),
+    );
+    for (const head of subsets)
+      for (const main of subsets)
+        for (const production of subsets) {
+          for (const custom of subsets) {
+            const contains = (whole: typeof names, part: typeof names) =>
+              part.every((migration) => whole.includes(migration));
+            const witnessed = (group: typeof names) =>
+              contains(main, group) || contains(production, group);
+            const expectedDuplicate = head.length > 1 && !witnessed(head);
+            const expectedCollision = [main, production, custom].some(
+              (base) =>
+                base.length > 0 &&
+                head.some((migration) => !base.includes(migration)) &&
+                !witnessed([...head, ...base]),
+            );
+            const result = findProtectedOrdinalCollisions(head, [
+              { ref: "origin/main", files: main },
+              { ref: "origin/production", files: production },
+              { ref: "custom", files: custom },
+            ]);
+            expect(result.duplicates.length > 0).toBe(expectedDuplicate);
+            expect(result.collisions.length > 0).toBe(expectedCollision);
+          }
+        }
   });
 
   test("rewrites the basename, companion slug, and bare ordinal without touching neighbours", () => {
@@ -330,35 +458,6 @@ describe("migration ordinal helpers", () => {
     );
     expect(widened.unrewrittenBare).toEqual([]);
   });
-
-  test("only exact SHA-256 Expected/Received pairs count as re-pinnable mismatches", () => {
-    const a = "a".repeat(64);
-    const b = "b".repeat(64);
-    expect(parseHashMismatch(`Expected: "${a}"\nReceived: "${b}"`)).toEqual({
-      expected: a,
-      received: b,
-    });
-    expect(
-      parseHashMismatch(`Expected: {\n  sha256: "${a}",\n}\nReceived: {\n  sha256: "${b}",\n}`),
-    ).toEqual({
-      expected: a,
-      received: b,
-    });
-    expect(
-      parseHashMismatch(
-        `@@ -2,3 +2,4 @@\n    "deploymentMode": "maintenance",\n-   "sha256": "${a}",\n+   "path": "x.sql",\n+   "sha256": "${b}",\n`,
-      ),
-    ).toEqual({ expected: a, received: b });
-    expect(parseHashMismatch('Expected: "9871_x.sql"\nReceived: "9872_x.sql"')).toBeNull();
-    expect(parseHashMismatch("Expected length: 5\nReceived length: 6")).toBeNull();
-    // Pairs are only taken when adjacent inside one failure block: an Expected
-    // hash with a non-hash Received must not pair with a later block.
-    expect(
-      parseHashMismatch(
-        `Expected: "${a}"\nReceived: undefined\n\n(fail) one\n\nExpected: "9871_x.sql"\nReceived: "${b}"\n`,
-      ),
-    ).toBeNull();
-  });
 });
 
 describe("migration ordinal CLIs", () => {
@@ -388,13 +487,6 @@ describe("migration ordinal CLIs", () => {
     expect(renumber.code).toBe(0);
     expect(renumber.stdout).toContain(
       "renumber 0003_scheduled_authority.sql -> 0004_scheduled_authority.sql",
-    );
-    // The mini release contract was re-pinned (per-file + chain) and is green.
-    expect(renumber.stdout).toMatch(/repin +scripts\/release-schema-contract\.test\.ts/);
-    const contract = await run(root, ["bun", "test", "scripts/release-schema-contract.test.ts"]);
-    expect(contract.code).toBe(0);
-    expect(await readFile(join(root, "scripts/release-schema-contract.test.ts"), "utf8")).toContain(
-      'path: "0004_scheduled_authority.sql"',
     );
     expect(existsSync(join(root, "packages/db/drizzle/0004_scheduled_authority.sql"))).toBe(true);
     expect(existsSync(join(root, "packages/db/drizzle/0003_scheduled_authority.sql"))).toBe(false);
@@ -497,7 +589,6 @@ describe("migration ordinal CLIs", () => {
       "--next",
       "--base",
       "origin/main",
-      "--no-refresh-release-contract",
     ]);
     expect(renumber.stderr).toBe("");
     expect(renumber.code).toBe(0);
@@ -512,6 +603,40 @@ describe("migration ordinal CLIs", () => {
     expect(
       existsSync(join(root, "packages/db/test/migration-0004-scheduled-authority.test.ts")),
     ).toBe(true);
+  });
+
+  test("published main duplicates survive a lagging production comparison without renaming", async () => {
+    const { root } = await fixtureRepo();
+    await git(root, "push", "-q", "origin", "origin/main:refs/heads/production");
+    await git(root, "merge", "-q", "--no-edit", "origin/main");
+    await git(root, "push", "-q", "origin", "HEAD:refs/heads/main");
+    await git(root, "fetch", "-q", "origin");
+    const guard = ["bun", join(scripts, "check-migration-ordinals.ts")];
+    const published = await run(root, guard);
+    expect(published.code).toBe(0);
+    expect(published.stdout).toContain("next 0004");
+    expect(await git(root, "status", "--porcelain")).toBe("");
+    await writeFile(
+      join(root, "packages/db/drizzle/0003_unpublished.sql"),
+      "-- deployment-mode: rolling\nselect 3;\n",
+    );
+    const collision = await run(root, guard);
+    expect(collision.code).toBe(1);
+    expect(collision.stderr).toContain("0003_unpublished.sql");
+  });
+
+  test("--base HEAD cannot grandfather unpublished local duplicate history", async () => {
+    const { root } = await fixtureRepo();
+    await git(root, "merge", "-q", "--no-edit", "origin/main");
+    const result = await run(root, [
+      "bun",
+      join(scripts, "check-migration-ordinals.ts"),
+      "--base",
+      "HEAD",
+    ]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("0003_scheduled_authority.sql");
+    expect(result.stderr).toContain("duplicate ordinal");
   });
 
   test("--to refuses to fill a gap below the ledger head unless --allow-gap", async () => {
@@ -537,7 +662,6 @@ describe("migration ordinal CLIs", () => {
       "--base",
       "origin/main",
       "--allow-gap",
-      "--no-refresh-release-contract",
     ]);
     expect(allowed.code).toBe(0);
     expect(existsSync(join(root, "packages/db/drizzle/0000_scheduled_authority.sql"))).toBe(true);
@@ -583,7 +707,6 @@ describe("migration ordinal CLIs", () => {
       "0009",
       "--base",
       "origin/main",
-      "--no-refresh-release-contract",
     ]);
     expect(wip.code).toBe(0);
     expect(existsSync(join(root, "packages/db/drizzle/0009_wip.sql"))).toBe(true);

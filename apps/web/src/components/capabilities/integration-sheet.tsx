@@ -13,18 +13,18 @@ import {
   type IntegrationOption,
   type IntegrationToolsBlock,
   type IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
-import { Button } from "@/components/ui/button";
-import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
-import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { Button } from "@opengeni/react/ui/button";
+import { CapabilityDialogContent } from "@opengeni/react/app/components/capabilities/detail-dialog";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Select } from "@opengeni/react/ui/select";
 import {
   Dialog as Sheet,
   DialogDescription as SheetDescription,
   DialogHeader as SheetHeader,
   DialogTitle as SheetTitle,
-} from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/dialog";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /** Stable element id for a disclosure so affordances can aria-describedby it. */
 export function integrationDisclosureElementId(disclosureId: string): string {
@@ -182,6 +182,33 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
             ) : null}
           </DetailDisclosure>
         ) : null}
+        {model.sections?.map((section) => (
+          <Block
+            key={section.id}
+            title={section.title}
+            action={
+              section.action ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={section.action.primary ? "default" : "outline"}
+                  data-integration-section-action={section.id}
+                  disabled={section.action.disabled || section.action.busy}
+                  onClick={section.action.onClick}
+                >
+                  {section.action.busy ? <Loader2Icon className="animate-spin" /> : null}
+                  {section.action.label}
+                </Button>
+              ) : undefined
+            }
+          >
+            <p className="text-xs leading-5 text-fg-muted">{section.description}</p>
+            {section.status ? <p className="text-sm leading-6 text-fg">{section.status}</p> : null}
+            {section.note ? (
+              <p className="text-xs leading-5 text-fg-muted">{section.note}</p>
+            ) : null}
+          </Block>
+        ))}
         {!model.presentation && model.connection.length > 0 ? (
           <Block title="Connection">
             <ConnectionFacts facts={model.connection} />
@@ -299,7 +326,7 @@ function AccessBlock({ access }: { access: IntegrationAccess }) {
             onClick={access.onEdit}
             disabled={access.editDisabled}
             aria-describedby={describedBy(access.editDisclosureId)}
-            className="text-xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
+            className="text-xs font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
           >
             {access.editLabel}
           </button>
@@ -344,10 +371,8 @@ function AccessBlock({ access }: { access: IntegrationAccess }) {
                       disabled={itemAction.disabled}
                       aria-describedby={describedBy(itemAction.disclosureId)}
                       className={cn(
-                        "shrink-0 rounded-sm text-2xs font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline",
-                        itemAction.destructive
-                          ? "text-fg-muted hover:text-status-failed"
-                          : "text-brand",
+                        "shrink-0 rounded-sm text-2xs font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline",
+                        itemAction.destructive && "text-fg-muted hover:text-status-failed",
                       )}
                     >
                       {itemAction.label}
@@ -426,10 +451,25 @@ function OptionRow({ option }: { option: IntegrationOption }) {
             type="button"
             onClick={option.action.onClick}
             disabled={option.disabled || (option.kind !== "link" && option.busy)}
+            aria-label={option.kind === "link" ? option.action.ariaLabel : undefined}
             aria-describedby={describedBy(option.disclosureId)}
-            className="mt-1 text-2xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
+            className="mt-1 text-2xs font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
           >
             {option.action.label}
+          </button>
+        ) : null}
+        {option.kind === "link" && option.secondaryAction ? (
+          <button
+            type="button"
+            onClick={option.secondaryAction.onClick}
+            disabled={option.disabled}
+            aria-label={option.secondaryAction.ariaLabel}
+            className={cn(
+              "mt-1 ml-3 text-2xs font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline",
+              option.secondaryAction.destructive && "text-fg-muted hover:text-status-failed",
+            )}
+          >
+            {option.secondaryAction.label}
           </button>
         ) : null}
       </div>

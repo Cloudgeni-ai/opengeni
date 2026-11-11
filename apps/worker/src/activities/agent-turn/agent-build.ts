@@ -1,75 +1,95 @@
 import {
-  selectXaiCredentialForUse,
-  materializeXaiCredentialForRun,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-  getXaiSessionAccountPin,
-  setXaiSessionAccountPin,
   getWorkspaceVideoGenerationPolicy,
+  ImageGenerationCreditError,
   loadWorkspaceVercelAiGatewayCredentialLease,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
+  ensureSessionAgentInstructions,
   ensureSessionSkillCatalog,
-  sessionHasToolRouterHistory,
+  ensureSessionWorkspaceGovernance,
+  type SessionAgentPrompt,
+  SUBSCRIPTION_CORE_XAI,
+  turnWorkspaceSettingsAccess,
 } from "@opengeni/db";
+import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
+import { openSuffixApprovedCallIds } from "../open-suffix-resume";
 import {
   formatSkillCatalog,
   skillCatalogEntryIds,
+  type AgentPromptToolAvailability,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
+  CommandCompletionDelivery,
   type ConnectorActionPolicyHooks,
+  modelToolTextBudgetBytes,
   type SandboxFileDownload,
   type TurnSandboxCommandSession,
 } from "@opengeni/runtime";
+import { claimPendingBackgroundCommandResults } from "@opengeni/db/session-background-commands";
 import {
   serviceTierForLatencyMode,
-  environmentsEncryptionKeyBytes,
   WORKSPACE_GATEWAY_PROVIDER_ID,
-  resolveModelProvider,
+  configuredProviders,
   type Settings,
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
-import { executeXaiSubscriptionImageGeneration } from "../xai-image-generation";
-import { rigProviderImageContentHash, videoGenerationCapabilitiesForPolicy } from "@opengeni/core";
+import { executeCoreXaiImageGeneration } from "../xai-image-generation";
+import { createSessionCredentialEnvironment, rigProviderImageContentHash } from "@opengeni/core";
 import {
   admitVideoGenerationRequest,
   managedVideoGenerationCredentialLease,
-  xaiVideoGenerationCredentialLease,
   type VideoGenerationCredentialLease,
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
-import { rigProviderImageSourceImage } from "../sandbox-images";
+import { createVideoGenerationToolAdapter } from "../video-generation-availability";
+import { rigProviderImageContentSourceImage } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
-import { executeGatewayImageGeneration } from "../gateway-image-generation";
-import { executeCodexImageGeneration } from "../codex-image-generation";
+import {
+  executeGatewayImageGeneration,
+  GatewayImageApiError,
+  imageGenerationCreditRefusedResult,
+  imageGenerationProviderFailedResult,
+  managedImageGenerationCredential,
+  reportImageGenerationProviderFailure,
+} from "../gateway-image-generation";
+import {
+  executeCodexImageGeneration,
+  executeCoreCodexImageGeneration,
+} from "../codex-image-generation";
 import {
   ImageGenerationReferenceError,
   resolveImageGenerationReferencesForTool,
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
-import { sandboxRunAs } from "@opengeni/runtime";
-import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@opengeni/contracts";
+import { managedCodemodeClientDownload } from "./codemode-client-download";
+import { personalGitHubLoginForTurn } from "./personal-github-login";
+import { withSandboxStartupPhases } from "./sandbox-startup-phase";
+import {
+  VideoGenerationRejectedResult,
+  resolveAgentToolFamilies,
+  type VideoGenerationPolicy,
+} from "@opengeni/contracts";
+import { sessionStartedUnattended, sessionUnattendedNow } from "./unattended";
 
 import {
   structuredToolTransportForTurn,
-  hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
+  openingToolNamesForTurn,
   textVerbosityForTurn,
+  reasoningSummaryForTurn,
 } from "./tool-policy";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
 import type { CompactionPrepOk } from "./compaction-prep";
 import type { runtimeResourcesForTurn } from "./file-resources";
 import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
-import type {
-  loadWorkspaceEnvironmentForRunWithCredentials,
-  sandboxEnvironmentForRun,
-} from "../environment";
+import type { sandboxEnvironmentForRun } from "../environment";
 import type {
   AttemptIdentityState,
   EventingState,
@@ -77,14 +97,38 @@ import type {
   SandboxRuntimeState,
 } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
+import {
+  configuredToolDecisionModel,
+  configuredToolMeaningRanker,
+  recordToolDecisionUsage,
+  TOOL_SELECTION_FALLBACK_METRIC,
+  toolSelectionFallbackReason,
+} from "./tool-discovery";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
+import { turnWebSearchPlan } from "./web-search";
+import {
+  decisionModelProcessingResidency,
+  gateImageGenerationOption,
+  gateVideoGenerationOption,
+  imageGenerationRoute,
+  videoGenerationRoute,
+} from "./side-feature-gates";
+import {
+  attemptQuestionVaultValidator,
+  createAttemptSecretResolver,
+  secretsCapabilityEnabled,
+  type AttemptVaultAccess,
+} from "./secret-resolver";
 
 export type BuildTurnAgentDeps = {
+  /** Connected-vault providers and the shared read budget for this attempt. */
+  vaultAccess: AttemptVaultAccess;
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
   mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
+  bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
@@ -98,6 +142,8 @@ export type BuildTurnAgentDeps = {
   leases: ReturnType<typeof createTurnCredentialLeases>;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
+  /** The agent revision in the system prompt; null for chats without one. */
+  agentPrompt: SessionAgentPrompt | null;
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   humanInputResume: ClaimTurnOk["humanInputResume"];
@@ -115,13 +161,16 @@ export type BuildTurnAgentDeps = {
   workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
+  workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
+  hostedToolsBillCredits: GovernanceModelOk["hostedToolsBillCredits"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
-  workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
   runtimeResources: ReturnType<typeof runtimeResourcesForTurn>;
+  /** Repositories removed from the chat whose sandbox folders are removed before this turn. */
+  repositoryRemoval?: BuildAgentOptions["repositoryRemoval"] | null;
   sandboxEnvironment: Record<string, string>;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
   sandboxGitToken: string | undefined;
@@ -137,9 +186,20 @@ export type BuildTurnAgentDeps = {
   preparationIndependentToolNames: readonly string[];
   /** The attempt's tool catalog includes the Jev-backed code_search tool. */
   codeSearchAvailable: boolean;
+  /**
+   * Frozen clause availability for the modular instructions; undefined for
+   * sessions without an agent configuration. Rendering input only.
+   */
+  promptToolAvailability?: AgentPromptToolAvailability | undefined;
+  /** Durable router use, read once with the tool runtime. */
+  toolRouterInHistory: boolean;
+  /** False when nothing this attempt attaches is deferred (see turnToolRouterExpected). */
+  toolRouterExpected: boolean;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
+  /** The repository skill index would prepare the workspace before the model. */
+  deferRepositorySkillIndex: boolean;
   postToolPreparationStartedAt: number;
   codexContext: CodexRequestContext | null;
 };
@@ -149,6 +209,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     mcpServers,
     input,
     db,
+    bus,
     runtime,
     objectStorage,
     observability,
@@ -161,6 +222,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     leases,
     turn,
     session,
+    agentPrompt,
     fileAuthoritySubjectId,
     capabilitySettings,
     humanInputResume,
@@ -183,8 +245,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     rigName,
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
-    workspaceVariableSet,
     runtimeResources,
+    repositoryRemoval,
     sandboxEnvironment,
     sandboxArtifactRuntime,
     sandboxGitToken,
@@ -197,6 +259,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     trigger,
     preparationIndependentToolNames,
     codeSearchAvailable,
+    promptToolAvailability,
+    toolRouterInHistory,
+    toolRouterExpected,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -227,24 +292,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // resolved ONCE at turn start (above) via resolveActiveSandboxBackend (the
   // tested gate) and is reused here — resolving once is correct because the
   // clone hook runs at beforeAgentStart, so a mid-turn swap can't affect it.
-  // buildAgent's option key is `workspaceEnvironment` (internal runtime
-  // symbol; the product concept is a variable set). Built as a TYPED const —
-  // a direct literal assignment to Pick<BuildAgentOptions,...> IS excess-
-  // property-checked, so a wrong key fails tsc. A bare conditional spread
-  // inside the options literal is NOT checked, which is exactly how the M1
-  // key regression (workspaceVariableSet vs workspaceEnvironment) slipped
-  // through and silently dropped the variable-set instructions block.
-  const workspaceEnvironmentOption: Pick<BuildAgentOptions, "workspaceEnvironment"> =
-    workspaceVariableSet
-      ? {
-          workspaceEnvironment: {
-            name: workspaceVariableSet.name,
-            description: workspaceVariableSet.description,
-            variableNames: Object.keys(workspaceVariableSet.values),
-          },
-        }
-      : {};
-  const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+  // Fallback mode (the default) keeps hosted search exactly as resolved; the
+  // operator's `replace` mode withholds it in favour of provider tools, and
+  // so does a turn whose hosted search would run on Opengeni's bill.
+  const hostedWebSearch = turnWebSearchPlan(
+    resolvedModel,
+    runSettings,
+    deps.workspaceCreditModelsAllowed,
+    deps.hostedToolsBillCredits,
+  ).hostedWebSearch;
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>
@@ -262,12 +318,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           "Sandbox image reference is unavailable",
         );
         const relativePath = path.slice("/workspace/".length);
-        const referenceRunAs = sandboxRunAs(eventing.modelRunSettings);
         const channel = new SandboxChannelAService({
           session: imageReferenceSandbox.session,
           workspaceRoot: "/workspace",
           leaseEpoch: imageReferenceSandbox.leaseEpoch,
-          ...(referenceRunAs ? { runAs: referenceRunAs } : {}),
         });
         const read = await channel.fsRead({
           path: relativePath,
@@ -283,7 +337,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         return Uint8Array.from(Buffer.from(read.content, "base64"));
       },
     });
-  const imageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
+  const unrestrictedImageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
     // Never expose a paid image operation unless its permanent artifact can
     // be committed. Failing after provider execution would leave an
     // unrecoverable outcome-unknown operation with no user-visible image.
@@ -299,6 +353,47 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     }
 
     if (resolvedModel?.provider.kind === "codex-subscription") {
+      // A turn placed by the shared core funds its image operations through
+      // core operation leases on its own connection, never the legacy tables.
+      const core = providerTurn.codexSubscriptionCore;
+      if (core) {
+        const executionGeneration = leases.codex.generation;
+        if (!codexContext || executionGeneration === null) return {};
+        return {
+          imageGeneration: {
+            kind: "provider_adapter",
+            execute: async ({ prompt, references }, { toolCallId }) => {
+              const referenceResolution = await resolveImageReferences(references);
+              if (referenceResolution.status === "rejected") return referenceResolution.result;
+              const receipt = await executeCoreCodexImageGeneration({
+                db,
+                settings: capabilitySettings,
+                objectStorage,
+                core,
+                executionGeneration,
+                clientVersion: codexContext.clientVersion,
+                assertChatLease: () => leases.codex.assertCurrentForDispatch(),
+                assertCreditAdmission: async () => {
+                  await codexContext.getToken();
+                  await codexContext.beforeProviderDispatch?.();
+                },
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                toolCallId,
+                prompt,
+                references: referenceResolution.references,
+                ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+              });
+              media.rememberGeneratedImageCreatedThisTurn(receipt);
+              await media.materializeGeneratedImage(receipt);
+              return receipt;
+            },
+          },
+        };
+      }
       const imageAuthority = connectedSubscriptionImageGenerationAuthority(
         codexContext,
         providerTurn.effectiveCodexCredentialId,
@@ -334,18 +429,74 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     }
 
     if (resolvedModel?.provider.kind === "xai-subscription") {
-      const imageAuthority = connectedSubscriptionImageGenerationAuthority(
-        providerTurn.xaiRequestContext,
-        providerTurn.effectiveXaiCredentialId,
-      );
-      if (!imageAuthority) return {};
-      return {
-        imageGeneration: {
-          kind: "provider_adapter",
-          execute: async ({ prompt, references }, { toolCallId }) => {
-            const referenceResolution = await resolveImageReferences(references);
-            if (referenceResolution.status === "rejected") return referenceResolution.result;
-            const receipt = await executeXaiSubscriptionImageGeneration({
+      // A SuperGrok turn placed by the shared core generates images on its own
+      // placed connection under an `image` operation lease; the session
+      // binding is never touched. A turn without a core placement offers no
+      // image tool.
+      const core = providerTurn.xaiSubscriptionCore;
+      if (core) {
+        const executionGeneration = leases.xai.generation;
+        if (executionGeneration === null) return {};
+        return {
+          imageGeneration: {
+            kind: "provider_adapter",
+            execute: async ({ prompt, references }, { toolCallId }) => {
+              const referenceResolution = await resolveImageReferences(references);
+              if (referenceResolution.status === "rejected") return referenceResolution.result;
+              const receipt = await executeCoreXaiImageGeneration({
+                db,
+                settings: capabilitySettings,
+                objectStorage,
+                core,
+                executionGeneration,
+                assertChatLease: () => leases.xai.assertCurrentForDispatch(),
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                toolCallId,
+                prompt,
+                references: referenceResolution.references,
+                ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+              });
+              media.rememberGeneratedImageCreatedThisTurn(receipt);
+              await media.materializeGeneratedImage(receipt);
+              return receipt;
+            },
+          },
+        };
+      }
+      return {};
+    }
+
+    // The workspace's own Gateway key pays first. Otherwise the deployment's
+    // Gateway key generates the image on Opengeni credits, like credit-funded
+    // video, unless the operator or the workspace turned that off. The
+    // workspace key is a provider, not a model: look it up by provider id.
+    const gateway = configuredProviders(capabilitySettings).find(
+      (provider) => provider.id === WORKSPACE_GATEWAY_PROVIDER_ID,
+    );
+    const route =
+      gateway?.kind === "vercel-gateway-workspace" && gateway.apiKey
+        ? {
+            apiKey: gateway.apiKey,
+            modelId: capabilitySettings.imageGenerationModel,
+            pricedCostMicros: 0,
+          }
+        : deps.workspaceCreditModelsAllowed === false
+          ? null
+          : managedImageGenerationCredential(capabilitySettings);
+    if (!route) return {};
+    return {
+      imageGeneration: {
+        kind: "provider_adapter",
+        execute: async ({ prompt, references }, { toolCallId }) => {
+          const referenceResolution = await resolveImageReferences(references);
+          if (referenceResolution.status === "rejected") return referenceResolution.result;
+          let receipt: Awaited<ReturnType<typeof executeGatewayImageGeneration>>;
+          try {
+            receipt = await executeGatewayImageGeneration({
               db,
               objectStorage,
               accountId: input.accountId,
@@ -353,49 +504,41 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               sessionId: input.sessionId,
               turnId: turn.id,
               attemptId: input.attemptId,
-              toolCallId,
+              apiKey: route.apiKey,
+              modelId: route.modelId,
+              ...(route.pricedCostMicros > 0
+                ? {
+                    pricedCostMicros: route.pricedCostMicros,
+                    creditUsageModelId: turnExecutionPolicy.productModelId,
+                  }
+                : {}),
               prompt,
               references: referenceResolution.references,
-              credentialId: imageAuthority.credentialId,
-              xaiContext: imageAuthority.credentialContext,
+              toolCallId,
               ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
             });
-            media.rememberGeneratedImageCreatedThisTurn(receipt);
-            await media.materializeGeneratedImage(receipt);
-            return receipt;
-          },
-        },
-      };
-    }
-
-    const gatewayResolution = resolveModelProvider(
-      capabilitySettings,
-      WORKSPACE_GATEWAY_PROVIDER_ID,
-    );
-    const gateway = gatewayResolution?.provider;
-    if (gateway?.kind !== "vercel-gateway-workspace" || !gateway.apiKey) return {};
-    const gatewayApiKey = gateway.apiKey;
-    return {
-      imageGeneration: {
-        kind: "provider_adapter",
-        execute: async ({ prompt, references }, { toolCallId }) => {
-          const referenceResolution = await resolveImageReferences(references);
-          if (referenceResolution.status === "rejected") return referenceResolution.result;
-          const receipt = await executeGatewayImageGeneration({
-            db,
-            objectStorage,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            apiKey: gatewayApiKey,
-            modelId: capabilitySettings.imageGenerationModel,
-            prompt,
-            references: referenceResolution.references,
-            toolCallId,
-            ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
-          });
+          } catch (error) {
+            // Credits refused the image before any provider request: tell the
+            // agent plainly so it can tell the person, instead of failing.
+            if (error instanceof ImageGenerationCreditError) {
+              return imageGenerationCreditRefusedResult(error);
+            }
+            // The image provider answered without an image (out of credit,
+            // rate limited, refused, down). That is this tool's failure, not
+            // the chat model's: the agent gets a plain reason and the turn
+            // continues. Nothing is debited and no credits stay held.
+            if (error instanceof GatewayImageApiError) {
+              const result = imageGenerationProviderFailedResult(error);
+              reportImageGenerationProviderFailure(observability, {
+                error,
+                result,
+                modelId: route.modelId,
+                funding: route.pricedCostMicros > 0 ? "opengeni_credits" : "workspace_gateway",
+              });
+              return result;
+            }
+            throw error;
+          }
           media.rememberGeneratedImageCreatedThisTurn(receipt);
           await media.materializeGeneratedImage(receipt);
           return receipt;
@@ -403,180 +546,164 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
-  const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
-  const videoGenerationEnabled =
-    videoGenerationPolicy.defaultModelId !== null &&
-    videoGenerationPolicy.enabledModelIds.length > 0;
-  let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
-  if (objectStorage && videoGenerationEnabled && resolveAgentToolFamilies(session.agent).media) {
-    if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
-      videoGenerationCredential = managedVideoGenerationCredentialLease(eventing.modelRunSettings);
-    } else if (videoGenerationPolicy.fundingSource === "workspace_gateway") {
+  const imageGenerationOption = gateImageGenerationOption(
+    runSettings,
+    imageGenerationRoute({
+      nativeHosted: Boolean(nativeImageProviderBinding),
+      providerKind: resolvedModel?.provider.kind,
+    }),
+    unrestrictedImageGenerationOption,
+  );
+  // The video tools are attached whenever the deployment has object storage,
+  // a sandbox and the agent has the media tools, whatever the workspace's
+  // policy. Each call reads the live policy and credential, so a turn that
+  // turns video on can use it, and while video is off the tools answer
+  // plainly (with who can turn it on) instead of being missing.
+  const resolveVideoGenerationCredential = async (
+    policy: VideoGenerationPolicy,
+  ): Promise<VideoGenerationCredentialLease | null> => {
+    if (policy.fundingSource === "opengeni_credits") {
+      // Credit-funded video honors the workspace switch that turns Opengeni
+      // credits off.
+      return deps.workspaceCreditModelsAllowed === false
+        ? null
+        : managedVideoGenerationCredentialLease(eventing.modelRunSettings);
+    }
+    if (policy.fundingSource === "workspace_gateway") {
       const workspaceCredential = await loadWorkspaceVercelAiGatewayCredentialLease(
         db,
         eventing.modelRunSettings,
         input.workspaceId,
       );
-      if (workspaceCredential) {
-        videoGenerationCredential = {
-          fundingSource: "workspace_gateway",
-          ...workspaceCredential,
-        };
-      }
-    } else if (videoGenerationPolicy.fundingSource === "supergrok_subscription") {
-      const encryptionKey = environmentsEncryptionKeyBytes(eventing.modelRunSettings);
-      const subjectId = leases.xai.subjectId ?? turn.initiatingHumanSubjectId;
-      if (encryptionKey && subjectId) {
-        const authoritySnapshot =
-          providerTurn.xaiAuthoritySnapshot ??
-          (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
-            workspaceId: input.workspaceId,
-            subjectId,
-          }));
-        const pin = await getXaiSessionAccountPin(db, {
-          workspaceId: input.workspaceId,
-          subjectId,
-          sessionId: input.sessionId,
-          authoritySnapshot,
-        });
-        const selected = providerTurn.effectiveXaiCredentialId
-          ? {
-              credentialId: providerTurn.effectiveXaiCredentialId,
-              rotationEnabled: providerTurn.xaiRotationEnabled,
-            }
-          : await selectXaiCredentialForUse(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId,
-              authoritySnapshot,
-              shardKey: input.sessionId,
-              pinnedCredentialId: pin?.pinnedCredentialId ?? null,
-              pinSource:
-                pin?.pinSource === "manual" || pin?.pinSource === "policy" ? pin.pinSource : null,
-            });
-        if (selected.credentialId) {
-          if (
-            selected.rotationEnabled &&
-            pin?.pinSource !== "manual" &&
-            pin?.pinnedCredentialId !== selected.credentialId
-          ) {
-            await setXaiSessionAccountPin(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId,
-              sessionId: input.sessionId,
-              authoritySnapshot,
-              credentialId: selected.credentialId,
-              pinSource: "policy",
-              expectedVersion: pin?.version ?? null,
-            }).catch((error: unknown) => {
-              if (error instanceof Error && error.message === "xAI session pin changed") return;
-              throw error;
-            });
-          }
-          const credential = await materializeXaiCredentialForRun(db, {
-            workspaceId: input.workspaceId,
-            subjectId,
-            credentialId: selected.credentialId,
-            authoritySnapshot,
-            encryptionKey,
-          });
-          videoGenerationCredential = xaiVideoGenerationCredentialLease({
-            settings: eventing.modelRunSettings,
-            credential,
-            subjectId,
-            authoritySnapshot,
-          });
-        }
-      }
+      return workspaceCredential
+        ? { fundingSource: "workspace_gateway", ...workspaceCredential }
+        : null;
     }
-  }
-  const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> = (() => {
-    if (
-      !objectStorage ||
-      eventing.modelRunSettings.sandboxBackend === "none" ||
-      !videoGenerationCredential ||
-      !videoGenerationEnabled
-    ) {
-      return {};
-    }
-    // Parse the frozen capability snapshot before advertising either tool.
-    // Invalid or unsupported workspace policy therefore fails closed before
-    // it can perturb the model's tool list.
-    const capabilities = videoGenerationCapabilitiesForPolicy({
-      policy: videoGenerationPolicy,
-      credentialVersion: videoGenerationCredential.version,
-    });
-    return {
-      videoGeneration: {
-        capabilities: async () => capabilities,
-        execute: async (toolInput, { toolCallId }) => {
-          const referenceSandbox = await resolveVideoReferenceSandboxAccess(
-            toolInput,
-            sandboxState,
-            media.sdkOwnedSandboxSession,
-          );
-          const fence = eventing.toolCancellationFenceRef.current;
-          if (referenceSandbox && !fence) {
-            throw new Error("Video reference command fence is unavailable");
-          }
-          const runAs = sandboxRunAs(eventing.modelRunSettings);
-          let accepted: Awaited<ReturnType<typeof admitVideoGenerationRequest>>;
-          try {
-            accepted = await admitVideoGenerationRequest({
-              db,
-              storage: objectStorage,
-              settings: eventing.modelRunSettings,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              attemptId: input.attemptId,
-              toolCallId,
-              toolInput,
-              policy: videoGenerationPolicy,
-              credential: videoGenerationCredential,
-              ...(referenceSandbox && fence
-                ? {
-                    runCommand: async (command) =>
-                      await fence.runSandboxCommandStructured(
-                        referenceSandbox.session as TurnSandboxCommandSession,
-                        {
-                          ...command,
-                          ...(runAs ? { runAs } : {}),
-                        },
-                      ),
-                  }
-                : {}),
-              ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
-            });
-          } catch (error) {
-            if (error instanceof VideoReferenceInputError) {
-              return VideoGenerationRejectedResult.parse({
-                schemaVersion: 1,
-                status: "rejected",
-                code: error.code,
-                message: error.message,
-                operationCreated: false,
-              });
-            }
-            throw error;
-          }
-          videoGenerationAcceptancesByCallId.set(toolCallId, {
-            operationId: accepted.operationId,
-            requestDigest: accepted.requestDigest,
-          });
-          return accepted.receipt;
-        },
+    if (!eventing.modelRunSettings.supergrokSubscriptionEnabled) return null;
+    // After the receipt: a shared connection for the session's owner,
+    // referenced (never copied) by the operation (EP-T17/EP-N12), only while
+    // the deployment enables SuperGrok subscriptions.
+    return await subscriptionCoreVideoGenerationCredentialLease(
+      db,
+      eventing.modelRunSettings,
+      SUBSCRIPTION_CORE_XAI,
+      policy.fundingSource,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
       },
-    };
-  })();
+    );
+  };
+  // The one live read of the video policy: each tool call reads it, never the
+  // turn's startup. The EU gate below reads the same way when EU applies.
+  const readVideoGenerationPolicy = () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+  const unrestrictedVideoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> =
+    !objectStorage ||
+    eventing.modelRunSettings.sandboxBackend === "none" ||
+    !resolveAgentToolFamilies(session.agent).media
+      ? {}
+      : {
+          videoGeneration: createVideoGenerationToolAdapter({
+            settings: eventing.modelRunSettings,
+            workspaceId: input.workspaceId,
+            creditModelsAllowed: deps.workspaceCreditModelsAllowed !== false,
+            // Who can turn video on: someone who uses Opengeni through
+            // another product has no Settings page; whether this turn's app
+            // actions can change the workspace's settings is decided live.
+            external: (
+              turn.initiatingHumanSubjectId ??
+              (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : "")
+            ).startsWith("external_user:"),
+            settingsAccess: () =>
+              turnWorkspaceSettingsAccess(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+              }),
+            readPolicy: readVideoGenerationPolicy,
+            resolveCredential: resolveVideoGenerationCredential,
+            admit: async ({ policy, credential, toolInput, toolCallId }) => {
+              const referenceSandbox = await resolveVideoReferenceSandboxAccess(
+                toolInput,
+                sandboxState,
+                media.sdkOwnedSandboxSession,
+              );
+              const fence = eventing.toolCancellationFenceRef.current;
+              if (referenceSandbox && !fence) {
+                throw new Error("Video reference command fence is unavailable");
+              }
+              let accepted: Awaited<ReturnType<typeof admitVideoGenerationRequest>>;
+              try {
+                accepted = await admitVideoGenerationRequest({
+                  db,
+                  storage: objectStorage,
+                  settings: eventing.modelRunSettings,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  attemptId: input.attemptId,
+                  toolCallId,
+                  toolInput,
+                  policy,
+                  credential,
+                  ...(referenceSandbox && fence
+                    ? {
+                        runCommand: async (command) =>
+                          await fence.runSandboxCommandStructured(
+                            referenceSandbox.session as TurnSandboxCommandSession,
+                            {
+                              ...command,
+                            },
+                          ),
+                      }
+                    : {}),
+                  ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+                });
+              } catch (error) {
+                if (error instanceof VideoReferenceInputError) {
+                  return VideoGenerationRejectedResult.parse({
+                    schemaVersion: 1,
+                    status: "rejected",
+                    code: error.code,
+                    message: error.message,
+                    operationCreated: false,
+                  });
+                }
+                throw error;
+              }
+              videoGenerationAcceptancesByCallId.set(toolCallId, {
+                operationId: accepted.operationId,
+                requestDigest: accepted.requestDigest,
+              });
+              return accepted.receipt;
+            },
+          }),
+        };
+  // EU-only inference: no video route is EU, so under EU the tools are not
+  // offered; each call also checks the route its live funding policy names.
+  const videoGenerationOption = gateVideoGenerationOption(
+    runSettings,
+    async () => videoGenerationRoute((await readVideoGenerationPolicy()).fundingSource),
+    unrestrictedVideoGenerationOption,
+  );
   const serviceTier = serviceTierForLatencyMode(
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
-  const approvedToolCallId = approvedConnectorActionCallId(trigger);
+  const reasoningSummary = reasoningSummaryForTurn(resolvedModel);
+  // The calls this resume runs as approved: its trigger's and every sibling
+  // approval of the same pause decided before it began.
+  const approvedToolCallIds = await openSuffixApprovedCallIds({
+    db,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    trigger,
+  });
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -585,8 +712,41 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedExecutionGeneration: turn.executionGeneration,
     expectedAttemptId: input.attemptId,
     catalog: formatSkillCatalog(deps.skillCatalog),
+    // A configured agent with no Skill gets no empty index (it would only say
+    // there are none); an earlier non-empty index is still replaced.
+    omitWhenEmpty: session.agent != null && deps.skillCatalog.length === 0,
   });
-  eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
+  // Governance changes between turns and with who starts a turn. It reaches
+  // the model as a durable history item before the first turn that sees a new
+  // value, never in the system prompt, so a change does not rewrite text that
+  // earlier requests sent (which invalidated the whole cached history).
+  await ensureSessionWorkspaceGovernance(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    expectedExecutionGeneration: turn.executionGeneration,
+    expectedAttemptId: input.attemptId,
+    governance: workspaceGovernance ?? null,
+  });
+  // An agent edit made since this chat's system prompt was built reaches the
+  // model the same way, so the cached prompt stays intact until compaction
+  // folds it in. A deleted agent continues as a plain chat.
+  if (agentPrompt) {
+    await ensureSessionAgentInstructions(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      expectedExecutionGeneration: turn.executionGeneration,
+      expectedAttemptId: input.attemptId,
+      prompt: agentPrompt,
+    });
+  }
+  eventing.modelVisibleSkillIds = skillCatalogEntryIds(
+    modelVisibleSkillCatalogText,
+    deps.skillCatalog,
+  );
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
       buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
@@ -615,10 +775,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     eventing.modelRunSettings.reasoningConfigurationUpdatesEnabled &&
     resolvedModel?.provider.api === "responses" &&
     (resolvedModel.provider.id === "codex" || resolvedModel.provider.id === "openai") &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    );
   const requestReasoningEffort =
     useReasoningUpdates &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort)
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    )
       ? await ensureSessionReasoningConfiguration(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -626,16 +792,69 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           turnId: turn.id,
           expectedExecutionGeneration: turn.executionGeneration,
           expectedAttemptId: input.attemptId,
-          effort: turn.reasoningEffort,
+          effort: turnExecutionPolicy.reasoningEffort,
         })
-      : turn.reasoningEffort;
-  const toolRouterInHistory = session.agent
-    ? await sessionHasToolRouterHistory(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-      })
-    : false;
+      : turnExecutionPolicy.reasoningEffort;
+  // Codemode runs from a shell: a configured session with no sandbox or
+  // Connected Machine this turn gets neither the client nor its guidance,
+  // unless `run_on` can open a Codemode-enabled shell on another machine.
+  const codemodeToken =
+    session.agent &&
+    (activeSandboxBackend ?? groupBoxBackend) === "none" &&
+    !resolveAgentToolFamilies(session.agent).allowsFirstPartyTool("run_on")
+      ? undefined
+      : sandboxCodemodeToken;
+  // Managed boxes fetch the release's Codemode client in one setup command.
+  const codemodeClientDownload =
+    activeSandboxBackend !== "selfhosted" && codemodeToken
+      ? await withSandboxStartupPhases(
+          {
+            observability,
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            publish: eventing.publish,
+            publishInBackground: eventing.publishInBackground,
+          },
+          (measure) =>
+            measure("client_publication", () =>
+              managedCodemodeClientDownload({
+                settings: eventing.modelRunSettings,
+                objectStorage,
+                activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+              }),
+            ),
+        )
+      : undefined;
+  // One resolver per attempt, shared by exec references and the credential
+  // profile so approvals, audit and caching stay consistent.
+  const attemptResolver = createAttemptSecretResolver({
+    db,
+    bus,
+    settings: eventing.modelRunSettings,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: turn.executionGeneration,
+    agent: session.agent,
+    vaultAccess: deps.vaultAccess,
+  });
+  // Prompt text only: the repositories module names the person's login for
+  // repositories mounted as them in a managed sandbox. Best effort and never
+  // an authority; a failed read only drops the login from that turn's prompt.
+  const promptBackend = activeSandboxBackend ?? groupBoxBackend;
+  const personalGitHubLogin =
+    session.agent &&
+    promptBackend !== "selfhosted" &&
+    promptBackend !== "none" &&
+    runtimeResources.some(
+      (resource) =>
+        resource.kind === "repository" &&
+        (resource as { connectionType?: string }).connectionType === "github_personal",
+    )
+      ? await personalGitHubLoginForTurn(db, turn.personalConnectionDelegations)
+      : undefined;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -662,13 +881,49 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
-        ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
+        ...(session.agent
+          ? {
+              agentConfig: session.agent,
+              toolRouterInHistory,
+              ...(toolRouterExpected ? {} : { toolRouterExpected: false }),
+            }
+          : {}),
+        ...(agentPrompt?.instructions ? { agentInstructions: agentPrompt.instructions } : {}),
+        ...(personalGitHubLogin ? { personalGitHubLogin } : {}),
+        ...(session.agent && promptToolAvailability
+          ? { agentPromptToolAvailability: promptToolAvailability }
+          : {}),
         reasoningEffort: requestReasoningEffort,
+        ...(reasoningSummary ? { reasoningSummary } : {}),
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
+        // Frozen at create: only a child session has a parent agent to answer.
+        subSession: session.nestedAgentDepth > 0,
+        // Frozen at create: what the model is told and which tools it has.
+        ...(sessionStartedUnattended(session) ? { unattended: true } : {}),
+        // The current setting: approvals and questions are refused, not awaited.
+        ...(sessionUnattendedNow(session) ? { unattendedNow: true } : {}),
+        secrets: {
+          referencesEnabled: secretsCapabilityEnabled(session.agent),
+          // Same rule as the vault context (0739) and session authorization:
+          // the initiating human, else a subject initiator.
+          hasActingHuman: Boolean(
+            turn.initiatingHumanSubjectId ??
+            (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : null),
+          ),
+          validateQuestionVault: attemptQuestionVaultValidator({
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+          }),
+        },
         missingSessionTitleHint,
         sandboxEnvironment,
         ...(preparedTools.attemptToolCatalog
@@ -676,6 +931,49 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+        ...(deps.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
+        // W1: `{{secret:…}}` references resolve at the exec boundary, and the
+        // session's credential profile adds its variables to every command
+        // through the same resolver.
+        secretResolver: attemptResolver,
+        credentials: createSessionCredentialEnvironment({
+          db,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          resolver: attemptResolver,
+        }),
+        // Commands that finish while the model works arrive with its next
+        // plain-text tool result instead of waiting for a read or a later turn.
+        ...(eventing.modelRunSettings.sandboxBackend !== "none"
+          ? {
+              commandCompletionDelivery: new CommandCompletionDelivery({
+                take: async ({ maxBytes }) =>
+                  await claimPendingBackgroundCommandResults(db, {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    maxBytes,
+                  }),
+                maxTextBytes: () =>
+                  modelToolTextBudgetBytes(
+                    eventing.modelRunSettings.modelToolOutputTruncationTokens,
+                  ),
+                signal: cancellationSignal,
+                onDelivered: (appended) => {
+                  (eventing.commandCompletionNotices ??= new Set()).add(appended);
+                },
+                onError: (error) =>
+                  observability.warn("Finished background commands were not attached", {
+                    error: error instanceof Error ? error.message : String(error),
+                  }),
+              }),
+            }
+          : {}),
+        // A setup notice (a repository folder moved aside) follows the tool
+        // result the model reads; the timeline shows the tool's own output.
+        onSandboxSetupNoticeDelivered: (appended: string) => {
+          (eventing.commandCompletionNotices ??= new Set()).add(appended);
+        },
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },
@@ -694,16 +992,20 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
-        ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
+        ...(codemodeToken ? { codemodeAvailable: true } : {}),
         ...(codeSearchAvailable ? { codeSearchAvailable: true } : {}),
         // Managed boxes receive the bearer through their protected per-session
         // token file. Connected Machines use transient per-exec delivery above,
         // so they must not run the file-seeding lifecycle hook.
-        ...(activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
+        ...(activeSandboxBackend !== "selfhosted" && codemodeToken
           ? {
-              codemodeTokenSeed: sandboxCodemodeToken,
+              codemodeTokenSeed: codemodeToken,
               codemodeTokenSessionId: input.sessionId,
+              ...(codemodeClientDownload ? { codemodeClientDownload } : {}),
             }
+          : {}),
+        ...(activeSandboxBackend !== "selfhosted" && repositoryRemoval
+          ? { repositoryRemoval }
           : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
@@ -714,11 +1016,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
         connectorActionPolicy,
         attemptConnectorActionBindings,
-        ...(approvedToolCallId ? { approvedToolCallId } : {}),
-        // LIVE by-reference connector namespaces (fills during this turn's
-        // codex_apps tools/list): the codex tool_search description reads it per
-        // model call so the model sees the account's real connected sources.
+        ...(approvedToolCallIds.length > 0 ? { approvedToolCallIds } : {}),
+        // Legacy connector metadata remains available to non-progressive paths.
+        // Progressive discovery reads the authorized pool, never a changing
+        // source directory in its first-request control schemas.
         codexConnectorNamespaces: preparedTools.codexConnectorNamespaces,
+        // Best-effort MCP servers whose tools are missing this turn, and why;
+        // tool discovery reports them in its results.
+        unavailableMcpServers: preparedTools.unavailableMcpServers,
         // Resolved-model routing + gating (legacy defaults when null). The model
         // is passed as the model *string* (agent.model = runSettings.openaiModel),
         // NOT a Model instance: an instance only survives the in-process
@@ -734,11 +1039,71 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // session's MCP allow-list; the effective context window drives the
         // compaction threshold.
         hostedWebSearch,
+        ...(resolvedModel?.configured.hostedWebSearchContextSize === undefined
+          ? {}
+          : { hostedWebSearchContextSize: resolvedModel.configured.hostedWebSearchContextSize }),
         ...imageGenerationOption,
         ...videoGenerationOption,
         lazyToolTransport,
+        // A new session's opening tools load in its first turn's first model
+        // step, as a search by name would; the tool block stays unchanged.
+        openingToolNames: openingToolNamesForTurn(resolvedModel, turn.metadata),
+        toolSearchDecisionModel: configuredToolDecisionModel({
+          settings: runSettings,
+          onUnavailable: () =>
+            observability.warn(
+              "Configured decision model is unavailable; using lexical tool discovery",
+            ),
+          recordUsage: (modelId, usage, requestId) =>
+            recordToolDecisionUsage({
+              db,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              turnAttemptId: input.attemptId,
+              modelId,
+              usage,
+              requestId,
+              processingResidency: decisionModelProcessingResidency(runSettings),
+            }),
+        }),
+        // The search result says only that it fell back; the deployment
+        // keeps why, so slow or failing selections can be fixed.
+        onToolSelectionError: (failure) => {
+          // Telemetry never changes the search: it has already fallen back.
+          try {
+            const reason = toolSelectionFallbackReason(failure);
+            observability.incrementCounter({
+              ...TOOL_SELECTION_FALLBACK_METRIC,
+              labels: { reason },
+            });
+            const { status, code } = (failure.error ?? {}) as { status?: unknown; code?: unknown };
+            observability.warn("Tool search selection fell back to keywords", {
+              reason,
+              elapsedMs: failure.elapsedMs,
+              attempts: failure.attempts,
+              ...(typeof status === "number" ? { status } : {}),
+              ...(typeof code === "string" ? { code } : {}),
+            });
+          } catch {
+            // Best effort.
+          }
+        },
+        toolSearchMeaningRanker: configuredToolMeaningRanker({
+          settings: runSettings,
+          onError: (error) =>
+            observability.warn("Tool search meaning ranking is unavailable; using keywords", {
+              error: error instanceof Error ? error.message : String(error),
+            }),
+        }),
         ...(eventing.toolPreparationReady
-          ? { toolPreparationReady: eventing.toolPreparationReady }
+          ? {
+              toolPreparationReady: eventing.toolPreparationReady,
+              ...(eventing.preparedTools?.startDeferredPreparation
+                ? { startToolPreparation: eventing.preparedTools.startDeferredPreparation }
+                : {}),
+            }
           : {}),
         preparationIndependentToolNames,
         supportsImageInput,
@@ -754,8 +1119,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               // tool. Gateway Responses routes likewise expose ordinary function
               // tools, not OpenAI-hosted sandbox tools. Tell buildAgent to use
               // function apply_patch and wrap successful view_image results as
-              // typed input_image content. Chat wires have no proven typed image
-              // result transport and therefore receive no view_image tool.
+              // typed input_image content. The Chat adapter projects tool images
+              // into a labelled image envelope after the paired tool results.
               structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
               ...(promptCacheKey ? { promptCacheKey } : {}),
             }
@@ -781,13 +1146,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
-        ...(workspaceGovernance ? { workspaceGovernance } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
         ...(sessionInstructions ? { sessionInstructions } : {}),
-        ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential
         // hooks. All absent for a rig-less turn (byte-for-byte today).
@@ -804,7 +1167,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                       timeoutMs: runSettings.rigSetupTimeoutMs,
                       contentHash: rigProviderImageContentHash({
                         backend: turn.sandboxBackend,
-                        sourceImage: rigProviderImageSourceImage(
+                        sourceImage: rigProviderImageContentSourceImage(
                           logicalSandboxSettings,
                           turn.sandboxBackend,
                         ),
@@ -849,20 +1212,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     modelVisibleSkillCatalogText,
     postAgentPreparationStartedAt,
   };
-}
-
-function approvedConnectorActionCallId(trigger: ClaimTurnOk["trigger"]): string | null {
-  if (trigger.type !== "user.approvalDecision") {
-    return null;
-  }
-
-  const payload = trigger.payload as {
-    approvalId?: unknown;
-    decision?: unknown;
-  };
-  return payload.decision === "approve" && typeof payload.approvalId === "string"
-    ? payload.approvalId
-    : null;
 }
 
 export type BuildTurnAgentOk = Awaited<ReturnType<typeof buildTurnAgent>>;

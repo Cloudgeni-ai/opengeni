@@ -2,7 +2,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const fixturePath = "/test/personal-github-identity.html";
@@ -54,9 +55,11 @@ describe("personal GitHub identity dialog in Chromium", () => {
   test("keeps the desktop flow compact, keyboard-operable, and exact", async () => {
     const dialog = page.getByRole("dialog");
     await dialog.waitFor();
-    expect(await dialog.getByRole("heading", { name: "Your GitHub identity" }).count()).toBe(1);
+    expect(await dialog.getByRole("heading", { name: "Your GitHub" }).count()).toBe(1);
     expect(await dialog.textContent()).toContain("Connected as @octocat");
-    expect(await dialog.textContent()).toContain("additional allowlist");
+    expect(await dialog.textContent()).toContain("Only these repositories.");
+    // All my repositories is offered only once the deployment enables it.
+    expect(await dialog.getByLabel("Repositories Opengeni may use").count()).toBe(0);
 
     const search = dialog.getByLabel("Find a GitHub repository");
     await search.focus();

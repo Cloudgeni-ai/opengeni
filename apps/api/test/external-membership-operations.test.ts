@@ -1,24 +1,26 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
-import postgres from "postgres";
+
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { OpenGeniClient } from "@opengeni/sdk";
 import { type ApiRouteDeps } from "@opengeni/core";
 import {
   acquireOwnerMigratedTestDatabase,
-  testSettings,
-  MemoryEventBus,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   createDb,
   createWorkspace,
   createSession,
   createScheduledTask,
+  transitionSessionVisibility,
   withSessionRlsActorContext,
   createOrganizationApiKey,
+  updateOrganizationApiKey,
   ensureExternalIdentity,
   migrate,
   provisionRoles,
@@ -26,6 +28,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { rawRows } from "../../../packages/db/src/database";
+import { McpConnectionAccountBindings } from "@opengeni/contracts";
+import { personalDelegationsForAccountBindings } from "../../../packages/core/src/domain/mcp-account-bindings";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 
@@ -70,36 +74,6 @@ afterAll(async () => {
     }
   }
 }, 60_000);
-
-test("rolling owner-RLS repair replay preserves definitions, ownership and ACLs", async () => {
-  const definitions = () => shared.admin`select p.proname, pg_get_functiondef(p.oid) as definition,
-    p.proowner, p.proacl::text as acl from pg_proc p
-    where p.oid in ('prepare_workspace_membership_removal_settlements(jsonb)'::regprocedure,
-      'workspace_membership_removal_command(jsonb)'::regprocedure) order by p.proname`;
-  const before = await definitions();
-  const repair = await Bun.file(
-    new URL(
-      "../../../packages/db/drizzle/0558_external_membership_removal_owner_rls.sql",
-      import.meta.url,
-    ),
-  ).text();
-  const owner = postgres(shared.ownerUrl, { max: 1 });
-  try {
-    // Simulate SQL commit followed by a lost migration-ledger receipt. Replay
-    // must work under the same non-bypass owner, not merely skip via migrate().
-    await owner.begin(async (tx) => {
-      await tx.unsafe(repair);
-    });
-    await owner.begin(async (tx) => {
-      await tx.unsafe(repair);
-    });
-    expect(await definitions()).toEqual(before);
-  } finally {
-    await owner.end();
-  }
-  await migrate(shared.ownerUrl, "public", { applicationDatabaseRoles: [appRole] });
-  expect(await definitions()).toEqual(before);
-}, 180_000);
 
 async function fixture() {
   const [account] =
@@ -413,7 +387,8 @@ async function waitForBlockedOperations(count: number) {
   while (Date.now() < deadline) {
     const [row] = await shared.admin`select count(*)::int as n from pg_stat_activity
       where datname = current_database() and wait_event_type = 'Lock'
-        and query like '%prepare_external_workspace_membership_operation%'`;
+        and (query like '%prepare_external_workspace_membership_operation%'
+          or query like '%pg_advisory_xact_lock(hashtextextended%')`;
     if (Number(row!.n) >= count) return;
     await Bun.sleep(5);
   }
@@ -436,6 +411,41 @@ test.each(["grant-first", "revoke-first"] as const)(
     if (order === "revoke-first") expect(results[1]).toMatchObject({ status: 409 });
     else expect(results[1]).toMatchObject({ removed: true });
     expect(await f.members()).toEqual([]);
+  },
+  30_000,
+);
+
+test.each(["scope", "permissions"] as const)(
+  "keyed grant rechecks committed policy %s narrowing after request authorization",
+  async (narrowing) => {
+    const f = await fixture();
+    const other = await createWorkspace(db.db, {
+      accountId: f.accountId,
+      name: "Other selected workspace",
+    });
+    let grant!: Promise<unknown>;
+    await shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${f.accountId}`}, 0))`;
+      grant = f.add().catch((error: unknown) => error);
+      await waitForBlockedOperations(1);
+      await updateOrganizationApiKey(db.db, f.accountId, f.key.id, {
+        policy: {
+          preset: "custom",
+          permissions:
+            narrowing === "scope"
+              ? ["workspace:read", "members:manage"]
+              : ["workspace:admin", "members:manage"],
+          workspaceScope: {
+            kind: "selected",
+            workspaceIds: [narrowing === "scope" ? other.id : f.workspace.id],
+          },
+        },
+      });
+    });
+    expect(await grant).toMatchObject({ status: 403 });
+    const [members] = await shared.admin`select count(*)::int as n from workspace_memberships
+      where workspace_id = ${f.workspace.id} and subject_id = ${f.identity.subjectId}`;
+    expect(members!.n).toBe(0);
   },
   30_000,
 );
@@ -683,6 +693,151 @@ test("keyed cancellation tears down private, child, live and scheduled work only
   const [wake] =
     await shared.admin`select count(*)::int as n from session_workflow_wake_outbox where session_id = ${target.sessionId}`;
   expect(wake!.n).toBeGreaterThan(0);
+});
+
+async function sessionWithOwnMcpAccount(
+  f: Awaited<ReturnType<typeof fixture>>,
+  visibility: "workspace_shared" | "user_private" = "workspace_shared",
+) {
+  const connectionId = crypto.randomUUID();
+  const personal = McpConnectionAccountBindings.parse([
+    {
+      serverId: `account-${"c".repeat(64)}`,
+      canonicalServerId: "mail",
+      connectionId,
+      originWorkspaceId: f.workspace.id,
+      subjectScope: "subject",
+      ownerSubjectId: f.identity.subjectId,
+      accountLabel: "Personal mail",
+      providerDomain: "mail.test",
+      kind: "oauth2",
+      connectionRef: {
+        connectionId,
+        subjectScope: "subject",
+        providerDomain: "mail.test",
+        kind: "oauth2",
+      },
+    },
+  ]);
+  const session = await withSessionRlsActorContext({ subjectId: f.identity.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      initialMessage: "Read my mail",
+      resources: [],
+      metadata: {},
+      visibility,
+      createdBy: { kind: "subject", subjectId: f.identity.subjectId },
+      subjectId: f.identity.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      mcpAccountBindings: personal,
+      personalConnectionDelegations: personalDelegationsForAccountBindings(personal),
+    }),
+  );
+  await shared.admin`update sessions set owner_organization_membership_id = ${f.identity.organizationMembershipId}
+    where id = ${session.id}`;
+  const revoked = async () => {
+    const [row] = await shared.admin`select authority_epoch::int as epoch,
+        initial_personal_connection_delegations as delegations,
+        initial_mcp_account_bindings as bindings, visibility
+      from sessions where id = ${session.id}`;
+    return row!;
+  };
+  return { session, revoked };
+}
+
+test("keyed cancellation removes a member whose sessions selected their own MCP account", async () => {
+  const f = await fixture();
+  await f.add();
+  const { session, revoked } = await sessionWithOwnMcpAccount(f);
+  // Outside the native lifecycle command the delegation stays immutable.
+  const directClear = (advanceEpoch: boolean) =>
+    shared.admin
+      .begin(async (tx) => {
+        await tx`set local lock_timeout = '5s'`;
+        await tx`update sessions set initial_personal_connection_delegations = '[]'::jsonb,
+          authority_epoch = authority_epoch + ${advanceEpoch ? 1 : 0} where id = ${session.id}`;
+      })
+      .then(
+        () => "updated",
+        (error: unknown) => String(error),
+      );
+  // Without the lifecycle capability the binding fence refuses the clear
+  // before the immutability fence sees it, with or without an epoch advance.
+  expect(await directClear(false)).toContain(
+    "MCP account binding requires exact sender delegation",
+  );
+  expect(await directClear(true)).toContain("MCP account binding requires exact sender delegation");
+
+  await f.revoke();
+
+  expect((await f.members()).some((member) => member.subjectId === f.identity.subjectId)).toBe(
+    false,
+  );
+  // Authority is revoked, and the session's selection is cleared with it, as
+  // privatization does, so no binding outlives its delegation.
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
+});
+
+test("a regranted member can share a private session revoked while they were away", async () => {
+  const f = await fixture();
+  await f.add();
+  const { session, revoked } = await sessionWithOwnMcpAccount(f, "user_private");
+
+  await f.revoke();
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "user_private",
+  });
+
+  await f.add({ ...f.grant, operationId: crypto.randomUUID() });
+  await transitionSessionVisibility(db.db, {
+    workspaceId: f.workspace.id,
+    sessionId: session.id,
+    actorSubjectId: f.identity.subjectId,
+    targetVisibility: "workspace_shared",
+    expectedAuthorityEpoch: 2,
+    operationKey: `regrant-share-${crypto.randomUUID()}`,
+  });
+
+  expect(await revoked()).toEqual({
+    epoch: 3,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
+});
+
+test("organization offboarding revokes sessions that selected the member's own MCP account", async () => {
+  const f = await fixture();
+  await f.add();
+  const { revoked } = await sessionWithOwnMcpAccount(f);
+
+  await f.service.updateExternalIdentityMembership(
+    f.accountId,
+    f.identity.organizationMembershipId,
+    { kind: "offboard", expectedAuthorizationRevision: 1, operationId: crypto.randomUUID() },
+  );
+
+  expect(await f.service.lookupExternalIdentity(f.accountId, f.reference)).toMatchObject({
+    membershipStatus: "revoked",
+  });
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
 });
 
 test("keyed permission updates widen, narrow, and replay without teardown", async () => {

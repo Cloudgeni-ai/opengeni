@@ -1,7 +1,7 @@
 # Embedded product example
 
 Runnable Connect + Sites host application. Uses the public controller, shared
-React components, and existing Site iframe. No OpenGeni API key enters the browser.
+React components, and existing Site iframe. No Opengeni API key enters the browser.
 
 From this repository run `bun install`, then copy `.env.example` to `.env.local`
 in this directory and configure a **development** organization key and an

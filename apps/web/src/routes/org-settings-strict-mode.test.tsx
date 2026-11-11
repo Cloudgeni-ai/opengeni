@@ -1,3 +1,7 @@
+// The models section renders the shared models page, which navigates through
+// the page's navigation host; the router mock below backs it.
+import "@/navigation-host";
+import type { ChatClient } from "@opengeni/sdk";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -8,9 +12,10 @@ import * as SonnerPackage from "sonner";
 
 import * as ReactPackage from "@opengeni/react";
 import * as RouterPackage from "@tanstack/react-router";
-import * as ContextModule from "@/context";
+import * as ContextModule from "@opengeni/react/app/app-context";
+import * as FormDialogModule from "@opengeni/react/ui/form-dialog";
 import * as AnalyticsModule from "@/lib/analytics";
-import type { CompanyProfileAgentPolicy } from "@/types";
+import type { CompanyProfileAgentPolicy } from "@opengeni/react/app/types";
 
 const accountId = "account-strict";
 const workspaceId = "workspace-strict";
@@ -21,7 +26,9 @@ const toastError = mock((_message: string) => undefined);
 const toastSuccess = mock((_message: string, _options?: unknown) => undefined);
 const navigate = mock(async (_options: unknown) => undefined);
 const captureAnalyticsEvent = mock((_name: string) => true);
-let accountRole: "owner" | "admin" = "owner";
+let accountRole: "owner" | "admin" | "member" = "owner";
+// Replaces the role's permissions for one test; null keeps the role's own.
+let accountPermissionsOverride: string[] | null = null;
 
 const getBilling = mock(async () => ({
   mode: "stripe" as const,
@@ -50,6 +57,8 @@ const getOrganizationUsageSummary = mock(
     nextWorkspaceCursor: null,
     personalWorkspaces: [],
     personalWorkspaceCount: 0,
+    privateChats: [],
+    privateChatsTruncated: false,
   }),
 );
 const getOrganizationUsageWorkspacePage = mock(
@@ -109,6 +118,33 @@ const updateCompanyProfileAgentPolicy = mock(
   }),
 );
 const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => ({ models: [] }));
+// The Developer page lists shared workspaces for "Only selected workspaces"
+// and the person's connected agents; these tests don't read them.
+const getOrganizationAdministrationOverview = mock(async (_accountId: string) => {
+  throw new Error("not used");
+});
+const listOrganizationMcpConnections = mock(async (_accountId: string) => ({
+  connections: [],
+  canManageAll: true,
+}));
+// Billing shows the per-person Personal-workspace limit from the
+// organization's privacy settings.
+const getOrganizationPrivacySettings = mock(async (_organizationId: string) => ({
+  organizationId: accountId,
+  defaultVisibility: "workspace" as const,
+  personalWorkspaces: true,
+  personalWorkspaceMonthlyCredits: null,
+  adminsSeePrivateSchedules: false,
+  limits: {
+    onlyMeAllowed: true,
+    defaultVisibilityLocked: false,
+    adminsSeePrivateSchedulesLocked: false,
+  },
+  updatedAt: null,
+}));
+const updateOrganizationPrivacySettings = mock(async () => {
+  throw new Error("not used");
+});
 const useBillingUsage = mock((_options: unknown) => ({
   loading: false,
   error: null,
@@ -131,7 +167,11 @@ const context = {
     getCompanyProfileAgentPolicy,
     updateCompanyProfileAgentPolicy,
     getWorkspaceModelCatalog,
-  } as unknown as OpenGeniBrowserClient,
+    getOrganizationAdministrationOverview,
+    listOrganizationMcpConnections,
+    getOrganizationPrivacySettings,
+    updateOrganizationPrivacySettings,
+  } as unknown as ChatClient<OpenGeniBrowserClient>,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
   accessContext: {
@@ -142,10 +182,18 @@ const context = {
       {
         accountId,
         subjectId: "user:strict-owner",
-        get role(): "owner" | "admin" {
+        get role(): "owner" | "admin" | "member" {
           return accountRole;
         },
-        permissions: ["account:admin", "billing:read", "billing:manage", "api_keys:manage"],
+        // An admin holds what the API grants admins; account:admin stays the owner's.
+        get permissions(): string[] {
+          if (accountPermissionsOverride) return accountPermissionsOverride;
+          return accountRole === "owner"
+            ? ["account:admin", "billing:read", "billing:manage", "api_keys:manage"]
+            : accountRole === "admin"
+              ? ["account:read", "members:manage", "workspace:create", "billing:read"]
+              : ["account:read"];
+        },
       },
     ],
     workspaceGrants: [],
@@ -185,7 +233,10 @@ const context = {
   revalidatePrincipalAccess: () => undefined,
 };
 
-mock.module("@/context", () => ({ ...ContextModule, useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({
+  ...ContextModule,
+  useAppContext: () => context,
+}));
 mock.module("@opengeni/react", () => ({
   ...ReactPackage,
   useBillingUsage,
@@ -203,6 +254,30 @@ mock.module("@tanstack/react-router", () => ({
   },
 }));
 mock.module("@/lib/analytics", () => ({ ...AnalyticsModule, captureAnalyticsEvent }));
+// The identity editor renders its form in place while open, independent of
+// Radix portal mounting.
+mock.module("@opengeni/react/ui/form-dialog", () => ({
+  ...FormDialogModule,
+  FormDialog: ({
+    open,
+    onOpenChange,
+    onSubmitted,
+    size: _size,
+    ...frame
+  }: Parameters<typeof FormDialogModule.FormDialog>[0]) =>
+    open ? (
+      <div role="dialog">
+        <FormDialogModule.FormFrame
+          variant="dialog"
+          {...frame}
+          onSubmitted={() => {
+            onSubmitted?.();
+            onOpenChange(false);
+          }}
+        />
+      </div>
+    ) : null,
+}));
 mock.module("sonner", () => ({
   ...SonnerPackage,
   toast: Object.assign(
@@ -346,54 +421,32 @@ describe("organization billing StrictMode ownership", () => {
 
     expect(getBilling.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(container.textContent).toContain("$25.00 available");
+    expect(getOrganizationPrivacySettings.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("Monthly limit per person");
+    const creditSection = container.querySelector('section[aria-label="Credits and payments"]');
+    expect(creditSection).not.toBeNull();
+    expect(creditSection?.textContent).toContain("$25.00");
+    expect(creditSection?.textContent).toContain("Total balance");
     expect(container.textContent).toContain("Seats");
-    expect(container.querySelector('section[aria-label="Credits and payments"]')).not.toBeNull();
     expect(container.querySelector('input[name="credit-amount"]')?.getAttribute("aria-label")).toBe(
       "Amount to add (USD)",
     );
-    expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
-      accountId,
-      period: "month",
-      afterWorkspaceId: undefined,
-    });
-    expect(container.textContent).toContain("No usage recorded in this period.");
+    // Usage moved to Organization > Insights; Billing links there and reads no usage.
+    expect(getOrganizationUsageSummary).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Open Insights");
     expect(useBillingUsage).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Invoices and payment details");
     expect(container.textContent).not.toContain("OG-0042");
 
-    const usageSection = container.querySelector('[aria-label="Organization usage dashboard"]')!;
-    const period = (label: string) =>
-      Array.from(
-        usageSection.querySelectorAll<HTMLButtonElement>(
-          '[aria-label="Usage period"] [data-slot=segmented-control-item]',
-        ),
-      ).find((item) => item.textContent?.trim() === label)!;
-    const readsBeforeChange = getOrganizationUsageSummary.mock.calls.length;
-    await act(async () => period("Today").click());
-    await flush();
-    expect(getOrganizationUsageSummary.mock.calls.length).toBe(readsBeforeChange + 1);
-    expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
-      accountId,
-      period: "today",
-    });
-    getOrganizationUsageSummary.mockImplementationOnce(async () => {
-      throw new Error("usage unavailable");
-    });
-    // No Refresh button: another period reloads, and a failure offers Try again.
-    await act(async () => period("This month").click());
-    await flush();
-    expect(usageSection.textContent).toContain("Couldn't load period usage");
-    expect(usageSection.textContent).toContain("Try again. If it keeps happening");
-    // The server's own message stays behind Technical details.
-    expect(usageSection.textContent!.split("Technical details")[0]).not.toContain(
-      "usage unavailable",
-    );
-    expect(usageSection.textContent).not.toContain("No usage recorded");
-
     await act(async () => button(container, "Add credits").click());
     await flush();
     expect(createBillingCheckout).toHaveBeenCalledTimes(1);
+    expect(createBillingCheckout).toHaveBeenCalledWith({
+      amountUsd: 25,
+      accountId,
+      successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=cancelled`,
+    });
     expect(toastError).toHaveBeenCalledWith("Couldn't open checkout", {
       description: "bounded checkout failure",
     });
@@ -411,54 +464,6 @@ describe("organization billing StrictMode ownership", () => {
     });
     expect(button(container, "Open Stripe billing").disabled).toBe(false);
 
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("workspace pagination retains totals and never refetches the organization summary", async () => {
-    getOrganizationUsageSummary.mockClear();
-    getOrganizationUsageWorkspacePage.mockClear();
-    const total = { eventType: "model.cost", unit: "usd_micros", quantity: "100", eventCount: "1" };
-    getOrganizationUsageSummary.mockImplementationOnce(async () => ({
-      accountId,
-      period: "month",
-      since: "2026-08-01T00:00:00.000Z",
-      until: timestamp,
-      granularity: "day",
-      totals: [total],
-      buckets: [],
-      workspaces: [{ workspaceId, name: "First page workspace", totals: [total] }],
-      nextWorkspaceCursor: workspaceId,
-      personalWorkspaces: [],
-      personalWorkspaceCount: 0,
-    }));
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    await act(async () =>
-      root.render(<OrgSettingsRoute workspaceId={workspaceId} section="billing" />),
-    );
-    await flush();
-    expect(container.textContent).toContain("First page workspace");
-    await act(async () => button(container, "Show more workspaces").click());
-    await flush();
-    expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
-    expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
-    expect(getOrganizationUsageWorkspacePage.mock.calls[0]?.[0]).toEqual({
-      accountId,
-      period: "month",
-      until: timestamp,
-      afterWorkspaceId: workspaceId,
-    });
-    // More workspaces add to the list; the first page stays.
-    expect(container.textContent).toContain("Second page workspace");
-    expect(container.textContent).toContain("First page workspace");
-    // Amounts read in cents; a sliver under a cent says so instead of $0.00.
-    expect(container.textContent).toContain("< $0.01");
-    expect(container.textContent).not.toContain("$0.000100");
-    expect(container.textContent).not.toContain("Show more workspaces");
-    expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
-    expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
     await act(async () => root.unmount());
     container.remove();
   });
@@ -489,9 +494,10 @@ describe("organization billing StrictMode ownership", () => {
     container.remove();
   });
 
-  test("updates the organization-wide agent identity mode with CAS", async () => {
+  test("shows the identity agent policy as one Agent learning row that opens Agent learning", async () => {
     getCompanyProfileAgentPolicy.mockClear();
     updateCompanyProfileAgentPolicy.mockClear();
+    navigate.mockClear();
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -505,39 +511,63 @@ describe("organization billing StrictMode ownership", () => {
     });
     await flush();
 
-    expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(
       Array.from(container.querySelectorAll("h2")).map((heading) => heading.textContent?.trim()),
     ).toEqual(expect.arrayContaining(["Identity and mission", "Agent changes", "Documents"]));
     expect(container.textContent).toContain("Organization documents");
     expect(container.textContent).not.toContain("Company");
-    expect(container.textContent).toContain("Require approval");
-    expect(container.textContent).not.toContain("Review first");
-    const automatic = container.querySelector<HTMLButtonElement>(
-      'button[role="radio"][value="automatic"]',
-    );
-    if (!automatic) throw new Error("Missing Automatic policy option");
+    // One vocabulary: `suggest` reads as Review first, never "Require approval".
+    expect(container.textContent).toContain("Review first");
+    expect(container.textContent).not.toContain("Require approval");
+    // No second control here: the mode changes on Agent learning.
+    expect(container.querySelector('button[role="radio"][value="automatic"]')).toBeNull();
+    const row = [
+      ...container.querySelectorAll<HTMLElement>("[data-slot=setting-nav-row] > *"),
+    ].find((element) => element.textContent?.includes("Agent learning"));
+    if (!row) throw new Error("Missing Agent learning row");
     await act(async () => {
-      automatic.click();
+      row.click();
       await Promise.resolve();
     });
-    await flush();
-
-    expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledTimes(1);
-    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[0]).toBe(workspaceId);
-    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[1]).toMatchObject({
-      mode: "automatic",
-      expectedVersion: 0,
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/workspaces/$workspaceId/settings",
+      params: { workspaceId },
+      search: { section: "learning" },
     });
-    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[1].operationId).toMatch(
-      /^[0-9a-f-]{36}$/,
-    );
-    expect(container.textContent).toContain(
-      "Agents can now apply identity changes an owner asks for.",
-    );
+    expect(updateCompanyProfileAgentPolicy).not.toHaveBeenCalled();
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  test("Organization documents opens Knowledge filtered to the organization", async () => {
+    navigate.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="identity" />);
+      });
+      await flush();
+      const row = [
+        ...container.querySelectorAll<HTMLElement>("[data-slot=setting-nav-row] > *"),
+      ].find((element) => element.textContent?.includes("Organization documents"));
+      if (!row) throw new Error("Missing Organization documents row");
+      await act(async () => {
+        row.click();
+        await Promise.resolve();
+      });
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/state",
+        params: { workspaceId },
+        search: { scope: "organization" },
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   test("discards an old organization policy load after the route identity changes", async () => {
@@ -580,11 +610,11 @@ describe("organization billing StrictMode ownership", () => {
       });
       await flush();
 
-      const selectedMode = () =>
-        container
-          .querySelector<HTMLButtonElement>('button[role="radio"][data-state="checked"]')
-          ?.getAttribute("value");
-      expect(selectedMode()).toBe("automatic");
+      const shownMode = () =>
+        [...container.querySelectorAll<HTMLElement>("[data-slot=setting-nav-row]")]
+          .find((row) => row.textContent?.includes("Agent learning"))
+          ?.textContent?.match(/Automatic|Review first|Off/)?.[0];
+      expect(shownMode()).toBe("Automatic");
 
       await act(async () =>
         resolveOldPolicy({
@@ -595,19 +625,7 @@ describe("organization billing StrictMode ownership", () => {
         }),
       );
       await flush();
-      expect(selectedMode()).toBe("automatic");
-
-      const off = container.querySelector<HTMLButtonElement>('button[role="radio"][value="off"]');
-      if (!off) throw new Error("Missing Off policy option");
-      await act(async () => {
-        off.click();
-        await Promise.resolve();
-      });
-      await flush();
-      expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledWith(
-        otherWorkspaceId,
-        expect.objectContaining({ mode: "off", expectedVersion: 7 }),
-      );
+      expect(shownMode()).toBe("Automatic");
     } finally {
       getCompanyProfileAgentPolicy.mockImplementation(defaultGetCompanyProfileAgentPolicy);
       workspace.id = workspaceId;
@@ -620,36 +638,43 @@ describe("organization billing StrictMode ownership", () => {
     }
   });
 
-  test("does not load the owner-only agent identity policy for an account administrator", async () => {
-    getCompanyProfileAgentPolicy.mockClear();
-    accountRole = "admin";
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+  test("an organization admin loads the agent identity policy; a member does not", async () => {
+    for (const role of ["admin", "member"] as const) {
+      getCompanyProfileAgentPolicy.mockClear();
+      accountRole = role;
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <OrgSettingsRoute workspaceId={workspaceId} section="identity" />
+            </StrictMode>,
+          );
+        });
+        await flush();
 
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <OrgSettingsRoute workspaceId={workspaceId} section="identity" />
-          </StrictMode>,
-        );
-      });
-      await flush();
-
-      expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
-      expect(container.textContent).not.toContain("Agent-managed organization identity mode");
-      expect(container.textContent).toContain("Agent-managed organization identity is owner-only");
-    } finally {
-      accountRole = "owner";
-      await act(async () => root.unmount());
-      container.remove();
+        if (role === "admin") {
+          expect(getCompanyProfileAgentPolicy).toHaveBeenCalled();
+          expect(container.textContent).toContain("Agent learning");
+        } else {
+          expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
+          expect(container.textContent).not.toContain("Agent learning");
+          expect(container.textContent).toContain("Organization identity is read-only for you.");
+        }
+      } finally {
+        accountRole = "owner";
+        await act(async () => root.unmount());
+        container.remove();
+      }
     }
   });
 
-  test("keeps model connections unavailable outside an organization administrator session", async () => {
+  test("opens model connections for an access key with account:admin, without person-only reads", async () => {
     const priorMode = context.clientConfig.auth.mode;
-    context.clientConfig.auth.mode = "apiKey";
+    context.clientConfig.auth.mode = "deploymentKey";
+    getOrganizationAdministrationOverview.mockClear();
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -658,19 +683,107 @@ describe("organization billing StrictMode ownership", () => {
       await act(async () =>
         root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
       );
-      // Models is hidden outside an organization administrator session, and a
-      // direct link says who manages models instead of opening another page.
+      await flush();
+      // The key administers the organization's subscription accounts, as the
+      // API and the database accept it. People and defaults stay with people.
+      expect(container.textContent).not.toContain("Only admins manage models");
+      expect(container.textContent).toContain("the subscriptions and keys that pay for them");
+      expect(getOrganizationAdministrationOverview).not.toHaveBeenCalled();
+    } finally {
+      context.clientConfig.auth.mode = priorMode;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps model connections unavailable to a key without account:admin", async () => {
+    const priorMode = context.clientConfig.auth.mode;
+    context.clientConfig.auth.mode = "deploymentKey";
+    accountPermissionsOverride = ["billing:read"];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
+      );
+      // Models is hidden without administrator authority, and a direct link
+      // says who manages models instead of opening another page.
       expect(container.textContent).toContain(
         "Only admins manage models. Ask an admin to add one.",
       );
       expect(container.textContent).not.toContain("Identity and mission");
-      expect(container.textContent).not.toContain("Connect account");
+      expect(container.textContent).not.toContain("Connect provider");
       expect(container.querySelector("#organization-model-connections-heading")).toBeNull();
       expect(
         container.querySelector('nav[aria-label="Organization settings"] a[aria-current="page"]'),
       ).toBeNull();
     } finally {
       context.clientConfig.auth.mode = priorMode;
+      accountPermissionsOverride = null;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("an owner opens the identity editor from Identity, filled with the current text", async () => {
+    listCompanyProfile.mockImplementation(
+      async () =>
+        ({
+          current: {
+            accountId,
+            revisionId: "00000000-0000-4000-8000-000000000007",
+            revision: 3,
+            contentHash: "a".repeat(64),
+            activationVersion: 4,
+            activatedAt: timestamp,
+          },
+          activeRevision: {
+            profile: {
+              identity: "A small bakery tools team.",
+              mission: "Local bakeries should thrive.",
+              products: [],
+              customers: [],
+              goals: [],
+              constraints: [],
+            },
+          },
+          revisions: [],
+          activationEvents: [],
+          nextAfterRevision: null,
+        }) as never,
+    );
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="identity" />);
+      });
+      await flush();
+      expect(container.textContent).toContain("A small bakery tools team.");
+      await act(async () => button(container, "Edit").click());
+      await flush();
+      const dialog = container.querySelector<HTMLElement>('[role="dialog"]');
+      if (!dialog) throw new Error("Missing edit dialog");
+      expect(dialog.textContent).toContain("Edit identity and mission");
+      expect(
+        dialog.querySelector<HTMLTextAreaElement>('textarea[name="organization-identity"]')!.value,
+      ).toBe("A small bakery tools team.");
+      expect(
+        dialog.querySelector<HTMLTextAreaElement>('textarea[name="organization-mission"]')!.value,
+      ).toBe("Local bakeries should thrive.");
+      // Nothing changed yet, so there is nothing to save.
+      expect(button(dialog, "Save").disabled).toBe(true);
+    } finally {
+      listCompanyProfile.mockImplementation(async () => ({
+        current: null,
+        activeRevision: null,
+        revisions: [],
+        activationEvents: [],
+        nextAfterRevision: null,
+      }));
       await act(async () => root.unmount());
       container.remove();
     }

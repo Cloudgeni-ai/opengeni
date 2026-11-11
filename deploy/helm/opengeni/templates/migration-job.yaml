@@ -1,4 +1,5 @@
 {{- if and .Values.migrations.enabled .Values.api.enabled }}
+{{- $settingsScope := dict "root" . "component" "migrate" }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.migrations.priorityClassName "tier" "durable") }}
 apiVersion: batch/v1
 kind: Job
@@ -39,11 +40,11 @@ spec:
             {{- toYaml .Values.migrations.command | nindent 12 }}
           envFrom:
             - configMapRef:
-                name: {{ include "opengeni.fullname" . }}-config
+                name: {{ include "opengeni.jobConfigName" $settingsScope }}
             # Later envFrom sources win duplicate keys. Keep the runtime Secret
             # authoritative for protected provider/model overrides.
             - secretRef:
-                name: {{ include "opengeni.secretName" . }}
+                name: {{ include "opengeni.jobRuntimeSecretName" $settingsScope }}
             {{- if ne (include "opengeni.migrationSecretName" .) (include "opengeni.secretName" .) }}
             # The migration Secret is last so owner-only database settings win.
             - secretRef:

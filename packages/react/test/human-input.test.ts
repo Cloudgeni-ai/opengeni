@@ -14,6 +14,9 @@ import {
 } from "../src";
 import type { SessionHumanInputRequest } from "@opengeni/sdk";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -54,6 +57,21 @@ function typeIntoInput(input: HTMLInputElement, value: string): void {
   )[reactPropsKey]?.onChange;
   if (!onChange) throw new Error("React input change handler was not attached");
   onChange({ target: input });
+}
+
+function typeIntoTextarea(textarea: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  setter?.call(textarea, value);
+  const reactPropsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"));
+  if (!reactPropsKey) throw new Error("React textarea props were not attached");
+  const onChange = (
+    textarea as unknown as Record<
+      string,
+      { onChange?: (event: { target: HTMLTextAreaElement }) => void }
+    >
+  )[reactPropsKey]?.onChange;
+  if (!onChange) throw new Error("React textarea change handler was not attached");
+  onChange({ target: textarea });
 }
 
 const questions: HumanInputQuestion[] = [
@@ -119,12 +137,38 @@ describe("structured human-input projection", () => {
       ]).map((request) => request.id),
     ).toEqual(["request-2"]);
   });
+
+  test("Opengeni's secret approval card outlives its turn until it is answered", () => {
+    const card = event(1, "session.humanInput.requested", {
+      request: {
+        id: "request-approval",
+        questions,
+        allowSkip: false,
+        expiresAt: null,
+        origin: "secret_use_approval",
+      },
+    });
+    expect(humanInputRequestFromEvent(card)).toMatchObject({ origin: "secret_use_approval" });
+    const afterTurn = [card, event(2, "turn.completed", {}, "turn-1")];
+    expect(projectPendingHumanInputRequests(afterTurn).map((request) => request.id)).toEqual([
+      "request-approval",
+    ]);
+    expect(
+      projectPendingHumanInputRequests([
+        ...afterTurn,
+        event(3, "user.humanInputResponse", {
+          requestId: "request-approval",
+          response: { outcome: "answered", answers: [] },
+        }),
+      ]),
+    ).toEqual([]);
+  });
 });
 
 describe("answersFromDrafts", () => {
   test("normalizes text, selections, and Other into the SDK response shape", () => {
     expect(
-      answersFromDrafts(questions, {
+      answersFromDrafts(englishText, questions, {
         summary: { values: ["Ship it"], other: "", otherSelected: false },
         targets: { values: ["staging"], other: "canary", otherSelected: true },
       }),
@@ -138,10 +182,10 @@ describe("answersFromDrafts", () => {
   });
 
   test("rejects missing required answers locally; text has no char min", () => {
-    const missing = answersFromDrafts(questions, {});
+    const missing = answersFromDrafts(englishText, questions, {});
     expect(Object.keys(missing.errors)).toEqual(["summary", "targets"]);
     expect(
-      answersFromDrafts(questions.slice(0, 1), {
+      answersFromDrafts(englishText, questions.slice(0, 1), {
         summary: { values: ["no"], other: "", otherSelected: false },
       }).errors,
     ).toEqual({});
@@ -149,14 +193,18 @@ describe("answersFromDrafts", () => {
 
   test("uses host validation copy without replacing the native validator", () => {
     expect(
-      answersFromDrafts(questions.slice(0, 1), {}, { required: "Dette feltet er påkrevd." }).errors
-        .summary,
+      answersFromDrafts(
+        englishText,
+        questions.slice(0, 1),
+        {},
+        { required: "Dette feltet er påkrevd." },
+      ).errors.summary,
     ).toBe("Dette feltet er påkrevd.");
   });
 
   test("Other selected with empty text prefers otherRequired over required", () => {
     expect(
-      answersFromDrafts(questions.slice(1), {
+      answersFromDrafts(englishText, questions.slice(1), {
         targets: { values: [], other: "", otherSelected: true },
       }).errors.targets,
     ).toBe("Enter a value for Other.");
@@ -165,6 +213,7 @@ describe("answersFromDrafts", () => {
   test("keeps exact Other text for a legacy choice that did not advertise it", () => {
     expect(
       answersFromDrafts(
+        englishText,
         [
           {
             id: "environment",
@@ -230,7 +279,7 @@ describe("HumanInputForm async host boundary", () => {
       await Promise.resolve();
     });
     expect(mounted.container.querySelector('[role="alert"]')?.textContent).toContain(
-      "Host submission failed",
+      "The request could not be completed.",
     );
   });
 
@@ -254,7 +303,7 @@ describe("HumanInputForm async host boundary", () => {
     expect(submissions).toEqual([{ outcome: "answered", answers: [] }]);
   });
 
-  test("multi-question header shows count; invalid Send answers focuses first error", async () => {
+  test("several questions are asked one at a time; Next checks the current one", async () => {
     const multi = {
       id: "request-multi",
       questions: [
@@ -285,33 +334,54 @@ describe("HumanInputForm async host boundary", () => {
         autoFocus: false,
       }),
     );
-    expect(mounted.container.textContent).toContain("2 questions");
-    expect(mounted.container.querySelector('button[type="submit"]')?.textContent).toBe(
-      "Send answers",
-    );
-    expect(mounted.container.querySelectorAll("[data-human-input-question]")).toHaveLength(2);
-    expect(
-      mounted.container.querySelector('[data-human-input-question="q1"] label')?.textContent,
-    ).toMatch(/1\.\s*First\?/);
-    const secondGroup = mounted.container.querySelector(
-      '[data-human-input-question="q2"] [role="radiogroup"]',
-    );
-    const secondLabelId = secondGroup?.getAttribute("aria-labelledby");
-    expect(secondLabelId).toBeTruthy();
-    expect(document.getElementById(secondLabelId!)?.textContent).toMatch(/2\.\s*Second\?/);
-
     const form = mounted.container.querySelector("form");
     expect(form).not.toBeNull();
+    const submitButton = () => mounted!.container.querySelector('button[type="submit"]');
+    const heading = () => form!.querySelector("h2")?.textContent;
+    const step = (id: string) =>
+      mounted!.container.querySelector<HTMLElement>(`[data-human-input-question="${id}"]`)!;
+    expect(mounted.container.textContent).toContain("Question 1 of 2");
+    expect(heading()).toBe("First?");
+    expect(submitButton()?.textContent).toBe("Next");
+    // Every step stays mounted so drafts and secrets survive; only the current one shows.
+    expect(mounted.container.querySelectorAll("[data-human-input-question]")).toHaveLength(2);
+    expect(step("q1").hidden).toBe(false);
+    expect(step("q2").hidden).toBe(true);
+
     await act(async () => {
       form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
       await Promise.resolve();
       await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
     });
     expect(mounted.container.textContent).toContain("This question is required.");
+    expect(step("q2").hidden).toBe(true);
     const firstField = mounted.container.querySelector(
       '[data-human-input-question="q1"] textarea, [data-human-input-question="q1"] input',
     );
     expect(document.activeElement).toBe(firstField);
+
+    await act(async () => {
+      typeIntoTextarea(firstField as HTMLTextAreaElement, "An answer");
+    });
+    await act(async () => {
+      form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    });
+    expect(mounted.container.textContent).toContain("Question 2 of 2");
+    expect(heading()).toBe("Second?");
+    expect(step("q1").hidden).toBe(true);
+    expect(step("q2").hidden).toBe(false);
+    expect(submitButton()?.textContent).toBe("Send answers");
+    const secondGroup = step("q2").querySelector('[role="radiogroup"]');
+    expect(
+      document.getElementById(secondGroup!.getAttribute("aria-labelledby")!)?.textContent,
+    ).toBe("Second?");
+    expect(
+      Array.from(mounted.container.querySelectorAll("button")).some(
+        (button) => button.textContent === "Back",
+      ),
+    ).toBe(true);
   });
 
   test("always renders an accessible inline Other field for a choice question", async () => {
@@ -351,6 +421,41 @@ describe("HumanInputForm async host boundary", () => {
     expect(otherInput?.labels?.[0]?.textContent).toContain(
       "Other answer for Where should this run?",
     );
+  });
+
+  test("a secret approval card offers only its own choices, with no Other field", async () => {
+    const questionId = "secret-approval:0f8fad5b-d9cb-469f-a165-70867728950e";
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-approval",
+          questions: [
+            {
+              id: questionId,
+              kind: "single_select" as const,
+              prompt: "Allow the agent to use GitHub › password in the browser on github.com?",
+              options: [
+                { id: "once", label: "Allow once" },
+                { id: "session", label: "Allow in this chat" },
+                { id: "window", label: "Allow for 1 hour" },
+                { id: "deny", label: "Deny" },
+              ],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const group = mounted.container.querySelector(`[data-human-input-question="${questionId}"]`);
+    expect(group?.querySelectorAll('[role="radio"], input[type="radio"]').length).toBe(4);
+    expect(group?.textContent).toContain("Allow in this chat");
+    expect(group?.textContent).not.toContain("Other");
+    expect(group?.querySelector('input[type="text"]')).toBeNull();
   });
 
   test("clicking or typing Other selects it and submits its exact text", async () => {
@@ -727,5 +832,150 @@ describe("HumanInputForm async host boundary", () => {
     await act(async () => {
       await pending;
     });
+  });
+});
+
+describe("HumanInputForm yes/no decisions", () => {
+  const decision = (labels: [string, string]) => ({
+    id: "request-decision",
+    questions: [
+      {
+        id: "decision",
+        kind: "single_select" as const,
+        label: "Approval",
+        prompt: "Change your display name to Sam Taylor QA?",
+        options: [
+          { id: "a", label: labels[0], description: "first" },
+          { id: "b", label: labels[1], description: "second" },
+        ],
+        required: true,
+        allowOther: false,
+      },
+    ],
+    allowSkip: false,
+    expiresAt: null,
+  });
+
+  test("an approval asked as a question answers with Approve/Cancel buttons and no Other", async () => {
+    const submissions: SubmitHumanInputResponseRequest[] = [];
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: decision(["Cancel", "Approve"]),
+        decisionButtons: true,
+        onSubmit: (response) => {
+          submissions.push(response);
+        },
+        autoFocus: false,
+      }),
+    );
+    const text = mounted.container.textContent ?? "";
+    expect(text).not.toContain("Other");
+    // Option descriptions stay visible, not hover-only.
+    expect(text).toContain("first");
+    expect(text).toContain("second");
+    expect(mounted.container.querySelector('input[type="radio"]')).toBeNull();
+    const buttons = [...mounted.container.querySelectorAll("[data-human-input-choice]")];
+    // Decline first, the primary accept last.
+    expect(buttons.map((button) => button.textContent)).toEqual(["Cancel", "Approve"]);
+    await act(async () => {
+      (buttons[1] as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(submissions).toEqual([
+      { outcome: "answered", answers: [{ questionId: "decision", values: ["b"] }] },
+    ]);
+  });
+
+  test("other two-option choices keep the full form with Other", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: decision(["Blue", "Green"]),
+        decisionButtons: true,
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.querySelector("[data-human-input-choice]")).toBeNull();
+    expect(mounted.container.textContent).toContain("Other");
+  });
+
+  test("the console keeps the full form unless decision buttons are requested", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: decision(["Cancel", "Approve"]),
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.querySelector("[data-human-input-choice]")).toBeNull();
+    expect(mounted.container.textContent).toContain("Other");
+  });
+
+  test("an agent-marked confirm answers with its own labels everywhere, action last", async () => {
+    const submissions: SubmitHumanInputResponseRequest[] = [];
+    const request = decision(["Send the email", "Keep it as a draft"]);
+    const confirm = { ...request, questions: [{ ...request.questions[0]!, confirm: true }] };
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: confirm,
+        onSubmit: (response) => {
+          submissions.push(response);
+        },
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.textContent).not.toContain("Other");
+    const buttons = [...mounted.container.querySelectorAll("[data-human-input-choice]")];
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "Keep it as a draft",
+      "Send the email",
+    ]);
+    await act(async () => {
+      (buttons[1] as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(submissions).toEqual([
+      { outcome: "answered", answers: [{ questionId: "decision", values: ["a"] }] },
+    ]);
+  });
+});
+
+describe("HumanInputForm option hints", () => {
+  test("marks the recommended option without choosing it, and shows option previews", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-hints",
+          questions: [
+            {
+              id: "format",
+              kind: "single_select" as const,
+              prompt: "How should dates look in the export?",
+              options: [
+                { id: "iso", label: "ISO", recommended: true, preview: "2026-10-27" },
+                { id: "long", label: "Written out", preview: "27 October 2026" },
+              ],
+              required: true,
+              allowOther: true,
+            },
+          ],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const badges = mounted.container.querySelectorAll("[data-human-input-recommended]");
+    expect(badges.length).toBe(1);
+    expect(badges[0]!.textContent).toBe("Recommended");
+    expect(badges[0]!.closest("label")?.textContent).toContain("ISO");
+    const previews = [...mounted.container.querySelectorAll("[data-human-input-preview]")];
+    expect(previews.map((preview) => preview.textContent)).toEqual([
+      "2026-10-27",
+      "27 October 2026",
+    ]);
+    const radios = [...mounted.container.querySelectorAll('input[type="radio"]')];
+    expect(radios.some((radio) => (radio as HTMLInputElement).checked)).toBe(false);
   });
 });

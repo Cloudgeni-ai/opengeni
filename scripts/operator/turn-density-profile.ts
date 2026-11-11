@@ -22,14 +22,12 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import {
-  MemoryEventBus,
-  ScriptedModel,
-  startTestMcpServer,
-  type ScriptedModelStep,
-} from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { ScriptedModel, type ScriptedModelStep } from "@opengeni/testing/scripted-model";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { eq } from "drizzle-orm";
 import { createTurnActivities } from "../../apps/worker/src/activities";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const MIB = 1024 * 1024;
 const MAX_ACTIVE_HISTORY_BYTES_PER_TURN = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES;
@@ -2350,7 +2348,7 @@ function densityProfileSettings(productionSettings: Settings, densityMcpUrl: str
     mcpServers: [
       {
         id: "opengeni",
-        name: "OpenGeni density profile",
+        name: "Opengeni density profile",
         url: densityMcpUrl,
         cacheToolsList: false,
       },
@@ -2477,10 +2475,6 @@ export async function withDeadline<T>(
     throw new Error(message);
   }
   return await withTimeout(work, remainingMs, message);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 if (import.meta.main) {

@@ -3,8 +3,8 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { ConnectionHealth } from "@/lib/capabilities";
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import type { ConnectionHealth } from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/react/app/types";
 
 import { CapabilityTile } from "./capability-tile";
 import { FeaturedConnectorTile } from "./featured-connectors";
@@ -168,6 +168,36 @@ describe("CapabilityTile", () => {
         "Needs attention",
       );
       expect(tiles[1]!.textContent).toContain("Needs attention");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a connector carried into Personal says which workspace it comes from", async () => {
+    const rendered = await render(
+      <>
+        <CapabilityTile
+          item={item({
+            id: "mcp:notion",
+            name: "Notion",
+            enabled: true,
+            metadata: {
+              personalExtension: { originWorkspaceId: "team", originWorkspaceName: "Team" },
+            },
+          })}
+          logoSrc={null}
+          health={CONNECTED}
+          onOpen={() => {}}
+        />
+        <CapabilityTile item={item()} logoSrc={null} onOpen={() => {}} />
+      </>,
+    );
+    try {
+      const tiles = [...rendered.container.querySelectorAll("[data-capability-catalog-tile]")];
+      expect(tiles[0]!.textContent).toContain("From Team");
+      expect(tiles[0]!.textContent).not.toContain("Issue tracking");
+      expect(tiles[1]!.textContent).toContain("Issue tracking");
+      expect(tiles[1]!.textContent).not.toContain("From ");
     } finally {
       await rendered.unmount();
     }

@@ -27,7 +27,7 @@ import {
  * - Sandbox hosts: names only sandboxes and the worker use to reach the API
  *   (`host.docker.internal` with the Docker sandbox, and the hosts of
  *   `OPENGENI_MCP_URL` and `OPENGENI_MCP_INTERNAL_URL`). They serve only the
- *   sandbox routes (Codemode, first-party MCP, and the Git broker) and refuse
+ *   sandbox routes (Codemode, first-party MCP, the Git broker and GitHub gateway) and refuse
  *   any request that carries browser metadata. A browser cannot tell a
  *   sandbox name from an attacker's, so a rebinding page on one of these
  *   names can neither send an accepted `Origin` nor reach the rest of the API.
@@ -37,10 +37,12 @@ import {
  * port is not compared: a rebinding page controls only the hostname, while
  * local proxies and forwarders legitimately present their own port.
  *
- * It applies only to `local` access mode in the `local` environment (the
- * `bun run dev` stack and manual local runs). Managed and configured access
- * modes, and deployments that set another `OPENGENI_ENVIRONMENT`, keep their
- * existing CORS policy.
+ * The `Host` and `Origin` checks apply only to `local` access mode in the
+ * `local` environment (the `bun run dev` stack and manual local runs):
+ * deployments that set another `OPENGENI_ENVIRONMENT` are reached through
+ * names this computer does not know. CORS is stricter everywhere `local`
+ * access mode runs (see `createLocalCorsOriginPolicy`): it never answers with
+ * wildcard CORS, whatever the environment.
  */
 export type LocalBrowserBoundarySettings = Pick<
   Settings,
@@ -103,15 +105,15 @@ const MAX_REPORTED_REJECTIONS = 32;
 const MAX_REPORTED_VALUE_LENGTH = 200;
 
 const HOST_NOT_ALLOWED_MESSAGE =
-  "The local OpenGeni API only answers requests addressed to this computer. " +
+  "The local Opengeni API only answers requests addressed to this computer. " +
   "To use another address, set it in OPENGENI_WEB_BASE_URL, OPENGENI_PUBLIC_BASE_URL, " +
   "or OPENGENI_LOCAL_ALLOWED_ORIGINS.";
 const ORIGIN_NOT_ALLOWED_MESSAGE =
-  "The local OpenGeni API has no authentication, so browser requests are accepted only " +
+  "The local Opengeni API has no authentication, so browser requests are accepted only " +
   "from this stack's web app. Add other trusted origins to OPENGENI_LOCAL_ALLOWED_ORIGINS.";
 const SANDBOX_ROUTE_ONLY_MESSAGE =
-  "This address is the local OpenGeni API's sandbox route. It serves only sandbox calls " +
-  "(Codemode, first-party MCP, and the Git broker), never browsers. Open the web app at " +
+  "This address is the local Opengeni API's sandbox route. It serves only sandbox calls " +
+  "(Codemode, first-party MCP, the Git broker and GitHub gateway), never browsers. Open the web app at " +
   "its own address, or list this address in OPENGENI_LOCAL_ALLOWED_ORIGINS.";
 
 const WARNINGS: Record<LocalBrowserBoundaryRejectionCode, { message: string; setting: string }> = {
@@ -148,6 +150,30 @@ export function localBrowserBoundaryApplies(
   return settings.productAccessMode === "local" && settings.environment === "local";
 }
 
+/** Whether `Origin` may read API responses, for a request addressed to `host`. */
+export type LocalCorsOriginPolicy = (origin: string, host: string | null) => boolean;
+
+/**
+ * The browser origins granted CORS by the unauthenticated `local` access mode,
+ * or null for the other access modes.
+ *
+ * A request without credentials acts as the local user in this mode, so a
+ * wildcard grant would let any site read its responses. Whatever
+ * `OPENGENI_ENVIRONMENT` says, only this stack's web and public origins and
+ * `OPENGENI_LOCAL_ALLOWED_ORIGINS` are granted; with the local browser boundary
+ * the API's own address on a browser host is too. Every other origin gets no
+ * CORS grant. `corsAllowOriginRegex` does not apply.
+ */
+export function createLocalCorsOriginPolicy(
+  settings: LocalBrowserBoundarySettings,
+  boundary: LocalBrowserBoundary | null,
+): LocalCorsOriginPolicy | null {
+  if (settings.productAccessMode !== "local") return null;
+  if (boundary) return boundary.originAllowed;
+  const allowedOrigins = localBrowserOrigins(settings).allowedOrigins;
+  return (origin) => exactOrigin(origin, allowedOrigins);
+}
+
 /** Build the boundary, or null when the deployment is not the local dev product. */
 export function createLocalBrowserBoundary(
   settings: LocalBrowserBoundarySettings,
@@ -155,26 +181,7 @@ export function createLocalBrowserBoundary(
 ): LocalBrowserBoundary | null {
   if (!localBrowserBoundaryApplies(settings)) return null;
 
-  const webOrigins = [settings.webBaseUrl ?? DEFAULT_LOCAL_WEB_ORIGIN, settings.publicBaseUrl]
-    .map((value) => parseHttpUrl(value))
-    .filter((url): url is URL => url !== null);
-  const extraOrigins = localAllowedOriginEntries(settings.localAllowedOrigins).map(
-    (origin) => new URL(origin),
-  );
-
-  const allowedOrigins = new Set<string>();
-  for (const url of [...webOrigins, ...extraOrigins]) {
-    allowedOrigins.add(url.origin);
-    // 127.0.0.1, localhost, and [::1] are the same machine and port; the
-    // developer may open the printed URL under any of those names.
-    if (isLoopbackHostname(url.hostname)) {
-      for (const hostname of LOOPBACK_HOSTNAMES) {
-        const alias = new URL(url.origin);
-        alias.hostname = hostname;
-        allowedOrigins.add(alias.origin);
-      }
-    }
-  }
+  const { webOrigins, extraOrigins, allowedOrigins } = localBrowserOrigins(settings);
 
   const browserHostnames = new Set<string>(LOOPBACK_HOSTNAMES);
   for (const url of [...webOrigins, ...extraOrigins]) browserHostnames.add(url.hostname);
@@ -303,6 +310,51 @@ export function localBrowserRequestHost(request: Request): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * This stack's web and public origins and `OPENGENI_LOCAL_ALLOWED_ORIGINS`.
+ * Only the local development stack assumes its web app's default address.
+ */
+function localBrowserOrigins(settings: LocalBrowserBoundarySettings): {
+  webOrigins: URL[];
+  extraOrigins: URL[];
+  allowedOrigins: Set<string>;
+} {
+  const webBaseUrl =
+    settings.webBaseUrl ??
+    (localBrowserBoundaryApplies(settings) ? DEFAULT_LOCAL_WEB_ORIGIN : undefined);
+  const webOrigins = [webBaseUrl, settings.publicBaseUrl]
+    .map((value) => parseHttpUrl(value))
+    .filter((url): url is URL => url !== null);
+  const extraOrigins = localAllowedOriginEntries(settings.localAllowedOrigins).map(
+    (origin) => new URL(origin),
+  );
+
+  const allowedOrigins = new Set<string>();
+  for (const url of [...webOrigins, ...extraOrigins]) {
+    allowedOrigins.add(url.origin);
+    // 127.0.0.1, localhost, and [::1] are the same machine and port; the
+    // developer may open the printed URL under any of those names.
+    if (isLoopbackHostname(url.hostname)) {
+      for (const hostname of LOOPBACK_HOSTNAMES) {
+        const alias = new URL(url.origin);
+        alias.hostname = hostname;
+        allowedOrigins.add(alias.origin);
+      }
+    }
+  }
+  return { webOrigins, extraOrigins, allowedOrigins };
+}
+
+/** Whether `origin` is exactly (no path or trailing junk) one of `allowed`. */
+function exactOrigin(origin: string, allowed: ReadonlySet<string>): boolean {
+  const url = parseHttpUrl(origin);
+  return (
+    url !== null &&
+    url.origin === origin.toLowerCase().replace(/\/$/u, "") &&
+    allowed.has(url.origin)
+  );
 }
 
 /** The normalized path the router sees (URL parsing resolves dot segments). */

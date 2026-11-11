@@ -139,3 +139,116 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
     expect(recoveryMetricCalls).toEqual([{ outcome: "exhausted", timeoutType: "HEARTBEAT" }]);
   });
 });
+
+describe("reconcileSettledSessionAttempt: authenticated original activity proof", () => {
+  const input = {
+    accountId: "account-1",
+    workspaceId: "workspace-1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    attemptId: "attempt-1",
+    executionGeneration: 4,
+    workflowId: "workflow-1",
+    workflowRunId: "original-run",
+    activityId: "original-activity",
+  };
+  const ref = {
+    workflowId: input.workflowId,
+    workflowRunId: input.workflowRunId,
+    activityId: input.activityId,
+    quiesced: false,
+  };
+
+  test.each(["pending", "unknown", "unavailable", "absent"])(
+    "%s inspection never reaches live-owner close",
+    async (state) => {
+      const close = mock(async () => ({ action: "recovering", events: [] }) as any);
+      const activities = createSessionStateActivities(
+        async () =>
+          ({
+            db: fakeDb,
+            bus: {},
+            settings: {},
+            observability: {},
+            inspectSessionAttemptActivity:
+              state === "absent"
+                ? null
+                : async () => {
+                    if (state === "unavailable")
+                      throw new Error("inspector temporarily unavailable");
+                    return state;
+                  },
+          }) as any,
+        {
+          getSessionAttemptActivityRef: mock(async () => ref),
+          reconcileSettledSessionAttempt: close,
+        },
+      );
+      expect(await activities.reconcileSettledSessionAttempt(input)).toEqual({ action: "pending" });
+      expect(close).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    null,
+    { ...ref, workflowRunId: "replacement-run" },
+    { ...ref, activityId: "replacement-activity" },
+  ])("missing/replaced stored dispatch %j is stale before inspection", async (stored) => {
+    const inspect = mock(async () => "settled");
+    const close = mock(async () => ({ action: "recovering", events: [] }) as any);
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: {},
+          inspectSessionAttemptActivity: inspect,
+        }) as any,
+      {
+        getSessionAttemptActivityRef: mock(async () => stored),
+        reconcileSettledSessionAttempt: close,
+      },
+    );
+    expect(await activities.reconcileSettledSessionAttempt(input)).toEqual({ action: "stale" });
+    expect(inspect).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  test("only explicit settled authenticated original run proof crosses into bounded under-lock recovery", async () => {
+    const inspect = mock(async () => "settled" as const);
+    const close = mock(async () => ({ action: "recovering", events: [{ id: "recovery" }] }) as any);
+    const fanout = mock(async () => {
+      throw new Error("live fanout unavailable after durable wake commit");
+    });
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: {},
+          inspectSessionAttemptActivity: inspect,
+        }) as any,
+      {
+        getSessionAttemptActivityRef: mock(async () => ref),
+        reconcileSettledSessionAttempt: close,
+        publishDurableSessionEvents: fanout,
+      },
+    );
+    expect(await activities.reconcileSettledSessionAttempt(input)).toEqual({
+      action: "recovering",
+    });
+    expect(inspect).toHaveBeenCalledWith(ref);
+    expect(close).toHaveBeenCalledWith(fakeDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      attemptId: input.attemptId,
+      executionGeneration: input.executionGeneration,
+      temporalWorkflowId: input.workflowId,
+      temporalWorkflowRunId: input.workflowRunId,
+      temporalActivityId: input.activityId,
+      activitySettled: true,
+      maxRedispatches: 3,
+    });
+    expect(fanout).toHaveBeenCalledTimes(1);
+  });
+});

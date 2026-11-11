@@ -1,0 +1,759 @@
+import { afterEach, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { act, type ReactNode } from "react";
+import type { Root } from "react-dom/client";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { useSubscriptionCatalog } from "./use-subscription-catalog";
+import {
+  isSeatLimitError,
+  planSeatsFull,
+  seatUpgradeFor,
+  seatUpgradeFromError,
+  subscriptionAction,
+} from "@opengeni/react/app/lib/subscription-plans";
+
+GlobalRegistrator.register();
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+// React's input-event detection needs a document when react-dom is imported.
+const { createRoot } = await import("react-dom/client");
+const { SubscriptionPlans } = await import("./subscription-plans");
+const { SeatLimitNotice } = await import("./plan-seats");
+const { OrganizationCreditBalance } = await import("@/components/organization-credit-balance");
+const { previewPlan, previewPlans } = await import("@/dev/subscription-plans-preview");
+let root: Root | undefined;
+afterEach(async () => {
+  await act(async () => root?.unmount());
+  root = undefined;
+  document.body.replaceChildren();
+});
+async function mount(node: ReactNode) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => root!.render(node));
+  return container;
+}
+async function click(label: string) {
+  const button = [...document.querySelectorAll("button")].find(
+    (item) => item.textContent?.trim() === label,
+  );
+  expect(button).toBeDefined();
+  await act(async () => button!.click());
+}
+async function submit() {
+  const form = document.querySelector("[role=dialog] form") ?? document.querySelector("form");
+  expect(form).not.toBeNull();
+  await act(async () =>
+    form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+}
+const receipt = {
+  subscriptionId: "sub_test",
+  planKey: "max",
+  effectiveAt: "2026-11-01T10:00:00Z",
+  cancelAtPeriodEnd: false,
+};
+function clientFixture() {
+  return {
+    upgradeBillingSubscription: mock(async (_request: unknown) => receipt),
+    changeBillingSubscription: mock(async (_request: unknown) => ({ ...receipt, planKey: "pro" })),
+    cancelBillingSubscription: mock(async (_request: unknown) => ({
+      ...receipt,
+      planKey: "free",
+      cancelAtPeriodEnd: true,
+    })),
+    createSubscriptionCheckout: mock(async (_request: unknown) => {
+      throw new Error("Checkout transport unavailable");
+    }),
+    createSubscriptionPortalSession: mock(async (_request: unknown) => {
+      throw new Error("Portal transport unavailable");
+    }),
+    getBillingSubscriptionPlans: mock(async (_request: unknown) => ({
+      accountId: "org-a",
+      revision: 1,
+      plans: previewPlans,
+      plan: previewPlan("pro"),
+    })),
+  };
+}
+function plans(
+  client: ReturnType<typeof clientFixture>,
+  key = "pro",
+  canManage = true,
+  onChanged = () => {},
+) {
+  const plan = previewPlan(key);
+  return (
+    <SubscriptionPlans
+      client={client as unknown as ChatClient<OpenGeniBrowserClient>}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan }}
+      plan={plan}
+      canManage={canManage}
+      supportEmail="support@example.test"
+      onChanged={onChanged}
+    />
+  );
+}
+
+test("upgrade confirms proration, fresh replacement credit and targets the selected organization", async () => {
+  const client = clientFixture();
+  const changed = mock(() => {});
+  await mount(plans(client, "pro", true, changed));
+  expect(document.body.textContent).toContain("$100.00 monthly credit");
+  expect(document.body.textContent).toContain("$500.00 monthly credit");
+  expect(document.body.textContent?.match(/5× prepaid credit/g)).toHaveLength(2);
+  await click("Upgrade to Max");
+  expect(document.body.textContent).toContain("Stripe prorates unused time");
+  expect(document.body.textContent).toContain("replaced, not added");
+  expect(client.upgradeBillingSubscription).not.toHaveBeenCalled();
+  await submit();
+  expect(client.upgradeBillingSubscription).toHaveBeenCalledTimes(1);
+  expect(client.upgradeBillingSubscription.mock.calls[0]![0]).toMatchObject({
+    accountId: "org-a",
+    planKey: "max",
+    idempotencyKey: expect.any(String),
+  });
+  expect(changed).toHaveBeenCalledTimes(1);
+  expect(document.body.textContent).toContain("Upgraded to Max");
+});
+
+test("checkout retries retain one UUID even after closing and reopening confirmation", async () => {
+  const client = clientFixture();
+  await mount(plans(client, "free"));
+  expect(document.body.textContent).not.toContain("Popular");
+  await click("Get Pro");
+  await submit();
+  expect(document.body.textContent).toContain("Checkout transport unavailable");
+  await click("Cancel");
+  await click("Get Pro");
+  await submit();
+  expect(client.createSubscriptionCheckout).toHaveBeenCalledTimes(2);
+  expect(client.createSubscriptionCheckout.mock.calls[0]![0]).toEqual(
+    client.createSubscriptionCheckout.mock.calls[1]![0],
+  );
+  expect(client.createSubscriptionCheckout.mock.calls[0]![0]).toMatchObject({
+    accountId: "org-a",
+    planKey: "pro",
+    successUrl: "https://console.example.test/workspaces/a/organization?section=billing",
+  });
+});
+
+test("checkout sends a typed promo code, trimmed, and only checkout asks for one", async () => {
+  const client = clientFixture();
+  client.createSubscriptionCheckout.mockImplementation(async () => {
+    throw new Error("This code can't be used for this plan.");
+  });
+  await mount(plans(client, "free"));
+  await click("Get Pro");
+  const input = document.querySelector<HTMLInputElement>("[role=dialog] input");
+  expect(input).not.toBeNull();
+  await submit();
+  expect(client.createSubscriptionCheckout.mock.calls[0]![0]).not.toHaveProperty("promotionCode");
+
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      input,
+      " PLAN100 ",
+    );
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await submit();
+  expect(client.createSubscriptionCheckout.mock.calls[1]![0]).toMatchObject({
+    planKey: "pro",
+    promotionCode: "PLAN100",
+  });
+  expect(document.body.textContent).toContain("This code can't be used for this plan.");
+
+  await click("Cancel");
+  await mount(plans(clientFixture(), "pro"));
+  await click("Upgrade to Max");
+  expect(document.querySelector("[role=dialog] input")).toBeNull();
+});
+
+test("downgrade and cancel use separate period-end endpoints without expiring credit early", async () => {
+  const client = clientFixture();
+  await mount(plans(client, "max"));
+  await click("Downgrade to Pro");
+  expect(document.body.textContent).toContain("Your current plan continues until");
+  await submit();
+  expect(client.changeBillingSubscription).toHaveBeenCalledTimes(1);
+  expect(client.upgradeBillingSubscription).not.toHaveBeenCalled();
+  expect(document.body.textContent).toContain("Pro starts");
+  await click("Cancel plan");
+  expect(document.body.textContent).toContain("existing people keep access");
+  await submit();
+  expect(client.cancelBillingSubscription.mock.calls[0]![0]).toMatchObject({
+    accountId: "org-a",
+    idempotencyKey: expect.any(String),
+  });
+  expect(document.body.textContent).toContain("Free starts");
+});
+
+test("portal preserves selected account and current return URL; read-only users cannot mutate", async () => {
+  const client = clientFixture();
+  await mount(plans(client));
+  await click("Manage billing");
+  expect(client.createSubscriptionPortalSession.mock.calls[0]![0]).toMatchObject({
+    accountId: "org-a",
+    returnUrl: "https://console.example.test/workspaces/a/organization?section=billing",
+  });
+  await act(async () => root!.render(plans(client, "pro", false)));
+  expect(document.body.textContent).not.toContain("Manage billing");
+  expect(document.body.textContent).not.toContain("Upgrade to Max");
+});
+
+test("a late mutation after leaving the organization cannot refresh or navigate", async () => {
+  const client = clientFixture();
+  const changed = mock(() => {});
+  let resolve!: (value: typeof receipt) => void;
+  client.upgradeBillingSubscription.mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  await mount(plans(client, "pro", true, changed));
+  await click("Upgrade to Max");
+  await act(async () =>
+    document
+      .querySelector("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  await act(async () => root!.render(<div>Another organization</div>));
+  await act(async () => resolve(receipt));
+  expect(changed).not.toHaveBeenCalled();
+  expect(document.body.textContent).toBe("Another organization");
+});
+
+test("plan actions follow catalog prices, availability and subscription state", () => {
+  const pro = previewPlan("pro");
+  const max = previewPlans[2]!;
+  expect(subscriptionAction(pro, previewPlans, max)).toBe("upgrade");
+  expect(subscriptionAction({ ...pro, cancelAtPeriodEnd: true }, previewPlans, max)).toBeNull();
+  expect(subscriptionAction({ ...pro, status: "past_due" }, previewPlans, max)).toBeNull();
+  expect(subscriptionAction(previewPlan("enterprise"), previewPlans, max)).toBeNull();
+  expect(subscriptionAction(pro, previewPlans, { ...max, selfService: false })).toBeNull();
+  expect(subscriptionAction(pro, previewPlans, { ...max, monthlyPriceMicros: 5_000_000 })).toBe(
+    "downgrade",
+  );
+});
+
+function Gate({
+  client,
+  ownerKey = "a",
+  hasPlan = true,
+}: {
+  client: ChatClient<OpenGeniBrowserClient>;
+  ownerKey?: string;
+  hasPlan?: boolean;
+}) {
+  const { catalog } = useSubscriptionCatalog(
+    client,
+    ownerKey,
+    ownerKey,
+    hasPlan ? previewPlan("pro") : null,
+  );
+  return <div>{catalog ? "Plans visible" : "Legacy billing"}</div>;
+}
+test("plan UI stays hidden for a missing balance plan or disabled endpoint", async () => {
+  const client = clientFixture();
+  const typed = client as unknown as ChatClient<OpenGeniBrowserClient>;
+  await mount(<Gate client={typed} hasPlan={false} />);
+  expect(client.getBillingSubscriptionPlans).not.toHaveBeenCalled();
+  client.getBillingSubscriptionPlans.mockImplementation(async () => {
+    throw new OpenGeniApiError(404, "disabled");
+  });
+  await act(async () => root!.render(<Gate client={typed} />));
+  expect(document.body.textContent).toBe("Legacy billing");
+});
+
+test("late catalog reads cannot display another organization's plan", async () => {
+  const client = clientFixture();
+  const typed = client as unknown as ChatClient<OpenGeniBrowserClient>;
+  let resolve!: (value: Awaited<ReturnType<typeof client.getBillingSubscriptionPlans>>) => void;
+  client.getBillingSubscriptionPlans.mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  await mount(<Gate client={typed} />);
+  await act(async () => root!.render(<Gate client={typed} ownerKey="b" hasPlan={false} />));
+  await act(async () =>
+    resolve({ accountId: "a", revision: 1, plans: previewPlans, plan: previewPlan("pro") }),
+  );
+  expect(document.body.textContent).toBe("Legacy billing");
+});
+
+test("scoped monthly credit appears once and is not subtracted from purchased general credit", async () => {
+  const container = await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 35_000_000,
+          generalBalanceMicros: 25_000_000,
+          currency: "usd",
+          updatedAt: new Date().toISOString(),
+          plan: previewPlan("free"),
+          promotionalCredits: [
+            {
+              grantId: "00000000-0000-4000-8000-000000000002",
+              label: "Monthly plan credit",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["gpt-6-luna"],
+              planCredit: true,
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  expect(container.textContent?.match(/Plan credit/g)).toHaveLength(1);
+  expect(container.textContent).not.toContain("Monthly plan credit");
+  // Plan credit and credits pay for different use: no blended $35 total.
+  expect(container.textContent).not.toContain("$35.00");
+  expect(container.textContent).toContain("$10.00");
+  expect(container.textContent).toContain("$25.00");
+  expect(container.textContent).not.toContain("$15.00");
+  expect(container.textContent).toContain("For app use · Resets monthly · View models");
+  const disclosure = container.querySelector("button")!;
+  await act(async () => disclosure.click());
+  expect(container.textContent).toContain("GPT-6 Luna");
+});
+
+test("balance splits monthly, promotional and other general credit without double counting", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 158_450_000,
+          generalBalanceMicros: 148_450_000,
+          currency: "usd",
+          updatedAt: "2026-10-16T14:00:00Z",
+          plan: previewPlan("pro"),
+          promotionalCredits: [
+            {
+              grantId: "grant",
+              label: "Launch credit",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["model-test"],
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  expect(document.body.textContent).not.toContain("Total balance");
+  expect(document.body.textContent).toContain("$73.45");
+  expect(document.body.textContent).toContain("$75.00");
+  expect(document.body.textContent).toContain("$10.00");
+  expect(document.body.textContent).toContain("Plan credit");
+  expect(document.body.textContent).toContain("For app use. Resets monthly.");
+  expect(document.body.textContent).toContain("Credits");
+  expect(document.body.textContent).toContain("For API use, and app use beyond plan credit.");
+  expect(document.body.textContent).not.toContain("Platform fee on your own API keys");
+});
+
+test("plan credit and credits are separate balances, and own-key fees have their own line", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          // API use overran credits by $5; the plan credit is untouched.
+          balanceMicros: 95_000_000,
+          generalBalanceMicros: 95_000_000,
+          creditsMicros: -5_000_000,
+          apiDebtMicros: 5_000_000,
+          byokPlatformFeeMonthMicros: 1_250_000,
+          currency: "usd",
+          updatedAt: "2026-10-29T14:00:00Z",
+          plan: { ...previewPlan("pro"), creditRemainingMicros: 100_000_000 },
+          promotionalCredits: [],
+        },
+      }}
+    />,
+  );
+  const rows = [...document.body.querySelectorAll("div.divide-y > div")].map(
+    (row) => row.textContent,
+  );
+  expect(rows).toEqual([
+    "Plan creditFor app use. Resets monthly.$100.00",
+    "CreditsFuture purchases cover prior usage first.-$5.00",
+  ]);
+  // Two balances for different use, not a blended $95 total.
+  expect(document.body.textContent).not.toContain("Total balance");
+  // A charge, set apart from the balances.
+  expect(document.body.querySelector('[data-testid="byok-platform-fee"]')!.textContent).toBe(
+    "Platform fee on your own API keysCharged this month$1.25",
+  );
+});
+
+test("without a plan or promotions, the fee line sits under the single total", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 20_000_000,
+          generalBalanceMicros: 20_000_000,
+          creditsMicros: 20_000_000,
+          byokPlatformFeeMonthMicros: 500_000,
+          currency: "usd",
+          updatedAt: "2026-10-29T14:00:00Z",
+          plan: null,
+          promotionalCredits: [],
+        },
+      }}
+    />,
+  );
+  expect(document.body.querySelectorAll("div.divide-y")).toHaveLength(0);
+  expect(document.body.textContent).toContain("Total balance");
+  expect(document.body.textContent).toContain("Charged this month$0.50");
+});
+
+test("with the plan row hidden, plan credit stays in Credits so the rows add up", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit={false}
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 130_000_000,
+          generalBalanceMicros: 120_000_000,
+          creditsMicros: 20_000_000,
+          currency: "usd",
+          updatedAt: "2026-10-29T14:00:00Z",
+          plan: { ...previewPlan("pro"), creditRemainingMicros: 100_000_000 },
+          promotionalCredits: [
+            {
+              grantId: "g-1",
+              label: "Promotional credits",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["gpt-6-luna"],
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  const rows = [...document.body.querySelectorAll("div.divide-y > div")].map(
+    (row) => row.textContent,
+  );
+  expect(rows.at(-1)).toContain("$120.00");
+});
+
+test("the Plans section states the two pricing lines", async () => {
+  await mount(
+    <SubscriptionPlans
+      client={clientFixture() as unknown as ChatClient<OpenGeniBrowserClient>}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: previewPlan("free") }}
+      plan={previewPlan("free")}
+      canManage
+      supportEmail="support@example.test"
+      onChanged={() => {}}
+    />,
+  );
+  expect(document.body.textContent).toContain(
+    "Plan credit is for the Opengeni apps. Paid plans include your own AI subscriptions, with no usage fee.",
+  );
+  expect(document.body.textContent).toContain(
+    "API use spends credits, not plan credit, and cannot use connected subscriptions.",
+  );
+  expect(document.body.textContent).not.toContain("5%");
+});
+
+test("plans of at least $20 a month include own subscriptions with no fee, Free does not", async () => {
+  // A cheaper paid plan sits below the $20 line and does not include them.
+  const lite = {
+    ...previewPlans.find((item) => item.key === "pro")!,
+    key: "lite",
+    label: "Lite",
+    monthlyPriceMicros: 10_000_000,
+  };
+  const catalogPlans = [...previewPlans, lite];
+  await mount(
+    <SubscriptionPlans
+      client={clientFixture() as unknown as ChatClient<OpenGeniBrowserClient>}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: catalogPlans, plan: previewPlan("free") }}
+      plan={previewPlan("free")}
+      canManage
+      supportEmail="support@example.test"
+      onChanged={() => {}}
+    />,
+  );
+  const lines = document.body.textContent?.match(/Your own AI subscriptions, no fee/g) ?? [];
+  // Pro, Max and Enterprise (custom price) qualify; Free and Lite do not.
+  expect(previewPlans.map((item) => item.key)).toEqual(["free", "pro", "max", "enterprise"]);
+  expect(document.body.textContent).toContain("Lite");
+  expect(lines).toHaveLength(3);
+});
+
+test("an organization without a monthly grant shows no empty plan credit meter or row", async () => {
+  const client = clientFixture();
+  const ungranted = { ...previewPlan("free"), creditGrantedMicros: 0, creditRemainingMicros: 0 };
+  await mount(
+    <SubscriptionPlans
+      client={client as unknown as ChatClient<OpenGeniBrowserClient>}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: ungranted }}
+      plan={ungranted}
+      canManage
+      supportEmail="support@example.test"
+      onChanged={() => {}}
+    />,
+  );
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 7_000_000,
+          generalBalanceMicros: 7_000_000,
+          currency: "usd",
+          updatedAt: "2026-10-18T18:00:00Z",
+          plan: ungranted,
+          promotionalCredits: [],
+        },
+      }}
+    />,
+  );
+  expect(document.body.textContent).toContain("Your plan");
+  expect(document.body.textContent).toContain("5 seats");
+  expect(document.body.textContent).not.toContain("of $0.00 left");
+  expect(document.body.textContent).not.toContain("For app use. Resets monthly.");
+  expect(document.body.textContent).not.toContain("For API use, and app use beyond plan credit.");
+  expect(document.body.textContent).toContain("$7.00");
+});
+
+test("seat refusal recognizes current and legacy bodies and offers exactly one upgrade action", async () => {
+  const envelope = JSON.stringify({
+    error: {
+      status: 402,
+      code: "seat_limit_reached",
+      message: "Organization seat limit reached. Upgrade your plan to add people.",
+      retryable: false,
+      details: { action: { type: "upgrade", href: "/billing" } },
+    },
+  });
+  expect(isSeatLimitError(new OpenGeniApiError(402, envelope, { mutation: true }))).toBe(true);
+  expect(isSeatLimitError({ status: 402, body: envelope })).toBe(true);
+  expect(
+    isSeatLimitError(
+      new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: "seat_limit_reached",
+          message: "Seat limit reached",
+          action: { type: "upgrade", href: "/billing" },
+        }),
+      ),
+    ),
+  ).toBe(true);
+  expect(
+    isSeatLimitError(new OpenGeniApiError(402, JSON.stringify({ code: "insufficient_credit" }))),
+  ).toBe(false);
+  const upgrade = mock(() => {});
+  await mount(<SeatLimitNotice canManage upgrade={null} onUpgrade={upgrade} />);
+  expect(document.querySelectorAll("button").length).toBe(1);
+  await click("View upgrade options");
+  expect(upgrade).toHaveBeenCalledTimes(1);
+});
+
+// Bendik's limits: Free 1, Pro 2, Max 10, Enterprise unlimited.
+const seatPlans = previewPlans.map((plan) => ({
+  ...plan,
+  seatLimit: ({ free: 1, pro: 2, max: 10 } as Record<string, number | undefined>)[plan.key] ?? null,
+}));
+function seatPlan(key: string, seatsUsed: number) {
+  const seatLimit = seatPlans.find((plan) => plan.key === key)!.seatLimit;
+  return { ...previewPlan(key), seatsUsed, seatLimit };
+}
+
+test("the seat fix is the cheapest plan with room, else Enterprise, and nothing above Enterprise", () => {
+  expect(seatUpgradeFor(seatPlan("free", 1), seatPlans)).toEqual({ key: "pro", label: "Pro" });
+  // Two more people do not fit Pro's two seats, so the fix is Max.
+  expect(seatUpgradeFor(seatPlan("free", 1), seatPlans, 2)).toEqual({ key: "max", label: "Max" });
+  expect(seatUpgradeFor(seatPlan("pro", 2), seatPlans)).toEqual({ key: "max", label: "Max" });
+  expect(seatUpgradeFor(seatPlan("max", 10), seatPlans)).toEqual({
+    key: "enterprise",
+    label: "Enterprise",
+  });
+  expect(seatUpgradeFor(seatPlan("enterprise", 40), seatPlans)).toBeNull();
+  expect(seatUpgradeFor(seatPlan("free", 1), [])).toBeNull();
+  expect(planSeatsFull(seatPlan("pro", 2))).toBe(true);
+  expect(planSeatsFull(seatPlan("pro", 1))).toBe(false);
+  expect(planSeatsFull(seatPlan("enterprise", 40))).toBe(false);
+  expect(
+    seatUpgradeFromError(
+      new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Upgrade to Max to add more people.",
+            details: { upgradePlan: "max", upgradePlanLabel: "Max" },
+          },
+        }),
+      ),
+    ),
+  ).toEqual({ key: "max", label: "Max" });
+  expect(seatUpgradeFromError(new Error("plain"))).toBeNull();
+});
+
+test("a seat refusal names one plan with one button, and members are told to ask an owner", async () => {
+  const upgrade = mock(() => {});
+  const owner = await mount(
+    <SeatLimitNotice canManage upgrade={{ key: "pro", label: "Pro" }} onUpgrade={upgrade} />,
+  );
+  // The plan is named once, on the button.
+  expect(owner.textContent).toBe("Your plan's seat limit is reachedUpgrade to Pro");
+  expect(document.querySelectorAll("button").length).toBe(1);
+  await click("Upgrade to Pro");
+  expect(upgrade).toHaveBeenCalledTimes(1);
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  const member = await mount(
+    <SeatLimitNotice
+      canManage={false}
+      upgrade={{ key: "max", label: "Max" }}
+      onUpgrade={upgrade}
+    />,
+  );
+  expect(member.textContent).toContain("Your plan's seat limit is reached");
+  expect(member.textContent).not.toContain("to add more people");
+  expect(member.textContent).toContain("Ask an organization owner to upgrade to Max.");
+  expect(document.querySelectorAll("button").length).toBe(0);
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Enterprise is named once, on the button.
+  const enterprise = await mount(
+    <SeatLimitNotice
+      canManage
+      upgrade={{ key: "enterprise", label: "Enterprise" }}
+      onUpgrade={upgrade}
+    />,
+  );
+  expect(enterprise.textContent).toBe(
+    "Your plan's seat limit is reachedTalk to us about Enterprise",
+  );
+});
+
+test("status-only seat fallback needs a full finite plan and never masks another typed refusal", () => {
+  const full = { seatsUsed: 5, seatLimit: 5 };
+  for (const error of [
+    { status: 402 },
+    { status: 402, body: "not json" },
+    new OpenGeniApiError(
+      402,
+      JSON.stringify({ error: { code: "payment_required", message: "Request failed." } }),
+      { mutation: true },
+    ),
+  ]) {
+    expect(isSeatLimitError(error, full)).toBe(true);
+    expect(isSeatLimitError(error, { seatsUsed: 4, seatLimit: 5 })).toBe(false);
+    expect(isSeatLimitError(error, { seatsUsed: 5, seatLimit: null })).toBe(false);
+    expect(isSeatLimitError(error, null)).toBe(false);
+  }
+  expect(isSeatLimitError({ status: 403 }, full)).toBe(false);
+  expect(isSeatLimitError({ status: 402, code: "allowance_exhausted" }, full)).toBe(false);
+  expect(isSeatLimitError({ status: 402, code: "session_usage_limit_reached" }, full)).toBe(false);
+  expect(
+    isSeatLimitError(
+      { status: 402, body: JSON.stringify({ error: { code: "allowance_exhausted" } }) },
+      full,
+    ),
+  ).toBe(false);
+});
+
+test("a funding hold explains unavailable free funds without erasing purchased credit", async () => {
+  const container = await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 35_000_000,
+          generalBalanceMicros: 25_000_000,
+          currency: "usd",
+          updatedAt: new Date().toISOString(),
+          plan: previewPlan("free"),
+          promotionDecision: "held",
+          heldCreditMicros: 10_000_000,
+          promotionalCredits: [
+            {
+              grantId: "00000000-0000-4000-8000-000000000002",
+              label: "Monthly plan credit",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["gpt-6-luna"],
+              planCredit: true,
+              held: true,
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toContain(
+    "Free credit restricted",
+  );
+  expect(container.textContent).toContain(
+    "This review applies to Free credit; purchased credit is not part of the hold",
+  );
+  expect(container.textContent).toContain("$10.00 of the balance is on hold");
+  expect(container.textContent).toContain("$25.00");
+  expect(container.textContent).not.toContain("For app use · Resets monthly");
+});

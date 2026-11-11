@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { SandboxBackend } from "@opengeni/contracts";
+import { collectDefaultMetrics, Registry } from "prom-client";
 import {
   createObservability,
+  dropFullHeapWalkMetrics,
+  FULL_HEAP_WALK_DEFAULT_METRICS,
   interactionAuthMetricObserver,
   interactionInterventionMetricObserver,
   interactionOperationMetricObserver,
@@ -52,6 +55,66 @@ describe("observability", () => {
     expect(metrics).toContain("opengeni_http_request_duration_seconds_bucket");
     expect(metrics).toContain("opengeni_build_info");
     expect(metrics).toContain("opengeni_process_cpu_user_seconds_total");
+  });
+
+  test("a scrape on Bun never walks the whole heap for per-space statistics", async () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toContain("opengeni_nodejs_heap_size_used_bytes");
+    for (const name of FULL_HEAP_WALK_DEFAULT_METRICS) {
+      expect(metrics).not.toContain(`opengeni_${name}`);
+    }
+  });
+
+  test("fast errors cannot hide slow successful HTTP requests", async () => {
+    const obs = createObservability(settings, { component: "api" });
+    const request = { method: "GET", route: "/v1/workspaces/:workspaceId/sessions/:id" };
+    obs.recordHttpRequest({ ...request, status: 200, durationSeconds: 0.4 });
+    obs.recordHttpRequest({ ...request, status: 204, durationSeconds: 2 });
+    for (let index = 0; index < 100; index += 1) {
+      obs.recordHttpRequest({ ...request, status: 404, durationSeconds: 0.01 });
+    }
+    const metrics = (await obs.prometheusMetrics()).split("\n");
+    const sample = (suffix: string, statusClass: string, bucket?: string) => {
+      const line = metrics.find(
+        (value) =>
+          value.startsWith(`opengeni_http_request_duration_seconds_${suffix}{`) &&
+          value.includes(`status_class="${statusClass}"`) &&
+          (bucket === undefined || value.includes(`le="${bucket}"`)),
+      );
+      expect(line).toBeDefined();
+      return Number(line?.split(" ").at(-1));
+    };
+    expect(sample("count", "2xx")).toBe(2);
+    expect(sample("bucket", "2xx", "0.5")).toBe(1);
+    expect(sample("sum", "2xx")).toBeCloseTo(2.4);
+    expect(sample("count", "4xx")).toBe(100);
+    expect(sample("bucket", "4xx", "0.5")).toBe(100);
+  });
+
+  test("HTTP duration status classes have a closed vocabulary", async () => {
+    const obs = createObservability(settings, { component: "api" });
+    for (const status of [100, 199, 200, 299, 300, 399, 400, 499, 500, 599, 99, 600, 200.5, NaN]) {
+      obs.recordHttpRequest({ method: "GET", route: "/healthz", status, durationSeconds: 0.01 });
+    }
+    const counts = (await obs.prometheusMetrics())
+      .split("\n")
+      .filter((line) => line.startsWith("opengeni_http_request_duration_seconds_count{"));
+    expect(counts).toHaveLength(6);
+    for (const statusClass of ["1xx", "2xx", "3xx", "4xx", "5xx", "unknown"]) {
+      const count = counts.find((line) => line.includes(`status_class="${statusClass}"`));
+      expect(count).toBeDefined();
+      expect(Number(count?.split(" ").at(-1))).toBe(statusClass === "unknown" ? 4 : 2);
+    }
+  });
+
+  test("per-space heap statistics are kept on a runtime where they are cheap", () => {
+    const registry = new Registry();
+    collectDefaultMetrics({ register: registry, prefix: "x_" });
+    dropFullHeapWalkMetrics(registry, "x_", {});
+    expect(registry.getSingleMetric("x_nodejs_heap_space_size_used_bytes")).toBeDefined();
+    dropFullHeapWalkMetrics(registry, "x_", { bun: "1.3.0" });
+    expect(registry.getSingleMetric("x_nodejs_heap_space_size_used_bytes")).toBeUndefined();
   });
 
   test("records identity-free Insights timing with an exact two-second target bucket", async () => {
@@ -209,6 +272,19 @@ describe("observability", () => {
     expect(metrics).not.toContain("sb-user-controlled-provider-id");
     expect(metrics).not.toContain("/private/path");
     expect(metrics).toContain("opengeni_sandbox_operation_duration_seconds_bucket");
+  });
+
+  test("records a caller path rejection apart from provider failures", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    const observe = sandboxOperationMetricObserver(obs);
+    observe({ backend: "modal", op: "viewImage", outcome: "rejected", durationMs: 1 });
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="modal"[^}]*op="viewImage"[^}]*outcome="rejected"[^}]*\} 1\b/,
+    );
+    // The failure-ratio alert reads outcome="failed" over outcome=~"ok|failed".
+    expect(metrics).not.toMatch(/opengeni_sandbox_operations_total\{[^}]*outcome="(?:failed|ok)"/);
   });
 
   test("capture waits have distinct bounded metrics and never inflate provider call counts", async () => {
@@ -451,7 +527,7 @@ describe("observability", () => {
       sourceKey: "source-1",
     });
     span.end({ attributes: { status: "idle", account_id: "account-1" } });
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     expect(exported[0]!.url).toBe("http://collector:4318/v1/traces");
@@ -514,7 +590,7 @@ describe("observability", () => {
 
     const span = obs.startSpan("HTTP POST /v1/sessions", {});
     span.end({ error, attributes: { "custom.large": "x".repeat(2_000) } });
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     const body = exported[0]!.body;
@@ -559,7 +635,7 @@ describe("observability", () => {
 
     const span = obs.startSpan("worker.hostile_status", {});
     expect(() => span.end({ error: hostile })).not.toThrow();
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     const rendered = JSON.stringify(exported[0]!.body);
@@ -806,6 +882,66 @@ describe("observability", () => {
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("arbitraryDiagnostic");
   });
 
+  test("reviewed operational codes retain fixed descriptions, never raw exception messages", () => {
+    const sentinel = "PRIVATE_OPERATIONAL_MESSAGE_SENTINEL_98cabc";
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "worker", now: () => 1 });
+      for (const [errorClass, errorCode] of [
+        ["ParallelSessionTitleGenerationError", "parallel_session_title_generation_failed"],
+        ["ParallelSessionTitlePersistenceError", "parallel_session_title_persistence_failed"],
+        ["KnowledgeIndexOperationError", "knowledge_index_embedding_failed"],
+        ["WorkerOperationError", "worker_operation_failed"],
+      ]) {
+        obs.warn("fixed operational failure", {
+          errorClass,
+          errorCode,
+          origin: "worker",
+          errorMessage: sentinel,
+          error: sentinel,
+          cause: sentinel,
+          status: 503,
+        });
+      }
+      obs.warn("unknown operational failure", {
+        errorClass: "UnreviewedFailure",
+        errorCode: "unreviewed_failure",
+        errorMessage: sentinel,
+        error: sentinel,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(observed).toHaveLength(5);
+    expect(observed.join("\n")).not.toContain(sentinel);
+    const records = observed.map((record) => JSON.parse(record));
+    expect(records[0]).toMatchObject({
+      errorClass: "ParallelSessionTitleGenerationError",
+      errorCode: "parallel_session_title_generation_failed",
+      errorMessage: "parallel session title generation failed",
+      origin: "worker",
+      status: 503,
+    });
+    expect(records[1]).toMatchObject({
+      errorClass: "ParallelSessionTitlePersistenceError",
+      errorMessage: "parallel session title persistence failed",
+    });
+    expect(records[2]).toMatchObject({
+      errorCode: "knowledge_index_embedding_failed",
+      errorMessage: "knowledge index embedding failed",
+    });
+    expect(records[3]).toMatchObject({
+      errorCode: "worker_operation_failed",
+      errorMessage: "worker operation failed",
+    });
+    expect(records[4]).toMatchObject({ errorClass: "OperationError" });
+    expect(records[4]).not.toHaveProperty("errorCode");
+    expect(records[4]).not.toHaveProperty("errorMessage");
+  });
+
   test("public structured logs admit only validated opaque sandbox correlation keys", () => {
     const observed: string[] = [];
     const originalLog = console.log;
@@ -865,6 +1001,77 @@ describe("observability", () => {
     });
   });
 
+  test("public structured logs admit a desktop app version, never other text", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      for (const clientAppVersion of [
+        "0.1.32",
+        "1.2.3-beta.4",
+        "unknown",
+        "0.1",
+        "x0.1.32",
+        "0.1.32 (Mac)",
+      ]) {
+        obs.warn("version", { clientAppVersion });
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(observed.map((line) => JSON.parse(line).clientAppVersion ?? null)).toEqual([
+      "0.1.32",
+      "1.2.3-beta.4",
+      "unknown",
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  test("public structured logs admit projected web client error text and nothing raw", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const stack = "TypeError: x is undefined\n    at A (https://app.example.test/assets/a.js:1:2)";
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("projected", {
+        clientErrorName: "TypeError",
+        clientErrorMessage: "token=[redacted] rejected",
+        clientErrorStack: stack,
+        clientComponentStack: "\n    at ArtifactPageChrome\n    at Suspense",
+      });
+      obs.warn("raw", {
+        clientErrorName: "x".repeat(129),
+        clientErrorMessage: "token=abc rejected",
+        clientErrorStack: "GET https://api.example.test/v1/files?sig=abc",
+        clientComponentStack: 42,
+        clientErrorCode: "free text under an unreviewed name",
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      clientErrorName: "TypeError",
+      clientErrorMessage: "token=[redacted] rejected",
+      clientErrorStack: stack,
+      clientComponentStack: "\n    at ArtifactPageChrome\n    at Suspense",
+    });
+    const raw = JSON.parse(observed[1]!);
+    for (const key of [
+      "clientErrorName",
+      "clientErrorMessage",
+      "clientErrorStack",
+      "clientComponentStack",
+      "clientErrorCode",
+    ]) {
+      expect(raw).not.toHaveProperty(key);
+    }
+  });
+
   test("public structured logs retain only grammar-validated request correlation ids", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;
@@ -897,6 +1104,54 @@ describe("observability", () => {
     });
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
+  });
+
+  test("HTTP failure logs keep bounded request and cause context without error text or credentials", () => {
+    const sentinel = "HTTP_DIAGNOSTIC_SECRET_CANARY";
+    const observed: string[] = [];
+    const originalError = console.error;
+    console.error = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 500,
+        method: "GET",
+        route: "/v1/workspaces/:workspaceId/mcp",
+        reasonKind: "TypeError",
+        diagnosticId: "00000000-0000-4000-8000-000000000001",
+        correlationId: "request-1",
+        error: new Error(sentinel),
+        errorMessage: sentinel,
+        authorization: sentinel,
+        cookie: sentinel,
+        body: sentinel,
+        sessionId: sentinel,
+      });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 500,
+        method: sentinel,
+        route: `/v1/workspaces/workspace/mcp?token=${sentinel}`,
+        reasonKind: sentinel,
+        diagnosticId: sentinel,
+      });
+    } finally {
+      console.error = originalError;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      method: "GET",
+      route: "/v1/workspaces/:workspaceId/mcp",
+      reasonKind: "TypeError",
+      diagnosticId: "00000000-0000-4000-8000-000000000001",
+      correlationId: "request-1",
+    });
+    for (const field of ["method", "route", "reasonKind", "diagnosticId"]) {
+      expect(JSON.parse(observed[1]!)).not.toHaveProperty(field);
+    }
+    expect(observed.join("\n")).not.toContain(sentinel);
   });
 
   test("public fatal diagnostics retain only closed structural fields", () => {

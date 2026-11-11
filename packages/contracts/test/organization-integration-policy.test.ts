@@ -8,7 +8,12 @@ import {
 describe("organization integration acquisition policy", () => {
   test("default is unrestricted revision zero", () => {
     const policy = OrganizationIntegrationPolicy.parse({});
-    expect(policy).toEqual({ mode: "unrestricted", allowedIntegrationKeys: [], revision: 0 });
+    expect(policy).toEqual({
+      mode: "unrestricted",
+      allowedIntegrationKeys: [],
+      personalIntegrationSetup: "members",
+      revision: 0,
+    });
     expect(() => assertOrganizationIntegrationAllowed(policy, null)).not.toThrow();
   });
   test("empty restriction and unknown classifications deny", () => {

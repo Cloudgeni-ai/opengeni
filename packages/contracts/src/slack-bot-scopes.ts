@@ -1,3 +1,5 @@
+import { OPENGENI_SLACK_REST_USER_SCOPES } from "./slack-rest-mcp";
+
 export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
   "app_mentions:read",
   "canvases:read",
@@ -23,6 +25,12 @@ export const OPENGENI_SLACK_REACTION_REQUIRED_SCOPE = "reactions:read" as const;
 export const OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE = "files:write" as const;
 
 /**
+ * Optional grant that lets a bot chat post under its own name and avatar
+ * instead of the app's. Slack still marks every such post as the app's.
+ */
+export const OPENGENI_SLACK_BOT_IDENTITY_SCOPE = "chat:write.customize" as const;
+
+/**
  * Bot-token search scopes for Slack's Real-time Search API
  * (`assistant.search.context`). Slack accepts these as BOT scopes, so
  * workspace-wide public search runs under the bot identity and never needs a
@@ -38,17 +46,25 @@ export const OPENGENI_SLACK_BOT_SEARCH_SCOPES = [
 /**
  * Scopes requested by the managed and generated self-hosted manifests.
  *
- * `reactions:read`, `files:write`, and the bot search scopes are not part of the
- * base eligibility contract: legacy installations may continue using existing
- * Slack interactions and tools while the reaction setting stays disabled, bot
- * search and file delivery stay unavailable, and the tools ask an admin to reinstall.
+ * `reactions:read`, `files:write`, `chat:write.customize`, and the bot search
+ * scopes are not part of the base eligibility contract: legacy installations
+ * may continue using existing Slack interactions and tools while the reaction
+ * setting stays disabled, bot search and file delivery stay unavailable, bots
+ * post as the app, and the tools ask an admin to reinstall.
  */
 export const OPENGENI_SLACK_BOT_REQUESTED_SCOPES = [
   ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
   OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE,
-  ...OPENGENI_SLACK_BOT_SEARCH_SCOPES,
+  OPENGENI_SLACK_BOT_IDENTITY_SCOPE,
 ] as const;
+
+export function openGeniSlackBotRequestedScopes(mode: "limited" | "full" = "limited"): string[] {
+  return [
+    ...OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+    ...(mode === "full" ? OPENGENI_SLACK_BOT_SEARCH_SCOPES : []),
+  ];
+}
 
 export const OPENGENI_SLACK_BOT_EVENTS = [
   "app_home_opened",
@@ -60,34 +76,8 @@ export const OPENGENI_SLACK_BOT_EVENTS = [
   "reaction_added",
 ] as const;
 
-/** Full user-token scope set for every tool currently exposed by Slack's hosted MCP server. */
-export const OPENGENI_SLACK_MCP_USER_SCOPES = [
-  "search:read.public",
-  "search:read.private",
-  "search:read.mpim",
-  "search:read.im",
-  "search:read.files",
-  "files:read",
-  "emoji:read",
-  "search:read.users",
-  "chat:write",
-  "channels:history",
-  "groups:history",
-  "mpim:history",
-  "im:history",
-  "channels:write",
-  "groups:write",
-  "im:write",
-  "mpim:write",
-  "reactions:write",
-  "canvases:read",
-  "canvases:write",
-  "users:read",
-  "users:read.email",
-  "channels:read",
-  "groups:read",
-  "mpim:read",
-] as const;
+/** User grants required by the reviewed Slack API MCP tools. */
+export const OPENGENI_SLACK_MCP_USER_SCOPES = OPENGENI_SLACK_REST_USER_SCOPES;
 
 export const OPENGENI_MANAGED_PUBLIC_BASE_URL = "https://app.opengeni.ai" as const;
 
@@ -96,6 +86,7 @@ export type OpenGeniSlackBotManifestOptions = Readonly<{
   botDisplayName?: string;
   slashCommand?: string;
   shortcutName?: string;
+  accessMode?: "limited" | "full";
 }>;
 
 function normalizedSlackManifestText(
@@ -138,17 +129,17 @@ export function buildOpenGeniSlackBotManifest(
   options: OpenGeniSlackBotManifestOptions = {},
 ) {
   const baseUrl = normalizedSlackManifestBaseUrl(publicBaseUrl);
-  const appName = normalizedSlackManifestText(options.appName, "OpenGeni", "app name", 35);
+  const appName = normalizedSlackManifestText(options.appName, "Opengeni", "app name", 35);
   const botDisplayName = normalizedSlackManifestText(
     options.botDisplayName,
-    "OpenGeni",
+    "Opengeni",
     "bot display name",
     80,
   );
   const slashCommand = normalizedSlackCommand(options.slashCommand);
   const shortcutName = normalizedSlackManifestText(
     options.shortcutName,
-    "Open in OpenGeni",
+    "Ask Opengeni",
     "shortcut name",
     35,
   );
@@ -164,7 +155,7 @@ export function buildOpenGeniSlackBotManifest(
       slash_commands: [
         {
           command: slashCommand,
-          description: "Start an OpenGeni task in this channel",
+          description: "Start an Opengeni task in this channel",
           should_escape: false,
           url: `${baseUrl}/v1/integrations/slack/commands`,
         },
@@ -172,7 +163,7 @@ export function buildOpenGeniSlackBotManifest(
       shortcuts: [
         {
           callback_id: "opengeni_message",
-          description: "Start an OpenGeni task from this Slack message",
+          description: "Start an Opengeni task from this Slack message",
           name: shortcutName,
           type: "message",
         },
@@ -184,7 +175,7 @@ export function buildOpenGeniSlackBotManifest(
         `${baseUrl}/v1/integrations/slack/callback`,
       ],
       scopes: {
-        bot: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+        bot: openGeniSlackBotRequestedScopes(options.accessMode),
         user: [...OPENGENI_SLACK_MCP_USER_SCOPES],
       },
     },
@@ -214,11 +205,16 @@ export const OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES = [
   "team:read",
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
   OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE,
+  OPENGENI_SLACK_BOT_IDENTITY_SCOPE,
   ...OPENGENI_SLACK_BOT_SEARCH_SCOPES,
 ] as const;
 
 export function hasOpenGeniSlackFileUploadScope(grantedScopes: readonly string[]): boolean {
   return grantedScopes.includes(OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE);
+}
+
+export function hasOpenGeniSlackBotIdentityScope(grantedScopes: readonly string[]): boolean {
+  return grantedScopes.includes(OPENGENI_SLACK_BOT_IDENTITY_SCOPE);
 }
 
 export function hasOpenGeniSlackBotSearchScopes(grantedScopes: readonly string[]): boolean {

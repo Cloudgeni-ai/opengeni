@@ -1,0 +1,464 @@
+# Session storage lifecycle
+
+Session data is the dominant share of an Opengeni database. On a busy
+deployment almost all of it is repetition rather than conversation: the same
+tool catalog and the same model-request prefix are recorded on every attempt,
+and streamed text is stored as one row per fragment next to the completed
+message. This document owns how session data is stored compactly while a
+session is live, and how idle sessions leave PostgreSQL.
+
+## Content-addressed session content
+
+`session_content_blobs` stores large JSON values once per session, keyed by
+the SHA-256 of their canonical JSON (object keys sorted, array order kept).
+Owning rows keep the non-repetitive fields inline plus digests in a nullable
+`content_refs` column:
+
+| Owning row | Externalized values | Stored inline |
+| --- | --- | --- |
+| `session_attempt_tool_catalogs` | every catalog entry | identity, generation, digest, `entries: []` |
+| `session_attempt_model_context_snapshots` | `instructions`, `layers`, `tools`, `skills`, and `providerRequest.body` as content-defined chunks | `tokens`, `parts`, request metadata, emptied externalized fields |
+
+The request body is a raw wire string that grows by a few items per attempt.
+It is split with content-defined chunking (a gear rolling hash over UTF-16
+code units, 2 Ki–64 Ki units per chunk, never splitting a surrogate pair), so
+consecutive attempts share every chunk except the changed tail. Chunk
+parameters affect only deduplication, never correctness: hydration
+concatenates the chunks.
+
+`packages/db/src/session-content-blobs.ts` is the only encoder and hydrator.
+Every reader selects `content_refs` and hydrates; a NULL value is the legacy
+inline form and is returned unchanged. Hydrated values are exactly the values
+written, so the tool-catalog integrity digest still verifies. A missing blob is
+an error (`SessionContentBlobMissingError`), never an empty value.
+
+Blobs belong to exactly one session: no sharing across sessions or workspaces,
+so tenancy, visibility and lifecycle are the session's. The table is FORCE-RLS
+with the ordinary workspace policy plus the restrictive session-visibility
+policy, the application role may only `SELECT` and `INSERT`, and rows cascade
+with their session.
+
+### Legacy compaction
+
+Rows written before migration 0648 are compacted in place by the control
+worker's session storage maintenance Schedule (every five minutes, a bounded
+number of rows per content kind per pass). The worker cannot enumerate FORCE-RLS
+workspaces, so discovery is the SECURITY DEFINER
+`opengeni_private.session_content_compaction_candidates`, which returns only
+routing ids. For each row the worker encodes the value and writes its blobs
+under the row's workspace scope, then calls
+`opengeni_private.compact_session_content_row`. Under a row lock that routine
+proves the referenced blobs rebuild exactly the stored inline value (each
+externalized field compared as jsonb, the body compared as the concatenated
+string) and only then replaces the row. Any mismatch leaves the row untouched.
+
+Operators can drain the backlog faster with the same code path:
+
+```sh
+OPENGENI_DATABASE_URL=... bun run --cwd packages/db compact-session-content --batch-size=200
+```
+
+### Collecting unreferenced blobs
+
+An attempt keeps one model-request snapshot, and every later request of the
+attempt replaces it. Each request writes the body chunks the session does not
+hold yet, so the chunks only a replaced snapshot named are left behind. In a
+long attempt that is most of what `session_content_blobs` holds, and before
+migration 1359 it stayed until the session was archived.
+
+The same session storage maintenance pass now collects them after legacy
+compaction, within the same deadline. Discovery is the SECURITY DEFINER
+`opengeni_private.session_content_garbage_candidates_v1(limit)`, which returns
+routing ids of live sessions whose snapshots changed since their last
+collection (never-collected sessions first, each revisited at most every ten
+minutes). For each one the worker calls
+`opengeni_private.collect_session_content_garbage_v1(workspace, session, limit)`
+in the session's workspace scope. It deletes up to `limit` blobs of the live
+session that no model-context snapshot (`instructions`, `layers`, `tools`,
+`skills`, `body` chunks) or tool catalog entry of the session names and that
+are older than ten minutes, and records how far the session is collected in
+`opengeni_private.session_content_collections` once a call deletes fewer than
+`limit` rows.
+
+Collection is lossless. Every blob writer and every snapshot reader holds the
+session's content advisory lock shared for its whole transaction; the collector
+takes it exclusively, and only if it is free, otherwise it returns 0 and tries
+again on a later pass. A writer that found a blob present therefore always
+commits its reference before the blob can be judged unreferenced, and a reader
+never sees a snapshot whose blobs were deleted between two statements. Archived
+and archiving sessions are skipped; their blobs leave with the archive purge.
+
+Migration 1359 creates both routines without runtime `EXECUTE`, because the
+previous release rejects a grant on a definer it does not know. Until a later
+migration grants them, the maintenance pass reports the collector unavailable
+and collects nothing. An operator can run the same routines as the table owner,
+one transaction per call, for example:
+
+```sql
+DO $$
+DECLARE
+  c record;
+  n integer;
+BEGIN
+  FOR c IN SELECT * FROM opengeni_private.session_content_garbage_candidates_v1(200) LOOP
+    LOOP
+      PERFORM set_config('opengeni.account_id', c.account_id::text, true),
+        set_config('opengeni.workspace_id', c.workspace_id::text, true);
+      n := opengeni_private.collect_session_content_garbage_v1(c.workspace_id, c.session_id, 2000);
+      COMMIT;
+      EXIT WHEN n < 2000;
+    END LOOP;
+  END LOOP;
+END
+$$;
+```
+
+Run it outside an explicit transaction (it commits per call) with the
+database's data schema first on `search_path`, and repeat until a run finds no
+candidates. Deleted rows free space inside the table for later blob writes; see
+below for returning it to the operating system.
+
+### Returning disk space
+
+Compaction and collection free space inside PostgreSQL; they do not shrink table files. Plain
+`VACUUM` (autovacuum) makes the freed TOAST pages reusable for new writes. To
+return the space to the operating system, rewrite the two tables after the
+backlog is drained, for example with `pg_repack`, which rewrites online and
+needs free disk roughly equal to the compacted table size. `VACUUM FULL` also
+works but holds an exclusive lock for the duration.
+
+## Idle-session archive
+
+On by default. Turn it off per deployment to keep every session in PostgreSQL:
+
+| Setting | Helm value | Default |
+| --- | --- | --- |
+| `OPENGENI_SESSION_ARCHIVE_ENABLED` | `sessionArchive.enabled` | `true` |
+| `OPENGENI_SESSION_ARCHIVE_IDLE_DAYS` | `sessionArchive.idleDays` | `30` |
+
+The archive requires the deployment's object storage; a deployment without it
+never archives (the worker logs a warning each pass). The same maintenance
+Schedule runs it after content compaction; each pass keeps archiving batches
+of eligible sessions until its ten-minute budget ends or none remain, so a
+backlog drains steadily after the archive is first enabled.
+
+### Archiving a chat
+
+The chat Archive action is the same archive, started at once instead of after
+the idle period. `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/archive`
+with `{ "archived": true }` (session control; `updateSessionArchive` in the SDK)
+sets `sessions.archived_at` and `archive_requested_by` on the root chat and its
+sub-chats. From then on the chat is listed as archived for everyone
+(`archiveStatus=archived`), and new messages, steers and agent sends to it are
+refused. `{ "archived": false }` within ten seconds (a few seconds' grace for
+the request itself) undoes it exactly; after that it restores the chat (see
+"Restoring an archived chat"). Archive answers 409 `session_archive_blocked`,
+with `blockers` and a message saying what to change, while keep-live, a
+repeating automation, or a site sign-in keeps the chat live. One-time
+automations do not block: they are retired when the window ends. The older
+`mode`, `confirmPause`, `expectedVersion` and `clientEventId` fields are
+accepted and ignored.
+
+Archive also refuses while a sub-chat is still in use, because archiving the
+root stops every sub-chat with it. A sub-chat is in use when it is running
+(an active turn, queued work or a running background command), waiting for
+input or a person's answer, working on an active goal, or was messaged
+directly by a person in the last 14 days (a prompt sent through the web app,
+Slack, the API and the like; an agent's message does not count). Then the
+409 `session_archive_blocked` lists one blocker per such sub-chat,
+`{ "kind": "active_sub_chat", "sessionId", "title", "reason": "running" |
+"waiting" | "goal" | "messaged" }`, and the message names them with how many.
+Repeating the request with `confirmActiveSubChats` listing every one of those
+ids archives them with the chat; a list that misses one is refused again with
+all of them named. Finished sub-chats that only agents used never block.
+Keeping a live sub-chat under an archived root is not offered: an archived
+root hides its whole tree from the list, a sub-chat's results go to its
+parent, and moving sub-chats to a new root would rewrite who they belong to.
+
+When the Undo window ends, a delayed workflow stops the chat (one-time
+automations retired, goals paused, running work cancelled) and stores it with
+the steps below. An archived chat qualifies as soon as nothing runs in it: the
+idle period, the age limit and recent activity no longer apply, and a sub-chat
+blocks it only while it runs. The maintenance pass is the backstop: its listing
+also returns archived chats that still have work running, and the worker stops
+that work first, so a chat whose workflow was lost is stored on a later pass.
+
+Cancelling the running work leaves the session status `cancelled`, recorded
+with the reason `SESSION_ARCHIVE_STOP_REASON` (`@opengeni/contracts/session-history`).
+That status is internal: clients present an archived chat (`archived`, or a
+`retention.archive`) as Archived on every surface through `sessionDisplayStatus`,
+and a timeline reads that status change as archived, never as cancelled.
+Compact `session_get` reports the `archive` (state `archiving` until stored) as
+soon as the chat is archived.
+
+Migration 1213 replaced the earlier personal archive (a member hiding a chat
+from their own list, with Restore). Chats people had hidden that way were
+archived for real, unless keep-live, a scheduled task, or a site sign-in
+keeps them live; those came back to the list.
+
+### What qualifies
+
+Each session is judged on its own, not by its tree. A session that was not
+archived by a person qualifies when all of these hold for the idle period:
+
+- it is older than the idle period, no turn was created or updated in it, and
+  the session is `idle`, `failed` or `cancelled` with no active turn. Activity
+  is measured by turns, because every message, steer, child result or
+  scheduled wake creates or advances one. The session row's `updated_at` and
+  bookkeeping events (visibility changes, machine link notices) are not
+  activity: bulk maintenance and infrastructure appends touch them on idle
+  sessions;
+- it is not marked keep-live, is not an imported archive, and has no session
+  wait;
+- it has no pending human input request, active goal, pending machine input or
+  inbound outbox delivery, running background command, scheduled task that
+  reuses it, or site-authentication maintenance binding;
+- no direct child is still active or recently active.
+
+### What happens
+
+1. Under the session's write lock the worker re-checks eligibility and sets
+   `content_archive_state = 'archiving'`, recording the planned object keys.
+   From that moment the database refuses new turns, attempts, history, goals,
+   workflow wakes and machine inputs for the session (`SESSION_ARCHIVED_READ_ONLY`),
+   the API refuses sends and steers with 409, and the agent tools
+   `session_send_message` and `session_steer` return a non-retryable
+   `<tool>_session_read_only` error that says to start a new session. A
+   message cannot race the archive.
+2. The worker streams two zstd-compressed JSON-lines objects to a temporary
+   file and uploads them through the bounded object-storage path, which reads
+   every byte back before success. On object stores without read-after-write
+   consistency a just-written object can briefly read as missing, so readback
+   is retried with a short backoff (about 16 seconds in total) before the
+   attempt fails; size or digest mismatches fail at once:
+   - `bundle.jsonl.zst`: a header with the exact `sessions` row, then every row
+     of the session's turns, attempts, goals, goal revisions, all events,
+     history items, machine inputs, realtime entries, code-mode calls, tool
+     catalogs, model-request snapshots, content blobs, pending tool calls and
+     preference snapshots, each as `{"table": ..., "row": <exact row JSON>}`,
+     then a footer with row counts. Full fidelity, for analysis and audit.
+     Rows are read in pages of 200 under the workspace's row-level security,
+     and each page is an indexed read, so a session with hundreds of thousands
+     of rows exports in linear time. Under a policy PostgreSQL only uses
+     leakproof comparisons as index conditions; numeric and row comparisons
+     are not leakproof and become a filter after the policy, which re-reads
+     every earlier row, and a multi-column cursor only bounds its first column.
+     So tables ordered by several keys or by a numeric key (turns, attempts,
+     model history, code-mode calls and the like) read their ordered row ids
+     once and then fetch each page by primary key. Events, machine inputs and
+     content blobs page by one integer or text key that leads a unique
+     `(workspace_id, session_id, key)` index.
+   - `transcript.jsonl.zst`: a header, then the readable timeline as public
+     `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
+     stable, documented readable section and does not require Opengeni's
+     internal tables to interpret. It is made from the event rows the bundle
+     export reads, so kept events are not read a second time. Kept events
+     added while the session archives, after the bundle read its events, are
+     not in the bundle but still appear in the transcript.
+3. The manifest (object keys, sizes, SHA-256 digests, row counts) is recorded
+   and the state becomes `archived`.
+4. Only then are the bulky tables purged in bounded batches: realtime entries,
+   machine inputs, model history, code-mode calls, tool catalogs, model-request
+   snapshots, content blobs, pending tool calls, and the event types only an
+   executing session or a debugger needs (streamed fragments, model-request
+   telemetry, update bookkeeping, startup phases, credential selection and
+   late-rejected events).
+   Each step resumes at the table the previous step left unfinished, and the
+   purge is recorded complete only after one pass over every table finds
+   nothing left.
+   Every foreign key into these tables has an index led by its key columns,
+   so the check each deleted row fires is an index seek rather than a scan of
+   the referencing table across all workspaces (enforced by
+   `packages/db/test/session-archive-postgres.test.ts`).
+
+What stays in PostgreSQL: the session row, turns, attempts, goals and every
+readable timeline event, so the web app, `session_events` and the SDK read an
+archived session exactly as before, and every durable reference (task notes,
+artifact versions, Knowledge lifecycle, usage, billing and audit facts) is
+unchanged. Small per-turn audit snapshots also stay, as do a scheduled run's
+delivered occurrence updates (immutable schedule evidence) and the history
+items they delivered.
+
+An archived session can be restored (below), or its work continued in a new
+session. A late machine input for an archived session (a child result,
+schedule or media completion) is settled like input to a cancelled session,
+and is not replayed by a restore.
+
+Purging leaves holes in an archived session's event sequence. Event streams
+report them as covered: each SSE frame's `id` (its covered-through sequence)
+extends to just before the next stored event, or to the session's last
+sequence, so stream clients never try to backfill an intentional hole. Raw
+event pages simply skip the missing sequences.
+
+### Restoring an archived chat
+
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/archive` with
+`{ "archived": false }` restores a root chat at any time (session control).
+Within the Undo window it is the exact undo. After it, the chat and the
+sub-chats this same Archive took (those whose `archived_at` equals the
+root's) come back:
+
+- a chat whose content was not stored yet is live again at once;
+- a stored chat gets `content_restore_requested_at` and stays read-only, with
+  `retention.archive.restoring: true`, while the
+  `sessionArchiveRestoreWorkflow` puts its content back. For each chat the
+  worker downloads the bundle, verifies its size and SHA-256 against the
+  manifest, its header against the session and each table's rows against the
+  footer counts, then, in one transaction, returns the session to live and
+  re-inserts the purged rows exactly as they were (rows still present are
+  kept). Only that transaction may leave the archived state: it marks itself
+  with the transaction-local `opengeni.session_content_restore` setting, which
+  the session guard checks. Either every row is back and the chat is live, or
+  nothing changed and the workflow retries.
+
+The stored objects of a restored chat are queued for deletion in the same
+transaction, and a later Archive stores it again under new keys. A restored
+chat counts as active for the idle period, so the idle archiver does not take
+it back on its next pass. If the workflow is lost, the maintenance pass
+finishes any restore requested more than five minutes earlier.
+
+A restored chat takes new messages again. Stopping an archived chat's work is
+a Cancel with the reason `Archived`, which leaves the chat and its sub-chats
+`cancelled` and paused. Once a chat is live again (at once, or when its
+content is back), each chat that Cancel stopped (its last
+`session.status.changed` is `cancelled` with reason `Archived`) records
+`session.status.changed` `{ "status": "idle", "reason": "restored" }` and
+becomes `idle`, and the topmost chat the Archive paused is resumed (a
+`session.control.resumed` by the person who restored it, or by the
+`service:session-archive-restore` service when the maintenance pass finishes
+the restore), which lifts the pause on its sub-chats too. The turn the Archive
+cut off stays cancelled and reads as interrupted. A chat that was cancelled
+for another reason before the Archive stays cancelled. Repeating
+`{ "archived": false }` on a live chat finishes this step if an earlier
+attempt could not.
+
+Restoring a sub-chat on its own answers 409 `session_archive_restore_root`
+with the `rootSessionId` to restore instead; a chat that is being stored right
+now, or whose stopped turn is still settling, answers 409
+`session_archive_busy` (try again a moment later). A sub-chat that was stored
+on its own before the root was archived stays stored.
+
+What a restore does not bring back: purged event types (streamed text and
+output fragments, model-request telemetry, update bookkeeping, startup
+phases, credential selection and late-rejected events), which only a running
+turn or a debugger reads; the turn and queued messages the stop step
+cancelled; goals it paused (they stay paused, so the agent does not start
+again on its own); and one-time automations it retired.
+
+### Keep-live
+
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
+`{ "keepLive": true }`, `keepLive: true` on session create, or the SDK's
+`updateSessionRetention`, exempts a session permanently. It is workspace-wide
+and keeps the chat Archive action from starting. It cannot change once a
+session is archived.
+
+### In the web app
+
+- Archive (in a chat's row, menu, header and the command menu) takes the chat
+  out of the list at once and shows a notice with Undo for ten seconds, saying
+  the chat moves to long-term storage and can be restored from Archived. When
+  sub-chats are still in use, nothing is archived: a notice says how many and
+  names them, and "Archive all" archives them with the chat.
+- An archived chat opens normally with a notice above its timeline that it is
+  archived, a "Restore chat" button for a root chat the person can archive,
+  and a "Continue in a new chat" button, which opens a new chat with a message
+  pointing at it; the composer is not shown. While a restore runs, the notice
+  says the content is coming back, and the chat opens for new messages once
+  it is live.
+- The chat's Settings tab has a "Keep this chat active" switch (keep-live) under
+  Storage, shown only when the deployment archives idle sessions
+  (`ClientConfig.sessionArchive`, present when archiving is enabled and object
+  storage is configured).
+- The session list's view menu links to the Archived page
+  (`/workspaces/:id/archived`; the old `read-only-chats` path redirects), which
+  lists every archived root chat in the workspace with title search, a project
+  filter and sorting. Command-menu search finds archived chats too.
+
+### Recovery and deletion
+
+An archive left in `archiving` by a crashed worker for more than two hours is
+abandoned: the session returns to live, and its planned objects are queued for
+deletion in the same transaction. An `archived` session whose purge did not
+finish resumes purging on the next pass. Deleting an archived session queues
+its objects for deletion in the deleting transaction, and the maintenance
+worker removes them, so a deleted session never leaves its bundle behind.
+
+### Removing secrets from the archive
+
+The secret history scrub (docs/secrets.md, "Removing secrets from stored
+history") also covers sessions in long-term storage. The database copies that
+stay (session row, turns, goals, readable events) are rewritten in place; the
+archive's read-only guard lets the scrub's updates through (it marks its
+transaction) for content columns only and still refuses every other write.
+Then the bundle and transcript are downloaded and verified against the
+manifest, rewritten line by line, and uploaded under a fresh archive id, so a
+published key is never overwritten. Each bundle row is redacted column by
+column, through the column's lossless codec where it has one, and its other
+bytes (numbers included) stay exact. A model-request snapshot is hydrated
+from the bundle's own blob rows, redacted whole and re-encoded; its new blob
+rows are added in digest order, blob rows nothing refers to any more are
+dropped, and the footer's and manifest's content-blob row count follow. A
+matched blob row a tool catalog still refers to stays, and the run reports
+it as `cell_not_rewritten`. The
+session's manifest is swapped to the new keys, sizes and SHA-256 digests only
+while it is still the manifest that was read; nothing else in it may change.
+The replaced objects are queued for deletion in the same transaction. An
+object with no match is kept as it is. A dry run only reads and counts, as
+`archive_bundle` and `archive_transcript`.
+
+Any error from the swap is treated as an unknown outcome (the connection may
+have dropped while it could still commit, or after it did), and the uploaded
+objects are kept, because deleting them could leave the manifest naming
+objects that are gone. If the swap did not in fact commit, such an object is
+already redacted, but nothing refers to it, so neither the deletion queue nor
+deleting the session removes it; it stays in object storage until removed by
+hand. The uploaded objects are deleted only when the swap was never attempted
+(an upload failed), lost its compare-and-swap (the manifest changed
+meanwhile), or the session is gone.
+
+## Streamed text deltas
+
+A model answer or reasoning stream arrives as many small provider fragments.
+The turn writer flushes them at most one window apart (100 ms; the first
+fragment of a turn, after a structural event such as a tool call or a
+completed message, or after a silence of one window goes at once, so time to
+first token is unchanged) and stores each flush's adjacent `agent.message.delta` or
+`agent.reasoning.delta` fragments (one message and phase, plain
+`text`/`messageId`/`phase` payloads, at most 48 KiB of text) as one row. Live
+subscribers receive exactly the stored rows. The text and the order of every
+other event are unchanged; only the provider's fragment boundaries are not
+kept. Reasoning fragments are joined with the separator every reader uses
+(`reasoningDeltaSeparator` in `@opengeni/events`: a part that opens bold right
+after one that closed bold starts a new paragraph), so reasoning renders the
+same from fragments, merged rows or the read-side coalescer. On staging
+traffic this stores about a fifth of the fragments, with no
+deletes afterwards and so no table or index churn.
+
+### Rows folded by earlier versions
+
+Before write-time merging, a maintenance pass folded each settled turn's runs
+of fragment rows into the run's first row. Those rows keep their id, sequence
+and timestamps, and a payload in the shape live streams deliver:
+
+```json
+{
+  "text": "the whole run's text",
+  "coalescedUntil": 1234,
+  "messageId": "optional, as on the fragments",
+  "phase": "optional, as on the fragments",
+  "folded": {
+    "v": 1,
+    "parts": [[0, 0, 0, 17, 5, "id-of-fragment-1"], [1, 1520, 1610, 18, 3, "id-of-fragment-2"]]
+  }
+}
+```
+
+Each part is `[sequenceOffset, occurredOffsetMicroseconds,
+createdOffsetMicroseconds, producerSeq, textLengthInUtf16Units, id]`, relative
+to the folded row. Readers treat a delta with `coalescedUntil` as covering the
+sequences up to it; event streams and compact pages report that coverage, and
+raw pages skip the removed sequences. The pass no longer runs; its routines and
+the `opengeni_private.session_turn_delta_folds` bookkeeping table remain until
+a later contract migration removes them. Fragments of unfolded older sessions
+leave PostgreSQL with the idle-session archive.

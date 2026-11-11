@@ -52,6 +52,11 @@ pub enum PlatformError {
         detail: BTreeMap<String, String>,
     },
 
+    /// The request's `run_as` names no account in the password database. Maps
+    /// to [`ErrorCode::RunAsUnknownUser`].
+    #[error("run_as names no local user: {0}")]
+    RunAsUnknownUser(String),
+
     /// A stream producer or relay channel could not be established. Unlike a
     /// generic OS failure, this preserves whether the stream layer knows a
     /// fresh channel may be retried safely. Maps to [`ErrorCode::Stream`].
@@ -116,6 +121,7 @@ impl PlatformError {
             Self::Timeout(_) => ErrorCode::Timeout,
             Self::Os { .. } => ErrorCode::Os,
             Self::Stream { .. } => ErrorCode::Stream,
+            Self::RunAsUnknownUser(_) => ErrorCode::RunAsUnknownUser,
         }
     }
 

@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
+import { accountContactEmail } from "@opengeni/contracts/managed-sign-in-methods";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   clearSignInChangeFeedback,
+  isStaleSignInRequestCallbackError,
   isVerificationLinkCallbackError,
   readSignInCallbackError,
   readSignInChangeFeedback,
@@ -35,10 +37,25 @@ export function SignInCallbackNotice({
       window.location.pathname === "/" &&
       new URLSearchParams(window.location.search).get("signInMethod") === "connected",
   );
+  const [staleRequest] = useState(() => isStaleSignInRequestCallbackError(window.location.search));
   const linkError = isVerificationLinkCallbackError(message);
   useEffect(() => {
     if (linkError && verificationLinkError === "auth-panel") setMessage(null);
   }, [linkError, verificationLinkError]);
+  // A stale-request code next to a valid session describes an old request (a
+  // duplicate or late callback): the sign-in that matters succeeded. Drop the
+  // notice and the leftover `error` so a reload cannot resurface it.
+  useEffect(() => {
+    if (!staleRequest || userId === null) return;
+    setMessage(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("error");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }, [staleRequest, userId]);
   const shownMessage = linkError && verificationLinkError !== "notice" ? null : message;
   const [receipt, setReceipt] = useState(readSignInChangeFeedback);
   useEffect(() => {
@@ -49,40 +66,46 @@ export function SignInCallbackNotice({
   const ownReceipt = receipt && (userId === null || receipt.userId === userId) ? receipt : null;
   if (!shownMessage && !ownReceipt && !returned) return null;
   return (
-    <div role="alert" className="mx-auto w-full max-w-3xl px-4 pt-3">
-      <Notice
-        tone={shownMessage ? "failed" : "info"}
-        title={shownMessage ? "Sign-in needs attention" : "Review your sign-in methods"}
-        action={
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setMessage(null);
-              setReturned(false);
-              clearSignInChangeFeedback();
-            }}
-          >
-            Dismiss
-          </Button>
-        }
-      >
-        {shownMessage ?? ownReceipt?.message ?? (
-          <>
-            The provider returned to Opengeni. Sign in with an existing method if asked, then review
-            your current connections in{" "}
-            <a className="underline underline-offset-2" href="/settings/security">
-              Personal settings → Security
-            </a>
-            .
-          </>
-        )}
-        {ownReceipt && userId === null ? (
-          <p className="mt-1">
-            Sign in again as {ownReceipt.email} with a remaining sign-in method to continue.
-          </p>
-        ) : null}
-      </Notice>
+    // The full width, so on the desktop it can move the window; the box is
+    // centred inside (window-control clearance in apps/web/src/styles.css).
+    <div role="alert" data-app-notice="centered" data-window-drag className="pt-3">
+      <div className="mx-auto w-full max-w-3xl px-4">
+        <Notice
+          tone={shownMessage ? "failed" : "info"}
+          title={shownMessage ? "Sign-in needs attention" : "Review your sign-in methods"}
+          action={
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setMessage(null);
+                setReturned(false);
+                clearSignInChangeFeedback();
+              }}
+            >
+              Dismiss
+            </Button>
+          }
+        >
+          {shownMessage ?? ownReceipt?.message ?? (
+            <>
+              The provider returned to Opengeni. Sign in with an existing method if asked, then
+              review your current connections in{" "}
+              <a className="underline underline-offset-2" href="/settings/security">
+                Personal settings → Security
+              </a>
+              .
+            </>
+          )}
+          {ownReceipt && userId === null ? (
+            <p className="mt-1">
+              {accountContactEmail(ownReceipt.email)
+                ? `Sign in again as ${ownReceipt.email} with a remaining sign-in method to continue.`
+                : "Sign in again with a remaining passkey to continue."}
+            </p>
+          ) : null}
+        </Notice>
+      </div>
     </div>
   );
 }

@@ -1,20 +1,15 @@
 import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
-  recordCodexAccountUsageForFinalization,
-  recordClaudeSubscriptionUsage,
-  releaseCodexCredentialLease,
-  releaseXaiCredentialLease,
-  updateXaiQuotaMetadata,
   type SessionAttemptQuiescenceCommit,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
-import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
 import type { Settings } from "@opengeni/config";
-import { signalCodexCapacityWakeTargets } from "../codex-capacity";
+
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
+import { turnFailureOriginMetricFields } from "./failure-attribution";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
@@ -42,6 +37,12 @@ import {
   type ResumedTurnSandbox,
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
+import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-core-settlement";
+import { finalizeCoreSubscriptionTurn } from "./subscription-core-settlement";
+import { XAI_CORE_REFUSAL } from "./xai-core";
+import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
+import { finalizeCoreClaudeTurn } from "./claude-core";
+import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
   assertPhysicalToolQuiescenceForCancellation,
@@ -74,6 +75,8 @@ export type TurnFinalizationDeps = {
   wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   signalSessionAttemptQuiesced: ActivityServices["signalSessionAttemptQuiesced"];
   signalCodexCapacityWorkflow: ActivityServices["signalCodexCapacityWorkflow"];
+  requestWorkerDrain: ActivityServices["requestWorkerDrain"];
+  turnFinalizationTimeoutMs: ActivityServices["turnFinalizationTimeoutMs"];
   cancellationSignal: AbortSignal | undefined;
   sandboxResumeController: AbortController;
   activityContext: ReturnType<typeof currentActivityContext>;
@@ -113,6 +116,9 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   deps.eventing.heartbeatTimer = startActivityHeartbeat(deps.activityContext, details);
   const monitor = startTurnFinalizationMonitor({
     observability: deps.observability,
+    ...(deps.turnFinalizationTimeoutMs === undefined
+      ? {}
+      : { timeoutMs: deps.turnFinalizationTimeoutMs }),
     details,
     heartbeat: (value) => {
       try {
@@ -121,10 +127,20 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         // A closed Temporal transport is not proof of physical quiescence.
       }
     },
-    terminateWorker: () => process.exit(1),
+    requestWorkerDrain: deps.requestWorkerDrain,
+    outstandingWriters: () =>
+      deps.eventing.toolCancellationFenceRef.current?.outstandingWriters?.() ?? [],
+    execution: {
+      workspaceId: deps.input.workspaceId,
+      sessionId: deps.input.sessionId,
+      attemptId: deps.input.attemptId,
+    },
   });
   try {
     monitor.enter("tool_writers");
+    // Startup progress receipts still in flight finish before cleanup, so no
+    // append of this attempt outlives it. They never reject.
+    await deps.eventing.backgroundEventsSettled?.();
     await finalizeTurnAttemptSteps(deps, monitor);
   } finally {
     monitor.stop();
@@ -235,6 +251,30 @@ async function finalizeTurnAttemptSteps(
       codemodeTokenRenewal: codemodeRenewalToStop,
       runCredentialRenewal: runRenewalToStop,
     });
+    // Secret files live outside the workspace in an attempt-private directory;
+    // a successor never reads them. Start their best-effort deletion after the
+    // writers drain, but do not make provider availability a prerequisite for
+    // quiescence, lease release, or activity completion. The cleanup targets the
+    // original backend, never a newly resolved route. Run-credential pointer
+    // deletion below is different: it remains a mandatory workspace write.
+    if (toolCancellationFence?.clearSecretFiles) {
+      const reportSecretCleanupFailure = (error: unknown) => {
+        try {
+          observability.warn("attempt secret file cleanup failed", {
+            "opengeni.session_id": input.sessionId,
+            "opengeni.attempt_id": input.attemptId,
+            "error.type": error instanceof Error ? error.name : "unknown",
+          });
+        } catch {
+          // Neither a late provider rejection nor diagnostics owns the turn.
+        }
+      };
+      try {
+        void toolCancellationFence.clearSecretFiles().catch(reportSecretCleanupFailure);
+      } catch (error) {
+        reportSecretCleanupFailure(error);
+      }
+    }
     // Attempt-qualified credential deletion is also a real workspace write,
     // but it must not be submitted behind the very command being cancelled.
     // Drain tool processes and credential renewals first, then delete only this
@@ -275,6 +315,10 @@ async function finalizeTurnAttemptSteps(
         },
       });
     }
+    // The drain above cancelled and quiesced this exact fence. Platform setup
+    // writes only through it, so a setup still waiting on something else (a
+    // read, an unanswered agent) cannot write any more either.
+    sandboxState.drainedCommandFence = toolCancellationFence ?? null;
     sandboxState.attemptWritersDrained = true;
     if (control.acknowledgeQuiescence) {
       // A cancellation before sandbox-backed capabilities exist still has
@@ -411,55 +455,33 @@ async function finalizeTurnAttemptSteps(
     // best-effort (same discipline as today's usage write). Both writers skip
     // version/updatedAt, so neither can race the token-refresh CAS.
     monitor.enter("provider_leases");
-    for (const [scope, snapshot] of providerTurn.latestClaudeUsage) {
-      await waitForTurnFinalizerStep(
-        recordClaudeSubscriptionUsage(
-          db,
-          settings,
-          { accountId: input.accountId, workspaceId: input.workspaceId, scope },
-          snapshot,
-        ).catch(() => null),
-        finalizerSignal,
-      );
-    }
-    if (providerTurn.effectiveCodexCredentialId) {
-      // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
-      // full duration-identified snapshot (parseCodexUsageHeaders gates on both),
-      // so untyped response headers cannot mislabel weekly-only quota.
-      if (
-        providerTurn.latestCodexUsage &&
-        attempt.turnId &&
-        leases.codex.held &&
-        leases.codex.holderId &&
-        leases.codex.generation !== null &&
-        providerTurn.effectiveCodexCredentialVersion !== null
-      ) {
-        const usageMutation = await waitForTurnFinalizerStep(
-          recordCodexAccountUsageForFinalization(
+    const coreCodex = providerTurn.codexSubscriptionCore;
+    if (coreCodex) {
+      // Shared-core turn: usage headers become a quota observation on the
+      // leased connection and a completed model call advances the binding's
+      // cache clock. The legacy Codex usage cache never sees a core id.
+      if (attempt.turnId && leases.codex.held) {
+        const finalized = await waitForTurnFinalizerStep(
+          finalizeCoreCodexUsage({
             db,
-            input.workspaceId,
-            providerTurn.effectiveCodexCredentialId,
-            providerTurn.latestCodexUsage,
-            {
-              turnId: attempt.turnId,
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-              holderId: leases.codex.holderId,
-              generation: leases.codex.generation,
-              credentialVersion: providerTurn.effectiveCodexCredentialVersion,
-            },
-          ).catch(() => null),
+            core: coreCodex,
+            lease: leases.codex,
+            usage: providerTurn.latestCodexUsage,
+            credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+            modelCallCompletedAt: coreCodexModelCallCompletedAt(providerTurn),
+          }).catch(() => undefined),
           finalizerSignal,
         );
-        if (usageMutation) {
+        // An observation that ended a stored exhaustion is a capacity change
+        // for every core waiter of the account (EP-T10).
+        if (finalized?.capacityRecovered) {
           await waitForTurnFinalizerStep(
-            signalCodexCapacityWakeTargets(
-              { signalCodexCapacityWorkflow, wakeSessionWorkflow },
-              usageMutation.wakeTargets,
+            wakeSubscriptionCoreCodexWaitersAndDeliver(
+              { db, signalCodexCapacityWorkflow },
+              { accountId: input.accountId, reason: "quota_observed_available" },
             ),
             finalizerSignal,
-          );
+          ).catch(() => undefined);
         }
       }
     }
@@ -471,65 +493,51 @@ async function finalizeTurnAttemptSteps(
       leases.codex.generation !== null
     ) {
       await waitForTurnFinalizerStep(
-        releaseCodexCredentialLease(
-          db,
-          input.accountId,
-          input.workspaceId,
-          attempt.turnId,
-          leases.codex.holderId,
-          leases.codex.generation,
-        ).catch(() => undefined),
+        leases.codex.releaseCurrent().catch(() => false),
         finalizerSignal,
       );
       leases.codex.held = false;
     }
-    if (
-      providerTurn.effectiveXaiCredentialId &&
-      leases.xai.subjectId &&
-      providerTurn.xaiRequestContext &&
-      !providerTurn.xaiCredentialQuarantined
-    ) {
-      const quota = await waitForTurnFinalizerStep(
-        fetchXaiSubscriptionQuota({ context: providerTurn.xaiRequestContext }).catch(() => null),
-        finalizerSignal,
-      );
-      if (quota) {
-        await waitForTurnFinalizerStep(
-          updateXaiQuotaMetadata(db, {
-            workspaceId: input.workspaceId,
-            subjectId: leases.xai.subjectId,
-            credentialId: providerTurn.effectiveXaiCredentialId,
-            quotaUsedPercent: quota.usedPercent,
-            quotaResetAt: quota.period?.end ?? null,
-            quotaCheckedAt: quota.checkedAt,
-            exhaustedUntil:
-              quota.usedPercent !== null && quota.usedPercent >= 100
-                ? (quota.period?.end ?? null)
-                : null,
-          }).catch(() => undefined),
-          finalizerSignal,
-        );
-      }
-    }
-    leases.xai.stopHeartbeat();
-    if (
-      leases.xai.held &&
-      attempt.turnId &&
-      leases.xai.subjectId &&
-      leases.xai.holderId &&
-      leases.xai.generation !== null
-    ) {
+    // A core-placed SuperGrok turn moves its binding's cache clock after a
+    // completed model call, then releases its core lease (SuperGrok has no
+    // legacy lease after its cutover).
+    if (providerTurn.xaiSubscriptionCore && leases.xai.held && attempt.turnId) {
       await waitForTurnFinalizerStep(
-        releaseXaiCredentialLease(db, {
-          workspaceId: input.workspaceId,
-          subjectId: leases.xai.subjectId,
-          turnId: attempt.turnId,
-          holderId: leases.xai.holderId,
-          generation: leases.xai.generation,
+        finalizeCoreSubscriptionTurn({
+          db,
+          provider: XAI_CORE_REFUSAL.provider,
+          core: providerTurn.xaiSubscriptionCore,
+          lease: leases.xai,
         }).catch(() => undefined),
         finalizerSignal,
       );
+      leases.xai.stopHeartbeat();
+      await waitForTurnFinalizerStep(
+        leases.xai.releaseCurrent().catch(() => false),
+        finalizerSignal,
+      );
       leases.xai.held = false;
+    }
+    // The same for a Claude turn (always core-placed: the legacy Claude
+    // runtime, its usage receipts and its lease release are deleted).
+    if (providerTurn.claudeSubscriptionCore && leases.claude.held && attempt.turnId) {
+      // Queued quota writes still need this lease's fence. Cancellation and
+      // housekeeping timeouts may detach only the wake, never that write join.
+      // The provider_leases stage monitor contains a genuinely stuck join by
+      // requesting host drain; it must not manufacture completion/release.
+      await finalizeCoreClaudeTurn({
+        db,
+        signalCodexCapacityWorkflow,
+        core: providerTurn.claudeSubscriptionCore,
+        lease: leases.claude,
+        signal: finalizerSignal,
+      }).catch(() => undefined);
+      leases.claude.stopHeartbeat();
+      await waitForTurnFinalizerStep(
+        leases.claude.releaseCurrent().catch(() => false),
+        finalizerSignal,
+      );
+      leases.claude.held = false;
     }
     // Workbench v2 turn-end workspace capture — runs FIRST in
     // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
@@ -613,12 +621,6 @@ async function finalizeTurnAttemptSteps(
     }
     monitor.enter("tool_close");
     eventing.toolPreparationClosing = true;
-    if (eventing.toolPreparationReady) {
-      await waitForTurnFinalizerStep(
-        eventing.toolPreparationReady.catch(() => undefined),
-        finalizerSignal,
-      );
-    }
     if (eventing.codemodeDispatcher) {
       await waitForTurnFinalizerStep(
         eventing.codemodeDispatcher.close().catch(() => undefined),
@@ -629,6 +631,14 @@ async function finalizeTurnAttemptSteps(
     if (eventing.preparedTools) {
       await waitForTurnFinalizerStep(
         eventing.preparedTools.close().catch(() => undefined),
+        finalizerSignal,
+      );
+    }
+    // Closing owns the never-started case as well as joining active setup.
+    // The closing flag above prevents completion from starting a dispatcher.
+    if (eventing.toolPreparationReady) {
+      await waitForTurnFinalizerStep(
+        eventing.toolPreparationReady.catch(() => undefined),
         finalizerSignal,
       );
     }
@@ -742,6 +752,21 @@ async function finalizeTurnAttemptSteps(
     }
     monitor.enter("workspace_snapshot");
     await drainInFlightWarmSnapshot();
+    // Join any provider establish still running behind a cancelled wrapper
+    // (finalization already aborted provisioning when no box resolved). Its
+    // own exact cleanup (roll an unpublished box back to cold, or keep a
+    // published box and drop its holder) must commit before this activity can
+    // let a shutting-down worker exit. A late success is routed through
+    // releaseLateSandbox before the release targets are collected below.
+    monitor.enter("sandbox_provisioning");
+    if (sandboxState.inFlightSandboxResumes.size > 0) {
+      const drained = await drainPhysicalSandboxResumes(sandboxState.inFlightSandboxResumes);
+      if (drained === "timed_out") {
+        console.error(
+          "in-flight sandbox establish did not settle before finalization; the lease reaper owns its warming row",
+        );
+      }
+    }
     monitor.enter("sandbox_release");
     const sandboxReleaseTargets = new Set(sandboxState.lateSandboxesAwaitingWriterDrain);
     sandboxState.lateSandboxesAwaitingWriterDrain.clear();
@@ -826,6 +851,8 @@ async function finalizeTurnAttemptSteps(
       turnLifecycleMetricsFor(observability).finish({
         attemptId: input.attemptId,
         outcome: control.turnMetricOutcome,
+        recoveryCause: control.turnRecoveryCause,
+        ...turnFailureOriginMetricFields(control),
         durationSeconds,
       });
     }
@@ -833,7 +860,6 @@ async function finalizeTurnAttemptSteps(
       attributes: {
         "opengeni.turn_id": attempt.turnId ?? "",
         "opengeni.status": control.activityStatus,
-        "opengeni.variable_set_id": workspaceRefs.variableSetId,
         "opengeni.rig_id": workspaceRefs.rigId,
         "opengeni.rig_version_id": workspaceRefs.rigVersionId,
         "opengeni.codex_credential_id": providerTurn.effectiveCodexCredentialId ?? "",

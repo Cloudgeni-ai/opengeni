@@ -68,6 +68,9 @@ async function mount(
   const commands: PreparedSignInCommand[] = [];
   const api = {
     list,
+    async passkeyOptions() {
+      return { challengeId: "c".repeat(32), options: {} };
+    },
     async prepare(path, body) {
       return { path, body, headers: { "x-opengeni-session-csrf": "fixed-test-admission" } };
     },
@@ -212,4 +215,48 @@ test("uncertainty locks new changes but not reauthentication after freshness exp
     (host.querySelector('[aria-label="Reconnect GitHub"]') as HTMLButtonElement).disabled,
   ).toBe(true);
   expect(host.textContent).toContain("Retry same request");
+});
+
+test("removing one of several passkeys keeps this session signed in and reloads the list", async () => {
+  const keys = [
+    {
+      id: "0b6f4d2e-6c1d-4f0a-9a43-2f1a7c3c9d10",
+      name: "Laptop",
+      createdAt: "2026-10-01T10:00:00.000Z",
+      lastUsedAt: null,
+      backedUp: true,
+    },
+    {
+      id: "1c7f5e3f-7d2e-4a1b-8b54-3a2b8d4d0e21",
+      name: "Security key",
+      createdAt: "2026-10-02T10:00:00.000Z",
+      lastUsedAt: null,
+      backedUp: false,
+    },
+  ];
+  let removed = false;
+  const { commands } = await mount(
+    async () => {
+      removed = true;
+      return { reauthenticationRequired: false, notification: "sent" };
+    },
+    async () => ({
+      ...inventory,
+      passkeys: removed ? keys.slice(1) : keys,
+      passkeysAvailable: true,
+      canRemovePasskey: true,
+    }),
+  );
+  await click("Remove passkey Laptop");
+  const confirm = [...document.querySelectorAll('[role="dialog"] button')].find(
+    (node) => node.textContent === "Remove passkey",
+  ) as HTMLButtonElement;
+  await act(async () => confirm.click());
+  expect(commands).toHaveLength(1);
+  expect(commands[0]!.path).toBe("passkey/remove");
+  expect(commands[0]!.body).toMatchObject({ passkeyId: keys[0]!.id });
+  expect(host.textContent).toContain("Passkey removed.");
+  expect(host.textContent).not.toContain("Sign in again as");
+  expect(host.textContent).toContain("Security key");
+  expect(host.textContent).not.toContain("Laptop");
 });

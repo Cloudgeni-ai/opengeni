@@ -2,19 +2,13 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 import type { ApiRouteDeps } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createDb, createOrganizationApiKey, type DbClient } from "@opengeni/db";
-import {
-  createQuickstartChatHandler,
-  onboardChatUser,
-} from "../../../examples/chat-quickstart/quickstart";
+import { createQuickstartChatHandler } from "../../../examples/chat-quickstart/quickstart";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
@@ -89,9 +83,9 @@ async function fixture() {
   });
   registerWorkspaceRoutes(api, deps);
   registerSessionRoutes(api, deps);
-  const og = new OpenGeni({
+  const og = new Opengeni({
+    // No organizationId: the facade derives it from the key.
     apiKey: token,
-    organizationId: accountId,
     baseUrl: "http://opengeni.test",
     source: "chat-quickstart",
     fetch: async (input, init) => await api.request(input, init),
@@ -110,7 +104,7 @@ async function fixture() {
         ...(signal ? { signal } : {}),
       }),
     );
-  return { og, call };
+  return { og, call, accountId };
 }
 
 type History = {
@@ -155,20 +149,15 @@ async function send(
   expect(delivered).toBe(true);
 }
 
-test("the chat quickstart works as written once the user is onboarded", async () => {
+test("the chat quickstart works as written with no onboarding step", async () => {
   if (!available) return;
   const f = await fixture();
 
-  // Chat requests never grant workspace membership: before onboarding the
-  // API refuses the product user, which the handler returns as a 403.
-  expect((await f.call("POST", { message: "Hello" })).status).toBe(403);
-  expect((await f.call("GET")).status).toBe(403);
-
-  const workspaceId = await onboardChatUser(f.og, {
-    tenant: "demo-tenant",
-    user: "u_42",
-    operationId: crypto.randomUUID(),
-  });
+  // The first request admits the product user to the tenant workspace: the
+  // organization key holds members:manage, so the API creates the missing
+  // membership once with conversation permissions and continues.
+  const workspaceId = await f.og.workspaceId({ tenant: "demo-tenant" });
+  expect(await f.og.resolveOrganizationId()).toBe(f.accountId);
 
   const empty = (await (await f.call("GET")).json()) as History;
   expect(empty).toMatchObject({ created: false, messages: [] });

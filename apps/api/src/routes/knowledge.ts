@@ -12,18 +12,23 @@ import {
   KnowledgeEntryReviewRequest,
   KnowledgeEntryRestoreRequest,
   KnowledgeEntrySaveRequest,
+  KnowledgeEntryReachRecord,
   KnowledgeOriginalFileDownload,
+  UpdateKnowledgeEntryReachRequest,
 } from "@opengeni/contracts";
 import {
+  changeKnowledgeEntryReach,
   prepareKnowledgeFile,
   prepareKnowledgeSave,
   searchKnowledgeEntries,
+  KnowledgeVectorCreditsDisabledError,
   KnowledgeVectorFundingError,
   KnowledgeVectorQueryRejectedError,
   hasPermission,
   knowledgeContextForAccess,
   requireAccessGrantAuthorization,
   requireSessionAuthorization,
+  requireWorkspaceContributorGrant,
   requireWorkspaceSettingsGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -33,6 +38,7 @@ import {
   archiveKnowledgeEntry,
   getAgentLearningSettings,
   getKnowledgeEntry,
+  getKnowledgeEntryReach,
   listAgentLearningOverrides,
   listKnowledgeEntryHistory,
   listKnowledgeReviewBatches,
@@ -53,7 +59,7 @@ import { z } from "zod";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery, requestValidationError } from "../http/request-body";
 
 const ReadSettings = z
   .object({
@@ -68,11 +74,19 @@ const WriteSettings = ReadSettings.extend({
   settings: AgentLearningOverridePatch,
 });
 const Id = z.uuid();
+/** How every Knowledge route answers invalid input: 422, naming the fields. */
+const KNOWLEDGE_REQUEST = { status: 422, message: "Invalid Knowledge request" } as const;
 function knowledgeHttpError(error: unknown): never {
   if (error instanceof HTTPException) throw error;
   if (error instanceof KnowledgeVectorFundingError)
     throw new ApiHttpError(402, {
       code: "payment_required",
+      message: error.message,
+      details: { code: error.code, keywordAvailable: true },
+    });
+  if (error instanceof KnowledgeVectorCreditsDisabledError)
+    throw new ApiHttpError(403, {
+      code: "forbidden",
       message: error.message,
       details: { code: error.code, keywordAvailable: true },
     });
@@ -94,10 +108,7 @@ function knowledgeHttpError(error: unknown): never {
       message: error.message,
       details: { code: error.code },
     });
-  if (error instanceof z.ZodError)
-    throw new HTTPException(422, {
-      message: error.issues[0]?.message ?? "Invalid Knowledge request",
-    });
+  if (error instanceof z.ZodError) throw requestValidationError(error, "body", KNOWLEDGE_REQUEST);
   const state = nestedPostgresSqlState(error);
   if (state === "40001" || state === "23505")
     throw new HTTPException(409, { message: "This item changed. Refresh it and try again." });
@@ -116,20 +127,29 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
     c: Context,
     write: boolean,
     fn: (context: Awaited<ReturnType<typeof knowledgeContextForAccess>>) => Promise<T>,
+    readPermission: "documents:search" | "workspace:read" = "documents:search",
   ) {
     try {
       const access = await requireAccessGrantAuthorization(
         c,
         deps,
         c.req.param("workspaceId")!,
-        write ? "documents:manage" : "documents:search",
+        write
+          ? "documents:manage"
+          : readPermission === "workspace:read"
+            ? undefined
+            : readPermission,
       );
+      // Preserve existing document-reader access to the settings read while
+      // admitting workspace readers to that one endpoint as well.
+      const permission = write
+        ? "documents:manage"
+        : readPermission === "workspace:read" &&
+            hasPermission(access.grant.permissions, "documents:search")
+          ? "documents:search"
+          : readPermission;
       return await withAccessGrantSessionRlsContext(deps, access.grant, async () => {
-        const context = await knowledgeContextForAccess(
-          deps,
-          access,
-          write ? "documents:manage" : "documents:search",
-        );
+        const context = await knowledgeContextForAccess(deps, access, permission);
         c.header("cache-control", "private, no-store");
         return fn(context);
       });
@@ -276,10 +296,11 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await listKnowledgeReviewBatches(
           deps.db,
           context,
-          KnowledgeReviewBatchListRequest.parse({
-            ...query,
-            ...(query.limit ? { limit: Number(query.limit) } : {}),
-          }),
+          parseRequestQuery(
+            KnowledgeReviewBatchListRequest,
+            { ...query, ...(query.limit ? { limit: Number(query.limit) } : {}) },
+            KNOWLEDGE_REQUEST,
+          ),
         ),
       );
     }),
@@ -302,10 +323,11 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await searchKnowledgeEntries(
           deps.db,
           context,
-          KnowledgeEntryListRequest.parse({
-            ...query,
-            ...(query.limit ? { limit: Number(query.limit) } : {}),
-          }),
+          parseRequestQuery(
+            KnowledgeEntryListRequest,
+            { ...query, ...(query.limit ? { limit: Number(query.limit) } : {}) },
+            KNOWLEDGE_REQUEST,
+          ),
           () => deps.getDocumentServices().embedder,
           deps.settings,
         ),
@@ -338,13 +360,16 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
   );
   app.get(`${base}/:entryId`, (c) =>
     run(c, false, async (context) => {
-      const options = z
-        .object({
-          revisionId: Id.optional(),
-          view: z.enum(["published", "needs_review", "archived", "rejected"]).optional(),
-        })
-        .strict()
-        .parse(c.req.query());
+      const options = parseRequestQuery(
+        z
+          .object({
+            revisionId: Id.optional(),
+            view: z.enum(["published", "needs_review", "archived", "rejected"]).optional(),
+          })
+          .strict(),
+        c.req.query(),
+        KNOWLEDGE_REQUEST,
+      );
       const entry = await getKnowledgeEntry(
         deps.db,
         context,
@@ -387,6 +412,38 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       );
     }),
   );
+  // Where an organization or personal entry works besides the workspace it
+  // was added in. Readable by anyone who can open the entry here; changed by
+  // whoever may write its scope (the owner, for a personal entry).
+  app.get(`${base}/:entryId/reach`, (c) =>
+    run(c, false, async (context) => {
+      if (context.actor.kind === "agent")
+        throw new HTTPException(403, { message: "Only people choose where Knowledge works." });
+      const reach = await getKnowledgeEntryReach(
+        deps.db,
+        context,
+        Id.parse(c.req.param("entryId")),
+      );
+      if (!reach) throw new HTTPException(404, { message: "Knowledge entry not found" });
+      return c.json(KnowledgeEntryReachRecord.parse(reach));
+    }),
+  );
+  app.put(`${base}/:entryId/reach`, (c) =>
+    run(c, true, async (context) => {
+      if (context.actor.kind === "agent")
+        throw new HTTPException(403, { message: "Only people choose where Knowledge works." });
+      const request = await parseRequestJson(
+        c,
+        UpdateKnowledgeEntryReachRequest,
+        KNOWLEDGE_REQUEST,
+      );
+      return c.json(
+        KnowledgeEntryReachRecord.parse(
+          await changeKnowledgeEntryReach(deps, context, Id.parse(c.req.param("entryId")), request),
+        ),
+      );
+    }),
+  );
 
   const learning = "/v1/workspaces/:workspaceId/agent-learning";
   async function instructionReviewContext(
@@ -397,7 +454,9 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       throw new HTTPException(403, {
         message: "Instruction review requires an authenticated person",
       });
-    await requireWorkspaceSettingsGrant(c, deps, context.workspaceId);
+    // Whoever may edit the workspace's instructions reviews the agent's
+    // proposed changes to them; the learning settings stay with admins.
+    await requireWorkspaceContributorGrant(c, deps, context.workspaceId);
     context.actor.settingsScopes = ["workspace"];
     return context;
   }
@@ -424,12 +483,20 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
     ),
   );
   app.post(`${learning}/read`, (c) =>
-    run(c, false, async (context) => {
-      const request = await parseRequestJson(c, ReadSettings);
-      return c.json(
-        await getAgentLearningSettings(deps.db, context, request.scope, request.source),
-      );
-    }),
+    // Members can inspect the settings relevant to their admitted workspace or
+    // owner context without gaining Knowledge search or settings-write access.
+    // The database still requires a human and checks each source's owner layer.
+    run(
+      c,
+      false,
+      async (context) => {
+        const request = await parseRequestJson(c, ReadSettings);
+        return c.json(
+          await getAgentLearningSettings(deps.db, context, request.scope, request.source),
+        );
+      },
+      "workspace:read",
+    ),
   );
   app.get(`${learning}/overrides`, (c) =>
     run(c, false, async (context) => {

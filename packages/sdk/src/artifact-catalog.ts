@@ -16,6 +16,12 @@ export type ArtifactCatalogItem = {
   createdAt: string;
   updatedAt: string;
   status: "active" | "archived";
+  /** Shared workspace pin; absent on older servers. Never grants content access. */
+  pinned?: boolean;
+  /** Sites, files and documents: "private" when only its owner (the viewer) can see it. */
+  visibility?: "private" | "workspace";
+  /** Files and documents: the viewer owns it, so they can share or limit it. */
+  ownedByViewer?: boolean;
   /** Present only when the viewer can read this session. */
   sourceSessionId?: string;
   versionId?: string;
@@ -27,6 +33,8 @@ export type ArtifactCatalogItem = {
 
 export type ArtifactCatalogListOptions = {
   sourceSessionId?: string;
+  /** With `sourceSessionId`: also that chat's sub-sessions, in the same read. */
+  includeSubSessions?: boolean;
   q?: string;
   kind?: ArtifactCatalogKind;
   sort?: "updated" | "newest" | "title";
@@ -38,4 +46,12 @@ export type ArtifactCatalogListOptions = {
 export type ArtifactCatalogListResponse = {
   items: ArtifactCatalogItem[];
   nextCursor: string | null;
+};
+
+export type ArtifactLinkResolution = { artifactId: string; kind: "file" | "site" };
+
+export type ArtifactPinResponse = {
+  kind: ArtifactCatalogKind;
+  artifactId: string;
+  pinned: boolean;
 };

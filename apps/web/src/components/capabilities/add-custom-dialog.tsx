@@ -3,7 +3,7 @@ import "@opengeni/react/connect.css";
 import { Loader2Icon, PlusIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -11,14 +11,15 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   capabilityFormError,
   emptyCapabilityForm,
   type CapabilityFormState,
-} from "@/lib/capabilities";
+} from "@opengeni/react/app/lib/capabilities";
 
 export const ADD_CUSTOM_CATALOG_KINDS = ["mcp"] as const;
 
@@ -32,12 +33,15 @@ export function AddCustomDialog({
   busy,
   onSubmit,
   onCustomApi,
+  error: submitError = null,
 }: {
   onCustomApi?: (protocol: "openapi" | "graphql") => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   busy: boolean;
   onSubmit: (form: CapabilityFormState) => void;
+  /** Why the last add failed, shown in the dialog that stays open. */
+  error?: { title: string; description: string } | null | undefined;
 }) {
   const [connectionType, setConnectionType] = useState<ConnectionType>("mcp");
   const [form, setForm] = useState<CapabilityFormState>(() => emptyCapabilityForm());
@@ -135,6 +139,12 @@ export function AddCustomDialog({
               />
               Enable after adding
             </label>
+
+            {submitError ? (
+              <Notice tone="failed" title={submitError.title} live="assertive">
+                {submitError.description}
+              </Notice>
+            ) : null}
 
             <DialogFooter>
               <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>

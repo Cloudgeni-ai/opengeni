@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent-proto"
-description = "Generated wire-protocol types for the OpenGeni self-hosted agent (Rust side of the single-source-of-truth codegen)."
+description = "Generated wire-protocol types for the Opengeni self-hosted agent (Rust side of the single-source-of-truth codegen)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

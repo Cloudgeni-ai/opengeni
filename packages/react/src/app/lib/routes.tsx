@@ -1,0 +1,199 @@
+// Canonical console paths. Everything is workspace-scoped; there are no
+// legacy unscoped session URLs.
+
+export function workspacePath(workspaceId: string): string {
+  return `/workspaces/${encodeURIComponent(workspaceId)}`;
+}
+
+export function workspaceSessionsPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/sessions`;
+}
+
+/** Back-compat name: the old "agent" home is now the sessions index. */
+export function workspaceAgentPath(workspaceId: string): string {
+  return workspaceSessionsPath(workspaceId);
+}
+
+export function workspaceSessionPath(workspaceId: string, sessionId: string): string {
+  return `${workspaceSessionsPath(workspaceId)}/${encodeURIComponent(sessionId)}`;
+}
+
+/** First-class durable workspace memory surface. */
+export function workspaceMemoryPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/memory`;
+}
+
+/** Workspace Insights — usage, spend, live ops (preview surface). */
+export function workspaceInsightsPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/insights`;
+}
+
+/** Workspace settings: workspace name, API keys, environments link, danger zone. */
+export function workspaceSettingsPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/settings`;
+}
+
+/** Organization (formerly "account") settings: billing, usage, plan, members. */
+export function orgSettingsPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/organization`;
+}
+
+// Stripe Checkout may return directly to organization billing or through the
+// API's `/billing` fallback. Keep only known outcome values for the balance
+// confirmation; a stray `?checkout=foo` never renders one.
+export type CheckoutOutcome = "success" | "cancelled";
+
+export function parseCheckoutOutcome(search: Record<string, unknown>): CheckoutOutcome | undefined {
+  return search.checkout === "success" || search.checkout === "cancelled"
+    ? search.checkout
+    : undefined;
+}
+
+/** Full-page artifact return context belongs to route assembly, not the session graph. */
+export type ArtifactReturnSearch = {
+  fromSession?: string | undefined;
+  kind?: "site" | "image" | "document" | "spreadsheet" | "presentation" | "file" | undefined;
+  q?: string | undefined;
+  sort?: "newest" | "title" | undefined;
+  status?: "archived" | undefined;
+  /**
+   * Opened from the Artifacts list: show the artifact's detail page with the
+   * list's previous/next controls. Without it (a link from a chat, a
+   * notification, a copied or pasted URL) the artifact opens straight in its
+   * full view, and leaving the full view shows the detail page.
+   */
+  browse?: boolean | undefined;
+  /**
+   * A Site's own sub-page. `publish` is kept for links made before Publish to
+   * web moved into the Site's Settings tab, and opens that tab.
+   */
+  view?: "publish" | undefined;
+  /** A Site page's tab other than the Site itself. */
+  tab?: SiteDetailTab | undefined;
+};
+
+export type SiteDetailTab = "versions" | "conversations" | "data" | "settings";
+
+export function artifactReturnSearch(search: Record<string, unknown>): ArtifactReturnSearch {
+  // Router match search merges validation over raw input. An omitted key would
+  // leave an invalid raw fromSession available to useSearch() consumers.
+  return {
+    fromSession:
+      typeof search.fromSession === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(search.fromSession)
+        ? search.fromSession
+        : undefined,
+    kind:
+      search.kind === "site" ||
+      search.kind === "image" ||
+      search.kind === "document" ||
+      search.kind === "spreadsheet" ||
+      search.kind === "presentation" ||
+      search.kind === "file"
+        ? search.kind
+        : undefined,
+    q: typeof search.q === "string" ? search.q.slice(0, 500) || undefined : undefined,
+    sort: search.sort === "newest" || search.sort === "title" ? search.sort : undefined,
+    status: search.status === "archived" ? "archived" : undefined,
+    browse: search.browse === true ? true : undefined,
+    view: search.view === "publish" ? "publish" : undefined,
+    tab:
+      search.tab === "versions" ||
+      search.tab === "conversations" ||
+      search.tab === "data" ||
+      search.tab === "settings"
+        ? search.tab
+        : undefined,
+  };
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** The Site view: the Site with its conversations beside it, one of them open. */
+export type SiteViewSearch = {
+  conversation?: string | undefined;
+  /** Open with a new conversation, its composer focused (Edit with Opengeni). Dropped once used. */
+  new?: true | undefined;
+  /**
+   * The Site's own address (`/unsubscribe?t=abc#done`), answered to the
+   * Site's `site.location`; the Site's root when omitted.
+   */
+  page?: string | undefined;
+} & SiteViewArtifactsReturn;
+
+/**
+ * Opened from the Artifacts page (`browse`), with that page's own query, so
+ * the Site view's Back returns to it as it was. Absent when the Site was
+ * opened any other way (the rail, a chat, a link).
+ */
+export type SiteViewArtifactsReturn = Pick<
+  ArtifactReturnSearch,
+  "browse" | "fromSession" | "kind" | "q" | "sort" | "status"
+>;
+
+export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch {
+  const back = siteViewArtifactsReturn(search);
+  return {
+    conversation:
+      typeof search.conversation === "string" && UUID.test(search.conversation)
+        ? search.conversation
+        : undefined,
+    new: search.new === true || search.new === "true" || search.new === 1 ? true : undefined,
+    page:
+      typeof search.page === "string" && search.page.startsWith("/") && search.page !== "/"
+        ? search.page
+        : undefined,
+    // Every key, set or not: the router merges this over the raw search, so
+    // an omitted key would let an unchecked raw value through.
+    browse: back.browse,
+    fromSession: back.fromSession,
+    kind: back.kind,
+    q: back.q,
+    sort: back.sort,
+    status: back.status,
+  };
+}
+
+/** The Artifacts page a Site view was opened from, or nothing; only its set keys. */
+export function siteViewArtifactsReturn(search: Record<string, unknown>): SiteViewArtifactsReturn {
+  const library = artifactReturnSearch(search);
+  if (library.browse !== true) return {};
+  return Object.fromEntries(
+    Object.entries({
+      browse: true,
+      fromSession: library.fromSession,
+      kind: library.kind,
+      q: library.q,
+      sort: library.sort,
+      status: library.status,
+    }).filter(([, value]) => value !== undefined),
+  ) as SiteViewArtifactsReturn;
+}
+
+export function workspaceSitePath(
+  workspaceId: string,
+  siteId: string,
+  conversation?: string | undefined,
+): string {
+  const path = `${workspacePath(workspaceId)}/sites/${encodeURIComponent(siteId)}`;
+  return conversation ? `${path}?conversation=${encodeURIComponent(conversation)}` : path;
+}
+
+/**
+ * What the rail marks as open for a location: a session page's session, or a
+ * Site view's Site and its selected conversation.
+ */
+export function railRouteSelection(location: {
+  pathname: string;
+  search: Record<string, unknown>;
+}): { sessionId: string | null; siteId: string | null } {
+  const session = /\/sessions\/([^/]+)/u.exec(location.pathname);
+  if (session) return { sessionId: session[1] ?? null, siteId: null };
+  const site = /^\/workspaces\/[^/]+\/sites\/([^/]+)\/?$/u.exec(location.pathname);
+  // Site ids are UUIDs; anything else (including a malformed escape) is no Site.
+  if (!site || !UUID.test(site[1] ?? "")) return { sessionId: null, siteId: null };
+  return {
+    sessionId: siteViewSearch(location.search).conversation ?? null,
+    siteId: site[1]!.toLowerCase(),
+  };
+}

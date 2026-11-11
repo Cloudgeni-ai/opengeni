@@ -1,6 +1,7 @@
-import type { Observability } from "@opengeni/observability";
+import { turnExecutionTelemetryKey, type Observability } from "@opengeni/observability";
 import type { TurnHeartbeatDetails } from "../../op-journal";
 import { armTurnQuiescenceWatchdog } from "./quiescence";
+import type { TurnToolCancellationFence } from "@opengeni/runtime";
 
 export const TURN_FINALIZATION_STAGES = [
   "tool_writers",
@@ -41,11 +42,32 @@ export function startTurnFinalizationMonitor(input: {
   observability: Observability;
   details: TurnHeartbeatDetails;
   heartbeat: (details: TurnHeartbeatDetails) => void;
-  terminateWorker: () => void;
+  requestWorkerDrain: () => void | (() => void);
+  execution?: { workspaceId: string; sessionId: string; attemptId: string };
   timeoutMs?: number;
   slowAfterMs?: number;
+  outstandingWriters?: TurnToolCancellationFence["outstandingWriters"];
 }) {
   const { observability, details } = input;
+  const writerDetails = () => {
+    const writers = input.outstandingWriters?.() ?? [];
+    return writers.length
+      ? {
+          writerKinds: writers.map(({ kind }) => kind).join(","),
+          registered: writers.reduce((total, { count }) => total + count, 0),
+        }
+      : {};
+  };
+  const correlation: { correlationId?: string } = {};
+  diagnose(() => {
+    if (input.execution) {
+      correlation.correlationId = turnExecutionTelemetryKey(
+        input.execution.workspaceId,
+        input.execution.sessionId,
+        input.execution.attemptId,
+      );
+    }
+  });
   if (!initialized.has(observability)) {
     for (const stage of TURN_FINALIZATION_STAGES) {
       diagnose(() => observability.incrementGauge({ ...INFLIGHT, labels: { stage }, amount: 0 }));
@@ -59,9 +81,15 @@ export function startTurnFinalizationMonitor(input: {
   let disarm = () => {};
   let stopped = false;
   let slowTimer: ReturnType<typeof setTimeout> | undefined;
+  // A contained stage holds the host's containment until it moves on: the host
+  // may stop early only while every in-flight activity is such a stall.
+  let releaseContainment: (() => void) | undefined;
   const leave = () => {
     disarm();
     clearTimeout(slowTimer);
+    const release = releaseContainment;
+    releaseContainment = undefined;
+    diagnose(() => release?.());
     if (stage) {
       const previous = stage;
       diagnose(() =>
@@ -88,15 +116,19 @@ export function startTurnFinalizationMonitor(input: {
               surface: "turn_finalization",
               outcome: "containment",
               reason: next,
+              ...(next === "tool_writers" ? writerDetails() : {}),
+              ...correlation,
             });
           } catch {
             // Diagnostic failure must never disable physical containment.
           }
         },
-        terminateWorker: input.terminateWorker,
+        terminateWorker: () => {
+          const release = input.requestWorkerDrain();
+          if (typeof release === "function") releaseContainment = release;
+        },
       });
-      // Record the precursor while the process remains scrapeable. A counter
-      // increment immediately before process.exit can never reach Prometheus.
+      // Record the precursor while the process remains scrapeable.
       slowTimer = setTimeout(
         () =>
           diagnose(() => {
@@ -105,6 +137,8 @@ export function startTurnFinalizationMonitor(input: {
               surface: "turn_finalization",
               outcome: "slow",
               reason: next,
+              ...(next === "tool_writers" ? writerDetails() : {}),
+              ...correlation,
             });
           }),
         input.slowAfterMs ?? 30_000,

@@ -1,6 +1,7 @@
 import type {
   AgentPromptModuleId,
   AgentRenderer,
+  FirstPartyMcpToolName,
   ResolvedAgentCapabilities,
 } from "@opengeni/contracts";
 
@@ -23,9 +24,23 @@ export type RigInstructionsContext = {
 };
 
 /**
+ * Which GitHub identity one mounted repository acts as. `personal` is the
+ * person's own account (Git through the personal broker, github_personal__*
+ * tools); `app` is the workspace Opengeni GitHub App bot.
+ */
+export type AgentPromptRepositoryIdentity = {
+  /** Mount path relative to the workspace, e.g. repos/github.com/acme/web. */
+  path: string;
+  identity: "personal" | "app";
+  /** The person's GitHub login, when known (personal only). */
+  login?: string | undefined;
+};
+
+/**
  * What the session is attached to, as far as its instructions care. Every flag
- * must be derived from session-level facts (or the exact turn's resources for
- * attachments) so the composed prefix only changes when they change.
+ * must be derived from session-level facts so the composed prefix only changes
+ * when they change. Per-turn resources (file attachments) must never appear
+ * here: they are described by the turn's own notice at the end of the input.
  */
 export type AgentPromptResources = {
   /** A managed (provisioned) sandbox is the active compute. */
@@ -36,10 +51,45 @@ export type AgentPromptResources = {
   repositories: boolean;
   /** Git provider credentials were delivered to the sandbox. */
   gitCredentials: boolean;
-  /** Files are attached (mounted) for this turn. */
-  attachments: boolean;
+  /**
+   * The runtime resolves `{{secret:…}}` references for this attempt. Gates
+   * the secrets prompt module; omitted keeps prompts unchanged.
+   */
+  secretReferences?: boolean | undefined;
+  /**
+   * No person will see or answer a question until the task ends (frozen at
+   * session create). Gates the unattended module; omitted keeps prompts unchanged.
+   */
+  unattended?: boolean | undefined;
+  /**
+   * Personal GitHub sign-in ("Your GitHub") is enabled on this deployment.
+   * Gates personal-identity guidance; omitted keeps prompts unchanged.
+   */
+  personalGitHub?: boolean | undefined;
+  /**
+   * Finished background commands report themselves with their output (with a
+   * later tool result, or as input). Gates the "do not poll" sentence; omitted
+   * keeps prompts unchanged.
+   */
+  commandCompletionDelivery?: boolean | undefined;
+  /**
+   * `false` when the session's Skill index is empty, so with Skills read-only
+   * there is no Skill to read. Omitted keeps Skill guidance unchanged.
+   */
+  skillsReadable?: boolean | undefined;
+  /**
+   * `false` when the attempt attaches no image or video tool although the
+   * media capability is on (no provider adapter, hosted tool or video
+   * boundary). Gates the media module; omitted keeps it.
+   */
+  mediaTools?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
+  /**
+   * GitHub identity per mounted GitHub repository (session-level). Omitted
+   * keeps the repositories module unchanged.
+   */
+  repositoryIdentities?: readonly AgentPromptRepositoryIdentity[] | undefined;
 };
 
 /** Everything a prompt module may read. Pure data; no settings, no clock. */
@@ -47,7 +97,87 @@ export type AgentPromptContext = {
   capabilities: ResolvedAgentCapabilities;
   renderer: AgentRenderer;
   resources: AgentPromptResources;
+  /**
+   * Frozen per-attempt tool availability. Omitted means unknown: every
+   * tool-specific clause renders exactly as before.
+   */
+  toolAvailability?: AgentPromptToolAvailability | undefined;
+  /** Deployment prompt experiments; omitted renders the default prompt byte for byte. */
+  experiments?: AgentPromptExperiments | undefined;
 };
+
+/** Opt-in prompt variants for A/B evaluation, set from deployment settings. */
+export type AgentPromptExperiments = {
+  /** OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE */
+  knowledgeRetrievalGuidance?: boolean | undefined;
+};
+
+/**
+ * Which tool-specific instruction clauses may render for one attempt. A
+ * rendering input only: it never grants, withholds, defers or reorders a tool.
+ *
+ * `unavailable` lists tool names proven absent for the attempt (see
+ * `deriveAgentPromptToolAvailability`), plus save-only tools whose writes the
+ * turn's frozen learning policy refuses. Every other name — deferred or lazily
+ * disclosed, external MCP, provider-hosted, local adapter, or unknown — counts
+ * as available, so its guidance stays.
+ */
+export type AgentPromptToolAvailability = {
+  readonly unavailable: readonly FirstPartyMcpToolName[];
+  /**
+   * The session can never have child sessions: its nesting depth, frozen at
+   * create, has reached its frozen maximum, so no child was or will be
+   * admitted. Omitted when that is not proven (for example `session_create`
+   * merely unselected on a turn of a session that may already have children).
+   */
+  readonly childSessionsImpossible?: true;
+  /**
+   * Nothing the attempt attaches is deferred, so it has no tool search router
+   * (`tool_search`, `tool_list`, `tool_invoke`) and tool discovery guidance is
+   * omitted. Omitted keeps that guidance.
+   */
+  readonly toolSearchAbsent?: true;
+};
+
+/** False only when the attempt proved it has no tool search router. */
+export function toolSearchAvailable(context: AgentPromptContext): boolean {
+  return context.toolAvailability?.toolSearchAbsent !== true;
+}
+
+/** The agent can save Knowledge, instructions or Skills, which learning policy governs. */
+export function canLearn(context: AgentPromptContext): boolean {
+  return context.capabilities.knowledge || context.capabilities.skills === "manage";
+}
+
+/**
+ * The agent can read a Skill this turn: Skill management is on, or reading is
+ * on and the Skill index is not proven empty.
+ */
+export function skillsReadable(context: AgentPromptContext): boolean {
+  const { skills } = context.capabilities;
+  return skills === "manage" || (skills !== false && context.resources.skillsReadable !== false);
+}
+
+/**
+ * Something can resume the agent after a wait or on a timer: `wait_for_input`
+ * may exist, or automations can be scheduled.
+ */
+export function canWaitOrSchedule(context: AgentPromptContext): boolean {
+  return toolAvailable(context, "wait_for_input") || context.capabilities.schedules;
+}
+
+/** False only when the attempt proved the named tool absent. */
+export function toolAvailable(context: AgentPromptContext, name: FirstPartyMcpToolName): boolean {
+  return !context.toolAvailability?.unavailable.includes(name);
+}
+
+/** True when none of the named tools was proven absent. */
+export function toolsAvailable(
+  context: AgentPromptContext,
+  names: readonly FirstPartyMcpToolName[],
+): boolean {
+  return names.every((name) => toolAvailable(context, name));
+}
 
 /** One conditional section of the operational contract. */
 export type AgentPromptModule = {

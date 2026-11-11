@@ -22,7 +22,7 @@ describe("observability series projection", () => {
     ).toBe(true);
   });
 
-  test("keeps only the logical Temporal backlog needed by the OpenGeni queue alert", () => {
+  test("keeps only the logical Temporal backlog needed by the Opengeni queue alert", () => {
     expect(TEMPORAL_MATCHING_METRICS).toEqual(
       new Set(["approximate_backlog_age_seconds", "approximate_backlog_count"]),
     );

@@ -1,10 +1,12 @@
 import AxeBuilder from "@axe-core/playwright";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
-import { chromium, type Browser, type Page } from "playwright";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 describe("Appearance in Chromium", () => {
   let browser: Browser;
+  let context: BrowserContext;
   let page: Page;
   let web: StartedProcess;
   let baseUrl: string;
@@ -37,9 +39,21 @@ describe("Appearance in Chromium", () => {
       },
     );
     browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ viewport: { width: 1120, height: 760 } });
-    page = await context.newPage();
   }, 60_000);
+
+  beforeEach(async () => {
+    // Storage, media preferences and pages must not leak between test cases.
+    context = await browser.newContext({ viewport: { width: 1120, height: 760 } });
+    // Fail at the stalled operation, not at Bun's aggregate test deadline,
+    // which kills the shared browser and cascades into unrelated cases.
+    context.setDefaultTimeout(5_000);
+    context.setDefaultNavigationTimeout(10_000);
+    page = await context.newPage();
+  }, 10_000);
+
+  afterEach(async () => {
+    await context?.close();
+  }, 10_000);
 
   afterAll(async () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
@@ -103,12 +117,12 @@ describe("Appearance in Chromium", () => {
     expect(await page.locator("[data-sonner-toaster]").getAttribute("data-sonner-theme")).toBe(
       "light",
     );
-  });
+  }, 30_000);
 
-  test("desktop and narrow menus fit the viewport in both palettes", async () => {
-    for (const width of [1120, 390]) {
-      await page.setViewportSize({ width, height: 760 });
-      for (const colorScheme of ["light", "dark"] as const) {
+  for (const width of [1120, 390]) {
+    for (const colorScheme of ["light", "dark"] as const) {
+      test(`menu fits a ${width}px viewport in the ${colorScheme} palette`, async () => {
+        await page.setViewportSize({ width, height: 760 });
         await page.emulateMedia({ colorScheme });
         await page.goto(`${baseUrl}/test/appearance.html`);
         const accessibility = await new AxeBuilder({ page })
@@ -122,7 +136,7 @@ describe("Appearance in Chromium", () => {
         expect(box.x + box.width).toBeLessThanOrEqual(width);
         expect(box.height).toBeGreaterThanOrEqual(44);
         await page.screenshot({ path: `/tmp/opengeni-appearance-${width}-${colorScheme}.png` });
-      }
+      }, 15_000);
     }
-  });
+  }
 });

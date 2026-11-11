@@ -3,6 +3,7 @@ import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } fr
 import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
+import { useOpenGeniText } from "../messages/runtime";
 
 const COPIED_MS = 1600;
 
@@ -27,10 +28,12 @@ export type CopyButtonProps = {
  */
 export const CopyButton = memo(function CopyButton({
   text,
-  label = "Copy",
+  label: labelProp,
   className,
   reveal = "group-hover",
 }: CopyButtonProps) {
+  const t = useOpenGeniText();
+  const label = labelProp === undefined ? t("copyButton.copy") : labelProp;
   const [copied, setCopied] = useState(false);
   const [tipOpen, setTipOpen] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -76,7 +79,7 @@ export const CopyButton = memo(function CopyButton({
     }
   };
 
-  const tip = copied ? "Copied" : label;
+  const tip = copied ? t("copyButton.copied") : label;
 
   return (
     <Tooltip

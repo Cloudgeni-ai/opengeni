@@ -1,4 +1,4 @@
-//! Relay-edge stream transport for the OpenGeni self-hosted agent.
+//! Relay-edge stream transport for the Opengeni self-hosted agent.
 //!
 //! The agent dials OUT to a stateless relay edge and pumps interactive PTY bytes
 //! and desktop framebuffer frames over it, fate-isolated from the NATS control
@@ -96,18 +96,22 @@
 
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-stream")]
 
+pub mod activity;
 pub mod backoff;
 pub mod browser_pump;
 pub mod channel;
 pub mod codec;
+pub mod credential;
 pub mod error;
 pub mod framebuffer_pump;
 pub mod hub;
 pub mod pty_pump;
 pub mod transport;
 
+pub use activity::{ActivityStamp, StreamActivity};
 pub use channel::{ChannelConfig, ChannelKey, RelayChannel};
 pub use codec::{MsgTag, RelayMessage};
+pub use credential::{RelayCredential, RelayEndpoint, CREDENTIAL_WAIT};
 pub use error::{StreamError, StreamResult};
 pub use hub::{RelayHub, RelayHubConfig, DESKTOP_STREAM_PORT, PTY_STREAM_PORT};
 pub use transport::{RelayTransport, TransportKind};

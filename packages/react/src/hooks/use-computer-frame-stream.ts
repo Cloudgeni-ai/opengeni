@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   computerFrameSocketUrl,
   decodeComputerFrameMessage,
@@ -19,6 +20,8 @@ import {
   type EmbeddedComputerInteractionClientOverride,
   useEmbeddedComputerInteraction,
 } from "../session-context";
+import { useOpenGeniText } from "../messages/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type ComputerFrameConnectionState =
   | "idle"
@@ -44,20 +47,26 @@ const RELAY_TAG_FRAME = 3;
 const RELAY_TAG_CLOSE = 4;
 const MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME = 2;
 
-export type UseComputerFrameStreamOptions = EmbeddedComputerInteractionClientOverride & {
-  computerSessionId: string | null;
-  targetId: string | null;
-  enabled?: boolean | undefined;
-  stream?: ComputerFrameStreamOptions | undefined;
-  webSocketFactory?: ComputerFrameWebSocketFactory | undefined;
-};
+export type UseComputerFrameStreamOptions =
+  EmbeddedComputerInteractionClientOverride<ChatClient> & {
+    computerSessionId: string | null;
+    targetId: string | null;
+    enabled?: boolean | undefined;
+    stream?: ComputerFrameStreamOptions | undefined;
+    webSocketFactory?: ComputerFrameWebSocketFactory | undefined;
+  };
 
 export type UseComputerFrameStreamResult = {
   state: ComputerFrameConnectionState;
   frame: ComputerFrame | null;
   attachment: Pick<
     ComputerSessionAttachment,
-    "computerSessionId" | "controllerGeneration" | "targetId" | "stream" | "expiresAt"
+    | "computerSessionId"
+    | "controllerGeneration"
+    | "targetId"
+    | "inputAllowed"
+    | "stream"
+    | "expiresAt"
   > | null;
   error: Error | null;
   reconnect: () => void;
@@ -68,6 +77,7 @@ export type UseComputerFrameStreamResult = {
 export function useComputerFrameStream(
   options: UseComputerFrameStreamOptions,
 ): UseComputerFrameStreamResult {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedComputerInteraction(options);
   const enabled = options.enabled ?? true;
   const [nonce, setNonce] = useState(0);
@@ -301,12 +311,12 @@ export function useComputerFrameStream(
 
     const onError = (source: ComputerFrameWebSocket) => {
       if (source !== socket) return;
-      fail(new Error("Desktop view lost connection."));
+      fail(new Error(t("hooks.useComputerFrameStream.desktopViewLostConnection")));
     };
 
     const onClose = (source: ComputerFrameWebSocket) => {
       if (disposed || source !== socket) return;
-      fail(new Error("Desktop view lost connection."));
+      fail(new Error(t("hooks.useComputerFrameStream.desktopViewLostConnection")));
     };
 
     const connectSocket = () => {
@@ -366,7 +376,7 @@ export function useComputerFrameStream(
             expiresInSeconds: 120,
             ...(streamRef.current ? { stream: streamRef.current } : {}),
           },
-          { signal: attachmentAbort.signal },
+          { signal: attachmentAbort.signal, timeoutMs: 15_000 },
         );
         if (disposed) return;
         if (
@@ -391,6 +401,7 @@ export function useComputerFrameStream(
             computerSessionId: attachment.computerSessionId,
             controllerGeneration: attachment.controllerGeneration,
             targetId: attachment.targetId,
+            inputAllowed: attachment.inputAllowed,
             stream: attachment.stream,
             expiresAt: attachment.expiresAt,
           },
@@ -422,7 +433,7 @@ export function useComputerFrameStream(
       clearRecoveryTimers();
       clearSocket(true);
     };
-  }, [client, enabled, nonce, options.computerSessionId, options.targetId, workspaceId]);
+  }, [client, enabled, nonce, options.computerSessionId, options.targetId, workspaceId, t]);
 
   return { ...result, reconnect };
 }
@@ -446,6 +457,6 @@ async function messageBytes(value: unknown): Promise<Uint8Array> {
 }
 
 function isPlacementGenerationLossError(cause: unknown): boolean {
-  const message = cause instanceof Error ? cause.message : String(cause);
+  const message = errorMessage(cause);
   return /placement instance changed|controller authority changed/i.test(message);
 }

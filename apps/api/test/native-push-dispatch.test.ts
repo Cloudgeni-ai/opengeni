@@ -1,0 +1,402 @@
+import { describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
+import type { ClaimedNativePushDelivery } from "@opengeni/db";
+import {
+  createApnsSender,
+  createFcmSender,
+  nativeCallPushBody,
+  nativePushAlert,
+  nativePushInterruptionLevel,
+  nativePushCategory,
+  nativePushData,
+  nativeFcmMessage,
+  nativePushEndsCall,
+  nativePushRingsCall,
+  plainNotificationText,
+} from "../src/native-push-dispatch";
+import {
+  nativeAppRedirectAllowed,
+  pkceS256Challenge,
+  unregisteredNativeRedirectMessage,
+} from "../src/routes/native-app-auth";
+
+const payload: ClaimedNativePushDelivery["payload"] = {
+  rule: "needs_input",
+  sessionId: "11111111-1111-4111-8111-111111111111",
+  workspaceId: "22222222-2222-4222-8222-222222222222",
+  subjectId: "user:abc",
+  body: "Which branch should I use?",
+};
+
+function delivery(token = "fcm-token-123"): ClaimedNativePushDelivery {
+  return {
+    deliveryId: "33333333-3333-4333-8333-333333333333",
+    platform: "android",
+    appId: "ai.opengeni.app",
+    environment: "production",
+    token,
+    payload,
+    attempts: 1,
+  };
+}
+
+describe("native push presentation", () => {
+  test("questions and approvals carry the category whose actions answer them", () => {
+    expect(nativePushCategory({ ...payload, eventType: "session.requiresAction" })).toBe(
+      "og.approval",
+    );
+    expect(nativePushCategory({ ...payload, eventType: "session.humanInput.requested" })).toBe(
+      "og.question",
+    );
+    expect(nativePushCategory({ ...payload, rule: "agent", eventType: "turn.completed" })).toBe(
+      undefined,
+    );
+    expect(nativePushCategory(payload)).toBe(undefined);
+  });
+
+  test("lock-screen text shows bare source links without hosted-search tracking", () => {
+    expect(
+      plainNotificationText(
+        "Permit rules: https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai and [the guide](https://example.com/g?utm_source=openai)",
+      ),
+    ).toBe("Permit rules: https://example.com/rules/4-1 and the guide");
+  });
+
+  test("an MCP server's question shows as the question and opens the app", () => {
+    const confirmation = {
+      ...payload,
+      eventType: "session.requiresAction",
+      body: "Messages asks: Send “On my way” to Design team?",
+      serverQuestionKind: "confirm" as const,
+    };
+    expect(nativePushAlert(confirmation).body).toBe(
+      "Messages asks: Send “On my way” to Design team?",
+    );
+    // No lock-screen Approve: it could answer a question asked after the push.
+    expect(nativePushCategory(confirmation)).toBe(undefined);
+    expect(nativePushCategory({ ...confirmation, serverQuestionKind: "form" })).toBe(undefined);
+    const { serverQuestionKind: _kind, ...ordinary } = confirmation;
+    expect(nativePushCategory(ordinary)).toBe("og.approval");
+  });
+
+  test("a secret question push is title-only with no inline answer action (AC-5)", () => {
+    const secret = {
+      ...payload,
+      eventType: "session.humanInput.requested",
+      secretQuestion: true,
+    };
+    expect(nativePushCategory(secret)).toBe(undefined);
+    const alert = nativePushAlert(secret);
+    expect(alert.title).toBe("The agent needs a secret");
+    expect(alert.body).not.toContain("Which branch");
+    expect(alert.body).toContain("Open Opengeni");
+  });
+
+  test("a secret approval card push shows its question but is answered only in the app", () => {
+    const approval = {
+      ...payload,
+      eventType: "session.humanInput.requested",
+      body: "Allow the agent to use GitHub › password in the browser on github.com?",
+      secretUseApproval: true,
+    };
+    expect(nativePushCategory(approval)).toBe(undefined);
+    expect(nativePushAlert(approval)).toEqual({
+      title: "The agent needs you",
+      body: "Allow the agent to use GitHub › password in the browser on github.com?",
+    });
+  });
+
+  test("falls back to a title per rule and keeps the agent's text", () => {
+    expect(nativePushAlert(payload)).toEqual({
+      title: "The agent needs you",
+      body: "Which branch should I use?",
+    });
+    expect(nativePushAlert({ ...payload, rule: "failed", body: undefined })).toEqual({
+      title: "A turn failed",
+      body: "A turn failed",
+    });
+    expect(nativePushAlert({ ...payload, title: "Fix the build" }).title).toBe("Fix the build");
+  });
+
+  test("an agent notification shows its subtitle, a plain message and its facts", () => {
+    const agent = {
+      ...payload,
+      rule: "agent" as const,
+      title: "Release is out",
+      subtitle: "v2.4.0 on production",
+      body: "Deployed **all** services:\n- api\n- web with [notes](https://example.com)\n\nRun `smoke` next.",
+      facts: [
+        { label: "Tests", value: "412 passed" },
+        { label: "Duration", value: "6m 12s" },
+      ],
+    };
+    expect(nativePushAlert(agent)).toEqual({
+      title: "Release is out",
+      subtitle: "v2.4.0 on production",
+      body: "Deployed all services:\n• api\n• web with notes\n\nRun smoke next.\n\nTests: 412 passed\nDuration: 6m 12s",
+    });
+    // A title-only notification doesn't repeat its title as the body.
+    expect(
+      nativePushAlert({ ...agent, subtitle: undefined, body: "Release is out", facts: [] }),
+    ).toEqual({ title: "Release is out" });
+  });
+
+  test("time-sensitive notifications, questions and approvals break through Focus", () => {
+    expect(nativePushInterruptionLevel(payload)).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, rule: "agent" })).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "normal" })).toBe(
+      "active",
+    );
+    expect(
+      nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "time_sensitive" }),
+    ).toBe("time-sensitive");
+    // A question or approval is ordinary unless its person asked for
+    // time-sensitive ones, which puts the urgency on the delivery.
+    expect(nativePushInterruptionLevel(payload)).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, urgency: "time_sensitive" })).toBe(
+      "time-sensitive",
+    );
+    // Replies and failures never are.
+    expect(
+      nativePushInterruptionLevel({ ...payload, rule: "reply_ready", urgency: "time_sensitive" }),
+    ).toBe("active");
+    expect(
+      nativePushInterruptionLevel({ ...payload, rule: "failed", urgency: "time_sensitive" }),
+    ).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, rule: "reply_ready" })).toBe("active");
+  });
+
+  test("carries exactly what a tap needs to open the session in its account", () => {
+    expect(nativePushData(payload)).toEqual({
+      sessionId: payload.sessionId,
+      workspaceId: payload.workspaceId,
+      subjectId: "user:abc",
+      rule: "needs_input",
+    });
+    expect(nativePushData({ ...payload, sequence: 42 })).toMatchObject({ sequence: 42 });
+  });
+
+  test("a call ring goes to PushKit with the call, and shows as a call on Android", () => {
+    const ring = {
+      ...payload,
+      rule: "call" as const,
+      callId: "44444444-4444-4444-8444-444444444444",
+      title: "Deploy watcher",
+      body: "Production is down",
+      ringUntil: "2026-10-26T18:00:40.000Z",
+    };
+    expect(nativePushRingsCall(ring)).toBe(true);
+    expect(nativePushRingsCall(payload)).toBe(false);
+    expect(nativeCallPushBody(ring)).toEqual({
+      aps: {},
+      call: {
+        callId: ring.callId,
+        sessionId: payload.sessionId,
+        workspaceId: payload.workspaceId,
+        subjectId: "user:abc",
+        title: "Deploy watcher",
+        reason: "Production is down",
+        ringUntil: ring.ringUntil,
+      },
+    });
+    expect(nativePushAlert(ring)).toEqual({
+      title: "Deploy watcher is calling",
+      body: "Production is down",
+    });
+    expect(nativePushInterruptionLevel(ring)).toBe("time-sensitive");
+    expect(nativePushData(ring)).toMatchObject({ callId: ring.callId, ringUntil: ring.ringUntil });
+  });
+
+  test("an Android call ring carries the call for the ring screen and expires with the ring", () => {
+    const ring = {
+      ...payload,
+      rule: "call" as const,
+      callId: "44444444-4444-4444-8444-444444444444",
+      title: "Deploy watcher",
+      body: "Production is down",
+      ringUntil: "2026-10-26T18:00:40.000Z",
+    };
+    const message = nativeFcmMessage(
+      { token: "fcm-token-123", payload: ring },
+      Date.parse("2026-10-26T18:00:10.500Z"),
+    );
+    expect(message.android).toEqual({ priority: "HIGH", collapse_key: ring.callId, ttl: "29s" });
+    // An app without system calls still shows the ordinary notification.
+    expect(message.data.title).toBe("Deploy watcher is calling");
+    expect(message.data.message).toBe("Production is down");
+    expect(JSON.parse(message.data.opengeniCall!)).toEqual({
+      type: "ring",
+      callId: ring.callId,
+      sessionId: payload.sessionId,
+      workspaceId: payload.workspaceId,
+      subjectId: "user:abc",
+      title: "Deploy watcher",
+      reason: "Production is down",
+      ringUntil: ring.ringUntil,
+    });
+
+    const notice = nativeFcmMessage({ token: "fcm-token-123", payload });
+    expect(notice.android).toEqual({ priority: "HIGH", collapse_key: payload.sessionId });
+    expect(notice.data.opengeniCall).toBeUndefined();
+  });
+
+  test("the end of a ring settled elsewhere is a silent Android message that replaces the ring", () => {
+    const ended = {
+      ...payload,
+      body: undefined,
+      rule: "call" as const,
+      callId: "44444444-4444-4444-8444-444444444444",
+      callEnded: "answeredElsewhere" as const,
+      ringUntil: "2026-10-26T18:00:40.000Z",
+    };
+    expect(nativePushEndsCall(ended)).toBe(true);
+    expect(nativePushRingsCall(ended)).toBe(false);
+    expect(nativePushEndsCall({ ...ended, callEnded: undefined })).toBe(false);
+    const message = nativeFcmMessage(
+      { token: "fcm-token-123", payload: ended },
+      Date.parse("2026-10-26T18:00:20.000Z"),
+    );
+    // Same collapse key as the ring, so FCM swaps a ring it has not delivered.
+    expect(message.android).toEqual({ priority: "HIGH", collapse_key: ended.callId, ttl: "20s" });
+    // No title or message: expo-notifications presents nothing for it.
+    expect(Object.keys(message.data)).toEqual(["opengeniCall"]);
+    expect(JSON.parse(message.data.opengeniCall!)).toEqual({
+      type: "ended",
+      callId: ended.callId,
+      reason: "answeredElsewhere",
+    });
+    // iOS hears a call's outcome from the app; the sender never sends one.
+    const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const apns = createApnsSender({
+      keyId: "KEY",
+      teamId: "TEAM",
+      privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    });
+    return apns({ ...delivery(), platform: "ios", voipToken: null, payload: ended }).then(
+      (result) => expect(result.outcome).toBe("failed"),
+    );
+  });
+});
+
+describe("FCM sender", () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const serviceAccountJson = JSON.stringify({
+    project_id: "push-project",
+    client_email: "sender@push-project.iam.gserviceaccount.com",
+    private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  });
+
+  function fakeFetch(messageStatus: number, messageBody = "{}") {
+    const calls: Array<{ url: string; body: string; authorization: string | null }> = [];
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url,
+        body: String(init?.body ?? ""),
+        authorization: headers.get("authorization"),
+      });
+      if (url.includes("oauth2")) {
+        return Response.json({ access_token: "access-1", expires_in: 3600 });
+      }
+      return new Response(messageBody, { status: messageStatus });
+    }) as typeof fetch;
+    return { calls, fetcher };
+  }
+
+  test("exchanges a signed assertion once and sends a data message the app presents", async () => {
+    const { calls, fetcher } = fakeFetch(200);
+    const send = createFcmSender({ serviceAccountJson, fetch: fetcher });
+    expect(await send(delivery())).toEqual({ outcome: "delivered" });
+    expect(await send(delivery())).toEqual({ outcome: "delivered" });
+    expect(calls.filter((call) => call.url.includes("oauth2"))).toHaveLength(1);
+    const message = calls.find((call) => call.url.includes("messages:send"))!;
+    expect(message.url).toBe("https://fcm.googleapis.com/v1/projects/push-project/messages:send");
+    expect(message.authorization).toBe("Bearer access-1");
+    const sent = JSON.parse(message.body) as {
+      message: { token: string; data: Record<string, string> };
+    };
+    expect(sent.message.token).toBe("fcm-token-123");
+    expect(sent.message.data.title).toBe("The agent needs you");
+    expect(sent.message.data.message).toBe("Which branch should I use?");
+    expect(JSON.parse(sent.message.data.body!)).toMatchObject({ sessionId: payload.sessionId });
+  });
+
+  test("maps provider answers to settle outcomes", async () => {
+    expect(
+      (await createFcmSender({ serviceAccountJson, fetch: fakeFetch(404).fetcher })(delivery()))
+        .outcome,
+    ).toBe("unregistered");
+    expect(
+      (await createFcmSender({ serviceAccountJson, fetch: fakeFetch(503).fetcher })(delivery()))
+        .outcome,
+    ).toBe("retry");
+    expect(
+      (await createFcmSender({ serviceAccountJson, fetch: fakeFetch(400).fetcher })(delivery()))
+        .outcome,
+    ).toBe("failed");
+  });
+});
+
+describe("native app sign-in helpers", () => {
+  test("only an exact registered scheme callback is allowed", () => {
+    expect(nativeAppRedirectAllowed("opengeni://auth/callback", ["opengeni"])).toBe(true);
+    expect(nativeAppRedirectAllowed("opengeni://auth/callback?x=1", ["opengeni"])).toBe(false);
+    expect(nativeAppRedirectAllowed("evil://auth/callback", ["opengeni"])).toBe(false);
+    expect(nativeAppRedirectAllowed("https://auth/callback", ["opengeni"])).toBe(false);
+  });
+
+  test("the Office add-in's callback is allowed only on this deployment's web origins", () => {
+    const origins = ["https://app.example.com"];
+    expect(
+      nativeAppRedirectAllowed(
+        "https://app.example.com/office/auth-callback.html",
+        ["opengeni"],
+        origins,
+      ),
+    ).toBe(true);
+    for (const other of [
+      "https://evil.example.com/office/auth-callback.html",
+      "https://app.example.com/office/auth-callback.html?x=1",
+      "https://app.example.com/office/other.html",
+      "http://app.example.com/office/auth-callback.html",
+    ]) {
+      expect(nativeAppRedirectAllowed(other, ["opengeni"], origins)).toBe(false);
+    }
+    expect(
+      nativeAppRedirectAllowed("https://app.example.com/office/auth-callback.html", ["opengeni"]),
+    ).toBe(false);
+  });
+
+  test("an add-in installed from another address is told to reinstall from the current page", () => {
+    const addin = { name: "Opengeni", installUrl: "https://app.example.com/excel" };
+    expect(
+      unregisteredNativeRedirectMessage("https://old.example.net/office/auth-callback.html", addin),
+    ).toBe(
+      "This copy of the Opengeni add-in is out of date: it was installed from an address that no longer signs in. Remove it from Excel, add the current one from https://app.example.com/excel, then sign in again.",
+    );
+    expect(
+      unregisteredNativeRedirectMessage("https://old.example.net/office/auth-callback.html", {
+        name: "Acme",
+        installUrl: null,
+      }),
+    ).toBe(
+      "This copy of the Acme add-in is out of date: it was installed from an address that no longer signs in. Remove it from Excel, add the current one, then sign in again.",
+    );
+    for (const other of [
+      "evil://auth/callback",
+      "https://old.example.net/office/other.html",
+      "not a url",
+    ]) {
+      expect(unregisteredNativeRedirectMessage(other, addin)).toBe(
+        "Unregistered native app redirect",
+      );
+    }
+  });
+
+  test("PKCE S256 matches RFC 7636 appendix B", () => {
+    expect(pkceS256Challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")).toBe(
+      "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    );
+  });
+});

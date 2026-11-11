@@ -20,8 +20,12 @@
 // active pointer.
 
 import type { Settings } from "@opengeni/config";
+import { publishedAgentReleasesFor, stableAgentVersion } from "./agent-release";
 import {
+  enrollmentMacPermissions,
   getSession,
+  getSessionForSubject,
+  getSessionMachineAccess,
   getLiveEnrollmentConnection,
   listEnrollments,
   listSandboxes,
@@ -32,7 +36,12 @@ import {
   type EnrollmentRecord,
   type MachineMetricsRow,
 } from "@opengeni/db";
-import { MachineView, MetricSample, type MachinesResponse } from "@opengeni/contracts";
+import {
+  MachineView,
+  MetricSample,
+  type MachineRuntime,
+  type MachinesResponse,
+} from "@opengeni/contracts";
 import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "@opengeni/core";
 import { selfhostedHeartbeatLiveness } from "@opengeni/runtime/sandbox";
 
@@ -41,7 +50,7 @@ export type MachinesServices = {
   settings: Settings;
 };
 
-const ACTIVE_UPDATE_STATUSES = new Set([
+export const ACTIVE_UPDATE_STATUSES: ReadonlySet<string> = new Set([
   "requested",
   "accepted",
   "waiting_for_idle",
@@ -51,7 +60,7 @@ const ACTIVE_UPDATE_STATUSES = new Set([
   "restarting",
 ]);
 
-function compareAgentVersions(left: string, right: string): number | null {
+export function compareAgentVersions(left: string, right: string): number | null {
   const parse = (value: string): { core: number[]; prerelease: string | null } | null => {
     const match = /^(?:v)?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(value.trim());
     if (!match) return null;
@@ -73,6 +82,17 @@ function compareAgentVersions(left: string, right: string): number | null {
   return a.prerelease.localeCompare(b.prerelease);
 }
 
+/** The build promoted for a machine's update channel, or null when this
+ * deployment cannot name one (see stableAgentVersion). */
+export function promotedAgentVersion(
+  settings: Pick<Settings, "agentStableVersion" | "agentBetaVersion">,
+  channel: string | null,
+): string | null {
+  return channel === "beta"
+    ? (settings.agentBetaVersion ?? stableAgentVersion(settings))
+    : stableAgentVersion(settings);
+}
+
 /** Older Mac updaters replace a single file inside a sealed app. They must
  * bootstrap once through the official whole-app installer, never an RPC swap. */
 export function machineUpdateBlockedReason(os: string, version: string | null): string | null {
@@ -80,31 +100,53 @@ export function machineUpdateBlockedReason(os: string, version: string | null): 
   const order = version ? compareAgentVersions(version, "0.1.29") : null;
   return order !== null && order >= 0
     ? null
-    : "Install OpenGeni Agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
+    : "Install the connected-machine agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
+}
+
+type AgentUpdateRecord = EnrollmentRecord["agentUpdate"];
+
+/** Where the installed agent stands against the promoted build. A failed update
+ * stops mattering once its target (or newer) is installed, and a busy machine
+ * postponing an update (`update_busy_*`) has not failed: it is still outdated. */
+export function agentVersionState(
+  installedVersion: string | null,
+  desiredVersion: string | null,
+  update: AgentUpdateRecord,
+): MachineRuntime["versionState"] {
+  if (update && ACTIVE_UPDATE_STATUSES.has(update.status)) return "updating";
+  if (
+    update?.status === "failed" &&
+    !update.errorCode?.startsWith("update_busy") &&
+    !(
+      installedVersion && (compareAgentVersions(installedVersion, update.targetVersion) ?? -1) >= 0
+    ) &&
+    // A failed attempt at a release newer than the one updates now target
+    // (one that was not published yet) no longer describes the machine.
+    !(desiredVersion && (compareAgentVersions(update.targetVersion, desiredVersion) ?? -1) > 0)
+  ) {
+    return "update_failed";
+  }
+  const order =
+    installedVersion && desiredVersion
+      ? compareAgentVersions(installedVersion, desiredVersion)
+      : null;
+  if (order === null) return "unknown";
+  if (order === 0) return "current";
+  return order < 0 ? "outdated" : "ahead";
 }
 
 function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {
-  const desiredVersion =
-    enrollment.agentUpdateChannel === "beta"
-      ? (settings.agentBetaVersion ?? settings.agentStableVersion)
-      : settings.agentStableVersion;
+  // The release updates target, as a check in this process last confirmed it
+  // published. Until one has, the promoted build is shown and a check starts
+  // in the background, so a page load never waits for the release host.
+  const releases = publishedAgentReleasesFor(settings);
+  let desiredVersion = releases.peek(enrollment.agentUpdateChannel);
+  if (desiredVersion === undefined) {
+    void releases.resolve(enrollment.agentUpdateChannel).catch(() => undefined);
+    desiredVersion = promotedAgentVersion(settings, enrollment.agentUpdateChannel);
+  }
   const update = enrollment.agentUpdate;
-  const activeUpdate = update ? ACTIVE_UPDATE_STATUSES.has(update.status) : false;
-  const order =
-    enrollment.agentVersion && desiredVersion
-      ? compareAgentVersions(enrollment.agentVersion, desiredVersion)
-      : null;
-  const versionState = activeUpdate
-    ? "updating"
-    : update?.status === "failed"
-      ? "update_failed"
-      : order === null
-        ? "unknown"
-        : order === 0
-          ? "current"
-          : order < 0
-            ? "outdated"
-            : "ahead";
+  const versionState = agentVersionState(enrollment.agentVersion, desiredVersion, update);
   const capability = (name: string): boolean => enrollment.agentCapabilities[name] === true;
   return {
     installedVersion: enrollment.agentVersion,
@@ -124,8 +166,15 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
       operationResourcePolicy: capability("operationResourcePolicy"),
       operationCpuQuota: capability("operationCpuQuota"),
       transactionalFsWrite: capability("transactionalFsWrite"),
+      credentialRenew: capability("credentialRenew"),
+      screenControl:
+        typeof enrollment.agentCapabilities.screenControl === "boolean"
+          ? enrollment.agentCapabilities.screenControl
+          : null,
     },
     update,
+    macPermissions:
+      enrollment.os === "macos" ? enrollmentMacPermissions(enrollment.agentCapabilities) : null,
   };
 }
 
@@ -154,6 +203,9 @@ function connectionAuthorityFor(
     leaseExpiresAt: enrollment.connectionLeaseExpiresAt,
     duplicateRunnerDeniedCount: enrollment.connectionDuplicateDeniedCount,
     duplicateRunnerDeniedAt: enrollment.connectionDuplicateDeniedAt,
+    ...(!liveConnection && enrollment.wentOfflineReason === "credentials_expired"
+      ? { authenticationError: "credentials_expired" as const }
+      : {}),
   };
 }
 
@@ -249,7 +301,9 @@ export async function listMachines(
   let activeEpoch = 0;
   let session: Awaited<ReturnType<typeof getSession>> | null = null;
   if (input.sessionId) {
-    session = await getSession(db, workspaceId, input.sessionId);
+    session = input.subjectId
+      ? await getSessionForSubject(db, workspaceId, input.sessionId, input.subjectId, "target")
+      : await getSession(db, workspaceId, input.sessionId);
     if (session) {
       const pointer = await readActiveSandbox(db, workspaceId, input.sessionId);
       activeSandboxId = pointer?.activeSandboxId ?? null;
@@ -406,10 +460,20 @@ export async function listMachines(
         runtime: runtimeFor(services.settings, enrollment),
         operationPolicy: enrollment.operationPolicy,
         metrics: metricsRow ? metricRowToSample(metricsRow) : null,
+        reach: enrollment.reach ?? null,
       });
     }),
   );
   machines.push(...machineViews.filter((machine): machine is MachineView => machine !== null));
 
-  return { activeSandboxId, activeEpoch, machines };
+  const sessionMachineAccess =
+    session && input.subjectId && input.accountId
+      ? await getSessionMachineAccess(db, {
+          accountId: input.accountId,
+          workspaceId,
+          sessionId: session.id,
+          subjectId: input.subjectId,
+        })
+      : null;
+  return { activeSandboxId, activeEpoch, machines, sessionMachineAccess };
 }

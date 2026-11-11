@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   BrowserSession,
   BrowserSessionMutationResponse,
@@ -11,7 +12,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseBrowserSessionsOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseBrowserSessionsOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   /** Current agent/session relevance. Workspace peers remain in `sessions`. */
   sessionId?: string | undefined;
   enabled?: boolean | undefined;
@@ -71,17 +72,19 @@ export function useBrowserSessions(
     id: 0,
     controller: null,
   });
+  const loadQueueRef = useRef<{ pending: boolean; promise: Promise<void> } | null>(null);
   const mountedRef = useRef(true);
 
   const visibleState = state.workspaceId === workspaceId ? state : emptyState(workspaceId, enabled);
 
   const cancelLoad = useCallback(() => {
+    loadQueueRef.current = null;
     const id = requestRef.current.id + 1;
     requestRef.current.controller?.abort();
     requestRef.current = { id, controller: null };
   }, []);
 
-  const load = useCallback(
+  const loadOnce = useCallback(
     async (foreground: boolean): Promise<void> => {
       if (!enabled) return;
       const id = requestRef.current.id + 1;
@@ -126,6 +129,35 @@ export function useBrowserSessions(
       }
     },
     [client, enabled, workspaceId],
+  );
+
+  const load = useCallback(
+    (foreground: boolean): Promise<void> => {
+      const current = loadQueueRef.current;
+      if (current) {
+        current.pending = true;
+        return current.promise;
+      }
+      const queue = { pending: false, promise: Promise.resolve() };
+      loadQueueRef.current = queue;
+      queue.promise = Promise.resolve()
+        .then(async () => {
+          // A slow read must be allowed to finish. Invalidations and polling
+          // coalesce into one trailing read instead of repeatedly aborting it.
+          while (loadQueueRef.current === queue) {
+            queue.pending = false;
+            await loadOnce(foreground);
+            foreground = false;
+            if (!queue.pending) break;
+          }
+          if (loadQueueRef.current === queue) loadQueueRef.current = null;
+        })
+        .finally(() => {
+          if (loadQueueRef.current === queue) loadQueueRef.current = null;
+        });
+      return queue.promise;
+    },
+    [loadOnce],
   );
 
   const refresh = useCallback(async () => await load(false), [load]);
@@ -289,4 +321,4 @@ function mergeSession(
 }
 
 /** Exported for narrow proxy implementations and tests. */
-export type BrowserSessionsClient = EmbeddedBrowserInteractionClientLike;
+export type BrowserSessionsClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

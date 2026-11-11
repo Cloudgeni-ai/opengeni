@@ -1,60 +1,107 @@
+import * as primitives from "./primitives";
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { RetainedArtifactReferenceSchema } from "./retained-output";
 
-export const ArtifactCatalogKind = z.enum([
-  "site",
-  "document",
-  "spreadsheet",
-  "presentation",
-  "image",
-  "file",
-]);
+export const ArtifactCatalogKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["site", "document", "spreadsheet", "presentation", "image", "file"]),
+);
 export type ArtifactCatalogKind = z.infer<typeof ArtifactCatalogKind>;
 
 /** Metadata only: native domain IDs, never content, storage keys or credentials. */
-export const ArtifactCatalogItem = z
-  .object({
-    id: z.string().min(1).max(128),
-    kind: ArtifactCatalogKind,
-    title: z.string().min(1).max(1024),
-    createdAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true }),
-    status: z.enum(["active", "archived"]),
-    sourceSessionId: z.string().uuid().optional(),
-    versionId: z.string().min(1).max(128).optional(),
-    file: RetainedArtifactReferenceSchema.optional(),
-    filename: z.string().max(1024).optional(),
-    contentType: z.string().max(127).optional(),
-    sizeBytes: z.number().int().nonnegative().safe().optional(),
-  })
-  .strict();
+export const ArtifactCatalogItem = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().min(1).max(128),
+      kind: ArtifactCatalogKind,
+      title: z.string().min(1).max(1024),
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
+      status: z.enum(["active", "archived"]),
+      /** Shared workspace metadata, not content-access authority. */
+      pinned: primitives.optionalBoolean,
+      /**
+       * Sites, files, documents, spreadsheets and presentations: "private"
+       * when only its owner (the viewer) can see it.
+       */
+      visibility: z.enum(["private", "workspace"]).optional(),
+      /**
+       * Files, documents, spreadsheets and presentations: the viewer owns it,
+       * so they can share or limit it.
+       */
+      ownedByViewer: primitives.optionalBoolean,
+      sourceSessionId: primitives.optionalUuid,
+      versionId: z.string().min(1).max(128).optional(),
+      file: RetainedArtifactReferenceSchema.optional(),
+      filename: z.string().max(1024).optional(),
+      contentType: z.string().max(127).optional(),
+      sizeBytes: primitives.nonnegativeInteger.safe().optional(),
+    })
+    .strict(),
+);
 export type ArtifactCatalogItem = z.infer<typeof ArtifactCatalogItem>;
 
-export const ArtifactCatalogListQuery = z
-  .object({
-    sourceSessionId: z.string().uuid().optional(),
-    q: z
-      .string()
-      .trim()
-      .max(200)
-      .refine((value) => !value.includes("\0"))
-      .optional(),
-    kind: ArtifactCatalogKind.optional(),
-    sort: z.enum(["updated", "newest", "title"]).default("updated"),
-    status: z.enum(["active", "archived"]).default("active"),
-    limit: z.coerce.number().int().min(1).max(100).default(50),
-    cursor: z.string().min(1).max(8192).optional(),
-  })
-  .strict();
+const QueryBoolean = /* @__PURE__ */ defineSchema(() =>
+  z
+    .union([primitives.boolean, z.enum(["true", "false"])])
+    .transform((value) => value === true || value === "true"),
+);
+
+export const ArtifactCatalogListQuery = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sourceSessionId: primitives.optionalUuid,
+      /**
+       * With `sourceSessionId`: also list the artifacts of that chat's
+       * sub-sessions (the ones its lineage lists) in the same read.
+       */
+      includeSubSessions: QueryBoolean.optional(),
+      q: primitives.string
+        .trim()
+        .max(200)
+        .refine((value) => !value.includes("\0"))
+        .optional(),
+      kind: ArtifactCatalogKind.optional(),
+      sort: z.enum(["updated", "newest", "title"]).default("updated"),
+      status: z.enum(["active", "archived"]).default("active"),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      cursor: z.string().min(1).max(8192).optional(),
+    })
+    .strict(),
+);
 export type ArtifactCatalogListQuery = z.infer<typeof ArtifactCatalogListQuery>;
 export type ArtifactCatalogListOptions = Omit<z.input<typeof ArtifactCatalogListQuery>, "limit"> & {
   limit?: number;
 };
 
-export const ArtifactCatalogListResponse = z
-  .object({
-    items: z.array(ArtifactCatalogItem).max(100),
-    nextCursor: z.string().max(8192).nullable(),
-  })
-  .strict();
+export const ArtifactCatalogListResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      items: z.array(ArtifactCatalogItem).max(100),
+      nextCursor: z.string().max(8192).nullable(),
+    })
+    .strict(),
+);
 export type ArtifactCatalogListResponse = z.infer<typeof ArtifactCatalogListResponse>;
+
+/** Exact UUID link resolution; content still uses the kind's normal read route. */
+export const ArtifactLinkResolution = /* @__PURE__ */ defineSchema(() =>
+  z.object({ artifactId: primitives.uuid, kind: z.enum(["file", "site"]) }).strict(),
+);
+export type ArtifactLinkResolution = z.infer<typeof ArtifactLinkResolution>;
+
+export const UpdateArtifactPinRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ pinned: primitives.boolean }).strict(),
+);
+export type UpdateArtifactPinRequest = z.infer<typeof UpdateArtifactPinRequest>;
+
+export const ArtifactPinResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: ArtifactCatalogKind,
+      artifactId: z.string().min(1).max(128),
+      pinned: primitives.boolean,
+    })
+    .strict(),
+);
+export type ArtifactPinResponse = z.infer<typeof ArtifactPinResponse>;

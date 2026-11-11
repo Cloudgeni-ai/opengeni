@@ -1,6 +1,6 @@
-# OpenGeni Azure Reference Deployment
+# Opengeni Azure Reference Deployment
 
-This Terraform root module is the Azure reference substrate for OpenGeni. It is intentionally focused on platform primitives and does not store application secrets in source control.
+This Terraform root module is the Azure reference substrate for Opengeni. It is intentionally focused on platform primitives and does not store application secrets in source control.
 
 ## What It Creates
 
@@ -10,7 +10,7 @@ This Terraform root module is the Azure reference substrate for OpenGeni. It is 
 - Optional dedicated autoscaling AKS user pool for OpenSandbox workload Pods.
 - Azure Key Vault with RBAC authorization enabled.
 - Azure Database for PostgreSQL Flexible Server when `postgres.mode = "managed"`.
-- `pgcrypto`, `pgvector`, and `btree_gin` enablement for managed Postgres through the `azure.extensions` server configuration. `btree_gin` is required by the upstream Temporal PostgreSQL visibility schema.
+- `pgcrypto`, `pgvector`, `btree_gin`, and `pg_trgm` enablement for managed Postgres through the `azure.extensions` server configuration. `btree_gin` is required by the upstream Temporal PostgreSQL visibility schema; `btree_gin` and `pg_trgm` also back indexed conversation message search.
 - Optional PostgreSQL firewall rules through `postgres.allow_azure_services` or `postgres.firewall_rules`.
 - Optional managed PostgreSQL high availability, custom maintenance window, pinned `max_connections`, and CPU/connection saturation alerts (see the Managed PostgreSQL sections below).
 - Azure Storage account and private Blob container when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
@@ -26,6 +26,22 @@ per-replica in-memory registry, so its public wss ingress must route both dials
 for a channel to the same replica (consistent-hash / session affinity keyed on
 the channel) whenever more than one relay replica runs. See `docs/deployment.md`
 (Connected Machines) for the full relay/NATS/secret wiring.
+
+## Outbound connection capacity
+
+`aks_outbound_ports_allocated` sets SNAT ports per node on the existing static
+egress IP. The default `0` preserves Azure's automatic allocation; an explicit
+value must be a multiple of 8. Size it against **all** node-pool ceilings plus
+upgrade surge, not the current node count: one IP supplies 64,000 ports, so
+4,000 ports per node supports at most 16 nodes including surge. This root does
+not add outbound IPs when the budget is exceeded.
+
+When importing a cluster or reconciling an operational repair, pass the live
+explicit allocation so Terraform does not reset it to automatic. Monitor Azure
+`UsedSnatPorts`, `AllocatedSnatPorts` and failed `SnatConnectionCount`, together
+with actual application journeys. Change the cluster through AKS rather than
+editing its managed load balancer directly; network changes can affect flows.
+See [Microsoft's allocation guidance](https://learn.microsoft.com/en-us/azure/aks/configure-load-balancer-standard#configure-the-allocated-outbound-ports).
 
 ## Phases
 
@@ -56,7 +72,7 @@ object_storage = {
 }
 ```
 
-External mode means Terraform does not create that dependency. The Helm values or secret manager integration must still provide the runtime values expected by OpenGeni, such as `OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING` for Azure Blob.
+External mode means Terraform does not create that dependency. The Helm values or secret manager integration must still provide the runtime values expected by Opengeni, such as `OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING` for Azure Blob.
 
 ## AKS Capacity and staged rollout
 
@@ -212,7 +228,7 @@ OpenSandbox BatchSandbox template:
 - label: `opengeni.ai/sandbox-pool=opensandbox`
 - taint: `opengeni.ai/sandbox=true:NoSchedule`
 
-OpenGeni/control components do not tolerate that taint. OpenSandbox workload
+Opengeni/control components do not tolerate that taint. OpenSandbox workload
 Pods require both the label and toleration, preventing sandbox load from
 competing with the AKS system pool by default. This is capacity/autoscaling
 isolation, not a tenant-security boundary.
@@ -422,7 +438,7 @@ tfvars.
   if the private ops workflow cannot set the configured app A record, the
   deployment is not ready.
 - Object storage defaults to managed Azure Blob for Azure reference deployments with private container access, nested public blob access disabled, blob versioning enabled, and seven-day blob/container delete retention. The sensitive connection string is exposed only as a sensitive Terraform output and should be written to Key Vault or a Kubernetes Secret, not source control.
-- Temporal can be `external` for Temporal Cloud/customer endpoints or `officialChart` for the stack-wrapper managed upstream Temporal chart. The chart still needs durable Postgres persistence prepared outside the OpenGeni app chart.
+- Temporal can be `external` for Temporal Cloud/customer endpoints or `officialChart` for the stack-wrapper managed upstream Temporal chart. The chart still needs durable Postgres persistence prepared outside the Opengeni app chart.
 - For temporary AKS/Flexible Server smoke tests, `postgres.allow_azure_services = true` can unblock Azure-internal access. Prefer private networking or tightly scoped `postgres.firewall_rules` for long-lived deployments.
 - If a failed Azure PostgreSQL create reserves a server name without leaving an importable resource, set `postgres.name` to a new cleanup-friendly name and rerun the private-state plan. Terraform ignores later `zone` changes on the managed server (Azure assigns a zone at create time and HA failover can move it), so `postgres.zone` only affects server creation.
 

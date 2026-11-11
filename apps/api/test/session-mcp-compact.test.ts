@@ -37,6 +37,8 @@ function page(count = 1): Page {
       id: uuid(i + 1),
       title: `Task ${i + 1}`,
       titleOriginalChars: 6,
+      visibility: "workspace",
+      archived: false,
       status: "idle",
       parentSessionId: null,
       rootSessionId: uuid(i + 1),
@@ -129,6 +131,23 @@ describe("compact-by-default MCP allowlists and byte regressions", () => {
       expect(bytes(compact)).toBeLessThan(bytes(capSessionDiscoveryPage(source, false)) * 0.25);
       expect(capSessionDiscoveryCompactPage(source)).toEqual(compact);
     }
+  });
+
+  test("visibility and archive facts stay out of compact rows and appear in full rows", () => {
+    const source = page(3);
+    source.sessions[1]!.visibility = "private";
+    source.sessions[2]!.archived = true;
+    for (const row of capSessionDiscoveryCompactPage(source).sessions) {
+      expect(keys(row)).toEqual(["id", "status", "title", "updatedAt"]);
+    }
+    const full = capSessionDiscoveryPage(source, false);
+    expect(full.sessions.map((row) => row.visibility)).toEqual([
+      "workspace",
+      "private",
+      "workspace",
+    ]);
+    expect(full.sessions[2]).toMatchObject({ archived: true });
+    expect(full.sessions[0]).not.toHaveProperty("archived");
   });
 
   test("closed allowlist ignores new/diagnostic/configuration properties", () => {
@@ -312,6 +331,31 @@ describe("compact-by-default MCP allowlists and byte regressions", () => {
     expect(bytes(result)).toBeLessThan(300);
     expect(JSON.stringify(result)).not.toContain("PRIVATE");
     expect(result).not.toHaveProperty("projection");
+  });
+
+  test("detail says an archived chat is archived and read-only, also before it is stored", () => {
+    // Archiving a running chat cancels its work: status alone reads `cancelled`.
+    const archived = {
+      ...page().sessions[0]!,
+      status: "cancelled",
+      archived: true,
+      lastSequence: 9,
+    } as unknown as Session;
+    expect(boundSessionCompactDetailMcp(archived, noFacts, null)).toMatchObject({
+      status: "cancelled",
+      archive: { state: "archiving", archivedAt: null, readOnly: true },
+    });
+    const stored = {
+      ...archived,
+      retention: { keepLive: false, archive: { state: "archived", archivedAt: at } },
+    } as unknown as Session;
+    expect(boundSessionCompactDetailMcp(stored, noFacts, null).archive).toEqual({
+      state: "archived",
+      archivedAt: at,
+      readOnly: true,
+    });
+    const live = { ...page().sessions[0]!, lastSequence: 9 } as unknown as Session;
+    expect(boundSessionCompactDetailMcp(live, noFacts, null)).not.toHaveProperty("archive");
   });
 
   test("detail preserves encoded-prefix loss without inventing an original character count", () => {

@@ -3,7 +3,7 @@
 // This is the heart of Channel B's data plane. exposeStreamPort resolves the
 // provider's scoped tunnel for the ONE exposed stream port (6080), assembles the
 // direct-to-provider WS URL (client → provider-tunnel direct; the pixel socket
-// never traverses OpenGeni), and mints the scoped OpenGeni stream token. It is a
+// never traverses Opengeni), and mints the scoped Opengeni stream token. It is a
 // plain function over a live, externally-owned `{session}` handle — NO Temporal,
 // NO worker RPC, NO actor. The API-direct handshake handler (apps/api) calls it
 // in-process on a freshly-resumed-by-id box and returns the result as the HTTP
@@ -13,13 +13,14 @@
 //
 // THE TOKEN IS NOT A URL QUERY PARAM. The provider's own scoped tunnel URL
 // (Modal raw-TLS host:port, Daytona signed preview, Blaxel preview-token query)
-// carries the reach-the-port boundary; the OpenGeni stream token is RECORDED
+// carries the reach-the-port boundary; the Opengeni stream token is RECORDED
 // against the viewer holder and is the in-box websockify edge boundary (P3/P5).
 // Per the sandbox contract ruling, exposeStreamPort returns the token alongside the
 // URL so the caller records it; it does NOT append it to `url`.
 
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 import { mintStreamToken, STREAM_TOKEN_DEFAULT_TTL_SECONDS } from "./stream-token";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The provider-resolved endpoint for an exposed port. Mirrors the SDK's
  *  `ExposedPortEndpoint` (host/port/tls/query/...) WITHOUT importing the
@@ -35,6 +36,9 @@ export type ExposedPortEndpoint = {
    *  the root (`/`, the default); the selfhosted relay serves it at `/stream`
    *  (M8b). When set, buildStreamUrl uses it instead of the root. */
   path?: string;
+  /** A Connected Machine relay stream's exact channel; the viewer token is
+   *  bound to it (see MintStreamTokenInput.relayChannel). */
+  relayChannel?: { workspaceId: string; agentId: string; channelId: string };
   [key: string]: unknown;
 };
 
@@ -74,6 +78,9 @@ export type ExposeStreamPortInput = {
   resolution?: [number, number];
   /** Override the issue clock (tests). Seconds since the epoch. */
   nowSeconds?: number;
+  /** Input authority the API route granted this viewer. `view` (the default)
+   *  only watches; `control` lets the relay forward the viewer's input. */
+  mode?: "view" | "control";
   /** The authenticated viewer subject the token is minted for (0281). */
   subjectId?: string;
   /** The session authority epoch observed at mint (0281). */
@@ -82,9 +89,9 @@ export type ExposeStreamPortInput = {
 
 export type ExposeStreamPortResult = {
   /** The direct-to-provider WS URL the viewer connects to (provider-scoped; the
-   *  OpenGeni token is NOT appended). */
+   *  Opengeni token is NOT appended). */
   url: string;
-  /** The scoped OpenGeni stream token — recorded against the holder, NEVER a URL
+  /** The scoped Opengeni stream token — recorded against the holder, NEVER a URL
    *  query param. */
   token: string;
   /** ISO absolute expiry of the token (the rotation hot-swap window backstop). */
@@ -106,7 +113,7 @@ const DEFAULT_RESOLUTION: [number, number] = [1280, 800];
  * the leaf stays agent-loop-free (the helper lives behind the bare
  * `@openai/agents-core` root, which the import-discipline test forbids). The
  * provider's own `endpoint.query` (Blaxel `bl_preview_token`, Daytona signed
- * token) is preserved; the OpenGeni token is NOT appended (it is recorded against
+ * token) is preserved; the Opengeni token is NOT appended (it is recorded against
  * the holder + validated at the in-box websockify edge).
  */
 export function buildStreamUrl(endpoint: ExposedPortEndpoint): string {
@@ -272,7 +279,7 @@ export function exposedPortEndpointFromUrl(value: string): ExposedPortEndpoint {
 
 /**
  * Resolve the provider's scoped tunnel for the stream port and mint the scoped
- * OpenGeni stream token. Returns a coherent `{url, token, expiresAt, transport,
+ * Opengeni stream token. Returns a coherent `{url, token, expiresAt, transport,
  * client, resolution}` cell the caller records on the lease (data_plane_url) and
  * returns in the DesktopStream handshake.
  *
@@ -300,7 +307,7 @@ export async function exposeStreamPort(
     endpoint = await s.resolveExposedPort(port);
   } catch (error) {
     throw new StreamPortUnavailableError(
-      `provider failed to resolve the stream port ${port}: ${error instanceof Error ? error.message : String(error)}`,
+      `provider failed to resolve the stream port ${port}: ${errorMessage(error)}`,
       error,
     );
   }
@@ -313,12 +320,13 @@ export async function exposeStreamPort(
     sessionId: input.sessionId,
     viewerId: input.viewerId,
     leaseEpoch: input.leaseEpoch,
-    mode: "view",
+    mode: input.mode ?? "view",
     port,
     ttlSeconds,
     nowSeconds,
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     ...(input.authorityEpoch ? { authorityEpoch: input.authorityEpoch } : {}),
+    ...(endpoint.relayChannel ? { relayChannel: endpoint.relayChannel } : {}),
   });
 
   return {

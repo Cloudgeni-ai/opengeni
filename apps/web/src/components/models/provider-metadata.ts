@@ -1,5 +1,15 @@
-import type { OrganizationModelProviderKind as ProviderKind } from "@opengeni/sdk";
+import { AzureOpenAIEndpoint, DirectModelName } from "@opengeni/contracts";
+import type { OrganizationModelCatalogProviderKind as ProviderKind } from "@opengeni/sdk";
 import type { ProviderPresentation } from "@/components/ai-gateway-connection";
+import { readAzureOpenAIAddress } from "./azure-endpoint";
+
+/** An exact OpenAI model ID or Azure deployment name, as the API checks it. */
+function directModelNameProblem(value: string, noun: "model ID" | "deployment name") {
+  if (!value) return `Enter the ${noun}.`;
+  return DirectModelName.safeParse(value).success
+    ? null
+    : `Enter the exact ${noun}: letters, numbers, dots, underscores or hyphens.`;
+}
 
 // Dependency-free presentation data shared by workspace and organization connections.
 export const ORGANIZATION_PROVIDER_META: Record<
@@ -33,9 +43,9 @@ export const ORGANIZATION_PROVIDER_META: Record<
     shortName: "Claude",
     provider: "claude_subscription",
     billedTo: "The connected Claude subscription",
-    summary: "Use your Claude plan in OpenGeni. Sign in to check usage and reset times.",
+    summary: "Use your Claude plan in Opengeni. Sign in to check usage and reset times.",
     keyHelp:
-      "Run claude setup-token in your terminal, then paste the token here. The token uses your subscription limits. Replace it when it expires or is revoked; OpenGeni does not refresh setup tokens.",
+      "Run claude setup-token in your terminal, then paste the token here. The token uses your subscription limits. Replace it when it expires or is revoked; Opengeni does not refresh setup tokens.",
     keyAriaLabel: "Claude subscription setup token",
     credentialLabelText: "Sign-in",
     customModelsHeading: "Claude models",
@@ -90,6 +100,103 @@ export const ORGANIZATION_PROVIDER_META: Record<
     waitingModelDescription: "Waiting for an OpenRouter key",
     unavailableModelDescription: "Connection status unavailable",
     modelToastName: "OpenRouter model",
+    connectionManagerDescription: "",
+  },
+  opper: {
+    title: "Opper",
+    shortName: "Opper",
+    provider: "opper",
+    billedTo: "The organization's Opper account",
+    summary:
+      "Use models through the organization's Opper account in shared workspaces, billed to Opper.",
+    keyHelp: "Create one at platform.opper.ai under API keys.",
+    keyAriaLabel: "Organization Opper API key",
+    customModelsHeading: "Custom models",
+    customModelsDescription:
+      "Exact Opper model ids shared workspaces can pick: a pool such as gemini-3.8-flash or a pinned route such as aws/claude-opus-5-5. Separate from deployment-provided Opper models.",
+    customModelInputAriaLabel: "Opper organization model id",
+    customModelPlaceholder: "aws/claude-opus-5-5",
+    emptyCustomModelsDescription: "No custom models yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an Opper key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Opper model",
+    connectionManagerDescription: "",
+  },
+  openai: {
+    title: "OpenAI API",
+    shortName: "OpenAI",
+    provider: "openai",
+    billedTo: "The organization's OpenAI API account",
+    summary:
+      "Use models through the organization's OpenAI API key in shared workspaces, billed to OpenAI.",
+    connectSummary: "Use OpenAI models with your own API key. Usage is billed by OpenAI.",
+    keyHelp: "Create one at platform.openai.com under API keys.",
+    keyAriaLabel: "OpenAI API key",
+    firstModelField: {
+      label: "Model",
+      hint: "The exact OpenAI model ID to use, as in the API.",
+      placeholder: "gpt-6-sol",
+      initialValue: "gpt-6-sol",
+      validate: (value) => directModelNameProblem(value, "model ID"),
+    },
+    customModelsHeading: "Models",
+    customModelsDescription:
+      "Exact OpenAI model IDs shared workspaces can pick. Each one is checked with the organization's key before it is saved.",
+    customModelsAfterConnect: "Models can be added after OpenAI is connected.",
+    customModelInputAriaLabel: "OpenAI model ID",
+    customModelPlaceholder: "gpt-6-sol",
+    emptyCustomModelsDescription: "No models yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an OpenAI key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "OpenAI model",
+    connectionManagerDescription: "",
+  },
+  azure_openai: {
+    title: "Azure OpenAI",
+    shortName: "Azure OpenAI",
+    provider: "azure_openai",
+    billedTo: "The organization's Azure OpenAI account",
+    summary:
+      "Use your Azure OpenAI deployments in shared workspaces, billed to the organization's Azure account.",
+    connectSummary:
+      "Use your Azure OpenAI or Microsoft Foundry deployments. Usage is billed to your Azure subscription.",
+    keyHelp:
+      "In the Azure portal or Microsoft Foundry, it's next to the endpoint (Keys and Endpoint).",
+    keyAriaLabel: "Azure OpenAI API key",
+    endpointField: {
+      label: "Endpoint",
+      ariaLabel: "Azure OpenAI endpoint",
+      placeholder: "https://RESOURCE.openai.azure.com",
+      hint: "Paste your resource's endpoint, or a deployment's Target URI from Microsoft Foundry.",
+      read: (value) => {
+        const address = readAzureOpenAIAddress(value);
+        return address ? { endpoint: address.endpoint, model: address.deployment } : null;
+      },
+      validate: (value) =>
+        AzureOpenAIEndpoint.safeParse(value).success
+          ? null
+          : "Paste the endpoint of your Azure OpenAI or Foundry resource, like https://RESOURCE.openai.azure.com.",
+    },
+    firstModelField: {
+      label: "Deployment name",
+      hint: "Filled in from a Target URI. Otherwise, copy it from Deployments in Microsoft Foundry.",
+      placeholder: "gpt-6-sol",
+      validate: (value) => directModelNameProblem(value, "deployment name"),
+    },
+    customModelNoun: "deployment",
+    customModelsHeading: "Deployments",
+    customModelsDescription:
+      "Exact Azure deployment names shared workspaces can pick. Each one is checked against the organization's endpoint before it is saved.",
+    customModelsAfterConnect: "Deployments can be added after Azure OpenAI is connected.",
+    customModelInputAriaLabel: "Azure OpenAI deployment name",
+    customModelPlaceholder: "gpt-6.1-sol",
+    emptyCustomModelsDescription: "No deployments yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an Azure OpenAI key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Azure OpenAI deployment",
     connectionManagerDescription: "",
   },
 };

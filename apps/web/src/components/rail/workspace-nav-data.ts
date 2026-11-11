@@ -3,12 +3,13 @@
 
 export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/insights"
-  | "/workspaces/$workspaceId/variable-sets"
+  | "/workspaces/$workspaceId/secrets"
   | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
-  | "/workspaces/$workspaceId/schedules"
-  | "/workspaces/$workspaceId/memory"
+  | "/workspaces/$workspaceId/automations"
+  | "/workspaces/$workspaceId/agents"
+  | "/workspaces/$workspaceId/meetings"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
   | "/workspaces/$workspaceId/settings";
@@ -16,11 +17,14 @@ export type WorkspaceConfigTarget =
 export type WorkspaceConfigIcon =
   | "gauge"
   | "box"
+  | "lock-keyhole"
   | "server-cog"
   | "laptop"
   | "brain-circuit"
   | "plug"
-  | "calendar-clock"
+  | "zap"
+  | "bot"
+  | "audio-lines"
   | "panels-top-left"
   | "settings";
 
@@ -51,13 +55,25 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/state",
     icon: "brain-circuit",
     label: "Knowledge",
-    description: "Knowledge, instructions, and skills",
+    description: "Knowledge, instructions, and agent learning",
   },
   {
-    to: "/workspaces/$workspaceId/schedules",
-    icon: "calendar-clock",
-    label: "Schedules",
-    description: "Run agents on a schedule",
+    to: "/workspaces/$workspaceId/automations",
+    icon: "zap",
+    label: "Automations",
+    description: "Run tasks on a schedule or when something happens",
+  },
+  {
+    to: "/workspaces/$workspaceId/agents",
+    icon: "bot",
+    label: "Agents",
+    description: "Named agents you can chat with here and in Slack",
+  },
+  {
+    to: "/workspaces/$workspaceId/meetings",
+    icon: "audio-lines",
+    label: "Meetings",
+    description: "Record meetings and read who said what",
   },
   {
     to: "/workspaces/$workspaceId/artifacts",
@@ -86,10 +102,10 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
     label: "Runtime",
     items: [
       {
-        to: "/workspaces/$workspaceId/variable-sets",
-        icon: "box",
-        label: "Variable sets",
-        description: "Secret variableSets for sandboxes",
+        to: "/workspaces/$workspaceId/secrets",
+        icon: "lock-keyhole",
+        label: "Secrets",
+        description: "Logins, keys and files agents use without seeing them",
       },
       {
         to: "/workspaces/$workspaceId/rigs",
@@ -102,18 +118,6 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
         icon: "laptop",
         label: "Machines",
         description: "Your own connected computers",
-      },
-    ],
-  },
-  {
-    id: "knowledge",
-    label: "Knowledge",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/memory",
-        icon: "brain-circuit",
-        label: "Memory",
-        description: "Durable facts agents carry across sessions",
       },
     ],
   },

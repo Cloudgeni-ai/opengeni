@@ -5,16 +5,15 @@ import {
 } from "@opengeni/contracts";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { useAppContext } from "@/context";
-import { builtInMcpCapability, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
+import { Button } from "@opengeni/react/ui/button";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
-  clientFirstPartyMcpToolPolicy,
-  firstPartySessionToolOptionsFor,
-  type McpServerOption,
-} from "@/lib/session-tools";
+  builtInMcpCapability,
+  sessionCapabilityGroupsFor,
+} from "@opengeni/react/app/lib/session-capabilities";
+import { type McpServerOption } from "@opengeni/react/app/lib/session-tools";
 
 type Defaults = Required<
   Pick<WorkspaceSessionToolDefaults, "mcpServerIds" | "firstPartyMcpTools">
@@ -25,58 +24,6 @@ type SelectionPatch = {
   mcpServerIds?: string[] | null;
   inheritConnectedMcpServers?: boolean | null;
 };
-
-export function WorkspaceCapabilityDefaults({
-  workspaceId,
-  canManage,
-  kind,
-}: {
-  workspaceId: string;
-  canManage: boolean;
-  kind: "permissions" | "plugins";
-}) {
-  const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
-  const policy = clientFirstPartyMcpToolPolicy(context.clientConfig);
-  const configured = resolveWorkspaceSessionToolDefaults(workspace?.settings);
-  const defaults: Defaults = {
-    ...(configured?.mcpServerIds !== undefined
-      ? { inheritConnectedMcpServers: configured.inheritConnectedMcpServers }
-      : { inheritConnectedMcpServers: true }),
-    mcpServerIds: configured?.mcpServerIds ?? context.toolMcpServers.map((server) => server.id),
-    firstPartyMcpTools: configured?.firstPartyMcpTools ?? policy.default,
-  };
-  const custom =
-    kind === "permissions"
-      ? configured?.firstPartyMcpTools !== undefined ||
-        (configured?.mcpServerIds !== undefined &&
-          context.toolMcpServers.some(
-            (server) =>
-              builtInMcpCapability(server) && !configured.mcpServerIds!.includes(server.id),
-          ))
-      : configured?.mcpServerIds !== undefined;
-  return (
-    <WorkspaceCapabilityDefaultsView
-      servers={context.toolMcpServers}
-      firstPartyTools={firstPartySessionToolOptionsFor(policy.allowed)}
-      defaults={defaults}
-      custom={custom}
-      revisionKey={workspace?.updatedAt ?? workspaceId}
-      canManage={canManage}
-      kind={kind}
-      onSave={async (patch) => {
-        const invocation = context.captureWorkspaceInvocation(workspaceId);
-        if (!invocation) return false;
-        const updated = await context.updateWorkspaceSettings(workspaceId, {
-          sessionToolDefaults: patch,
-        });
-        if (!updated || !context.ownsWorkspaceInvocation(workspaceId, invocation)) return false;
-        toast.success("Defaults for new sessions updated");
-        return true;
-      }}
-    />
-  );
-}
 
 /**
  * Settings > General > "Use connected apps automatically": new sessions start

@@ -1,0 +1,1139 @@
+//! Requests from handles, checked against each sandbox's generation.
+
+use std::io;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use compute_core::{
+    CreateRoom, DiskSpace, Durability, HoldId, Host, Input, Level, Priority, SandboxId, Size,
+    SleepPolicy, Step,
+};
+use compute_engine::Engine;
+
+use crate::layout::{Images, Paths, sync_parent};
+use crate::observe::Cause;
+use crate::pool::{Shape, Sources, Start, Template, first_files};
+use crate::protocol::{
+    BlockedSandbox, CapacityStatus, CpuStatus, DiskStatus, FailedStep, HostStatus, Id,
+    MemoryStatus, SandboxConfig, SandboxStatus, SleepConfig, step_name,
+};
+use crate::rootfs::Missing;
+use crate::state::{Change, Identity, Record, check_generation};
+use crate::step::images_of;
+use crate::store::{OwnerEpoch, Store};
+
+use super::disk::{AfterReading, Room, unwanted};
+use super::holds::{Write, hold_id};
+use super::observe::{By, Why};
+use super::remove::unmake;
+use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
+
+/// Replies to `reply` once the write in `outcome` has made a change
+/// durable, or with why the change was refused or could not be kept.
+fn answer_once_written<T: Send + 'static>(outcome: Result<(Write, T), HostError>, reply: Reply<T>) {
+    match outcome {
+        Ok((write, answer)) => {
+            tokio::spawn(async move {
+                let result = write
+                    .await
+                    .map(|()| answer)
+                    .map_err(|error| HostError::Io(format!("keeping the holds failed: {error}")));
+                let _ = reply.send(result);
+            });
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
+
+/// Makes a new sandbox's directory and first files, from `template` where
+/// one fits. Blocks.
+pub(super) fn new_files(
+    paths: &Paths,
+    base: &Path,
+    template: Option<(&Template, &Sources)>,
+) -> io::Result<Start> {
+    // The directory must be new: one already there belongs to a sandbox
+    // this agent does not know, and is left alone.
+    std::fs::create_dir(&paths.dir)?;
+    std::fs::create_dir(&paths.jail)?;
+    let start = first_files(paths, &images_of(paths), base, template)?;
+    // The record, written next, vouches for these: their directory entries
+    // must outlast a crash first, all the way up to the one in the
+    // sandboxes' directory.
+    sync_parent(&paths.disk)?;
+    sync_parent(&paths.jail)?;
+    sync_parent(&paths.dir)?;
+    Ok(start)
+}
+
+impl<E: Engine, S: Store> HostAgent<E, S> {
+    pub(super) fn on_command(&mut self, command: Command) {
+        match command {
+            Command::Create {
+                id,
+                config,
+                owner,
+                reply,
+            } => self.create(id, config, owner, reply),
+            command @ (Command::Adopt { .. }
+            | Command::HandOff { .. }
+            | Command::Reconcile { .. }
+            | Command::Owned { .. }
+            | Command::Inventory { .. }) => self.on_fleet_command(command),
+            Command::Traced(trace, command) => {
+                self.trace = Some(trace);
+                self.on_command(*command);
+                self.trace = None;
+            }
+            Command::Remove {
+                id,
+                generation,
+                reply,
+            } => self.remove(id, generation, reply),
+            Command::Touch {
+                id,
+                generation,
+                priority,
+                by,
+                reply,
+            } => {
+                let result = self.touch(id, generation, priority, by);
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                }
+            }
+            Command::Check {
+                id,
+                generation,
+                reply,
+            } => {
+                let result = match self.records.get(id) {
+                    Some(record) => check_generation(&record, Some(generation)).map_err(Into::into),
+                    None => Err(HostError::Removed(id)),
+                };
+                let _ = reply.send(result);
+            }
+            Command::Sleep {
+                id,
+                generation,
+                level,
+                reply,
+            } => self.sleep(id, generation, level, reply),
+            Command::Restart { id, reply } => self.restart(id, reply),
+            Command::Capture {
+                id,
+                generation,
+                into,
+                reply,
+            } => {
+                let _ = reply.send(self.capture(id, generation, &into));
+            }
+            command @ (Command::Hold { .. }
+            | Command::Unhold { .. }
+            | Command::Acquire { .. }
+            | Command::Release { .. }) => self.on_hold_command(command),
+            Command::Status { reply } => {
+                let _ = reply.send(self.status());
+            }
+            Command::Inspect { id, reply } => {
+                let _ = reply.send(
+                    self.core
+                        .sandbox(id.0)
+                        .map(|view| (view.state.level, view.step)),
+                );
+            }
+        }
+    }
+
+    /// Holds taken, ended, acquired and released.
+    fn on_hold_command(&mut self, command: Command) {
+        match command {
+            Command::Hold {
+                id,
+                generation,
+                name,
+                ttl,
+                priority,
+                reply,
+            } => {
+                let outcome = self
+                    .check(id, generation)
+                    .and_then(|()| self.hold(id, name, ttl, priority));
+                answer_once_written(outcome, reply);
+            }
+            Command::Unhold {
+                id,
+                generation,
+                name,
+                reply,
+            } => {
+                let outcome = self
+                    .check(id, generation)
+                    .and_then(|()| self.unhold(id, &name));
+                answer_once_written(outcome.map(|write| (write, ())), reply);
+            }
+            Command::Acquire {
+                id,
+                generation,
+                hold,
+                priority,
+                reply,
+            } => self.acquire(id, generation, hold, priority, reply),
+            Command::Release { id, hold } => {
+                if self.slots.contains_key(&id.0) {
+                    self.input(Input::Release {
+                        sandbox: id.0,
+                        hold,
+                    });
+                }
+            }
+            _ => unreachable!("not a hold command"),
+        }
+    }
+
+    /// Notes that a request asks about `id`, for the step it causes.
+    /// Notes that `by` asked for sandbox `id` to wake, for the step that
+    /// wakes it to say.
+    fn note_ask(&mut self, id: Id, by: By) {
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+                by: Some(by),
+            });
+        }
+    }
+
+    pub(super) fn remove(&mut self, id: Id, generation: Option<u64>, reply: Reply<()>) {
+        if self.blocked.contains_key(&id.0) {
+            // A blocked sandbox with a readable record can still be removed:
+            // removal stops whatever VM it has and retries any removal that
+            // stopped part way.
+            let Some(record) = self.records.get(id) else {
+                match self.leftovers.get(&id.0) {
+                    Some(&left) => self.remove_leftovers(id, left, reply),
+                    None => {
+                        let _ = reply.send(Err(self.blocked_error(id)));
+                    }
+                }
+                return;
+            };
+            if let Err(error) = check_generation(&record, generation) {
+                let _ = reply.send(Err(error.into()));
+                return;
+            }
+            self.blocked.remove(&id.0);
+            self.remove_recorded(&record, None, vec![reply], None);
+            return;
+        }
+        if let Err(error) = self.check(id, generation) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.removers.push(reply);
+            self.input(Input::Remove { sandbox: id.0 });
+        } else if let Some(removers) = self.destroying.get_mut(&id.0) {
+            removers.push(reply);
+        } else if self.preparing.contains(&id.0) {
+            let _ = reply.send(Err(HostError::Busy(id)));
+        } else {
+            let _ = reply.send(Err(HostError::NotFound(id)));
+        }
+    }
+
+    /// Marks sandbox `id` used now, if it exists at `generation`.
+    fn touch(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        priority: Priority,
+        by: By,
+    ) -> Result<(), HostError> {
+        self.check(id, generation)?;
+        self.wake_past_hand_off(id)?;
+        if !self.slots.contains_key(&id.0) {
+            return Err(HostError::NotFound(id));
+        }
+        self.note_ask(id, by);
+        self.input(Input::Touch {
+            sandbox: id.0,
+            priority,
+        });
+        Ok(())
+    }
+
+    /// Ends named hold `name`, returning the write that makes its end
+    /// durable. If it was already gone, an earlier release may still be
+    /// on its way to disk, or have failed to get there: the write then
+    /// resolves once that release is kept.
+    pub(super) fn unhold(&mut self, id: Id, name: &str) -> Result<Write, HostError> {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return Err(HostError::NotFound(id));
+        };
+        let write = if slot.holds.remove(name) {
+            slot.holds.write(unix_ms_now())
+        } else {
+            slot.holds.flush()
+        };
+        self.input(Input::Release {
+            sandbox: id.0,
+            hold: hold_id(name),
+        });
+        Ok(write)
+    }
+
+    pub(super) fn acquire(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        hold: HoldId,
+        priority: Priority,
+        reply: Reply<Woke>,
+    ) {
+        if let Err(error) = self
+            .check(id, generation)
+            .and_then(|()| self.wake_past_hand_off(id))
+        {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        let during = self.core.sandbox(id.0).and_then(|view| view.step);
+        let Some(slot) = self.slots.get_mut(&id.0).filter(|slot| !slot.destroy) else {
+            let _ = reply.send(Err(HostError::NotFound(id)));
+            return;
+        };
+        slot.waiters.push(Waiter {
+            generation,
+            during,
+            queued: false,
+            reply,
+        });
+        self.note_ask(id, By::Fleet);
+        self.input(Input::Hold {
+            sandbox: id.0,
+            hold,
+            until: None,
+            priority,
+        });
+        self.settle(id);
+        // Still waiting: whatever wake runs now is the one it joins.
+        if let Some(waiter) = self
+            .slots
+            .get_mut(&id.0)
+            .and_then(|slot| slot.waiters.last_mut())
+        {
+            waiter.queued = true;
+        }
+    }
+
+    /// Refuses a request that names an execution the sandbox no longer
+    /// runs.
+    pub(super) fn check(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
+        if self.blocked.contains_key(&id.0) {
+            return Err(self.blocked_error(id));
+        }
+        match self.records.get(id) {
+            Some(record) => Ok(check_generation(&record, generation)?),
+            None => Ok(()),
+        }
+    }
+
+    /// Answers a request that sandbox `id`, under `generation` if one is
+    /// named, sleep to `level` or deeper, once the next disk reading has
+    /// decided it if only that can; see [`Self::request_sleep`].
+    pub(super) fn sleep(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        level: Level,
+        reply: Reply<()>,
+    ) {
+        match self
+            .check(id, generation)
+            .and_then(|()| self.request_sleep(id, level))
+        {
+            Ok(Room::Now) => {
+                let _ = reply.send(Ok(()));
+            }
+            Ok(Room::AfterReading) => {
+                self.after_reading(AfterReading::Sleep(id, generation, level, reply));
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+
+    /// Asks sandbox `id` to sleep to `level` or deeper, unless only the
+    /// next disk reading can tell whether its save fits
+    /// ([`Room::AfterReading`]): then nothing is asked yet, and the caller
+    /// asks again after that reading.
+    pub(super) fn request_sleep(&mut self, id: Id, level: Level) -> Result<Room, HostError> {
+        if !self.slots.contains_key(&id.0) {
+            return Err(HostError::NotFound(id));
+        }
+        if level >= Level::Archived && !self.store.is_configured() {
+            return Err(HostError::Invalid(
+                "this host has no store, so sandboxes cannot be archived".into(),
+            ));
+        }
+        if level >= Level::Saved
+            && self
+                .core
+                .sandbox(id.0)
+                .is_some_and(|view| view.unsavable && view.state.durability == Durability::Volatile)
+        {
+            return Err(cannot_save(id));
+        }
+        if level == Level::Compressed && !self.can_compress {
+            return Err(HostError::Invalid(
+                "this host cannot compress memory; ask for saved instead".into(),
+            ));
+        }
+        // One the host never saves on its own books its save only from
+        // now on: a save the disk cannot take is refused before its VM is
+        // paused for it, as a hand-off would pause it and then wait.
+        if level >= Level::Saved {
+            match self.core.save_room(id.0) {
+                CreateRoom::Fits => {}
+                CreateRoom::AwaitsReading(..) => return Ok(Room::AfterReading),
+                CreateRoom::Short(resource, needed, free) => {
+                    return Err(HostError::HostFull {
+                        id,
+                        resource,
+                        needed,
+                        free,
+                    });
+                }
+            }
+        }
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.sleep_asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+                by: None,
+            });
+        }
+        self.input(Input::Sleep {
+            sandbox: id.0,
+            level,
+        });
+        Ok(Room::Now)
+    }
+
+    /// Holds sandbox `id` awake for `name`, returning the write that makes
+    /// the hold durable, and whether the hold was already there.
+    pub(super) fn hold(
+        &mut self,
+        id: Id,
+        name: String,
+        ttl: Option<Duration>,
+        priority: Priority,
+    ) -> Result<(Write, bool), HostError> {
+        if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
+            return Err(HostError::NotFound(id));
+        }
+        self.wake_past_hand_off(id)?;
+        let until = ttl.map(|ttl| self.now() + ttl);
+        self.note_ask(id, By::Fleet);
+        self.input(Input::Hold {
+            sandbox: id.0,
+            hold: hold_id(&name),
+            until,
+            priority,
+        });
+        let now_ms = unix_ms_now();
+        let lapses_ms = ttl
+            .map(|ttl| now_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
+        let slot = self.slots.get_mut(&id.0).ok_or(HostError::NotFound(id))?;
+        let renewed = slot.holds.set(name, lapses_ms);
+        Ok((slot.holds.write(now_ms), renewed))
+    }
+
+    /// The refusal of a request for blocked sandbox `id`.
+    pub(super) fn blocked_error(&self, id: Id) -> HostError {
+        HostError::Blocked {
+            id,
+            reason: self.blocked.get(&id.0).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// The answer to creating `id` with `config` when no work is needed: a
+    /// refusal, or success for a repeat of a create that already happened.
+    fn create_answer(&self, id: Id, config: &SandboxConfig) -> Option<Result<(), HostError>> {
+        if self.blocked.contains_key(&id.0) {
+            return Some(Err(self.blocked_error(id)));
+        }
+        if let Err(problem) = self.ordinals_known() {
+            return Some(Err(HostError::Io(problem)));
+        }
+        if self.preparing.contains(&id.0) {
+            // Perhaps this very create's earlier attempt: retrying once it
+            // is done tells.
+            return Some(Err(HostError::Busy(id)));
+        }
+        let record = self.records.get(id);
+        if self.slots.contains_key(&id.0)
+            || self.destroying.contains_key(&id.0)
+            || self.hosts.contains_key(&id.0)
+            || record.is_some()
+        {
+            // Creating is idempotent: a client retrying a create whose reply
+            // it lost finds the sandbox it asked for. One with other
+            // settings, or on its way out, is someone else's.
+            let same = self.slots.get(&id.0).is_some_and(|slot| !slot.destroy)
+                && !self.destroying.contains_key(&id.0)
+                && record
+                    .is_some_and(|record| !record.removing && record.config.same_sandbox(config));
+            return Some(if same {
+                Ok(())
+            } else {
+                Err(HostError::Exists(id))
+            });
+        }
+        if self.tearing_down.contains_key(&id.0) {
+            // An old VM of this id is still being torn down; its teardown
+            // must not touch the new sandbox's files.
+            return Some(Err(HostError::Busy(id)));
+        }
+        match self.sleep_policy(config) {
+            Err(error) => Some(Err(HostError::Invalid(error))),
+            Ok(_) => self
+                .needs_absent_store(&config.sleep)
+                .or_else(|| self.unoffered(config))
+                .map(Err),
+        }
+    }
+
+    /// The refusal of `sleep` on a host without a store, if it archives or
+    /// checkpoints: judged by what was asked, before the host drops
+    /// checkpoints it cannot take.
+    fn needs_absent_store(&self, sleep: &SleepConfig) -> Option<HostError> {
+        (!self.store.is_configured()
+            && (sleep.archive_after_ms.is_some() || sleep.checkpoint_every_ms.is_some()))
+        .then(|| {
+            HostError::Invalid(
+                "this host has no store, so sandboxes cannot be archived or checkpointed".into(),
+            )
+        })
+    }
+
+    /// The refusal of a sandbox of `config` that asks to reach what this
+    /// host does not offer.
+    fn unoffered(&self, config: &SandboxConfig) -> Option<HostError> {
+        let offered = |name: &String| self.net.as_ref().is_some_and(|net| net.offers(name));
+        config.reach.iter().find(|name| !offered(name)).map(|name| {
+            HostError::Invalid(format!(
+                "this host does not offer {name:?}, which the sandbox asks to reach"
+            ))
+        })
+    }
+
+    /// Refuses a new sandbox `id` of `config` that cannot be created here,
+    /// or not woken at once as `size`; adopted with `remote`, its first
+    /// wake fetches it. Otherwise says whether it fits now or only the
+    /// next disk reading can tell, and how it sleeps here.
+    pub(super) fn can_create(
+        &self,
+        id: Id,
+        config: &SandboxConfig,
+        size: Size,
+        remote: bool,
+    ) -> Result<(Room, SleepPolicy), HostError> {
+        let policy = self.sleep_policy(config).map_err(HostError::Invalid)?;
+        if let Some(refused) = self.needs_absent_store(&config.sleep) {
+            return Err(refused);
+        }
+        if let Some(refused) = self.unoffered(config) {
+            return Err(refused);
+        }
+        let room = self.room_for(id, size, policy, remote, DiskSpace::default())?;
+        Ok((room, policy))
+    }
+
+    /// Refuses a new sandbox `id` of `config` this host could not wake at
+    /// once, as it would refuse that wake: it would sit here unable to
+    /// run, so it goes elsewhere before anything of it is made. `files` is
+    /// what is written for it before its first wake, booked together with
+    /// that wake, which books a save only if the host may save it unasked
+    /// by `policy`. Every create and adopt taken books its first wake with
+    /// [`Self::first_wake`] in the same turn of the agent as a check that
+    /// it fits now, so a burst of them cannot take the same room twice.
+    pub(super) fn room_for(
+        &self,
+        id: Id,
+        size: Size,
+        policy: SleepPolicy,
+        remote: bool,
+        files: DiskSpace,
+    ) -> Result<Room, HostError> {
+        match self
+            .core
+            .create_room(self.now(), id.0, size, policy, remote, files)
+        {
+            CreateRoom::Fits => Ok(Room::Now),
+            CreateRoom::AwaitsReading(..) => Ok(Room::AfterReading),
+            CreateRoom::Short(resource, needed, free) => Err(HostError::HostFull {
+                id,
+                resource,
+                needed,
+                free,
+            }),
+        }
+    }
+
+    /// When the first wake of a sandbox created, claimed or adopted now
+    /// stops being booked, in milliseconds since the Unix epoch, after
+    /// [`super::HostConfig::first_wake_within`]; see [`Self::first_wake`].
+    pub(super) fn first_wake_by_ms(&self) -> u64 {
+        let within = u64::try_from(self.first_wake_within.as_millis()).unwrap_or(u64::MAX);
+        unix_ms_now().saturating_add(within)
+    }
+
+    /// What books the first wake of new sandbox `id` of `size` that sleeps
+    /// by `policy`, checked with [`Self::room_for`], until it runs or until
+    /// `by_ms` (from [`Self::first_wake_by_ms`]), which its record keeps so
+    /// an agent that starts before then books it again; see
+    /// [`Input::Creating`].
+    pub(super) fn first_wake(
+        &self,
+        id: Id,
+        size: Size,
+        policy: SleepPolicy,
+        remote: bool,
+        by_ms: u64,
+    ) -> Input {
+        let left = Duration::from_millis(by_ms.saturating_sub(unix_ms_now()));
+        Input::Creating {
+            sandbox: id.0,
+            size,
+            policy,
+            remote,
+            until: self.now() + left,
+        }
+    }
+
+    /// Books the first wake of adopted sandbox `record` as its copy's own
+    /// disk needs if this host can wake it now: the adopt booked it
+    /// without that disk, which only the claimed copy shows. If it fits
+    /// only once disk relief or the next reading is in, it books that disk
+    /// as wanted meanwhile (see [`Input::Wants`]) and says to wait.
+    /// Otherwise the adopt is refused as a wake that would wait here for
+    /// room is.
+    pub(super) fn adopted_room(&mut self, record: &Record) -> Result<Room, HostError> {
+        let (id, size) = (record.id, self.record_size(record));
+        let policy = self
+            .sleep_policy(&record.config)
+            .map_err(HostError::Invalid)?;
+        let room =
+            self.core
+                .create_room(self.now(), id.0, size, policy, true, DiskSpace::default());
+        match room {
+            CreateRoom::Fits => {
+                let by_ms = record
+                    .first_wake_by_ms
+                    .unwrap_or_else(|| self.first_wake_by_ms());
+                self.inputs([
+                    unwanted(id.0),
+                    self.first_wake(id, size, policy, true, by_ms),
+                ]);
+                Ok(Room::Now)
+            }
+            CreateRoom::AwaitsReading(..) => {
+                self.want_disk(id.0, Host::first_wake_disk(size, policy, true));
+                Ok(Room::AfterReading)
+            }
+            CreateRoom::Short(resource, needed, free) => Err(HostError::HostFull {
+                id,
+                resource,
+                needed,
+                free,
+            }),
+        }
+    }
+
+    /// Ends the booking of new sandbox `id`'s first wake, and of the disk
+    /// it waited for disk relief to free, if it did (see
+    /// [`Input::Wants`]): its create or adopt failed before the sandbox
+    /// joined the core.
+    pub(super) fn first_wake_unbooked(&mut self, id: Id) {
+        self.inputs([
+            Input::Creating {
+                sandbox: id.0,
+                size: Size::default(),
+                policy: SleepPolicy::NEVER,
+                remote: false,
+                until: self.now(),
+            },
+            unwanted(id.0),
+        ]);
+    }
+
+    pub(super) fn create(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    ) {
+        self.create_from(id, config, owner, reply, true);
+    }
+
+    /// Creates sandbox `id`, from a ready sandbox if `ready` and there is
+    /// one, for the ownership under `owner`.
+    pub(super) fn create_from(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+        ready: bool,
+    ) {
+        if let Some(answer) = self.create_answer(id, &config) {
+            // A repeat with the agent link sent changed takes it up.
+            if answer.is_ok()
+                && let Some(record) = self.records.get(id)
+                && record.config.link != config.link
+            {
+                self.take_owner(id, Change::new().owner(owner).link(config.link), reply);
+                return;
+            }
+            let _ = reply.send(answer);
+            return;
+        }
+        let room = match self.can_create(id, &config, self.size(&config, None), false) {
+            Ok((room, _)) => room,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        self.template_used(Shape::of(&config));
+        // A ready sandbox is claimed only with room for it now; otherwise
+        // the fresh create waits for the reading that decides it.
+        let unclaimed = if ready && room == Room::Now {
+            self.claim(id, config, owner, reply)
+        } else {
+            Some((config, reply))
+        };
+        let Some((config, reply)) = unclaimed else {
+            return;
+        };
+        self.create_fresh(id, config, owner, reply);
+    }
+
+    /// Creates sandbox `id` from its shape's template, or cold, once the
+    /// host has its image, and books its first wake meanwhile. A build of
+    /// the template the create wanted and found missing starts only once
+    /// that wake is booked, so it takes only room the create leaves: the
+    /// sandbox boots cold rather than give its place to the build.
+    pub(super) fn create_fresh(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    ) {
+        let policy = match self.sleep_policy(&config) {
+            Ok(policy) => policy,
+            Err(problem) => {
+                self.first_wake_unbooked(id);
+                let _ = reply.send(Err(HostError::Invalid(problem)));
+                return;
+            }
+        };
+        if let Some(image) = config.image.filter(|image| !self.rootfs.has(*image)) {
+            // Back from a disk reading, the image may have gone meanwhile:
+            // the room is checked again, its own hold given back, before
+            // it is held for the fetch.
+            if let Err(error) = self.room_for(
+                id,
+                self.size(&config, None),
+                policy,
+                false,
+                DiskSpace::default(),
+            ) {
+                self.first_wake_unbooked(id);
+                let _ = reply.send(Err(error));
+                return;
+            }
+            self.create_after_fetch(image, id, config, owner, reply);
+            return;
+        }
+        let shape = Shape::of(&config);
+        let (template, build) = self.template_for(shape);
+        // Its first files are written before the core knows it: they are
+        // booked from before the copy until a reading shows them, and must
+        // fit together with its first wake.
+        let template_disk = template.as_ref().map(|t| t.disk());
+        let disk = self.first_files_disk(shape.image, template_disk.as_deref());
+        match self.room_for(id, self.size(&config, None), policy, false, disk) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                self.unwant_template(shape, build);
+                self.hold_room(id, &config);
+                // Booked meanwhile, so disk relief frees it, once it waits
+                // where relief sees what it uses.
+                let wake = Host::first_wake_disk(self.size(&config, None), policy, false);
+                self.after_reading(AfterReading::Create(id, Box::new(config), owner, reply));
+                self.want_disk(id.0, disk.add(wake));
+                return;
+            }
+            Err(error) => {
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
+                let _ = reply.send(Err(error));
+                return;
+            }
+        }
+        let ordinal = match self.take_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(problem) => {
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
+                let _ = reply.send(Err(HostError::Io(problem)));
+                return;
+            }
+        };
+        self.preparing.insert(id.0);
+        let allocation = match self.images.allocate(ordinal) {
+            Ok(allocation) => allocation,
+            Err(problem) => {
+                self.preparing.remove(&id.0);
+                self.ordinals.remove(&ordinal);
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
+                let _ = reply.send(Err(HostError::Invalid(problem)));
+                return;
+            }
+        };
+        let by_ms = self.first_wake_by_ms();
+        self.inputs([
+            unwanted(id.0),
+            Input::Writes { key: id.0, disk },
+            self.first_wake(id, self.size(&config, None), policy, false, by_ms),
+        ]);
+        if build {
+            self.build_template(shape);
+        }
+        let mut record = Record::new(id, ordinal, allocation, config);
+        record.owner_epoch = owner.0;
+        record.first_wake_by_ms = Some(by_ms);
+        // Made here from nothing the store holds of it.
+        record.only_copy = true;
+        self.prepare(record, template, reply);
+    }
+
+    /// Books what new sandbox `id`'s first wake takes of memory and
+    /// processor time while its create waits, for its image or for a disk
+    /// reading, before anything of it is made: a create the host took
+    /// keeps its room meanwhile, and nothing taken after it, a template
+    /// build, a ready clone's fill or another create, takes that room. Its
+    /// disk is booked with its first files once they can be written (see
+    /// [`Self::create_fresh`]); a fetch books its image's write itself.
+    /// Like any first wake, the booking lapses at [`Self::first_wake_by_ms`];
+    /// [`Self::held_rooms`] renews it while the create still waits, so
+    /// only a create the agent lost track of gives its room back that way.
+    /// The create is checked again when it goes on.
+    pub(super) fn hold_room(&mut self, id: Id, config: &SandboxConfig) {
+        // The hold books no disk, so no save either, whatever the policy.
+        let size = self.held_size(config);
+        self.input(self.first_wake(id, size, SleepPolicy::NEVER, false, self.first_wake_by_ms()));
+    }
+
+    /// What [`Self::hold_room`] books for a create of `config`: its first
+    /// wake's memory and processor time, without disk.
+    fn held_size(&self, config: &SandboxConfig) -> Size {
+        Size {
+            save: 0,
+            disk: 0,
+            fetch: 0,
+            ..self.size(config, None)
+        }
+    }
+
+    /// Renews the holds of the creates still waiting for their image or a
+    /// disk reading, each only while it still fits: a hold that lapsed
+    /// meanwhile, its room taken, is not booked again unchecked, and the
+    /// create is refused when it goes on.
+    pub(super) fn held_rooms(&self) -> Vec<Input> {
+        let fetching = self
+            .fetching
+            .values()
+            .flat_map(super::fetch::Fetch::waiting);
+        let reading = self.after_reading.iter().filter_map(|work| match work {
+            AfterReading::Create(id, config, ..) => Some((*id, &**config)),
+            AfterReading::Adopt(..)
+            | AfterReading::Claimed(..)
+            | AfterReading::Fetch(..)
+            | AfterReading::Sleep(..)
+            | AfterReading::HandOff(..) => None,
+        });
+        fetching
+            .chain(reading)
+            .filter_map(|(id, config)| {
+                let size = self.held_size(config);
+                self.room_for(id, size, SleepPolicy::NEVER, false, DiskSpace::default())
+                    .is_ok()
+                    .then(|| {
+                        self.first_wake(
+                            id,
+                            size,
+                            SleepPolicy::NEVER,
+                            false,
+                            self.first_wake_by_ms(),
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// Makes the files of the new sandbox `record` describes in the
+    /// background, from `template` if it has one, its disk as long as it
+    /// asks for, then records it; [`Event::Prepared`] says how it went.
+    fn prepare(&self, mut record: Record, template: Option<Arc<Template>>, reply: Reply<()>) {
+        let (id, ordinal) = (record.id, record.ordinal);
+        let image = record.config.image;
+        let sized = record.config.clone();
+        let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
+        let link = Images::link(&record);
+        let paths = Paths::new(&self.root, id);
+        let dir = paths.dir.clone();
+        let base = self.base_image.clone();
+        let rootfs = Arc::clone(&self.rootfs);
+        let records = Arc::clone(&self.records);
+        let net = self.net.clone();
+        let events = self.events_tx.clone();
+        tokio::spawn(async move {
+            // Held until its disk is copied, so it is not removed meanwhile.
+            let held = match image {
+                Some(image) => {
+                    let Some(held) = rootfs.hold(image).await else {
+                        let missing = Missing::Failed {
+                            image,
+                            error: "it was removed before the create could copy it".into(),
+                        };
+                        tracing::warn!(%id, %missing, "a create's image is gone");
+                        let _ = events.send(Event::Prepared {
+                            id,
+                            ordinal,
+                            result: Err(missing.into()),
+                            reply,
+                            stale: None,
+                            left: None,
+                        });
+                        return;
+                    };
+                    Some(held)
+                }
+                None => None,
+            };
+            let first = held.as_ref().map_or(base, |held| held.path.clone());
+            let networks = net.clone();
+            let from = template.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                let warm = from.as_deref().zip(sources.as_deref());
+                let start = new_files(&paths, &first, warm)?;
+                if let (Some(net), Some(link)) = (&networks, &link) {
+                    net.ensure(link)?;
+                }
+                // A copy of a template is as long as the template's, which
+                // its memory image says the guest's disk is: the first wake
+                // tells the guest it grew (see `Step::restore`).
+                let copied = std::fs::metadata(&paths.disk)?.len();
+                let length = super::disk::lengthen(&paths.disk, sized.disk_bytes(copied))?;
+                Ok((start, length))
+            })
+            .await
+            .unwrap_or_else(|error| Err(io::Error::other(error)));
+            drop(held);
+            let stale = match prepared {
+                Ok((Start::Stale, _)) => template,
+                _ => None,
+            };
+            // The record goes last: a directory without one is an
+            // unfinished creation and is cleaned up on recovery.
+            let result = match prepared {
+                Ok((start, disk_bytes)) => {
+                    record.allocation.disk_bytes = Some(disk_bytes);
+                    // A sandbox started from a template holds a memory image
+                    // of a guest that never ran as it: its first wake
+                    // restores it.
+                    // It learns which sandbox it is from the restore notice.
+                    if start == Start::Template {
+                        record.image = true;
+                        record.identity = Identity::Pending;
+                    }
+                    records
+                        .insert(record)
+                        .await
+                        .map(Box::new)
+                        .map_err(HostError::from)
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    tracing::error!(%id, "a directory for a new sandbox already exists; refusing it");
+                    let _ = events.send(Event::Prepared {
+                        id,
+                        ordinal,
+                        result: Err(HostError::Exists(id)),
+                        reply,
+                        stale,
+                        left: None,
+                    });
+                    return;
+                }
+                Err(error) => Err(HostError::Io(error.to_string())),
+            };
+            let left = match &result {
+                Ok(_) => None,
+                Err(_) => unmake(id, Some(ordinal), &dir, net)
+                    .await
+                    .err()
+                    .map(|error| error.to_string()),
+            };
+            let _ = events.send(Event::Prepared {
+                id,
+                ordinal,
+                result,
+                reply,
+                stale,
+                left,
+            });
+        });
+    }
+
+    pub(super) fn status(&self) -> HostStatus {
+        let mut sandboxes: Vec<SandboxStatus> = self
+            .slots
+            .iter()
+            .filter_map(|(id, slot)| self.sandbox_status(*id, slot))
+            .collect();
+        sandboxes.sort_by_key(|sandbox| sandbox.id);
+        let steps = Step::ALL
+            .iter()
+            .map(|step| {
+                let mut stats = self.stats[step.index()];
+                stats.in_flight = self.core.in_flight(*step);
+                (step_name(*step).to_owned(), stats)
+            })
+            .collect();
+        #[cfg(target_os = "linux")]
+        let store_stalled_ms = self
+            .fetcher
+            .as_ref()
+            .and_then(|fetcher| fetcher.stalled_for())
+            .map(|stalled| u64::try_from(stalled.as_millis()).unwrap_or(u64::MAX));
+        #[cfg(not(target_os = "linux"))]
+        let store_stalled_ms = None;
+        HostStatus {
+            sandboxes,
+            steps,
+            available_memory: self.available_memory,
+            reclaimable_memory: self.core.reclaimable_memory(self.now()),
+            blocked: self
+                .blocked
+                .iter()
+                .map(|(id, problem)| BlockedSandbox {
+                    id: Id(*id),
+                    problem: problem.clone(),
+                    frozen_owner_epoch: self.frozen_owner(*id).map(|owner| owner.0),
+                })
+                .collect(),
+            capacity: self.core.capacity().map(|capacity| CapacityStatus {
+                total: capacity.budget,
+                reserved: capacity.reserved,
+                occupied: capacity.occupied,
+                free: capacity.free(),
+                awake: capacity.awake,
+            }),
+            cpu: self.core.cpu_capacity().map(|cpu| CpuStatus {
+                total: cpu.budget,
+                reserved: cpu.reserved,
+                free: cpu.free(),
+            }),
+            disk: self.core.disk().map(|disk| {
+                let free = disk.free();
+                DiskStatus {
+                    available: disk.available.bytes,
+                    booked: disk.booked.bytes,
+                    reserve: disk.reserve.bytes,
+                    free: free.bytes,
+                    reclaimable: self.core.reclaimable_disk(self.now()),
+                    inodes_available: disk.available.inodes,
+                    inodes_booked: disk.booked.inodes,
+                    inodes_free: free.inodes,
+                }
+            }),
+            templates: {
+                let mut templates = self
+                    .warm
+                    .as_ref()
+                    .map(|warm| warm.pool.status())
+                    .unwrap_or_default();
+                self.ready.status(&mut templates, &self.ready_usage());
+                templates
+            },
+            store_stalled_ms,
+            unseen_activity: self.unseen_activity,
+            about: self.about.clone(),
+        }
+    }
+    /// One sandbox's state, as status reports it.
+    fn sandbox_status(&self, id: SandboxId, slot: &Slot<E::Vm>) -> Option<SandboxStatus> {
+        let view = self.core.sandbox(id)?;
+        let record = self.records.get(Id(id));
+        Some(SandboxStatus {
+            id: Id(id),
+            generation: record.as_ref().map_or(0, |record| record.generation),
+            owner_epoch: record
+                .as_ref()
+                .map_or(OwnerEpoch::FIRST.0, |record| record.owner_epoch),
+            revision: record.as_ref().map_or(0, |record| record.revision),
+            level: view.state.level.into(),
+            durability: view.state.durability.into(),
+            backed_up_ms: record.as_ref().and_then(|record| record.backed_up_ms),
+            memory_saved: view.state.keeps_programs(),
+            step: view.step.map(|step| step_name(step).to_owned()),
+            holds: view.holds,
+            launches: slot.launches,
+            resident_bytes: slot
+                .vm
+                .as_ref()
+                .and_then(|live| self.engine.resident_bytes(&live.vm).ok()),
+            unsavable: view.unsavable,
+            broken: view.broken,
+            waiting_for_room: self.core.room_needed(id),
+            paused_for_memory: view.paused_for_memory,
+            balloon_bytes: (view.balloon > 0).then_some(view.balloon),
+            memory: slot
+                .vm
+                .as_ref()
+                .and_then(|live| self.engine.memory_stats(&live.vm).ok())
+                .map(memory_status),
+            failed_step: slot.failed.as_ref().map(|(step, error)| FailedStep {
+                step: step_name(*step).to_owned(),
+                error: error.clone(),
+            }),
+        })
+    }
+}
+
+/// What the API reports of a VM cgroup's memory counters.
+fn memory_status(stats: compute_engine::MemoryStats) -> MemoryStatus {
+    MemoryStatus::new(stats.zswpout, stats.zswpin, stats.pressure_some_avg10)
+}
+
+/// The refusal of a sleep, or hand-off, that needs sandbox `id`'s VM
+/// process saved when no copy of it can be trusted.
+pub(super) fn cannot_save(id: Id) -> HostError {
+    HostError::Invalid(format!(
+        "sandbox {id}'s VM may have lost disk writes, so it cannot be saved; \
+         it sleeps no deeper than compressed until its VM is replaced"
+    ))
+}

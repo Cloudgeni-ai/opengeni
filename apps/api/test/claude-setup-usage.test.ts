@@ -3,22 +3,19 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
-import {
-  bootstrapWorkspace,
-  createDb,
-  decryptEnvironmentValue,
-  recordClaudeSubscriptionUsage,
-  type DbClient,
-} from "@opengeni/db";
-import { parseClaudeUsageHeaders } from "@opengeni/config";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { type ApiRouteDeps } from "@opengeni/core";
+import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { registerConnectionRoutes } from "../src/routes/connections";
 import { registerWorkspaceModelProviderRoutes } from "../src/routes/workspace-model-providers";
+import { registerClaudeSubscriptionAccountRoutes } from "../src/routes/claude-subscription-accounts";
+import { registerClaudeSubscriptionOAuthRoutes } from "../src/routes/claude-subscription-oauth";
+import { registerModelConnectionAccessRoutes } from "../src/routes/model-connection-access";
+
+// The legacy Claude pool is deleted (design 5.3, C4). These tests cover
+// authorization and retirement refusals; the served routes are covered by
+// claude-core-routes.
 
 const secret = "claude-usage-api-test-delegation";
 const key = Buffer.alloc(32, 7);
@@ -52,6 +49,7 @@ function api(enabled = true) {
     delegationSecret: secret,
     claudeSubscriptionEnabled: enabled,
     environmentsEncryptionKey: key.toString("base64"),
+    publicBaseUrl: "https://opengeni.test",
   });
   const app = new Hono();
   app.onError((error) => {
@@ -61,11 +59,16 @@ function api(enabled = true) {
   const deps = { db: client.db, settings } as ApiRouteDeps;
   registerConnectionRoutes(app, deps);
   registerWorkspaceModelProviderRoutes(app, deps);
+  registerClaudeSubscriptionAccountRoutes(app, deps);
+  registerClaudeSubscriptionOAuthRoutes(app, deps);
+  registerModelConnectionAccessRoutes(app, deps);
   return { app, settings };
 }
 async function headers(permissions: Permission[]) {
   return {
     "content-type": "application/json",
+    origin: "https://opengeni.test",
+    "sec-fetch-site": "same-origin",
     authorization: `Bearer ${await signDelegatedAccessToken(secret, {
       accountId,
       workspaceId,
@@ -76,8 +79,8 @@ async function headers(permissions: Permission[]) {
     })}`,
   };
 }
-test("public setup accepts only a token, preserves idempotency and never returns identity or credentials", async () => {
-  const { app, settings } = api();
+test("0598 retirement rejects legacy Claude creation and replay before effect", async () => {
+  const { app } = api();
   const auth = await headers(["workspace:read", "connections:write"]);
   const path = `/v1/workspaces/${workspaceId}/connections`;
   const body = JSON.stringify({
@@ -89,68 +92,81 @@ test("public setup accepts only a token, preserves idempotency and never returns
     operationId: crypto.randomUUID(),
   });
   const response = await app.request(path, { method: "POST", headers: auth, body });
-  expect(response.status).toBe(201);
-  const value = await response.json();
+  // Account pools replaced this operation-id API. Do not revive the retired
+  // credential store merely to satisfy its obsolete 201/replay expectation.
+  expect(response.status).toBe(410);
+  expect(await response.text()).not.toContain("sk-ant-oat01");
   const replay = await app.request(path, { method: "POST", headers: auth, body });
-  expect(replay.status).toBe(201);
-  expect((await replay.json()).connection.id).toBe(value.connection.id);
-  const [stored] =
-    await shared.admin`select credential_encrypted from connections where id = ${value.connection.id}`;
-  const credential = JSON.parse(decryptEnvironmentValue(key, stored!.credential_encrypted));
-  const bundle = JSON.parse(credential.apiKey);
-  expect(bundle.identity.accountUuid).toBe("");
-  expect(bundle.identity.deviceId).toMatch(/^[a-f0-9]{64}$/);
-  expect(JSON.stringify(value)).not.toContain("sk-ant-oat");
-  expect(JSON.stringify(value)).not.toContain(bundle.identity.deviceId);
-  await recordClaudeSubscriptionUsage(
-    client.db,
-    settings,
-    { accountId, workspaceId, scope: "workspace" },
-    {
-      token: bundle.token,
-      observation: parseClaudeUsageHeaders(
-        new Headers({
-          "anthropic-ratelimit-unified-5h-utilization": "1",
-          "anthropic-ratelimit-unified-7d-utilization": ".5",
-        }),
-      )!,
-    },
-  );
-  const usage = await app.request(
-    `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage`,
-    { headers: await headers(["workspace:read"]) },
-  );
-  expect(usage.status).toBe(200);
-  expect(usage.headers.get("cache-control")).toBe("private, no-store");
-  expect(
-    (await usage.json()).windows.map((window: { usedPercent: number }) => window.usedPercent),
-  ).toEqual([100, 50]);
-  const replaced = await app.request(`${path}/${value.connection.id}`, {
-    method: "PATCH",
-    headers: auth,
-    body: JSON.stringify({
-      credential: { apiKey: "sk-ant-oat01-route-replacement" },
-      status: "active",
-      expectedVersion: value.connection.version,
-      operationId: crypto.randomUUID(),
-    }),
-  });
-  expect(replaced.status).toBe(200);
-  const cleared = await app.request(
-    `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage`,
-    { headers: auth },
-  );
-  expect((await cleared.json()).windows).toEqual([]);
+  expect(replay.status).toBe(410);
+  expect(await replay.text()).not.toContain("sk-ant-oat01");
+  const [effects] = await shared.admin`
+    select count(*)::int as count from connections
+    where workspace_id = ${workspaceId} and metadata->>'credentialRole' = 'claude_subscription'`;
+  expect(effects!.count).toBe(0);
 });
-test("readers cannot refresh, unauthenticated callers cannot read, and gating leaves API-key providers independent", async () => {
-  const path = `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage`;
+
+async function claudeRowCounts() {
+  const [row] = await shared.admin`
+    select count(*)::int as core from subscription_connections where provider = 'claude'`;
+  return row;
+}
+
+test("Claude routes check workspace access before any effect", async () => {
   const { app } = api();
-  const response = await app.request(`${path}/refresh`, {
+  const before = await claudeRowCounts();
+  const reader = await headers(["sessions:read"]);
+  const writer = await headers(["connections:write"]);
+  const connectionId = crypto.randomUUID();
+  const workspace = `/v1/workspaces/${workspaceId}`;
+  const setup = JSON.stringify({ token: "sk-ant-oat01-route-fixture", scope: "workspace" });
+  const refused: Array<[string, string, Record<string, string>, string?]> = [
+    // Neither token may read this workspace, even if it names write permission.
+    ["POST", `${workspace}/claude/accounts/${connectionId}/activate`, reader],
+    ["DELETE", `${workspace}/claude/accounts/${connectionId}`, writer],
+    [
+      "PATCH",
+      `${workspace}/claude/accounts/${connectionId}`,
+      writer,
+      JSON.stringify({ label: "x" }),
+    ],
+    [
+      "PATCH",
+      `${workspace}/claude/accounts/${connectionId}/allocator`,
+      reader,
+      JSON.stringify({ enabled: true, expectedVersion: 1 }),
+    ],
+    ["PATCH", `${workspace}/claude/settings`, reader, JSON.stringify({ rotationEnabled: true })],
+    ["POST", `${workspace}/claude/accounts/${connectionId}/usage/refresh`, reader],
+    ["POST", `${workspace}/claude/accounts/setup-token`, writer, setup],
+    [
+      "PUT",
+      `${workspace}/model-connections/claude_subscription/${connectionId}/access`,
+      writer,
+      JSON.stringify({ allowedModelIds: [] }),
+    ],
+  ];
+  for (const [method, path, auth, body] of refused) {
+    const response = await app.request(path, { method, headers: auth, body });
+    expect({ method, path, status: response.status }).toEqual({ method, path, status: 403 });
+  }
+  // Setup-token always required a same-origin browser request, even with an
+  // Authorization header.
+  const admin = await headers(["workspace:read", "workspace:admin", "connections:write"]);
+  const { origin: _origin, ...crossSite } = admin;
+  const response = await app.request(`${workspace}/claude/accounts/setup-token`, {
     method: "POST",
-    headers: await headers(["workspace:read"]),
+    headers: crossSite,
+    body: setup,
   });
   expect(response.status).toBe(403);
+  expect(await claudeRowCounts()).toEqual(before);
+});
+
+test("unauthenticated callers cannot reach the Claude routes, and gating leaves API-key providers independent", async () => {
+  const path = `/v1/workspaces/${workspaceId}/claude/accounts/${crypto.randomUUID()}/usage`;
+  const { app } = api();
   expect((await app.request(path)).status).toBe(401);
+  expect((await app.request(`${path}/refresh`, { method: "POST" })).status).toBe(403);
   expect(
     (await api(false).app.request(path, { headers: await headers(["workspace:read"]) })).status,
   ).toBe(404);

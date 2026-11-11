@@ -3,13 +3,13 @@ import type {
   BrowserActionCommand,
   BrowserActionReceipt,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
   BrowserTarget,
 } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
-  BrowserProtectedAuthController,
   InteractionControllerError,
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
   type BrowserInteractionDriver,
 } from "../src";
 
@@ -476,6 +476,107 @@ describe("BrowserInteractionController", () => {
     expect(sideEffects).toBe(1);
   });
 
+  test("hands an unclassified dispatch error to the diagnostics hook without changing the outcome", async () => {
+    const targets = new Map([["target-1", target()]]);
+    const failure = new TypeError("Cannot read properties of undefined");
+    const reported: Array<{ error: unknown; operationId: string }> = [];
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: driver(targets, async () => {
+        throw failure;
+      }),
+      onUnexpectedDispatchError: (error, current) => {
+        reported.push({ error, operationId: current.operationId });
+        throw new Error("diagnostics must not leak into the outcome");
+      },
+    });
+
+    const receipt = await controller.run(command(1));
+    expect(receipt.state).toBe("outcome_unknown");
+    expect(receipt.error?.code).toBe("controller_lost");
+    expect(reported).toEqual([{ error: failure, operationId: operationId(1) }]);
+  });
+
+  test("an unclassified dispatch error is a lost controller only when the driver is gone", async () => {
+    type State = "connected" | "lost" | "unresponsive";
+    const run = async (
+      thrown: unknown,
+      probe: (() => Promise<State>) | undefined,
+    ): Promise<{ state: string; error: unknown; probes: number }> => {
+      let probes = 0;
+      const base = driver(new Map([["target-1", target()]]), async () => {
+        throw thrown;
+      });
+      const controller = new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        driver: probe
+          ? {
+              ...base,
+              connectionState: async () => {
+                probes += 1;
+                return await probe();
+              },
+            }
+          : base,
+      });
+      const receipt = await controller.run(command(1));
+      return { state: receipt.state, error: receipt.error, probes };
+    };
+    const pageError = new Error("Node does not have a layout object");
+
+    // The browser still answers: the command failed, its effect is unknown.
+    expect(await run(pageError, async () => "connected")).toEqual({
+      state: "outcome_unknown",
+      error: {
+        code: "driver_failed",
+        message:
+          "browser command failed unexpectedly after dispatch and its outcome is unknown; the browser is still connected, so check its current state before repeating the command",
+        retryable: false,
+      },
+      probes: 1,
+    });
+    // A browser that does not answer in time is neither connected nor lost.
+    expect(await run(pageError, async () => "unresponsive")).toEqual({
+      state: "outcome_unknown",
+      error: {
+        code: "driver_failed",
+        message:
+          "browser command failed unexpectedly after dispatch and its outcome is unknown; the browser did not answer a check right afterwards, so check its current state before repeating the command",
+        retryable: false,
+      },
+      probes: 1,
+    });
+    // Gone, a probe that fails, or a driver without a probe: lost, as before.
+    const lost = {
+      state: "outcome_unknown",
+      error: {
+        code: "controller_lost",
+        message: "browser command outcome is unknown after dispatch",
+        retryable: false,
+      },
+    };
+    expect(await run(pageError, async () => "lost")).toEqual({ ...lost, probes: 1 });
+    expect(
+      await run(pageError, async () => {
+        throw new Error("probe failed");
+      }),
+    ).toEqual({ ...lost, probes: 1 });
+    expect(await run(pageError, undefined)).toEqual({ ...lost, probes: 0 });
+    // A typed controller error keeps its own code, without a probe.
+    expect(
+      await run(
+        new InteractionControllerError("tab_crashed", "browser tab crashed", true),
+        async () => "connected",
+      ),
+    ).toEqual({
+      state: "outcome_unknown",
+      error: { code: "tab_crashed", message: "browser tab crashed", retryable: false },
+      probes: 0,
+    });
+  });
+
   test("durably journals preparation and dispatch before invoking the driver", async () => {
     const targets = new Map([["target-1", target()]]);
     const preparedRelease = deferred();
@@ -622,79 +723,200 @@ describe("BrowserInteractionController", () => {
       code: "driver_failed",
     });
   });
-});
 
-function protectedCommand(value: string): BrowserProtectedAuthFillCommand {
-  const base = command(20);
-  return {
-    protocolVersion: 1,
-    operationId: base.operationId,
-    browserSessionId,
-    controllerGeneration,
-    targetId: base.targetId,
-    expectedTargetGeneration: base.expectedTargetGeneration,
-    expectedDocumentGeneration: "document-1",
-    expectedFrameId: "frame-1",
-    actor: base.actor,
-    authorityId: "password-authority",
-    credentialVersion: 7,
-    allowedOrigins: ["https://target-1.test"],
-    fields: [
-      {
-        fieldId: "password",
-        locator: { kind: "ref", ref: "e-password" },
-        purpose: "password",
-        value,
-      },
-    ],
-    submit: { type: "press", key: "Enter" },
-  };
-}
-
-describe("BrowserProtectedAuthController", () => {
-  test("journals a secret-free digest and deduplicates retries without comparing value bytes", async () => {
-    const records: unknown[] = [];
-    let dispatchCount = 0;
-    const currentTarget = target();
-    const controller = new BrowserProtectedAuthController({
+  test("an unknown target is named, with where current ones are found", async () => {
+    const targets = new Map([["target-1", target()]]);
+    const controller = new BrowserInteractionController({
       browserSessionId,
       controllerGeneration,
-      onJournalRecord(record) {
-        records.push(record);
-      },
+      driver: driver(targets, async () => observation(targets.get("target-1")!)),
+    });
+
+    await expect(controller.observe("app:guessed")).rejects.toMatchObject({
+      code: "target_not_found",
+      message:
+        'browser target "app:guessed" does not exist; list the current targets and use one of their ids',
+    });
+  });
+
+  test("an action on a tab the driver knows is gone says why, and never dispatches", async () => {
+    let dispatches = 0;
+    const gone =
+      "browser target does not exist: this tab was closed at 2026-01-02T03:04:05Z by a close-tab call; list the current tabs and use one of their IDs";
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
       driver: {
-        async target(targetId) {
-          return targetId === currentTarget.id ? currentTarget : null;
-        },
-        async observe() {
-          return { target: currentTarget, status: "working" };
-        },
-        async dispatch() {
-          dispatchCount += 1;
-          return { target: currentTarget, status: "submitted" };
+        ...driver(new Map(), async () => {
+          dispatches++;
+          return observation(target());
+        }),
+        async target() {
+          throw new InteractionDefiniteDriverError("target_not_found", gone);
         },
       },
     });
 
-    const first = await controller.run(protectedCommand("correct horse battery staple"));
-    const retry = await controller.run(protectedCommand("different one-time value"));
-    expect(first.state).toBe("completed");
-    expect(retry).toEqual(first);
-    expect(dispatchCount).toBe(1);
-    expect(JSON.stringify(records)).not.toContain("correct horse battery staple");
-    expect(JSON.stringify(records)).not.toContain("different one-time value");
-    expect(controller.journalSnapshot()[0]?.commandDigest).toMatch(/^[0-9a-f]{64}$/u);
+    const receipt = await controller.run(command(1));
+    expect(receipt.state).toBe("failed");
+    expect(receipt.dispatchedAt).toBeNull();
+    expect(receipt.error).toEqual({ code: "target_not_found", message: gone, retryable: false });
+    expect(dispatches).toBe(0);
+  });
 
-    expect(() =>
-      controller.run({
-        ...protectedCommand("correct horse battery staple"),
-        fields: [
-          {
-            ...protectedCommand("unused").fields[0]!,
-            locator: { kind: "ref", ref: "another-field" },
-          },
-        ],
-      }),
-    ).toThrow(InteractionControllerError);
+  test("any other driver failure before dispatch stays a generic driver failure", async () => {
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: {
+        ...driver(new Map(), async () => observation(target())),
+        async target() {
+          throw new InteractionDefiniteDriverError("invalid_action", "internal detail");
+        },
+      },
+    });
+
+    const receipt = await controller.run(command(1));
+    expect(receipt.error).toEqual({
+      code: "driver_failed",
+      message: "browser command failed before dispatch",
+      retryable: false,
+    });
+  });
+});
+
+describe("resolved action targets", () => {
+  const headerClose = {
+    actionIndex: 0,
+    ref: "e7",
+    role: "button",
+    name: "Close",
+    container: { role: "banner", name: null },
+  } as const;
+
+  function tracedController(
+    dispatch: BrowserInteractionDriver["dispatch"],
+    records: Array<{ receipt: BrowserActionReceipt }>,
+  ) {
+    return new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      onJournalRecord(record) {
+        records.push(structuredClone(record));
+      },
+      driver: driver(new Map([["target-1", target()]]), dispatch),
+    });
+  }
+
+  test("returns what each locator resolved to without journaling it", async () => {
+    const records: Array<{ receipt: BrowserActionReceipt }> = [];
+    const controller = tracedController(async (_command, trace) => {
+      trace?.record(headerClose);
+      trace?.record({ ...headerClose, actionIndex: 1, ref: null, role: "textbox", name: null });
+      return observation(target());
+    }, records);
+
+    const receipt = await controller.run(command(1));
+
+    expect(receipt.state).toBe("completed");
+    expect(receipt.targets).toEqual([
+      headerClose,
+      { ...headerClose, actionIndex: 1, ref: null, role: "textbox", name: null },
+    ]);
+    // An older controller reading this journal must parse every record.
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) expect(record.receipt).not.toHaveProperty("targets");
+    expect(controller.receipt(operationId(1))).not.toHaveProperty("targets");
+  });
+
+  test("keeps targets when the action fails after input", async () => {
+    for (const failure of [
+      new InteractionDefiniteDriverError("invalid_action", "fixture refusal"),
+      new InteractionOutcomeUnknownDriverError("outcome_unknown", "fixture unknown"),
+      new Error("fixture transport loss"),
+    ]) {
+      const controller = tracedController(async (_command, trace) => {
+        trace?.record(headerClose);
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).not.toBe("completed");
+      expect(receipt.targets).toEqual([headerClose]);
+    }
+  });
+
+  test("never lets an invalid or absent trace change the outcome", async () => {
+    const invalid = tracedController(async (_command, trace) => {
+      trace?.record({ ...headerClose, role: "" });
+      return observation(target());
+    }, []);
+    const invalidReceipt = await invalid.run(command(1));
+    expect(invalidReceipt.state).toBe("completed");
+    expect(invalidReceipt).not.toHaveProperty("targets");
+
+    const untraced = tracedController(async () => observation(target()), []);
+    expect(await untraced.run(command(1))).not.toHaveProperty("targets");
+  });
+
+  test("returns the page a driver observed after a failure", async () => {
+    for (const failure of [
+      new InteractionDefiniteDriverError("locator_not_found", "fixture stale ref"),
+      new InteractionOutcomeUnknownDriverError("outcome_unknown", "fixture unknown"),
+    ]) {
+      failure.observation = observation(target());
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe(
+        failure instanceof InteractionDefiniteDriverError ? "failed" : "outcome_unknown",
+      );
+      expect(receipt.error?.code).toBe(failure.code);
+      expect(receipt.observation?.target.id).toBe("target-1");
+    }
+
+    // An observation of another target, or one that does not parse, is dropped
+    // without changing the failure.
+    for (const invalid of [observation(target("target-2")), { bogus: true }]) {
+      const failure = new InteractionDefiniteDriverError("invalid_action", "fixture refusal");
+      failure.observation = invalid;
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe("failed");
+      expect(receipt.error?.code).toBe("invalid_action");
+      expect(receipt.observation).toBeNull();
+    }
+  });
+
+  test("bounds recorded targets", async () => {
+    const controller = tracedController(async (_command, trace) => {
+      for (let index = 0; index < 500; index += 1) {
+        trace?.record({ ...headerClose, actionIndex: index % 32 });
+      }
+      return observation(target());
+    }, []);
+    const receipt = await controller.run(command(1));
+    expect(receipt.targets).toHaveLength(64);
+  });
+
+  test("returns per-action notes beside targets, outside the journal", async () => {
+    const records: Array<{ receipt: BrowserActionReceipt }> = [];
+    const note = {
+      actionIndex: 1,
+      kind: "network_busy" as const,
+      message: "page loaded; its network was still busy after 30 s, so the wait ended there",
+    };
+    const controller = tracedController(async (_command, trace) => {
+      trace?.record(headerClose);
+      trace?.record(note);
+      return observation(target());
+    }, records);
+    const receipt = await controller.run(command(1));
+    expect(receipt.state).toBe("completed");
+    expect(receipt.targets).toEqual([headerClose]);
+    expect(receipt.notes).toEqual([note]);
+    for (const record of records) expect(record.receipt).not.toHaveProperty("notes");
   });
 });

@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   initializeWorkerOutcomeMetrics,
   recordCreditBalanceGauges,
   recordVerifiedSignupTrialDeploymentFlagGauge,
+  recordManagedAuthNewSignupsSwitchGauge,
   recordVerifiedSignupTrialSwitchGauge,
   recordWorkerDeathRecoveryMetrics,
   TurnLifecycleMetrics,
@@ -136,6 +137,21 @@ describe("turn lifecycle metrics", () => {
     expect(metrics).toMatch(/opengeni_verified_signup_trial_credits_runtime_enabled\{[^}]*\} 0/);
   });
 
+  test("records the managed auth new-signups runtime switch as a 0/1 gauge", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordManagedAuthNewSignupsSwitchGauge(observability, true);
+    let metrics = await observability.prometheusMetrics();
+    expect(metrics).toContain(
+      "# HELP opengeni_managed_auth_new_signups_runtime_enabled Whether the runtime switch allows new managed account sign-ups (1) or has paused them (0).",
+    );
+    expect(metrics).toMatch(/opengeni_managed_auth_new_signups_runtime_enabled\{[^}]*\} 1/);
+
+    recordManagedAuthNewSignupsSwitchGauge(observability, false);
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_managed_auth_new_signups_runtime_enabled\{[^}]*\} 0/);
+  });
+
   test("records the verified signup trial deployment master opt-in as its own 0/1 gauge", async () => {
     const observability = createObservability(testSettings(), { component: "worker-control" });
 
@@ -199,4 +215,18 @@ describe("turn lifecycle metrics", () => {
       }
     }
   });
+});
+
+test("customer provider failures stay observable without hiding platform failures on the same worker", async () => {
+  const obs = createObservability(testSettings(), { component: "worker" });
+  initializeWorkerOutcomeMetrics(obs);
+  const tracker = new TurnLifecycleMetrics(obs);
+  tracker.finish({ attemptId: "quota", outcome: "failed", failureOrigin: "customer_provider" });
+  tracker.finish({ attemptId: "invalid-tool-name", outcome: "failed" });
+  recordWorkerDeathRecoveryMetrics(obs, { outcome: "exhausted", timeoutType: "HEARTBEAT" });
+  const lines = (await obs.prometheusMetrics())
+    .split("\n")
+    .filter((line) => line.startsWith("opengeni_turns_total{"));
+  expect(lines.find((line) => line.includes('failure_origin="customer_provider"'))).toEndWith(" 1");
+  expect(lines.find((line) => line.includes('failure_origin="platform"'))).toEndWith(" 2");
 });

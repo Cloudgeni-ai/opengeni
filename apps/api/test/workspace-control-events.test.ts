@@ -1,14 +1,21 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createEnrollment,
+  createSandbox,
+  createSession,
+  listWorkspaceControlEvents,
+  mutateSessionControlInTransaction,
+  withWorkspaceRls,
+  type DbClient,
+} from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
@@ -49,7 +56,12 @@ beforeAll(async () => {
   bus = new MemoryEventBus();
   const noop = async () => undefined;
   const deps = {
-    settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret: SECRET,
+      sandboxOwnershipEnabled: true,
+      sandboxSelfhostedEnabled: true,
+    }),
     db: client.db,
     bus,
     workflowClient: {
@@ -98,6 +110,44 @@ async function authorization(subjectId = grant.subjectId): Promise<string> {
 }
 
 describe("workspace control event API", () => {
+  test("workspace default accepts a shared machine and rejects an unavailable replacement", async () => {
+    const enrollment = await createEnrollment(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      os: "linux",
+      arch: "x86_64",
+      hasDisplay: false,
+      allowScreenControl: false,
+    });
+    const machine = await createSandbox(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      kind: "selfhosted",
+      name: "Workspace machine",
+      enrollmentId: enrollment.id,
+    });
+    const auth = await authorization();
+    const patch = (target: unknown) =>
+      app.request(`http://x/v1/workspaces/${grant.workspaceId}/settings`, {
+        method: "PATCH",
+        headers: { authorization: auth, "content-type": "application/json" },
+        body: JSON.stringify({ defaultExecutionTarget: target }),
+      });
+    const target = { kind: "machine", targetSandboxId: machine.id };
+    const saved = await patch(target);
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ settings: { defaultExecutionTarget: target } });
+    expect((await patch({ kind: "machine", targetSandboxId: crypto.randomUUID() })).status).toBe(
+      422,
+    );
+    expect((await patch({ kind: "machine", targetSandboxId: "not-an-id" })).status).toBe(400);
+    const cleared = await patch(null);
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ settings: { defaultExecutionTarget: null } });
+  });
+
   test("tool defaults save and reset independently without losing concurrent changes", async () => {
     const auth = await authorization();
     const patch = async (body: unknown) => {
@@ -320,4 +370,71 @@ test("pause timers require workspace admin even for an authenticated workspace r
     }),
   });
   expect(response.status).toBe(403);
+});
+
+test("chat control events reach only readers who can see that chat, and never stall their cursor", async () => {
+  const workspaceId = grant.workspaceId!;
+  const before = await listWorkspaceControlEvents(client.db, workspaceId, 0, 1000);
+  const after = before.at(-1)?.sequence ?? 0;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    initialMessage: "control visibility",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  await withWorkspaceRls(client.db, workspaceId, async (db) =>
+    mutateSessionControlInTransaction(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      actor: { type: "human", subjectId: grant.subjectId },
+      operationKey: crypto.randomUUID(),
+      action: "pause",
+      reason: "private reason",
+    }),
+  );
+  const [sessionEvent] = await listWorkspaceControlEvents(client.db, workspaceId, after, 10);
+  expect(sessionEvent).toMatchObject({ scope: "session", rootSessionId: session.id });
+
+  const reader = `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+    permissions: ["workspace:read"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })}`;
+  const hidden = await app.request(
+    `http://x/v1/workspaces/${workspaceId}/control-events?after=${after}&limit=10`,
+    { headers: { authorization: reader } },
+  );
+  expect(hidden.status).toBe(200);
+  expect(await hidden.json()).toEqual([]);
+  // The reader still moves past the event it cannot see.
+  expect(hidden.headers.get("X-OpenGeni-Next-After")).toBe(String(sessionEvent!.sequence));
+
+  const hiddenBatch = await app.request(
+    `http://x/v1/workspaces/${workspaceId}/control-events/stream?after=${after}&transport=http1-bounded`,
+    { headers: { authorization: reader } },
+  );
+  const hiddenBody = await hiddenBatch.text();
+  expect(hiddenBody).not.toContain(session.id);
+  expect(hiddenBody).not.toContain("private reason");
+  expect(hiddenBody).toContain(
+    `"type":"workspace.control.cursor","workspaceId":"${workspaceId}","sequence":${sessionEvent!.sequence}`,
+  );
+
+  const visible = await app.request(
+    `http://x/v1/workspaces/${workspaceId}/control-events?after=${after}&limit=10`,
+    { headers: { authorization: await authorization() } },
+  );
+  expect(await visible.json()).toEqual([
+    expect.objectContaining({ scope: "session", rootSessionId: session.id, action: "pause" }),
+  ]);
 });

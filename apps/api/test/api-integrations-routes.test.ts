@@ -1,18 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   CORE_INTEGRATION_DEFINITIONS,
-  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
   INTEGRATION_DEFINITION_PRESENTATIONS,
   integrationFacetDefinitions,
 } from "@opengeni/capabilities";
 import { CURATED_CATALOG } from "../../../scripts/catalog-curation";
 import {
-  GOOGLE_DRIVE_CREDENTIAL_LABEL,
-  GOOGLE_DRIVE_CREDENTIAL_ROLE,
-  GOOGLE_DRIVE_READONLY_SCOPE,
-  GoogleDriveConnectionMetadata,
-} from "@opengeni/contracts/google-drive";
-import {
+  ApiIntegrationPreview,
+  InstalledApiIntegration,
   IntegrationPresentation,
   OrganizationIntegrationDeniedError,
   ListIntegrationDefinitionsResponse,
@@ -31,11 +26,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import postgres from "postgres";
@@ -49,8 +41,6 @@ import { registerIntegrationFacetRoutes } from "../src/routes/integration-facets
 const delegationSecret = "api-integration-route-secret";
 const environmentsEncryptionKey = new Uint8Array(32).fill(19);
 let sourceVersion = "1.0.0";
-let googleDriveFolderName = "Product";
-const googleDriveProviderRequests: string[] = [];
 let sourceFetches = 0;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -200,21 +190,6 @@ beforeAll(async () => {
       delegationSecret,
       environmentsEncryptionKey: Buffer.from(environmentsEncryptionKey).toString("base64"),
     }),
-    googleDriveFetch: async (input) => {
-      const url = new URL(input instanceof Request ? input.url : input.toString());
-      googleDriveProviderRequests.push(url.href);
-      if (url.pathname === "/drive/v3/files/folder-1") {
-        return Response.json({
-          id: "folder-1",
-          name: googleDriveFolderName,
-          mimeType: "application/vnd.google-apps.folder",
-          modifiedTime: "2026-08-14T06:00:00.000Z",
-          webViewLink: "https://drive.google.com/drive/folders/folder-1",
-          trashed: false,
-        });
-      }
-      throw new Error(`unexpected Google Drive provider request: ${url.href}`);
-    },
   } as ApiRouteDeps);
 }, 180_000);
 
@@ -512,16 +487,18 @@ describe("API Integration routes", () => {
     // Gmail is not one of these API integration definitions: it is a
     // Connector, consolidated onto its catalog row and the REST bridge
     // (packages/runtime/src/gmail-rest-mcp.ts). It must never reappear here.
-    expect(payload.definitions).toHaveLength(5);
-    expect(payload.definitions.some((definition) => definition.id === "google-gmail")).toBe(false);
+    // Google Drive is not one either since its native integration retired:
+    // it is the remote Drive MCP Connector.
+    expect(payload.definitions.map((definition) => definition.id).sort()).toEqual([
+      "microsoft-onedrive",
+      "microsoft-outlook-calendar",
+      "microsoft-outlook-contacts",
+      "microsoft-outlook-mail",
+      "microsoft-sharepoint",
+    ]);
     expect(payload.definitions).toContainEqual(
       expect.objectContaining({
-        id: "google-drive",
-        name: "Google Drive",
-        provider: {
-          id: "google",
-          domain: "www.googleapis.com",
-        },
+        id: "microsoft-onedrive",
         authentication: expect.objectContaining({ kind: "oauth2" }),
       }),
     );
@@ -532,8 +509,6 @@ describe("API Integration routes", () => {
     // grants nothing). Every core definition carries it, and the whole payload
     // must satisfy the published contract, bounds included.
     const parsed = ListIntegrationDefinitionsResponse.parse(payload);
-    const drive = parsed.definitions.find((definition) => definition.id === "google-drive");
-    expect(drive?.presentation).toMatchObject({ providerName: "Google", icon: "files" });
     for (const definition of parsed.definitions) {
       expect(definition.presentation).toBeDefined();
     }
@@ -710,6 +685,125 @@ describe("API Integration routes", () => {
     });
   }, 60_000);
 
+  test("an organization's API integration is listed as the organization's, and a workspace turns it off here or back on", async () => {
+    if (!available || !shared) return;
+    const slug = `org-ledger-${crypto.randomUUID().slice(0, 8)}`;
+    const capabilityId = `api:openapi:${slug}`;
+    const definition = {
+      kind: "api",
+      name: "Ledger API",
+      description: null,
+      definitionId: slug,
+      definitionProvenance: "workspace",
+      protocol: "openapi",
+      pluginKey: `integration/openapi/${slug}`,
+      serverId: `api_openapi_${slug.replaceAll("-", "_")}`,
+      provider: null,
+      providerDomain: "127.0.0.1",
+      baseUrl: "https://127.0.0.1/v1/",
+      sourceUrl: "https://127.0.0.1/ledger.json",
+      source: { kind: "openapi", url: "https://127.0.0.1/ledger.json" },
+      requiredScopes: [],
+      auth: { kind: "none" },
+      authScheme: { kind: "none" },
+      revision: {
+        id: `openapi:${"5".repeat(24)}`,
+        protocol: "openapi",
+        definitionId: slug,
+        contentSha256: "5".repeat(64),
+        source: { url: "https://127.0.0.1/ledger.json" },
+        title: "Ledger API",
+        tools: [
+          {
+            id: "list_entries",
+            operationKey: "listEntries",
+            name: "List entries",
+            description: "List entries.",
+            inputSchema: { type: "object", properties: {} },
+            safety: "read",
+            approvalMode: "never",
+            deprecated: false,
+          },
+        ],
+        bindings: {
+          list_entries: {
+            method: "get",
+            pathTemplate: "/entries",
+            serverUrl: "https://127.0.0.1/v1/",
+            parameters: [],
+          },
+        },
+      },
+    };
+    const [row] = await shared.admin<{ id: string }[]>`
+      insert into organization_connectors
+        (account_id, kind, capability_id, custom_definition, created_by_subject_id, updated_by_subject_id)
+      values (${accountId}, 'api', ${capabilityId}, ${shared.admin.json(definition)},
+        ${subjectId}, ${subjectId})
+      returning id`;
+    try {
+      const listed = async () =>
+        (
+          (await (await request("/integrations")).json()).integrations as {
+            capabilityId: string;
+            instanceKey: string;
+            organizationConnector?: { connectorId: string; login: string; enabledHere: boolean };
+          }[]
+        ).filter((integration) => integration.capabilityId === capabilityId);
+      expect(await listed()).toEqual([
+        expect.objectContaining({
+          instanceKey: "organization",
+          name: "Ledger API",
+          requiresConnection: false,
+          // Managed in the organization's settings, never removed here.
+          canRemove: false,
+          organizationConnector: {
+            connectorId: row!.id,
+            login: "none",
+            auth: { kind: "none" },
+            enabledHere: true,
+          },
+        }),
+      ]);
+      const here = (enabledHere: boolean, id = capabilityId) =>
+        request(`/integrations/${encodeURIComponent(id)}/organization`, {
+          method: "PUT",
+          body: JSON.stringify({ enabledHere }),
+        });
+      const off = await here(false);
+      expect(off.status).toBe(200);
+      expect(await off.json()).toEqual({ capabilityId, enabledHere: false });
+      expect(await listed()).toEqual([
+        expect.objectContaining({
+          organizationConnector: {
+            connectorId: row!.id,
+            login: "none",
+            auth: { kind: "none" },
+            enabledHere: false,
+          },
+        }),
+      ]);
+      expect((await here(true)).status).toBe(200);
+      expect((await listed())[0]!.organizationConnector!.enabledHere).toBe(true);
+      expect((await here(false, `api:openapi:not-shared-${slug}`)).status).toBe(404);
+      // It is managed in the organization's settings, never removed or replaced here.
+      const instance = `/integrations/${encodeURIComponent(capabilityId)}/instances/organization`;
+      expect((await request(`${instance}/uninstall-preview`)).status).toBe(409);
+      expect(
+        (
+          await request(instance, {
+            method: "DELETE",
+            body: JSON.stringify({ expectedInstallationVersion: 1, expectedInstanceVersion: 1 }),
+          })
+        ).status,
+      ).toBe(409);
+    } finally {
+      await shared.admin`delete from capability_installations
+        where workspace_id = ${workspaceId} and capability_id = ${capabilityId}`;
+      await shared.admin`delete from organization_connectors where id = ${row!.id}`;
+    }
+  });
+
   test("previews and installs an inline OpenAPI document by stable source key", async () => {
     if (!available || !client) return;
     const fetchesBefore = sourceFetches;
@@ -782,6 +876,364 @@ describe("API Integration routes", () => {
     expect(removed.status).toBe(200);
   }, 60_000);
 
+  test("inline URL rotation keeps immutable versions and shared instance settings while fencing stale installs", async () => {
+    if (!client || !shared) throw new Error("URL rotation regression requires PostgreSQL");
+    const fetchesBefore = sourceFetches;
+    const source = {
+      kind: "openapi_document",
+      sourceKey: `url-rotation-${crypto.randomUUID()}`,
+      document: JSON.stringify(openApiDocument()),
+      baseUrl: "https://127.0.0.1/v1/",
+    };
+    let capabilityId: string | null = null;
+    try {
+      const previewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source }),
+      });
+      expect(previewResponse.status).toBe(200);
+      const preview = await previewResponse.json();
+      capabilityId = preview.capabilityId;
+      const installPayload = {
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+      };
+      const installResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify(installPayload),
+      });
+      expect(installResponse.status).toBe(201);
+      const installed = await installResponse.json();
+      const same = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          ...installPayload,
+          source: { ...source, baseUrl: "https://127.0.0.1:443/a/../v1/" },
+        }),
+      });
+      expect(same.status).toBe(201);
+      expect(await same.json()).toEqual(installed);
+      const peerResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...installPayload, instanceKey: "peer" }),
+      });
+      expect(peerResponse.status).toBe(201);
+      const peer = await peerResponse.json();
+      const oldVersions = await shared.admin`
+      select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+      from capability_plugin_versions v
+      join capability_plugins p on p.id = v.plugin_id
+      join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+      join integration_spec_revisions s on s.api_facet_id = f.id
+      where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+      order by v.id`;
+      expect(oldVersions).toHaveLength(1);
+
+      const rotatedSource = { ...source, baseUrl: "https://127.0.0.1/rotated/" };
+      const rotatedPreviewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: rotatedSource }),
+      });
+      expect(rotatedPreviewResponse.status).toBe(200);
+      const rotatedPreview = await rotatedPreviewResponse.json();
+      expect(rotatedPreview.capabilityId).toBe(preview.capabilityId);
+      expect(rotatedPreview.revisionId).not.toBe(preview.revisionId);
+      expect(rotatedPreview.contentSha256).not.toBe(preview.contentSha256);
+      expect(rotatedPreview.tools).toEqual(preview.tools);
+      const stalePreview = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...installPayload, source: rotatedSource }),
+      });
+      expect(stalePreview.status).toBe(409);
+      const rotatedPayload = {
+        source: rotatedSource,
+        expectedRevisionId: rotatedPreview.revisionId,
+        expectedContentSha256: rotatedPreview.contentSha256,
+      };
+      const staleVersion = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...rotatedPayload, expectedInstanceVersion: 9999 }),
+      });
+      expect(staleVersion.status).toBe(409);
+      const rotatedResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          ...rotatedPayload,
+          expectedInstanceVersion: installed.instanceVersion,
+        }),
+      });
+      expect(rotatedResponse.status).toBe(200);
+      const rotated = await rotatedResponse.json();
+      expect(rotated.instanceId).toBe(installed.instanceId);
+      expect(rotated.instanceVersion).toBeGreaterThan(installed.instanceVersion);
+      const versions = await shared.admin`
+      select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+      from capability_plugin_versions v
+      join capability_plugins p on p.id = v.plugin_id
+      join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+      join integration_spec_revisions s on s.api_facet_id = f.id
+      where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+      order by v.id`;
+      expect(versions).toHaveLength(2);
+      expect(versions.find((version) => version.id === oldVersions[0]!.id)).toEqual(oldVersions[0]);
+      const listing = await (await request("/integrations")).json();
+      expect(listing.integrations).toContainEqual(
+        expect.objectContaining({
+          instanceId: peer.instanceId,
+          instanceVersion: peer.instanceVersion + 1,
+          baseUrl: rotatedPreview.baseUrl,
+          revisionId: rotatedPreview.revisionId,
+          allowedTools: preview.tools.map((tool: { id: string }) => tool.id).sort(),
+          ownership: "none",
+        }),
+      );
+      expect(listing.integrations).toContainEqual(
+        expect.objectContaining({
+          instanceId: rotated.instanceId,
+          baseUrl: rotatedPreview.baseUrl,
+          revisionId: rotatedPreview.revisionId,
+        }),
+      );
+      // A new instance must also be able to introduce a new executable URL
+      // under the same source key, without colliding with either stored revision.
+      const namedSource = { ...source, baseUrl: "https://127.0.0.1/new-instance-rotation/" };
+      const namedPreviewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: namedSource }),
+      });
+      expect(namedPreviewResponse.status).toBe(200);
+      const namedPreview = await namedPreviewResponse.json();
+      expect(namedPreview.capabilityId).toBe(preview.capabilityId);
+      expect(namedPreview.revisionId).not.toBe(rotatedPreview.revisionId);
+      const namedResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          source: namedSource,
+          instanceKey: "new-route",
+          expectedRevisionId: namedPreview.revisionId,
+          expectedContentSha256: namedPreview.contentSha256,
+        }),
+      });
+      expect(namedResponse.status).toBe(201);
+      expect(await namedResponse.json()).toMatchObject({
+        capabilityId: preview.capabilityId,
+        instanceKey: "new-route",
+        revisionId: namedPreview.revisionId,
+      });
+      const retained = await shared.admin`
+        select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+        from capability_plugin_versions v
+        join capability_plugins p on p.id = v.plugin_id
+        join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+        join integration_spec_revisions s on s.api_facet_id = f.id
+        where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+        order by v.id`;
+      expect(retained).toHaveLength(3);
+      for (const version of versions) {
+        expect(retained.find((candidate) => candidate.id === version.id)).toEqual(version);
+      }
+      expect(sourceFetches).toBe(fetchesBefore);
+    } finally {
+      if (capabilityId) {
+        const listing = (await (await request("/integrations")).json()) as {
+          integrations: { capabilityId: string; instanceKey: string }[];
+        };
+        for (const instance of listing.integrations.filter(
+          (integration) => integration.capabilityId === capabilityId,
+        )) {
+          const removal = await getApiIntegrationUninstallPreview(
+            client.db,
+            workspaceId,
+            subjectId,
+            capabilityId,
+            instance.instanceKey,
+          );
+          await uninstallApiIntegration(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            capabilityId,
+            instanceKey: instance.instanceKey,
+            expectedInstallationVersion: removal.installationVersion!,
+            expectedInstanceVersion: removal.instanceVersion!,
+          });
+        }
+      }
+    }
+  }, 60_000);
+
+  for (const sharedOwner of [false, true]) {
+    test(`numeric operation-ID reorder deduplicates storage${sharedOwner ? " with another owner" : ""} with unchanged selected tools`, async () => {
+      if (!client || !shared) throw new Error("Numeric reorder regression requires PostgreSQL");
+      const fetchesBefore = sourceFetches;
+      const role = await shared.admin`
+        select rolsuper, rolbypassrls from pg_roles where rolname = ${new URL(shared.appUrl).username}`;
+      expect(role[0]).toMatchObject({ rolsuper: false, rolbypassrls: false });
+      const path = (operationId: string, serverUrl: string) => ({
+        get: {
+          operationId,
+          servers: [{ url: serverUrl }],
+          responses: { "200": { description: "OK" } },
+        },
+      });
+      const one = path("1", "https://127.0.0.1/numeric/one/");
+      const two = path("2", "https://127.0.0.1/numeric/two/");
+      const document = {
+        openapi: "3.1.0",
+        info: { title: "Numeric operation-ID reorder", version: "1.0.0" },
+        paths: { "/two": two, "/one": one },
+      };
+      const source = {
+        kind: "openapi_document" as const,
+        sourceKey: `numeric-reorder-${crypto.randomUUID()}`,
+        document: JSON.stringify(document),
+      };
+      const reorderedSource = {
+        ...source,
+        document: JSON.stringify({ ...document, paths: { "/one": one, "/two": two } }),
+      };
+      const preview = async (selectedSource: typeof source) => {
+        const response = await request("/integrations/preview", {
+          method: "POST",
+          body: JSON.stringify({ source: selectedSource }),
+        });
+        expect(response.status).toBe(200);
+        return ApiIntegrationPreview.parse(await response.json());
+      };
+      let installed: InstalledApiIntegration | null = null;
+      const ownerId = `numeric-reorder-owner-${crypto.randomUUID()}`;
+      try {
+        const first = await preview(source);
+        // Keep the selected request authority unchanged: the omitted-tools
+        // default preserves traversal order and is independent of revision hashing.
+        const allowedTools = first.tools.map((tool) => tool.id).sort();
+        const created = await request("/integrations/install", {
+          method: "POST",
+          body: JSON.stringify({
+            source,
+            expectedRevisionId: first.revisionId,
+            expectedContentSha256: first.contentSha256,
+            allowedTools,
+          }),
+        });
+        expect(created.status).toBe(201);
+        installed = InstalledApiIntegration.parse(await created.json());
+        if (sharedOwner) {
+          await shared.admin`
+            insert into capability_component_owners
+              (account_id, workspace_id, facet_installation_id, owner_kind, owner_id, removable)
+            values
+              (${accountId}, ${workspaceId}, ${installed.integrationFacetInstallationId}, 'migration', ${ownerId}, false),
+              (${accountId}, ${workspaceId}, ${installed.apiFacetInstallationId}, 'migration', ${ownerId}, false)`;
+          await shared.admin`
+            insert into integration_facet_binding_owners
+              (account_id, workspace_id, binding_id, owner_kind, owner_id, removable)
+            values (${accountId}, ${workspaceId}, ${installed.instanceId}, 'migration', ${ownerId}, false)`;
+        }
+        const snapshot = async () => {
+          const [versions, installation, facets, bindings, componentOwners, bindingOwners] =
+            await Promise.all([
+              shared!.admin`
+              select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+              from capability_plugin_versions v
+              join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+              join integration_spec_revisions s on s.api_facet_id = f.id
+              where v.plugin_id = ${installed!.pluginId} order by v.id`,
+              shared!.admin`
+              select * from capability_plugin_installations where id = ${installed!.pluginInstallationId}`,
+              shared!.admin`
+              select * from capability_facet_installations
+              where plugin_installation_id = ${installed!.pluginInstallationId} order by id`,
+              shared!.admin`
+              select * from integration_facet_bindings where id = ${installed!.instanceId}`,
+              shared!.admin`
+              select * from capability_component_owners where workspace_id = ${workspaceId}
+              and facet_installation_id in (${installed!.integrationFacetInstallationId}, ${installed!.apiFacetInstallationId})
+              order by id`,
+              shared!.admin`
+              select * from integration_facet_binding_owners where binding_id = ${installed!.instanceId} order by id`,
+            ]);
+          return { versions, installation, facets, bindings, componentOwners, bindingOwners };
+        };
+        const before = await snapshot();
+        expect(before.versions).toHaveLength(1);
+        expect(before.bindings[0]!.config.allowedTools).toEqual(allowedTools);
+        expect(first.baseUrl).toBe("https://127.0.0.1/numeric/one/");
+        expect(before.versions[0]!.manifest.baseUrl).toBe(first.baseUrl);
+        expect(Object.values(before.versions[0]!.spec.bindings)[0]).toMatchObject({
+          serverUrl: first.baseUrl,
+        });
+        if (sharedOwner) {
+          expect(before.componentOwners.filter((owner) => owner.owner_id === ownerId)).toHaveLength(
+            2,
+          );
+          expect(before.bindingOwners.filter((owner) => owner.owner_id === ownerId)).toHaveLength(
+            1,
+          );
+        }
+        const reordered = await preview(reorderedSource);
+        expect(reordered.baseUrl).toBe(first.baseUrl);
+        expect(reordered.capabilityId).toBe(first.capabilityId);
+        const byId = (value: ApiIntegrationPreview) =>
+          [...value.tools].sort((left, right) => left.id.localeCompare(right.id));
+        expect(byId(reordered)).toEqual(byId(first));
+        let failure: unknown;
+        const repeated = await request("/integrations/install", {
+          method: "POST",
+          body: JSON.stringify({
+            source: reorderedSource,
+            expectedRevisionId: reordered.revisionId,
+            expectedContentSha256: reordered.contentSha256,
+            expectedInstanceVersion: installed.instanceVersion,
+            allowedTools,
+          }),
+        }).catch((error: unknown) => {
+          failure = error;
+          return null;
+        });
+        const after = await snapshot();
+        if (failure || after.versions.length !== 1) {
+          console.info(
+            `[numeric-reorder:${sharedOwner ? "shared" : "direct"}] published=${before.versions.length}->${after.versions.length}; instance=${before.bindings[0]!.version}->${after.bindings[0]!.version}; failure=${failure instanceof Error ? failure.name : "none"}`,
+          );
+        }
+        expect(failure).toBeUndefined();
+        expect(repeated!.status).toBe(200);
+        expect(await repeated!.json()).toEqual(installed);
+        expect(after).toEqual(before);
+        expect(reordered.revisionId).toBe(first.revisionId);
+        expect(reordered.contentSha256).toBe(first.contentSha256);
+        expect(sourceFetches).toBe(fetchesBefore);
+      } finally {
+        if (installed) {
+          if (sharedOwner) {
+            await shared.admin`delete from integration_facet_binding_owners
+              where binding_id = ${installed.instanceId} and owner_kind = 'migration' and owner_id = ${ownerId}`;
+            await shared.admin`delete from capability_component_owners
+              where workspace_id = ${workspaceId} and owner_kind = 'migration' and owner_id = ${ownerId}`;
+          }
+          const removal = await getApiIntegrationUninstallPreview(
+            client.db,
+            workspaceId,
+            subjectId,
+            installed.capabilityId,
+            installed.instanceKey,
+          );
+          await uninstallApiIntegration(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            capabilityId: installed.capabilityId,
+            instanceKey: installed.instanceKey,
+            expectedInstallationVersion: removal.installationVersion!,
+            expectedInstanceVersion: removal.instanceVersion!,
+          });
+        }
+      }
+    }, 60_000);
+  }
+
   test("installers can auto-approve selected write tools for unattended runs", async () => {
     if (!available || !client) return;
     const source = { kind: "openapi", url: "https://127.0.0.1/approval-openapi.json" };
@@ -826,10 +1278,18 @@ describe("API Integration routes", () => {
     const updated = await exempted.json();
     expect((await listed())?.approvalRequiredToolCount).toBe(0);
 
-    // Declarative: omitting the field restores approval for every write tool.
-    const restored = await install({
+    // Omission preserves the exact saved choice; resetting is explicit.
+    const preserved = await install({
       instanceKey: installed.instanceKey,
       expectedInstanceVersion: updated.instanceVersion,
+    });
+    expect(preserved.status).toBe(200);
+    const unchanged = await preserved.json();
+    expect((await listed())?.approvalRequiredToolCount).toBe(0);
+    const restored = await install({
+      instanceKey: installed.instanceKey,
+      expectedInstanceVersion: unchanged.instanceVersion,
+      autoApprovedTools: [],
     });
     expect(restored.status).toBe(200);
     const final = await restored.json();
@@ -1042,7 +1502,7 @@ describe("API Integration routes", () => {
       facetDefinitions: [
         {
           facetKey: "inventory-source",
-          kind: "knowledge_source",
+          kind: "inbound_trigger",
           configSchema: {
             type: "object",
             required: ["collection"],
@@ -1053,6 +1513,14 @@ describe("API Integration routes", () => {
             additionalProperties: false,
           },
           capabilities: { connectionRequired: true, sync: "incremental" },
+        },
+        {
+          // Integration Knowledge sync was removed: a stray stored source facet
+          // is hidden and cannot be configured.
+          facetKey: "legacy-source",
+          kind: "knowledge_source",
+          configSchema: { type: "object", properties: {}, additionalProperties: false },
+          capabilities: {},
         },
       ],
       revision: {
@@ -1087,7 +1555,8 @@ describe("API Integration routes", () => {
     const base = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/finance/facets`;
     const listed = await request(base);
     expect(listed.status).toBe(200);
-    expect(await listed.json()).toMatchObject({
+    const listedBody = await listed.json();
+    expect(listedBody).toMatchObject({
       capabilityId: installed.capabilityId,
       instanceKey: "finance",
       connectionId: connection.id,
@@ -1095,12 +1564,26 @@ describe("API Integration routes", () => {
         {
           definition: {
             facetKey: "inventory-source",
-            kind: "knowledge_source",
+            kind: "inbound_trigger",
           },
           binding: null,
         },
       ],
     });
+    expect(
+      listedBody.facets.map(
+        (facet: { definition: { facetKey: string } }) => facet.definition.facetKey,
+      ),
+    ).toEqual(["inventory-source"]);
+    const retired = await request(`${base}/legacy-source`, {
+      method: "PUT",
+      body: JSON.stringify({
+        displayName: "Legacy source",
+        config: {},
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(retired.status).toBe(404);
 
     const configureKey = crypto.randomUUID();
     const configuredResponse = await request(`${base}/inventory-source`, {
@@ -1260,205 +1743,5 @@ describe("API Integration routes", () => {
       }),
     });
     expect(conflictAfterInstanceDrift.status).toBe(409);
-  }, 60_000);
-
-  test("replays completed Google Drive facet saves before provider and Connection validation", async () => {
-    if (!available || !client) return;
-    googleDriveFolderName = "Product";
-    googleDriveProviderRequests.length = 0;
-    const connection = await createConnection(client.db, {
-      accountId,
-      workspaceId,
-      subjectId,
-      providerDomain: "googleapis.com",
-      kind: "oauth2",
-      credentialEncrypted: encryptEnvironmentValue(
-        environmentsEncryptionKey,
-        JSON.stringify({ access_token: "route-google-access", token_type: "Bearer" }),
-      ),
-      grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE],
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-      metadata: GoogleDriveConnectionMetadata.parse({
-        credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
-        credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
-        googlePermissionId: "route-google-permission",
-        googleEmail: "route-google@example.com",
-        googleDisplayName: "Route Google",
-        verifiedAt: "2026-08-14T06:00:00.000Z",
-        accessMode: "readonly",
-        lifecycle: {
-          state: "active",
-          recoverable: true,
-          observedAt: "2026-08-14T06:00:00.000Z",
-        },
-      }),
-      createdBySubjectId: subjectId,
-    });
-    const installed = await installApiIntegration(client.db, {
-      accountId,
-      workspaceId,
-      subjectId,
-      capabilityId: "api:route-google-drive-facet",
-      pluginKey: "integration/route-google-drive-facet",
-      serverId: "route_google_drive_facet",
-      name: "Route Google Drive",
-      description: "Exercises provider-specific facet receipt replay.",
-      definitionId: "route-google-drive-facet",
-      definitionProvenance: "workspace",
-      providerDomain: "googleapis.com",
-      protocol: "openapi",
-      baseUrl: GOOGLE_DRIVE_INTEGRATION_DEFINITION.baseUrl,
-      sourceUrl: "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
-      authScheme: { kind: "oauth2" },
-      connectionId: connection.id,
-      instanceKey: "finance",
-      requiredScopes: [GOOGLE_DRIVE_READONLY_SCOPE],
-      ownership: "subject",
-      facetDefinitions: GOOGLE_DRIVE_INTEGRATION_DEFINITION.facets,
-      revision: {
-        id: "openapi:444444444444444444444444",
-        protocol: "openapi",
-        definitionId: "route-google-drive-facet",
-        contentSha256: "4".repeat(64),
-        source: { url: "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest" },
-        title: "Route Google Drive",
-        tools: [
-          {
-            id: "files_get",
-            operationKey: "drive.files.get",
-            name: "Get file",
-            description: "Get Drive metadata.",
-            inputSchema: { type: "object", properties: {} },
-            safety: "read",
-            approvalMode: "never",
-            deprecated: false,
-          },
-        ],
-        bindings: {
-          files_get: {
-            method: "get",
-            pathTemplate: "/files/{fileId}",
-            serverUrl: GOOGLE_DRIVE_INTEGRATION_DEFINITION.baseUrl,
-            parameters: [],
-          },
-        },
-      },
-    });
-    const endpoint = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/${installed.instanceKey}/facets/drive-content/source`;
-    const aliasCollisionKey = crypto.randomUUID();
-    const aliasCollision = await request(endpoint, {
-      method: "PUT",
-      body: JSON.stringify({
-        sources: [
-          {
-            id: "folder-1",
-            name: "Product",
-            mimeType: "application/vnd.google-apps.folder",
-            driveId: null,
-          },
-          {
-            id: "https://drive.google.com/drive/folders/folder-1",
-            name: "Product",
-            mimeType: "application/vnd.google-apps.folder",
-            driveId: null,
-          },
-        ],
-        destination: { authorityKind: "workspace", collectionId: null },
-        syncCadence: "hourly",
-        syncEnabled: true,
-        readPolicy: "allow",
-        idempotencyKey: aliasCollisionKey,
-      }),
-    });
-    expect(aliasCollision.status).toBe(400);
-    expect(await aliasCollision.text()).toBe("Google Drive sources must be unique");
-    expect(googleDriveProviderRequests).toHaveLength(0);
-    expect(
-      await shared!.admin<Array<{ count: number }>>`
-        select count(*)::int as count
-        from capability_operations
-        where workspace_id = ${workspaceId}::uuid
-          and idempotency_key = ${aliasCollisionKey}
-      `,
-    ).toEqual([{ count: 0 }]);
-
-    const idempotencyKey = crypto.randomUUID();
-    const payload = {
-      sources: [
-        {
-          id: "https://drive.google.com/drive/folders/folder-1",
-          name: "Product",
-          mimeType: "application/vnd.google-apps.folder",
-          driveId: null,
-        },
-      ],
-      destination: { authorityKind: "workspace", collectionId: null },
-      syncCadence: "hourly",
-      syncEnabled: true,
-      readPolicy: "allow",
-      idempotencyKey,
-    };
-    const configuredResponse = await request(endpoint, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
-    expect(configuredResponse.status).toBe(200);
-    const configured = await configuredResponse.json();
-    expect(configured).toMatchObject({
-      status: "configured",
-      binding: {
-        connectionId: connection.id,
-        status: "active",
-        version: 1,
-        config: { sources: [{ id: "folder-1" }] },
-      },
-    });
-    expect(googleDriveProviderRequests).toHaveLength(1);
-
-    const legacyConfigured = {
-      ...configured,
-      binding: { ...configured.binding },
-    };
-    delete legacyConfigured.binding.directlyOwned;
-    delete legacyConfigured.binding.owners;
-    await shared!.admin`
-      update capability_operations
-      set result = ${shared!.admin.json(legacyConfigured)}
-      where workspace_id = ${workspaceId}::uuid
-        and idempotency_key = ${idempotencyKey}
-    `;
-
-    googleDriveFolderName = "Renamed Product";
-    await shared!.admin`
-      update connections
-      set status = 'revoked', version = version + 1, updated_at = now()
-      where id = ${connection.id}
-    `;
-    const providerRequestCount = googleDriveProviderRequests.length;
-    const replay = await request(endpoint, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
-    expect(replay.status).toBe(200);
-    expect(await replay.json()).toEqual(configured);
-    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
-
-    const conflict = await request(endpoint, {
-      method: "PUT",
-      body: JSON.stringify({
-        ...payload,
-        sources: [{ ...payload.sources[0], name: "Renamed Product" }],
-      }),
-    });
-    expect(conflict.status).toBe(409);
-    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
-
-    const crossSubjectReplay = await request(
-      endpoint,
-      { method: "PUT", body: JSON.stringify(payload) },
-      "user:api-integration-route-other-admin",
-    );
-    expect(crossSubjectReplay.status).toBe(409);
-    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
   }, 60_000);
 });

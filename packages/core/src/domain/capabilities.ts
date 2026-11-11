@@ -1,15 +1,38 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
+import {
+  personalWorkspaceExtensionApiIntegrations,
+  personalWorkspaceExtensionMcpServers,
+  personalWorkspaceExtensionSubject,
+  type PersonalWorkspaceExtensionMcpServer,
+} from "./personal-workspace-connectors";
+import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
+import type { ConnectionAccountReads } from "./connection-account-reads";
+import {
+  integrationMentionMatcher,
+  integrationNamesAgree,
+  isDistinctiveIntegrationMention,
+  isIntegrationDefinitionEnabled,
+  registrableHostDomain,
+  sharedVendorDomains,
+  type IntegrationDefinition,
+} from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  findIntegrationsOauthClient,
+  parseIntegrationsOauthClientsJson,
+  type Settings,
+} from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
+import { legacyMcpClientError, withMcpStreamableHttpClient } from "./mcp-streamable-http-client";
+import { storeMcpServerLogo, type McpServerLogoStorage } from "./mcp-server-logo";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
   FIKEN_PROVIDER_DOMAIN,
   FIRST_PARTY_MCP_TOOL_NAMES,
+  OPENGENI_BROWSER_EXTENSION_URL,
   type AccessGrant,
   type CapabilityAction,
   type CapabilityCatalogResponse,
@@ -17,10 +40,16 @@ import {
   type ConnectionMetadata,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
+  type OrganizationIntegrationPolicy,
   type McpServerConnectionRef,
   type McpPersonalConnectionDelegation,
   assertOrganizationIntegrationAllowed,
+  INTEGRATION_DEFINITION_CAPABILITY_PREFIX,
+  integrationDefinitionCapabilityId,
+  integrationDefinitionIdFromCapabilityId,
   type SocialConnection,
+  ToolAuthNeededPayload,
+  type UserSetupBlocker,
 } from "@opengeni/contracts";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -29,16 +58,29 @@ import {
   CODEX_APPS_STARTUP_TIMEOUT_MS,
 } from "@opengeni/codex";
 import {
-  decryptVariableSetValue,
+  decryptEnvironmentValue,
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
+  listCapabilityInstallationInstallers,
+  removeCapabilityInstallation,
   enableCapabilityInstallation,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
-  getCodexAppsCredentialAuthorizationForRun,
-  getWorkspaceGrant,
+  isOrganizationConnectorOverride,
+  isTransactionHandle,
+  listOrganizationConnectorsReachingWorkspace,
+  organizationConnectorAsInstallation,
+  organizationConnectorCatalogItem,
+  organizationConnectorLogin,
+  restoreOrganizationConnectorInWorkspace,
+  turnOffOrganizationConnectorInWorkspace,
+  type OrganizationConnectorRow,
+  resolveSubscriptionCoreCodexAppsDesignation,
+  rlsContextForWorkspace,
+  subscriptionCoreCodexAppsRequestAuth,
+  type SubscriptionCoreCodexAppsRequestAuth,
   getStoredCapabilityHeaderCiphertext,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
@@ -49,20 +91,26 @@ import {
   listSocialConnections,
   mcpServerIdForCapability,
   upsertCapabilityCatalogItem,
+  setWorkspaceCapabilityCatalogItemLogo,
   type Database,
   type ApiIntegrationRuntime,
   type EnabledMcpCapabilityServer,
   type InstalledSkillSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
-import { hasPermission } from "../access";
+
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
+import { listOwnConnectionMetadata } from "./personal-connection-delegations";
+import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -79,7 +127,32 @@ export async function buildCapabilityCatalog(input: {
   workspaceId: string;
   settings: Settings;
   subjectId?: string | null;
+  /** The workspace's organization, when the caller knows it (skips a lookup). */
+  accountId?: string;
 }): Promise<CapabilityCatalogResponse> {
+  // Scoped readers use savepoints and transaction-local actor settings. They
+  // must not overlap on a caller's transaction: one reader can otherwise
+  // restore another reader's subject instead of the enclosing caller's.
+  // Independent pool reads keep their existing parallel execution.
+  const serial = isTransactionHandle(input.db);
+  const reads = [
+    () => listCapabilityCatalogItems(input.db, input.workspaceId),
+    () => listCapabilityInstallations(input.db, input.workspaceId),
+    () => listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
+    () => listConnectionsMetadata(input.db, input.workspaceId, null),
+    () => discoverCuratedSkillLibraryItems(),
+    () => listInstalledSkills(input.db, input.workspaceId),
+    () =>
+      input.settings.codexConnectedAppsEnabled
+        ? resolveCodexAppsDesignationForRun(
+            input.db,
+            input.workspaceId,
+            input.accountId ? { accountId: input.accountId } : {},
+          )
+        : Promise.resolve(null),
+    () => listEnabledMcpCapabilityServers(input.db, input.workspaceId),
+    () => listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId),
+  ] as const;
   const [
     persistedItems,
     capabilityInstallations,
@@ -87,21 +160,34 @@ export async function buildCapabilityCatalog(input: {
     workspaceConnections,
     curatedLibrarySkills,
     installedSkills,
-    codexAppsCredentialId,
+    codexAppsDesignation,
     runnableMcpServers,
-  ] = await Promise.all([
-    listCapabilityCatalogItems(input.db, input.workspaceId),
-    listCapabilityInstallations(input.db, input.workspaceId),
-    listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
-    listConnectionsMetadata(input.db, input.workspaceId, null),
-    discoverCuratedSkillLibraryItems(),
-    listInstalledSkills(input.db, input.workspaceId),
-    input.settings.codexConnectedAppsEnabled
-      ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
-      : Promise.resolve(null),
-    listEnabledMcpCapabilityServers(input.db, input.workspaceId),
-  ]);
+    organizationConnectors,
+  ] = serial
+    ? ([
+        await reads[0](),
+        await reads[1](),
+        await reads[2](),
+        await reads[3](),
+        await reads[4](),
+        await reads[5](),
+        await reads[6](),
+        await reads[7](),
+        await reads[8](),
+      ] as const)
+    : await Promise.all([
+        reads[0](),
+        reads[1](),
+        reads[2](),
+        reads[3](),
+        reads[4](),
+        reads[5](),
+        reads[6](),
+        reads[7](),
+        reads[8](),
+      ]);
   const runnableCapabilityIds = new Set(runnableMcpServers.map((server) => server.capabilityId));
+  const operatorOAuthClientConfigured = operatorOAuthClientResolver(input.settings);
   const catalogInstallations = capabilityInstallations.filter(
     (installation) => installation.kind === "mcp",
   );
@@ -115,8 +201,11 @@ export async function buildCapabilityCatalog(input: {
   );
   const builtIns = [
     ...configuredMcpCatalogItems(input.settings),
-    ...providerIntegrationCatalogItems(socialConnections),
-    fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
+    ...builtInConnectorCatalogItems({
+      settings: input.settings,
+      socialConnections,
+      workspaceConnections,
+    }),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -126,9 +215,9 @@ export async function buildCapabilityCatalog(input: {
       .map(installedSkillCatalogItem),
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
-    ? codexAppsCatalogItem(codexAppsCredentialId !== null)
+    ? codexAppsCatalogItem(codexAppsDesignation !== null)
     : null;
-  const items = dedupeCatalogItems([
+  const ownItems = dedupeCatalogItems([
     ...builtIns,
     ...persistedItems.filter(
       (item) =>
@@ -140,36 +229,260 @@ export async function buildCapabilityCatalog(input: {
     // Keep the reserved, server-derived item authoritative over any stale
     // legacy catalog row with the same id.
     ...(codexApps ? [codexApps] : []),
-  ])
-    .map((item) => {
-      const projected =
-        item.kind === "skill"
-          ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
-          : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id));
-      // An installed connector can become unrunnable after a lifecycle or
-      // ownership change. Use the execution registry rather than presenting
-      // its stale catalog definition as a selectable tool.
-      const runtimeProjected =
-        projected.kind === "mcp" &&
-        projected.enabled &&
-        projected.source !== "configured" &&
-        projected.source !== "built_in" &&
-        !runnableCapabilityIds.has(projected.id)
-          ? {
-              ...projected,
-              runtime: {
-                ...projected.runtime,
-                available: false,
-                notes: "This installed connection is unavailable. Review its connection settings.",
-              },
-            }
-          : projected;
-      return applyCapabilityLifecycle(runtimeProjected);
-    })
-    .sort(compareCatalogItems);
+  ]).map((item) => {
+    const projected =
+      item.kind === "skill"
+        ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
+        : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id));
+    // An installed connector can become unrunnable after a lifecycle or
+    // ownership change. Use the execution registry rather than presenting
+    // its stale catalog definition as a selectable tool.
+    const runtimeProjected =
+      projected.kind === "mcp" &&
+      projected.enabled &&
+      projected.source !== "configured" &&
+      projected.source !== "built_in" &&
+      !runnableCapabilityIds.has(projected.id)
+        ? {
+            ...projected,
+            runtime: {
+              ...projected.runtime,
+              available: false,
+              notes: "This installed connection is unavailable. Review its connection settings.",
+            },
+          }
+        : projected;
+    return applyCapabilityLifecycle(
+      applyGoogleConnectorSetupAvailability(
+        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+        input.settings,
+      ),
+    );
+  });
+  const items = withOrganizationConnectorItems(ownItems, {
+    connectors: organizationConnectors,
+    installations: capabilityInstallationById,
+    runnableCapabilityIds,
+    workspaceId: input.workspaceId,
+  }).sort(compareCatalogItems);
+  // A Personal workspace also shows the connectors its owner's "Only me"
+  // connections carry in from the organization's other workspaces.
+  const carried = input.subjectId
+    ? await personalWorkspaceExtensionMcpServers(input.db, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        accountId: input.accountId,
+        ownServers: [...input.settings.mcpServers, ...runnableMcpServers],
+      })
+    : [];
   return {
-    items,
+    items: carried.length
+      ? (await withPersonalWorkspaceCarriedItems(input.db, items, carried)).sort(
+          compareCatalogItems,
+        )
+      : items,
     installations: catalogInstallations,
+  };
+}
+
+/**
+ * Organization connectors that reach this workspace (OR-11), listed once and
+ * marked as the organization's (`lifecycle.managedBy: "organization"`,
+ * `metadata.organizationConnector`). The workspace's own installation of the
+ * same connector wins and is listed as usual, except a turned-off override,
+ * which shows the organization's connector as off here. Workspace managers
+ * can turn it off here (`disconnect`) and back on (`connect`); nobody edits
+ * it here. With "each person signs in", people connect their own account
+ * through its subject-scoped `connectionRef`, as for a workspace connector.
+ */
+function withOrganizationConnectorItems(
+  items: CapabilityCatalogItem[],
+  input: {
+    connectors: readonly OrganizationConnectorRow[];
+    installations: ReadonlyMap<string, CapabilityInstallation>;
+    runnableCapabilityIds: ReadonlySet<string>;
+    workspaceId: string;
+  },
+): CapabilityCatalogItem[] {
+  if (input.connectors.length === 0) return items;
+  const result = [...items];
+  for (const connector of input.connectors) {
+    const installation = input.installations.get(connector.capabilityId);
+    const turnedOff = !!installation && isOrganizationConnectorOverride(installation);
+    if (installation && !turnedOff) continue;
+    const index = result.findIndex((item) => item.id === connector.capabilityId);
+    const base = connector.customDefinition
+      ? organizationConnectorCatalogItem(connector, input.workspaceId)
+      : index >= 0
+        ? result[index]!
+        : null;
+    if (!base || base.kind !== "mcp") continue;
+    const login = organizationConnectorLogin(connector.config);
+    const metadata = {
+      ...base.metadata,
+      organizationConnector: {
+        id: connector.id,
+        generation: connector.generation,
+        login,
+        source: connector.customDefinition ? "custom" : "catalog",
+      },
+    };
+    const ready = !turnedOff && input.runnableCapabilityIds.has(connector.capabilityId);
+    const connectionRef = ready ? installationConnectionRef(connector.config) : null;
+    const detail = turnedOff
+      ? "From your organization. Turned off in this workspace."
+      : ready
+        ? login === "auto_connect"
+          ? "From your organization. Connects you automatically the first time you use it."
+          : "From your organization"
+        : "Your organization's setup of this connector is unavailable. Ask an organization admin to review it.";
+    const projected: CapabilityCatalogItem = {
+      ...base,
+      authKind: base.authKind ?? (connectionRef?.kind === "oauth2" ? "oauth2" : null),
+      enabled: ready,
+      enabledReason: ready ? detail : null,
+      connectionRef,
+      runtime:
+        ready || turnedOff ? base.runtime : { ...base.runtime, available: false, notes: detail },
+      lifecycle: turnedOff
+        ? { status: "available", readiness: "setup_required", detail, managedBy: "organization" }
+        : ready
+          ? { status: "ready", readiness: "ready", detail, managedBy: "organization" }
+          : { status: "unavailable", readiness: "unavailable", detail, managedBy: "organization" },
+      actions: turnedOff ? ["connect", "inspect"] : ["disconnect", "inspect"],
+      metadata,
+    };
+    if (index >= 0) result[index] = projected;
+    else result.push(projected);
+  }
+  return result;
+}
+
+/**
+ * Carried connectors are enabled here but managed where their connection was
+ * made: they are labelled with that workspace and offer only inspection, since
+ * this workspace has no installation to configure or disconnect.
+ */
+async function withPersonalWorkspaceCarriedItems(
+  db: Database,
+  items: CapabilityCatalogItem[],
+  carried: readonly PersonalWorkspaceExtensionMcpServer[],
+): Promise<CapabilityCatalogItem[]> {
+  const result = [...items];
+  for (const server of carried) {
+    const index = result.findIndex((item) => item.id === server.capabilityId);
+    if (index >= 0 && result[index]!.enabled) continue;
+    const item =
+      index >= 0
+        ? result[index]!
+        : await getCapabilityCatalogItem(
+            db,
+            server.personalExtension.originWorkspaceId,
+            server.capabilityId,
+          );
+    if (!item || item.kind !== "mcp") continue;
+    const origin = server.personalExtension;
+    const detail = `From ${origin.originWorkspaceName}`;
+    const projected: CapabilityCatalogItem = {
+      ...item,
+      enabled: true,
+      enabledReason: detail,
+      connectionRef: {
+        providerDomain: server.connectionRef.providerDomain,
+        kind: server.connectionRef.kind ?? "oauth2",
+        subjectScope: "subject",
+      },
+      runtime: { ...item.runtime, available: true, mcpServerId: server.id },
+      lifecycle: { status: "ready", readiness: "ready", detail, managedBy: "workspace" },
+      actions: ["inspect"],
+      metadata: {
+        ...item.metadata,
+        personalExtension: {
+          originWorkspaceId: origin.originWorkspaceId,
+          originWorkspaceName: origin.originWorkspaceName,
+        },
+      },
+    };
+    if (index >= 0) result[index] = projected;
+    else result.push(projected);
+  }
+  return result;
+}
+
+/**
+ * `metadata.oauthClientRequirement` is stamped by the catalog import from
+ * `data/catalog/oauth-client-requirements.json` for providers that refuse
+ * OAuth self-registration. Whether the row can connect here is a deployment
+ * fact, so the catalog projects it rather than every surface guessing. The
+ * matcher is the one the OAuth start uses to find an operator client.
+ */
+function operatorOAuthClientResolver(settings: Settings): (issuer: string) => boolean {
+  let configured: ReturnType<typeof parseIntegrationsOauthClientsJson> = {};
+  try {
+    configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  } catch {
+    // Startup validates this setting; a malformed value can configure nothing.
+  }
+  return (issuer) =>
+    (issuer !== "https://accounts.google.com" || settings.googleConnectorSetupEnabled) &&
+    findIntegrationsOauthClient(configured, [issuer]) !== null;
+}
+
+export function applyGoogleConnectorSetupAvailability(
+  item: CapabilityCatalogItem,
+  settings: Settings,
+): CapabilityCatalogItem {
+  const url = item.mcpUrl ?? item.endpointUrl;
+  const drive = url === "https://drivemcp.googleapis.com/mcp/v1";
+  const gmail = url === "https://gmailmcp.googleapis.com/mcp/v1";
+  const calendar = url === "https://calendarmcp.googleapis.com/mcp/v1";
+  if (
+    item.kind !== "mcp" ||
+    (!drive && !gmail && !calendar) ||
+    (settings.googleConnectorSetupEnabled &&
+      (!drive || settings.googleDriveMcpEnabled) &&
+      (!calendar || settings.googleCalendarEnabled))
+  )
+    return item;
+  return {
+    ...item,
+    runtime: {
+      ...item.runtime,
+      operatorOAuthClient: { configured: false },
+      notes:
+        "New connections are unavailable until Google data-access verification and provider setup are complete.",
+    },
+  };
+}
+
+export function applyOperatorOAuthClientRequirement(
+  item: CapabilityCatalogItem,
+  configured: (issuer: string) => boolean,
+): CapabilityCatalogItem {
+  if (item.kind !== "mcp") return item;
+  const requirement = item.metadata.oauthClientRequirement;
+  const issuer =
+    requirement && typeof requirement === "object" && !Array.isArray(requirement)
+      ? (requirement as Record<string, unknown>).issuer
+      : undefined;
+  if (typeof issuer !== "string" || !issuer) return item;
+  const isConfigured = configured(issuer);
+  // An installed row keeps its own status note; the setup note is for rows
+  // that are not on yet.
+  if (isConfigured || item.enabled) {
+    return {
+      ...item,
+      runtime: { ...item.runtime, operatorOAuthClient: { configured: isConfigured } },
+    };
+  }
+  return {
+    ...item,
+    runtime: {
+      ...item.runtime,
+      operatorOAuthClient: { configured: false },
+      notes:
+        "New connections are unavailable until this deployment registers an OAuth client with the provider.",
+    },
   };
 }
 
@@ -178,6 +491,14 @@ export async function createCatalogItem(input: {
   accountId: string;
   workspaceId: string;
   payload: CreateCapabilityCatalogItemRequest;
+  /**
+   * The caller is a member, not an integration admin: they add a new server
+   * and never change or shadow one that exists (a built-in, configured or
+   * registry entry, or another workspace entry), and the server id is always
+   * derived from the capability id. Their organization must let members turn
+   * on integrations. See `INTEGRATION_SETUP_PERMISSION`.
+   */
+  memberCreate?: { settings: Settings } | undefined;
 }): Promise<CapabilityCatalogItem> {
   const id = input.payload.id?.trim() || generatedCapabilityId(input.payload);
 
@@ -213,6 +534,44 @@ export async function createCatalogItem(input: {
     input.payload.source === "registry"
       ? "manual"
       : input.payload.source;
+  if (input.memberCreate) {
+    if (
+      input.payload.metadata.mcpServerId !== undefined &&
+      input.payload.metadata.mcpServerId !== mcpServerIdForCapability(id, {})
+    )
+      throw new HTTPException(403, { message: "Only an admin can choose a server's tool ID" });
+    await requireMemberIntegrationSetupAllowed(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    });
+    const catalog = await buildCapabilityCatalog({
+      db: input.db,
+      workspaceId: input.workspaceId,
+      settings: input.memberCreate.settings,
+    });
+    const existing =
+      catalog.items.find((candidate) => candidate.id === id) ??
+      (await getCapabilityCatalogItem(input.db, input.workspaceId, id));
+    if (existing && !sameMemberCatalogEntry(existing, input.workspaceId, input.payload))
+      throw new HTTPException(409, {
+        message: "A connection with this ID already exists. Only an admin can change it.",
+      });
+    if (existing) return existing;
+    // Nor may the new server take the tool ID another connection runs under.
+    const serverId = mcpServerIdForCapability(id, {});
+    if (
+      catalog.items.some(
+        (candidate) =>
+          candidate.kind === "mcp" &&
+          candidate.id !== id &&
+          mcpServerIdForCapability(candidate.id, candidate.metadata) === serverId,
+      ) ||
+      input.memberCreate.settings.mcpServers.some((server) => server.id === serverId)
+    )
+      throw new HTTPException(409, {
+        message: "A connection with this ID already exists. Only an admin can change it.",
+      });
+  }
   const metadata = {
     ...input.payload.metadata,
     ...(input.payload.kind === "mcp" &&
@@ -221,7 +580,7 @@ export async function createCatalogItem(input: {
       ? { mcpServerId: mcpServerIdForCapability(id, input.payload.metadata) }
       : {}),
   };
-  return await upsertCapabilityCatalogItem(input.db, {
+  const saved = await upsertCapabilityCatalogItem(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     id,
@@ -236,7 +595,28 @@ export async function createCatalogItem(input: {
     installUrl: input.payload.installUrl ?? null,
     authModel: input.payload.authModel?.trim() || null,
     metadata,
+    ...(input.memberCreate ? { createOnly: true } : {}),
   });
+  // Another request created this id first: a member never rewrites it.
+  if (input.memberCreate && !sameMemberCatalogEntry(saved, input.workspaceId, input.payload))
+    throw new HTTPException(409, {
+      message: "A connection with this ID already exists. Only an admin can change it.",
+    });
+  return saved;
+}
+
+/** An existing entry a member's add request may return as its own result: the
+ * same workspace's MCP server at the same address. */
+function sameMemberCatalogEntry(
+  existing: CapabilityCatalogItem,
+  workspaceId: string,
+  payload: CreateCapabilityCatalogItemRequest,
+): boolean {
+  return (
+    existing.workspaceId === workspaceId &&
+    existing.kind === payload.kind &&
+    existing.endpointUrl === (payload.endpointUrl ?? null)
+  );
 }
 
 type EnableCapabilityInput = {
@@ -246,20 +626,123 @@ type EnableCapabilityInput = {
   workspaceId: string;
   settings: Settings;
   capabilityId: string;
+  /**
+   * The caller holds only the personal setup permission: turn a reviewed
+   * OAuth integration on for personal accounts if it is not on yet, and
+   * change nothing else. See {@link assertPersonalIntegrationSetupRequest}.
+   */
+  personalSetup?: boolean;
+  /**
+   * The caller is a member, not an integration admin (see
+   * `INTEGRATION_SETUP_PERMISSION`): turn any integration on if it is not on
+   * yet, with their own or a shared account, but never change one that is
+   * already on, turn back on one an admin turned off, or choose its tool
+   * approval. See {@link assertMemberIntegrationSetupRequest}.
+   */
+  memberSetup?: boolean;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
+  /** Where a workspace MCP server's advertised icon is stored as its catalog logo. */
+  mcpServerLogoStorage?: McpServerLogoStorage | null;
+  /** Server-owned receipt from a just-verified native Connect credential.
+   * Never projected into EnableCapabilityRequest or accepted from a client. */
+  verifiedConnection?: {
+    id: string;
+    version: number;
+    endpointUrl: string;
+    connectivity: Record<string, unknown>;
+  };
 };
 
 export async function enableCapability(
   input: EnableCapabilityInput,
 ): Promise<CapabilityInstallation> {
   const prepared = await prepareCapabilityEnable(input);
-  return prepared.commit(input.db);
+  return await prepared.commit(input.db);
+}
+
+/** Personal and member setup never turn back on what an admin turned off. */
+function assertSetupLeftInstallationOn(installation: CapabilityInstallation): void {
+  if (installation.status !== "active")
+    throw new HTTPException(409, {
+      message: "An admin turned this integration off; ask them to turn it back on",
+    });
+}
+
+/**
+ * What the personal setup permission may enable: a reviewed catalog OAuth
+ * integration (never a custom MCP server or an API-key integration), for
+ * personal accounts only (each person signs in to their own account: no
+ * shared connection, credential headers, config or metadata).
+ */
+function assertPersonalIntegrationSetupRequest(
+  item: CapabilityCatalogItem,
+  payload: EnableCapabilityRequest,
+): void {
+  if (!isPersonalIntegrationSetupCandidate(item))
+    throw new HTTPException(403, {
+      message: `Only an admin can turn on ${item.name}. Ask an admin to turn it on first, then connect your account.`,
+    });
+  const ref = payload.connectionRef;
+  if (
+    !ref ||
+    ref.subjectScope !== "subject" ||
+    ref.kind !== "oauth2" ||
+    ref.connectionId ||
+    ref.authoritySource === "host" ||
+    ref.accountSelection ||
+    ref.selectedResources ||
+    Object.keys(payload.headers ?? {}).length > 0 ||
+    Object.keys(payload.config ?? {}).length > 0 ||
+    Object.keys(payload.metadata ?? {}).length > 0
+  )
+    throw new HTTPException(403, {
+      message:
+        "Without integration admin rights, an integration can only be turned on for personal accounts",
+    });
+}
+
+/**
+ * What a member may enable: anything not on yet, but tool approval stays with
+ * admins. An explicit `requireApproval` overrides the catalog's recommendation,
+ * so only asking for every tool (which can never widen it) is accepted.
+ */
+function assertMemberIntegrationSetupRequest(payload: EnableCapabilityRequest): void {
+  if (
+    Object.hasOwn(payload.config ?? {}, "requireApproval") &&
+    payload.config.requireApproval !== true
+  )
+    throw new HTTPException(403, {
+      message: "Only an admin can choose which tools run without asking",
+    });
+}
+
+/**
+ * Personal and member setup both need the organization to let members turn on
+ * integrations (`personalIntegrationSetup: "members"`, the default).
+ */
+export function assertMemberIntegrationSetupAllowed(policy: OrganizationIntegrationPolicy): void {
+  if (policy.personalIntegrationSetup !== "members")
+    throw new HTTPException(403, {
+      message: "Your organization lets only admins turn on integrations",
+    });
+}
+
+/** {@link assertMemberIntegrationSetupAllowed} for a route without its own policy transaction. */
+export async function requireMemberIntegrationSetupAllowed(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+): Promise<void> {
+  await withOrganizationIntegrationPolicyFence(db, scope, async (_tx, policy) =>
+    assertMemberIntegrationSetupAllowed(policy),
+  );
 }
 
 /** Probe outside a durable Connect commit; persist the exact prepared settings
  * inside the caller's authorized receipt transaction. Native enable uses this too. */
 export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
+  const organizationOverride = await organizationConnectorEnableShortcut(input);
+  if (organizationOverride) return organizationOverride;
   input = { ...input, payload: structuredClone(input.payload) };
   const item = await requireCatalogItem(
     input.db,
@@ -292,6 +775,15 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
     });
   }
+  if (input.personalSetup) {
+    assertPersonalIntegrationSetupRequest(item, input.payload);
+    // Create-only: an existing installation is returned unchanged.
+    input.payload.onlyIfUninstalled = true;
+  } else if (input.memberSetup) {
+    assertMemberIntegrationSetupRequest(input.payload);
+    // Create-only: an existing installation is returned unchanged.
+    input.payload.onlyIfUninstalled = true;
+  }
   let installationMetadata = input.payload.metadata;
   // Credential-header storage is written exclusively by this flow; strip the
   // reserved keys from caller-provided config so the stored shape stays
@@ -301,13 +793,24 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
+  let mcpServerLogoAssetPath: string | null = null;
   if (item.kind === "mcp") {
+    if (
+      mcpEndpointRequiresPersonalConnection(item) &&
+      (input.payload.connectionRef?.subjectScope !== "subject" ||
+        Object.keys(input.payload.headers ?? {}).length > 0)
+    ) {
+      throw new HTTPException(422, {
+        message: "Google connector requires a personal-owned connection reference",
+      });
+    }
     // This generic, potentially workspace-authored catalog is not proof of a
     // curated provider identity. Dedicated Connect adapters classify separately.
     const unchanged = await withOrganizationIntegrationPolicyFence(
       input.db,
       input,
       async (tx, policy) => {
+        if (input.personalSetup || input.memberSetup) assertMemberIntegrationSetupAllowed(policy);
         const existing = await unchangedMcpInstallation(
           { ...input, db: tx },
           item,
@@ -332,33 +835,51 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
                 message: "Capability installation changed; reload before reconciling",
               });
             }
+            if (input.personalSetup || input.memberSetup) assertSetupLeftInstallationOn(current);
             return current;
           }),
       };
     }
-    const headers = await resolveMcpCredentialHeaders(input, item);
+    const headers = input.verifiedConnection
+      ? null
+      : await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
       ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
+    // An Opengeni API key reads its organization: EU-only content stays in
+    // EU-only workspaces.
+    await assertMcpCredentialContentFlowAllowed(input.db, {
+      target: { accountId: input.accountId, workspaceId: input.workspaceId },
+      url: item.endpointUrl,
+      headers,
+    });
+    if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
+    let serverInfo: unknown;
     installationMetadata = {
       ...installationMetadata,
-      ...(connectionRef && !headers
-        ? authDeferredMcpConnectivity()
-        : await validateMcpCapabilityConnection(
-            item,
-            input.probeMcpServer,
-            headers ?? undefined,
-            input.settings,
-          )),
+      ...(input.verifiedConnection
+        ? input.verifiedConnection.connectivity
+        : connectionRef && !headers
+          ? authDeferredMcpConnectivity()
+          : await validateMcpCapabilityConnection(
+              item,
+              input.probeMcpServer,
+              headers ?? undefined,
+              input.settings,
+              (info) => {
+                serverInfo = info;
+              },
+            )),
     };
+    mcpServerLogoAssetPath = await workspaceMcpServerLogo(input, item, serverInfo);
     if (connectionRef) {
       installationConfig.connectionRef = connectionRef;
     }
     if (headers) {
       const key = requireCapabilityHeaderEncryption(input.settings);
       installationConfig.headersEncrypted = Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(key, value)]),
+        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(key, value)]),
       );
     }
   }
@@ -370,15 +891,187 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     config: installationConfig,
     metadata: installationMetadata,
     ...(input.payload.onlyIfUninstalled ? { onlyIfUninstalled: true } : {}),
+    // Whoever turns it on or changes it; a member removes only their own.
+    installedBySubjectId: input.grant.subjectId,
+  };
+  const withServerLogo = async (tx: Database, enabled: CapabilityInstallation) => {
+    if (mcpServerLogoAssetPath)
+      await setWorkspaceCapabilityCatalogItemLogo(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        id: item.id,
+        logoAssetPath: mcpServerLogoAssetPath,
+      });
+    return enabled;
   };
   return {
     commit: (db: Database) =>
-      item.kind === "mcp"
-        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], (tx) =>
-            enableCapabilityInstallation(tx, installation),
-          )
-        : enableCapabilityInstallation(db, installation),
+      item.kind === "mcp" && (input.personalSetup || input.memberSetup)
+        ? withOrganizationIntegrationPolicyFence(db, installation, async (tx, policy) => {
+            assertMemberIntegrationSetupAllowed(policy);
+            assertOrganizationIntegrationAllowed(policy, "custom:mcp");
+            if (input.verifiedConnection)
+              await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+            const enabled = await enableCapabilityInstallation(tx, installation);
+            assertSetupLeftInstallationOn(enabled);
+            return withServerLogo(tx, enabled);
+          })
+        : item.kind === "mcp"
+          ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
+              if (input.verifiedConnection)
+                await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+              return withServerLogo(tx, await enableCapabilityInstallation(tx, installation));
+            })
+          : enableCapabilityInstallation(db, installation),
   };
+}
+
+/** Google's MCP servers act as one person's account: only "each person signs in" fits them. */
+export function mcpEndpointRequiresPersonalConnection(
+  item: Pick<CapabilityCatalogItem, "endpointUrl">,
+): boolean {
+  return [
+    "https://gmailmcp.googleapis.com/mcp/v1",
+    "https://drivemcp.googleapis.com/mcp/v1",
+    "https://calendarmcp.googleapis.com/mcp/v1",
+  ].includes(item.endpointUrl?.replace(/\/+$/u, "") ?? "");
+}
+
+/**
+ * Enabling a connector the organization serves here (OR-11). An enable that
+ * brings no setup of its own (no login, key, config or metadata) means "use
+ * the organization's": it removes this workspace's turned-off override, or
+ * changes nothing. So does a person connecting their own account to an
+ * "each person signs in" connector, which is how they use the organization's
+ * setup, not a new one. Personal setup never adds a workspace setup over the
+ * organization's (that would replace it for everyone here) and never turns
+ * back on what an admin turned off. An admin's enable with a setup of its own
+ * becomes this workspace's own installation, which wins; a custom
+ * organization server has no definition outside the organization's, so it
+ * can only be used as the organization set it up.
+ */
+async function organizationConnectorEnableShortcut(
+  input: EnableCapabilityInput,
+): Promise<{ commit: (db: Database) => Promise<CapabilityInstallation> } | null> {
+  if (input.verifiedConnection) return null;
+  const connector = (
+    await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId)
+  ).find((candidate) => candidate.capabilityId === input.capabilityId);
+  if (!connector) return null;
+  const existing = await getCapabilityInstallation(
+    input.db,
+    input.workspaceId,
+    connector.capabilityId,
+  );
+  if (existing && !isOrganizationConnectorOverride(existing)) return null;
+  const ownSetup =
+    (!!input.payload.connectionRef &&
+      !isOwnSignInToOrganizationConnector(input.payload.connectionRef, connector)) ||
+    Object.keys(input.payload.headers ?? {}).length > 0 ||
+    Object.keys(input.payload.config ?? {}).length > 0 ||
+    Object.keys(input.payload.metadata ?? {}).length > 0;
+  if (ownSetup && !input.personalSetup) {
+    if (connector.customDefinition)
+      throw new HTTPException(409, {
+        message:
+          "Your organization set up this server. Turn it on here to use its setup, or ask an organization admin to change it.",
+      });
+    return null;
+  }
+  if (existing && input.personalSetup)
+    throw new HTTPException(409, {
+      message: "An admin turned this integration off; ask them to turn it back on",
+    });
+  return {
+    commit: async (db: Database) => {
+      if (existing)
+        await restoreOrganizationConnectorInWorkspace(
+          db,
+          input.workspaceId,
+          connector.capabilityId,
+        );
+      return organizationConnectorAsInstallation(connector, input.workspaceId);
+    },
+  };
+}
+
+/**
+ * A person's own sign-in to an "each person signs in" organization connector:
+ * a subject-scoped OAuth reference to the same provider, with no pinned
+ * account, resources or host authority (what connecting your own account
+ * sends). A shared workspace account is a setup of the workspace's own.
+ */
+function isOwnSignInToOrganizationConnector(
+  ref: NonNullable<EnableCapabilityRequest["connectionRef"]>,
+  connector: OrganizationConnectorRow,
+): boolean {
+  const login = organizationConnectorLogin(connector.config);
+  // An auto-connect connector falls back to the same own sign-in.
+  if (login !== "each_person" && login !== "auto_connect") return false;
+  const organizationRef = installationConnectionRef(connector.config);
+  return (
+    !!organizationRef &&
+    ref.subjectScope === "subject" &&
+    ref.kind === "oauth2" &&
+    !ref.connectionId &&
+    ref.authoritySource !== "host" &&
+    !ref.selectedResources &&
+    canonicalDomain(ref.providerDomain) === canonicalDomain(organizationRef.providerDomain)
+  );
+}
+
+/**
+ * The stored logo for a workspace's own MCP server, from the icon it just
+ * advertised during verification. Shared registry entries keep their curated
+ * catalog logo.
+ */
+export async function workspaceMcpServerLogo(
+  input: { settings: Settings; mcpServerLogoStorage?: McpServerLogoStorage | null | undefined },
+  item: Pick<CapabilityCatalogItem, "source" | "endpointUrl">,
+  serverInfo: unknown,
+): Promise<string | null> {
+  if (item.source !== "manual" || !item.endpointUrl || serverInfo === undefined) return null;
+  return await storeMcpServerLogo({
+    serverInfo,
+    endpointUrl: item.endpointUrl,
+    objectStorage: input.mcpServerLogoStorage,
+    fetch: (url, init) =>
+      pinnedFetch(url, init, input.settings, {
+        label: "MCP server icon",
+        requireHttpsOutsideLocalTest: true,
+      }),
+  });
+}
+
+async function validateVerifiedMcpConnection(
+  input: EnableCapabilityInput,
+  item: CapabilityCatalogItem,
+) {
+  const proof = input.verifiedConnection;
+  const ref = input.payload.connectionRef;
+  if (
+    !proof ||
+    !ref ||
+    item.endpointUrl !== proof.endpointUrl ||
+    ref.resource !== proof.endpointUrl
+  )
+    throw new HTTPException(409, { message: "MCP verification no longer matches the connection" });
+  const connection = await getConnectionMetadata(
+    input.db,
+    input.workspaceId,
+    proof.id,
+    input.grant.subjectId,
+  );
+  if (
+    !connection ||
+    connection.version !== proof.version ||
+    connection.status !== "active" ||
+    connection.providerDomain !== ref.providerDomain ||
+    connection.kind !== ref.kind ||
+    connection.subjectId !== (ref.subjectScope === "subject" ? input.grant.subjectId : null) ||
+    connection.metadata.mcpUrl !== proof.endpointUrl
+  )
+    throw new HTTPException(409, { message: "MCP connection changed after verification" });
 }
 
 /** A no-effect reconciliation is not a new acquisition. Validate ordinary
@@ -459,7 +1152,7 @@ async function resolveMcpCredentialHeaders(
     return Object.fromEntries(
       Object.entries(storedCiphertext).map(([name, value]) => [
         name,
-        decryptVariableSetValue(key, value),
+        decryptEnvironmentValue(key, value),
       ]),
     );
   } catch {
@@ -469,7 +1162,7 @@ async function resolveMcpCredentialHeaders(
   }
 }
 
-function normalizedMcpCredentialHeaders(
+export function normalizedMcpCredentialHeaders(
   headers: Record<string, string>,
 ): Record<string, string> | null {
   const entries = Object.entries(headers)
@@ -554,7 +1247,7 @@ async function validateMcpCapabilityConnectionRef(
     return normalized;
   }
 
-  let connection = normalized.connectionId
+  let connection: ConnectionMetadata | null = normalized.connectionId
     ? await getConnectionMetadata(
         input.db,
         input.workspaceId,
@@ -581,7 +1274,36 @@ async function validateMcpCapabilityConnectionRef(
           candidate.status === "active",
       ) ?? null;
   }
+  if (!connection && subjectScope === "subject") {
+    // A personal account follows its owner: it may have been connected from
+    // another of their workspaces and is still the same, usable connection.
+    const own = await listOwnConnectionMetadata(input.db, {
+      accountId: input.grant.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.grant.subjectId,
+      reach: "anywhere",
+      includeInactive: true,
+    });
+    connection =
+      own.find((candidate) =>
+        normalized.connectionId
+          ? candidate.id === normalized.connectionId
+          : candidate.providerDomain === normalized.providerDomain &&
+            (!normalized.kind || candidate.kind === normalized.kind) &&
+            candidate.status === "active",
+      ) ?? null;
+  }
   if (!connection) {
+    // "Each person signs in": every person's own account is resolved when
+    // they use it, so turning the server on needs no account of the caller's
+    // own. Only for the server's own provider, and only a plain OAuth ref.
+    if (isPerPersonOAuthRefForItem(item, normalized))
+      // Stored as each person's sign-in records it, so their rows match.
+      return {
+        ...normalized,
+        kind: "oauth2",
+        providerDomain: canonicalDomain(normalized.providerDomain),
+      };
     throw new HTTPException(422, {
       message: "connectionRef does not reference a visible active connection",
     });
@@ -617,7 +1339,67 @@ async function validateMcpCapabilityConnectionRef(
   return normalized;
 }
 
-function authDeferredMcpConnectivity(): Record<string, unknown> {
+function canonicalDomain(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./u, "");
+}
+
+function hostOf(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The "each person signs in" reference for this server, stored as each
+ * person's own sign-in records it, or null when the server has no sign-in of
+ * its own to offer (an API-key or credential-free catalog connector).
+ */
+export function perPersonOAuthRefForItem(
+  item: CapabilityCatalogItem,
+): McpServerConnectionRef | null {
+  if (item.authKind === "api_key" || item.authKind === "none") return null;
+  const domain = item.providerDomain ?? hostOf(item.mcpUrl ?? item.endpointUrl);
+  if (!domain) return null;
+  const ref: McpServerConnectionRef = {
+    providerDomain: canonicalDomain(domain),
+    kind: "oauth2",
+    subjectScope: "subject",
+  };
+  return isPerPersonOAuthRefForItem(item, ref) ? ref : null;
+}
+
+/**
+ * A per-person OAuth reference for this exact server: no account id, no
+ * account selection or resources, and the provider is the server itself
+ * (its catalog provider domain or its endpoint host). Each person's own
+ * account for that provider is resolved when they use it.
+ */
+function isPerPersonOAuthRefForItem(
+  item: CapabilityCatalogItem,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.subjectScope !== "subject" ||
+    ref.kind !== "oauth2" ||
+    ref.connectionId ||
+    ref.accountSelection ||
+    ref.authoritySource === "host" ||
+    ref.selectedResources
+  )
+    return false;
+  const domain = canonicalDomain(ref.providerDomain);
+  return [item.providerDomain, hostOf(item.mcpUrl ?? item.endpointUrl)].some(
+    (candidate) => typeof candidate === "string" && canonicalDomain(candidate) === domain,
+  );
+}
+
+export function authDeferredMcpConnectivity(): Record<string, unknown> {
   return {
     mcpConnectivity: {
       status: "auth_deferred",
@@ -626,7 +1408,7 @@ function authDeferredMcpConnectivity(): Record<string, unknown> {
   };
 }
 
-function assertRequiredMcpCredentialHeaders(
+export function assertRequiredMcpCredentialHeaders(
   item: CapabilityCatalogItem,
   headers: Record<string, string> | null,
   connectionRef: McpServerConnectionRef | null,
@@ -659,7 +1441,7 @@ function requiredCapabilityHeaders(metadata: Record<string, unknown>): string[] 
     .map((name) => name.trim());
 }
 
-function requireCapabilityHeaderEncryption(settings: Settings): Uint8Array {
+export function requireCapabilityHeaderEncryption(settings: Settings): Uint8Array {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
     throw new HTTPException(503, {
@@ -680,6 +1462,8 @@ export type McpCapabilityProbeInput = {
 
 export type McpCapabilityProbeResult = {
   toolCount: number;
+  /** The server's `initialize` Implementation (serverInfo), when the probe saw it. */
+  serverInfo?: unknown;
 };
 
 export type McpCapabilityProbe = (
@@ -691,6 +1475,7 @@ export async function validateMcpCapabilityConnection(
   probe: McpCapabilityProbe = probeStreamableHttpMcpServer,
   headers?: Record<string, string>,
   settings?: Settings,
+  onServerInfo?: (serverInfo: unknown) => void,
 ): Promise<Record<string, unknown>> {
   if (item.kind !== "mcp") {
     return {};
@@ -709,6 +1494,7 @@ export async function validateMcpCapabilityConnection(
       ...(headers ? { headers } : {}),
       ...(settings ? { settings } : {}),
     });
+    if (result.serverInfo !== undefined) onServerInfo?.(result.serverInfo);
     return {
       mcpConnectivity: {
         status: "ok",
@@ -730,39 +1516,42 @@ async function probeStreamableHttpMcpServer(
   if (!settings) throw new Error("Network policy is unavailable for MCP validation");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
-  const client = new Client(
-    { name: "opengeni-capability-probe", version: "0.1.0" },
-    { capabilities: {} },
-  );
   try {
-    const transport = new StreamableHTTPClientTransport(new URL(input.url), {
-      requestInit: {
-        signal: controller.signal,
-        ...(input.headers ? { headers: input.headers } : {}),
+    return await withMcpStreamableHttpClient(
+      {
+        url: input.url,
+        clientName: "opengeni-capability-probe",
+        clientVersion: "0.1.0",
+        timeoutMs: input.timeoutMs,
+        requestInit: {
+          signal: controller.signal,
+          ...(input.headers ? { headers: input.headers } : {}),
+        },
+        fetch: (url, init) =>
+          pinnedFetch(url, init, settings, {
+            label: "MCP capability probe",
+            requireHttpsOutsideLocalTest: true,
+          }),
       },
-      fetch: (url, init) =>
-        pinnedFetch(url, init, settings, {
-          label: "MCP capability probe",
-          requireHttpsOutsideLocalTest: true,
-        }),
-    });
-    await client.connect(transport as unknown as Transport, {
-      timeout: input.timeoutMs,
-      maxTotalTimeout: input.timeoutMs,
-    });
-    const tools = await client.listTools(undefined, {
-      timeout: input.timeoutMs,
-      maxTotalTimeout: input.timeoutMs,
-    });
-    return { toolCount: tools.tools.length };
+      async (client) => {
+        const tools = await client
+          .listTools(undefined, {
+            timeout: input.timeoutMs,
+            maxTotalTimeout: input.timeoutMs,
+          })
+          .catch((error: unknown) => {
+            throw legacyMcpClientError(error);
+          });
+        return { toolCount: tools.tools.length, serverInfo: client.getServerVersion() };
+      },
+    );
   } finally {
     clearTimeout(timeout);
-    await client.close().catch(() => undefined);
   }
 }
 
 function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const normalized = message.replace(/\s+/g, " ").trim();
   const endpoint = safeEndpointLabel(endpointUrl);
   if (
@@ -770,9 +1559,9 @@ function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
       normalized,
     )
   ) {
-    return `OpenGeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
+    return `the workspace could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
   }
-  return `OpenGeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
+  return `the workspace could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
 }
 
 function safeEndpointLabel(endpointUrl: string): string {
@@ -819,11 +1608,111 @@ export async function disableCapability(input: {
     });
   }
   if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
+    // A connector only the organization serves here is turned off here by a
+    // turned-off installation of the workspace's own, which wins (OR-11).
+    const organization = (
+      await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId)
+    ).some((connector) => connector.capabilityId === item.id);
+    if (organization)
+      return await turnOffOrganizationConnectorInWorkspace(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        capabilityId: item.id,
+      });
     throw new HTTPException(409, {
       message: "capability is not currently enabled",
     });
   }
   return await disableCapabilityInstallation(input.db, input.workspaceId, item.id);
+}
+
+/**
+ * A custom MCP server added in this workspace (`POST …/capabilities`): its
+ * own catalog entry, not a reviewed, registry, built-in or configured one,
+ * not a server a plugin brings (removed with its plugin), and not one the
+ * organization serves here (managed in its settings, turned off here instead).
+ */
+export function isWorkspaceCustomMcpServer(
+  item: Pick<CapabilityCatalogItem, "kind" | "workspaceId" | "source" | "provenance" | "metadata">,
+  workspaceId: string,
+): boolean {
+  return (
+    item.kind === "mcp" &&
+    item.workspaceId === workspaceId &&
+    item.source !== "built_in" &&
+    item.source !== "configured" &&
+    item.provenance !== "plugin_configured_mcp" &&
+    item.metadata.pluginInstallationId === undefined &&
+    item.metadata.organizationConnector === undefined
+  );
+}
+
+/**
+ * Whether the caller may remove each custom MCP server that is set up in the
+ * workspace: integration admins remove any, a member only one they turned on
+ * that is still on. False for everything else.
+ */
+export async function customMcpServerRemovability(input: {
+  db: Database;
+  workspaceId: string;
+  items: readonly CapabilityCatalogItem[];
+  canRemove: (installerSubjectId: string | null) => boolean;
+  admin: boolean;
+}): Promise<(item: CapabilityCatalogItem) => boolean> {
+  const installers = await listCapabilityInstallationInstallers(input.db, input.workspaceId);
+  return (item) => {
+    const installation = installers.get(item.id);
+    if (!installation || !isWorkspaceCustomMcpServer(item, input.workspaceId)) return false;
+    if (input.admin) return true;
+    return installation.status === "active" && input.canRemove(installation.installedBySubjectId);
+  };
+}
+
+/**
+ * Removes a custom MCP server from the workspace: its installation goes, so
+ * it is no longer on, and anyone who may turn integrations on can add it
+ * again (becoming its installer). Its catalog entry stays, so it keeps its
+ * address and an admin's tool rules. With `memberRemoval` (the caller lacks
+ * `capabilities:manage`) only the person who turned it on removes it, while
+ * it is on; the check runs in the removal transaction.
+ */
+export async function removeCustomMcpServer(input: {
+  db: Database;
+  accountId: string;
+  workspaceId: string;
+  settings: Settings;
+  capabilityId: string;
+  subjectId: string;
+  memberRemoval?: boolean;
+}): Promise<CapabilityInstallation> {
+  const item = await requireCatalogItem(
+    input.db,
+    input.workspaceId,
+    input.settings,
+    input.capabilityId,
+  );
+  if (!isWorkspaceCustomMcpServer(item, input.workspaceId))
+    throw new HTTPException(409, {
+      message: "Only a custom MCP server added in this workspace is removed here",
+    });
+  // The organization serving the same server here would take its place.
+  if (
+    (await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId)).some(
+      (connector) => connector.capabilityId === item.id,
+    )
+  )
+    throw new HTTPException(409, {
+      message: "Your organization serves this server here; turn it off instead",
+    });
+  const removed = await removeCapabilityInstallation(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    capabilityId: item.id,
+    subjectId: input.subjectId,
+    ...(input.memberRemoval ? { memberRemoval: true } : {}),
+  });
+  if (!removed) throw new HTTPException(409, { message: "capability is not currently enabled" });
+  return removed;
 }
 
 export async function settingsWithEnabledCapabilityMcpServers(
@@ -834,27 +1723,247 @@ export async function settingsWithEnabledCapabilityMcpServers(
     subjectId?: string;
     personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /** Every enabled capability server read, before static-id shadowing. */
+    onResolvedCapabilityServers?: (servers: readonly EnabledMcpCapabilityServer[]) => void;
+    /**
+     * The Codex Apps designation the caller already resolves (a claim reads
+     * its cutover once), or what it knows for resolving it here.
+     */
+    codexApps?: Promise<CodexAppsDesignationForRun | null> | CodexAppsRunContext;
+    /**
+     * `db` is one bounded transaction: run the reads one after another, since
+     * its RLS scopes must not overlap.
+     */
+    oneReadAtATime?: boolean;
+    /** The workspace's organization, when the caller knows it (skips a lookup). */
+    accountId?: string;
+    /**
+     * One connection-account resolution's shared reads, when `db` is that
+     * resolution's transaction (see `ConnectionAccountReads`).
+     */
+    connectionAccountReads?: ConnectionAccountReads;
   },
 ): Promise<Settings> {
-  const apiIntegrationsPromise = options?.subjectId
-    ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
-    : listInstalledApiIntegrationsForDelegations(
-        db,
+  const readApiIntegrations = () =>
+    options?.subjectId
+      ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
+      : listInstalledApiIntegrationsForDelegations(
+          db,
+          workspaceId,
+          options?.personalConnectionDelegations ?? [],
+        );
+  // Registration is dropped below when Apps are off for the deployment, so
+  // resolving the designation then would be pure cost.
+  const readCodexAppsDesignation = () =>
+    !settings.codexConnectedAppsEnabled
+      ? Promise.resolve(null)
+      : options?.codexApps instanceof Promise
+        ? options.codexApps
+        : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {});
+  let enabled: Awaited<ReturnType<typeof listEnabledMcpCapabilityServers>>;
+  let apiIntegrations: Awaited<ReturnType<typeof readApiIntegrations>>;
+  let codexAppsDesignation: Awaited<ReturnType<typeof readCodexAppsDesignation>>;
+  if (options?.oneReadAtATime) {
+    enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
+    apiIntegrations = await readApiIntegrations();
+    codexAppsDesignation = await readCodexAppsDesignation();
+  } else {
+    // The integration read starts first: callers that pass a transaction rely
+    // on its subject scope being established before the other reads begin.
+    const apiIntegrationsPromise = readApiIntegrations();
+    [enabled, apiIntegrations, codexAppsDesignation] = await Promise.all([
+      listEnabledMcpCapabilityServers(db, workspaceId),
+      apiIntegrationsPromise,
+      readCodexAppsDesignation(),
+    ]);
+  }
+  // A Personal workspace also carries its owner's "Only me" connectors from
+  // the organization's other workspaces. Read after the reads above so no RLS
+  // scope overlaps on a caller's transaction.
+  const extensionSubject = personalWorkspaceExtensionSubject(options ?? {});
+  if (extensionSubject) {
+    const accountId =
+      options?.accountId ??
+      (options?.codexApps && !(options.codexApps instanceof Promise)
+        ? options.codexApps.accountId
+        : undefined) ??
+      (await rlsContextForWorkspace(db, workspaceId)).accountId;
+    const origins = await personalWorkspaceOwnerOriginConnections(
+      db,
+      { accountId, workspaceId, subjectId: extensionSubject },
+      options?.connectionAccountReads,
+    );
+    if (origins.length > 0) {
+      enabled = [
+        ...enabled,
+        ...(await personalWorkspaceExtensionMcpServers(db, {
+          workspaceId,
+          subjectId: extensionSubject,
+          accountId,
+          origins,
+          ownServers: [...settings.mcpServers, ...enabled],
+        })),
+      ];
+      const carriedApiIntegrations = await personalWorkspaceExtensionApiIntegrations(db, {
         workspaceId,
-        options?.personalConnectionDelegations ?? [],
-      );
-  const [enabled, apiIntegrations, codexAppsCredentialId] = await Promise.all([
-    listEnabledMcpCapabilityServers(db, workspaceId),
-    apiIntegrationsPromise,
-    resolveCodexAppsCredentialIdForRun(db, workspaceId),
-  ]);
+        subjectId: extensionSubject,
+        accountId,
+        origins,
+        ownIntegrations: apiIntegrations,
+        takenServerIds: [
+          ...settings.mcpServers.map((server) => server.id),
+          ...enabled.map((server) => server.id),
+          ...apiIntegrations.map((integration) => integration.serverId),
+        ],
+      });
+      // A turn acting only through frozen delegations keeps exactly those.
+      apiIntegrations = [
+        ...apiIntegrations,
+        ...(options?.subjectId
+          ? carriedApiIntegrations
+          : apiIntegrationsMatchingDelegations(
+              carriedApiIntegrations,
+              options?.personalConnectionDelegations ?? [],
+            )),
+      ];
+    }
+  }
+  apiIntegrations = apiIntegrations.filter((integration) =>
+    apiIntegrationIsExecutable(integration, settings, workspaceId),
+  );
   options?.onResolvedApiIntegrations?.(apiIntegrations);
+  options?.onResolvedCapabilityServers?.(enabled);
   return settingsWithCodexAppsMcpServer(
     settingsWithApiIntegrationServers(
       settingsWithMcpCapabilityServers(settings, enabled),
       apiIntegrations,
+      workspaceId,
     ),
-    codexAppsCredentialId !== null,
+    codexAppsDesignation !== null,
+  );
+}
+
+/**
+ * Target ids a live fence could still find among a Personal workspace's
+ * carried connectors: connector ids nothing else resolved. Account route ids
+ * (`mcpAccountRouteId`) always arrive beside their canonical connector id, and
+ * Codex Apps resolves on its own, so neither is a candidate.
+ */
+export function carriedConnectorCandidateIds(
+  serverIds: Iterable<string>,
+  resolvedIds: Iterable<string>,
+): string[] {
+  const resolved = new Set(resolvedIds);
+  return [...serverIds].filter(
+    (id) =>
+      !resolved.has(id) && id !== CODEX_APPS_MCP_SERVER_ID && !/^account-[0-9a-f]{64}$/u.test(id),
+  );
+}
+
+/**
+ * `settingsWithEnabledCapabilityMcpServers` for a live target fence: only the
+ * rows that can produce `serverIds`. That is the capability installations that
+ * produced them at preparation plus any catalog item explicitly claiming one of
+ * those ids (shadowing), integrations with exactly those runtime keys (read
+ * with the same subject visibility), and the Codex designation only when Codex
+ * Apps itself is a target. Static servers come from `settings`, unchanged.
+ * Restricted to `serverIds`, the result equals the complete projection.
+ */
+export async function settingsWithEnabledCapabilityMcpServersForTargets(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  options: {
+    subjectId: string;
+    accountId: string;
+    serverIds: readonly string[];
+    capabilityIds: readonly string[];
+    onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /** Checked between reads: a stopped caller starts no further read. */
+    signal?: AbortSignal;
+  },
+): Promise<Settings> {
+  const serverIds = new Set(options.serverIds);
+  // One RLS scope at a time: `db` may be a single bounded transaction.
+  const enabled = (
+    await listEnabledMcpCapabilityServers(db, workspaceId, {
+      capabilityIds: options.capabilityIds,
+      serverIds: [...serverIds],
+    })
+  ).filter((server) => serverIds.has(server.id));
+  options.signal?.throwIfAborted();
+  const apiIntegrations = (
+    await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
+  ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId));
+  options.signal?.throwIfAborted();
+  // The fence re-derives a Personal workspace's carried connectors live: a
+  // lost origin membership or removed connection drops them here too. Only a
+  // connector id nothing above resolved can be a carried one, so a fence whose
+  // connectors all resolved here (every shared-workspace fence) reads nothing
+  // more.
+  const unresolved = carriedConnectorCandidateIds(serverIds, [
+    ...[...settings.mcpServers, ...enabled].map((server) => server.id),
+    ...apiIntegrations.map((integration) => integration.serverId),
+  ]);
+  if (unresolved.length > 0) {
+    const origins = await personalWorkspaceOwnerOriginConnections(db, {
+      accountId: options.accountId,
+      workspaceId,
+      subjectId: options.subjectId,
+    });
+    options.signal?.throwIfAborted();
+    if (origins.length > 0) {
+      // Duplicate checks need the workspace's complete own set, not only the
+      // targets; read it only once the workspace is a Personal one.
+      const ownMcp = [
+        ...settings.mcpServers,
+        ...(await listEnabledMcpCapabilityServers(db, workspaceId)),
+      ];
+      enabled.push(
+        ...(
+          await personalWorkspaceExtensionMcpServers(db, {
+            workspaceId,
+            subjectId: options.subjectId,
+            accountId: options.accountId,
+            origins,
+            ownServers: ownMcp,
+          })
+        ).filter((server) => serverIds.has(server.id)),
+      );
+      options.signal?.throwIfAborted();
+      apiIntegrations.push(
+        ...(
+          await personalWorkspaceExtensionApiIntegrations(db, {
+            workspaceId,
+            subjectId: options.subjectId,
+            accountId: options.accountId,
+            origins,
+            serverIds: unresolved,
+            takenServerIds: async () => [
+              ...ownMcp.map((server) => server.id),
+              ...enabled.map((server) => server.id),
+              ...(await listInstalledApiIntegrations(db, workspaceId, options.subjectId)).map(
+                (integration) => integration.serverId,
+              ),
+            ],
+          })
+        ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId)),
+      );
+      options.signal?.throwIfAborted();
+    }
+  }
+  const codexAppsDesignation =
+    settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
+      ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })
+      : null;
+  options.onResolvedApiIntegrations?.(apiIntegrations);
+  return settingsWithCodexAppsMcpServer(
+    settingsWithApiIntegrationServers(
+      settingsWithMcpCapabilityServers(settings, enabled),
+      apiIntegrations,
+      workspaceId,
+    ),
+    codexAppsDesignation !== null,
   );
 }
 
@@ -908,14 +2017,34 @@ async function listInstalledApiIntegrationsForDelegations(
   return [...byServerId.values()];
 }
 
+function apiIntegrationIsExecutable(
+  integration: ApiIntegrationRuntime,
+  settings: Settings,
+  workspaceId?: string,
+): boolean {
+  return (
+    isIntegrationDefinitionEnabled(integration.definitionId, {
+      teamsEnabled: settings.microsoftTeamsToolsEnabled,
+      teamsAllowedWorkspaceIds: settings.microsoftTeamsAllowedWorkspaceIds,
+      ...(workspaceId ? { workspaceId } : {}),
+    }) &&
+    !(integration.definitionProvenance === "curated" && integration.definitionId === "google-drive")
+  );
+}
+
 export function settingsWithApiIntegrationServers(
   settings: Settings,
   integrations: readonly ApiIntegrationRuntime[],
+  workspaceId?: string,
 ): Settings {
   if (integrations.length === 0) return settings;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const dynamicServers = integrations
-    .filter((integration) => !existingIds.has(integration.serverId))
+    .filter(
+      (integration) =>
+        apiIntegrationIsExecutable(integration, settings, workspaceId) &&
+        !existingIds.has(integration.serverId),
+    )
     .map((integration) => ({
       id: integration.serverId,
       name: integration.name,
@@ -934,19 +2063,68 @@ export function settingsWithApiIntegrationServers(
 }
 
 /**
- * Resolve executable Apps authority. The connector must remain active and its
- * exact owner must still hold workspace connection-management permission.
+ * The workspace's executable Codex Apps designation. Without a Codex cutover
+ * row this is the legacy designation (`resolveCodexAppsCredentialIdForRun`).
+ * With an enabled cutover it is the core designation, which the database
+ * rechecks (designated shared Codex connection, still in the workspace's
+ * scope, active). A disabled cutover row designates nothing and reads no
+ * legacy Codex table.
+ */
+export type CodexAppsDesignationForRun = {
+  source: "core";
+  accountId: string;
+  connectionId: string;
+};
+
+/**
+ * What the caller already knows, so the resolver does not read it again: the
+ * workspace's organization (skips the workspace lookup).
+ */
+export type CodexAppsRunContext = {
+  accountId?: string;
+};
+
+export async function resolveCodexAppsDesignationForRun(
+  db: Database,
+  workspaceId: string,
+  known: CodexAppsRunContext = {},
+): Promise<CodexAppsDesignationForRun | null> {
+  const coreAccountId =
+    known.accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
+  const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
+    accountId: coreAccountId,
+    workspaceId,
+  });
+  return designation?.status === "active"
+    ? { source: "core", accountId: coreAccountId, connectionId: designation.connectionId }
+    : null;
+}
+
+/** Runtime Apps authentication for whichever designation `resolveCodexAppsDesignationForRun` returned. */
+export function codexAppsRequestAuthForDesignation(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  designation: CodexAppsDesignationForRun,
+): SubscriptionCoreCodexAppsRequestAuth {
+  return subscriptionCoreCodexAppsRequestAuth(db, settings, {
+    accountId: designation.accountId,
+    workspaceId,
+    connectionId: designation.connectionId,
+  });
+}
+
+/**
+ * Resolve the legacy executable Apps authority. Organizations with a Codex
+ * cutover row (enabled or disabled) have none here: their designation lives
+ * on the core (`resolveCodexAppsDesignationForRun`).
  */
 export async function resolveCodexAppsCredentialIdForRun(
   db: Database,
   workspaceId: string,
 ): Promise<string | null> {
-  const authorization = await getCodexAppsCredentialAuthorizationForRun(db, workspaceId);
-  if (!authorization) return null;
-  const grant = await getWorkspaceGrant(db, authorization.ownerSubjectId, workspaceId);
-  return grant && hasPermission(grant.permissions, "connections:write")
-    ? authorization.credentialId
-    : null;
+  const designation = await resolveCodexAppsDesignationForRun(db, workspaceId);
+  return designation?.connectionId ?? null;
 }
 
 /**
@@ -1124,7 +2302,7 @@ async function fetchMcpRegistryPage(
       });
     }
     throw new HTTPException(502, {
-      message: `MCP registry request failed: ${error instanceof Error ? error.message : String(error)}`,
+      message: `MCP registry request failed: ${errorMessage(error)}`,
     });
   } finally {
     clearTimeout(timeout);
@@ -1150,7 +2328,7 @@ async function requireCatalogItem(
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
   return (
     settings.mcpServers
-      // OpenGeni, Files, and Document Search are native runtime surfaces. They
+      // Opengeni, Files, and Document Search are native runtime surfaces. They
       // remain available to sessions through configuration, but are not things a
       // user installs, connects, or enables in the Capabilities control center.
       .filter(
@@ -1183,7 +2361,7 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
             available: true,
             mcpServerId: server.id,
             transport: "streamable-http",
-            notes: "Managed by this OpenGeni deployment through OPENGENI_MCP_SERVERS.",
+            notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
           },
           metadata: {
             mcpServerId: server.id,
@@ -1195,7 +2373,7 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
   );
 }
 
-function isReservedCodexAppsCatalogItem(item: CapabilityCatalogItem): boolean {
+export function isReservedCodexAppsCatalogItem(item: CapabilityCatalogItem): boolean {
   return (
     item.id === `mcp:${CODEX_APPS_MCP_SERVER_ID}` ||
     (item.kind === "mcp" &&
@@ -1293,6 +2471,26 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
 } as const;
 
 /**
+ * Opengeni's own connector rows. No registry import supplies them, so each
+ * needs a mark bundled with the shared UI (see capability-logo-source); a
+ * test fails when one is added without it. Codex Apps is the other built-in
+ * connector (codexAppsCatalogItem); deployment-configured MCP servers are the
+ * operator's own and carry no known brand.
+ */
+export function builtInConnectorCatalogItems(input: {
+  settings: Parameters<typeof excelAddin>[0];
+  socialConnections: SocialConnection[];
+  workspaceConnections: ConnectionMetadata[];
+}): CapabilityCatalogItem[] {
+  return [
+    ...providerIntegrationCatalogItems(input.socialConnections),
+    fikenCatalogItem(input.workspaceConnections.filter(isFikenConnection)),
+    onePasswordCatalogItem(input.workspaceConnections.filter(isOnePasswordConnection)),
+    excelAddinCatalogItem(excelAddin(input.settings)),
+  ];
+}
+
+/**
  * The first-party Fiken accounting connector tile. Enablement is derived from
  * the workspace-shared verified Fiken connection (either lane), mirroring how
  * the social provider tiles derive theirs from social connections.
@@ -1319,7 +2517,7 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
     runtime: {
       available: true,
       mcpServerId: "opengeni",
-      notes: "Fiken access is provided through OpenGeni's first-party fiken tools.",
+      notes: "Fiken access is provided through Opengeni's first-party fiken tools.",
     },
     enabled: fikenEnabled,
     enabledReason: fikenEnabled
@@ -1334,6 +2532,139 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
       // Derived from the contracts catalog so a new fiken_* tool cannot be
       // registered without also appearing on the capability tile.
       firstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("fiken_")),
+    },
+  });
+}
+
+/**
+ * The 1Password tile (design §10.9). Connecting a service account happens in
+ * Settings > Secrets (`POST /connections/1password/install`); its vaults are
+ * then reached through secret references and the secrets tools, not MCP.
+ * Enabled while a workspace-shared 1Password connection is active.
+ */
+function onePasswordCatalogItem(connections: ConnectionMetadata[]): CapabilityCatalogItem {
+  const active = connections.filter((connection) => connection.status === "active");
+  const enabled = active.length > 0;
+  return CapabilityCatalogItem.parse({
+    id: "api:1password",
+    kind: "api",
+    source: "built_in",
+    name: "1Password",
+    description:
+      "Connect a 1Password service account so its vaults appear as read-only or read-write secret vaults.",
+    category: "security",
+    tags: ["api", "1password", "password-manager", "secrets", "vaults"],
+    homepageUrl: "https://1password.com",
+    authModel: "service_account_token",
+    providerDomain: "1password.com",
+    surfaceType: "first_party_onepassword",
+    authKind: "api_key",
+    tools: [],
+    runtime: {
+      available: true,
+      notes: "1Password vaults are used through secret references and the secrets tools.",
+    },
+    enabled,
+    enabledReason: enabled
+      ? `${active.length === 1 ? "1Password connection" : `${active.length} 1Password connections`} active`
+      : null,
+    metadata: {
+      connectorMode: "first_party_onepassword",
+      connectionCount: connections.length,
+      planTiers: [
+        ...new Set(
+          connections.map(
+            (connection) => onePasswordConnectionMetadata(connection.metadata)?.planTier,
+          ),
+        ),
+      ].filter(Boolean),
+    },
+  });
+}
+
+/** How people and agents name the deployment's Chrome extension, and where it is installed. */
+export type BrowserExtension = { name: string; installUrl: string };
+
+/** The deployment's configured Chrome extension, else Opengeni Browser. */
+export function browserExtension(settings: {
+  browserExtensionName?: string | undefined;
+  browserExtensionInstallUrl?: string | undefined;
+}): BrowserExtension {
+  return {
+    name: settings.browserExtensionName ?? "Opengeni Browser",
+    installUrl: settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
+  };
+}
+
+/** The catalog id of the Excel add-in tile and its in-chat install card. */
+export const EXCEL_ADDIN_CAPABILITY_ID = "api:excel-addin";
+
+/** How people and agents name the deployment's Excel add-in, and where it is installed. */
+export type ExcelAddin = { name: string; installUrl: string | null };
+
+/** The deployment's configured add-in, else this web app's own /excel install page. */
+export function excelAddin(settings: {
+  officeAddinName?: string | undefined;
+  officeAddinInstallUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
+  publicBaseUrl?: string | undefined;
+}): ExcelAddin {
+  const web = settings.webBaseUrl ?? settings.publicBaseUrl;
+  return {
+    name: settings.officeAddinName ?? "Opengeni",
+    installUrl:
+      settings.officeAddinInstallUrl ?? (web ? `${web.replace(/\/+$/u, "")}/excel` : null),
+  };
+}
+
+/**
+ * The Excel add-in tile. The add-in is installed in each person's own Excel
+ * and connects whichever workbook they open its pane in, so there is nothing
+ * to enable for the workspace: the tile explains it and links to the install
+ * page, and `excel_run` reaches the person's connected workbooks.
+ */
+export function excelAddinCatalogItem(addin: ExcelAddin): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: EXCEL_ADDIN_CAPABILITY_ID,
+    kind: "api",
+    source: "built_in",
+    name: "Microsoft Excel",
+    description: `Add the ${addin.name} add-in to Excel (web, Windows or Mac) and open it in a workbook: you can chat there, and agents in any chat can read and change that workbook live.`,
+    category: "productivity",
+    tags: [
+      "excel",
+      "microsoft",
+      "office",
+      "microsoft-365",
+      "spreadsheet",
+      "spreadsheets",
+      "workbook",
+      "xlsx",
+      "add-in",
+      "finance",
+      "budget",
+      "model",
+    ],
+    homepageUrl: addin.installUrl,
+    providerDomain: "microsoft.com",
+    authModel: "office_addin",
+    authKind: "none",
+    surfaceType: "first_party_excel_addin",
+    tools: [],
+    runtime: {
+      available: addin.installUrl !== null,
+      notes:
+        addin.installUrl !== null
+          ? `Agents use excel_run in workbooks people have open with the ${addin.name} add-in.`
+          : "This deployment has no Excel add-in install page configured.",
+    },
+    enabled: false,
+    enabledReason: null,
+    metadata: {
+      connectorMode: "first_party_excel_addin",
+      addinName: addin.name,
+      installUrl: addin.installUrl,
+      firstPartyMcpTools: ["excel_run"],
     },
   });
 }
@@ -1362,11 +2693,11 @@ function providerIntegrationCatalogItems(
         available: true,
         mcpServerId: "opengeni",
         notes:
-          "OpenGeni's social provider adapter routes every call through an exact visible account Connection.",
+          "Opengeni's social provider adapter routes every call through an exact visible account Connection.",
       },
       enabled,
       enabledReason: socialConnectionSummary(counts),
-      provenance: "OpenGeni provider adapter",
+      provenance: "Opengeni provider adapter",
       metadata: {
         providerAdapter: "social",
         provider: definition.provider,
@@ -1384,16 +2715,156 @@ function providerIntegrationCatalogItems(
  * recommend the owning product flow without manufacturing an enabled catalog
  * row for GitHub resources, Documents, schedules, or other platform features.
  */
-export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogItem[] {
-  return [
+/** The in-chat card id for connecting a person's own computer. */
+export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
+
+export { OPENGENI_BROWSER_EXTENSION_URL };
+
+export {
+  INTEGRATION_DEFINITION_CAPABILITY_PREFIX,
+  integrationDefinitionCapabilityId,
+  integrationDefinitionIdFromCapabilityId,
+};
+
+/**
+ * What people call each reviewed definition when they ask for it. Someone asks
+ * for "my Hotmail" or "Outlook", not "Microsoft Graph mail", so the names of
+ * the consumer and work mail services are search tags here. Beyond each
+ * definition's own name, tags are only names that mean Microsoft: generic
+ * words (email, inbox, chat, meetings, files) would outrank Gmail, Google
+ * Calendar, Slack or Google Drive for requests that never mention Microsoft.
+ * Search splits "live.com" into the bare word "live", so Live addresses are
+ * named in the description only.
+ */
+const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
+  Record<string, { description: string; category: string; tags: readonly string[] }>
+> = {
+  "microsoft-outlook-mail": {
+    description:
+      "Read, search, send and organize email in the person's own Microsoft mailbox: an Outlook.com, Hotmail, Live.com or MSN address, or a work or school Microsoft 365 (Exchange) account.",
+    category: "communication",
+    tags: [
+      "outlook",
+      "hotmail",
+      "outlook.com",
+      "hotmail.com",
+      "msn.com",
+      "exchange",
+      "microsoft",
+      "microsoft-365",
+      "office-365",
+    ],
+  },
+  "microsoft-outlook-calendar": {
+    description:
+      "Read and manage events, meetings and availability in the person's own Outlook calendar (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
+    category: "productivity",
+    tags: ["outlook", "calendar", "exchange", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-outlook-contacts": {
+    description:
+      "Read and manage contacts and people in the person's own Outlook address book (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
+    category: "productivity",
+    tags: ["outlook", "contacts", "exchange", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-onedrive": {
+    description:
+      "Find, read, upload and share files in the person's own OneDrive (personal, or work or school Microsoft 365), including files shared with them. Use SharePoint to find team sites, libraries and lists.",
+    category: "productivity",
+    tags: ["onedrive", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-sharepoint": {
+    description:
+      "Search SharePoint, find team sites, browse document libraries and read files, read or update list items, and look up colleagues in the organization directory, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+    category: "productivity",
+    tags: ["sharepoint", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-teams": {
+    description:
+      "Read and search the person's teams, channels and chats, send messages as them, and look up colleagues with their role, manager and reports, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+    category: "communication",
+    tags: ["teams", "microsoft-teams", "microsoft", "microsoft-365", "office-365"],
+  },
+};
+
+/**
+ * The catalog category chosen for a reviewed integration definition, if one
+ * was. Its catalog entry shows "productivity" when none was chosen.
+ */
+export function integrationDefinitionCategory(definitionId: string): string | undefined {
+  return INTEGRATION_DEFINITION_DISCOVERY[definitionId]?.category;
+}
+
+/**
+ * Agent-facing entries for the reviewed API integration definitions this
+ * deployment can connect. Like the GitHub App and Connected Machine entries,
+ * these are recommendations for the native Connect flow, not rows in the
+ * Capabilities UI catalog (which shows these definitions as their own rows).
+ * Each person connects their own account; the card installs the definition's
+ * reviewed tools for that account.
+ */
+export function integrationDefinitionCapabilityRecommendations(
+  definitions: readonly IntegrationDefinition[],
+): CapabilityCatalogItem[] {
+  return definitions.map((definition) => {
+    const discovery = INTEGRATION_DEFINITION_DISCOVERY[definition.id];
+    const provider = definition.provider.id === "microsoft" ? "Microsoft" : "Google";
+    return CapabilityCatalogItem.parse({
+      id: integrationDefinitionCapabilityId(definition.id),
+      kind: "api",
+      source: "built_in",
+      name: definition.name,
+      description: discovery?.description ?? definition.summary,
+      category: integrationDefinitionCategory(definition.id) ?? "productivity",
+      tags: [...(discovery?.tags ?? [definition.provider.id])],
+      homepageUrl: null,
+      providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",
+      authModel: "oauth2_authorization_code",
+      authKind: "oauth2",
+      surfaceType: "integration_definition",
+      tools: [],
+      runtime: {
+        available: true,
+        notes: `Each person connects their own ${provider} account from the chat card.`,
+      },
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "Connect an account from the chat card.",
+        managedBy: "platform",
+      },
+      actions: ["connect", "inspect"],
+      metadata: {
+        integrationDefinitionId: definition.id,
+        recommendationOnly: true,
+      },
+    });
+  });
+}
+
+export function nativeConnectionCapabilityRecommendations(
+  options: {
+    connectedMachines?: boolean;
+    /** Personal GitHub OAuth is enabled: offer the person's own GitHub identity. */
+    personalGitHub?: boolean;
+    /** All my repositories is offered: the person may allow all their repositories. */
+    personalGitHubAllRepositories?: boolean;
+    browserExtension?: BrowserExtension;
+    /** Reviewed API integration definitions this deployment can connect here. */
+    integrationDefinitions?: readonly IntegrationDefinition[];
+  } = {},
+): CapabilityCatalogItem[] {
+  const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
+  const items = [
     CapabilityCatalogItem.parse({
       id: "api:github-app",
       kind: "api",
       source: "built_in",
       name: "GitHub App",
-      description: "Connect repositories through OpenGeni's GitHub resource picker.",
+      description:
+        "The Opengeni GitHub App: work appears as the Opengeni bot, shared with the workspace, installed per organization or account. Use for 'install the GitHub app' or giving Opengeni access to an org's repositories.",
       category: "source-control",
-      tags: ["github", "repositories", "source-control"],
+      tags: ["github", "repositories", "source-control", "github app", "install", "bot"],
       homepageUrl: "https://github.com",
       providerDomain: "github.com",
       authModel: "github_app_owner_consent",
@@ -1414,11 +2885,157 @@ export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogIt
       actions: ["connect", "inspect"],
       metadata: {
         endpointPath: "/v1/workspaces/{workspaceId}/github/app",
-        firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
+        firstPartyMcpTools: [
+          "github_connect_link",
+          "github_repositories_list",
+          "github_repository_attach",
+        ],
         recommendationOnly: true,
       },
     }),
   ];
+  if (options.personalGitHub) {
+    items.push(
+      CapabilityCatalogItem.parse({
+        id: PERSONAL_GITHUB_CAPABILITY_ID,
+        kind: "api",
+        source: "built_in",
+        name: "Your GitHub",
+        description: `The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose${options.personalGitHubAllRepositories ? " or all of theirs" : ""}. Use for 'connect my GitHub', 'use my account' or 'do it as me'.`,
+        category: "source-control",
+        tags: [
+          "github",
+          "repositories",
+          "source-control",
+          "my github",
+          "personal",
+          "my account",
+          "as me",
+          "identity",
+        ],
+        homepageUrl: "https://github.com",
+        providerDomain: "github.com",
+        authModel: "github_personal_oauth",
+        authKind: "oauth2",
+        surfaceType: "first_party_github_personal",
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        runtime: {
+          available: true,
+          notes:
+            "Only the person can connect their own GitHub account; the token never reaches the sandbox.",
+        },
+        lifecycle: {
+          status: "available",
+          readiness: "setup_required",
+          detail: "The person connects their GitHub account from the chat card.",
+          managedBy: "platform",
+        },
+        actions: ["connect", "inspect"],
+        metadata: {
+          firstPartyMcpTools: ["github_connect_link"],
+          recommendationOnly: true,
+        },
+      }),
+    );
+  }
+  if (options.connectedMachines) {
+    items.push(
+      CapabilityCatalogItem.parse({
+        id: CONNECTED_MACHINE_CAPABILITY_ID,
+        kind: "api",
+        source: "built_in",
+        name: "Connected Machine",
+        description:
+          "Run this chat on the person's own computer or server (Mac, Linux or Windows), and optionally let agents use their Chrome through the browser extension.",
+        category: "compute",
+        tags: [
+          "machine",
+          "computer",
+          "laptop",
+          "desktop",
+          "mac",
+          "macbook",
+          "linux",
+          "windows",
+          "server",
+          "gpu",
+          "local",
+          "self-hosted",
+          "chrome",
+          "browser",
+          "extension",
+          "terminal",
+        ],
+        homepageUrl: null,
+        providerDomain: "opengeni.ai",
+        authModel: "connected_machine_enrollment",
+        authKind: "none",
+        surfaceType: "first_party_connected_machine",
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        runtime: {
+          available: true,
+          notes: `The person sets up their machine from the chat card. The Chrome browser extension (${extensionUrl}) works only after the machine is connected.`,
+        },
+        lifecycle: {
+          status: "available",
+          readiness: "setup_required",
+          detail: "Connect a machine from the chat card.",
+          managedBy: "platform",
+        },
+        actions: ["connect", "inspect"],
+        metadata: {
+          firstPartyMcpTools: [
+            "sandboxes_list",
+            "sandbox_swap",
+            "run_on",
+            "connected_machine_enroll_token",
+            "connected_machine_enable_screen_control",
+          ],
+          browserExtensionUrl: extensionUrl,
+          recommendationOnly: true,
+        },
+      }),
+    );
+  }
+  items.push(
+    ...integrationDefinitionCapabilityRecommendations(options.integrationDefinitions ?? []),
+  );
+  return items;
+}
+
+/**
+ * The `tool.auth_needed` payload of the setup card that fixes a person-fixable
+ * tool refusal (see USER_SETUP_BLOCKERS). Every tool and route that hits such a
+ * refusal posts this same card in the calling turn, so the person sees the fix
+ * on the first attempt. Null when the blocker's capability is not a native
+ * card this deployment can show.
+ */
+export function userSetupCardPayload(
+  blocker: UserSetupBlocker,
+  options: { toolName: string; requestedSandboxId?: string | null },
+): ToolAuthNeededPayload | null {
+  const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+    (candidate) => candidate.id === blocker.capabilityId,
+  );
+  if (!item) return null;
+  return ToolAuthNeededPayload.parse({
+    serverId: "opengeni",
+    toolName: options.toolName,
+    // Built-in capabilities are Opengeni's own; a blank domain must not fail the card.
+    providerDomain: item.providerDomain?.trim() || "opengeni.local",
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: "connect",
+      rationale: blocker.rationale,
+      requiredVariables: [],
+    },
+    ...(options.requestedSandboxId ? { requestedSandboxId: options.requestedSandboxId } : {}),
+    ...(blocker.purpose ? { purpose: blocker.purpose } : {}),
+  });
 }
 
 function socialConnectionCounts(
@@ -1580,9 +3197,9 @@ export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
 ): CapabilityCatalogItem {
-  if (item.surfaceType === "first_party_fiken") {
-    // Fiken is an API item with connection-derived state, not a generic API
-    // installation. Preserve that state before the non-MCP fallback below.
+  if (item.surfaceType === "first_party_fiken" || item.surfaceType === "first_party_onepassword") {
+    // Fiken and 1Password are API items with connection-derived state, not
+    // generic API installations. Preserve that state before the non-MCP fallback below.
     return { ...item, connectionRef: null };
   }
   if (item.kind === "skill" || item.kind === "api" || item.kind === "plugin") {
@@ -1766,7 +3383,7 @@ function installationConnectionRef(
   if (authoritySource === "host") {
     // The internal installation/runtime ref retains the exact host binding.
     // Public capability catalogs use the existing null representation for an
-    // enabled capability without a native OpenGeni connection, so indefinitely
+    // enabled capability without a native Opengeni connection, so indefinitely
     // open old browser bundles cannot treat a host UUID as native OAuth state.
     return null;
   }
@@ -1820,13 +3437,44 @@ export type CapabilityCatalogSearchMatch = {
   item: CapabilityCatalogItem;
   score: number;
   matchedOn: Array<"name" | "provider" | "tag" | "category" | "description" | "id">;
+  /**
+   * True when the item matched only through the typo-tolerant tier (an edit
+   * distance hit), never through an exact, prefix, or substring hit.
+   */
+  approximate: boolean;
 };
+
+export type CapabilityCatalogSuggestion = {
+  item: CapabilityCatalogItem;
+  /** Name similarity to the query in [0, 1]; 1 means identical once normalized. */
+  similarity: number;
+};
+
+// Typo tolerance stays deterministic and bounded: tokens shorter than four
+// characters never fuzz, compared strings are capped, and only identity fields
+// (name, provider domain, tags) participate in the fuzzy tier.
+const FUZZY_MIN_TOKEN_LENGTH = 4;
+const FUZZY_PREFIX_MIN_TOKEN_LENGTH = 5;
+const FUZZY_MAX_COMPARED_LENGTH = 48;
+const FUZZY_MAX_TOKENS = 8;
+/** Above any sum of ordinary word hits a search sentence can collect. */
+const NAMED_ENTRY_BONUS = 10_000;
+const FUZZY_FIELDS = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>([
+  "name",
+  "provider",
+  "tag",
+]);
 
 /**
  * Deterministically rank the already-merged workspace catalog for an agent.
  * The caller still owns live authorization checks (GitHub binding, OAuth row,
  * and so on); this function searches metadata only and never probes a provider
  * or exposes credential/setup prose to the model.
+ *
+ * Exact word, prefix, and substring hits rank first. A typo-tolerant tier
+ * (bounded Damerau-Levenshtein on name, provider-domain, and tag words, plus
+ * the space-stripped name against the space-stripped query) contributes a
+ * smaller score so a one-letter spelling difference still finds the entry.
  */
 export function searchCapabilityCatalogItems(
   items: readonly CapabilityCatalogItem[],
@@ -1836,48 +3484,105 @@ export function searchCapabilityCatalogItems(
   const phrase = normalizeCapabilitySearchText(query);
   const tokens = [...new Set(phrase.split(" ").filter(Boolean))].slice(0, 24);
   if (tokens.length === 0) return [];
+  const compactPhrase = phrase.replaceAll(" ", "");
+  const fuzzyTokens = tokens.slice(0, FUZZY_MAX_TOKENS);
+  const trusted = items.filter((item) => capabilityCatalogItemIsTrustedForExposure(item));
+  const providerDomains = new Map(
+    trusted.map((item) => [item, capabilityCatalogSearchProviderDomain(item)] as const),
+  );
+  // A vendor word names an entry only when its domain is one product's.
+  const mentionsOf = integrationMentionMatcher(query, {
+    sharedDomains: sharedVendorDomains(
+      trusted.map((item) => ({ name: item.name, providerDomain: providerDomains.get(item) })),
+    ),
+  });
+  // Entries the query names distinctively ("dictate this note with
+  // whisperflow"); "send a message" does not name Send.
+  const namedNames = trusted.flatMap((item) =>
+    mentionsOf({ name: item.name, providerDomain: providerDomains.get(item) }).some((mention) =>
+      isDistinctiveIntegrationMention(mention, item.name),
+    )
+      ? [item.name]
+      : [],
+  );
   const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
   const weightedFields = (item: CapabilityCatalogItem) =>
     [
       ["name", item.name, 100],
-      ["provider", item.providerDomain ?? "", 80],
+      ["provider", capabilityCatalogSearchProviderDomain(item) ?? "", 80],
       ["tag", item.tags.join(" "), 50],
       ["category", item.category, 30],
       ["id", item.id, 25],
       ["description", item.description ?? "", 15],
     ] as const;
 
-  return items
-    .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
+  return trusted
     .flatMap((item): CapabilityCatalogSearchMatch[] => {
       let score = 0;
+      let approximate = true;
       const matchedOn = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>();
+      const hit = (
+        field: CapabilityCatalogSearchMatch["matchedOn"][number],
+        points: number,
+        fuzzy = false,
+      ) => {
+        score += points;
+        matchedOn.add(field);
+        if (!fuzzy) approximate = false;
+      };
       for (const [field, raw, weight] of weightedFields(item)) {
         const value = normalizeCapabilitySearchText(raw);
         if (!value) continue;
         const words = value.split(" ");
+        const fuzzyField = FUZZY_FIELDS.has(field);
         if (value.includes(phrase)) {
-          score += Math.round(weight * 1.5);
-          matchedOn.add(field);
+          hit(field, Math.round(weight * 1.5));
+        } else if (fuzzyField && compactPhrase.length >= FUZZY_MIN_TOKEN_LENGTH) {
+          // Compare with separators removed so "wispr flow" meets "WisprFlow"
+          // and "wisprflow" meets "Wispr Flow"; a near miss is typo-tolerant.
+          const compactValue = value.replaceAll(" ", "");
+          const budget = fuzzyEditBudget(compactPhrase.length);
+          if (compactValue.includes(compactPhrase)) {
+            hit(field, weight);
+          } else {
+            const distance = boundedEditDistance(compactPhrase, compactValue, budget);
+            if (distance.whole <= budget) {
+              hit(field, Math.round(weight * 0.5), true);
+            } else if (
+              compactPhrase.length >= FUZZY_PREFIX_MIN_TOKEN_LENGTH &&
+              distance.prefix <= budget
+            ) {
+              hit(field, Math.round(weight * 0.3), true);
+            }
+          }
         }
         for (const token of tokens) {
           if (words.includes(token)) {
-            score += weight;
-            matchedOn.add(field);
+            hit(field, weight);
           } else if (words.some((word) => word.startsWith(token) || token.startsWith(word))) {
-            score += Math.round(weight * 0.7);
-            matchedOn.add(field);
+            hit(field, Math.round(weight * 0.7));
           } else if (value.includes(token)) {
-            score += Math.round(weight * 0.4);
-            matchedOn.add(field);
+            hit(field, Math.round(weight * 0.4));
+          } else if (fuzzyField && fuzzyTokens.includes(token)) {
+            const fuzzy = fuzzyWordMatch(token, words);
+            if (fuzzy === "word") hit(field, Math.round(weight * 0.3), true);
+            else if (fuzzy === "prefix") hit(field, Math.round(weight * 0.2), true);
           }
         }
+      }
+      // An entry the query names (its name, a near spelling of it or its
+      // vendor's domain word) ranks above entries that only share ordinary
+      // words with a sentence. So do entries whose names agree with a named
+      // one ("GitHub App" when "GitHub" is named), keeping their usual order.
+      if (namedNames.some((name) => integrationNamesAgree(name, item.name))) {
+        if (score === 0) matchedOn.add("name");
+        score += NAMED_ENTRY_BONUS;
       }
       if (score === 0) return [];
       if (item.enabled) score += 12;
       if (item.tier === "verified") score += 8;
       if (item.source === "built_in") score += 6;
-      return [{ item, score, matchedOn: [...matchedOn] }];
+      return [{ item, score, matchedOn: [...matchedOn], approximate }];
     })
     .sort(
       (left, right) =>
@@ -1887,6 +3592,141 @@ export function searchCapabilityCatalogItems(
         left.item.id.localeCompare(right.item.id),
     )
     .slice(0, boundedLimit);
+}
+
+/**
+ * Closest catalog names for a query that matched nothing. A miss must never
+ * read as "this integration does not exist" while the workspace has entries,
+ * so callers surface these as explicitly labelled suggestions. An empty
+ * (all-punctuation) query returns the first entries by name for browsing.
+ */
+export function suggestCapabilityCatalogItems(
+  items: readonly CapabilityCatalogItem[],
+  query: string,
+  limit = 5,
+): CapabilityCatalogSuggestion[] {
+  const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
+  const compactPhrase = normalizeCapabilitySearchText(query)
+    .replaceAll(" ", "")
+    .slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  return items
+    .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
+    .map((item): CapabilityCatalogSuggestion => {
+      if (!compactPhrase) return { item, similarity: 0 };
+      let best = 0;
+      for (const raw of [item.name, capabilityCatalogSearchProviderDomain(item) ?? ""]) {
+        const candidate = normalizeCapabilitySearchText(raw)
+          .replaceAll(" ", "")
+          .slice(0, FUZZY_MAX_COMPARED_LENGTH);
+        if (!candidate) continue;
+        const distance = boundedEditDistance(compactPhrase, candidate, FUZZY_MAX_COMPARED_LENGTH);
+        best = Math.max(
+          best,
+          1 - distance.whole / Math.max(compactPhrase.length, candidate.length),
+          // A query that resembles the start of a longer name ("wspr" for
+          // "Whisprflow") is as informative as a whole-name resemblance.
+          1 - distance.prefix / compactPhrase.length,
+        );
+      }
+      return { item, similarity: Math.round(Math.max(0, best) * 100) / 100 };
+    })
+    .sort(
+      (left, right) =>
+        right.similarity - left.similarity ||
+        Number(right.item.enabled) - Number(left.item.enabled) ||
+        left.item.name.localeCompare(right.item.name) ||
+        left.item.id.localeCompare(right.item.id),
+    )
+    .slice(0, boundedLimit);
+}
+
+/**
+ * The vendor domain search may match. A stored providerDomain wins. Workspace
+ * and operator entries (manual, configured, built-in) without one fall back to
+ * the registrable domain of their endpoint (api.wisprflow.ai -> wisprflow.ai).
+ * Registry rows do not: their endpoints may sit on a third-party host. This is
+ * a search-only projection and never changes the stored item or any
+ * connection/authority matching.
+ */
+export function capabilityCatalogSearchProviderDomain(item: CapabilityCatalogItem): string | null {
+  const stored = item.providerDomain?.trim();
+  if (stored) return stored;
+  if (item.source === "registry" || item.source === "public_registry") return null;
+  for (const candidate of [item.endpointUrl, item.mcpUrl, item.homepageUrl]) {
+    if (!candidate) continue;
+    const domain = registrableDomain(candidate);
+    if (domain) return domain;
+  }
+  return null;
+}
+
+function registrableDomain(url: string): string | null {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  return registrableHostDomain(hostname);
+}
+
+function fuzzyEditBudget(length: number): number {
+  if (length < FUZZY_MIN_TOKEN_LENGTH) return 0;
+  return length >= 8 ? 2 : 1;
+}
+
+function fuzzyWordMatch(token: string, words: readonly string[]): "word" | "prefix" | null {
+  const budget = fuzzyEditBudget(token.length);
+  if (budget === 0 || token.length > FUZZY_MAX_COMPARED_LENGTH) return null;
+  let prefixHit = false;
+  for (const word of words) {
+    const lengthGap = Math.abs(word.length - token.length);
+    const prefixCandidate =
+      token.length >= FUZZY_PREFIX_MIN_TOKEN_LENGTH && word.length > token.length;
+    if (lengthGap > budget && !prefixCandidate) continue;
+    const distance = boundedEditDistance(token, word, budget);
+    if (lengthGap <= budget && distance.whole <= budget) return "word";
+    if (prefixCandidate && distance.prefix <= budget) prefixHit = true;
+  }
+  return prefixHit ? "prefix" : null;
+}
+
+/**
+ * Optimal-string-alignment (restricted Damerau-Levenshtein) distance from
+ * `source` to all of `target` (`whole`) and to its closest prefix (`prefix`).
+ * Both inputs are capped at FUZZY_MAX_COMPARED_LENGTH, and the computation
+ * stops early once every cell of a row exceeds `budget`, returning budget + 1.
+ */
+function boundedEditDistance(
+  source: string,
+  target: string,
+  budget: number,
+): { whole: number; prefix: number } {
+  const a = source.slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  const b = target.slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  const over = budget + 1;
+  const width = b.length + 1;
+  let previousPrevious = new Array<number>(width).fill(0);
+  let previous = Array.from({ length: width }, (_, index) => index);
+  let current = new Array<number>(width).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    let rowMinimum = current[0];
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, previousPrevious[j - 2]! + 1);
+      }
+      current[j] = value;
+      if (value < rowMinimum) rowMinimum = value;
+    }
+    if (rowMinimum > budget) return { whole: over, prefix: over };
+    [previousPrevious, previous, current] = [previous, current, previousPrevious];
+  }
+  let prefix = previous[0]!;
+  for (let j = 1; j <= b.length; j += 1) prefix = Math.min(prefix, previous[j]!);
+  return { whole: Math.min(previous[b.length]!, over), prefix: Math.min(prefix, over) };
 }
 
 function normalizeCapabilitySearchText(value: string): string {
@@ -1905,6 +3745,18 @@ function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): str
     payload.endpointUrl ?? payload.installUrl ?? payload.homepageUrl ?? "",
   ].join(":");
   return `${payload.kind}:${slugify(payload.name)}-${shortHash(source)}`;
+}
+
+/**
+ * A custom organization server's capability id: from its name and endpoint,
+ * so adding the same server again (after removing it) gives the same tool
+ * names, and marked as the organization's so it can't take a workspace's id.
+ */
+export function organizationCustomCapabilityId(definition: {
+  name: string;
+  endpointUrl: string;
+}): string {
+  return `mcp:organization-${slugify(definition.name)}-${shortHash(`organization:mcp:${definition.name}:${definition.endpointUrl}`)}`;
 }
 
 function publicRegistryCapabilityId(name: string, version: string, endpointUrl: string): string {

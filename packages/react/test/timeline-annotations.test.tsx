@@ -245,6 +245,54 @@ describe("timeline annotations", () => {
     }
   });
 
+  test("annotates a whole selection that crosses bold text and a link", async () => {
+    stubRangeGeometry();
+    let captured: DraftTimelineAnnotation | null = null;
+    const markdown =
+      "For the new plan: do you mean **Max on** [me@example.com](mailto:me@example.com), or another one?";
+    const item = agentItem(SOURCE_EVENT_ID, markdown, 4);
+    const rendered = await renderComponent(
+      <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
+    );
+    try {
+      let source: HTMLElement | null = null;
+      await waitFor(() => {
+        source = rendered.container.querySelector<HTMLElement>(
+          `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+        );
+        return Boolean(source?.querySelector("strong") && source.querySelector("a"));
+      }, "formatted message did not render");
+      const walker = document.createTreeWalker(source!, NodeFilter.SHOW_TEXT);
+      const nodes: Text[] = [];
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node as Text);
+      const start = nodes.find((node) => node.data.includes("do you mean"))!;
+      const end = nodes.find((node) => node.data === "me@example.com")!;
+      await act(async () => {
+        const range = document.createRange();
+        range.setStart(start, start.data.indexOf("do you mean"));
+        range.setEnd(end, end.data.length);
+        const selection = document.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => Boolean(addNoteButton()), "annotation action did not appear");
+      const action = addNoteButton();
+      expect(action?.textContent).toContain("do you mean Max on me@example.com");
+      await act(async () => action?.click());
+      expect(captured).toMatchObject({
+        quote: "do you mean **Max on** [me@example.com](mailto:me@example.com)",
+        source: {
+          startOffset: markdown.indexOf("do you mean"),
+          contextBefore: "For the new plan: ",
+        },
+      });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("offers Add note for a selection made before the selection controls mount", async () => {
     let captured: DraftTimelineAnnotation | null = null;
     const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
@@ -358,6 +406,47 @@ describe("timeline annotations", () => {
     await flush();
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
     expect(consumed).toBeGreaterThan(0);
+    await rendered.unmount();
+  });
+
+  test("consumes each focus request once across parent renders and permits a new request", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    const first = annotation("");
+    const second = { ...annotation(""), id: "00000000-0000-4000-8000-000000000504" };
+    let consumed = 0;
+    const view = (target: string | null) => (
+      <TimelineAnnotationsChip
+        annotations={[first, second]}
+        editable
+        focusAnnotationId={target}
+        onFocusConsumed={() => {
+          consumed += 1;
+        }}
+        onUpdate={() => undefined}
+      />
+    );
+    const rendered = await renderComponent(view(first.id));
+    const notes = document.body.querySelectorAll("textarea");
+    expect(document.activeElement).toBe(notes.item(0));
+    expect(consumed).toBe(1);
+    await act(async () => notes[1]?.focus());
+    // Both the callback and annotation array have new identities on this render.
+    await rendered.rerender(view(first.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(1);
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(2);
+    await act(async () => notes[0]?.focus());
+    await rendered.rerender(view(null));
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(3);
+    await act(async () => notes[0]?.focus());
+    await rendered.rerender(view("00000000-0000-4000-8000-000000000599"));
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(4);
     await rendered.unmount();
   });
 
@@ -505,7 +594,7 @@ describe("timeline annotations", () => {
         annotations={[
           {
             ...annotation(""),
-            quote: "OpenGeni stack is working.",
+            quote: "Opengeni stack is working.",
           },
         ]}
         editable
@@ -515,8 +604,8 @@ describe("timeline annotations", () => {
       />,
     );
     expect(rendered.container.textContent).toContain("1 annotation");
-    expect(rendered.container.textContent).not.toContain("OpenGeni stack is working.");
-    expect(document.body.textContent).toContain("OpenGeni stack is working.");
+    expect(rendered.container.textContent).not.toContain("Opengeni stack is working.");
+    expect(document.body.textContent).toContain("Opengeni stack is working.");
     expect(document.body.querySelector("textarea")).not.toBeNull();
     await rendered.unmount();
   });
@@ -586,7 +675,7 @@ describe("timeline annotations", () => {
 
   test("clips a chrome-inclusive highlight back to the assistant sentence", async () => {
     const captured: DraftTimelineAnnotation[] = [];
-    const text = "OpenGeni stack is working.";
+    const text = "Opengeni stack is working.";
     const item = agentItem(SOURCE_EVENT_ID, text, 4);
     const rendered = await renderComponent(
       <MessageTimeline items={[item]} onAnnotate={(next) => captured.push(next)} />,
@@ -611,7 +700,7 @@ describe("timeline annotations", () => {
       "annotation action did not appear for a long highlight",
     );
     const action = addNoteButton();
-    expect(action?.textContent).toContain("OpenGeni stack is working.");
+    expect(action?.textContent).toContain("Opengeni stack is working.");
     await act(async () => action?.click());
     expect(captured[0]?.quote).toBe(text);
     await rendered.unmount();
@@ -742,7 +831,7 @@ describe("timeline annotations", () => {
       id: `00000000-0000-4000-8000-${String(0x502 + index).padStart(12, "0")}`,
       quote:
         index === 0
-          ? "OpenGeni stack is working across a much longer quoted sentence that must stay clamped in the review list."
+          ? "Opengeni stack is working across a much longer quoted sentence that must stay clamped in the review list."
           : `quote-${index + 1}`,
     }));
     const focusId = items[11]!.id;
@@ -771,7 +860,7 @@ describe("timeline annotations", () => {
     expect(notes[0]?.className).toContain("break-words");
     expect(document.activeElement).toBe(notes.item(11));
     const quoteButton = [...document.body.querySelectorAll("button")].find((button) =>
-      button.getAttribute("aria-label")?.includes("OpenGeni stack is working"),
+      button.getAttribute("aria-label")?.includes("Opengeni stack is working"),
     );
     expect(quoteButton?.querySelector("span")?.className).toContain("line-clamp-2");
     await rendered.unmount();
@@ -866,6 +955,9 @@ describe("timeline annotations", () => {
     const rendered = await renderComponent(<TimelineAnnotationCards annotations={items} />);
     const cards = rendered.container.querySelector<HTMLElement>("[data-og-annotation-cards]");
     expect(cards?.className).toContain("overflow-y-auto");
+    // The stack sits inside the timeline: wheel scrolling over it must chain
+    // to the timeline, so the message never becomes a dead zone.
+    expect(cards?.className).not.toContain("overscroll");
     const notes = rendered.container.querySelectorAll<HTMLElement>("[data-og-annotation-note]");
     expect(notes).toHaveLength(6);
     expect(notes[0]?.className).toContain("line-clamp-4");

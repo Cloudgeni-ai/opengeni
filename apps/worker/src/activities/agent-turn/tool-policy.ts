@@ -2,9 +2,13 @@ import {
   desktopCapableBackend,
   type ComputerToolMode,
   type LazyToolTransport,
+  type OpenGeniRuntime,
 } from "@opengeni/runtime";
+import { openingToolsFromTurnMetadata, type TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import {
+  configuredModelForAcceptedTurnExecutionPolicy,
   isDirectOpenAiApiBaseUrl,
+  paidHostedToolsChargeCredits,
   type ModelProviderApi,
   type ResolvedModelProvider,
   type Settings,
@@ -126,10 +130,44 @@ function modelAcceptsTextVerbosity(upstreamModelId: string): boolean {
 }
 
 /**
- * Progressive tool disclosure is universal for supported OpenGeni turns; only
+ * Ask supported reasoning Responses routes for their provider-selected summary
+ * format. This is public summary text, never private or encrypted reasoning.
+ * Codex and unverified compatible wires retain the existing detailed setting.
+ */
+export function reasoningSummaryForTurn(
+  resolvedModel: {
+    provider: {
+      id: string;
+      api: ModelProviderApi;
+      wireProfile: "openai" | "azure-openai";
+      builtin: boolean;
+      baseUrl?: string | undefined;
+    };
+    configured: {
+      upstreamModelId: string;
+      capabilities: { reasoning: { runnable: boolean } };
+    };
+  } | null,
+): "auto" | undefined {
+  if (
+    resolvedModel?.provider.api !== "responses" ||
+    !resolvedModel.configured.capabilities.reasoning.runnable ||
+    !modelAcceptsTextVerbosity(resolvedModel.configured.upstreamModelId)
+  ) {
+    return undefined;
+  }
+  const provider = resolvedModel.provider;
+  return provider.wireProfile === "azure-openai" ||
+    (provider.builtin && provider.id === "openai" && isDirectOpenAiApiBaseUrl(provider.baseUrl))
+    ? "auto"
+    : undefined;
+}
+
+/**
+ * Progressive tool disclosure is universal for supported Opengeni turns; only
  * its contained transport differs. Codex keeps its native path, built-in direct
  * OpenAI/Azure Responses use native client tool search, and every other ordinary
- * function-calling provider uses OpenGeni's stable search/invoke dispatcher.
+ * function-calling provider uses Opengeni's stable search/invoke dispatcher.
  */
 export function lazyToolTransportForTurn(
   resolvedModel: {
@@ -156,6 +194,20 @@ export function lazyToolTransportForTurn(
   return "generic_dispatch";
 }
 
+/**
+ * The opening tools a turn loads before its first model request (a new
+ * session's frozen `openingTools`). Not on Anthropic Messages: there the load
+ * would be an assistant tool_use with no thinking block before it, which
+ * Claude can reject while thinking is on, so the model searches as usual.
+ */
+export function openingToolNamesForTurn(
+  resolvedModel: { provider: { api: ModelProviderApi } } | null,
+  turnMetadata: unknown,
+): string[] {
+  if (resolvedModel?.provider.api === "anthropic-messages") return [];
+  return openingToolsFromTurnMetadata(turnMetadata);
+}
+
 /** Only brand-new lazy-capable turns may overlap non-eager tool preparation. */
 export function shouldDeferNonEagerToolPreparation(args: {
   lazyToolTransport: LazyToolTransport | null;
@@ -175,6 +227,28 @@ export function shouldDeferNonEagerToolPreparation(args: {
 }
 
 /**
+ * Resolve the provider routing/gating shape for an accepted turn. The current
+ * definition is projected back onto the verified frozen policy: a turn
+ * accepted before hosted web search was enabled keeps its frozen tool set on
+ * every recovery attempt (stable tool prefix, exact accepted definition); the
+ * next accepted logical turn resolves the newly enabled tool.
+ */
+export function resolveAcceptedTurnModel(
+  runtime: Pick<OpenGeniRuntime, "resolveTurnModel">,
+  settings: Settings,
+  policy: TurnExecutionPolicyV1,
+): ReturnType<OpenGeniRuntime["resolveTurnModel"]> {
+  const current = runtime.resolveTurnModel(settings, policy.productModelId);
+  if (!current) return null;
+  const configured = configuredModelForAcceptedTurnExecutionPolicy(
+    current.configured,
+    current.provider,
+    policy,
+  );
+  return configured === current.configured ? current : { ...current, configured };
+}
+
+/**
  * Native web search is a runtime capability, not part of the session's MCP
  * allow-list. Attach it whenever the resolved provider advertises runnable
  * support. The null model is the legacy built-in Responses path, whose
@@ -186,6 +260,22 @@ export function hostedWebSearchForTurn(
   deploymentWebSearchEnabled: boolean,
 ): boolean {
   return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
+}
+
+/**
+ * Whether paid tools the model provider hosts (its own web search and image
+ * generation) would run on Opengeni's bill on this turn, decided by the
+ * single check point {@link paidHostedToolsChargeCredits} from the claim's
+ * billing class (`chargesOpenGeniCredits`, the frozen accepted policy's cost
+ * class `credits`). Such a turn gets Opengeni's metered tools instead, or is
+ * charged for what the provider reports. Every recovery attempt of a turn
+ * gets the same answer.
+ */
+export function hostedToolsBillCreditsForTurn(
+  settings: Parameters<typeof paidHostedToolsChargeCredits>[0],
+  turn: { accountId: string; chargesOpenGeniCredits: boolean },
+): boolean {
+  return paidHostedToolsChargeCredits(settings, turn);
 }
 
 /**
@@ -203,7 +293,13 @@ export function connectedSubscriptionImageGenerationAuthority<T>(
   return { credentialContext, credentialId };
 }
 
-/** Direct OpenAI hosted image IDs are reusable only by the exact API credential. */
+/**
+ * Direct OpenAI hosted image IDs are reusable only by the exact API credential.
+ * Hosted image generation on the deployment's own OpenAI key has no image
+ * charge, so a turn whose hosted tools bill credits never gets it: the turn
+ * falls through to the priced Gateway image tool when one is available, and
+ * otherwise has no image tool.
+ */
 export function openAiHostedImageProviderBindingForTurn(
   settings: Pick<Settings, "openaiProvider" | "openaiApiKey" | "openaiBaseUrl">,
   resolvedModel: {
@@ -219,7 +315,9 @@ export function openAiHostedImageProviderBindingForTurn(
       };
     };
   } | null,
+  hostedToolsBillCredits: boolean,
 ): { providerId: string; providerBindingHash: string } | null {
+  if (hostedToolsBillCredits) return null;
   if (!resolvedModel?.configured.capabilities.hostedTools.imageGeneration.runnable) return null;
   const providerId = resolvedModel.provider.id;
   const isDirectOpenAi =
@@ -260,12 +358,8 @@ export function modelAttachmentInputPolicyForTurn(
     };
   } | null,
 ): ModelAttachmentInputPolicy {
-  const typedTransport =
-    resolvedModel === null ||
-    resolvedModel.provider.api === "responses" ||
-    resolvedModel.provider.api === "anthropic-messages";
   return {
-    supportsImageInput: typedTransport && modelSupportsImageInputForTurn(resolvedModel),
+    supportsImageInput: modelSupportsImageInputForTurn(resolvedModel),
     inputFileMediaTypes: [],
   };
 }

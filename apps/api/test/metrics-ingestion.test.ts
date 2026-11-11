@@ -8,6 +8,7 @@ import {
 } from "../src/sandbox/metrics-ingestion";
 import {
   AgentEvent,
+  AttachedBrowserConnectionEndReason,
   Arch,
   GoingOfflineReason,
   Os,
@@ -167,6 +168,79 @@ describe("Connected Machine event ingestion scheduling", () => {
     expect(coalesced).toBe(197);
   });
 
+  test("a terminal output collector does not block its runner's liveness or other completions", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let progressed!: () => void;
+    const progress = new Promise<void>((resolve) => {
+      progressed = resolve;
+    });
+    const seen: string[] = [];
+    const scheduler = createAgentEventIngestionScheduler(async (payload, subject) => {
+      expect(subject).toBe(subjectA);
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "operationCompleted") {
+        seen.push(event.operationCompleted.opId);
+        if (event.operationCompleted.opId === "slow") await gate;
+        else progressed();
+      } else if (event?.$case === "heartbeat") seen.push("heartbeat");
+    });
+    const completed = (opId: string) =>
+      AgentEvent.encode({
+        event: {
+          $case: "operationCompleted",
+          operationCompleted: { opId },
+        },
+      }).finish();
+    scheduler.enqueue(completed("slow"), subjectA);
+    for (let retry = 0; retry < 100; retry++) scheduler.enqueue(completed("slow"), subjectA);
+    scheduler.enqueue(heartbeat(1), subjectA);
+    scheduler.enqueue(completed("fast"), subjectA);
+    await progress;
+    expect(seen).toEqual(["slow", "heartbeat", "fast"]);
+    release();
+    await scheduler.whenIdle();
+    expect(seen).toEqual(["slow", "heartbeat", "fast", "slow"]);
+  });
+
+  test("an inventory page that collects output does not block its runner's liveness, and every page is answered in order", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let progressed!: () => void;
+    const progress = new Promise<void>((resolve) => {
+      progressed = resolve;
+    });
+    const seen: string[] = [];
+    const scheduler = createAgentEventIngestionScheduler(async (payload) => {
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "operationInventory") {
+        seen.push(`page-${event.operationInventory.page}`);
+        if (event.operationInventory.page === 0) await gate;
+      } else if (event?.$case === "heartbeat") {
+        seen.push("heartbeat");
+        progressed();
+      }
+    });
+    const page = (index: number) =>
+      AgentEvent.encode({
+        event: {
+          $case: "operationInventory",
+          operationInventory: { reportId: "1", page: index, pages: 3, operations: [] },
+        },
+      }).finish();
+    for (const index of [0, 1, 2]) scheduler.enqueue(page(index), subjectA);
+    scheduler.enqueue(heartbeat(1), subjectA);
+    await progress;
+    expect(seen).toEqual(["page-0", "heartbeat"]);
+    release();
+    await scheduler.whenIdle();
+    expect(seen).toEqual(["page-0", "heartbeat", "page-1", "page-2"]);
+  });
+
   test("a rejected event does not strand later liveness for the same runner", async () => {
     const handled: string[] = [];
     const scheduler = createAgentEventIngestionScheduler(async (payload) => {
@@ -178,6 +252,41 @@ describe("Connected Machine event ingestion scheduling", () => {
     scheduler.enqueue(heartbeat(2), subjectA);
     await scheduler.whenIdle();
     expect(handled).toEqual(["2"]);
+  });
+
+  test("saturating all completion slots never consumes heartbeat/control capacity", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let renew!: () => void;
+    const renewed = new Promise<void>((resolve) => {
+      renew = resolve;
+    });
+    let active = 0;
+    const scheduler = createAgentEventIngestionScheduler(async (payload) => {
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "operationCompleted") {
+        active++;
+        await held;
+      } else if (event?.$case === "heartbeat") renew();
+    });
+    for (let index = 0; index < 33; index++)
+      scheduler.enqueue(
+        AgentEvent.encode({
+          event: {
+            $case: "operationCompleted",
+            operationCompleted: { opId: String(index) },
+          },
+        }).finish(),
+        subjectA,
+      );
+    scheduler.enqueue(heartbeat(1), subjectB);
+    await renewed;
+    expect(active).toBe(32);
+    release();
+    await scheduler.whenIdle();
+    expect(active).toBe(33);
   });
 
   test("bounds cross-runner database concurrency without serializing every runner", async () => {
@@ -312,6 +421,7 @@ describe("wireAttachedBrowserInventoryToContract", () => {
           },
         },
       ],
+      connectionEnds: [],
       ...overrides,
     };
   }
@@ -336,7 +446,53 @@ describe("wireAttachedBrowserInventoryToContract", () => {
           capabilities: expect.objectContaining({ debuggerAttachment: true }),
         },
       ],
+      connectionEnds: [],
     });
+  });
+
+  test("projects why recent profile connections ended and drops ends it cannot hold", () => {
+    const end = {
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      connectionGeneration: "extension-connection-0",
+      reason:
+        AttachedBrowserConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_NATIVE_HOST_LOST,
+      detail: "",
+      endedAtUnixMs: "1767225600000",
+      connectedMs: "4200",
+    };
+    const projected = wireAttachedBrowserInventoryToContract(
+      inventory({
+        connectionEnds: [
+          end,
+          {
+            ...end,
+            connectionGeneration: "extension-connection-1",
+            reason:
+              AttachedBrowserConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_AGENT_REJECTED,
+            detail: "x".repeat(600),
+          },
+          {
+            ...end,
+            reason:
+              AttachedBrowserConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_UNSPECIFIED,
+          },
+          { ...end, endedAtUnixMs: "0" },
+          { ...end, connectionGeneration: "" },
+        ],
+      }),
+    );
+    expect(projected.devices).toHaveLength(1);
+    expect(projected.connectionEnds).toEqual([
+      {
+        deviceId: end.deviceId,
+        connectionGeneration: "extension-connection-0",
+        reason: "native_host_lost",
+        detail: null,
+        endedAt: "2026-01-01T00:00:00.000Z",
+        connectedMs: 4200,
+      },
+      expect.objectContaining({ reason: "agent_rejected", detail: "x".repeat(512) }),
+    ]);
   });
 
   test("accepts native base64url generation prefixes without rewriting the fence", () => {

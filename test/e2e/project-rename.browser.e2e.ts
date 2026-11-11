@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 let browser: Browser;
 let page: Page;
@@ -78,9 +79,9 @@ test("folders disclose four at a time independently of their cached pages", asyn
   await defaultFolder.getByText("Default conversation 65").waitFor();
   expect(await page.evaluate(() => (window as any).renameQa.pageCalls)).toEqual(
     expect.arrayContaining([
-      { channelId: "project-qa", cursor: undefined, limit: 50 },
-      { channelId: "00000000-0000-4000-8000-000000000002", cursor: "50", limit: 50 },
-      { channelId: null, cursor: "50", limit: 50 },
+      { channelId: "project-qa", cursor: undefined, limit: 4 },
+      { channelId: "00000000-0000-4000-8000-000000000002", cursor: "52", limit: 4 },
+      { channelId: null, cursor: "64", limit: 4 },
     ]),
   );
   await bugfixes.getByRole("button", { name: "Bugfixes", exact: true }).click();
@@ -91,20 +92,26 @@ test("folders disclose four at a time independently of their cached pages", asyn
   expect(pageErrors).toEqual([]);
 }, 30_000);
 
-test("production project menu renames, guards saves, and preserves failed drafts", async () => {
+test("the project menu's Edit project renames, guards saves, and preserves failed drafts", async () => {
   const open = async (name: string) => {
     await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
     await capture("project-rename-menu");
-    await page.getByRole("menuitem", { name: "Rename project", exact: true }).click();
+    const edit = page.getByRole("menuitem", { name: "Edit project…", exact: true });
+    await edit.waitFor();
+    // Edit project is the one way to rename; there is no separate item.
+    expect(await page.getByRole("menuitem", { name: "Rename project" }).count()).toBe(0);
+    await edit.click();
   };
   await open("Website redesign");
-  const dialog = page.getByRole("dialog", { name: "Rename project" });
-  const input = dialog.getByRole("textbox");
-  const submit = dialog.getByRole("button", { name: "Rename", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Edit project" });
+  const input = dialog.getByRole("textbox", { name: "Name" });
+  const submit = dialog.getByRole("button", { name: "Save", exact: true });
   expect(await input.inputValue()).toBe("Website redesign");
   await capture("project-rename-dialog");
   await input.fill("   ");
-  expect(await submit.isDisabled()).toBe(true);
+  await submit.click();
+  await dialog.getByText("Give it a name.").waitFor();
+  expect(await dialog.isVisible()).toBe(true);
   await input.fill("Website redesign");
   await submit.click();
   await dialog.waitFor({ state: "hidden" });
@@ -116,7 +123,7 @@ test("production project menu renames, guards saves, and preserves failed drafts
     (window as any).renameQa.fail = true;
   });
   await submit.click();
-  await page.getByText("Couldn't rename the project. The name may already be in use.").waitFor();
+  await page.getByText("Couldn't save the project. The name may already be in use.").waitFor();
   expect(await input.inputValue()).toBe("Product launch");
   expect(await dialog.isVisible()).toBe(true);
   await capture("project-rename-error");
@@ -125,7 +132,7 @@ test("production project menu renames, guards saves, and preserves failed drafts
     (window as any).renameQa.delay = 1000;
   });
   await submit.click();
-  expect(await input.isDisabled()).toBe(true);
+  await dialog.locator("form[aria-busy=true]").waitFor();
   await page.keyboard.press("Escape");
   expect(await dialog.isVisible()).toBe(true);
   await dialog.waitFor({ state: "hidden" });
@@ -148,6 +155,16 @@ test("production project menu renames, guards saves, and preserves failed drafts
 
 test("an off-page project keeps its first-page retry visible", async () => {
   await page.evaluate(() => {
+    // Start compact, as a new tab does: the first test's Show more windows are
+    // tab-scoped navigation memory and would otherwise be restored on reload.
+    for (const key of Object.keys(sessionStorage)) {
+      if (key.startsWith("og.session.groupWindows:")) sessionStorage.removeItem(key);
+    }
+    // The first test collapsed Bugfixes, and collapsed projects are remembered
+    // across reloads; this test needs Bugfixes open.
+    for (const key of Object.keys(localStorage)) {
+      if (key.endsWith(":collapsed-sections")) localStorage.removeItem(key);
+    }
     sessionStorage.setItem("rename-qa-fail-channel-page", "00000000-0000-4000-8000-000000000002");
   });
   await page.reload();

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser } from "playwright";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -56,7 +57,7 @@ describe("composer connector account controls (local fixture)", () => {
     });
     let moduleRequests = 0;
     await page.route(
-      /\/src\/components\/session-connectors-menu-body\.tsx(?:\?|$)/,
+      /\/src\/app\/components\/session-connectors-menu-body\.tsx(?:\?|$)/,
       async (route) => {
         moduleRequests++;
         await moduleReady;
@@ -142,9 +143,9 @@ describe("composer connector account controls (local fixture)", () => {
         await page.getByRole("button", { name: "More composer actions" }).click();
         await page.getByRole("menuitem", { name: /Connectors/ }).click();
         await page.getByRole("menuitem", { name: "Slack account settings" }).click();
-        const personal = page.getByRole("menuitemcheckbox", { name: "alex@example.com, Only me" });
+        const personal = page.getByRole("menuitemcheckbox", { name: "alex@example.com, Yours" });
         const workspace = page.getByRole("menuitemcheckbox", {
-          name: "Support team, This workspace",
+          name: "Support team, Shared",
         });
         expect(await personal.getAttribute("aria-checked")).toBe("true");
         expect(await workspace.getAttribute("aria-checked")).toBe("true");

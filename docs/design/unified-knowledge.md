@@ -94,7 +94,12 @@ The settings page lists editable defaults and context overrides. Contextual
 shortcuts edit those same records:
 
 - Scheduled task: collapsed Advanced > Agent learning.
-- Chat: + > Chat settings > Agent learning, with no persistent composer toggle.
+- Chat: the session dock's Agent tab, beside the chat's identity and
+  capabilities; + > Chat settings opens it. A new chat sets its draft choice in
+  + > Chat settings. No persistent composer toggle.
+- Organization identity (owners only): a row on Settings > Agent learning in the
+  same Off / Review first / Automatic words, backed by the separate
+  company-profile agent policy.
 
 Knowledge, Instructions and Skills appear together in the browsing area while
 their content and activation authorities remain distinct. The existing unified
@@ -109,7 +114,7 @@ answer the user. Future-task retrieval excludes pending content; if a previous
 published revision exists, it remains current until approval.
 
 Related pending writes are collected into one review batch per task/run. A
-nonblocking chat card and Knowledge > Needs review show the same proposals.
+nonblocking chat card and Knowledge > Review show the same proposals.
 Approve all, edit and approve, and reject operate on exact revisions. A stale
 review cannot overwrite a newer correction. There is no second approval after
 the review decision and no `requires_action` interruption for Knowledge saves.
@@ -161,9 +166,10 @@ confirmation recovery remain; conversation history and task notes are separate.
 This is a maintenance cutover: stop old API and workers, migrate and provision
 roles, and start only the matching runtime. Do not restart an old binary.
 
-Built-in Drive/Atlassian sources use ordinary scheduled agent turns. Their fetch
-adapter retains originals/source text under the frozen policy; the agent selects
-useful findings. Task lifecycle owns completion; source adapters own checkpoints.
+Integration Knowledge sync (Drive, OneDrive, Jira/Confluence) was removed:
+integrations give agents tools, and recurring work is an ordinary agent schedule
+that uses them. Imported Documents remain; the saved source schedules were
+deleted (see [Knowledge](../knowledge.md)).
 Legacy source schedules keep their IDs and configuration. Those with no active
 owning-human authority are preserved paused, and require a current authorized
 edit. The change does not extend the managed scheduled-authority lifecycle to

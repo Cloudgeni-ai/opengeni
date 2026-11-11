@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chromium, type Browser } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const root = new URL("../..", import.meta.url).pathname;
 describe("nonblocking session Skill review", () => {
@@ -40,10 +41,12 @@ describe("nonblocking session Skill review", () => {
       const page = await browser.newPage({ viewport: { width, height: 900 } });
       try {
         await page.goto(url);
-        const review = page.getByText("Review Release checklist", { exact: true });
-        await review.waitFor();
+        await page.getByRole("heading", { name: "Release checklist", exact: true }).waitFor();
+        // Before anything is opened, the bar says the Skill isn't in use yet.
+        await page.getByText("New Skill · Not active until approved", { exact: true }).waitFor();
         await page.getByRole("textbox", { name: "Message" }).fill("Keep working");
-        await review.focus();
+        const name = page.getByRole("button", { name: "Release checklist", exact: true });
+        await name.focus();
         await page.keyboard.press("Enter");
         await page.getByText("SKILL.md", { exact: true }).waitFor();
         expect(await page.locator("pre").allTextContents()).toHaveLength(2);
@@ -56,8 +59,11 @@ describe("nonblocking session Skill review", () => {
             path: `${process.env.OPENGENI_SESSION_SKILL_REVIEW_SCREENSHOTS}/session-skill-review-${width}.png`,
             fullPage: true,
           });
-        await page.getByRole("button", { name: "Approve Skill", exact: true }).click();
-        await page.getByRole("region", { name: "Skill review" }).waitFor({ state: "detached" });
+        await page.getByRole("button", { name: "Approve", exact: true }).click();
+        await page
+          .getByText("Approved · Agents can use it from your next message", { exact: true })
+          .waitFor();
+        expect(await page.getByRole("button", { name: "Approve", exact: true }).count()).toBe(0);
         expect(await page.getByRole("textbox", { name: "Message" }).inputValue()).toBe(
           "Keep working",
         );
@@ -76,9 +82,27 @@ describe("nonblocking session Skill review", () => {
     try {
       await page.goto(`${url}/?fail`);
       await page.getByRole("alert").waitFor();
-      expect(await page.getByRole("button", { name: "Approve Skill" }).count()).toBe(0);
+      expect(await page.getByRole("button", { name: "Approve", exact: true }).count()).toBe(0);
       await page.getByRole("button", { name: "Reload review" }).click();
       expect(await page.getByRole("textbox", { name: "Message" }).isEnabled()).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+  test("declining rejects the exact revision and never approves it", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.goto(url);
+      await page.getByRole("button", { name: "Decline", exact: true }).click();
+      await page.getByText("Declined · Agents won't use it", { exact: true }).waitFor();
+      expect(await page.getByRole("button", { name: "Approve", exact: true }).count()).toBe(0);
+      expect(
+        await page.evaluate(() => ({
+          rejected: (window as unknown as { rejection?: { revisionId: string } }).rejection
+            ?.revisionId,
+          approved: "approval" in window,
+        })),
+      ).toEqual({ rejected: "33333333-3333-4333-8333-333333333333", approved: false });
     } finally {
       await page.close();
     }

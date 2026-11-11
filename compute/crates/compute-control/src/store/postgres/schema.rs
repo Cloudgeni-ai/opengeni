@@ -1,0 +1,271 @@
+//! The schema of the store in Postgres, and bringing a database up to it.
+
+use deadpool_postgres::Object;
+
+use super::{corrupt, database};
+use crate::store::Result;
+
+/// The schema, one migration for each version, applied in order by
+/// [`migrate`]. A released migration is never changed: a change to the
+/// schema is a new one at the end.
+const MIGRATIONS: &[&str] = &[
+    MIGRATION_1,
+    MIGRATION_2,
+    MIGRATION_3,
+    MIGRATION_4,
+    MIGRATION_5,
+    MIGRATION_6,
+    MIGRATION_7,
+    MIGRATION_8,
+    MIGRATION_9,
+];
+
+/// Version 1: the tables, made if missing.
+const MIGRATION_1: &str = "
+create sequence if not exists compute_changes;
+create sequence if not exists compute_host_epochs;
+create table if not exists compute_hosts (
+    id bigint primary key,
+    name text not null unique,
+    info jsonb not null,
+    epoch bigint not null,
+    state text not null check (state in ('live', 'draining', 'lost')),
+    renewals bigint not null,
+    seq bigint not null,
+    attempt bigint not null,
+    answer jsonb not null,
+    capacity jsonb not null,
+    changed bigint not null
+);
+create sequence if not exists compute_host_ids owned by compute_hosts.id;
+create index if not exists compute_hosts_changed on compute_hosts (changed);
+create table if not exists compute_sandboxes (
+    id text primary key,
+    team text not null,
+    spec jsonb not null,
+    metadata jsonb not null,
+    owner bigint,
+    epoch bigint not null,
+    taken bigint not null,
+    unanswered_epoch bigint,
+    unanswered_stamp bigint,
+    landed_epoch bigint,
+    landed_host_epoch bigint,
+    landed_seq bigint,
+    class text,
+    created_ms bigint not null,
+    version bigint not null
+);
+create index if not exists compute_sandboxes_owner on compute_sandboxes (owner)
+    where owner is not null;
+create index if not exists compute_sandboxes_team on compute_sandboxes (team, created_ms);
+create index if not exists compute_sandboxes_metadata on compute_sandboxes
+    using gin (metadata jsonb_path_ops);
+create table if not exists compute_keys (digest text primary key, team text not null);
+create table if not exists compute_lifecycles (
+    id text primary key,
+    team text not null,
+    record jsonb not null,
+    due_ms bigint not null,
+    version bigint not null
+);
+create index if not exists compute_lifecycles_team on compute_lifecycles (team);
+create index if not exists compute_lifecycles_due on compute_lifecycles (due_ms, id collate \"C\");
+create table if not exists compute_create_requests (
+    team text not null,
+    request_id text not null,
+    id text not null,
+    digest text not null,
+    created_ms bigint not null,
+    gone_ms bigint,
+    primary key (team, request_id)
+);
+create index if not exists compute_create_requests_id on compute_create_requests (id);
+create index if not exists compute_create_requests_gone_ms on compute_create_requests (gone_ms)
+    where gone_ms is not null;
+";
+
+/// Version 2: the owner epoch under which a sandbox's stored copy is its
+/// whole latest state (`whole_epoch`, see `Ownership::whole`); a host
+/// taking the sandbox up under any other epoch starts it from the copy's
+/// files.
+const MIGRATION_2: &str = "
+alter table compute_sandboxes add column if not exists whole_epoch bigint;
+";
+
+/// Version 3: when a host was given up on (`gone_ms`), so hosts given up on
+/// are forgotten after a while (`Store::prune_hosts`, which also dates the
+/// hosts given up on before this, or by an older build, from when it first
+/// sees them); and a sandbox's owner must be a host the store has, so no
+/// write, from this build or an older one still running during a rollout,
+/// can name a host since forgotten. A sandbox naming a host the store does
+/// not have (none should) is first given up on, as giving up on its host
+/// would. The owner is checked when a transaction commits, not at each
+/// statement: a registration (from this build or an older one) may give a
+/// new host the sandboxes it holds before it writes the host itself.
+const MIGRATION_3: &str = "
+alter table compute_hosts add column if not exists gone_ms bigint;
+update compute_sandboxes set owner = null, epoch = epoch + 1, version = version + 1
+    where owner is not null
+    and not exists (select 1 from compute_hosts where id = compute_sandboxes.owner);
+alter table compute_sandboxes add constraint compute_sandboxes_owner_host
+    foreign key (owner) references compute_hosts (id) deferrable initially deferred;
+";
+
+/// Version 4: the stored image built from each OCI image
+/// (`Store::record_built`), and which of them each of the fleet's image
+/// names used, the latest with the highest `used`.
+const MIGRATION_4: &str = "
+create table if not exists compute_images (
+    source text primary key,
+    image text not null,
+    built_ms bigint not null
+);
+create sequence if not exists compute_image_uses;
+create table if not exists compute_image_names (
+    name text not null,
+    source text not null references compute_images (source),
+    used bigint not null,
+    primary key (name, source)
+);
+create index if not exists compute_image_names_by_use on compute_image_names (name, used);
+";
+
+/// Version 5: whether an operator drained each host and has not undrained
+/// it since, which, unlike its state, outlasts its being given up on.
+const MIGRATION_5: &str = "
+alter table compute_hosts add column if not exists drained boolean not null default false;
+update compute_hosts set drained = true where state = 'draining';
+";
+
+/// Version 6: templates saved from sandboxes (`Store::insert_template`),
+/// and every image captured for one, with since when nothing uses it and
+/// which collector claimed it to forget it, when; sandboxes are found by
+/// the image their config names, which tells whether one is used.
+const MIGRATION_6: &str = "
+create table if not exists compute_templates (
+    team text not null,
+    id text not null,
+    name text,
+    image text not null,
+    source text not null,
+    vcpus integer not null,
+    memory_mib bigint not null,
+    disk_mib bigint not null,
+    created_ms bigint not null,
+    primary key (team, id)
+);
+create unique index if not exists compute_templates_name on compute_templates (team, name)
+    where name is not null;
+create index if not exists compute_templates_image on compute_templates (image);
+create table if not exists compute_captured_images (
+    image text primary key,
+    unused_ms bigint,
+    collector text,
+    claimed_ms bigint
+);
+create index if not exists compute_sandboxes_image on compute_sandboxes
+    ((spec -> 'config' ->> 'image'));
+create index if not exists compute_images_image on compute_images (image);
+";
+
+/// Version 7: what the sandbox a template was saved from was guaranteed,
+/// which E2B creates from the template are guaranteed too; none for one
+/// saved before.
+const MIGRATION_7: &str = "
+alter table compute_templates add column if not exists memory_request_mib bigint;
+alter table compute_templates add column if not exists cpu_request_millis bigint;
+";
+
+/// Version 8: the pointers to the fleet's stored copies (ADR 25), each
+/// with its owner stamp (both numbers `u64` kept bit for bit, as a
+/// tombstone's save is `u64::MAX`) and a version no other write is ever
+/// given, and,
+/// once they were moved in from the object store, when and from where.
+const MIGRATION_8: &str = "
+create sequence if not exists compute_pointer_versions;
+create table if not exists compute_pointers (
+    name text primary key,
+    owner_epoch bigint not null,
+    owner_save bigint not null,
+    pointer bytea not null,
+    version bigint not null
+);
+create table if not exists compute_pointers_imported (
+    one boolean primary key default true check (one),
+    imported_ms bigint not null,
+    from_store text not null
+);
+";
+
+/// Version 9: the loss a sandbox's row notes once its host's copy was
+/// given up for gone (`lost`, see `LostCopy`), and when each pointer last
+/// pointed at a new copy (`saved_ms`), which that note tells.
+const MIGRATION_9: &str = "
+alter table compute_sandboxes add column if not exists lost jsonb;
+alter table compute_pointers add column if not exists saved_ms bigint;
+";
+
+/// The transaction-scoped advisory lock replicas starting together take
+/// turns migrating by.
+const MIGRATION_LOCK: i64 = 7_231_401;
+
+/// Brings the schema to the latest version, in one transaction: either
+/// every migration it lacked is applied, or none is. Replicas starting
+/// together take turns.
+pub(super) async fn migrate(client: &mut Object) -> Result<()> {
+    let transaction = client.transaction().await.map_err(database)?;
+    transaction
+        .execute("select pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK])
+        .await
+        .map_err(database)?;
+    transaction
+        .batch_execute(
+            "create table if not exists compute_schema ( \
+             one boolean primary key default true check (one), \
+             version integer not null)",
+        )
+        .await
+        .map_err(database)?;
+    let version = transaction
+        .query_opt("select version from compute_schema", &[])
+        .await
+        .map_err(database)?
+        .map_or(0, |row| row.get::<_, i32>(0));
+    let at = usize::try_from(version).map_err(corrupt)?;
+    if at > MIGRATIONS.len() {
+        // A newer build migrated it; its migrations keep what this one
+        // reads.
+        tracing::warn!(
+            version,
+            known = MIGRATIONS.len(),
+            "the database's schema is newer than this build's"
+        );
+        return Ok(());
+    }
+    if at == MIGRATIONS.len() {
+        return Ok(());
+    }
+    for migration in &MIGRATIONS[at..] {
+        transaction
+            .batch_execute(migration)
+            .await
+            .map_err(database)?;
+    }
+    let latest = i32::try_from(MIGRATIONS.len()).map_err(corrupt)?;
+    transaction
+        .execute(
+            "insert into compute_schema (version) values ($1) \
+             on conflict (one) do update set version = excluded.version",
+            &[&latest],
+        )
+        .await
+        .map_err(database)?;
+    transaction.commit().await.map_err(database)?;
+    tracing::info!(
+        from = version,
+        to = latest,
+        "migrated the database's schema"
+    );
+    Ok(())
+}

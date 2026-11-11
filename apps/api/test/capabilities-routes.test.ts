@@ -5,22 +5,24 @@ import {
   upsertCapabilityCatalogItem,
   enableCapabilityInstallation,
   listConnectorToolPermissionPolicies,
-  clearCodexAppsCredential,
   createDb,
   deleteWorkspace,
-  designateCodexAppsCredential,
   encryptEnvironmentValue,
-  upsertCodexSubscriptionCredential,
   type DbClient,
 } from "@opengeni/db";
 import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+  clearSubscriptionCoreCodexApps,
+  designateSubscriptionCoreCodexApps,
+  connectSubscriptionCoreCodexConnection,
+} from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 
 import type { ApiRouteDeps } from "@opengeni/core";
+import { getCapabilityCatalogItem } from "@opengeni/db";
+import { registerCatalogAssetRoutes } from "../src/routes/catalog-assets";
 import { registerCapabilityRoutes } from "../src/routes/capabilities";
 
 const DELEGATION_SECRET = "codex-apps-capabilities-route-secret";
@@ -32,6 +34,7 @@ let app: Hono | null = null;
 let workspaceId = "";
 let accountId = "";
 let subjectId = "";
+let designationVersion = 0;
 let available = true;
 const settings = testSettings({
   codexConnectedAppsEnabled: true,
@@ -59,6 +62,13 @@ beforeAll(async () => {
   const grant = access.workspaceGrants[0]!;
   workspaceId = grant.workspaceId;
   accountId = grant.accountId;
+  // Retain the seeded core gate: the capability projection uses core Apps.
+  const [personal] = await shared.admin`insert into workspaces(account_id, name)
+    values (${accountId}, 'Fixture owner Personal') returning id`;
+  await shared.admin`insert into organization_memberships
+    (account_id, subject_id, role, status, personal_workspace_id)
+    values (${accountId}, ${subjectId}, 'owner', 'active', ${personal!.id})
+    on conflict (account_id, subject_id) do nothing`;
   await shared.admin`
     update workspace_memberships
     set permissions = '["workspace:read", "workspace:admin", "connections:write", "capabilities:manage"]'::jsonb
@@ -90,30 +100,34 @@ async function request(): Promise<Response> {
 describe("Codex Apps capability catalog API", () => {
   test("projects designated Apps as an enabled selectable MCP server", async () => {
     if (!available || !client) return;
-    const credential = await upsertCodexSubscriptionCredential(client.db, {
+    const credential = await connectSubscriptionCoreCodexConnection(client.db, {
       accountId,
       workspaceId,
       credentialEncrypted: encryptEnvironmentValue(
         encryptionKey,
         JSON.stringify({ access_token: "access", refresh_token: "refresh", id_token: "id" }),
       ),
-      chatgptAccountId: `codex-apps-${crypto.randomUUID()}`,
-      scopes: null,
+      providerAccountId: `codex-apps-${crypto.randomUUID()}`,
+      providerSubjectId: subjectId,
+      accountEmail: null,
+      label: null,
       planType: "pro",
       isFedramp: false,
       expiresAt: new Date(Date.now() + 60 * 60_000),
       lastRefreshAt: new Date(),
-      connectedBySubjectId: subjectId,
+      subjectId,
     });
-    expect(
-      await designateCodexAppsCredential(client.db, {
-        accountId,
-        workspaceId,
-        credentialId: credential.id,
-        subjectId,
-        expectedVersion: 0,
-      }),
-    ).toMatchObject({ kind: "updated" });
+    if (credential.kind !== "connected") throw new Error(`fixture refused: ${credential.reason}`);
+    const designation = await designateSubscriptionCoreCodexApps(client.db, {
+      accountId,
+      workspaceId,
+      connectionId: credential.id,
+      subjectId,
+      expectedVersion: 0,
+    });
+    expect(designation).toMatchObject({ kind: "updated" });
+    if (designation.kind !== "updated") throw new Error("fixture designation refused");
+    designationVersion = designation.version;
 
     const response = await request();
     expect(response.status).toBe(200);
@@ -131,11 +145,11 @@ describe("Codex Apps capability catalog API", () => {
   test("keeps the Apps item visible but unavailable after designation is cleared", async () => {
     if (!available || !client) return;
     expect(
-      await clearCodexAppsCredential(client.db, {
+      await clearSubscriptionCoreCodexApps(client.db, {
         accountId,
         workspaceId,
         subjectId,
-        expectedVersion: 1,
+        expectedVersion: designationVersion,
       }),
     ).toMatchObject({ kind: "updated", credentialId: null });
 
@@ -166,6 +180,14 @@ describe("connector tool permissions API", () => {
         if (req.method !== "POST") return new Response(null, { status: 405 });
         const body = (await req.json()) as { id?: string | number; method: string };
         if (body.id === undefined) return new Response(null, { status: 202 });
+        // A 2025-era server: the 2026-07-28 era probe is an unknown method.
+        if (body.method === "server/discover") {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            error: { code: -32601, message: "Method not found" },
+          });
+        }
         const result =
           body.method === "initialize"
             ? {
@@ -360,6 +382,94 @@ describe("connector tool permissions API", () => {
       expect(invocations).toBe(0);
     } finally {
       await server.stop(true);
+    }
+  }, 60_000);
+});
+
+describe("connected MCP server icons", () => {
+  test("enabling a custom MCP server stores its advertised icon as the item's logo", async () => {
+    if (!available || !client) return;
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"><rect/></svg>';
+    const mcp = startTestMcpServer({
+      serverIcons: [
+        // Unreachable https icons rank below the vector; the data URI wins.
+        { src: "https://icons.invalid/logo.png", sizes: ["16x16"] },
+        {
+          src: `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
+          mimeType: "image/svg+xml",
+        },
+      ],
+    });
+    const objects = new Map<string, Uint8Array>();
+    const objectStorage = {
+      putObject: async (input: { key: string; body: Uint8Array }) => {
+        objects.set(input.key, input.body.slice());
+      },
+      getObjectBytes: async (key: string) => {
+        const bytes = objects.get(key);
+        return bytes ? { bytes, contentType: "application/octet-stream" } : null;
+      },
+    } as unknown as ApiRouteDeps["objectStorage"];
+    const iconSettings = { ...settings, integrationsEnabled: true };
+    const iconApp = new Hono();
+    registerCapabilityRoutes(iconApp, {
+      db: client.db,
+      settings: iconSettings,
+      objectStorage,
+    } as ApiRouteDeps);
+    registerCatalogAssetRoutes(iconApp, { settings: iconSettings, objectStorage } as ApiRouteDeps);
+    const capabilityId = `mcp:icons-${crypto.randomUUID()}`;
+    const item = {
+      accountId,
+      workspaceId,
+      id: capabilityId,
+      kind: "mcp" as const,
+      source: "manual",
+      name: "Icon fixture",
+      description: null,
+      category: "custom",
+      tags: [],
+      homepageUrl: null,
+      endpointUrl: mcp.url,
+      installUrl: null,
+      authModel: null,
+      metadata: { mcpServerId: `icons_${crypto.randomUUID().replaceAll("-", "")}` },
+    };
+    try {
+      await upsertCapabilityCatalogItem(client.db, item);
+      const bearer = await signDelegatedAccessToken(DELEGATION_SECRET, {
+        accountId,
+        workspaceId,
+        subjectId,
+        principalKind: "human_session",
+        permissions: ["workspace:read", "capabilities:manage"],
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const enabled = await iconApp.request(
+        `http://x/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/enable`,
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+          body: JSON.stringify({ config: {}, metadata: {} }),
+        },
+      );
+      expect(enabled.status, await enabled.clone().text()).toBe(201);
+      const stored = await getCapabilityCatalogItem(client.db, workspaceId, capabilityId);
+      const logoAssetPath = stored?.logoAssetPath ?? "";
+      expect(logoAssetPath).toMatch(/^catalog-assets\/mcp-icons\/127\.0\.0\.1\/[0-9a-f]{24}\.svg$/);
+
+      const served = await iconApp.request(`http://x/v1/${logoAssetPath}`);
+      expect(served.status).toBe(200);
+      expect(served.headers.get("content-type")).toBe("image/svg+xml");
+      expect(await served.text()).toBe(svg);
+
+      // Editing the item (as setup does on every save) keeps the server's logo.
+      await upsertCapabilityCatalogItem(client.db, { ...item, name: "Icon fixture renamed" });
+      expect(
+        (await getCapabilityCatalogItem(client.db, workspaceId, capabilityId))?.logoAssetPath,
+      ).toBe(logoAssetPath);
+    } finally {
+      mcp.close();
     }
   }, 60_000);
 });

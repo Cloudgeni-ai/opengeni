@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser, type Page } from "playwright";
+import { resolveSiteClientScript } from "../../packages/sdk/src/site-document";
+import type { OpenGeniSiteClient, OpenGeniSiteClientOptions } from "../../packages/sdk/src/site";
 
 describe("Site conversation navigation", () => {
   let browser: Browser;
@@ -37,13 +40,64 @@ describe("Site conversation navigation", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
+  test("injected runtime executes the documented access-filtered conversation list", async () => {
+    await page.goto(`${baseUrl}/test/site-conversations.html`, {
+      waitUntil: "networkidle",
+    });
+    await page.setContent(
+      resolveSiteClientScript('<script src="/__opengeni/site-tools/client.js"></script>'),
+    );
+    const result = await page.evaluate(async () => {
+      const create = (
+        globalThis as unknown as {
+          createOpenGeniSiteClient: (options: OpenGeniSiteClientOptions) => OpenGeniSiteClient;
+        }
+      ).createOpenGeniSiteClient;
+      const paths: string[] = [];
+      const site = create({
+        localCodemodePath: "/__opengeni/site-tools",
+        fetch: (async (input) => {
+          paths.push(String(input));
+          return Response.json({
+            pinned: [],
+            sessions: [],
+            nextCursor: null,
+            filtersApplied: true,
+            siteAccessId: "pinned-site",
+          });
+        }) as typeof fetch,
+      });
+      try {
+        const list = await site.client.listSessionPage(site.workspaceId, {
+          siteAccessId: "current",
+        });
+        let refusal: string | undefined;
+        try {
+          await site.client.listSessionPage(site.workspaceId);
+        } catch (error) {
+          refusal = (error as Error).name;
+        }
+        return { paths, list, refusal };
+      } finally {
+        site.close();
+      }
+    });
+    expect(result.paths).toEqual([
+      "/__opengeni/site-tools/sdk/v1/workspaces/site-host/sessions?view=page&siteAccessId=current",
+    ]);
+    expect(result.list.siteAccessId).toBe("pinned-site");
+    expect(result.refusal).toBe("SiteSessionPathError");
+  }, 30_000);
+
   for (const theme of ["light", "dark"])
     test(`${theme}: linked origin, group disclosure, paginated/searchable host panel`, async () => {
       const errors: string[] = [];
       const onError = (error: Error) => errors.push(error.message);
       page.on("pageerror", onError);
       try {
-        await page.goto(`${baseUrl}/test/site-conversations.html`, { waitUntil: "networkidle" });
+        await page.goto(`${baseUrl}/test/site-conversations.html`, {
+          waitUntil: "networkidle",
+        });
         await page.evaluate((selectedTheme) => {
           document.documentElement.dataset.ogTheme = selectedTheme;
           document.documentElement.style.colorScheme = selectedTheme;
@@ -53,16 +107,18 @@ describe("Site conversation navigation", () => {
         });
         expect(await originLinks.count()).toBe(2);
         expect(await originLinks.first().getAttribute("href")).toContain(
-          "/artifacts/22222222-2222-4222-8222-222222222222",
+          "/sites/22222222-2222-4222-8222-222222222222",
         );
         const disclosure = page.getByRole("button", {
-          name: "Expand conversations from Product analytics",
+          name: "Expand 3 conversations from Product analytics",
         });
         await disclosure.focus();
         await page.keyboard.press("Enter");
         expect(
           await page
-            .getByRole("button", { name: "Collapse conversations from Product analytics" })
+            .getByRole("button", {
+              name: "Collapse 3 conversations from Product analytics",
+            })
             .getAttribute("aria-expanded"),
         ).toBe("true");
         await page.getByRole("link", { name: "Review conversion trends" }).waitFor();

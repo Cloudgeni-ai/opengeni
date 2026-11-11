@@ -1,0 +1,409 @@
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createOrganizationApiKey,
+  deleteWorkspace,
+  ensureExternalIdentity,
+  getConnectionMetadata,
+  listConnectionsMetadata,
+  type DbClient,
+} from "@opengeni/db";
+import * as network from "@opengeni/network";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { SignJWT, exportJWK, generateKeyPair } from "jose";
+import postgres from "postgres";
+import { createApp } from "../src/app";
+import {
+  OFFICIAL_GMAIL_MCP_SCOPES,
+  OFFICIAL_GMAIL_MCP_URL,
+} from "../src/integrations/oauth-profiles";
+
+let database: SharedTestDatabase;
+let client: DbClient;
+const workspaces: string[] = [];
+beforeAll(async () => {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (Boolean(adminUrl) !== Boolean(appUrl))
+    throw new Error("Both PostgreSQL fixture URLs are required");
+  const admin = adminUrl ? postgres(adminUrl, { max: 4 }) : null;
+  const acquired =
+    admin && adminUrl && appUrl
+      ? {
+          admin,
+          adminUrl,
+          appUrl,
+          release: async () => {
+            await admin.end();
+          },
+        }
+      : await acquireSharedTestDatabase("oauth-account-deduplication");
+  if (!acquired) throw new Error("OAuth account deduplication requires PostgreSQL");
+  database = acquired;
+  client = createDb(database.appUrl);
+}, 180_000);
+afterAll(async () => {
+  try {
+    for (const workspaceId of workspaces) await deleteWorkspace(client.db, workspaceId);
+  } finally {
+    await client?.close();
+    await database?.release();
+  }
+}, 180_000);
+
+async function fixture(kind: "gmail" | "opaque" | "oidc") {
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: randomUUID(),
+    accountName: "OAuth deduplication",
+    workspaceExternalSource: "test",
+    workspaceExternalId: randomUUID(),
+    workspaceName: "Fixture",
+    subjectId: `user:${randomUUID()}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  workspaces.push(grant.workspaceId);
+  const identity = await ensureExternalIdentity(client.db, {
+    accountId: grant.accountId,
+    externalId: "oauth-user",
+  });
+  const key = randomBytes(24).toString("hex");
+  await createOrganizationApiKey(client.db, {
+    accountId: grant.accountId,
+    name: "Fixture",
+    prefix: "test",
+    keyHash: createHash("sha256").update(key).digest("hex"),
+    permissions: ["workspace:read", "connections:read", "connections:write"],
+  });
+  const issuer =
+    kind === "gmail"
+      ? "https://accounts.google.com"
+      : kind === "oidc"
+        ? "https://oidc.example.test"
+        : "https://oauth.example.test";
+  // An authorization server that advertises OpenID Connect only in its own
+  // metadata, like Linear or Dropbox: the resource lists just its own scopes.
+  const signing = kind === "oidc" ? await generateKeyPair("ES256") : null;
+  const jwks = signing
+    ? { keys: [{ ...(await exportJWK(signing.publicKey)), kid: "k1", alg: "ES256" }] }
+    : null;
+  let nonce: string | null = null;
+  const tokenUrl = kind === "gmail" ? "https://oauth2.googleapis.com/token" : `${issuer}/token`;
+  const endpoint = kind === "gmail" ? OFFICIAL_GMAIL_MCP_URL : "https://connector.example.test/mcp";
+  const scopes = kind === "gmail" ? OFFICIAL_GMAIL_MCP_SCOPES : ["documents:read"];
+  const app = createApp({
+    db: client.db,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+    settings: testSettings({
+      productAccessMode: "managed",
+      integrationsEnabled: true,
+      publicBaseUrl: "https://runtime.example.test",
+      environmentsEncryptionKey: randomBytes(32).toString("base64"),
+      integrationsStateSecret: "oauth-account-deduplication-synthetic-state",
+      integrationsOauthClientsJson: JSON.stringify({
+        [issuer]: {
+          clientId: "fixture-client",
+          clientSecret: "fixture-secret",
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+      }),
+    }),
+  });
+  const headers = {
+    authorization: `Bearer ${key}`,
+    "content-type": "application/json",
+    "x-opengeni-external-actor": encodeURIComponent(
+      JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+    ),
+  };
+  const attemptsPath = (workspaceId: string) => `/v1/workspaces/${workspaceId}/connect/attempts`;
+  const base = attemptsPath(identity.personalWorkspaceId);
+  let email = "mailbox@example.test";
+  let exchanges = 0;
+  const transport = spyOn(network, "pinnedFetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url === tokenUrl)
+      return Response.json({
+        access_token: `synthetic-access-${++exchanges}`,
+        refresh_token: `synthetic-refresh-${exchanges}`,
+        token_type: "Bearer",
+        scope: [...scopes, ...(signing ? ["openid", "email"] : [])].join(" "),
+        ...(signing
+          ? {
+              id_token: await new SignJWT({ email, ...(nonce ? { nonce } : {}) })
+                .setProtectedHeader({ alg: "ES256", kid: "k1" })
+                .setSubject(`subject-${email}`)
+                .setIssuer(issuer)
+                .setAudience("fixture-client")
+                .setIssuedAt()
+                .setExpirationTime("5m")
+                .sign(signing.privateKey),
+            }
+          : {}),
+      });
+    if (jwks && url === `${issuer}/jwks`) return Response.json(jwks);
+    if (url === "https://gmail.googleapis.com/gmail/v1/users/me/profile")
+      return Response.json({ emailAddress: email });
+    if (url.startsWith(`${issuer}/.well-known/`))
+      return Response.json({
+        issuer,
+        authorization_endpoint: `${issuer}/authorize`,
+        token_endpoint: tokenUrl,
+        response_types_supported: ["code"],
+        code_challenge_methods_supported: ["S256"],
+        token_endpoint_auth_methods_supported: ["client_secret_post"],
+        scopes_supported: signing ? [...scopes, "openid", "email", "profile"] : scopes,
+        ...(signing ? { jwks_uri: `${issuer}/jwks` } : {}),
+      });
+    if (url.startsWith("https://connector.example.test/prm")) {
+      const resource = new URL(url).searchParams.get("resource")!;
+      return Response.json({ resource, authorization_servers: [issuer], scopes_supported: scopes });
+    }
+    if (url.startsWith("https://connector.example.test/")) {
+      if (!new Headers(init?.headers).has("authorization"))
+        return new Response(null, {
+          status: 401,
+          headers: {
+            "www-authenticate": `Bearer resource_metadata="https://connector.example.test/prm?resource=${encodeURIComponent(url)}"`,
+          },
+        });
+      const message = JSON.parse(String(init?.body ?? "{}"));
+      if (message.method === "initialize")
+        return Response.json({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            protocolVersion: "2025-03-26",
+            capabilities: { tools: {} },
+            serverInfo: { name: "opaque-fixture", version: "1" },
+          },
+        });
+      if (message.method === "tools/list")
+        return Response.json({ jsonrpc: "2.0", id: message.id, result: { tools: [] } });
+      return new Response(null, { status: 202 });
+    }
+    throw new Error(`Unexpected synthetic OAuth destination: ${url}`);
+  });
+  async function begin(
+    options: {
+      reconnectAccountId?: string;
+      mcpUrl?: string;
+      ownership?: "personal" | "workspace";
+      workspaceId?: string;
+    } = {},
+  ) {
+    const attempts = attemptsPath(options.workspaceId ?? identity.personalWorkspaceId);
+    const begun = await app.request(attempts, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: kind === "gmail" ? "gmail" : "mcp-oauth",
+        ownership: options.ownership ?? "personal",
+        ...(options.reconnectAccountId ? { reconnectAccountId: options.reconnectAccountId } : {}),
+        returnUrl: "https://product.example.test/settings",
+        idempotencyKey: randomUUID(),
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    const advanced = await app.request(`${attempts}/${attempt.id}/advance`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedRevision: attempt.revision,
+        idempotencyKey: randomUUID(),
+        action: {
+          type: "credentials",
+          values: kind === "gmail" ? {} : { mcpUrl: options.mcpUrl ?? endpoint },
+        },
+      }),
+    });
+    expect(advanced.status).toBe(200);
+    const ready = await advanced.json();
+    expect(ready.state).toBe("requires_user_action");
+    const authorize = new URL(ready.nextAction.url).searchParams;
+    return {
+      id: ready.id,
+      state: authorize.get("state")!,
+      scope: authorize.get("scope"),
+      nonce: authorize.get("nonce"),
+      attempts,
+    };
+  }
+  const read = async (id: string, attempts = base) =>
+    (await app.request(`${attempts}/${id}`, { headers })).json();
+  const callback = async (attempt: {
+    id: string;
+    state: string;
+    attempts: string;
+    nonce?: string | null;
+  }) => {
+    nonce = attempt.nonce ?? null;
+    await app.request(
+      `/v1/integrations/oauth/callback?${new URLSearchParams({ state: attempt.state, code: "fixture-code" })}`,
+    );
+    return read(attempt.id, attempt.attempts);
+  };
+  return {
+    begin,
+    callback,
+    read,
+    sharedWorkspaceId: grant.workspaceId,
+    joinSharedWorkspace: async () => {
+      await database.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
+        values (${grant.accountId}, ${grant.workspaceId}, ${identity.subjectId},
+          ${JSON.stringify(["workspace:read", "connections:read", "connections:write"])}::jsonb)
+        on conflict do nothing`;
+    },
+    setEmail: (value: string) => {
+      email = value;
+    },
+    connections: (workspaceId = identity.personalWorkspaceId) =>
+      listConnectionsMetadata(client.db, workspaceId, identity.subjectId),
+    connection: (id: string) =>
+      getConnectionMetadata(client.db, identity.personalWorkspaceId, id, identity.subjectId),
+    restore: () => transport.mockRestore(),
+  };
+}
+
+describe("OAuth account deduplication across connector profiles", () => {
+  test("concurrent verified-account Connect callbacks reuse one account without refreshing it", async () => {
+    const provider = await fixture("gmail");
+    try {
+      const first = await provider.begin();
+      const second = await provider.begin();
+      const results = await Promise.all([provider.callback(first), provider.callback(second)]);
+      expect(results.map((result) => result.state)).toEqual(["complete", "complete"]);
+      expect(results[0].account.id).toBe(results[1].account.id);
+      const rows = await provider.connections();
+      expect(rows).toHaveLength(1);
+      const before = await provider.connection(rows[0]!.id);
+      const repeated = await provider.callback(await provider.begin());
+      expect(repeated.state).toBe("complete");
+      expect(repeated.account.id).toBe(rows[0]!.id);
+      expect(await provider.connection(rows[0]!.id)).toEqual(before);
+    } finally {
+      provider.restore();
+    }
+  }, 60_000);
+
+  test("different verified accounts remain separate and reconnect cannot switch identity", async () => {
+    const provider = await fixture("gmail");
+    try {
+      const first = await provider.callback(await provider.begin());
+      expect(first.state).toBe("complete");
+      const before = await provider.connection(first.account.id);
+      provider.setEmail("another@example.test");
+      const second = await provider.callback(await provider.begin());
+      expect(second.state).toBe("complete");
+      expect(second.account.id).not.toBe(first.account.id);
+      const mismatch = await provider.callback(
+        await provider.begin({ reconnectAccountId: first.account.id }),
+      );
+      expect(mismatch).toMatchObject({ state: "failed", error: { code: "account_mismatch" } });
+      expect(await provider.connection(first.account.id)).toEqual(before);
+      expect(await provider.connections()).toHaveLength(2);
+    } finally {
+      provider.restore();
+    }
+  }, 60_000);
+
+  test("connecting a personal account again from another workspace reuses it", async () => {
+    const provider = await fixture("gmail");
+    try {
+      const first = await provider.callback(await provider.begin());
+      expect(first.state).toBe("complete");
+      const before = await provider.connection(first.account.id);
+      await provider.joinSharedWorkspace();
+      const again = await provider.callback(
+        await provider.begin({ workspaceId: provider.sharedWorkspaceId }),
+      );
+      expect(again.state).toBe("complete");
+      expect(again.account.id).toBe(first.account.id);
+      expect(await provider.connection(first.account.id)).toEqual(before);
+      expect(await provider.connections()).toHaveLength(1);
+      expect(
+        (await provider.connections(provider.sharedWorkspaceId)).filter(
+          (connection) => connection.subjectId !== null,
+        ),
+      ).toEqual([]);
+    } finally {
+      provider.restore();
+    }
+  }, 60_000);
+
+  test("an opaque OAuth provider cannot create duplicate account rows through concurrent Connect", async () => {
+    const provider = await fixture("opaque");
+    try {
+      const first = await provider.begin();
+      const second = await provider.begin();
+      const results = await Promise.all([provider.callback(first), provider.callback(second)]);
+      expect(results.map((result) => result.state).sort()).toEqual(["complete", "failed"]);
+      const failure = results.find((result) => result.state === "failed");
+      expect(failure.error.message).toContain("you can connect one account");
+      expect(await provider.connections()).toHaveLength(1);
+    } finally {
+      provider.restore();
+    }
+  }, 60_000);
+
+  test("opaque connections keep endpoints separate and give each person one account", async () => {
+    const provider = await fixture("opaque");
+    try {
+      const first = await provider.callback(await provider.begin());
+      const otherEndpoint = await provider.callback(
+        await provider.begin({ mcpUrl: "https://connector.example.test/other" }),
+      );
+      // The person already has their own; a shared one would show them two
+      // connections nobody can tell apart.
+      const shared = await provider.callback(await provider.begin({ ownership: "workspace" }));
+      expect([first.state, otherEndpoint.state, shared.state]).toEqual([
+        "complete",
+        "complete",
+        "failed",
+      ]);
+      expect(shared.error.message).toContain("you can connect one account");
+      expect(first.account.id).not.toBe(otherEndpoint.account.id);
+      expect(await provider.connections()).toHaveLength(2);
+    } finally {
+      provider.restore();
+    }
+  }, 60_000);
+  test("OpenID Connect sign-ins ask for openid and email and tell accounts apart", async () => {
+    const provider = await fixture("oidc");
+    try {
+      const begun = await provider.begin();
+      expect(begun.scope?.split(" ")).toEqual(["documents:read", "openid", "email"]);
+      expect(begun.nonce).toBeTruthy();
+      const first = await provider.callback(begun);
+      expect(first.state).toBe("complete");
+      // The same person again reuses the connection.
+      const again = await provider.callback(await provider.begin());
+      expect(again.account.id).toBe(first.account.id);
+      // A different account is allowed alongside it, and named by its email.
+      provider.setEmail("second@example.test");
+      const second = await provider.callback(await provider.begin());
+      expect(second.state).toBe("complete");
+      expect(second.account.id).not.toBe(first.account.id);
+      const rows = await provider.connections();
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.metadata?.oidcEmail).sort()).toEqual([
+        "mailbox@example.test",
+        "second@example.test",
+      ]);
+      // A reconnect that signs in as someone else is refused.
+      const mismatch = await provider.callback(
+        await provider.begin({ reconnectAccountId: first.account.id }),
+      );
+      expect(mismatch).toMatchObject({ state: "failed", error: { code: "account_mismatch" } });
+    } finally {
+      provider.restore();
+    }
+  }, 60_000);
+});

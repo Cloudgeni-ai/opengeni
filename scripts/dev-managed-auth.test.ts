@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 test("local managed signing secrets persist without exposing or rotating them", async () => {
-  const root = await mkdtemp(join(import.meta.dir, ".managed-auth-test-"));
+  const root = await mkdtemp(join(tmpdir(), "opengeni-managed-auth-test-"));
   const envFile = join(root, "runtime.env");
   try {
     const run = async (environment: string) => {

@@ -4,7 +4,8 @@ import {
   type ModalSandboxSession,
   type ModalSandboxSessionState,
 } from "@openai/agents-extensions/sandbox/modal";
-import type { SandboxDirectoryEntry } from "@openai/agents/sandbox";
+import { imageOutputFromBytes } from "@openai/agents-core/sandbox/internal";
+import { posix } from "node:path";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -14,15 +15,31 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { installModalCommandSession } from "./modal-command-session";
+import {
+  installModalSynchronousCommandCollection,
+  withNativeSynchronousCommandCollection,
+} from "../native-synchronous-collection";
 import { ModalCommandControl } from "./modal-command-control";
 import {
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartNotDispatchedError,
 } from "./modal-command-router-wire";
-import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
+import {
+  createModalSessionWithLifecycle,
+  resumeModalSessionOnSharedClient,
+  type ModalCreateLifecycle,
+  type OpenGeniModalSandboxClientOptions,
+} from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
 import type { ModalClient } from "modal";
-import { hasModalCommandStartBoundary } from "./modal-command-start-errors";
+import {
+  hasModalCommandStartBoundary,
+  hasModalCommandStartOutcomeUnknownBoundary,
+  installModalCommandStartContext,
+  installModalCommandStartRetention,
+  modalCommandStartHasOwnAccessor,
+  modalCommandStartOwnData,
+} from "./modal-command-start-errors";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
@@ -67,6 +84,22 @@ export type ModalOrphanSweepResult = {
   examined: number;
   terminated: ModalOrphanSweepTermination[];
   skipped: number;
+  /**
+   * Provider/lease reconciliation observed by this pass, judged against the
+   * live-lease snapshot passed in (read before the listing). `unterminated`
+   * holds orphan candidates still running after the pass (termination skipped,
+   * postponed, or failed); `missingLiveLeaseInstanceIds` names live-lease
+   * instances absent from the listing. Both can include a lease transition that
+   * raced the listing, so a caller re-reads durable ownership before reporting
+   * them. Only meaningful when `complete` (the whole app listing was read; the
+   * termination budget can cut a pass short).
+   */
+  inventory: {
+    complete: boolean;
+    running: number;
+    unterminated: ModalOrphanSweepTermination[];
+    missingLiveLeaseInstanceIds: string[];
+  };
 };
 
 export type RevalidateModalOrphanTermination = (
@@ -95,6 +128,7 @@ export function modalSandboxAttributionTags(
 }
 
 type MutableModalSnapshotSandbox = {
+  exec?: ConstructorParameters<typeof ModalSandboxSession>[0]["sandbox"]["exec"];
   terminate?: (options?: { wait?: boolean }) => Promise<unknown>;
   detach?: () => void;
   snapshotFilesystem?: (...args: unknown[]) => Promise<unknown>;
@@ -103,6 +137,10 @@ type MutableModalSnapshotSandbox = {
 
 type ModalWorkspaceCaptureOptions = {
   requestId: string;
+  /** Hard provider-side timeout for this one capture. A zero-holder drain
+   * passes its own (longer) budget so the caller's wait never doubles as
+   * Modal's deadline; other captures keep the session's configured value. */
+  providerTimeoutMs?: number;
 };
 
 type MutableModalSandboxSession = {
@@ -127,9 +165,14 @@ type MutableModalSandboxSession = {
     snapshotFilesystemTimeoutMs?: number;
   };
   execCommand?: ChannelASession["execCommand"];
+  getSynchronousCommandOutput?: ChannelASession["getSynchronousCommandOutput"];
   cancelPendingExecCommand?: () => Promise<void>;
   readFile?: ChannelASession["readFile"];
-  listDir?: (args: { path: string; runAs?: string }) => Promise<SandboxDirectoryEntry[]>;
+  listDir?: ChannelASession["listDir"];
+  viewImage?: (args: { path: string; runAs?: string }) => Promise<unknown>;
+  // Pinned Agents Extensions 0.14.3: the adapter's own file read, the one its
+  // viewImage and readFile use after path validation.
+  readSandboxFile?: (path: string) => Promise<Uint8Array>;
   persistWorkspace?: (options?: ModalWorkspaceCaptureOptions) => Promise<Uint8Array>;
   writeStdin?: (args: {
     sessionId: number;
@@ -145,6 +188,7 @@ const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
 const modalSnapshotRequestIds = new WeakMap<object, string>();
 const modalDirectorySnapshotTimeouts = new WeakMap<object, number | undefined>();
+const modalProviderSnapshotTimeouts = new WeakMap<object, number>();
 const MODAL_TURN_SHELL_MARKER = "/tmp/opengeni-turn-shell/";
 
 type ModalPendingExecStart = {
@@ -176,28 +220,40 @@ function modalWorkspaceAbsolutePath(path: string, workspaceRoot: string): string
 function installModalListDirCompatibility(session: MutableModalSandboxSession): void {
   if (typeof session.listDir === "function") return;
   const execCommand = session.execCommand;
+  const writeStdin = session.writeStdin?.bind(session);
+  const getOutput = session.getSynchronousCommandOutput?.bind(session);
   if (typeof execCommand !== "function" || typeof session.readFile !== "function") return;
   const workspaceRoot = session.state?.manifest?.root;
   if (!workspaceRoot) {
     throw new Error("Modal listDir compatibility requires a manifest workspace root");
   }
-  session.listDir = async (args) => {
+  session.listDir = async (args, commandRunner) => {
     const absoluteResultPaths = args.path.startsWith("/");
     const relativePath = modalWorkspaceRelativePath(args.path, workspaceRoot);
     // This function is the provider's listDir compatibility surface. Do not
     // pass it back into Channel A as a native accelerator or fsList() recurses
     // into this shim instead of using Modal's command data plane.
     const service = new SandboxChannelAService({
-      session: { execCommand: execCommand.bind(session) },
+      session: {
+        execCommand: execCommand.bind(session),
+        ...(writeStdin ? { writeStdin } : {}),
+        ...(getOutput ? { getSynchronousCommandOutput: getOutput } : {}),
+        ...(session.cancelPendingExecCommand
+          ? { cancelPendingExecCommand: session.cancelPendingExecCommand.bind(session) }
+          : {}),
+      },
+      ...(commandRunner ? { commandRunner } : {}),
       workspaceRoot,
       ...(args.runAs ? { runAs: args.runAs } : {}),
     });
-    const listed = await service.fsList({
-      path: relativePath,
-      depth: 1,
-      maxEntries: MODAL_LIST_DIR_MAX_ENTRIES,
-      includeHidden: true,
-    });
+    const listed = await withNativeSynchronousCommandCollection(session as ChannelASession, () =>
+      service.fsList({
+        path: relativePath,
+        depth: 1,
+        maxEntries: MODAL_LIST_DIR_MAX_ENTRIES,
+        includeHidden: true,
+      }),
+    );
     if (listed.truncated || listed.root.truncated) {
       throw new Error(
         `Modal listDir exceeded the ${MODAL_LIST_DIR_MAX_ENTRIES}-entry safety bound`,
@@ -210,6 +266,33 @@ function installModalListDirCompatibility(session: MutableModalSandboxSession): 
         : entry.path,
       type: entry.type === "file" || entry.type === "dir" ? entry.type : "other",
     }));
+  };
+}
+
+/**
+ * `view_image` reads whatever the agent's own shell can read in the box, as it
+ * does on Connected Machine and compute sandboxes. The adapter's viewImage
+ * first confines the path to the manifest root (or a manifest path grant, which
+ * Modal create refuses), so an image the shell had just rendered to `/tmp` was
+ * refused with SandboxInvalidManifestPathError although the same box reads it.
+ * Resolve the path the way the shell does (absolute as given, relative from the
+ * workspace root, the shell's working directory) and read it with the
+ * adapter's own file read, which runs inside the box as the shell's user. That
+ * also drops the adapter's separate validation command, one round trip per
+ * image. A `runAs` read keeps the adapter's user-scoped path.
+ */
+function installModalShellPathViewImage(session: MutableModalSandboxSession): void {
+  if (typeof session.viewImage !== "function" || typeof session.readSandboxFile !== "function") {
+    return;
+  }
+  const viewImage = session.viewImage.bind(session);
+  session.viewImage = async (args) => {
+    const root = session.state?.manifest?.root;
+    if (args.runAs || !root?.startsWith("/") || typeof session.readSandboxFile !== "function") {
+      return await viewImage(args);
+    }
+    const path = posix.resolve(root, args.path.trim());
+    return imageOutputFromBytes(args.path, await session.readSandboxFile(path));
   };
 }
 
@@ -228,15 +311,11 @@ function modalHttpStatus(value: unknown): number | null {
 }
 
 function hasContradictoryModalHttpStatus(record: Record<string, unknown>): boolean {
-  const values = [record.status, record.statusCode, record.httpStatus, record.httpStatusCode];
-  const response = record.response;
+  const keys = ["status", "statusCode", "httpStatus", "httpStatusCode"];
+  const values = keys.map((key) => modalCommandStartOwnData(record, key));
+  const response = modalCommandStartOwnData(record, "response");
   if (response && typeof response === "object") {
-    values.push(
-      Reflect.get(response, "status"),
-      Reflect.get(response, "statusCode"),
-      Reflect.get(response, "httpStatus"),
-      Reflect.get(response, "httpStatusCode"),
-    );
+    values.push(...keys.map((key) => modalCommandStartOwnData(response, key)));
   }
   return values.some((value) => modalHttpStatus(value) !== null);
 }
@@ -266,6 +345,19 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
     let nested: unknown[];
     try {
       const record = current.value as Record<string, unknown>;
+      if (
+        [
+          "cause",
+          "error",
+          "errors",
+          "response",
+          "status",
+          "statusCode",
+          "httpStatus",
+          "httpStatusCode",
+        ].some((key) => modalCommandStartHasOwnAccessor(record, key))
+      )
+        return false;
       if (isRoutingMutationOutcomeUnknownError(current.value)) return false;
       if (hasModalCommandStartBoundary(current.value, "outcome-unknown")) return false;
       if (current.value instanceof ModalCommandStartNotDispatchedError) return false;
@@ -283,12 +375,12 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
 
       nested = [];
       for (const key of ["cause", "error"] as const) {
-        const value = record[key];
+        const value = modalCommandStartOwnData(record, key);
         if (value !== undefined) nested.push(value);
       }
 
-      if (current.value instanceof AggregateError || record.name === "AggregateError") {
-        const errors = record.errors;
+      const errors = modalCommandStartOwnData(record, "errors");
+      if (errors !== undefined) {
         if (
           !Array.isArray(errors) ||
           errors.length === 0 ||
@@ -296,7 +388,8 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
         ) {
           return false;
         }
-        nested.push(...errors);
+        for (let index = 0; index < errors.length; index++)
+          nested.push(modalCommandStartOwnData(errors, String(index)));
       }
 
       if (nested.length === 0) return false;
@@ -314,35 +407,9 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
 }
 
 /** Any typed ambiguous Start in a bounded wrapper graph vetoes generic provider
- * retries. Setup/probe calls have no retained command handle to replay safely. */
+ * retries. Its original IDs are observation authority, never replay authority. */
 export function isModalCommandStartOutcomeUnknownError(error: unknown): boolean {
-  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
-  const seen = new WeakSet<object>();
-  for (
-    let inspected = 0;
-    pending.length && inspected < MODAL_TASK_EXEC_START_ERROR_MAX_NODES;
-    inspected++
-  ) {
-    const { depth, value } = pending.shift()!;
-    if (!value || typeof value !== "object" || seen.has(value)) continue;
-    seen.add(value);
-    if (hasModalCommandStartBoundary(value, "outcome-unknown")) return true;
-    if (depth >= MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH) continue;
-    try {
-      const record = value as Record<string, unknown>;
-      for (const key of ["cause", "error"] as const)
-        if (record[key] !== undefined) pending.push({ depth: depth + 1, value: record[key] });
-      if (Array.isArray(record.errors))
-        for (const nested of record.errors.slice(
-          0,
-          MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS,
-        ))
-          pending.push({ depth: depth + 1, value: nested });
-    } catch {
-      // Unknown wrappers never establish dispatch proof.
-    }
-  }
-  return false;
+  return hasModalCommandStartOutcomeUnknownBoundary(error);
 }
 
 /**
@@ -372,7 +439,7 @@ function assertPinnedModalSdk(session: MutableModalSandboxSession): void {
   const actualVersion = session.modal?.version?.();
   if (actualVersion !== OPENGENI_MODAL_SDK_VERSION) {
     throw new Error(
-      `OpenGeni Modal snapshot compatibility requires modal@${OPENGENI_MODAL_SDK_VERSION}; ` +
+      `Opengeni Modal snapshot compatibility requires modal@${OPENGENI_MODAL_SDK_VERSION}; ` +
         `the active session reported ${actualVersion ?? "no version"}`,
     );
   }
@@ -428,7 +495,7 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
     // Agents Extensions 0.13.x still invokes the Modal 0.7 positional timeout
     // signature. Modal 0.9 moved timeout into an options object and changed the
     // default Image retention from indefinite to 30 days. Translate at the
-    // provider boundary and retain the Image until OpenGeni's artifact ledger
+    // provider boundary and retain the Image until Opengeni's artifact ledger
     // proves it unreferenced and garbage-collects its exact provider id.
     sandbox.snapshotFilesystem = async (legacyParams?: unknown) => {
       if (legacyParams !== undefined && typeof legacyParams !== "number") {
@@ -438,8 +505,9 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
       if (!requestId) {
         throw new Error("Modal native workspace capture requires a durable request id");
       }
+      const timeoutMs = modalProviderSnapshotTimeouts.get(session) ?? legacyParams;
       return await snapshotFilesystem.call(sandbox, {
-        ...(legacyParams === undefined ? {} : { timeoutMs: legacyParams }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ttlMs: null,
         snapshotId: requestId,
       });
@@ -609,11 +677,14 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     throw new Error("Modal session does not expose workspace persistence");
   }
   assertPinnedModalSdk(mutable);
+  if (mutable.modal) installModalCommandStartContext(mutable.modal);
   installModalTerminationConfirmation(mutable);
-  installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
   installModalPendingExecCancellation(mutable);
+  installModalSynchronousCommandCollection(mutable, () => mutable.sandbox);
+  installModalListDirCompatibility(mutable);
+  installModalShellPathViewImage(mutable);
   if (
     mutable.modal?.cpClient &&
     mutable.modal.version &&
@@ -661,10 +732,20 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     if (options && nativePersistence) {
       modalSnapshotRequestIds.set(session, options.requestId);
     }
+    const providerTimeoutMs =
+      options?.providerTimeoutMs !== undefined &&
+      Number.isSafeInteger(options.providerTimeoutMs) &&
+      options.providerTimeoutMs > 0
+        ? options.providerTimeoutMs
+        : undefined;
+    if (providerTimeoutMs !== undefined && nativePersistence) {
+      modalProviderSnapshotTimeouts.set(session, providerTimeoutMs);
+    }
     const directoryTimeout =
       mutable.state?.workspacePersistence === "snapshot_directory"
-        ? mutable.state.snapshotFilesystemTimeoutMs
+        ? (providerTimeoutMs ?? mutable.state.snapshotFilesystemTimeoutMs)
         : undefined;
+    const savedDirectoryTimeout = mutable.state?.snapshotFilesystemTimeoutMs;
     const directoryTimeoutWasPresent =
       mutable.state?.workspacePersistence === "snapshot_directory" &&
       Object.hasOwn(mutable.state, "snapshotFilesystemTimeoutMs");
@@ -679,9 +760,10 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
       return await persistWorkspace();
     } finally {
       modalSnapshotRequestIds.delete(session);
+      modalProviderSnapshotTimeouts.delete(session);
       if (mutable.state?.workspacePersistence === "snapshot_directory") {
         if (directoryTimeoutWasPresent) {
-          Reflect.set(mutable.state, "snapshotFilesystemTimeoutMs", directoryTimeout);
+          Reflect.set(mutable.state, "snapshotFilesystemTimeoutMs", savedDirectoryTimeout);
         } else {
           delete mutable.state.snapshotFilesystemTimeoutMs;
         }
@@ -690,17 +772,18 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     }
   };
   modalRetentionWrappedSessions.add(session);
+  installModalCommandStartRetention(session);
   return session;
 }
 
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   readonly #snapshotFilesystemTimeoutMs: number | undefined;
-  readonly #createOptions: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]>;
+  readonly #createOptions: OpenGeniModalSandboxClientOptions;
 
-  constructor(...args: ConstructorParameters<typeof ModalSandboxClient>) {
-    super(...args);
-    this.#snapshotFilesystemTimeoutMs = args[0]?.snapshotFilesystemTimeoutMs;
-    this.#createOptions = { ...args[0] };
+  constructor(options?: OpenGeniModalSandboxClientOptions) {
+    super(options);
+    this.#snapshotFilesystemTimeoutMs = options?.snapshotFilesystemTimeoutMs;
+    this.#createOptions = { ...options };
   }
 
   override async create(
@@ -738,8 +821,15 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
             ...state,
             snapshotFilesystemTimeoutMs: this.#snapshotFilesystemTimeoutMs,
           };
-    const session = await super.resume(effectiveState);
+    const session = await this.resumeOnSharedClient(effectiveState);
     return installOpenGeniModalSnapshotPolicy(session);
+  }
+
+  /** Reattach on the shared process-wide Modal client (see
+   * resumeModalSessionOnSharedClient). Replaces the pinned adapter's resume,
+   * which built a new client for every call. */
+  async resumeOnSharedClient(state: ModalSandboxSessionState): Promise<ModalSandboxSession> {
+    return await resumeModalSessionOnSharedClient(this.#createOptions, state);
   }
 }
 
@@ -798,6 +888,7 @@ export const modalProvider: ProviderRegistration = {
     }
   },
   descriptor: CAPABILITY_DESCRIPTORS.modal,
+  sessionSupportsPty: true,
   validateCredentials(settings) {
     // both-or-neither (preserves existing validation at config validateSettings).
     if (Boolean(settings.modalTokenId) !== Boolean(settings.modalTokenSecret)) {
@@ -811,27 +902,27 @@ export const modalProvider: ProviderRegistration = {
     }
   },
   build({ settings, environment, exposedPorts }) {
-    const options: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]> = {
+    const options: OpenGeniModalSandboxClientOptions = {
       appName: settings.modalAppName,
       timeoutMs: settings.modalTimeoutSeconds * 1000,
       sandboxCreateTimeoutS: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
       // The Agents Extensions session persists this value in its provider
       // state and passes it to persistWorkspace(). Keep it aligned with the
-      // same current setting that bounds OpenGeni's outer capture operation.
+      // same current setting that bounds Opengeni's outer capture operation.
       snapshotFilesystemTimeoutMs: settings.sandboxSnapshotTimeoutMs,
       exposedPorts,
       env: environment,
       // A registry image's own CMD is not a sandbox keepalive contract (for
       // example, python:3.12-slim can exit immediately). Keep the provider's
       // control process alive so exec/resume remains available; Modal's hard
-      // timeout and explicit OpenGeni teardown still own the box lifetime.
+      // timeout and explicit Opengeni teardown still own the box lifetime.
       useSleepCmd: true,
     };
     // gap-fill (module 03 §4.1): these SDK options were previously unmapped.
     // ALWAYS pin idleTimeoutMs (sandbox-file-persistence): an UNSET idle timeout
     // lets the SDK send idleTimeoutSecs=undefined, so Modal applies its short
     // server-default idle-reap and kills an idle (between-turns) box LONG before
-    // OpenGeni's reaper can resume+snapshot it. effectiveModalIdleTimeoutSeconds
+    // Opengeni's reaper can resume+snapshot it. effectiveModalIdleTimeoutSeconds
     // defaults this to the hard lifetime so the box survives its full warm window
     // and the reaper — not Modal's idle-reap — governs teardown (and snapshots
     // /workspace first).
@@ -841,6 +932,9 @@ export const modalProvider: ProviderRegistration = {
     }
     if (settings.modalSandboxMemoryMiB !== undefined) {
       options.memoryMiB = settings.modalSandboxMemoryMiB;
+    }
+    if (settings.modalRegions !== undefined) {
+      options.regions = [...settings.modalRegions];
     }
     if (settings.modalWorkspacePersistence) {
       options.workspacePersistence = settings.modalWorkspacePersistence;
@@ -870,7 +964,7 @@ type ModalClientLike = InstanceType<ModalModule["ModalClient"]>;
 // OPENGENI_MODAL_IMAGE_ID is the preferred immutable provider-native path. The
 // Agents extension resolves it with ModalImageSelector.fromId and serializes the
 // actual imageId into the session state, while modalImageRef remains the logical
-// digest persisted on the OpenGeni lease.
+// digest persisted on the Opengeni lease.
 //
 // The Agents-extension Modal backend resolves `modalImageRef` via
 // `Image.fromRegistry(tag)` with NO secret, so it can only pull PUBLIC images. To run
@@ -928,7 +1022,7 @@ export async function ensureModalRegistryImage(
       // NOT the static `modal.Secret.fromName`, which resolves against
       // `getDefaultClient()` — i.e. the standard MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env
       // or ~/.modal.toml — and so would throw "Profile is missing token_id" in any host
-      // that supplies the token only through OpenGeni settings (OPENGENI_MODAL_TOKEN_ID).
+      // that supplies the token only through Opengeni settings (OPENGENI_MODAL_TOKEN_ID).
       const secret = await client.secrets.fromName(
         settings.modalImageRegistrySecret!,
         settings.modalEnvironment ? { environment: settings.modalEnvironment } : undefined,
@@ -1049,7 +1143,7 @@ async function modalCheckpointProviderBindingForClient(
     version: 1,
     serverUrl: modal.profile.serverUrl,
     workspaceName,
-    // Resolve through the authenticated client, not the optional OpenGeni
+    // Resolve through the authenticated client, not the optional Opengeni
     // override alone. When the override is absent Modal may select a profile
     // environment; persisting "" would fail to fence a later profile change.
     environment: modal.environmentName(settings.modalEnvironment),
@@ -1060,9 +1154,11 @@ async function modalCheckpointProviderBindingForClient(
   return resolved.binding;
 }
 
-const modalSessionCheckpointBindings = new WeakMap<
+// Keyed by the authenticated client, not the session: every session on the
+// shared process-wide client has the same identity, so it is looked up once.
+const modalClientCheckpointBindings = new WeakMap<
   object,
-  Promise<{ key: string; binding: ModalCheckpointProviderBinding }>
+  Map<string, Promise<{ key: string; binding: ModalCheckpointProviderBinding }>>
 >();
 
 /**
@@ -1079,8 +1175,6 @@ export async function resolveModalCheckpointProviderBindingForSession(
   if (!session || typeof session !== "object") {
     throw new Error("Modal checkpoint session identity is unavailable");
   }
-  const cached = modalSessionCheckpointBindings.get(session);
-  if (cached) return await cached;
   const modal = (session as { modal?: unknown }).modal as ModalClientLike | undefined;
   if (
     !modal ||
@@ -1090,14 +1184,19 @@ export async function resolveModalCheckpointProviderBindingForSession(
   ) {
     throw new Error("Pinned Modal session no longer exposes its authenticated checkpoint identity");
   }
+  let byEnvironment = modalClientCheckpointBindings.get(modal);
+  if (!byEnvironment) modalClientCheckpointBindings.set(modal, (byEnvironment = new Map()));
+  const environmentKey = settings.modalEnvironment ?? "";
+  const cached = byEnvironment.get(environmentKey);
+  if (cached) return await cached;
   const pending = modalCheckpointProviderBindingForClient(settings, modal).then(
     (binding) => canonicalModalCheckpointProviderBinding(binding)!,
   );
-  modalSessionCheckpointBindings.set(session, pending);
+  byEnvironment.set(environmentKey, pending);
   try {
     return await pending;
   } catch (error) {
-    modalSessionCheckpointBindings.delete(session);
+    if (byEnvironment.get(environmentKey) === pending) byEnvironment.delete(environmentKey);
     throw error;
   }
 }
@@ -1419,6 +1518,44 @@ function attributionKey(
   return `${input.workspaceId}:${input.sandboxGroupId}:${input.leaseId}`;
 }
 
+/**
+ * Whether the deployment's Modal app has any unfinished sandbox: the first
+ * page of exactly the listing the orphan sweep walks. When it has none, the
+ * sweep has nothing to terminate or attribute, and its inventory is empty. A
+ * missing app is an empty inventory, as in the sweep.
+ */
+export async function modalAppHasRunningSandboxes(
+  settings: Settings,
+  options: { client?: ModalClientLike } = {},
+): Promise<boolean> {
+  const ownedClient = options.client ? null : await createModalClient(settings);
+  const modal = (options.client ?? ownedClient)! as ModalCpListClient;
+  try {
+    let appId: string | undefined;
+    try {
+      appId = (
+        await modal.apps.fromName(settings.modalAppName, {
+          createIfMissing: false,
+          ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
+        })
+      ).appId;
+    } catch (error) {
+      if (isModalNotFoundError(error)) return false;
+      throw error;
+    }
+    if (!appId) return false;
+    const response = await modal.cpClient.sandboxList({
+      appId,
+      includeFinished: false,
+      ...(settings.modalEnvironment ? { environmentName: settings.modalEnvironment } : {}),
+      tags: [],
+    });
+    return (response.sandboxes ?? []).length > 0;
+  } finally {
+    ownedClient?.close();
+  }
+}
+
 export async function sweepModalOrphanSandboxes(
   settings: Settings,
   liveLeases: LiveModalSandboxLeaseAttribution[],
@@ -1461,17 +1598,20 @@ export async function sweepModalOrphanSandboxes(
       // A new deployment has no Modal app until its first sandbox is created.
       // That is an empty provider inventory, not a failed orphan sweep.
       if (isModalNotFoundError(error)) {
-        return { examined: 0, terminated: [], skipped: 0 };
+        return emptyModalOrphanSweepResult(liveLeases);
       }
       throw error;
     }
     const appId = app.appId;
     if (!appId) {
-      return { examined: 0, terminated: [], skipped: 0 };
+      return emptyModalOrphanSweepResult(liveLeases);
     }
 
     let examined = 0;
     let skipped = 0;
+    const unterminated: ModalOrphanSweepTermination[] = [];
+    let complete = false;
+    const seenInstanceIds = new Set<string>();
     const terminated: ModalOrphanSweepTermination[] = [];
     let beforeTimestamp: number | undefined;
     while (terminated.length < maxTerminations) {
@@ -1484,10 +1624,14 @@ export async function sweepModalOrphanSandboxes(
       });
       const sandboxes = response.sandboxes ?? [];
       if (sandboxes.length === 0) {
+        complete = true;
         break;
       }
       for (const info of sandboxes) {
         examined += 1;
+        if (info.id) {
+          seenInstanceIds.add(info.id);
+        }
         const tags = tagsFromInfo(info);
         const leaseId = tags.opengeni_lease_id;
         const workspaceId = tags.opengeni_workspace_id;
@@ -1546,18 +1690,21 @@ export async function sweepModalOrphanSandboxes(
           sandbox = await modal.sandboxes.fromId(info.id);
         } catch {
           skipped += 1;
+          unterminated.push(candidate);
           continue;
         }
         if (options.revalidateTermination) {
           try {
             if (!(await options.revalidateTermination(candidate))) {
               skipped += 1;
+              unterminated.push(candidate);
               continue;
             }
           } catch {
             // Destructive provider cleanup fails closed when the fresh durable
             // ownership read is unavailable or otherwise inconclusive.
             skipped += 1;
+            unterminated.push(candidate);
             continue;
           }
         }
@@ -1566,6 +1713,7 @@ export async function sweepModalOrphanSandboxes(
           terminated.push(candidate);
         } catch {
           skipped += 1;
+          unterminated.push(candidate);
         }
         if (terminated.length >= maxTerminations) {
           break;
@@ -1573,11 +1721,47 @@ export async function sweepModalOrphanSandboxes(
       }
       beforeTimestamp = sandboxes[sandboxes.length - 1]?.createdAt;
       if (beforeTimestamp === undefined) {
+        complete = true;
         break;
       }
     }
-    return { examined, terminated, skipped };
+    return {
+      examined,
+      terminated,
+      skipped,
+      inventory: {
+        complete,
+        running: examined,
+        unterminated,
+        // The live-lease snapshot was read before the listing began, so an
+        // instance id it names already existed and a complete listing of
+        // running boxes contains it unless that box has stopped.
+        missingLiveLeaseInstanceIds: complete
+          ? liveLeases.flatMap((lease) =>
+              lease.instanceId && !seenInstanceIds.has(lease.instanceId) ? [lease.instanceId] : [],
+            )
+          : [],
+      },
+    };
   } finally {
     ownedClient?.close();
   }
+}
+
+function emptyModalOrphanSweepResult(
+  liveLeases: LiveModalSandboxLeaseAttribution[],
+): ModalOrphanSweepResult {
+  return {
+    examined: 0,
+    terminated: [],
+    skipped: 0,
+    inventory: {
+      complete: true,
+      running: 0,
+      unterminated: [],
+      missingLiveLeaseInstanceIds: liveLeases.flatMap((lease) =>
+        lease.instanceId ? [lease.instanceId] : [],
+      ),
+    },
+  };
 }

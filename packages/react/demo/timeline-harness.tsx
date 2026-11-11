@@ -8,6 +8,7 @@ import {
   LightboxProvider,
   MessageTimeline,
   TimelineRow,
+  TooltipProvider,
   TurnSummary,
   type ActivityItem,
   type TimelineGroup,
@@ -25,6 +26,9 @@ import {
 } from "./timeline-fixtures";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+import { createOpenGeniText } from "@opengeni/react/messages";
+
+const englishText = createOpenGeniText();
 
 // The demo ships the optional @pierre/diffs peer.
 enablePierreDiffs();
@@ -232,7 +236,10 @@ function Harness() {
  * bubble or goal-pill markup — the demo and the live app draw identical rows.
  */
 function RawRail({ events }: { events: ReturnType<typeof tourEvents> }) {
-  const groups = useMemo(() => groupTimeline(buildTimeline(events)), [events]);
+  const groups = useMemo(
+    () => groupTimeline(englishText, buildTimeline(englishText, events)),
+    [events],
+  );
   return (
     <div className="flex flex-col gap-4">
       {groups.map((group) => (
@@ -327,4 +334,8 @@ function durationBetween(startedAt: string, endedAt: string): number | undefined
     : undefined;
 }
 
-createRoot(document.getElementById("root")!).render(<Harness />);
+createRoot(document.getElementById("root")!).render(
+  <TooltipProvider>
+    <Harness />
+  </TooltipProvider>,
+);

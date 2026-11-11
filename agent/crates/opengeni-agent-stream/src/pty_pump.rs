@@ -97,7 +97,7 @@ pub async fn run(
     let reader = process.take_reader();
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_BOUND);
     let reader_task = reader.map(|mut reader| {
-        tokio::task::spawn_blocking(move || {
+        opengeni_agent_platform::spawn_blocking_reserved(move || {
             let mut buf = [0u8; READ_CHUNK];
             loop {
                 match reader.read(&mut buf) {
@@ -121,7 +121,7 @@ pub async fn run(
     let writer = process.take_writer();
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_BOUND);
     let writer_task = writer.map(|mut writer| {
-        tokio::task::spawn_blocking(move || {
+        opengeni_agent_platform::spawn_blocking_reserved(move || {
             while let Some(bytes) = in_rx.blocking_recv() {
                 if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
                     break;
@@ -174,11 +174,14 @@ pub async fn run(
         }
     };
 
-    // Tear down: dropping the senders/receivers ends the blocking tasks.
+    // Signal the child before awaiting a writer that may be blocked in OS IO.
+    // Neither aborting a started blocking reader nor signalling kill is an exit
+    // receipt. The actual bridges and PtyProcess child cleanup retain the guard.
+    let _ = process.kill();
     drop(in_tx);
     drop(out_rx);
     if let Some(t) = reader_task {
-        t.abort();
+        drop(t);
     }
     if let Some(t) = writer_task {
         let _ = t.await;
@@ -242,12 +245,8 @@ async fn pump_loop(
                 })?;
                 backoff.reset();
                 match message {
-                    RelayMessage::Frame(frame) => {
-                        // Best-effort: if the writer task ended, stop pumping input.
-                        if in_tx.send(frame.data.to_vec()).await.is_err() {
-                            return Ok(());
-                        }
-                    }
+                    // Best-effort: if the writer task ended, stop pumping input.
+                    RelayMessage::Frame(frame) if in_tx.send(frame.data.to_vec()).await.is_err() => return Ok(()),
                     RelayMessage::Close(_) => return Ok(()),
                     // Open/OpenAck/DesktopInput are not expected on a live PTY data
                     // channel; ignore them defensively rather than tearing down.
@@ -337,9 +336,10 @@ mod tests {
                 agent_id: "ag".to_string(),
                 kind: v1::StreamKind::Pty as i32,
                 port: 7681,
+                relay_route: None,
             },
-            token: "ogs_x".to_string(),
-            relay_url: "wss://relay/stream".to_string(),
+            credential: crate::RelayCredential::fixed("wss://relay/stream", "ogs_x"),
+            activity: crate::ActivityStamp::untracked(),
         }
     }
 
@@ -516,6 +516,7 @@ mod tests {
                 accepted: true,
                 error: None,
                 resume_from_seq,
+                relay_route: None,
             }))
             .await
             .unwrap();

@@ -1,6 +1,7 @@
 /**
- * One schedule's own page: back to Schedules, the header with its actions,
- * then Overview (on/off, instructions, setup) and Runs. Never a side sheet.
+ * One automation's own page: back to Automations, the header with its
+ * actions, then Overview (on/off, the events it listens for, instructions,
+ * setup) and Runs. Never a side sheet.
  */
 import { Link } from "@tanstack/react-router";
 import {
@@ -14,6 +15,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  BookmarkPlusIcon,
   CalendarClockIcon,
   CopyIcon,
   LinkIcon,
@@ -24,42 +26,44 @@ import {
   SparklesIcon,
   TextCursorInputIcon,
   Trash2Icon,
+  ZapIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useVariableSets } from "@opengeni/react";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { AutomationTemplateDialog, automationTemplateFromTask } from "@opengeni/react/automations";
+import { modelDisplayName } from "@opengeni/react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailFact, DetailFacts, DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { InlineHelp } from "@/components/ui/inline-help";
+} from "@opengeni/react/ui/detail-page";
+import { DetailFact, DetailFacts, DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { payerLabel } from "@/components/models/models-ui";
-import { useAppContext } from "@/context";
-import { formatElapsedSeconds } from "@/lib/format";
-import { hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/ui/line-tabs";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { modelPayerHint } from "@opengeni/react/app/lib/model-payer";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { formatElapsedSeconds } from "@opengeni/react/app/lib/format";
 import {
   markScheduledTaskAttentionSeen,
   notifyScheduledTaskAttentionUpdated,
@@ -70,7 +74,6 @@ import {
   scheduledTaskDriftDismissal,
 } from "@/lib/scheduled-task-drift-dismissals";
 import {
-  knowledgeSyncSourceLabel,
   scheduledTaskAccessFailuresText,
   scheduledTaskDescription,
   scheduledTaskRunSessionAccess,
@@ -79,41 +82,55 @@ import {
   scheduledTaskStateLabel,
   visibleScheduledTaskPolicyDrift,
 } from "@/lib/scheduled-tasks";
-import { sessionDisplayTitle } from "@/lib/session-rename";
-import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
-import { cn } from "@/lib/utils";
+import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
+import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type {
   ScheduledTask,
   ScheduledTaskAccessAttention,
   ScheduledTaskRun,
   Session,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import {
   NAME_MAX_LENGTH,
-  isKnowledgeSync,
+  automationWhenSentence,
+  automationWhenWords,
+  hasEventTriggers,
+  isFinishedOnce,
   nextRunOf,
   ownerName,
+  runEventsLabel,
   runTimeLabel,
   scheduleErrorReference,
   scheduleErrorText,
-  scheduleWords,
+  scheduleInheritsChatSettings,
 } from "./schedule-model";
 import {
+  NextRunValue,
   OwnerValue,
   RunStatusBadge,
   ScheduleTile,
+  eventSourcePath,
+  inAppClick,
   schedulePath,
   schedulePermissions,
+  scheduleSwitchedOn,
   useScheduleAccess,
   useScheduleNavigation,
   type ScheduleAccess,
 } from "./schedule-parts";
+import { useEventSourceLogo, useEventSources, useEventTriggersEnabled } from "./use-event-sources";
+import { EventTriggerSummary } from "@opengeni/react/automations";
+import type { EventSource } from "@opengeni/sdk";
+import { scheduledRunErrorText, scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
+import { ScheduleBlockerNotice, SchedulePausedChatNotice } from "./schedule-blocker-notice";
 import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
+import { ScheduleAccounts, scheduleAccountsDescription } from "./schedule-accounts";
 import { useScheduleActions } from "./use-schedule-actions";
-import { MoreMenu } from "@/components/ui/page-actions";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 const POLL_MS = 30_000;
 
@@ -147,7 +164,12 @@ export function ScheduleDetailPage({
   const [clock, setClock] = useState(() => new Date());
   const [tab, setTab] = useState("overview");
   const [renaming, setRenaming] = useState(false);
-  // Owner-only: this schedule's latest run could not use a connector, or a
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const eventTriggers = useEventTriggersEnabled();
+  // Source names and states for the When section; read only when it has triggers.
+  const listens = load.status === "ready" && hasEventTriggers(load.task);
+  const eventSources = useEventSources(workspaceId, eventTriggers && listens);
+  // Owner-only: this automation's latest run could not use a connector, or a
   // chosen account is gone. Advisory; a failed read keeps the last answer.
   const [attention, setAttention] = useState<ScheduledTaskAccessAttention | null>(null);
   const [refreshingAccess, setRefreshingAccess] = useState(false);
@@ -225,7 +247,7 @@ export function ScheduleDetailPage({
 
   if (load.status === "loading") {
     return (
-      <DetailPage back={{ label: "Schedules", onClick: go.list }}>
+      <DetailPage back={{ label: "Automations", onClick: go.list }}>
         <div className="flex items-start gap-4 border-b border-border pb-4" aria-busy="true">
           <Skeleton className="size-10 rounded-[10px]" />
           <div className="flex-1 space-y-2">
@@ -234,7 +256,7 @@ export function ScheduleDetailPage({
           </div>
         </div>
         <span className="sr-only" role="status">
-          Loading schedule
+          Loading automation
         </span>
       </DetailPage>
     );
@@ -242,16 +264,16 @@ export function ScheduleDetailPage({
 
   if (load.status === "error") {
     return (
-      <DetailPage back={{ label: "Schedules", onClick: go.list }}>
+      <DetailPage back={{ label: "Automations", onClick: go.list }}>
         {load.missing ? (
           <EmptyState
             variant="page"
             icon={<CalendarClockIcon />}
-            title="This schedule doesn't exist"
-            description="It may have been deleted. Your other schedules are on the list."
+            title="This automation doesn't exist"
+            description="It may have been deleted. Your other automations are on the list."
             action={
               <Button type="button" variant="outline" onClick={go.list}>
-                Back to Schedules
+                Back to Automations
               </Button>
             }
             className="pt-12"
@@ -259,7 +281,7 @@ export function ScheduleDetailPage({
         ) : (
           <ErrorMessage
             align="center"
-            title="Couldn't load this schedule"
+            title="Couldn't load this automation"
             reference={scheduleErrorReference(load.error)}
             details={[{ label: "Error", value: scheduleErrorText(load.error) }]}
             action={
@@ -315,12 +337,12 @@ export function ScheduleDetailPage({
       });
       carryScheduledTaskDriftDismissal(workspaceId, task.id, dismissal, refreshed.executionDigest);
       toast.success("Access refreshed", {
-        description: "New runs of this schedule use it. Run it now to check.",
+        description: "New runs of this automation use it. Run it now to check.",
       });
       await refresh(true);
       notifyScheduledTaskAttentionUpdated();
     } catch (error) {
-      toast.error("Couldn't refresh this schedule's access", {
+      toast.error("Couldn't refresh this automation's access", {
         description: scheduleErrorText(error),
       });
     } finally {
@@ -348,6 +370,7 @@ export function ScheduleDetailPage({
         task.executionDigest,
       )}
       attention={attention?.taskId === task.id ? attention : null}
+      pinnedAccountsRequired={task.agentConfig.pinnedAccountsRequired === true}
       ownsTask={perms.own}
       busy={busy}
       onRefreshAccess={() => void refreshAccess()}
@@ -356,6 +379,44 @@ export function ScheduleDetailPage({
   );
   const runCount = runs.status === "ready" ? runs.runs.length : undefined;
   const latest = runs.status === "ready" ? runs.runs[0] : undefined;
+
+  // Unpinning sends the remaining pins only; the server refuses a schedule
+  // that changed since this page read it.
+  const unpinConnector = async (connectorId: string) => {
+    setRefreshingAccess(true);
+    try {
+      await client.updateScheduledTask(workspaceId, task.id, {
+        pinnedAccounts: (task.agentConfig.pinnedAccounts ?? []).filter(
+          (pin) => pin.serverId !== connectorId,
+        ),
+        expectedExecutionDigest: task.executionDigest,
+      });
+      toast.success("Uses your current accounts", {
+        description: "The next run uses the accounts you have connected then.",
+      });
+      await refresh(true);
+      notifyScheduledTaskAttentionUpdated();
+    } catch (error) {
+      toast.error("Couldn't change this automation's accounts", {
+        description: scheduleErrorText(error),
+      });
+    } finally {
+      setRefreshingAccess(false);
+    }
+  };
+  const accountPlan = task.accountPlan;
+  const accounts =
+    accountPlan && accountPlan.connectors.length > 0 ? (
+      <DetailSection title="Accounts" description={scheduleAccountsDescription(task, accountPlan)}>
+        <ScheduleAccounts
+          plan={accountPlan}
+          skipsRuns={task.agentConfig.pinnedAccountsRequired === true}
+          canEdit={perms.canEdit}
+          busy={busy}
+          onUseCurrentAccounts={(connectorId) => void unpinConnector(connectorId)}
+        />
+      </DetailSection>
+    ) : null;
 
   const copyLink = () => {
     const url = new URL(schedulePath(workspaceId, task.id), window.location.origin).toString();
@@ -366,7 +427,7 @@ export function ScheduleDetailPage({
   };
 
   return (
-    <DetailPage back={{ label: "Schedules", onClick: go.list }}>
+    <DetailPage back={{ label: "Automations", onClick: go.list }}>
       <LineTabs value={tab} onValueChange={setTab}>
         <div ref={titleRef}>
           <DetailPageHeader
@@ -374,7 +435,7 @@ export function ScheduleDetailPage({
             title={task.name}
             chips={<StatusChip task={task} latest={latest} />}
             meta={[
-              scheduleWords(task.schedule, clock).short,
+              automationWhenWords(task, eventSources.sources ?? [], clock),
               perms.own ? "by you" : `by ${ownerName(task)}`,
             ]}
             actions={
@@ -439,6 +500,16 @@ export function ScheduleDetailPage({
                       Duplicate
                     </DropdownMenuItem>
                   ) : null}
+                  {perms.canDuplicate ? (
+                    <DropdownMenuItem
+                      // A trigger's kind of source comes from its source.
+                      disabled={listens && eventSources.sources === undefined}
+                      onSelect={() => setSavingTemplate(true)}
+                    >
+                      <BookmarkPlusIcon />
+                      Save as template
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem onSelect={copyLink}>
                     <LinkIcon />
                     Copy link
@@ -483,6 +554,10 @@ export function ScheduleDetailPage({
               now={clock}
               workspaceId={workspaceId}
               accessNotices={accessNotices}
+              accounts={accounts}
+              eventSources={eventSources.sources}
+              onEdit={() => go.edit(task.id)}
+              onOpenSource={go.source}
               onActiveChange={(active) =>
                 void (active ? actions.resume(task) : actions.pause(task))
               }
@@ -516,6 +591,25 @@ export function ScheduleDetailPage({
         onOpenChange={setRenaming}
         onRenamed={() => void refresh(true)}
       />
+      <AutomationTemplateDialog
+        open={savingTemplate}
+        onOpenChange={setSavingTemplate}
+        mode="save"
+        initial={{ name: task.name, description: "" }}
+        onSubmit={async (values) => {
+          const saved = await client.createAutomationTemplate(
+            workspaceId,
+            automationTemplateFromTask(t, task, eventSources.sources ?? [], {
+              ...values,
+              now: new Date(),
+            }),
+          );
+          toast.success("Saved as a template", {
+            description: saved.name,
+            action: { label: "Templates", onClick: go.templates },
+          });
+        }}
+      />
     </DetailPage>
   );
 }
@@ -524,15 +618,22 @@ export function ScheduleDetailPage({
    Header chip.
    -------------------------------------------------------------------------- */
 
-/** Only a state worth noticing: running, paused or a failed last run. A healthy schedule has no chip. */
+/**
+ * Only a state worth noticing: running, paused, finished or a failed last run.
+ * A healthy automation has no chip.
+ */
 function StatusChip({ task, latest }: { task: ScheduledTask; latest?: ScheduledTaskRun }) {
   const state = scheduledTaskStateLabel(task);
   if (latest?.status === "dispatched") return <StatusBadge status="running" />;
   if (!state.active) {
     return <StatusBadge status="paused">{state.label}</StatusBadge>;
   }
+  if (isFinishedOnce(task)) return <StatusBadge status="off">Finished</StatusBadge>;
   if (latest?.status === "failed") {
     return <StatusBadge status="failed">Last run failed</StatusBadge>;
+  }
+  if (scheduledRunSkippedForPausedChat(latest)) {
+    return <StatusBadge status="paused">Last run: chat paused</StatusBadge>;
   }
   return null;
 }
@@ -549,6 +650,10 @@ function Overview({
   now,
   workspaceId,
   accessNotices,
+  accounts,
+  eventSources,
+  onEdit,
+  onOpenSource,
   onActiveChange,
   onOpenSession,
 }: {
@@ -560,24 +665,37 @@ function Overview({
   workspaceId: string;
   /** Frozen-access drift and connector failures, for the owner to act on. */
   accessNotices: ReactNode;
+  /** Which account each connector would use now; only the owner receives it. */
+  accounts: ReactNode;
+  /** The event sources the viewer can see, for the When section. */
+  eventSources: EventSource[] | undefined;
+  onEdit: () => void;
+  onOpenSource: (sourceId: string) => void;
   onActiveChange: (active: boolean) => void;
   onOpenSession: (sessionId: string) => void;
 }) {
   const perms = schedulePermissions(task, access);
-  const knowledge = isKnowledgeSync(task);
   const state = scheduledTaskStateLabel(task);
   const next = nextRunOf(task, now);
-  const sentence = `${scheduleWords(task.schedule, now).sentence}.`;
+  const sentence = automationWhenSentence(task, now);
+  const listens = hasEventTriggers(task);
+  const finished = isFinishedOnce(task);
+  const sourceLogo = useEventSourceLogo();
   const status =
     task.status === "paused"
-      ? "Paused, so it won't run until you turn it back on."
+      ? task.blocker?.state === "paused"
+        ? "Paused itself, so it won't run until you turn it back on."
+        : "Paused, so it won't run until you turn it back on."
       : !state.active
         ? `${state.label}, so it won't run.`
-        : task.schedule.type === "manual"
-          ? null
+        : finished
+          ? "It ran once and stopped listening. Turn it on to wait for the next matching event."
           : next
             ? `Next run ${runTimeLabel(next, now)}.`
-            : "It has no runs left.";
+            : listens || task.schedule.type === "manual"
+              ? null
+              : "It has no runs left.";
+  const throttled = state.active && !finished ? task.events?.throttledSince : null;
   const owner = ownerName(task);
   const firstName = owner.split(" ")[0] ?? owner;
   const description = scheduledTaskDescription(task);
@@ -585,9 +703,45 @@ function Overview({
     <>
       <DetailSection className="pt-6">
         {accessNotices}
-        {latest?.status === "failed" ? (
+        {task.blocker ? (
+          <ScheduleBlockerNotice
+            blocker={task.blocker}
+            onOpenChat={
+              latest?.sessionId && access.canReadSessionIds
+                ? () => onOpenSession(latest.sessionId!)
+                : undefined
+            }
+          />
+        ) : scheduledRunSkippedForPausedChat(latest) ? (
+          <SchedulePausedChatNotice
+            onOpenChat={
+              latest?.sessionId && access.canReadSessionIds
+                ? () => onOpenSession(latest.sessionId!)
+                : undefined
+            }
+          />
+        ) : null}
+        {latest?.status === "failed" && !task.blocker ? (
           <Notice tone="failed" title="The last run failed" className="mb-4">
             {latest.error?.trim() || "Open the run's chat to see what went wrong."}
+          </Notice>
+        ) : null}
+        {throttled ? (
+          <Notice
+            tone="waiting"
+            title="Holding events back"
+            className="mb-4"
+            actionLayout="responsive"
+            action={
+              perms.canEdit ? (
+                <Button type="button" variant="outline" size="sm" onClick={onEdit}>
+                  Change the limit
+                </Button>
+              ) : undefined
+            }
+          >
+            More events arrived than its {task.events?.maxRunsPerHour} event runs an hour allow. The
+            rest wait and arrive together in its next run.
           </Notice>
         ) : null}
         <SettingRow
@@ -601,13 +755,13 @@ function Overview({
           control={
             <Switch
               aria-label={`${task.name} is active`}
-              checked={task.status === "active"}
+              checked={scheduleSwitchedOn(task)}
               onCheckedChange={onActiveChange}
               pending={busy}
               disabled={!perms.canPauseOrDelete}
               disabledReason={
                 perms.own
-                  ? "You need permission to manage schedules in this workspace."
+                  ? "You need permission to manage automations in this workspace."
                   : `Only ${owner} can pause or resume it.`
               }
             />
@@ -620,33 +774,37 @@ function Overview({
           </InlineHelp>
         ) : null}
       </DetailSection>
-      {knowledge ? (
-        <DetailSection title="Source">
-          <p className="m-0 text-sm leading-5 text-fg">
-            {knowledgeSyncSourceLabel(
-              task.action as Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>,
-            )}
-          </p>
-          <p className="mt-1 text-xs leading-4.5 text-fg-muted">
-            Brings the source into Knowledge without starting a chat or using agent runs.
-          </p>
-        </DetailSection>
-      ) : (
-        <DetailSection title="Instructions">
-          <Instructions text={task.agentConfig.prompt} />
-        </DetailSection>
-      )}
-      {knowledge ? null : (
-        <DetailSection title="Setup">
-          <Setup
-            task={task}
-            access={access}
-            workspaceId={workspaceId}
-            description={description}
-            onOpenSession={onOpenSession}
+      {listens ? (
+        <DetailSection
+          title="When"
+          description={
+            task.events?.once
+              ? "The first matching event runs it once."
+              : `Each matching event runs it, up to ${task.events?.maxRunsPerHour} runs an hour.`
+          }
+        >
+          <EventTriggerSummary
+            triggers={task.events?.triggers ?? []}
+            sources={eventSources}
+            sourceLogo={sourceLogo}
+            sourceHref={(sourceId) => eventSourcePath(workspaceId, sourceId)}
+            onOpenSource={(sourceId, event) => inAppClick(() => onOpenSource(sourceId))(event)}
           />
         </DetailSection>
-      )}
+      ) : null}
+      <DetailSection title="Message">
+        <Instructions text={task.agentConfig.prompt} />
+      </DetailSection>
+      <DetailSection title="Setup">
+        <Setup
+          task={task}
+          access={access}
+          workspaceId={workspaceId}
+          description={description}
+          onOpenSession={onOpenSession}
+        />
+      </DetailSection>
+      {accounts}
     </>
   );
 }
@@ -685,7 +843,7 @@ function Instructions({ text }: { text: string }) {
           aria-expanded={expanded}
           aria-controls={id}
           onClick={() => setExpanded((value) => !value)}
-          className="mt-1.5 inline-flex rounded-[6px] text-xs leading-4.5 font-medium text-brand underline-offset-4 hover:underline pointer-coarse:min-h-11 pointer-coarse:items-center"
+          className="mt-1.5 inline-flex rounded-[6px] text-xs leading-4.5 font-medium og-link pointer-coarse:min-h-11 pointer-coarse:items-center"
         >
           {expanded ? "Show less" : "Show more"}
         </button>
@@ -695,14 +853,15 @@ function Instructions({ text }: { text: string }) {
 }
 
 const EACH_RUN: Record<ScheduledTask["runMode"], string> = {
-  new_session_per_run: "New chat each run",
-  reusable_session: "One ongoing chat",
-  existing_session: "Posts into an existing chat",
+  new_session_per_run: "Starts a new chat",
+  reusable_session: "Continues one ongoing chat",
+  existing_session: "Continues an existing chat",
 };
 
 const IF_STILL_RUNNING: Record<ScheduledTask["overlapPolicy"], string> = {
   allow_concurrent: "Queue the next run",
   buffer_one: "Queue the next run",
+  steer: "Steer the current run",
   skip: "Skip the next run",
 };
 
@@ -725,15 +884,18 @@ function Setup({
   description: string;
   onOpenSession: (sessionId: string) => void;
 }) {
-  const { accessContext, client, toolMcpServers } = useAppContext();
-  const canListSets =
-    hasWorkspacePermission(accessContext, workspaceId, "variable-sets:list") &&
-    Boolean(task.variableSetId);
-  const variableSets = useVariableSets({ enabled: canListSets });
+  const { client, toolMcpServers } = useAppContext();
   const rigs = useWorkspaceRigs({ enabled: Boolean(task.rigId) });
   const [chat, setChat] = useState<Session | null>(null);
-  const targetId = task.runMode === "existing_session" ? task.targetSessionId : null;
+  const inheritsChatSettings = scheduleInheritsChatSettings(task);
+  const targetId =
+    task.runMode === "existing_session"
+      ? task.targetSessionId
+      : task.runMode === "reusable_session"
+        ? task.reusableSessionId
+        : null;
   useEffect(() => {
+    setChat(null);
     if (!targetId || !access.canTargetSessions) return;
     let live = true;
     void client
@@ -747,9 +909,6 @@ function Setup({
     };
   }, [access.canTargetSessions, client, targetId, workspaceId]);
 
-  const setName = task.variableSetId
-    ? variableSets.variableSets.find((set) => set.id === task.variableSetId)?.name
-    : undefined;
   const rigName = task.rigId ? rigs.rigs.find((rig) => rig.id === task.rigId)?.name : undefined;
   const repositories = task.agentConfig.resources.filter(
     (resource): resource is Extract<typeof resource, { kind: "repository" }> =>
@@ -765,13 +924,13 @@ function Setup({
   return (
     <DetailFacts>
       <DetailFact label="Each run">{EACH_RUN[task.runMode]}</DetailFact>
-      {task.runMode === "existing_session" && targetId ? (
+      {inheritsChatSettings && targetId ? (
         <DetailFact label="Chat">
           {chat || access.canReadSessionIds ? (
             <button
               type="button"
               onClick={() => onOpenSession(targetId)}
-              className="rounded-[6px] text-left font-medium text-brand underline-offset-4 hover:underline"
+              className="rounded-[6px] text-left font-medium og-link"
             >
               {chat ? sessionDisplayTitle(chat) : "Open the chat"}
             </button>
@@ -782,17 +941,6 @@ function Setup({
       ) : null}
       {task.runMode !== "new_session_per_run" ? (
         <DetailFact label="If still running">{IF_STILL_RUNNING[task.overlapPolicy]}</DetailFact>
-      ) : null}
-      {task.variableSetId ? (
-        <DetailFact label="Variable set">
-          <Link
-            to="/workspaces/$workspaceId/variable-sets/$variableSetId"
-            params={{ workspaceId, variableSetId: task.variableSetId }}
-            className="rounded-[6px] font-medium text-brand underline-offset-4 hover:underline"
-          >
-            {setName ?? (variableSets.loading ? "Loading…" : "Attached variable set")}
-          </Link>
-        </DetailFact>
       ) : null}
       {repositories.length > 0 ? (
         <DetailFact label={repositories.length === 1 ? "Repository" : "Repositories"}>
@@ -806,18 +954,20 @@ function Setup({
           </span>
         </DetailFact>
       ) : null}
-      {task.rigId ? (
+      {!inheritsChatSettings && task.rigId ? (
         <DetailFact label="Environment">
           <Link
             to="/workspaces/$workspaceId/rigs/$rigId"
             params={{ workspaceId, rigId: task.rigId }}
-            className="rounded-[6px] font-medium text-brand underline-offset-4 hover:underline"
+            className="rounded-[6px] font-medium og-link"
           >
             {rigName ?? (rigs.loading ? "Loading…" : "Attached sandbox environment")}
           </Link>
         </DetailFact>
       ) : null}
-      {tools.length > 0 ? <DetailFact label="Tools">{tools.join(", ")}</DetailFact> : null}
+      {!inheritsChatSettings && tools.length > 0 ? (
+        <DetailFact label="Tools">{tools.join(", ")}</DetailFact>
+      ) : null}
       {description ? <DetailFact label="Description">{description}</DetailFact> : null}
     </DetailFacts>
   );
@@ -838,54 +988,59 @@ function ScheduleAside({
   now: Date;
   workspaceId: string;
 }) {
-  const catalog = useWorkspaceModelCatalog(isKnowledgeSync(task) ? null : workspaceId);
+  const catalog = useWorkspaceModelCatalog(workspaceId);
   const machineId = task.agentConfig.machineTarget?.targetSandboxId;
   const fleet = useWorkspaceMachines({ enabled: Boolean(machineId) });
-  const state = scheduledTaskStateLabel(task);
-  const next = nextRunOf(task, now);
   const model = useMemo(() => {
-    if (isKnowledgeSync(task)) return null;
+    if (scheduleInheritsChatSettings(task)) return null;
     const chosen = task.agentConfig.model;
     const id = chosen ?? catalog.defaultSelection?.model;
     const row = id ? catalog.rows.find((candidate) => candidate.id === id) : undefined;
-    const name = row ? `${row.label} · ${payerLabel(row.billingClass, row.providerLabel)}` : id;
+    const name = row
+      ? `${row.label} · ${modelPayerHint(row)}`
+      : id
+        ? modelDisplayName(id)
+        : undefined;
     if (chosen) return name ?? chosen;
     return name ? `Workspace default - ${name}` : "Workspace default";
   }, [catalog.defaultSelection?.model, catalog.rows, task]);
   const machine = machineId
     ? fleet.machines.find((candidate) => candidate.sandboxId === machineId)
     : undefined;
-  const where = machineId
-    ? `${machine?.name ?? "Connected machine"}${
-        task.agentConfig.machineTarget?.workingDir
-          ? ` · ${task.agentConfig.machineTarget.workingDir}`
-          : ""
-      }`
-    : task.runMode === "existing_session"
-      ? "Where the chat runs"
-      : "Managed sandbox";
+  const where = scheduleInheritsChatSettings(task)
+    ? "Where the chat runs"
+    : task.agentConfig.executionTarget === "workspace_default"
+      ? "Workspace default"
+      : machineId
+        ? `${machine?.name ?? "Connected machine"}${
+            task.agentConfig.machineTarget?.workingDir
+              ? ` · ${task.agentConfig.machineTarget.workingDir}`
+              : ""
+          }`
+        : task.runMode === "existing_session"
+          ? "Where the chat runs"
+          : "Managed sandbox";
   return (
     <DetailAside label={`About ${task.name}`}>
       <DetailAsideItem label="Owner">
         <OwnerValue task={task} viewerSubjectId={access.viewerSubjectId} size="md" />
       </DetailAsideItem>
-      <DetailAsideItem label="Next run" icon={<CalendarClockIcon />}>
-        {!state.active ? (
-          <span className="text-fg-muted">{state.label}</span>
-        ) : next ? (
-          <RelativeTime date={next} format="absolute" />
-        ) : (
-          <span className="text-fg-muted">
-            {task.schedule.type === "manual" ? "On demand" : "No runs left"}
-          </span>
-        )}
+      <DetailAsideItem
+        label="Next run"
+        icon={hasEventTriggers(task) && !nextRunOf(task, now) ? <ZapIcon /> : <CalendarClockIcon />}
+      >
+        <NextRunValue task={task} now={now} />
       </DetailAsideItem>
       {model ? (
         <DetailAsideItem label="Model" icon={<SparklesIcon />}>
           {catalog.loading ? "Loading…" : model}
         </DetailAsideItem>
       ) : null}
-      {isKnowledgeSync(task) ? null : (
+      {scheduleInheritsChatSettings(task) ? (
+        <DetailAsideItem label="Settings">
+          Uses the chat’s model, tools and machine.
+        </DetailAsideItem>
+      ) : (
         <DetailAsideItem label="Where it runs" icon={<ServerIcon />}>
           {where}
         </DetailAsideItem>
@@ -917,13 +1072,10 @@ function durationLabel(run: ScheduledTaskRun): string | null {
 function runOutcome(run: ScheduledTaskRun): string | undefined {
   const accessFailures = scheduledTaskAccessFailuresText(run.accessFailures);
   if (run.error?.trim()) {
-    return accessFailures ? `${run.error.trim()} ${accessFailures}` : run.error.trim();
+    const error = scheduledRunErrorText(run.error);
+    return accessFailures ? `${error} ${accessFailures}` : error;
   }
   if (accessFailures) return accessFailures;
-  const summary = run.knowledgeSummary;
-  if (summary) {
-    return `${summary.imported} imported · ${summary.unchanged} unchanged · ${summary.failed} failed`;
-  }
   if (run.status === "skipped") return "Skipped because the previous run was still working.";
   if (run.status === "queued") return "Waiting to start.";
   return undefined;
@@ -954,7 +1106,7 @@ function RunsList({
   if (runs.status === "error") {
     return (
       <ErrorMessage
-        title="Couldn't load this schedule's runs"
+        title="Couldn't load this automation's runs"
         action={
           <Button type="button" variant="outline" size="sm" onClick={onRetry}>
             Try again
@@ -974,13 +1126,12 @@ function RunsList({
       />
     );
   }
-  const knowledge = isKnowledgeSync(task);
   return (
     <>
       <p className="m-0 mb-2 text-xs leading-4.5 text-fg-muted">
-        {knowledge
-          ? "Each run syncs the source into Knowledge."
-          : "Each run opens its own chat. Open a run to see what it did."}
+        {task.runMode === "new_session_per_run"
+          ? "Each run opens its own chat. Open a run to see what it did."
+          : "Runs continue in the same chat. Open a run to see what it did."}
       </p>
       <RowList label={`Runs of ${task.name}`} flush>
         {runs.runs.map((run) => {
@@ -1010,7 +1161,7 @@ function RunsList({
                 />
               }
               titleAddon={<RunStatusBadge run={run} />}
-              description={runOutcome(run)}
+              description={runOutcome(run) ?? runEventsLabel(run) ?? undefined}
               meta={meta}
               {...(sessionAccess === "open" && sessionId
                 ? { onOpen: () => onOpenSession(sessionId), indicator: "open" as const }
@@ -1054,7 +1205,7 @@ function RenameDialog({
       open={open}
       onOpenChange={onOpenChange}
       size="sm"
-      title="Rename schedule"
+      title="Rename automation"
       submitLabel="Rename"
       pendingLabel="Renaming…"
       onSubmit={async () => {
@@ -1071,7 +1222,7 @@ function RenameDialog({
         try {
           await client.updateScheduledTask(workspaceId, task.id, { name: trimmed });
         } catch (caught) {
-          throw new Error(`Couldn't rename the schedule. ${scheduleErrorText(caught)}`, {
+          throw new Error(`Couldn't rename the automation. ${scheduleErrorText(caught)}`, {
             cause: caught,
           });
         }
@@ -1082,11 +1233,7 @@ function RenameDialog({
       onSubmitted={() => onOpenChange(false)}
     >
       <FieldStack>
-        <Field
-          label="Name"
-          error={error}
-          hint="Shown in the list and as the title of each run's chat."
-        >
+        <Field label="Name" error={error} hint="Shown in the automations list.">
           <TextInput
             value={name}
             onChange={(event) => {

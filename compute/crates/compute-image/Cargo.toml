@@ -1,0 +1,35 @@
+[package]
+name = "compute-image"
+description = "Builds sandbox root file systems from OCI images"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+compute-guest = { path = "../compute-guest" }
+flate2 = "1"
+futures = "0.3"
+httpdate = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+rustix = { version = "1", features = ["fs", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false, features = ["xattr"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
+tracing = "0.1"
+zstd = "0.13"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["net"] }
+
+[lints]
+workspace = true

@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import { PluginReview } from "./source-import-dialog";
 import { initialSourceImportState, sourceImportReducer } from "./source-import-flow";
-import type { ConnectionMetadata, PluginPreview } from "@/types";
+import type { ConnectionMetadata, PluginPreview } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();

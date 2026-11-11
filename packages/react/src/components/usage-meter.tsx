@@ -15,6 +15,7 @@ import {
   type UsageReading,
   type UsageSummary,
 } from "../usage/summary";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type UsageMeterLabels = AllowanceLabels & {
   /** Heading for the member's own ceiling. */
@@ -41,21 +42,23 @@ export type UsageMeterLabels = AllowanceLabels & {
   workspaceLine: (value: string) => string;
 };
 
-export const DEFAULT_USAGE_METER_LABELS: UsageMeterLabels = {
-  ...allowanceLabels(),
-  title: "Your usage",
-  workspaceTitle: "Workspace usage",
-  left: (percent) => `${percent}% left`,
-  used: (percent) => `${percent}% used`,
-  limitReached: "Limit reached",
-  nearLimit: "Near limit",
-  amountLeft: (amount) => `${amount} left`,
-  unlimited: "No usage limit",
-  loading: "Checking usage…",
-  error: "Couldn't load usage",
-  retry: "Try again",
-  amounts: (used, limit) => `${used} of ${limit} used`,
-  workspaceLine: (value) => `Workspace: ${value}`,
+export const DEFAULT_USAGE_METER_LABELS = (t: OpenGeniText): UsageMeterLabels => {
+  return {
+    ...allowanceLabels(t),
+    title: t("usageMeter.yourUsage"),
+    workspaceTitle: t("usageMeter.workspaceUsage"),
+    left: (percent) => `${percent}% left`,
+    used: (percent) => `${percent}% used`,
+    limitReached: t("usageMeter.limitReached"),
+    nearLimit: t("usageMeter.nearLimit"),
+    amountLeft: (amount) => `${amount} left`,
+    unlimited: t("usageMeter.noUsageLimit"),
+    loading: t("usageMeter.checkingUsage"),
+    error: t("usageMeter.couldnTLoadUsage"),
+    retry: t("usageMeter.tryAgain"),
+    amounts: (used, limit) => `${used} of ${limit} used`,
+    workspaceLine: (value) => t("usageMeter.workspaceValue", { value }),
+  };
 };
 
 export type UsageMeterBaseProps = {
@@ -180,7 +183,8 @@ export function UsageMeterView({
   showWorkspace = true,
   className,
 }: UsageMeterViewProps) {
-  const labels = { ...DEFAULT_USAGE_METER_LABELS, ...overrides };
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_USAGE_METER_LABELS(t), ...overrides };
   const compact = density === "compact";
   if (loading || error || !summary) {
     return (
@@ -196,7 +200,7 @@ export function UsageMeterView({
               <button
                 type="button"
                 onClick={onRetry}
-                className="rounded-og-sm text-og-fg underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-og-accent"
+                className="rounded-og-sm og-link focus-visible:outline-2 focus-visible:outline-og-accent"
               >
                 {labels.retry}
               </button>
@@ -270,7 +274,7 @@ export function UsageMeterView({
       <span
         {...meterProps}
         data-og-usage-meter={primary.status}
-        title={primary.resetsAt ? `${reset} ${formatAllowanceInstant(primary.resetsAt)}` : reset}
+        title={primary.resetsAt ? `${reset} ${formatAllowanceInstant(t, primary.resetsAt)}` : reset}
         className={cn("og-root inline-flex min-w-0 items-center gap-2 text-og-xs", className)}
       >
         <span className={valueClass}>{value}</span>
@@ -326,7 +330,7 @@ export function UsageMeterView({
             .filter(Boolean)
             .join(" · ")}{" "}
           ·{" "}
-          <span title={primary.resetsAt ? formatAllowanceInstant(primary.resetsAt) : undefined}>
+          <span title={primary.resetsAt ? formatAllowanceInstant(t, primary.resetsAt) : undefined}>
             {reset}
           </span>
         </p>
@@ -346,7 +350,7 @@ export function UsageMeterView({
       </div>
       {bar}
       <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-og-xs text-og-fg-subtle">
-        <span title={primary.resetsAt ? formatAllowanceInstant(primary.resetsAt) : undefined}>
+        <span title={primary.resetsAt ? formatAllowanceInstant(t, primary.resetsAt) : undefined}>
           {reset}
         </span>
         {amounts ? <span className="tabular-nums">{amounts}</span> : null}

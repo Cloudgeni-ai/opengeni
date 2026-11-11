@@ -8,7 +8,9 @@ const get = mock(
     throw new Error("missing");
   },
 );
-mock.module("@/context", () => ({ useAppContext: () => ({ client: { getKnowledgeEntry: get } }) }));
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => ({ client: { getKnowledgeEntry: get } }),
+}));
 const { KnowledgeEvidenceEditor } = await import("./knowledge-evidence-editor");
 beforeAll(() => {
   GlobalRegistrator.register();

@@ -5,11 +5,17 @@ const testFiles =
   requestedTestFiles.length > 0
     ? requestedTestFiles
     : [
+        "./test/e2e/annotation-scroll.browser.e2e.ts",
+        "./test/e2e/artifact-desktop.browser.e2e.ts",
+        "./test/e2e/desktop-rail.browser.e2e.ts",
+        "./test/e2e/desktop-corner.browser.e2e.ts",
+        "./test/e2e/agents.browser.e2e.ts",
         "./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
         "./test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
         "./test/e2e/artifact-static-renderer.browser.e2e.ts",
         "./test/e2e/ai-gateway-connection.browser.e2e.ts",
         "./test/e2e/claude-subscription.browser.e2e.ts",
+        "./test/e2e/codex-account.browser.e2e.ts",
         "./test/e2e/editable-artifacts.browser.e2e.ts",
         "./test/e2e/browser.e2e.ts",
         "./test/e2e/connected-machine-removal.browser.e2e.ts",
@@ -17,6 +23,7 @@ const testFiles =
         "./test/e2e/developer-settings.browser.e2e.ts",
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",
         "./test/e2e/lossless-message.browser.e2e.ts",
+        "./test/e2e/machine-card.browser.e2e.ts",
         "./test/e2e/organization-workspace-administration.browser.e2e.ts",
         "./test/e2e/organization-recovery.browser.e2e.ts",
         "./test/e2e/personal-workspace-accessibility.browser.e2e.ts",
@@ -29,13 +36,17 @@ const testFiles =
         "./test/e2e/react-demo-mobile.browser.e2e.ts",
         "./test/e2e/realtime-demo.browser.e2e.ts",
         "./test/e2e/restored-attachment-preview.browser.e2e.ts",
+        "./test/e2e/secrets-fake-login-suite.browser.e2e.ts",
+        "./test/e2e/secrets-fake-login.browser.e2e.ts",
         "./test/e2e/chat-media-entry.browser.e2e.ts",
         "./test/e2e/embedded-artifact-viewer.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-loading-startup.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
+        "./test/e2e/project-profile.browser.e2e.ts",
         "./test/e2e/project-rename.browser.e2e.ts",
         "./test/e2e/session-sidebar.browser.e2e.ts",
+        "./test/e2e/session-usage-limit.browser.e2e.ts",
         "./test/e2e/session-search.browser.e2e.ts",
         "./test/e2e/skill-review.browser.e2e.ts",
         "./test/e2e/workspace-pause-timers.browser.e2e.ts",
@@ -53,18 +64,22 @@ const testFiles =
 
 if (import.meta.main)
   for (const testFile of testFiles) {
-    const engineIds = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
-      ? (["chromium", "firefox", "webkit"] as const)
-      : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
-        ? (["chromium", "webkit"] as const)
-        : ([undefined] as const);
+    const engineIds =
+      testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts") ||
+      testFile.endsWith("annotation-scroll.browser.e2e.ts")
+        ? (["chromium", "firefox", "webkit"] as const)
+        : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+          ? (["chromium", "webkit"] as const)
+          : ([undefined] as const);
     for (const engineId of engineIds) {
       // Keep native browser engines in separate Bun processes so one engine's teardown cannot
       // influence another engine's performance or liveness result.
       const environment: Readonly<Record<string, string>> = engineId
-        ? testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
-          ? { OPENGENI_AI_GATEWAY_BROWSER_ENGINE: engineId }
-          : { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId }
+        ? testFile.endsWith("annotation-scroll.browser.e2e.ts")
+          ? { ANNOTATION_SCROLL_BROWSER_ENGINE: engineId }
+          : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+            ? { OPENGENI_AI_GATEWAY_BROWSER_ENGINE: engineId }
+            : { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId }
         : {};
       const status = runTestFile(testFile, environment);
       if (status !== 0) process.exit(status);

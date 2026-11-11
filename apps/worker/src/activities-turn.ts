@@ -2,6 +2,7 @@ import { createProductionAgentRuntime, summarizeForCompaction } from "@opengeni/
 import { createSharedActivityServices } from "./activity-services";
 import { createRunAgentTurnActivity } from "./activities/agent-turn";
 import { createVideoGenerationActivities } from "./activities/video-generation-reconciliation";
+import { createSessionTitleActivities } from "./activities/independent-session-title";
 import type { ActivityDependencies, TurnActivityServices } from "./activities/types";
 import { runtimeMetricsHooksForObservability } from "./observability-metrics";
 
@@ -12,6 +13,9 @@ function createTurnActivityServices(
   let servicesPromise: Promise<TurnActivityServices> | null = null;
   return async () => {
     servicesPromise ??= (async () => {
+      if (!dependencies.requestWorkerDrain) {
+        throw new Error("Turn activities require a host requestWorkerDrain lifecycle edge");
+      }
       const services = await shared();
       return {
         ...services,
@@ -20,6 +24,8 @@ function createTurnActivityServices(
           createProductionAgentRuntime({
             metrics: runtimeMetricsHooksForObservability(services.observability),
           }),
+        requestWorkerDrain: dependencies.requestWorkerDrain,
+        turnFinalizationTimeoutMs: dependencies.turnFinalizationTimeoutMs,
         summarizeContextForCompaction:
           dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
       };
@@ -36,5 +42,6 @@ export function createTurnActivitiesFromServices(services: () => Promise<TurnAct
   return {
     runAgentTurn: createRunAgentTurnActivity(services),
     ...createVideoGenerationActivities(services),
+    ...createSessionTitleActivities(services),
   };
 }

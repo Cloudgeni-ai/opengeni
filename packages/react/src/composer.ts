@@ -19,6 +19,7 @@ export type {
 } from "./components/model-policy-picker";
 export {
   Actions,
+  AlternateSendButton,
   AttachButton,
   Attachments,
   CommandPalette,
@@ -31,11 +32,13 @@ export {
   Input,
   ModelPicker,
   PauseButton,
+  PauseButtonSlot,
   PausedState,
   RestoredResources,
   Root,
   SendButton,
   Status,
+  StopButton,
   Surface,
   defaultChatComposerMessages,
   useChatComposer,
@@ -46,6 +49,7 @@ export type {
   ChatComposerContextValue,
   ChatComposerMessages,
   ComposerActionsProps,
+  ComposerAlternateSendButtonProps,
   ComposerAttachButtonProps,
   ComposerCommandPaletteProps,
   ComposerControlLinks,
@@ -60,7 +64,9 @@ export type {
   ComposerModelPickerProps,
   ComposerPauseButtonProps,
   ComposerRootProps,
+  ComposerRunControl,
   ComposerSendButtonProps,
+  ComposerStopButtonProps,
   ComposerSubmitBlocker,
   ComposerSubmitMode,
   ComposerSurfaceProps,
@@ -70,6 +76,7 @@ export type {
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
   ComposerTranscriptionControlProps,
+  ComposerVoiceInputOptions,
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
 export {
@@ -83,6 +90,7 @@ export type {
   UseVoiceInputOptions,
   UseVoiceInputResult,
   VoiceInputStatus,
+  VoiceInputRecordingsClient,
 } from "./hooks/use-voice-input";
 export {
   IndexedDbVoiceRecordingStore,

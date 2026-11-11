@@ -1,10 +1,14 @@
 import {
   authorizeAutomaticSandboxCheckpointRecovery,
+  computeHostHandingOff,
   getEnrollment,
-  getSandbox,
+  getSandboxForAttempt,
   readActiveSandbox,
+  readLease,
   getLiveEnrollmentConnection,
-  assertPersonalMachineForAttempt,
+  countSessionTurnSandboxProcessStartRestarts,
+  SANDBOX_PROCESS_START_RESTART_OPERATION,
+  resolvePersonalMachineRouteForAttempt,
   type SandboxRecord,
 } from "@opengeni/db";
 import {
@@ -23,17 +27,29 @@ import {
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
   type SelfhostedSession,
+  type ComputeTurnDeps,
   resolveConnectedMachineWorkspaceRoot,
+  type SoftSetupFailure,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
-import { managedSessionGroupBackend, managedSessionGroupOs } from "@opengeni/core";
+import { managedCodemodeClientDownload } from "./codemode-client-download";
+import {
+  isPersonalMachineAccessRefusal,
+  PersonalMachineAccessRequiredError,
+} from "./machine-access";
+import {
+  backgroundCommandWakeSender,
+  managedSessionGroupBackend,
+  managedSessionGroupOs,
+} from "@opengeni/core";
 import { mergeResourceRefs } from "../common";
 import {
   mintSandboxCodemodeToken,
   type MintedRunGitCredentials,
+  type MintedSandboxCodemodeToken,
   type SandboxCodemodeAuthority,
 } from "../environment";
-import { rigProviderImageSourceImage } from "../sandbox-images";
+import { rigProviderImageSourceImage } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import type { currentActivityContext } from "../streaming";
 import {
@@ -44,6 +60,7 @@ import {
 import {
   wrapTurnBoxWithRouting,
   wrapLazyTurnBoxWithRouting,
+  agentBackgroundCommandDeps,
   establishSelfhostedTurnSession,
   routingEnabled,
 } from "../../sandbox-routing";
@@ -55,6 +72,7 @@ import {
   recordSandboxProvisionAttempt,
   recordSandboxSharedPreparation,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
@@ -66,6 +84,7 @@ import {
   classifySandboxLogicalProvisionFailure,
   isLazySandboxProvisionRetryable,
   createTurnSandboxProvisioner,
+  trackPhysicalSandboxResume,
 } from "./sandbox-provision";
 import {
   resolveActiveSandboxBackend,
@@ -74,6 +93,7 @@ import {
   sandboxEstablishPolicyDecision,
   shouldPrefetchManagedSandbox,
   reconcileActiveSandboxPointer,
+  readTurnRouteFact,
   sandboxSettingsForRoute,
 } from "./sandbox-route";
 import type { ClaimTurnOk } from "./claim";
@@ -81,9 +101,18 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import {
+  createSandboxSetupReplayGuard,
+  modalSandboxBoxReplacer,
+  recoverSandboxSetupFailure,
+  recoverUnresponsiveComputeAgent,
+} from "./sandbox-setup-agent-failure";
+import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type SandboxRouteDeps = {
   input: RunAgentTurnInput;
+  turn: ClaimTurnOk["turn"];
   settings: Settings;
   db: ActivityServices["db"];
   eventing: EventingState;
@@ -112,6 +141,8 @@ export type EstablishTurnSandboxDeps = SandboxRouteOk & {
   settings: Settings;
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
+  /** Wakes a session waiting on a background command this turn settles. */
+  wakeSessionWorkflow?: ActivityServices["wakeSessionWorkflow"] | undefined;
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
@@ -144,11 +175,12 @@ export type EstablishTurnSandboxDeps = SandboxRouteOk & {
 
 export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]>;
+  /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ) => Promise<void>;
+  ) => Promise<SoftSetupFailure | null | void>;
   attachGitCredentialRenewal: (
     tokenSession: GitCredentialTokenWriterSession,
     initial: MintedRunGitCredentials | undefined,
@@ -156,7 +188,7 @@ export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   ) => Promise<void>;
   attachCodemodeTokenRenewal: (
     tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt?: Date,
+    seeded?: MintedSandboxCodemodeToken,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
   throwIfWorkerShuttingDown: () => void;
@@ -172,6 +204,7 @@ export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
 export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<SandboxRouteOk> {
   const {
     input,
+    turn,
     settings,
     db,
     eventing,
@@ -188,14 +221,20 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   // home box for a machine-primary turn), buildAgent (skip the repository clone
   // hook so a private repo is never `git clone`d onto the user's real disk), and
   // the warm-rate (a machine accrues ZERO cloud warm-seconds). The active pointer
-  // + its sandbox row are loaded ONCE here (best-effort, never throwing) and the
+  // + its sandbox row are loaded ONCE here and the
   // SAME values feed resolveActiveSandboxBackend (the tested gate) AND the
   // machine-primary establish branch (enrollmentId/epoch/workingDir) below — no
   // double read, no read-skew between the gate decision and the establish. With
   // routing OFF this is byte-for-byte the legacy path: no reads, undefined backend.
+  // These reads decide which box the turn uses, so they fail CLOSED: a read that
+  // still fails after a brief retry throws before anything touches a sandbox, and
+  // the attempt is retried. Reading a failure as "no machine" would start setup,
+  // credential seeding and file downloads on the managed home of a chat whose
+  // route names a Connected Machine, and the attempt would then be discarded the
+  // moment the routing proxy saw the real pointer.
   const routingOn = routingEnabled(settings);
   let activeSandboxPointer = routingOn
-    ? await readActiveSandbox(db, input.workspaceId, input.sessionId).catch(() => null)
+    ? await readTurnRouteFact(() => readActiveSandbox(db, input.workspaceId, input.sessionId))
     : null;
   // TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2): a persisted
   // pointer whose target is STRUCTURALLY unestablishable at turn start would strand
@@ -203,9 +242,9 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   // emit a visible event, honoring a concurrent higher-epoch swap. The sandbox row
   // is loaded HERE, inside reconcile, via a NON-swallowing lookup: a null decision
   // then means the row is genuinely absent, never a suppressed transient DB error
-  // (which would wrongly clear a healthy user-chosen pointer). On a lookup throw the
-  // reconcile fails open — pointer untouched, record null (machinePrimary:false),
-  // no event — and the establish branch below reads the returned values.
+  // (which would wrongly clear a healthy user-chosen pointer). A lookup that still
+  // throws after its brief retry propagates — pointer untouched, no event, no box —
+  // and the establish branch below reads only values that were actually loaded.
   let activeSandboxRecord: SandboxRecord | null = null;
   if (routingOn) {
     const reconciled = await reconcileActiveSandboxPointer(
@@ -217,16 +256,20 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
       },
       activeSandboxPointer,
       (sandboxId) =>
-        getSandbox(
-          db,
-          fileAuthoritySubjectId
-            ? {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                subjectId: fileAuthoritySubjectId,
-              }
-            : input.workspaceId,
-          sandboxId,
+        readTurnRouteFact(() =>
+          getSandboxForAttempt(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: fileAuthoritySubjectId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              executionGeneration: turn.executionGeneration,
+            },
+            sandboxId,
+          ),
         ),
       eventing.publish
         ? async (events) => {
@@ -268,6 +311,14 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     ? (managedSessionGroupBackend(settings.sandboxBackend, runSettings.sandboxBackend) ??
       runSettings.sandboxBackend)
     : runSettings.sandboxBackend;
+  // A machine-home chat with no machine selected, on a deployment without a
+  // managed sandbox to fall back to, has nowhere to run. Say so plainly instead
+  // of building a Connected Machine client that names no machine.
+  if (!machinePrimary && groupBoxBackend === "selfhosted") {
+    throw new Error(
+      "This chat runs on a Connected Machine, but no machine is selected for it. Choose a machine for this chat, then send the message again.",
+    );
+  }
   const groupRouteSettings = sandboxSettingsForRoute({
     runSettings,
     machinePrimary,
@@ -306,6 +357,45 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   };
 }
 
+/** Turn startup needs authorized metadata even when the machine's runner is
+ * offline. Keep the missing live connection for the normal offline transport. */
+export async function resolveMachineEnrollmentForTurn(
+  db: ActivityServices["db"],
+  sandbox: SandboxRecord,
+  authority: Omit<Parameters<typeof resolvePersonalMachineRouteForAttempt>[1], "enrollmentId">,
+) {
+  if (sandbox.scope === "user") {
+    let route: Awaited<ReturnType<typeof resolvePersonalMachineRouteForAttempt>>;
+    try {
+      route = await resolvePersonalMachineRouteForAttempt(db, {
+        ...authority,
+        enrollmentId: sandbox.enrollmentId!,
+      });
+    } catch (error) {
+      // A missing, used, revoked or expired approval is the person's to give
+      // again, not a database fault.
+      if (isPersonalMachineAccessRefusal(error))
+        throw new PersonalMachineAccessRequiredError(sandbox.name, { cause: error });
+      throw error;
+    }
+    // No admitted route: the attempt holds no approval for this machine (or
+    // the machine was removed, where the web app offers no Allow because the
+    // chat no longer lists it as its machine).
+    if (!route) throw new PersonalMachineAccessRequiredError(sandbox.name);
+    return route;
+  }
+  const liveConnection = await getLiveEnrollmentConnection(
+    db,
+    sandbox.workspaceId,
+    sandbox.enrollmentId!,
+  );
+  return {
+    enrollment:
+      liveConnection ?? (await getEnrollment(db, sandbox.workspaceId, sandbox.enrollmentId!)),
+    liveConnection,
+  };
+}
+
 export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Promise<void> {
   // One fresh-box readiness replacement per turn attempt, shared by the eager
   // establish and every lazy provisioner retry of this attempt.
@@ -315,6 +405,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     settings,
     db,
     bus,
+    wakeSessionWorkflow,
     objectStorage,
     observability,
     runtimeCancellationSignal,
@@ -364,9 +455,9 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
   // backend is "none" -> never resolve (no box to touch).
   //
   // Established AFTER sandboxEnvironment is computed (not before) so the box's
-  // manifest is created with the SAME variableSet the agent declares — the SDK
+  // manifest is created with the SAME environment the agent declares — the SDK
   // applies the agent's manifest to this provided session and throws on ANY
-  // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
+  // environment delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
   // here makes current==target so the delta is empty.
   recordTurnStartupPhase(observability, {
     phase: "runtime_preparation",
@@ -384,12 +475,60 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
   ) {
     const sandboxEstablishStartedAt = performance.now();
     let sandboxEstablishOutcome: "completed" | "failed" = "completed";
+    // A compute box's provider session is its agent's: bind this turn's op
+    // journal and background-command ledger onto it, as a Connected Machine
+    // turn does, so a yielded command is adopted instead of blocking.
+    const computeTurn: ComputeTurnDeps | undefined =
+      groupBoxBackend === "compute"
+        ? {
+            ...(opJournal !== undefined ? { opJournal } : {}),
+            ...agentBackgroundCommandDeps(db, bus ?? undefined, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              wake: backgroundCommandWakeSender(wakeSessionWorkflow),
+              backgroundCommandAttempt: {
+                turnId: turn.id,
+                executionGeneration: attempt.executionGeneration,
+                attemptId: input.attemptId,
+              },
+            }),
+            // A command whose agent stopped answering restarts the box, at
+            // most once per turn, before the command fails.
+            recoverUnresponsiveAgent: async (machine) =>
+              await recoverUnresponsiveComputeAgent(machine, {
+                restartsThisTurn: async () =>
+                  await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
+                    sessionId: input.sessionId,
+                    turnId: turn.id,
+                  }),
+                publish: async (events) => {
+                  // The restart guard counts these events: an unrecorded
+                  // restart could repeat, so no publisher means no restart.
+                  if (!eventing.publish) throw new Error("no event publisher for this turn");
+                  await eventing.publish(events, true);
+                },
+                operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+                hostBusy: async () =>
+                  computeHostHandingOff(
+                    session.sandboxGroupId
+                      ? await readLease(db, input.workspaceId, session.sandboxGroupId)
+                      : null,
+                  ),
+              }),
+          }
+        : undefined;
     // A committed system recovery decision is rematerialized in this turn even
     // when the sandbox is otherwise on-demand: the decision pins group
     // membership until publication, and the next turn must not dead-end.
     let automaticRecoveryPending = false;
     try {
-      if (!machinePrimary && groupBoxBackend === "modal" && activeSandboxBackend !== "selfhosted") {
+      if (
+        !machinePrimary &&
+        groupBoxBackend !== "none" &&
+        groupBoxBackend !== "selfhosted" &&
+        activeSandboxBackend !== "selfhosted"
+      ) {
         // This happens before buildTurnAgent reads the durable instruction
         // tail, even for an on-demand sandbox. The DB admits only a provider-
         // lost group with no unresolved workspace writers in ANY member: the
@@ -406,7 +545,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
           try {
             recordSandboxAutomaticRecoverySelected(
               observability,
-              "modal",
+              groupBoxBackend,
               sandboxAutomaticRecoveryOutcome(fallback),
             );
           } catch {
@@ -414,7 +553,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
           }
           if (fallback.lane === "checkpoint") {
             observability.warn("managed sandbox selected an older verified checkpoint", {
-              backend: "modal",
+              backend: groupBoxBackend,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               archiveGeneration: fallback.selection.archiveGeneration,
@@ -423,7 +562,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             });
           } else {
             observability.warn("managed sandbox continues on an empty workspace after loss", {
-              backend: "modal",
+              backend: groupBoxBackend,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               reason: fallback.reason,
@@ -450,24 +589,6 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
       // backend back to the deployment default cloud backend so swap-away / flag-off
       // degrade to a genuine cloud box exactly like today (home=modal did).
       if (machinePrimary) {
-        if (activeSandboxRecord!.scope === "user") {
-          if (!fileAuthoritySubjectId) {
-            throw new Error("personal machine use requires an initiating human subject");
-          }
-          const authorized = await assertPersonalMachineForAttempt(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: fileAuthoritySubjectId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            executionGeneration: turn.executionGeneration,
-            enrollmentId: activeSandboxRecord!.enrollmentId!,
-          });
-          if (!authorized) {
-            throw new Error("personal Connected Machine use was not admitted for this turn");
-          }
-        }
         // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
         // establish OR lease the managed home box. The active-sandbox pointer is
         // the machine route's own epoch fence; the managed-home lease separately
@@ -477,18 +598,16 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // Whether the machine's latest Hello advertised the op-stream engine
         // (refreshed on every connect). Read only when the server flag is on —
         // one indexed lookup, and the flag off keeps this path byte-identical.
-        const liveMachineEnrollment = await getLiveEnrollmentConnection(
-          db,
-          activeSandboxRecord!.workspaceId,
-          activeSandboxRecord!.enrollmentId!,
-        );
-        const machineEnrollment =
-          liveMachineEnrollment ??
-          (await getEnrollment(
-            db,
-            activeSandboxRecord!.workspaceId,
-            activeSandboxRecord!.enrollmentId!,
-          ));
+        const { enrollment: machineEnrollment, liveConnection: liveMachineEnrollment } =
+          await resolveMachineEnrollmentForTurn(db, activeSandboxRecord!, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: fileAuthoritySubjectId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+          });
         if (!machineEnrollment?.workspaceRoot) {
           throw new Error(
             "Connected Machine has not reported an absolute workspace root; reconnect it with a current agent",
@@ -505,9 +624,11 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             db,
             settings,
             bus,
+            wakeSessionWorkflow,
             onOp: machineOpObserver.observer,
             onSandboxOperation: sandboxOperationObserver,
             onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+            observability,
             opJournal,
           },
           {
@@ -541,18 +662,21 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               liveMachineEnrollment?.agentCapabilities.operationCpuQuota === true,
             transactionalFsWriteSupported:
               liveMachineEnrollment?.agentCapabilities.transactionalFsWrite === true,
-            ...(activeSandboxRecord!.scope === "user" && fileAuthoritySubjectId
-              ? {
-                  personalMachineAttempt: {
-                    accountId: input.accountId,
-                    subjectId: fileAuthoritySubjectId,
-                    sessionId: input.sessionId,
-                    turnId: turn.id,
-                    attemptId: input.attemptId,
-                    executionGeneration: attempt.executionGeneration,
-                  },
-                }
-              : {}),
+            transactionalFsWriteMachineSupported:
+              liveMachineEnrollment?.agentCapabilities.transactionalFsWriteMachine === true,
+            browserControlHttpSupported:
+              liveMachineEnrollment?.agentCapabilities.browserControlHttp === true,
+            runAsSupported: liveMachineEnrollment?.agentCapabilities.runAs === true,
+            // Carried for shared machines too: the audience can narrow to Only me
+            // mid-turn, and each operation then rechecks this authority.
+            personalMachineAttempt: {
+              accountId: input.accountId,
+              subjectId: fileAuthoritySubjectId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+            },
             epoch: activeSandboxPointer!.activeEpoch,
             environment: sandboxEnvironment,
             ...(transientCodemodeEnvironment
@@ -576,10 +700,12 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               db,
               settings,
               bus,
+              wakeSessionWorkflow,
               opJournal,
               onOp: machineOpObserver.observer,
               onSandboxOperation: sandboxOperationObserver,
               onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+              observability,
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
             },
@@ -588,17 +714,13 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               sessionId: input.sessionId,
               resourceAccountId: input.accountId,
               ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
-              ...(fileAuthoritySubjectId
-                ? {
-                    personalMachineAttempt: {
-                      accountId: input.accountId,
-                      subjectId: fileAuthoritySubjectId,
-                      turnId: turn.id,
-                      attemptId: input.attemptId,
-                      executionGeneration: attempt.executionGeneration,
-                    },
-                  }
-                : {}),
+              personalMachineAttempt: {
+                accountId: input.accountId,
+                subjectId: fileAuthoritySubjectId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration,
+              },
               environment: sandboxEnvironment,
               ...(transientCodemodeEnvironment
                 ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -613,16 +735,6 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 sandboxId: activeSandboxPointer!.activeSandboxId!,
                 epoch: activeSandboxPointer!.activeEpoch,
               },
-              // HOME semantics for a mid-turn clear-to-null: only a genuine
-              // machine-HOME session (its home IS this machine, session.sandboxBackend
-              // === "selfhosted") resolves null back to the pinned machine. A Modal-HOME
-              // session merely PINNED to a machine this turn never established its group
-              // box, so defaultIsHome:false makes a clear-to-null fail typed
-              // (`home_unavailable_this_turn`) rather than silently serving the machine.
-              // Failure settlement checkpoints the completed detach and continues the same
-              // logical turn in a fresh home-primary attempt; it never serves this machine
-              // after the pointer changed and never invents a cloud lease for machine-only work.
-              defaultIsHome: session.sandboxBackend === "selfhosted",
             },
             established,
           ),
@@ -638,46 +750,53 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // proxy's first default-pointer op. A chat-only turn never calls it, so
         // no lease row, no provider box, no warm-meter interval.
         //
-        // A repository still forces that first default-pointer op before HTTP
-        // (workspace-skill catalog in Agent.instructions). Start create now and
-        // join it at get(); do not await here or we serialize Modal before tools.
+        // A repository turn's box is likely to be used by a tool. Start create
+        // now and join it at get(); do not await here or we serialize the
+        // provider create before tools. The repository skill index no longer
+        // reaches the box before the model (shouldDeferRepositorySkillIndex).
         if (sandboxState.sandboxHolderId && sandboxState.sandboxGroupId) {
           const lazyHolderId = sandboxState.sandboxHolderId;
           const lazyGroupId = sandboxState.sandboxGroupId;
           sandboxState.resumeManagedGroupBox = () =>
-            resumeBoxForTurn(
-              {
-                db,
-                settings: runSettings,
-                logicalFallbackSettings: logicalSandboxSettings,
-                cancellationSignal: sandboxResumeSignal,
-                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                observability,
-                freshSandboxReadinessReplacementBudget,
-                onSandboxLost: publishSandboxLost,
-                objectStorage,
-              },
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: lazyGroupId,
-                sessionId: input.sessionId,
-                backend: groupBoxBackend,
-                os: groupBoxOs,
-                environment: sandboxEnvironment,
-                ...(groupBoxImage
-                  ? {
-                      image: groupBoxImage,
-                      imagePolicy: groupBoxImagePolicy,
-                    }
-                  : {}),
-                // The lazy acquire must enforce the same frozen rig authority
-                // as the eager acquire; otherwise a warm box for another rig
-                // can bypass the shared-state conflict/rotation fence.
-                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-              },
-              "turn",
-              lazyHolderId,
+            trackPhysicalSandboxResume(
+              sandboxState.inFlightSandboxResumes,
+              resumeBoxForTurn(
+                {
+                  db,
+                  settings: runSettings,
+                  logicalFallbackSettings: logicalSandboxSettings,
+                  cancellationSignal: sandboxResumeSignal,
+                  sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                  observability,
+                  freshSandboxReadinessReplacementBudget,
+                  onSandboxLost: publishSandboxLost,
+                  objectStorage,
+                  bus,
+                  wakeSessionWorkflow,
+                  ...(computeTurn ? { computeTurn } : {}),
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sandboxGroupId: lazyGroupId,
+                  sessionId: input.sessionId,
+                  backend: groupBoxBackend,
+                  os: groupBoxOs,
+                  environment: sandboxEnvironment,
+                  ...(groupBoxImage
+                    ? {
+                        image: groupBoxImage,
+                        imagePolicy: groupBoxImagePolicy,
+                      }
+                    : {}),
+                  // The lazy acquire must enforce the same frozen rig authority
+                  // as the eager acquire; otherwise a warm box for another rig
+                  // can bypass the shared-state conflict/rotation fence.
+                  ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+                },
+                "turn",
+                lazyHolderId,
+              ),
             );
           if (
             shouldPrefetchManagedSandbox({
@@ -724,51 +843,57 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         );
         try {
           sandboxState.resolvedSandbox = await waitForTurnOperation(
-            resumeBoxForTurn(
-              {
-                db,
-                settings: runSettings,
-                logicalFallbackSettings: logicalSandboxSettings,
-                cancellationSignal: sandboxResumeSignal,
-                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                observability,
-                freshSandboxReadinessReplacementBudget,
-                onSandboxLost: publishSandboxLost,
-                objectStorage,
-              },
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: session.sandboxGroupId,
-                sessionId: input.sessionId,
-                // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
-                // is not machine-primary resumes a real cloud group box (the
-                // deployment default), never a "selfhosted" box (which would throw
-                // for lack of a bound agentId).
-                backend: groupBoxBackend,
-                os: groupBoxOs,
-                environment: sandboxEnvironment,
-                // Deployment/workspace pins select NEW creates only. The lease
-                // retains a live group's image through between-turn repins, even
-                // with other holders; only rotation/reaping elects a new image.
-                // Select the image for the actual group-box backend; a configured Modal image must
-                // never override a Docker run. The selfhosted branch
-                // (establishSelfhostedTurnSession) NEVER passes
-                // an image — B3 lives only on this managed-box branch.
-                ...(groupBoxImage
-                  ? {
-                      image: groupBoxImage,
-                      imagePolicy: groupBoxImagePolicy,
-                    }
-                  : {}),
-                // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
-                // conflicts on a live shared box set up under a different rig (solo
-                // durable rotation / N-holders SandboxRigConflictError). Omitted for a
-                // rig-less turn -> never stamped or enforced (shares exactly as today).
-                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-              },
-              "turn",
-              managedOwnership!.holderId,
+            trackPhysicalSandboxResume(
+              sandboxState.inFlightSandboxResumes,
+              resumeBoxForTurn(
+                {
+                  db,
+                  settings: runSettings,
+                  logicalFallbackSettings: logicalSandboxSettings,
+                  cancellationSignal: sandboxResumeSignal,
+                  sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                  observability,
+                  freshSandboxReadinessReplacementBudget,
+                  onSandboxLost: publishSandboxLost,
+                  objectStorage,
+                  bus,
+                  wakeSessionWorkflow,
+                  ...(computeTurn ? { computeTurn } : {}),
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sandboxGroupId: session.sandboxGroupId,
+                  sessionId: input.sessionId,
+                  // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
+                  // is not machine-primary resumes a real cloud group box (the
+                  // deployment default), never a "selfhosted" box (which would throw
+                  // for lack of a bound agentId).
+                  backend: groupBoxBackend,
+                  os: groupBoxOs,
+                  environment: sandboxEnvironment,
+                  // Deployment/workspace pins select NEW creates only. The lease
+                  // retains a live group's image through between-turn repins, even
+                  // with other holders; only rotation/reaping elects a new image.
+                  // Select the image for the actual group-box backend; a configured Modal image must
+                  // never override a Docker run. The selfhosted branch
+                  // (establishSelfhostedTurnSession) NEVER passes
+                  // an image — B3 lives only on this managed-box branch.
+                  ...(groupBoxImage
+                    ? {
+                        image: groupBoxImage,
+                        imagePolicy: groupBoxImagePolicy,
+                      }
+                    : {}),
+                  // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
+                  // conflicts on a live shared box set up under a different rig (solo
+                  // durable rotation / N-holders SandboxRigConflictError). Omitted for a
+                  // rig-less turn -> never stamped or enforced (shares exactly as today).
+                  ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+                },
+                "turn",
+                managedOwnership!.holderId,
+              ),
             ),
             sandboxResumeSignal,
             releaseLateSandbox,
@@ -780,7 +905,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 type: "sandbox.operation.failed",
                 payload: {
                   name: "sandbox.provision",
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                 },
               },
             ],
@@ -794,19 +919,27 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // attributable from the DB alone — worker logs rotate within hours, which
         // left both 2026-07-06 incidents without a durable trace. Best-effort.
         await publishSandboxLifecycleEvents(sandboxState.resolvedSandbox);
-        await eventing.publish!(
-          [
-            {
-              type: "sandbox.operation.completed",
-              payload: {
-                name: "sandbox.provision",
-                ...(sandboxState.resolvedSandbox.established.origin
-                  ? { origin: sandboxState.resolvedSandbox.established.origin }
-                  : {}),
-              },
-            },
-          ],
-          true,
+        const establishedOrigin = sandboxState.resolvedSandbox.established.origin;
+        await measureTurnStartupPhase(
+          observability,
+          {
+            phase: "sandbox_provision_receipt",
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+          },
+          () =>
+            eventing.publish!(
+              [
+                {
+                  type: "sandbox.operation.completed",
+                  payload: {
+                    name: "sandbox.provision",
+                    ...(establishedOrigin ? { origin: establishedOrigin } : {}),
+                  },
+                },
+              ],
+              true,
+            ),
         );
         // M7 hot-swap: when the selfhosted feature is on, wrap the established
         // group box in the STABLE routing proxy before it is injected NON-OWNED
@@ -824,9 +957,11 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               db,
               settings,
               bus,
+              wakeSessionWorkflow,
               opJournal,
               onSandboxOperation: sandboxOperationObserver,
               onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+              observability,
               onHomeSandboxLost: publishSandboxLost,
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
@@ -840,17 +975,13 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               sessionId: input.sessionId,
               resourceAccountId: input.accountId,
               ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
-              ...(fileAuthoritySubjectId
-                ? {
-                    personalMachineAttempt: {
-                      accountId: input.accountId,
-                      subjectId: fileAuthoritySubjectId,
-                      turnId: turn.id,
-                      attemptId: input.attemptId,
-                      executionGeneration: attempt.executionGeneration,
-                    },
-                  }
-                : {}),
+              personalMachineAttempt: {
+                accountId: input.accountId,
+                subjectId: fileAuthoritySubjectId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration,
+              },
               environment: sandboxEnvironment,
               ...(transientCodemodeEnvironment
                 ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -899,6 +1030,7 @@ export async function bindLazySandboxProvisioner(
     settings,
     db,
     bus,
+    wakeSessionWorkflow,
     observability,
     runtimeCancellationSignal,
     sandboxResumeSignal,
@@ -931,6 +1063,7 @@ export async function bindLazySandboxProvisioner(
     toolResultSpill,
     connectionScope,
     codemodeAuthority,
+    objectStorage,
   } = deps;
   const {
     releaseLateSandbox,
@@ -1016,21 +1149,30 @@ export async function bindLazySandboxProvisioner(
           // This durable completion and its logical metric close at actual box
           // establishment. Credential, rig, repository, and file preparation below
           // must never be attributed to "Starting sandbox" or provision latency.
-          await eventing.publish?.(
-            [
-              {
-                type: "sandbox.operation.completed",
-                payload: {
-                  name: "sandbox.provision",
-                  ...(provisioned.established.origin
-                    ? { origin: provisioned.established.origin }
-                    : {}),
-                  provisionId: settlement.provisionId,
-                  internalAttempts: settlement.internalAttempts,
-                },
-              },
-            ],
-            true,
+          await measureTurnStartupPhase(
+            observability,
+            {
+              phase: "sandbox_provision_receipt",
+              provider: deps.turnExecutionPolicy.providerId,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+            },
+            async () =>
+              eventing.publish?.(
+                [
+                  {
+                    type: "sandbox.operation.completed",
+                    payload: {
+                      name: "sandbox.provision",
+                      ...(provisioned.established.origin
+                        ? { origin: provisioned.established.origin }
+                        : {}),
+                      provisionId: settlement.provisionId,
+                      internalAttempts: settlement.internalAttempts,
+                    },
+                  },
+                ],
+                true,
+              ),
           );
           const successStage =
             provisioned.established.origin === "created"
@@ -1051,104 +1193,192 @@ export async function bindLazySandboxProvisioner(
           });
           lazySandboxEstablishmentSettled = true;
 
-          const lazyGitCredentials =
-            activeSandboxBackend === "selfhosted" ? undefined : await startRunGitCredentialsMint();
-          const lazyGitTokens = lazyGitCredentials?.gitTokens;
-          const lazyCodemodeToken = sandboxCodemodeToken
-            ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
-            : undefined;
-          await attachRunCredentialRenewal(
-            provisioned.established.session as RunCredentialCommandSession,
-            initialRunCredentialMaterial,
-            provisioned,
-          );
-          const provisionedSetupSession = initialRunCredentialMaterial
-            ? withRunCredentialsSession(provisioned.established.session as object, input.sessionId)
-            : provisioned.established.session;
-          await runWorkspaceMutationForSandbox(
-            provisioned,
-            "lazyOwnedSandboxSetup",
-            async () =>
-              await runOwnedSandboxSetup(
-                agent,
-                provisioned.established.session as never,
-                provisionedSetupSession as never,
-                {
-                  settings: runSettings,
-                  environment: sandboxEnvironment,
-                  recordLazyManifest: true,
-                  onRuntimeEvent: async (event) => {
-                    await eventing.publish?.([{ type: event.type, payload: event.payload }], true);
-                  },
-                  ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
-                  ...(lazyGitCredentials?.bindings
-                    ? {
-                        gitCredentialBindingsOverride: lazyGitCredentials.bindings,
-                      }
-                    : {}),
-                  ...(lazyCodemodeToken
-                    ? {
-                        codemodeTokenSeedOverride: lazyCodemodeToken.token,
-                      }
-                    : {}),
-                  ...(eventing.toolCancellationFenceRef.current
-                    ? {
-                        commandRunner:
-                          eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                            eventing.toolCancellationFenceRef.current,
-                          ),
-                      }
-                    : {}),
-                  ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
-                    ? {
-                        coordinateSharedRigSetup: createSharedRigSetupCoordinator({
-                          db,
-                          accountId: input.accountId,
-                          workspaceId: input.workspaceId,
-                          sandboxGroupId: sandboxState.sandboxGroupId,
-                          attemptId: input.attemptId,
-                          holderId: sandboxState.sandboxHolderId,
-                          sandbox: provisioned,
-                          ...(runtimeCancellationSignal
-                            ? { signal: runtimeCancellationSignal }
-                            : {}),
-                          observe: (measurement) =>
-                            recordSandboxSharedPreparation(observability, measurement),
-                        }),
-                      }
-                    : {}),
-                },
+          const measure = sandboxStartupPhaseObserver({
+            observability,
+            provider: deps.turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            publish: eventing.publish,
+            publishInBackground: eventing.publishInBackground,
+          });
+          const setupReplayGuard = createSandboxSetupReplayGuard();
+          try {
+            // Post-provision prerequisites: independent authorities and storage.
+            // Join every started operation before failure/disposal; in particular
+            // never let credential writes outlive the setup's workspace owner.
+            const [credentials, clientDownload, materialization] = await Promise.allSettled([
+              measure("credential_mint", async () => {
+                const lazyGitCredentials =
+                  activeSandboxBackend === "selfhosted"
+                    ? undefined
+                    : await startRunGitCredentialsMint();
+                const lazyCodemodeToken = sandboxCodemodeToken
+                  ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
+                  : undefined;
+                return { lazyGitCredentials, lazyCodemodeToken };
+              }),
+              // Sign at actual use, never reuse an agent-build URL after a long
+              // lazy wait. Publication needs no minted bearer or sandbox writes.
+              measure("client_publication", async () =>
+                sandboxCodemodeToken
+                  ? await managedCodemodeClientDownload({
+                      settings: runSettings,
+                      objectStorage,
+                      activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+                    })
+                  : undefined,
               ),
-            (measurement) => {
-              if (eventing.firstModelRequestPreparationRecorded) return;
-              sandboxState.firstModelPreparationNestedSandboxMs +=
-                measurement.durationSeconds * 1_000;
-              sandboxState.firstModelPreparationNestedSandboxPhases.push(measurement);
-            },
-          );
-          await attachCodemodeTokenRenewal(
-            provisioned.established.session as CodemodeTokenWriterSession,
-            lazyCodemodeToken?.expiresAt,
-            provisioned,
-          );
-          await attachGitCredentialRenewal(
-            provisioned.established.session as GitCredentialTokenWriterSession,
-            lazyGitCredentials,
-            provisioned,
-          );
-          // `get()` does not release the first routed sandbox operation
-          // until this hook returns. Only images created during this exact
-          // turn can require deferred delivery here; historical images stay
-          // as durable receipts and are restored explicitly when requested.
-          for (const receipt of media.generatedImageReceiptsCreatedThisTurn.values()) {
-            await media.materializeGeneratedImageInSandbox(
-              receipt,
+              measure("credential_materialization", () =>
+                attachRunCredentialRenewal(
+                  provisioned.established.session as RunCredentialCommandSession,
+                  initialRunCredentialMaterial,
+                  provisioned,
+                ),
+              ),
+            ]);
+            // Preserve the original serial failure precedence, not completion order.
+            if (credentials.status === "rejected") throw credentials.reason;
+            if (clientDownload.status === "rejected") throw clientDownload.reason;
+            if (materialization.status === "rejected") throw materialization.reason;
+            const { lazyGitCredentials, lazyCodemodeToken } = credentials.value;
+            const lazyGitTokens = lazyGitCredentials?.gitTokens;
+            const lazyCodemodeClientDownload = clientDownload.value;
+            const provisionedSetupSession = initialRunCredentialMaterial
+              ? withRunCredentialsSession(
+                  provisioned.established.session as object,
+                  input.sessionId,
+                )
+              : provisioned.established.session;
+            // Every setup write runs as a command through this fence, which
+            // lets the attempt writer drain settle the setup admission even
+            // when the setup itself never returns (an unanswered agent).
+            const setupCommandFence = eventing.toolCancellationFenceRef.current;
+            await runWorkspaceMutationForSandbox(
               provisioned,
-              provisioned.established.session,
+              "lazyOwnedSandboxSetup",
+              async () =>
+                await runOwnedSandboxSetup(
+                  agent,
+                  provisioned.established.session as never,
+                  provisionedSetupSession as never,
+                  {
+                    settings: runSettings,
+                    environment: sandboxEnvironment,
+                    recordLazyManifest: true,
+                    measureSetup: measure,
+                    ...(materialization.value
+                      ? { priorSoftSetupFailures: [materialization.value] }
+                      : {}),
+                    onRuntimeEvent: async (event) => {
+                      await eventing.publish?.(
+                        [{ type: event.type, payload: event.payload }],
+                        true,
+                      );
+                    },
+                    ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                    ...(lazyGitCredentials?.bindings
+                      ? {
+                          gitCredentialBindingsOverride: lazyGitCredentials.bindings,
+                        }
+                      : {}),
+                    ...(lazyCodemodeToken
+                      ? {
+                          codemodeTokenSeedOverride: lazyCodemodeToken.token,
+                          ...(lazyCodemodeClientDownload
+                            ? { codemodeClientDownloadOverride: lazyCodemodeClientDownload }
+                            : {}),
+                        }
+                      : {}),
+                    ...(setupCommandFence
+                      ? {
+                          commandRunner:
+                            setupCommandFence.runSandboxCommand.bind(setupCommandFence),
+                        }
+                      : {}),
+                    ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
+                      ? {
+                          coordinateSharedRigSetup: setupReplayGuard.trackRigSetup(
+                            createSharedRigSetupCoordinator({
+                              db,
+                              accountId: input.accountId,
+                              workspaceId: input.workspaceId,
+                              sandboxGroupId: sandboxState.sandboxGroupId,
+                              attemptId: input.attemptId,
+                              holderId: sandboxState.sandboxHolderId,
+                              sandbox: provisioned,
+                              ...(runtimeCancellationSignal
+                                ? { signal: runtimeCancellationSignal }
+                                : {}),
+                              observe: (measurement) =>
+                                recordSandboxSharedPreparation(observability, measurement),
+                            }),
+                          ),
+                        }
+                      : {}),
+                  },
+                ),
+              (measurement) => {
+                if (eventing.firstModelRequestPreparationRecorded) return;
+                sandboxState.firstModelPreparationNestedSandboxMs +=
+                  measurement.durationSeconds * 1_000;
+                sandboxState.firstModelPreparationNestedSandboxPhases.push(measurement);
+              },
+              setupCommandFence ? { commandFence: setupCommandFence } : {},
             );
+            await attachCodemodeTokenRenewal(
+              provisioned.established.session as CodemodeTokenWriterSession,
+              lazyCodemodeToken,
+              provisioned,
+            );
+            await attachGitCredentialRenewal(
+              provisioned.established.session as GitCredentialTokenWriterSession,
+              lazyGitCredentials,
+              provisioned,
+            );
+            // `get()` does not release the first routed sandbox operation
+            // until this hook returns. Only images created during this exact
+            // turn can require deferred delivery here; historical images stay
+            // as durable receipts and are restored explicitly when requested.
+            for (const receipt of media.generatedImageReceiptsCreatedThisTurn.values()) {
+              await media.materializeGeneratedImageInSandbox(
+                receipt,
+                provisioned,
+                provisioned.established.session,
+              );
+            }
+            await toolResultSpill.materializeDeferred();
+            throwIfTurnOperationCancelled(sandboxResumeSignal);
+          } catch (error) {
+            // Nothing the model asked for has reached the box yet, and every
+            // setup step above is idempotent, so an unanswered agent lets the
+            // same turn retry instead of failing it, and a box that cannot
+            // start programs is restarted once per turn.
+            throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
+              session: provisioned.established.session,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+              boxReplacement: modalSandboxBoxReplacer(db, {
+                backend: activeSandboxBackend ?? groupBoxBackend,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: sandboxState.sandboxGroupId,
+                box: provisioned,
+                session: provisioned.established.session,
+              }),
+              restartsThisTurn: async () =>
+                await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                }),
+              publish: async (events) => {
+                // The restart guard counts these events: an unrecorded
+                // restart could repeat, so no publisher means no restart.
+                if (!eventing.publish) throw new Error("no event publisher for this turn");
+                await eventing.publish(events, true);
+              },
+              operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+            });
+          } finally {
+            await measure.flush();
           }
-          await toolResultSpill.materializeDeferred();
-          throwIfTurnOperationCancelled(sandboxResumeSignal);
         },
         onFailed: async (error, settlement) => {
           if (lazySandboxEstablishmentSettled) return;
@@ -1159,7 +1389,7 @@ export async function bindLazySandboxProvisioner(
                 type: "sandbox.operation.failed",
                 payload: {
                   name: "sandbox.provision",
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                   provisionId: settlement.provisionId,
                   internalAttempts: settlement.internalAttempts,
                   failureCategory: failure.category,
@@ -1192,10 +1422,12 @@ export async function bindLazySandboxProvisioner(
         db,
         settings,
         bus,
+        wakeSessionWorkflow,
         opJournal,
         onOp: machineOpObserver.observer,
         onSandboxOperation: sandboxOperationObserver,
         onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
+        observability,
         onHomeSandboxLost: publishSandboxLost,
         onHomeSandboxRebound,
         ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
@@ -1205,17 +1437,13 @@ export async function bindLazySandboxProvisioner(
         sessionId: input.sessionId,
         resourceAccountId: input.accountId,
         ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
-        ...(fileAuthoritySubjectId
-          ? {
-              personalMachineAttempt: {
-                accountId: input.accountId,
-                subjectId: fileAuthoritySubjectId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                executionGeneration: attempt.executionGeneration,
-              },
-            }
-          : {}),
+        personalMachineAttempt: {
+          accountId: input.accountId,
+          subjectId: fileAuthoritySubjectId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          executionGeneration: attempt.executionGeneration,
+        },
         environment: sandboxEnvironment,
         ...(transientCodemodeEnvironment
           ? { transientExecEnvironment: transientCodemodeEnvironment }

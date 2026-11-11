@@ -1,26 +1,38 @@
 import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
+import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 import type { Context, MiddlewareHandler } from "hono";
 import { ANALYTICS_CONSENT_PATH } from "../routes/analytics-consent";
 import { CLIENT_ERRORS_PATH } from "../routes/client-errors";
+import { isDesktopDistributionPath } from "../routes/desktop-distribution";
 import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 import {
   isMcpOAuthPublicProtocolPath,
   isMcpOAuthResourcePath,
   mcpOAuthBearerToken,
 } from "../mcp-oauth";
+import { isOrganizationIdentityIssuerPublicPath } from "../mcp-auto-connect";
 
+// The signed-out read of a chat share link (routes/session-share-links.ts).
+const SHARED_SESSION_PUBLIC_PATH = /^\/v1\/shared-sessions\/[^/]+$/;
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
+// The Connected Machine agent's own protocol. A machine never holds the
+// deployment key; each route authenticates its own enroll token, device code,
+// or signed install-key proof, and is rate limited by its route.
+const connectedMachineProtocolPaths = new Set([
+  "/v1/enrollments/token/exchange",
+  "/v1/enrollments/device/start",
+  "/v1/enrollments/device/poll",
+  "/v1/enrollments/renew",
+]);
 const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/installations$/;
-const prReviewGithubBrowserPathPattern =
-  /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/(?:connect|installations\/select|installations\/[^/]+\/configure)$/;
 
 export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
     // §7.2 P1: requireAccessKey is the coarse NETWORK perimeter, not the
     // per-tenant identity gate (that is resolveAccessContext). When
     // `authRequired:false` it is a NO-OP — the embedded (Path 2) case where the
-    // host's own auth is the sole human gate and OpenGeni is mounted behind it.
+    // host's own auth is the sole human gate and Opengeni is mounted behind it.
     // Standalone/separate deployments set `authRequired:true` to keep this ON as
     // the shared-deployment-key perimeter.
     if (!settings.authRequired || isAuthExempt(c, settings)) {
@@ -39,14 +51,29 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "OPTIONS") {
     return true;
   }
+  // An organization MCP action dispatched in this process for a verified
+  // person. Only server code can stamp the exact Request object.
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)) {
+    return true;
+  }
   const path = new URL(c.req.url).pathname;
   if (settings.mcpOauthEnabled && isMcpOAuthPublicProtocolPath(path)) {
+    return true;
+  }
+  // An organization's Opengeni issuer: its discovery document and public
+  // signing keys, which outside apps read to check auto-connect ID-JAGs.
+  if (c.req.method === "GET" && isOrganizationIdentityIssuerPublicPath(path)) {
     return true;
   }
   if (settings.mcpOauthEnabled && isMcpOAuthResourcePath(path) && mcpOAuthBearerToken(c.req.raw)) {
     return true;
   }
   if (path === "/v1/config/client") {
+    return true;
+  }
+  // The Site gateway authenticates every site-runtime call with its own
+  // signature, which the routes verify before anything else.
+  if (path === "/v1/site-runtime" || path.startsWith("/v1/site-runtime/")) {
     return true;
   }
   // The web error beacon must count failures before sign-in. Its payload is a
@@ -59,16 +86,25 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path === ANALYTICS_CONSENT_PATH) {
     return true;
   }
+  // A chat share link opens without signing in: the unguessable share id is
+  // the whole credential, the route is rate limited, and a deployment turns
+  // links off with OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED.
+  if (c.req.method === "GET" && SHARED_SESSION_PUBLIC_PATH.test(path)) {
+    return true;
+  }
   if (path === "/v1/auth" || path.startsWith("/v1/auth/")) {
     return true;
   }
   if (path === "/v1/webhooks/stripe") {
     return true;
   }
-  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/automations/")) {
+  // Event source webhooks are authenticated by the sender's signature, which
+  // the intake verifies over the raw body before reading anything.
+  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/events/")) {
     return true;
   }
-  if (c.req.method === "POST" && path === "/v1/webhooks/pr-review/github") {
+  // The GitHub App's webhooks: GitHub's signature with the App's webhook secret.
+  if (c.req.method === "POST" && path === "/v1/webhooks/github") {
     return true;
   }
   if (
@@ -80,19 +116,14 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     return true;
   }
   if (
-    path === "/v1/pr-review/github/setup" ||
-    path === "/v1/pr-review/github/install/callback" ||
-    path === "/v1/pr-review/github/oauth/callback"
-  ) {
-    return true;
-  }
-  if (
     path === "/v1/integrations/oauth/callback" ||
     path === "/v1/integrations/provider-oauth/callback" ||
     path === "/v1/integrations/github-personal/oauth/callback" ||
-    path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
+    // The sign-in popup's static last page; it reads nothing.
+    (c.req.method === "GET" && path === "/v1/integrations/connect/finished") ||
     path === "/v1/integrations/slack/callback" ||
+    path === "/v1/integrations/teams/messages" ||
     path === "/v1/integrations/slack/events" ||
     path === "/v1/integrations/slack/commands" ||
     path === "/v1/integrations/slack/interactions" ||
@@ -113,12 +144,14 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path.startsWith("/v1/catalog-assets/")) {
     return true;
   }
+  // A bot's avatar picture, fetched by Slack without credentials. The signed
+  // path is its only authority (integrations/session-avatar-image.ts).
+  if (c.req.method === "GET" && path.startsWith("/v1/public/session-avatars/")) {
+    return true;
+  }
   // The GitHub owner-consent entry remains public like the callbacks above; it
   // verifies fresh signed workspace-bound state before redirecting to GitHub.
   if (githubConnectPathPattern.test(path)) {
-    return true;
-  }
-  if (prReviewGithubBrowserPathPattern.test(path)) {
     return true;
   }
   // Compatibility endpoint for stale chooser submissions. It remains public
@@ -129,9 +162,18 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     return true;
   }
   // The get.<domain> install-serving routes (install.sh/.ps1/uninstall.sh/
-  // minisign pub + the release-binary redirects). Reached by a fresh machine
-  // with no credentials; the bodies carry no secrets.
-  if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
+  // minisign pub + the release-binary redirects) and the desktop app downloads.
+  // Reached by a fresh machine with no credentials; the bodies carry no secrets.
+  if (
+    installExactPaths.has(path) ||
+    isInstallRedirectPath(path) ||
+    isDesktopDistributionPath(path)
+  ) {
+    return true;
+  }
+  // Without this a key-protected deployment could never enroll or renew a
+  // machine. Human approval and lookup stay behind the key.
+  if (c.req.method === "POST" && connectedMachineProtocolPaths.has(path)) {
     return true;
   }
   if (
@@ -172,6 +214,28 @@ async function isAuthorized(c: Context, settings: Settings): Promise<boolean> {
     bearer &&
     delegationSecret &&
     (await verifyDelegatedAccessToken(delegationSecret, bearer)),
+  );
+}
+
+/**
+ * A request to a key-only (configured) deployment that presents the deployment
+ * key itself, from the operator rather than an agent acting for someone. The
+ * key travels in a request header that a page on another site can't add, so
+ * browser same-origin checks have nothing to protect on such a request.
+ */
+export function isConfiguredDeploymentKeyRequest(c: Context, settings: Settings): boolean {
+  const expected = settings.accessKey;
+  if (settings.productAccessMode !== "configured" || !settings.authRequired || !expected) {
+    return false;
+  }
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) !== null) return false;
+  const authorization = c.req.header("authorization");
+  const bearer = authorization?.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : undefined;
+  return (
+    constantTimeEqual(c.req.header("x-opengeni-access-key"), expected) ||
+    constantTimeEqual(bearer, expected)
   );
 }
 

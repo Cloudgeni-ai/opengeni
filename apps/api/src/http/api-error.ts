@@ -1,5 +1,36 @@
-import { AgentConfigError, AllowanceExhaustedRefusal, type ErrorCode } from "@opengeni/contracts";
-import { WorkspaceControlBusyError } from "@opengeni/db";
+import {
+  ADD_CREDITS_ACTION,
+  API_CREDITS_REQUIRED_CODE,
+  AgentConfigError,
+  BYOK_PAID_CREDIT_REQUIRED_CODE,
+  SUBSCRIPTION_PLAN_REQUIRED_CODE,
+  SUBSCRIPTION_API_UNAVAILABLE_CODE,
+  UPGRADE_PLAN_ACTION,
+  byokRefusalAction,
+  AllowanceExhaustedRefusal,
+  GitHubRepositoryUnavailableError,
+  ModelPolicyRefusedError,
+  ModelUnavailableError,
+  ScheduledTaskTargetAccessChange,
+  type ErrorCode,
+} from "@opengeni/contracts";
+import {
+  isDatabaseConnectionLoss,
+  SessionUsageLimitUnavailableError,
+  nestedPostgresSqlState,
+  SessionApprovalForbiddenError,
+  WorkspaceControlBusyError,
+  WorkspaceContentFlowRefusedError,
+} from "@opengeni/db";
+import {
+  AuthenticationRequiredRefusal,
+  ConnectionAccountSelectionError,
+  MissingPermissionRefusal,
+  SessionUsageLimitHttpError,
+  sessionUsageLimitRefusalFromError,
+  TranscriptionServiceError,
+} from "@opengeni/core";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
 
@@ -28,6 +59,62 @@ export class ApiHttpError extends HTTPException {
   }
 }
 
+/** A missing permission keeps its plain sentence and names the permission in `details`. */
+export function missingPermissionHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof MissingPermissionRefusal)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: error.details,
+  });
+}
+
+/** A request that signs no one in says why in `details.code` (missing or lapsed sign-in). */
+export function authenticationRequiredHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof AuthenticationRequiredRefusal)) return null;
+  return new ApiHttpError(401, {
+    code: "unauthenticated",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: error.details,
+  });
+}
+
+/**
+ * Approving an action on someone else's own login: says who can approve, and
+ * keeps the stable code in `details` so clients can tell it from other 403s.
+ */
+export function approvalForbiddenHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof SessionApprovalForbiddenError)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: {
+      code: error.code,
+      ...(error.owner.label ? { accountOwnerLabel: error.owner.label } : {}),
+    },
+  });
+}
+
+export function scheduledTaskTargetAccessHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof HTTPException) || error.status !== 409) return null;
+  const result = ScheduledTaskTargetAccessChange.safeParse(error.cause);
+  return result.success
+    ? new ApiHttpError(409, {
+        code: "conflict",
+        message: error.message,
+        retryable: false,
+        outcomeUnknown: false,
+        details: result.data,
+      })
+    : null;
+}
+
 /** Preserve typed admission details through the common public error envelope. */
 export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null {
   if (!(error instanceof HTTPException) || error.status !== 402) return null;
@@ -45,6 +132,122 @@ export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null
     outcomeUnknown: false,
     details,
   });
+}
+
+/**
+ * Core's "no credits for this model" refusal (a 402 whose cause is the
+ * `insufficient_credits` limit decision) keeps its public `payment_required`
+ * code and gains the stable `details.code: "insufficient_credits"`, so
+ * callers can tell it from other 402s without matching message text.
+ */
+export function insufficientCreditsHttpError(error: unknown): ApiHttpError | null {
+  if (error instanceof TranscriptionServiceError && error.subscriptionCode) {
+    error = new HTTPException(
+      error.subscriptionCode === SUBSCRIPTION_API_UNAVAILABLE_CODE ? 403 : 402,
+      {
+        message: error.message,
+        cause: { allowed: false, code: error.subscriptionCode },
+      },
+    );
+  }
+  if (!(error instanceof HTTPException)) return null;
+  const cause = error.cause as { allowed?: unknown; code?: unknown } | null | undefined;
+  if (!cause || typeof cause !== "object" || cause.allowed !== false) return null;
+  if (error.status === 403 && cause.code === SUBSCRIPTION_API_UNAVAILABLE_CODE) {
+    return new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: cause.code },
+    });
+  }
+  if (error.status !== 402) return null;
+  if (
+    cause.code !== "insufficient_credits" &&
+    cause.code !== API_CREDITS_REQUIRED_CODE &&
+    cause.code !== BYOK_PAID_CREDIT_REQUIRED_CODE &&
+    cause.code !== SUBSCRIPTION_PLAN_REQUIRED_CODE
+  ) {
+    return null;
+  }
+  // API work found no credits (plan credit never pays for it), the person's
+  // own key found no paid credit for its fee, or their own subscription found
+  // no paid plan: say so and offer the one action that fixes it.
+  return new ApiHttpError(402, {
+    code: "payment_required",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details:
+      cause.code === API_CREDITS_REQUIRED_CODE
+        ? { code: cause.code, action: { ...ADD_CREDITS_ACTION } }
+        : cause.code === BYOK_PAID_CREDIT_REQUIRED_CODE
+          ? { code: cause.code, action: { ...byokRefusalAction(error.message) } }
+          : cause.code === SUBSCRIPTION_PLAN_REQUIRED_CODE
+            ? { code: cause.code, action: { ...UPGRADE_PLAN_ACTION } }
+            : { code: "insufficient_credits" },
+  });
+}
+
+const SESSION_USAGE_LIMIT_ERROR_CODES: Record<SessionUsageLimitHttpError["code"], ErrorCode> = {
+  session_usage_limit_conflict: "conflict",
+  session_usage_limit_not_root: "conflict",
+  session_usage_limit_preparing: "conflict",
+  session_usage_limit_disabled: "validation_failed",
+  session_usage_limit_forbidden: "forbidden",
+  session_usage_limit_unavailable: "upstream_unavailable",
+  session_not_found: "not_found",
+};
+
+/**
+ * Per-task usage limits. A reached root limit is a non-retryable 402
+ * `session_usage_limit_reached` whose details carry only the public refusal
+ * fields; it is never `allowance_exhausted`, `payment_required` or a purchase
+ * prompt. Limit writes map to stable `details.code` values. Unreadable usage
+ * state is a retryable 503 that was not applied (never unlimited).
+ */
+export function sessionUsageLimitHttpError(error: unknown): ApiHttpError | null {
+  const refusal = sessionUsageLimitRefusalFromError(error);
+  if (refusal) {
+    return new ApiHttpError(402, {
+      code: "session_usage_limit_reached",
+      message: refusal.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: {
+        basis: refusal.basis,
+        rootSessionId: refusal.rootSessionId,
+        limitMicros: refusal.limitMicros,
+        usedMicros: refusal.usedMicros,
+      },
+    });
+  }
+  if (error instanceof SessionUsageLimitHttpError) {
+    return new ApiHttpError(error.status, {
+      code: SESSION_USAGE_LIMIT_ERROR_CODES[error.code],
+      message: error.message,
+      retryable: error.code === "session_usage_limit_unavailable",
+      outcomeUnknown: false,
+      details: { ...error.details, code: error.code },
+    });
+  }
+  const unavailable =
+    error instanceof SessionUsageLimitUnavailableError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof SessionUsageLimitUnavailableError
+        ? error.cause
+        : null;
+  if (unavailable) {
+    return new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: "Usage for this task is temporarily unavailable. Try again shortly.",
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: "session_usage_limit_unavailable" },
+    });
+  }
+  return null;
 }
 
 /**
@@ -71,6 +274,62 @@ export function workspaceControlBusyHttpError(error: unknown): ApiHttpError | nu
   });
 }
 
+/** `details.code` of the retryable 503 for a request whose database connection was lost. */
+export const DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE = "DATABASE_UNAVAILABLE";
+
+/**
+ * The request's database connection went away (an operator drain, failover,
+ * restart, or socket loss) rather than the statement being rejected. That is a
+ * brief, retryable outage, not an internal error. A read is safe to repeat. A
+ * mutation's outcome is unknown: the connection may have dropped after COMMIT,
+ * or after an earlier transaction of the same request committed, so the client
+ * must reconcile by its own idempotency key before resending.
+ */
+export function databaseUnavailableHttpError(error: unknown, method: string): ApiHttpError | null {
+  if (error instanceof ApiHttpError) return null;
+  if (error instanceof HTTPException && error.status < 500) return null;
+  if (!isDatabaseConnectionLoss(error)) return null;
+  const safeMethod = method === "GET" || method === "HEAD" || method === "OPTIONS";
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message: "The workspace is temporarily unavailable. Retry shortly.",
+    retryable: true,
+    outcomeUnknown: !safeMethod,
+    details: { code: DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE },
+  });
+}
+
+/** `details.code` of the retryable 503 for a deadlock/serialization victim. */
+export const DATABASE_CONTENTION_ERROR_DETAIL_CODE = "DATABASE_CONTENTION";
+
+/**
+ * PostgreSQL aborted the request's transaction as a deadlock (40P01) or
+ * serialization (40001) victim after any in-process retry was exhausted. The
+ * aborted transaction committed nothing, so this is transient contention, not
+ * an internal error. A read is safe to repeat. For a mutation the default is
+ * `outcomeUnknown` because an earlier transaction of the same request may have
+ * committed; a route whose only write is the aborted idempotent transaction
+ * passes `outcomeUnknown: false`.
+ */
+export function databaseContentionHttpError(
+  error: unknown,
+  method: string,
+  options: { outcomeUnknown?: boolean } = {},
+): ApiHttpError | null {
+  if (error instanceof ApiHttpError) return null;
+  if (error instanceof HTTPException && error.status < 500) return null;
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState !== "40P01" && sqlState !== "40001") return null;
+  const safeMethod = method === "GET" || method === "HEAD" || method === "OPTIONS";
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message: "The workspace hit transient database contention. Retry shortly.",
+    retryable: true,
+    outcomeUnknown: options.outcomeUnknown ?? !safeMethod,
+    details: { code: DATABASE_CONTENTION_ERROR_DETAIL_CODE, sqlState },
+  });
+}
+
 /**
  * A typed agent-configuration failure (capability unavailable, conflict,
  * widening, not enabled). Rendered as 422 validation_failed with the specific
@@ -92,5 +351,119 @@ export function agentConfigHttpError(error: unknown): ApiHttpError | null {
       code: cause.code,
       ...(cause.capability ? { capability: cause.capability } : {}),
     },
+  });
+}
+
+/**
+ * EU-only refusals, rendered as 422 `region_restricted`; retrying can't
+ * change them. Content from an EU-only workspace would reach a workspace that
+ * isn't EU-only, or EU-only inference refused a model-backed feature with no
+ * EU route. The inference refusal also carries `details.code:
+ * "region_restricted"`, the code every availability field reports for it.
+ */
+export function regionRestrictedHttpError(error: unknown): ApiHttpError | null {
+  if (error instanceof InferenceRegionRestrictedError) {
+    return new ApiHttpError(422, {
+      code: "region_restricted",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: error.code },
+    });
+  }
+  const cause =
+    error instanceof WorkspaceContentFlowRefusedError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof WorkspaceContentFlowRefusedError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "region_restricted",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+  });
+}
+
+/**
+ * The requested or stored model is not in the live catalog. Rendered as the
+ * same 422 `validation_failed` with its historical message, plus
+ * `details.code: "model_unavailable"` and the model id so clients can ask for
+ * another model rather than offer a retry that cannot succeed.
+ */
+export function modelUnavailableHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof ModelUnavailableError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof ModelUnavailableError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, modelId: cause.modelId },
+  });
+}
+
+/**
+ * A model the workspace's model policy refuses. The same request is refused
+ * again until someone changes the model or the policy, so clients get
+ * `details.code: "model_policy"` with the rule (`reason`) instead of a retry.
+ */
+export function modelPolicyRefusedHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof ModelPolicyRefusedError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof ModelPolicyRefusedError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, modelId: cause.modelId, reason: cause.reason },
+  });
+}
+
+/**
+ * GitHub App repositories the workspace can no longer use. The same 422
+ * `validation_failed` with its historical message, plus
+ * `details.code: "github_repository_unavailable"` and the repositories, so
+ * clients can say which repository to remove or restore instead of "check
+ * your input".
+ */
+export function githubRepositoryUnavailableHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof GitHubRepositoryUnavailableError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof GitHubRepositoryUnavailableError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, repositories: [...cause.repositories] },
+  });
+}
+
+/** Keep a rejected credential selection actionable without changing its authority. */
+export function connectionAccountSelectionHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof ConnectionAccountSelectionError)) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message:
+      "A selected connector account is unavailable. Review your connected accounts before sending again.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: "connection_account_selection_unavailable", ...error.diagnostic },
   });
 }

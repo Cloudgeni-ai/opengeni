@@ -4,16 +4,17 @@
 // the CLIENT half: reassembly, heals, ack policy, fault taxonomy, rendering
 // parity, and the durable-before-wire-ack ordering.
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
-import { ErrorCode, type ControlRequest } from "@opengeni/agent-proto";
+import { ErrorCode, ExecRequest, OpChannel, type ControlRequest } from "@opengeni/agent-proto";
 import type { ControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 import type { SelfhostedOpObservation } from "../src/sandbox/selfhosted/op-observer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
 import {
   OpStreamExecClient,
+  OP_START_RESEND_HORIZON_MS,
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   type OpStreamJournal,
   type OpStreamOutputFrame,
@@ -29,6 +30,7 @@ const WORKSPACE_ROOT = "/home/user/project";
 function buildRig(
   opts: {
     journal?: OpStreamJournal;
+    outputReleaseSupported?: boolean;
     execTimeoutMs?: number;
     windowBytes?: number;
     memoryMaxBytes?: number;
@@ -100,6 +102,7 @@ function buildRig(
     opStream: {
       transport,
       ...(opts.journal ? { journal: opts.journal } : {}),
+      ...(opts.outputReleaseSupported ? { outputReleaseSupported: true } : {}),
       ...(opts.windowBytes !== undefined ? { windowBytes: opts.windowBytes } : {}),
       ackIntervalMs: 20,
       silenceTimeoutMs: 120,
@@ -405,6 +408,8 @@ describe("op-stream exec (fake runner)", () => {
     expect(ownerAttaches).toHaveLength(2);
     expect(run.startCount).toBe(1);
     expect(run.exit.cancelled).toBe(false);
+    await session.finalizeOpStreamOps(["after_reaper"]);
+    await session.finalizeOpStreamOps();
     expect(run.finalAcked).toBe(false);
   });
 
@@ -441,6 +446,52 @@ describe("op-stream exec (fake runner)", () => {
     expect(requests.slice(before).map((request) => request.op?.$case)).not.toContain("opStart");
     expect(requests.slice(before).map((request) => request.op?.$case)).not.toContain("opCancel");
     expect(await session.refreshOwnedCommand("owned-refresh")).toBe(false);
+  });
+
+  test("an owner refresh after the result was stored and released reads the stored record, not a lost result", async () => {
+    const settled: string[] = [];
+    const { runner, session } = buildRig({
+      adoptBackgroundCommand: async ({ opId }) => ({ commandId: `cmd-${opId}` }),
+      captureBackgroundCommandOutput: async () => {},
+      settleBackgroundCommand: async ({ commandId }) => {
+        settled.push(commandId);
+      },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    for (const name of ["released_read", "evicted_read"]) {
+      runner.script(`${name}:0`, {
+        frames: [{ channel: "stdout", bytes: "done" }],
+        live: true,
+        holdUntilCancel: true,
+      });
+      await runWithToolCallCorrelation(name, () =>
+        session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+      );
+      await session.cancelExecCommand(`${name}:0`);
+    }
+    // A concurrent collection stored the result and released it on the runner
+    // between the wait's snapshot and this refresh.
+    const released = runner.runs.get("released_read:0")!;
+    await runner.request(
+      `agent.${WORKSPACE}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`,
+      {
+        requestId: crypto.randomUUID(),
+        epoch: 0,
+        op: {
+          $case: "opRelease",
+          opRelease: { opId: "released_read:0", exitSeq: released.exitSeq.toString() },
+        },
+      },
+      { timeoutMs: 1000 },
+    );
+    expect(await session.refreshOwnedCommand("cmd-released_read:0")).toBe(true);
+    expect(await session.refreshOwnedCommand("cmd-released_read:0")).toBe(false);
+    // Any other loss is still a real loss.
+    runner.lostOps.add("evicted_read:0");
+    await expect(session.refreshOwnedCommand("cmd-evicted_read:0")).rejects.toThrow(
+      "no longer available",
+    );
+    expect(settled).toEqual([]);
   });
 
   test("attach-only command reads replay exact UTF-8 frames without starting, cancelling, or final-acking", async () => {
@@ -527,10 +578,141 @@ describe("op-stream exec (fake runner)", () => {
       session.execCommand({ cmd: "live", yieldTimeMs: 0 }),
     );
     expect((await reader.readExisting("read_live:0", 5, async () => {})).status).toBe("running");
+    // A yielded consumer stops following: its generation's last word to the
+    // runner is a detach, so nothing keeps streaming to an unsubscribed
+    // subject over the machine's shared bulk connection. Older runners read
+    // the accompanying full credit range and keep draining as before.
+    const liveAcks = transport.decodedAcks().filter((ack) => ack.opId === "read_live:0");
+    const detaches = liveAcks.filter((ack) => ack.detach);
+    expect(detaches.length).toBeGreaterThan(0);
+    expect(liveAcks.at(-1)?.detach).toBe(true);
+    expect(detaches.every((ack) => ack.creditBytes === "18446744073709551615")).toBe(true);
+    expect(
+      liveAcks.filter((ack) => !ack.detach).every((ack) => BigInt(ack.creditBytes) < 2n ** 32n),
+    ).toBe(true);
     expect(runner.runs.get("read_live:0")!.exit.cancelled).toBe(false);
     expect(calls).not.toContain("opStart");
     expect(calls).not.toContain("opCancel");
   });
+
+  for (const path of ["replay", "adoption"] as const) {
+    for (const channel of ["stdout", "stderr"] as const) {
+      for (const missing of ["digest", "blank digest", "total"] as const) {
+        test(`${path} retains output when ${channel} exit ${missing} is missing`, async () => {
+          const { runner, transport } = buildRig();
+          const opId = `integrity_${path}_${channel}_${missing.replaceAll(" ", "_")}`;
+          runner.script(opId, {
+            frames: [
+              { channel: "stdout", bytes: "original-output" },
+              { channel: "stderr", bytes: "original-error" },
+            ],
+            ...(path === "adoption" ? { live: true, holdUntilCancel: true } : {}),
+          });
+          const captures: OpStreamOutputFrame[] = [];
+          const client = new OpStreamExecClient({
+            workspaceId: WORKSPACE,
+            agentId: AGENT,
+            connectionInstanceId: CONNECTION_INSTANCE,
+            epoch: 0,
+            rpcSubject: `agent.${WORKSPACE}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`,
+            controlRpc: runner,
+            transport,
+            controlTimeoutMs: 1000,
+            retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+          });
+          const exec = ExecRequest.create({ command: ["work"], shell: true });
+          if (path === "replay") {
+            await runner.request(
+              `agent.${WORKSPACE}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`,
+              {
+                requestId: opId,
+                epoch: 0,
+                resourcePolicy: undefined,
+                op: {
+                  $case: "opStart",
+                  opStart: {
+                    op: { $case: "exec", exec },
+                    windowBytes: "65536",
+                    deadlineMs: "0",
+                    originId: "synthetic-retained-command",
+                  },
+                },
+              },
+              { timeoutMs: 1000 },
+            );
+          }
+          let restoreIntegrity!: () => void;
+          const removeIntegrity = () => {
+            const run = runner.runs.get(opId)!;
+            const exit = run.exit;
+            const digest = exit.digests[channel]!;
+            const total = exit.totals[channel]!;
+            const data = run.frames.find(
+              (frame) =>
+                frame.body?.$case === "data" &&
+                frame.body.data.channel ===
+                  (channel === "stdout"
+                    ? OpChannel.OP_CHANNEL_STDOUT
+                    : OpChannel.OP_CHANNEL_STDERR),
+            )!.body!;
+            if (data.$case !== "data") throw new Error("missing synthetic output");
+            const original = data.data.bytes;
+            // Equal-length corruption would evade the remaining byte-count check.
+            if (missing !== "total") {
+              data.data.bytes = new TextEncoder().encode(
+                channel === "stdout" ? "modified-output" : "modified-error",
+              );
+            }
+            restoreIntegrity = () => {
+              exit.digests[channel] = digest;
+              exit.totals[channel] = total;
+              data.data.bytes = original;
+            };
+            if (missing === "total") delete exit.totals[channel];
+            else if (missing === "digest") delete exit.digests[channel];
+            else exit.digests[channel] = "";
+          };
+          const capture = async (frames: OpStreamOutputFrame[]) => {
+            captures.push(...frames);
+          };
+          if (path === "replay") removeIntegrity();
+          const read =
+            path === "replay"
+              ? client.readExisting(opId, 100, capture)
+              : client.execWithYield(opId, exec, 1000, 2000, {
+                  yieldMs: 1,
+                  onYield: async () => {
+                    removeIntegrity();
+                    await client.cancel(opId);
+                  },
+                  captureOutput: capture,
+                });
+          await expect(read).rejects.toMatchObject({
+            name: "SelfhostedControlError",
+            code: ErrorCode.ERROR_CODE_PROTOCOL,
+            retryable: false,
+          });
+          expect(captures).toEqual([]);
+          expect(runner.runs.get(opId)!.finalAcked).toBe(false);
+          expect(transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+          await client.finalizeSettledOps();
+          expect(runner.runs.get(opId)!.finalAcked).toBe(false);
+          restoreIntegrity();
+          const recovered = await client.readExisting(opId, 100, capture);
+          expect(recovered.status).toBe("completed");
+          expect(captures.map((frame) => frame.chunk).join("")).toBe(
+            "original-outputoriginal-error",
+          );
+          expect(recovered.outputReceipt).toBeDefined();
+          expect(await client.releaseCapturedOutput(opId, recovered.outputReceipt!)).toBe(
+            "published",
+          );
+          expect(runner.runs.get(opId)!.finalAcked).toBe(true);
+          expect(runner.runs.get(opId)!.startCount).toBe(1);
+        });
+      }
+    }
+  }
 
   test("adoption captures output with its durable UUID even when exit races the adoption transaction", async () => {
     const saved: { commandId: string; frames: OpStreamOutputFrame[] }[] = [];
@@ -671,6 +853,7 @@ describe("op-stream exec (fake runner)", () => {
         outcome: "exited",
         exitCode: -1,
         reason: "op_exit",
+        backgroundChildrenStopped: false,
       },
     ]);
   });
@@ -881,7 +1064,7 @@ describe("op-stream exec (fake runner)", () => {
     const cancelledAt = performance.now();
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
-    await invocation;
+    await expect(invocation).rejects.toThrow("steered");
 
     expect(performance.now() - cancelledAt).toBeLessThan(2_000);
     expect(runner.runs.get("call_shell_cancel:0")?.exit.cancelled).toBe(true);
@@ -941,6 +1124,224 @@ describe("op-stream exec (fake runner)", () => {
     expect(events[0]).toBe(`persist:call_ack:0@${run?.exitSeq.toString()}`);
     expect(events[1]).toBe("wire-ack");
     expect(runner.runs.get("call_ack:0")?.finalAcked).toBe(true);
+  });
+
+  test("a runner serving OpRelease releases a stored foreground op in one answered exchange", async () => {
+    const events: string[] = [];
+    let releases: () => ControlRequest[] = () => [];
+    const journal: OpStreamJournal = {
+      attachGeneration: () => "7",
+      persistSettled: (opId, exitSeq) => {
+        events.push(`persist:${opId}@${exitSeq}:released=${releases().length}`);
+      },
+    };
+    const { transport, runner, session, requests } = buildRig({
+      journal,
+      outputReleaseSupported: true,
+    });
+    releases = () => requests.filter((request) => request.op?.$case === "opRelease");
+    runner.script("call_release:0", { frames: [{ channel: "stdout", bytes: "stored" }] });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("call_release", () => session.exec({ cmd: "true" }));
+    const run = runner.runs.get("call_release:0");
+    const exitSeq = run!.exitSeq.toString();
+    expect(releases()).toEqual([]);
+
+    // The durability hook: the frontier is persisted first, then one
+    // OpRelease for exactly its exit frame, answered released.
+    await session.finalizeOpStreamOps();
+    expect(events).toEqual([`persist:call_release:0@${exitSeq}:released=0`]);
+    expect(releases().map((request) => request.op)).toEqual([
+      { $case: "opRelease", opRelease: { opId: "call_release:0", exitSeq } },
+    ]);
+    expect(runner.releasedOps.has("call_release:0")).toBe(true);
+    // No final ACK is published: the answer settled it.
+    expect(transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+    // Nothing is left for a later hook.
+    await session.finalizeOpStreamOps();
+    expect(releases()).toHaveLength(1);
+    expect(events).toHaveLength(1);
+  });
+
+  test("a durable tool result releases only its own sub-ops, preserving parallel and setup output", async () => {
+    const { runner, session, transport } = buildRig();
+    for (const opId of ["call_first:0", "call_first:1", "call_second:0"]) {
+      runner.script(opId, { frames: [{ channel: "stdout", bytes: opId }] });
+    }
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await Promise.all([
+      runWithToolCallCorrelation("call_first", async () => {
+        await session.exec({ cmd: "first sub-op" });
+        await session.exec({ cmd: "second sub-op" });
+      }),
+      runWithToolCallCorrelation("call_second", () => session.exec({ cmd: "parallel" })),
+    ]);
+    const request = runner.request.bind(runner);
+    runner.request = async (subject, input, options) => {
+      if (input.op?.$case === "opStart" && input.requestId.startsWith("anon_")) {
+        runner.script(input.requestId, { frames: [{ channel: "stdout", bytes: "setup" }] });
+      }
+      return request(subject, input, options);
+    };
+    await session.exec({ cmd: "setup without a tool call" });
+    const setupOpId = [...runner.runs.keys()].find((id) => id.startsWith("anon_"))!;
+
+    await session.finalizeOpStreamOps([]);
+    expect(transport.decodedAcks().filter((ack) => ack.final)).toEqual([]);
+    await session.finalizeOpStreamOps(["call_first"]);
+    expect(runner.runs.get("call_first:0")?.finalAcked).toBe(true);
+    expect(runner.runs.get("call_first:1")?.finalAcked).toBe(true);
+    expect(runner.runs.get("call_second:0")?.finalAcked).toBe(false);
+    expect(runner.runs.get(setupOpId)?.finalAcked).toBe(false);
+
+    await session.finalizeOpStreamOps(["call_second"]);
+    expect(runner.runs.get("call_second:0")?.finalAcked).toBe(true);
+    expect(runner.runs.get(setupOpId)?.finalAcked).toBe(false);
+    await session.finalizeOpStreamOps();
+    expect(runner.runs.get(setupOpId)?.finalAcked).toBe(true);
+    expect(transport.decodedAcks().filter((ack) => ack.final)).toHaveLength(4);
+  });
+
+  test("durable result scope uses the original call id, not a sanitized op-id prefix", async () => {
+    const { runner, session } = buildRig();
+    const { runWithToolCallCorrelation, sanitizeOpIdToken } =
+      await import("../src/sandbox/op-correlation");
+    const callId = "call.with.punctuation";
+    const opId = `${sanitizeOpIdToken(callId)}:0`;
+    runner.script(opId, { frames: [{ channel: "stdout", bytes: "retained result" }] });
+    await runWithToolCallCorrelation(callId, () => session.exec({ cmd: "work" }));
+    await session.finalizeOpStreamOps([sanitizeOpIdToken(callId)]);
+    expect(runner.runs.get(opId)?.finalAcked).toBe(false);
+    await session.finalizeOpStreamOps([callId]);
+    expect(runner.runs.get(opId)?.finalAcked).toBe(true);
+  });
+
+  test("failed journal persistence retains the frontier for a later durable-result hook", async () => {
+    let rejectPersistence = true;
+    const persisted: string[] = [];
+    const { runner, session, transport } = buildRig({
+      journal: {
+        attachGeneration: () => "11",
+        persistSettled: (opId) => {
+          if (rejectPersistence) throw new Error("journal unavailable");
+          persisted.push(opId);
+        },
+      },
+    });
+    runner.script("call_journal:0", { frames: [{ channel: "stdout", bytes: "preserve" }] });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("call_journal", () => session.exec({ cmd: "work" }));
+    await expect(session.finalizeOpStreamOps(["call_journal"])).rejects.toThrow(
+      "journal unavailable",
+    );
+    expect(runner.runs.get("call_journal:0")?.finalAcked).toBe(false);
+    expect(transport.decodedAcks().filter((ack) => ack.final)).toEqual([]);
+
+    rejectPersistence = false;
+    await session.finalizeOpStreamOps(["call_journal"]);
+    expect(persisted).toEqual(["call_journal:0"]);
+    expect(transport.decodedAcks().filter((ack) => ack.final)).toMatchObject([
+      { opId: "call_journal:0", attachGeneration: "11" },
+    ]);
+    await session.finalizeOpStreamOps();
+    expect(transport.decodedAcks().filter((ack) => ack.final)).toHaveLength(1);
+  });
+
+  test("a finalization boundary never consumes an op that settles during journal I/O", async () => {
+    let journalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      journalStarted = resolve;
+    });
+    let releaseJournal!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseJournal = resolve;
+    });
+    const { runner, session } = buildRig({
+      journal: {
+        attachGeneration: () => "13",
+        persistSettled: async () => {
+          journalStarted();
+          await blocked;
+        },
+      },
+    });
+    for (const opId of ["call_durable:0", "call_later:0"]) {
+      runner.script(opId, { frames: [{ channel: "stdout", bytes: opId }] });
+    }
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("call_durable", () => session.exec({ cmd: "first" }));
+    const finalization = session.finalizeOpStreamOps();
+    await started;
+    try {
+      await runWithToolCallCorrelation("call_later", () => session.exec({ cmd: "later" }));
+    } finally {
+      releaseJournal();
+    }
+    await finalization;
+    expect(runner.runs.get("call_durable:0")?.finalAcked).toBe(true);
+    expect(runner.runs.get("call_later:0")?.finalAcked).toBe(false);
+    await session.finalizeOpStreamOps(["call_later"]);
+    expect(runner.runs.get("call_later:0")?.finalAcked).toBe(true);
+  });
+
+  test("a failed wire final ACK remains retryable without repeating command execution", async () => {
+    const { runner, session, transport } = buildRig();
+    runner.script("call_wire:0", { frames: [{ channel: "stdout", bytes: "once" }] });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("call_wire", () => session.exec({ cmd: "work" }));
+    transport.available = false;
+    await session.finalizeOpStreamOps(["call_wire"]);
+    expect(runner.runs.get("call_wire:0")?.finalAcked).toBe(false);
+    transport.available = true;
+    await session.finalizeOpStreamOps(["call_wire"]);
+    expect(runner.runs.get("call_wire:0")?.finalAcked).toBe(true);
+    expect(runner.runs.size).toBe(1);
+  });
+
+  test("overlapping durability hooks serialize journal writes and final-ack each op once", async () => {
+    let journalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      journalStarted = resolve;
+    });
+    let releaseJournal!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseJournal = resolve;
+    });
+    const persisted: string[] = [];
+    const { runner, session, transport } = buildRig({
+      journal: {
+        attachGeneration: () => "17",
+        persistSettled: async (opId) => {
+          persisted.push(opId);
+          if (persisted.length === 1) {
+            journalStarted();
+            await blocked;
+          }
+        },
+      },
+    });
+    for (const opId of ["call_overlap_first:0", "call_overlap_second:0"]) {
+      runner.script(opId, { frames: [{ channel: "stdout", bytes: opId }] });
+    }
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await Promise.all([
+      runWithToolCallCorrelation("call_overlap_first", () => session.exec({ cmd: "first" })),
+      runWithToolCallCorrelation("call_overlap_second", () => session.exec({ cmd: "second" })),
+    ]);
+    const first = session.finalizeOpStreamOps(["call_overlap_first"]);
+    await started;
+    const completeBoundary = session.finalizeOpStreamOps();
+    expect(persisted).toEqual(["call_overlap_first:0"]);
+    expect(transport.decodedAcks().filter((ack) => ack.final)).toEqual([]);
+    releaseJournal();
+    await Promise.all([first, completeBoundary]);
+    expect(persisted).toEqual(["call_overlap_first:0", "call_overlap_second:0"]);
+    expect(transport.decodedAcks().filter((ack) => ack.final)).toMatchObject([
+      { opId: "call_overlap_first:0", attachGeneration: "17" },
+      { opId: "call_overlap_second:0", attachGeneration: "17" },
+    ]);
+    expect(runner.runs.get("call_overlap_first:0")?.startCount).toBe(1);
+    expect(runner.runs.get("call_overlap_second:0")?.startCount).toBe(1);
   });
 
   test("re-issued op id ATTACHES and collects — never re-runs (B1)", async () => {
@@ -1269,6 +1670,66 @@ describe("op-stream exec (fake runner)", () => {
     expect(runner.runs.has("call_retry_revoke:0")).toBe(false);
   });
 
+  test("no start for an op is sent past the resend horizon of its first attempt", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+    });
+    // Three refusals, then the runner would admit it: at the fourth attempt,
+    // five minutes after the third, the horizon has passed.
+    runner.script("call_horizon:0", {
+      frames: [{ channel: "stdout", bytes: "must-not-run" }],
+      drainingStarts: 3,
+    });
+    const startedAt = Date.now();
+    let now = startedAt;
+    const startsAt: number[] = [];
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      controlRpc: {
+        request: async (subject, request, opts) => {
+          if (request.op?.$case === "opStart") startsAt.push(Date.now());
+          return await runner.request(subject, request, opts);
+        },
+      },
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      // No exec deadline: only the horizon ends the retries.
+      execTimeoutMs: 0,
+      retryClock: {
+        sleep: async () => {
+          now += 5 * 60_000;
+          setSystemTime(new Date(now));
+        },
+        jitter: () => 0.5,
+      },
+      opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    try {
+      const outcome = await runWithToolCallCorrelation("call_horizon", () =>
+        session.exec({ cmd: "must-not-run" }),
+      ).then(
+        (result) => result.stdout,
+        (error: unknown) => error,
+      );
+      expect(outcome).not.toBe("must-not-run");
+    } finally {
+      setSystemTime();
+    }
+    expect(startsAt.length).toBe(3);
+    expect(runner.runs.has("call_horizon:0")).toBe(false);
+    for (const at of startsAt) {
+      expect(at - startedAt + 2_000 + 120_000).toBeLessThanOrEqual(OP_START_RESEND_HORIZON_MS);
+    }
+  });
+
   test("revocation while the frame subscription is opening fences the initial OpStart", async () => {
     const transport = new InMemoryOpStreamTransport();
     const runner = new FakeOpRunner({
@@ -1433,6 +1894,30 @@ describe("op-stream exec (fake runner)", () => {
     expect(responder.requests).toHaveLength(0);
   });
 
+  test("an expired delivery receipt preserves an unknown OpStart outcome without retry", async () => {
+    const { runner, session, requests } = buildRig();
+    runner.script("call_expired:0", {
+      frames: [],
+      startError: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "Earlier execution may have occurred; inspect the outcome before retrying.",
+        retryable: false,
+        detail: { failure_code: "control_delivery_expired", outcome_unknown: "true" },
+      },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await expect(
+      runWithToolCallCorrelation("call_expired", () => session.exec({ cmd: "do-not-repeat" })),
+    ).rejects.toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_PROTOCOL,
+      retryable: false,
+      neverSent: false,
+      detail: { outcome_unknown: "true" },
+    });
+    expect(requests.filter((request) => request.op?.$case === "opStart")).toHaveLength(1);
+  });
+
   test("a runner that refuses OpStart (protocol) is unsupported without fallback", async () => {
     const transport = new InMemoryOpStreamTransport();
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
@@ -1492,4 +1977,136 @@ describe("op-stream exec (fake runner)", () => {
       retryable: false,
     });
   });
+});
+
+async function retainedOutputRig() {
+  const { runner, transport } = buildRig();
+  const opId = "captured-output:0";
+  const rpcSubject = `agent.${WORKSPACE}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`;
+  runner.script(opId, { frames: [{ channel: "stdout", bytes: "retained output" }] });
+  await runner.request(
+    rpcSubject,
+    {
+      requestId: opId,
+      epoch: 0,
+      op: {
+        $case: "opStart",
+        opStart: {
+          op: { $case: "exec", exec: ExecRequest.fromPartial({ command: ["synthetic"] }) },
+          windowBytes: "65536",
+          deadlineMs: "0",
+          originId: "synthetic-session",
+        },
+      },
+    },
+    { timeoutMs: 1000 },
+  );
+  const requests: ControlRequest[] = [];
+  let generation = "1";
+  const makeReader = () =>
+    new OpStreamExecClient({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      epoch: 0,
+      rpcSubject,
+      transport,
+      controlRpc: {
+        request: async (subject, request, options) => {
+          requests.push(request);
+          return runner.request(subject, request, options);
+        },
+      },
+      controlTimeoutMs: 1000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      journal: {
+        attachGeneration: () => generation,
+        persistSettled: () => {
+          throw new Error("Output custody must not use the foreground journal");
+        },
+      },
+    });
+  return {
+    runner,
+    transport,
+    opId,
+    requests,
+    makeReader,
+    setGeneration: (value: string) => {
+      generation = value;
+    },
+  };
+}
+
+test("captured-output receipt waits for persistence and never publishes a final ACK by reading", async () => {
+  const rig = await retainedOutputRig();
+  const reader = rig.makeReader();
+  let capturing!: () => void;
+  const captureStarted = new Promise<void>((resolve) => {
+    capturing = resolve;
+  });
+  let persist!: () => void;
+  const persisted = new Promise<void>((resolve) => {
+    persist = resolve;
+  });
+  let returned = false;
+  const reading = reader
+    .readExisting(rig.opId, 1000, async () => {
+      capturing();
+      await persisted;
+    })
+    .then((result) => {
+      returned = true;
+      return result;
+    });
+  await captureStarted;
+  expect(returned).toBe(false);
+  expect(rig.transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+  persist();
+  const result = await reading;
+  expect(result.outputReceipt).toMatchObject({ exitSeq: "2" });
+  expect(rig.runner.runs.get(rig.opId)!.finalAcked).toBe(false);
+  await reader.finalizeSettledOps();
+  expect(rig.runner.runs.get(rig.opId)!.finalAcked).toBe(false);
+});
+
+test("a new output releaser retries the persisted exact receipt after publisher failure without replay or restart", async () => {
+  const rig = await retainedOutputRig();
+  const captured = await rig.makeReader().readExisting(rig.opId, 1000, async () => {});
+  const receipt = captured.outputReceipt!;
+  rig.transport.available = false;
+  await expect(rig.makeReader().releaseCapturedOutput(rig.opId, receipt)).rejects.toThrow();
+  expect(rig.runner.runs.get(rig.opId)!.finalAcked).toBe(false);
+  rig.transport.available = true;
+  rig.setGeneration((BigInt(receipt.attachGeneration) + 100n).toString());
+  expect(await rig.makeReader().releaseCapturedOutput(rig.opId, receipt)).toBe("published");
+  expect(rig.runner.runs.get(rig.opId)!.finalAcked).toBe(true);
+  expect(rig.runner.runs.get(rig.opId)!.startCount).toBe(1);
+  expect(
+    rig.requests.every((request) => request.epoch === 0 && request.op?.$case === "opAttach"),
+  ).toBe(true);
+  const ack = rig.transport.decodedAcks().find((value) => value.final)!;
+  expect(ack.opId).toBe(rig.opId);
+  expect(ack.ackedSeq).toBe(receipt.exitSeq);
+  expect(BigInt(ack.attachGeneration)).toBeGreaterThan(BigInt(receipt.attachGeneration));
+  rig.runner.lostOps.add(rig.opId);
+  expect(await rig.makeReader().releaseCapturedOutput(rig.opId, receipt)).toBe("not_retained");
+  expect(rig.transport.decodedAcks().filter((value) => value.final)).toHaveLength(1);
+});
+
+test("output release refuses divergent, malformed and nonterminal frontiers before final ACK", async () => {
+  const rig = await retainedOutputRig();
+  const reader = rig.makeReader();
+  const result = await reader.readExisting(rig.opId, 1000, async () => {});
+  const receipt = result.outputReceipt!;
+  for (const exitSeq of ["0", "-1", "18446744073709551616", "3"]) {
+    await expect(reader.releaseCapturedOutput(rig.opId, { ...receipt, exitSeq })).rejects.toThrow();
+  }
+  rig.runner.runs.get(rig.opId)!.script.holdUntilCancel = true;
+  rig.runner.runs.get(rig.opId)!.script.live = true;
+  rig.runner.runs.get(rig.opId)!.liveEmitted = false;
+  await expect(reader.releaseCapturedOutput(rig.opId, receipt)).rejects.toThrow();
+  expect(rig.runner.runs.get(rig.opId)!.finalAcked).toBe(false);
+  expect(rig.transport.decodedAcks().some((value) => value.final)).toBe(false);
+  expect(rig.runner.runs.get(rig.opId)!.startCount).toBe(1);
 });

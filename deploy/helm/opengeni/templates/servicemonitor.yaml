@@ -77,6 +77,13 @@ spec:
           targetLabel: release
         - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
           targetLabel: opengeni_workload_component
+        # Discovery identity is independent of the producer's worker_pod_uid.
+        # Keep it on up as well as raw series; readiness removal during drain
+        # must not turn a missing physical worker into an observed idle zero.
+        - sourceLabels: [__meta_kubernetes_pod_uid]
+          targetLabel: pod_uid
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
 {{- end }}
 {{- end }}
 {{- if and .Values.relay.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
@@ -122,4 +129,41 @@ spec:
         - targetLabel: job
           replacement: {{ include "opengeni.fullname" . }}-relay
         {{- end }}
+{{- end }}
+{{- if and .Values.computeControl.enabled (.Values.computeControl.metrics).port ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+---
+# Every replica of the compute control service: each reports its own
+# requests and whether it leads, and the leader alone the fleet's hosts.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "opengeni.computeControl.name" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+    {{- with ((.Values.observability).serviceMonitor).labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with ((.Values.observability).serviceMonitor).annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: compute-control
+      opengeni.ai/metrics-endpoint: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
+      scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_instance]
+          targetLabel: release
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
+          targetLabel: opengeni_workload_component
 {{- end }}

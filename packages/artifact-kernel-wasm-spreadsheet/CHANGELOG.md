@@ -1,5 +1,143 @@
 # @opengeni/artifact-kernel-wasm-spreadsheet
 
+## 6.14.0
+
+## 6.13.0
+
+## 6.12.0
+
+## 6.11.0
+
+## 6.10.0
+
+## 6.9.0
+
+## 6.8.0
+
+## 6.7.0
+
+## 6.6.0
+
+## 6.5.1
+
+## 6.4.0
+
+## 6.3.1
+
+## 6.2.1
+
+## 6.1.1
+
+## 6.0.2
+
+## 5.5.1
+
+## 5.4.2
+
+## 5.3.1
+
+## 5.2.1
+
+## 5.1.2
+
+## 5.0.2
+
+## 4.8.0
+
+## 4.7.2
+
+## 4.7.1
+
+## 4.7.0
+
+## 4.6.1
+
+## 4.5.0
+
+## 4.4.1
+
+## 4.3.1
+
+## 4.2.0
+
+## 4.1.3
+
+## 4.1.1
+
+## 4.0.4
+
+## 3.4.0
+
+## 3.3.0
+
+## 3.2.2
+
+## 3.1.2
+
+## 3.0.0
+
+## 2.0.1
+
+## 2.0.0
+
+### Minor Changes
+
+- c13d080: Add canonical sparse row-height and column-width set/reset commands with live
+  spreadsheet projections and immediate, frame-coalesced drag and keyboard
+  resizing. Preserve existing dimension-free artifacts and shared artifact
+  authority, collaboration, and history.
+
+  Preserve sparse dimensions through native workbook reconciliation and verified
+  XLSX materialization, including empty-sheet geometry. Refresh all modality
+  kernel distributions together to retain their shared build identity.
+
+  Keep spreadsheet input responsive during delayed saves, retain pending cell
+  drafts when refocused, surface independent failures without unsafe overlapping
+  retries, and show server sync state separately from local command acceptance.
+
+  Center resize targets on header borders and retain valid covered cells while
+  viewport queries change. Show submitted cell input immediately without inventing
+  formula results. Support canonical worksheet renaming by double-click or F2,
+  with validated Enter/Save, Escape/Cancel, and readable pending/failure feedback.
+
+### Patch Changes
+
+- 906d3c2: Preserve the exact scheduler authority label and immutable curated Skill artifacts during the branding refresh so scheduled dispatch and pinned library discovery remain compatible.
+
+  Refresh the canonical browser artifact kernels to match the branding-updated Rust source identity.
+
+## 1.4.4
+
+## 1.4.3
+
+## 1.4.2
+
+## 1.4.1
+
+## 1.4.0
+
+## 1.3.0
+
+## 1.2.0
+
+## 1.1.0
+
+## 1.0.2
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.3.39
+
+## 0.3.38
+
+## 0.3.37
+
+## 0.3.36
+
 ## 0.3.35
 
 ## 0.3.34

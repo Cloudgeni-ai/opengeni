@@ -1,10 +1,10 @@
 import {
-  ArrowRightIcon,
+  ArrowUpIcon,
+  EyeIcon,
   LoaderCircleIcon,
   Maximize2Icon,
   Minimize2Icon,
-  ShieldCheckIcon,
-  SparklesIcon,
+  PencilIcon,
 } from "lucide-react";
 import { useState } from "react";
 import { Markdown, OpenGeniProvider, SessionConversation } from "@opengeni/react";
@@ -12,6 +12,7 @@ import { OpenGeniClient } from "@opengeni/sdk";
 import type { DemoHealth, SupportCase } from "./types";
 import { createDemoSession } from "./use-support-demo";
 import { supportToolRegistry } from "./support-tool-renderers";
+import { OpengeniGlyph } from "./support-ticket";
 
 // The unmodified SDK client, pointed at the product backend's packaged proxy.
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
@@ -76,41 +77,30 @@ function SupportAgentPanelView({
   }
 
   return (
-    <aside className="northstar-agent-panel flex h-full min-h-0 flex-col border-l border-[#302a40] bg-white text-og-fg">
-      <header className="flex h-[72px] shrink-0 items-center justify-between gap-4 border-b border-white/10 bg-[#252131] px-5 text-white">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="relative grid size-8 shrink-0 place-items-center rounded-lg bg-[#6759ce] text-white">
-            <SparklesIcon className="size-4" />
-            <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-[#252131] bg-[#54b987]" />
-          </div>
-          <div className="min-w-0">
-            <h2 className="truncate text-[14px] font-semibold tracking-[-0.01em] text-white">
-              OpenGeni
-            </h2>
-            <p className="mt-0.5 truncate text-[10px] text-white/55">
-              Live inside Northstar · {supportCase.ticket.id}
-            </p>
-          </div>
+    <aside className="northstar-agent-panel flex h-full min-h-0 flex-col border-l border-og-ink bg-og-offwhite text-og-fg">
+      <header className="relative flex h-14 shrink-0 items-center justify-between gap-4 bg-og-ink px-5 text-white after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-[linear-gradient(90deg,#9fe3d3,#fbfbf8_55%,#ffb787)] after:opacity-60">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <OpengeniGlyph className="size-[22px] shrink-0 text-og-aqua" />
+          <h2 className="text-[16px] font-semibold tracking-[-0.01em]">Opengeni</h2>
+          <McpIndicator health={health} />
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1">
           {sessionId ? (
             <button
               type="button"
               onClick={onClearSession}
-              className="rounded-lg px-2.5 py-2 text-[11px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white"
+              className="rounded-md px-2.5 py-1.5 text-[13px] font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white"
             >
               New run
             </button>
-          ) : (
-            <McpIndicator health={health} />
-          )}
+          ) : null}
           <button
             type="button"
-            aria-label={expanded ? "Collapse OpenGeni panel" : "Expand OpenGeni panel"}
+            aria-label={expanded ? "Collapse Opengeni panel" : "Expand Opengeni panel"}
             aria-pressed={expanded}
             title={expanded ? "Collapse panel" : "Expand panel"}
             onClick={() => onExpandedChange(!expanded)}
-            className="grid size-8 place-items-center rounded-lg text-white/55 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/70"
+            className="grid size-8 place-items-center rounded-md text-white/60 transition-colors hover:bg-white/10 hover:text-white"
           >
             {expanded ? (
               <Minimize2Icon className="size-3.5" />
@@ -127,97 +117,77 @@ function SupportAgentPanelView({
             sessionId={sessionId}
             toolRegistry={supportToolRegistry}
             renderMessageText={renderNorthstarMessage}
+            // The panel is text-only; its relay forwards only the chat routes.
+            attachments={false}
+            voiceInput={false}
+            renderInteractiveBlock={false}
             className="northstar-agent-conversation"
           />
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col justify-between overflow-y-auto bg-[#f7f7f7] px-7 py-7">
-          <div>
-            <div className="inline-flex items-center gap-2 text-[11px] font-semibold text-[#5c50bf]">
-              <ShieldCheckIcon className="size-3.5" /> Connected to Northstar
-            </div>
-            <h3 className="mt-5 max-w-sm text-[27px] font-semibold leading-[1.12] tracking-[-0.04em] text-[#25222c]">
-              Investigate with OpenGeni
-            </h3>
-            <p className="mt-3 max-w-sm text-[13px] leading-5 text-[#6d6973]">
-              The agent reads this case, uses Northstar’s tools, and writes each result back here.
-            </p>
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-5 pt-9">
+          <h3 className="text-[24px] font-semibold leading-[1.2] tracking-[-0.025em] text-og-fg">
+            Hand this ticket to Opengeni
+          </h3>
+          <p className="mt-2 max-w-[34ch] text-[14px] leading-[1.55] text-og-fg-muted">
+            It works inside Northstar with the same tools you use, and every change lands on the
+            ticket as it happens.
+          </p>
 
-            <div className="mt-7 overflow-hidden rounded-xl border border-[#dedce5] bg-white">
-              <div className="border-b border-[#e8e7eb] px-4 py-3.5">
-                <p className="text-[11px] font-semibold text-[#514d59]">Available product tools</p>
-                <p className="mt-1 text-[10px] text-[#96929c]">
-                  Four MCP tools, scoped to {supportCase.ticket.id}
-                </p>
-              </div>
-              <div className="divide-y divide-[#ecebee] px-4">
-                {[
-                  ["Read", "Ticket details", "The case, message, tags, status"],
-                  ["Read", "Customer signals", "Plan, usage, health, failures"],
-                  ["Write", "Update the case", "Priority and workflow status"],
-                  ["Write", "Document the work", "Evidence-backed internal notes"],
-                ].map(([access, label, detail]) => (
-                  <div key={label} className="flex items-center gap-3 py-3">
-                    <span
-                      className={
-                        access === "Read"
-                          ? "w-11 text-[9px] font-bold uppercase tracking-[0.08em] text-[#3f8069]"
-                          : "w-11 text-[9px] font-bold uppercase tracking-[0.08em] text-[#6558cd]"
-                      }
-                    >
-                      {access}
-                    </span>
-                    <div className="min-w-0">
-                      <p className="text-[12px] font-semibold text-[#3d3948]">{label}</p>
-                      <p className="mt-0.5 truncate text-[10px] text-[#9994a4]">{detail}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+          <ul className="mt-7 divide-y divide-og-ink/[0.07] border-y border-og-ink/[0.07] text-[14px]">
+            {(
+              [
+                ["read", `Reads ${supportCase.ticket.id} and its conversation`],
+                ["read", `Reads ${supportCase.customer.name} account health and usage`],
+                ["write", "Changes the ticket's priority and status"],
+                ["write", "Adds internal notes for your team"],
+              ] as const
+            ).map(([access, label]) => (
+              <li key={label} className="flex items-center gap-3 py-2.5">
+                {access === "read" ? (
+                  <EyeIcon className="size-4 shrink-0 text-og-fg-subtle" aria-label="Reads" />
+                ) : (
+                  <PencilIcon className="size-4 shrink-0 text-og-green" aria-label="Writes" />
+                )}
+                <span className="text-og-fg">{label}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-[13px] leading-5 text-og-fg-subtle">
+            It can&apos;t email the customer or open other tickets.
+          </p>
 
-            <div className="mt-6 border-t border-[#dedde2] pt-4">
-              <p className="text-[10px] font-medium text-[#918e96]">Investigation sequence</p>
-              <div className="mt-2 flex items-center gap-2 text-[11px] font-medium text-[#5d5963]">
-                <span>Understand</span>
-                <ArrowRightIcon className="size-3 text-[#aaa7ae]" />
-                <span>Reason</span>
-                <ArrowRightIcon className="size-3 text-[#aaa7ae]" />
-                <span>Act</span>
-              </div>
-            </div>
-
-            <p className="mt-5 text-[10px] leading-4 text-[#96929c]">
-              Runs on the workspace&apos;s default model. Change model and reasoning per turn from
-              the composer.
-            </p>
-          </div>
-
-          <div className="sticky bottom-0 z-10 mt-8 border-t border-[#dedde2] bg-[#f7f7f7] pb-1 pt-4">
+          <div className="mt-auto pt-8">
             {startError ? (
-              <p className="mb-3 rounded-xl bg-[#fff0ed] px-3 py-2 text-xs text-[#b44835]">
+              <p className="mb-3 rounded-lg bg-[#fbece8] px-3 py-2.5 text-[13px] leading-5 text-[#9b3322]">
                 {startError.message}
               </p>
             ) : null}
-            <button
-              type="button"
-              onClick={() => void startDemo()}
-              disabled={starting || !health?.ok}
-              className="group flex w-full items-center justify-between rounded-lg bg-[#5f52c5] px-4 py-3 text-left text-[12px] font-semibold text-white transition hover:bg-[#5448b2] disabled:cursor-not-allowed disabled:opacity-45"
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void startDemo();
+              }}
+              className="rounded-2xl bg-white p-3 shadow-[0_0_0_1px_rgba(17,19,17,0.1),0_10px_30px_-12px_rgba(17,19,17,0.25)]"
             >
-              <span className="flex items-center gap-2.5">
-                {starting ? (
-                  <LoaderCircleIcon className="size-4 animate-spin" />
-                ) : (
-                  <SparklesIcon className="size-4 text-[#d8d4ff]" />
-                )}
-                {starting ? "Starting agent…" : "Start agent investigation"}
-              </span>
-              <ArrowRightIcon className="size-4 transition-transform group-hover:translate-x-0.5" />
-            </button>
-            <p className="mt-3.5 text-center text-[10px] text-[#9792a1]">
-              Scoped session proxy · MCP tools · live product updates
-            </p>
+              <p className="px-1.5 pt-1 text-[14.5px] leading-[1.55] text-og-fg">
+                {demoPrompt(supportCase)}
+              </p>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <span className="pl-1.5 text-[12px] text-og-fg-subtle">
+                  Runs on this workspace&apos;s default model
+                </span>
+                <button
+                  type="submit"
+                  disabled={starting || !health?.ok}
+                  className="inline-flex h-9 shrink-0 items-center gap-2 rounded-xl bg-og-ink pl-3.5 pr-2 text-[13px] font-semibold text-white transition-colors hover:bg-black disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {starting ? <LoaderCircleIcon className="size-4 animate-spin" /> : null}
+                  {starting ? "Starting" : "Start"}
+                  <ArrowUpIcon className="size-4 rounded-md bg-og-aqua p-0.5 text-og-ink" />
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -231,16 +201,16 @@ function McpIndicator({ health }: { health: DemoHealth | null }) {
     <span
       className={
         connected
-          ? "inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-[10px] font-semibold text-[#8de0ba]"
-          : "inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-[10px] font-semibold text-[#e8bc75]"
+          ? "ml-1 inline-flex items-center gap-1.5 text-[12px] text-white/60"
+          : "ml-1 inline-flex items-center gap-1.5 text-[12px] text-[#f0c27a]"
       }
     >
       <span
         className={
-          connected ? "size-1.5 rounded-full bg-[#44aa7c]" : "size-1.5 rounded-full bg-[#d49737]"
+          connected ? "size-1.5 rounded-full bg-og-aqua" : "size-1.5 rounded-full bg-[#f0c27a]"
         }
       />
-      {connected ? "Ready" : "Setup required"}
+      {connected ? "Connected to Northstar" : "Not connected"}
     </span>
   );
 }

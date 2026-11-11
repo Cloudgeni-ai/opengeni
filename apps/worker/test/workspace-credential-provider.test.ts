@@ -13,11 +13,8 @@ import {
   upsertWorkspaceCredentialProvider,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { verifyCredentialProviderRequest } from "../../../packages/sdk/src/workspace-integrations";
 import { bindRunCredentialResolver } from "../src/activities/run-credentials";
 import {
@@ -117,7 +114,6 @@ async function bind(options: { hostPort?: RunCredentialsResolution } = {}) {
     turn: { ...turn(), initiatingHumanSubjectId: "user:owner" },
     attemptId: crypto.randomUUID(),
     effectiveSandboxBackend: "docker",
-    variableSet: null,
   });
 }
 

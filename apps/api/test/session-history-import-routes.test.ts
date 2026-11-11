@@ -7,7 +7,8 @@ import {
 } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import * as accessGrantRls from "../src/access-grant-rls";
 import { createApp, routeLabel, workspaceActorContextExempt } from "../src/app";
@@ -103,7 +104,7 @@ function key(permissions: Permission[] = ["workspace:admin"], workspaceKey = fal
   );
   track(spyOn(db, "getWorkspaceGrant").mockResolvedValue(null));
   track(
-    spyOn(db, "requireWorkspace").mockResolvedValue({
+    spyOn(db, "getWorkspace").mockResolvedValue({
       id: workspaceId,
       accountId,
       kind: "shared",
@@ -125,6 +126,14 @@ function externalMapping(found = true) {
 }
 function asUser(permissions: Permission[] = ["sessions:create", "workspace:read"]) {
   const headers = key();
+  track(
+    spyOn(db, "withAccountRls").mockImplementation(async (_db, _account, callback) =>
+      callback({} as never),
+    ),
+  );
+  track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+  track(spyOn(db, "externalIdentityReadGranted").mockResolvedValue(false));
+  track(spyOn(db, "readExternalWorkspaceRevocationWatermark").mockResolvedValue("0"));
   track(
     spyOn(db, "ensureExternalIdentity").mockResolvedValue({
       id: externalId,
@@ -461,6 +470,9 @@ describe("archived session import HTTP adapters", () => {
     const headers = key();
     track(spyOn(core, "requireSessionAuthorization").mockResolvedValue(null));
     track(spyOn(db, "getSession").mockResolvedValue(imported.session as never));
+    // Routes that only need the session's existence and sequence read the
+    // narrow sequence projection instead of the full session.
+    track(spyOn(db, "getSessionEventSequence").mockResolvedValue(0));
     const admission = track(
       spyOn(core, "acceptSessionUserMessage").mockRejectedValue(
         new core.ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY"),

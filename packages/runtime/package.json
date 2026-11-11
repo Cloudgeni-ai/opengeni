@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "4.3.0",
+  "version": "6.14.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -33,13 +33,33 @@
       "types": "./src/mcp-network.ts",
       "default": "./src/mcp-network.ts"
     },
+    "./calling-workspace": {
+      "types": "./src/calling-workspace.ts",
+      "default": "./src/calling-workspace.ts"
+    },
+    "./model-call": {
+      "types": "./src/model-call.ts",
+      "default": "./src/model-call.ts"
+    },
     "./gmail-rest-mcp": {
       "types": "./src/gmail-rest-mcp.ts",
       "default": "./src/gmail-rest-mcp.ts"
     },
+    "./google-calendar-rest-mcp": {
+      "types": "./src/google-calendar-rest-mcp.ts",
+      "default": "./src/google-calendar-rest-mcp.ts"
+    },
+    "./slack-rest-mcp": {
+      "types": "./src/slack-rest-mcp.ts",
+      "default": "./src/slack-rest-mcp.ts"
+    },
     "./github-rest-mcp": {
       "types": "./src/github-rest-mcp.ts",
       "default": "./src/github-rest-mcp.ts"
+    },
+    "./web-search": {
+      "types": "./src/web-search/index.ts",
+      "default": "./src/web-search/index.ts"
     },
     "./workspace-tool-gateway": {
       "types": "./src/workspace-tool-gateway.ts",
@@ -52,13 +72,14 @@
   },
   "scripts": {
     "build": "bun ../../scripts/build-typescript-package.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@alibaba-group/opensandbox": "0.1.11",
-    "@grpc/grpc-js": "1.14.4",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@grpc/grpc-js": "1.14.7",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@noble/hashes": "^1.8.0",
     "@openai/agents": "0.14.3",
     "@openai/agents-core": "0.14.3",
@@ -69,20 +90,31 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/decisions": "workspace:*",
+    "@opengeni/interaction": "workspace:*",
+    "@opengeni/jev": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*",
+    "@opengeni/vaults": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
     "debug": "4.4.3",
+    "e2b": "2.56.0",
+    "libheif-js": "1.23.5",
     "modal": "0.9.0",
     "openai": "6.47.0",
+    "postal-mime": "2.7.5",
     "protobufjs": "7.6.5",
+    "sharp": "0.35.5",
     "ws": "8.21.1",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "devDependencies": {
+    "@daytonaio/sdk": "0.162.0",
+    "@modelcontextprotocol/server": "2.3.1",
     "@opengeni/ogtool": "workspace:*",
+    "@runloop/api-client": "1.16.2",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

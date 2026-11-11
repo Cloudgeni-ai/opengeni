@@ -1,0 +1,85 @@
+# The Agent Sandbox side of the benchmark. Substitute IMAGE, then
+# `kubectl apply -f`. The pod shape matches our sandboxes: 2 vCPUs and 1 GiB
+# at most, 0.25 vCPU and 512 MiB guaranteed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: compare
+---
+# The identity Pod Snapshots upload with (bound to the bucket by IAM).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: compare-sandbox
+  namespace: compare
+automountServiceAccountToken: false
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: compare
+  namespace: compare
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: compare-sandbox
+    spec:
+      serviceAccountName: compare-sandbox
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      nodeSelector:
+        sandbox.gke.io/runtime: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          value: gvisor
+          effect: NoSchedule
+      containers:
+        - name: runtime
+          image: IMAGE
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 1
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      restartPolicy: OnFailure
+---
+# Claims on this pool get a pod that is already running.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: compare-warm
+  namespace: compare
+spec:
+  replicas: 10
+  sandboxTemplateRef:
+    name: compare
+---
+# No ready pods: the v1beta1 way to ask for a cold create.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: compare-cold
+  namespace: compare
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: compare

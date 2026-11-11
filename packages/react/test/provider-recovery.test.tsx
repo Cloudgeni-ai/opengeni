@@ -1,0 +1,436 @@
+import { expect, test } from "bun:test";
+import type { SessionEvent } from "@opengeni/sdk";
+import { SessionConversation } from "../src/components/session-conversation";
+import { ProviderRecoveryNotice } from "../src/components/provider-recovery-notice";
+import { presentFailure } from "../src/lib/format";
+import {
+  currentProviderRecovery,
+  parseProviderRecovery,
+  providerRecoveryExhaustedText,
+  providerRecoveryRetryingText,
+} from "../src/lib/provider-recovery";
+import { buildTimeline } from "../src/timeline";
+import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+import { summarizeSessionFailure } from "../src/app/lib/events";
+import { failedSessionCopy } from "../src/app/lib/failed-session-copy";
+import { turnFailureClass } from "../src/app/lib/turn-failure-analytics";
+
+const englishText = createOpenGeniText();
+
+registerDom();
+
+const TURN_ID = "44444444-4444-4444-8444-444444444444";
+
+/** Exact worker recovery payload shape for an overloaded Bedrock-served Claude. */
+function recoveryPayload(attempt: number): Record<string, unknown> {
+  return {
+    error: "Claude request failed (HTTP 503)",
+    code: "provider_unavailable",
+    retryable: true,
+    providerCondition: "overloaded",
+    model: "claude-opus-5-5",
+    modelLabel: "Claude Opus 5.5",
+    providerLabel: "Amazon Bedrock",
+    continueDelayMs: 15_000,
+    providerRecoveryCount: attempt,
+    maxProviderRecoveryCount: 5,
+    triggerEventId: "55555555-5555-4555-8555-555555555555",
+    reason: "provider_unavailable",
+  };
+}
+
+const exhaustedPayload = {
+  error:
+    "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock). Opengeni retried 5 times without success. Try again in a few minutes, or switch to another model.",
+  code: "provider_unavailable",
+  retryable: false,
+  providerCondition: "overloaded",
+  model: "claude-opus-5-5",
+  modelLabel: "Claude Opus 5.5",
+  providerLabel: "Amazon Bedrock",
+  recoveryExhausted: true,
+  providerRecoveryCount: 5,
+  maxProviderRecoveryCount: 5,
+  lastRetryableError: "Claude request failed (HTTP 503)",
+  detail: "overloaded_error: Overloaded",
+};
+
+let sequence = 0;
+function event(type: string, payload: unknown, turnId: string | null = TURN_ID): SessionEvent {
+  sequence += 1;
+  return {
+    id: `66666666-6666-4666-8666-${String(sequence).padStart(12, "0")}`,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type,
+    payload,
+    occurredAt: new Date(1_790_000_000_000 + sequence * 1_000).toISOString(),
+    turnId,
+  } as SessionEvent;
+}
+
+test("live retry status names the model, provider condition and attempt", () => {
+  const facts = parseProviderRecovery(recoveryPayload(2));
+  expect(facts).toEqual({
+    code: "provider_unavailable",
+    condition: "overloaded",
+    modelLabel: "Claude Opus 5.5",
+    providerLabel: "Amazon Bedrock",
+    attempt: 2,
+    maxAttempts: 5,
+    modelRoute: true,
+  });
+  expect(providerRecoveryRetryingText(englishText, facts!)).toBe(
+    "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock) — retrying (attempt 2 of 5)…",
+  );
+});
+
+test("a turn parked behind a sandbox rotation says why it is waiting", () => {
+  const facts = parseProviderRecovery({
+    reason: "sandbox_deadline_rotation",
+    sandboxGroupId: "group",
+    leaseEpoch: 5,
+    rotationReason: "provider_deadline",
+    transitionReason: "rotation_in_progress",
+  });
+  expect(facts).toMatchObject({ sandboxWait: true, modelRoute: false });
+  expect(providerRecoveryRetryingText(englishText, facts!)).toBe(
+    "The sandbox reached its maximum lifetime, so Opengeni is moving the workspace to a fresh sandbox…",
+  );
+  const lifecycle = (detail: Record<string, unknown>) =>
+    providerRecoveryRetryingText(
+      englishText,
+      parseProviderRecovery({ reason: "sandbox_lifecycle_transition", ...detail })!,
+    );
+  expect(lifecycle({ transitionReason: "capture_in_progress" })).toBe(
+    "Opengeni is saving the sandbox workspace…",
+  );
+  expect(lifecycle({ transitionReason: "provider_recovery_in_progress" })).toBe(
+    "Opengeni is recovering the sandbox…",
+  );
+  expect(lifecycle({ rotationReason: "operator" })).toBe(
+    "Opengeni is moving the workspace to a fresh sandbox…",
+  );
+  expect(
+    providerRecoveryRetryingText(
+      englishText,
+      parseProviderRecovery({ reason: "sandbox_lease_superseded", rotationReason: "operator" })!,
+    ),
+  ).toBe("Opengeni is moving the workspace to a fresh sandbox…");
+  // A superseded lease with no recorded pending transition is not a wait.
+  expect(parseProviderRecovery({ reason: "sandbox_lease_superseded" })).toBeNull();
+});
+
+test("the sandbox wait notice promises no retry budget", async () => {
+  const facts = parseProviderRecovery({ reason: "sandbox_deadline_rotation" });
+  const view = await renderComponent(<ProviderRecoveryNotice recovery={facts} />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("moving the workspace to a fresh sandbox");
+    expect(text).toContain("continues automatically as soon as the sandbox is ready");
+    expect(text).not.toContain("retrying");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("other recovery reasons are never presented as provider outages", () => {
+  for (const payload of [
+    { reason: "human_retry", failureEventId: "x" },
+    { reason: "graceful_worker_shutdown" },
+    { reason: "sandbox_setup_physically_settled", retryable: true },
+    { code: "codex_capacity_recovery_exhausted", recoveryExhausted: true, retryable: false },
+    { code: "provider_unavailable", retryable: false },
+    null,
+    "provider_unavailable",
+  ]) {
+    expect(parseProviderRecovery(payload)).toBeNull();
+  }
+});
+
+test("only the active turn's newest boundary drives the live status", () => {
+  const session = {
+    id: SESSION_ID,
+    status: "recovering" as const,
+    activeTurnId: TURN_ID,
+    effectiveControl: { state: "active" },
+  };
+  const first = event("turn.recovery.requested", recoveryPayload(1));
+  const restarted = event("turn.started", {});
+  const second = event("turn.recovery.requested", recoveryPayload(2));
+  expect(currentProviderRecovery(session, [second, restarted, first])?.attempt).toBe(2);
+  expect(currentProviderRecovery(session, [first, restarted])).toBeNull();
+  expect(currentProviderRecovery({ ...session, status: "running" }, [first])).toBeNull();
+  expect(
+    currentProviderRecovery({ ...session, effectiveControl: { state: "paused" } }, [first]),
+  ).toBeNull();
+});
+
+test("an exhausted failure reads as one plain sentence in the timeline, not raw provider text", () => {
+  expect(presentFailure(englishText, exhaustedPayload).reason).toBe(exhaustedPayload.error);
+  const items = buildTimeline(englishText, [
+    event("turn.recovery.requested", recoveryPayload(5)),
+    event("turn.failed", exhaustedPayload),
+  ]);
+  const notice = items.find((item) => item.kind === "notice");
+  expect(notice).toMatchObject({ tone: "failed", text: exhaustedPayload.error });
+  expect(items.find((item) => item.kind === "turn-end")).toMatchObject({
+    outcome: "failed",
+    failureText: exhaustedPayload.error,
+  });
+  // Recovery requests themselves never add timeline rows.
+  expect(items.filter((item) => item.kind === "notice")).toHaveLength(1);
+});
+
+test("legacy exhausted payloads lose the internal wrapper wording", () => {
+  const legacy = {
+    error:
+      "Automatic same-turn recovery stopped after 5 retries because the upstream dependency remained unavailable. Send a new message to retry after the dependency recovers.",
+    code: "provider_unavailable",
+    retryable: false,
+    recoveryExhausted: true,
+    providerRecoveryCount: 5,
+    maxProviderRecoveryCount: 5,
+    lastRetryableError: "503 Service Unavailable: model overloaded",
+  };
+  expect(presentFailure(englishText, legacy).reason).toBe(
+    "The model is overloaded at the provider. Opengeni retried 5 times without success. Try again in a few minutes, or switch to another model.",
+  );
+  expect(
+    providerRecoveryExhaustedText(
+      englishText,
+      parseProviderRecovery({ ...legacy, code: "mcp_transport_timeout", lastRetryableError: "x" })!,
+    ),
+  ).toBe(
+    "A required MCP server isn't responding. Opengeni retried 5 times without success. Try again in a few minutes.",
+  );
+});
+
+test("the notice renders one live status and nothing without a recovery", async () => {
+  const facts = parseProviderRecovery(recoveryPayload(3));
+  const view = await renderComponent(<ProviderRecoveryNotice recovery={facts} />);
+  try {
+    const status = view.container.querySelector('[role="status"]');
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    expect(status?.textContent).toContain(
+      "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock) — retrying (attempt 3 of 5)…",
+    );
+    expect(view.container.querySelector("button")).toBeNull();
+  } finally {
+    await view.unmount();
+  }
+  const empty = await renderComponent(<ProviderRecoveryNotice recovery={null} />);
+  try {
+    expect(empty.container.textContent).toBe("");
+  } finally {
+    await empty.unmount();
+  }
+});
+
+test("an embedded conversation shows the live retry status above the composer", async () => {
+  const events = [
+    event("user.message", { text: "Summarize the launch" }),
+    event("turn.started", {}),
+    event("turn.recovery.requested", recoveryPayload(2)),
+    event("session.status.changed", { status: "recovering" }),
+  ];
+  const client = fakeClient({
+    getSession: async () =>
+      ({
+        id: SESSION_ID,
+        status: "recovering",
+        activeTurnId: TURN_ID,
+        effectiveControl: { state: "active" },
+      }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* () {},
+    listEvents: async () => events as never,
+  });
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+    />,
+  );
+  try {
+    await flush(100);
+    const notice = view.container.querySelector("[data-og-provider-recovery]");
+    expect(notice?.textContent).toContain(
+      "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock) — retrying (attempt 2 of 5)…",
+    );
+    expect(notice?.closest("[data-og-conversation-inputs]")).not.toBeNull();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("internal MCP outage notice waits automatically without a finite attempt budget", async () => {
+  for (const payload of [
+    { code: "first_party_mcp_setup_unavailable", retryable: true, continueDelayMs: 30_000 },
+    {
+      code: "first_party_mcp_setup_unavailable",
+      retryable: true,
+      databaseFailureCode: "db_failure",
+    },
+  ]) {
+    const facts = parseProviderRecovery(payload);
+    expect(facts).toMatchObject({ attempt: null, maxAttempts: null, modelRoute: false });
+    const view = await renderComponent(<ProviderRecoveryNotice recovery={facts} />);
+    expect(view.container.textContent).toContain(
+      "Opengeni’s tool service is temporarily unavailable",
+    );
+    expect(view.container.textContent).toContain("retrying automatically");
+    expect(view.container.textContent).not.toContain("of 5");
+    await view.unmount();
+  }
+});
+
+test("a sandbox capacity wait and its spent budget name the sandbox, never the model", () => {
+  const blamesModel = (text: string) => /\bmodel\b|\bprovider\b|claude/i.test(text);
+  const cases = [
+    {
+      code: "sandbox_capacity_unavailable",
+      error:
+        "No sandbox capacity is available right now. The same turn will retry after a short delay.",
+      subject: "No sandbox capacity is available right now",
+    },
+    {
+      code: "sandbox_service_unavailable",
+      error:
+        "The sandbox service is temporarily unavailable. The same turn will retry after a short delay.",
+      subject: "The sandbox service is temporarily unavailable",
+    },
+  ];
+  for (const { code, error, subject } of cases) {
+    const detail = "compute control service POST /v1/sandboxes: no host can take it now";
+    const live = parseProviderRecovery({
+      reason: code,
+      code,
+      error,
+      detail,
+      retryable: true,
+      continueDelayMs: 60_000,
+      providerRecoveryCount: 2,
+      maxProviderRecoveryCount: 5,
+    });
+    expect(live).toMatchObject({ code, attempt: 2, maxAttempts: 5, modelRoute: false });
+    expect(providerRecoveryRetryingText(englishText, live!)).toBe(
+      `${subject} — retrying (attempt 2 of 5)…`,
+    );
+
+    const exhausted = {
+      error: `${subject}. Retried 5 times without success. Try again in a few minutes.`,
+      code,
+      detail,
+      retryable: false,
+      recoveryExhausted: true,
+      providerRecoveryCount: 5,
+      maxProviderRecoveryCount: 5,
+      lastRetryableError: error,
+    };
+    const terminal = `${subject}. Opengeni retried 5 times without success. Try again in a few minutes.`;
+    expect(presentFailure(englishText, exhausted).reason).toBe(terminal);
+    const timeline = buildTimeline(englishText, [event("turn.failed", exhausted)]);
+    expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: terminal });
+
+    const summary = summarizeSessionFailure([event("turn.failed", exhausted)], "failed");
+    const banner = failedSessionCopy(summary, false, false, true);
+    expect(banner.reason).toStartWith(subject);
+    expect(blamesModel(banner.reason)).toBe(false);
+    expect(banner.unavailableModel).toBe(false);
+    expect(turnFailureClass(summary)).toBe("sandbox");
+  }
+});
+
+test("a sandbox failure that stops shows only its authored copy, never the service text", () => {
+  const blamesModel = (text: string) => /\bmodel\b|\bprovider\b|claude/i.test(text);
+  const cases = [
+    {
+      code: "sandbox_service_refused",
+      error:
+        "The sandbox service refused to provide a sandbox for this turn. This turn stopped without retrying.",
+      detail: "compute control service POST /v1/sandboxes: a valid X-API-Key is needed",
+    },
+    {
+      code: "sandbox_service_unavailable",
+      error: "The sandbox service is temporarily unavailable. This turn stopped without retrying.",
+      detail: "compute control service POST /v1/sandboxes/sbx/wake: busy",
+    },
+    {
+      code: "sandbox_capacity_unavailable",
+      error: "No sandbox capacity is available right now. This turn stopped without retrying.",
+      // Even model-credential-looking service text must not reach the person.
+      detail: "compute control service POST /v1/sandboxes: invalid api key",
+    },
+  ];
+  for (const { code, error, detail } of cases) {
+    const payload = { error, code, detail, retryable: false };
+    expect(parseProviderRecovery(payload)).toBeNull();
+    const presented = presentFailure(englishText, payload);
+    expect(presented.reason).toBe(error);
+    expect(presented.diagnostic).toBe(false);
+    const timeline = buildTimeline(englishText, [event("turn.failed", payload)]);
+    expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: error });
+
+    const summary = summarizeSessionFailure([event("turn.failed", payload)], "failed");
+    const banner = failedSessionCopy(summary, false, false, true);
+    expect(banner.reason).toBe(error);
+    expect(banner.reason).not.toContain("compute control service");
+    expect(blamesModel(banner.reason)).toBe(false);
+    expect(turnFailureClass(summary)).toBe("sandbox");
+  }
+});
+
+test("a workspace machine that can't start programs reads as plain words while restarting and once stopped", async () => {
+  // Exact worker shapes: the retryable recovery while the box restarts, and
+  // the terminal failure once a restart did not help.
+  const restarting = parseProviderRecovery({
+    error:
+      "The workspace machine couldn't start programs, so it was restarted. Your files are kept; programs that were running stopped. The same turn continues once it is back.",
+    code: "sandbox_machine_restarting",
+    retryable: true,
+    providerRecoveryCount: 1,
+    maxProviderRecoveryCount: 5,
+  });
+  expect(restarting).toMatchObject({ sandboxWait: true, modelRoute: false });
+  expect(providerRecoveryRetryingText(englishText, restarting!)).toBe(
+    "The workspace machine couldn't start programs, so it was restarted…",
+  );
+  const view = await renderComponent(<ProviderRecoveryNotice recovery={restarting} />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("The turn continues automatically as soon as it's back.");
+    expect(text).not.toContain("sandbox");
+    // Restarted once per turn: no attempt budget to count.
+    expect(text).not.toContain("attempt");
+  } finally {
+    await view.unmount();
+  }
+
+  const error =
+    "The workspace machine still can't start programs after it was restarted, so this turn stopped. Retry once more, or start a new chat if it keeps failing.";
+  const payload = {
+    error,
+    code: "sandbox_process_start_failed",
+    retryable: false,
+    detail:
+      "not found: start the program for a shell command: No such file or directory (os error 2)",
+  };
+  expect(parseProviderRecovery(payload)).toBeNull();
+  // The agent's own text stays on the event for operators, never in the copy.
+  const presented = presentFailure(englishText, payload);
+  expect(presented).toMatchObject({ reason: error, diagnostic: false });
+  const timeline = buildTimeline(englishText, [event("turn.failed", payload)]);
+  expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: error });
+  const summary = summarizeSessionFailure([event("turn.failed", payload)], "failed");
+  const banner = failedSessionCopy(summary, false, false, true);
+  expect(banner.reason).toBe(error);
+  expect(banner.reason).not.toContain("node -e");
+  expect(turnFailureClass(summary)).toBe("sandbox");
+});

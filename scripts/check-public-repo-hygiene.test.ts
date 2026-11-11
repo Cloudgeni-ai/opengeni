@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   auditCatalogSnapshot,
   auditPublicText,
@@ -6,6 +7,176 @@ import {
 } from "./check-public-repo-hygiene";
 
 describe("public repository hygiene", () => {
+  test("preserves only the four byte-exact upstream license copyright contacts", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    const copyrightLines = [
+      `Copyright(c) 2012 - 2015 fengmk2 <${["fengmk2@", "gmail.com"].join("")}>`,
+      `Copyright (c) 2015-2020, Matteo Collina <${["matteo.collina@", "gmail.com"].join("")}>`,
+      `Copyright 2014–present Olivier Lalonde <${["olalonde@", "gmail.com"].join("")}>, James Talmage <james@talmage.io>, Ruben Verborgh`,
+      `Copyright (c) 2018 Zejin Zhuang <${["heineiuo@", "gmail.com"].join("")}>`,
+    ];
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const line of copyrightLines) {
+      expect(source.split("\n")).toContain(line);
+      // A copied contact line alone is not the reviewed license context.
+      expect(auditPublicText(file, line)).toEqual([
+        { file, line: 1, reason: "personal email address" },
+      ]);
+    }
+  });
+
+  test("bounds upstream license contacts to the exact notices path and all reviewed bytes", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    for (const [path, text] of [
+      ["fixture.txt", source],
+      ["packages/runtime/src/THIRD_PARTY_NOTICES", source],
+      [file, source.replace("agentkeepalive 4.6.0", "agentkeepalive 4.6.1")],
+      [file, `${source} `],
+      [file, source.slice(1)],
+      [file, source.replaceAll("\n", "\r\n")],
+    ]) {
+      expect(
+        auditPublicText(path!, text!).some(
+          (finding) => finding.reason === "personal email address",
+        ),
+      ).toBe(true);
+    }
+    const contacts = [...source.matchAll(/\b[\w.+-]+@gmail\.com\b/g)];
+    expect(contacts).toHaveLength(5);
+    for (const [contact] of contacts) {
+      const altered = source.replace(contact, `x${contact.slice(1)}`);
+      expect(Buffer.byteLength(altered, "utf8")).toBe(Buffer.byteLength(source, "utf8"));
+      expect(
+        auditPublicText(file, altered).some(
+          (finding) => finding.reason === "personal email address",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  test("does not exempt private workspace metadata added to upstream license notices", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    for (const [metadata, reason] of [
+      [["private-user@", "gmail.com"].join(""), "personal email address"],
+      [["/home/", "private-license-owner/repo"].join(""), "non-generic home path"],
+      [[".claude/", "worktrees/private-branch"].join(""), "private worktree path"],
+      [[".agent/", "private-plan.md"].join(""), "private .agent document reference"],
+      [["OPE", "-123"].join(""), "internal issue reference"],
+    ]) {
+      expect(auditPublicText(file, `${source}\nworkspace metadata: ${metadata}`)).toContainEqual({
+        file,
+        line: source.split("\n").length + 1,
+        reason,
+      });
+    }
+  });
+
+  test("bounds upstream label exemptions to exact paths and bytes", () => {
+    for (const file of [
+      "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt",
+      "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt",
+      "packages/contracts/src/cua-desktop-tools.gen.json",
+      "packages/contracts/src/cua-desktop-tools.linux.gen.json",
+      "packages/contracts/src/cua-desktop-tools.windows.gen.json",
+    ]) {
+      const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+      expect(auditPublicText(file, source)).toEqual([]);
+      for (const [path, text] of [
+        ["fixture.txt", source],
+        [file, `${source} `],
+        [file, source.slice(1)],
+      ]) {
+        expect(
+          auditPublicText(path!, text!).some(
+            (finding) => finding.reason === "retired milestone label",
+          ),
+        ).toBe(true);
+      }
+      const personalMail = ["example-user@", "gmail.com"].join("");
+      const altered = auditPublicText(file, `${source}\n${personalMail}`);
+      expect(altered.map((finding) => finding.reason)).toContain("personal email address");
+      expect(altered.map((finding) => finding.reason)).toContain("retired milestone label");
+    }
+  });
+
+  test("SVG path data never reads as a retired label, but SVG text still does", () => {
+    const label = ["M", "12"].join("");
+    const file = "data/catalog/logos/example.svg";
+    const drawn = `<svg xmlns="http://www.w3.org/2000/svg"><path d="${label} 5.5h3"/><polygon points='${label} 1 2 3'/></svg>`;
+    expect(auditPublicText(file, drawn)).toEqual([]);
+    for (const text of [
+      `<svg><title>${label}</title></svg>`,
+      `<svg><path id="${label}" d="M1 2"/></svg>`,
+    ]) {
+      expect(auditPublicText(file, text).map((finding) => finding.reason)).toEqual([
+        "retired milestone label",
+      ]);
+    }
+    // Only SVG files: the same attribute in source text is still checked.
+    expect(auditPublicText("apps/web/src/icon.tsx", drawn).map((f) => f.reason)).toEqual(
+      Array(2).fill("retired milestone label"),
+    );
+  });
+
+  test("Android vector drawable path data never reads as a retired label", () => {
+    const label = ["M", "12"].join("");
+    const drawn = `<vector><path android:pathData="${label},9c-1.6,0 -3,0.2z" /></vector>`;
+    expect(auditPublicText("android/src/main/res/drawable/end.xml", drawn)).toEqual([]);
+    // Other XML, and drawable text outside path data, are still checked.
+    expect(auditPublicText("android/src/main/res/values/strings.xml", drawn)).toHaveLength(1);
+    expect(
+      auditPublicText("android/src/main/res/drawable/end.xml", `<!-- ${label} -->${drawn}`),
+    ).toHaveLength(1);
+  });
+
+  test("only exempts the reviewed upstream Rust field primitive", () => {
+    const file = "agent/vendor/async-nats/src/lib.rs";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    const fieldType = ["i", "8"].join("");
+    const field = `pub proto: ${fieldType},`;
+    expect(source.slice(9_379 - 11, 9_379 + 3)).toBe(field);
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const text of [
+      source.replace(field, `pub proto: ${fieldType.toUpperCase()},`),
+      `${source}\n`,
+    ]) {
+      expect(
+        auditPublicText(file, text).some((finding) => finding.reason === "retired milestone label"),
+      ).toBe(true);
+    }
+    const label = ["i", "8"].join("");
+    expect(
+      auditPublicText(file, `let label = "${label}";\n// ${label}\n/* ${label} */`).map(
+        (finding) => finding.reason,
+      ),
+    ).toEqual(Array(3).fill("retired milestone label"));
+  });
+
+  test("the committed catalog quarantines restricted clients and keeps counts consistent", () => {
+    const snapshot = JSON.parse(
+      readFileSync(new URL("../data/catalog/integrations-snapshot.json", import.meta.url), "utf8"),
+    ) as {
+      importRows: { domain: string }[];
+      quarantined: { row: { domain: string }; reason: string }[];
+      cleaning: { outputRows: number; quarantinedRows: number };
+      probe: { kept: number };
+      retention: { retainedRows: { domain: string }[] };
+    };
+    expect(auditCatalogSnapshot(snapshot)).toEqual([]);
+    expect(snapshot.importRows.some((row) => row.domain === "figma.com")).toBe(false);
+    expect(snapshot.retention.retainedRows.some((row) => row.domain === "figma.com")).toBe(false);
+    expect(snapshot.quarantined).toContainEqual({
+      row: expect.objectContaining({ domain: "figma.com" }),
+      reason: expect.stringContaining("approved MCP client"),
+    });
+    expect(snapshot.cleaning.outputRows).toBe(snapshot.importRows.length);
+    expect(snapshot.cleaning.quarantinedRows).toBe(snapshot.quarantined.length);
+    expect(snapshot.probe.kept).toBe(snapshot.importRows.length);
+  });
+
   test("distinguishes nested public URL paths from private filesystem roots", () => {
     const publicUrl = "https://example.com/repository/skills/home/SKILL.md";
     expect(auditPublicText("catalog.json", JSON.stringify({ sourceUrl: publicUrl }))).toEqual([]);
@@ -34,6 +205,15 @@ describe("public repository hygiene", () => {
         "const roots = ['/home/user/repo', '/Users/runner/repo']; const email = 'user@example.com'; const device = 'dev-desktop';",
       ),
     ).toEqual([]);
+  });
+
+  test("treats dot segments as no account, but not names that merely start with dots", () => {
+    expect(auditPublicText("fixture.rs", 'let invalid = ["/Users/..", "/home/."];')).toEqual([]);
+    expect(
+      auditPublicText("fixture.rs", ['let hidden = "/Users/', '..owner";'].join("")).map(
+        (f) => f.reason,
+      ),
+    ).toEqual(["non-generic home path"]);
   });
 
   test("does not mistake repository URL path segments for local home directories", () => {
@@ -106,16 +286,6 @@ describe("public repository hygiene", () => {
         "retired milestone label",
       ].sort(),
     );
-  });
-
-  test("does not rewrite immutable migration comments", () => {
-    const privatePlan = [".agent/", "private-plan.md"].join("");
-    expect(
-      auditPublicText(
-        "packages/db/drizzle/0024_sandboxes_enrollments_metrics.sql",
-        `-- historical source: ${privatePlan}`,
-      ),
-    ).toEqual([]);
   });
 
   test("does not exempt newly added migrations", () => {

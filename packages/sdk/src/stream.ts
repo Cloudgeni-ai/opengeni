@@ -1,6 +1,7 @@
 import { isAbortError, isRetryableStreamError, OpenGeniStreamError } from "./errors";
 import { parseSseStream } from "./sse";
 import type { SessionEvent } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const SESSION_EVENT_STREAM_COVERAGE = Symbol.for(
   "@opengeni/sdk/session-event-stream-covered-through",
@@ -53,6 +54,21 @@ export type StreamSessionEventsOptions = {
   /** Maximum time without any SSE bytes before reconnecting. Defaults to 45s. */
   heartbeatTimeoutMs?: number;
   onStateChange?: (state: StreamConnectionState) => void;
+  /**
+   * Session event streams only (other streams ignore it); opt-in. Runs before
+   * every reconnect, including a retry after a failed first attempt, but not
+   * before the first attempt, with the sequence the stream would resume
+   * after. Resolve a larger sequence to resume after it instead: the events
+   * in between are then NOT delivered, so the caller must already hold an
+   * equivalent view (for example, it re-read a bounded newest window after a
+   * long disconnect). Resolve nothing, or a sequence at or below the cursor,
+   * to replay exactly once from the cursor. A rejection counts as a failed
+   * reconnect attempt: retryable errors back off and call this again, others
+   * end the stream. Aborting `signal` ends the stream without waiting for it;
+   * the callback should bound its own work. Without it, reconnects keep
+   * exactly-once replay.
+   */
+  beforeReconnect?: ((cursor: number) => number | void | Promise<number | void>) | undefined;
 };
 
 /**
@@ -61,8 +77,9 @@ export type StreamSessionEventsOptions = {
  * Guarantees, anchored on the per-session contiguous `sequence`:
  * - **No duplicates**: events at or below the cursor are dropped, so server
  *   replay overlap and reconnect overlap never re-yield.
- * - **No gaps**: each reconnect resumes from the last seen sequence, and a
- *   gap observed inside one connection is backfilled from the durable replay
+ * - **No gaps**: each reconnect resumes from the last seen sequence (unless
+ *   an opt-in `beforeReconnect` deliberately moves it forward), and a gap
+ *   observed inside one connection is backfilled from the durable replay
  *   endpoint before the newer event is yielded (events are durable before
  *   they are published live, so the backfill always finds them).
  * - **Ordered**: sequences are yielded strictly ascending.
@@ -86,12 +103,22 @@ export async function* streamSessionEvents(
   let failedAttempts = 0;
   let delayMs = baseDelayMs;
   let everConnected = false;
+  let attempted = false;
 
   while (true) {
     if (signal?.aborted) break;
     options.onStateChange?.(everConnected || failedAttempts > 0 ? "reconnecting" : "connecting");
-    const cursorAtOpen = cursor;
+    let cursorAtOpen = cursor;
     try {
+      if (attempted && options.beforeReconnect) {
+        const resumeAfter = await runBeforeReconnect(options.beforeReconnect, cursor, signal);
+        if (signal?.aborted) return;
+        if (typeof resumeAfter === "number" && Number.isSafeInteger(resumeAfter)) {
+          cursor = Math.max(cursor, resumeAfter);
+        }
+        cursorAtOpen = cursor;
+      }
+      attempted = true;
       const body = await transport.openStream(cursor, signal);
       everConnected = true;
       failedAttempts = 0;
@@ -150,7 +177,7 @@ export async function* streamSessionEvents(
       failedAttempts += 1;
       if (failedAttempts > maxAttempts) {
         throw new OpenGeniStreamError(
-          `event stream gave up after ${maxAttempts} consecutive failed reconnect attempts: ${error instanceof Error ? error.message : String(error)}`,
+          `event stream gave up after ${maxAttempts} consecutive failed reconnect attempts: ${errorMessage(error)}`,
         );
       }
     }
@@ -182,6 +209,28 @@ export async function runBeforeLive(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+  }
+}
+
+// Races the caller's reconnect hook against abort so a hung callback can never
+// hold an aborted stream open. The hook bounds its own work (no timeout here:
+// a slow but progressing catch-up must not be cut short into a full replay).
+async function runBeforeReconnect(
+  beforeReconnect: (cursor: number) => number | void | Promise<number | void>,
+  cursor: number,
+  signal: AbortSignal | undefined,
+): Promise<number | void> {
+  if (!signal) return await beforeReconnect(cursor);
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  let abortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    abortListener = () => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", abortListener, { once: true });
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => beforeReconnect(cursor)), aborted]);
+  } finally {
+    if (abortListener) signal.removeEventListener("abort", abortListener);
   }
 }
 
@@ -313,6 +362,77 @@ function markSessionEventStreamCoverage(event: SessionEvent, covered: number): v
     configurable: false,
     writable: false,
   });
+}
+
+/**
+ * The reconnecting reader shared by the workspace streams. Each SSE message
+ * goes through `read`, which returns the advanced cursor and any event to
+ * deliver, or null to skip the message. A dropped stream reopens from the
+ * latest cursor with jittered exponential backoff; a clean end that delivered
+ * nothing new waits one base delay before reopening.
+ */
+export async function* reconnectingCursorStream<Cursor, Event>(input: {
+  /** Names the stream in the give-up error, for example "workspace control stream". */
+  label: string;
+  options: Omit<StreamSessionEventsOptions, "after">;
+  cursor: Cursor;
+  open: (cursor: Cursor, signal: AbortSignal | undefined) => Promise<ReadableStream<Uint8Array>>;
+  read: (data: string, cursor: Cursor) => { cursor: Cursor; event?: Event } | null;
+  sameCursor?: (a: Cursor, b: Cursor) => boolean;
+}): AsyncGenerator<Event, void, void> {
+  const { options } = input;
+  const sameCursor = input.sameCursor ?? Object.is;
+  const signal = options.signal;
+  const reconnect = options.reconnect ?? true;
+  const baseDelayMs = options.reconnectDelayMs ?? 500;
+  const maxDelayMs = options.maxReconnectDelayMs ?? 10_000;
+  const jitterRatio = options.reconnectJitterRatio ?? 0.2;
+  const beforeLiveTimeoutMs = options.beforeLiveTimeoutMs ?? 15_000;
+  const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 45_000;
+  const maxAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
+  let cursor = input.cursor;
+  let failures = 0;
+  let delayMs = baseDelayMs;
+  let everConnected = false;
+
+  for (;;) {
+    if (signal?.aborted) return;
+    options.onStateChange?.(everConnected || failures > 0 ? "reconnecting" : "connecting");
+    const cursorAtOpen = cursor;
+    try {
+      const body = await input.open(cursor, signal);
+      everConnected = true;
+      failures = 0;
+      delayMs = baseDelayMs;
+      await runBeforeLive(options.beforeLive, beforeLiveTimeoutMs, signal);
+      options.onStateChange?.("live");
+      for await (const message of parseSseStream(
+        withStreamInactivityTimeout(body, heartbeatTimeoutMs, signal),
+      )) {
+        if (signal?.aborted) return;
+        const read = input.read(message.data, cursor);
+        if (!read) continue;
+        cursor = read.cursor;
+        if (read.event !== undefined) yield read.event;
+      }
+      if (!reconnect) return;
+      if (sameCursor(cursor, cursorAtOpen)) {
+        await sleep(jitteredDelay(baseDelayMs, jitterRatio), signal);
+      }
+      continue;
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) return;
+      if (!reconnect || !isRetryableStreamError(error)) throw error;
+      failures += 1;
+      if (failures > maxAttempts) {
+        throw new OpenGeniStreamError(
+          `${input.label} gave up after ${maxAttempts} reconnect attempts: ${errorMessage(error)}`,
+        );
+      }
+    }
+    await sleep(jitteredDelay(delayMs, jitterRatio), signal);
+    delayMs = Math.min(Math.max(delayMs * 2, baseDelayMs), maxDelayMs);
+  }
 }
 
 async function sleep(delayMs: number, signal: AbortSignal | undefined): Promise<void> {

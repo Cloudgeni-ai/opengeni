@@ -10,6 +10,9 @@ import {
 } from "../src/commands/registry";
 import type { CommandContext, SlashCommand } from "../src/commands/types";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const ALL_PERMS = ["sessions:control" as const];
 
@@ -71,9 +74,11 @@ describe("hasPermission", () => {
 
 describe("filterCommands", () => {
   test("hides permission-gated commands entirely when the perm is absent", () => {
-    const names = filterCommands(defaultCommands, "", baseFilterCtx({ permissions: [] })).map(
-      (c) => c.name,
-    );
+    const names = filterCommands(
+      defaultCommands(englishText),
+      "",
+      baseFilterCtx({ permissions: [] }),
+    ).map((c) => c.name);
     expect(names).toContain("help");
     expect(names).toContain("clear-view");
     expect(names).not.toContain("clear");
@@ -82,48 +87,52 @@ describe("filterCommands", () => {
   });
 
   test("shows gated commands when the operator holds the permission", () => {
-    const names = filterCommands(defaultCommands, "", baseFilterCtx()).map((c) => c.name);
+    const names = filterCommands(defaultCommands(englishText), "", baseFilterCtx()).map(
+      (c) => c.name,
+    );
     expect(names).toEqual(
       expect.arrayContaining(["help", "clear-view", "goal", "compact", "clear"]),
     );
   });
 
   test("hides session-only commands until a session exists (available())", () => {
-    const names = filterCommands(defaultCommands, "", baseFilterCtx({ sessionId: null })).map(
-      (c) => c.name,
-    );
+    const names = filterCommands(
+      defaultCommands(englishText),
+      "",
+      baseFilterCtx({ sessionId: null }),
+    ).map((c) => c.name);
     expect(names).toContain("help");
     expect(names).not.toContain("clear");
     expect(names).not.toContain("goal");
   });
 
   test("prefix-filters by name and alias", () => {
-    expect(filterCommands(defaultCommands, "cl", baseFilterCtx()).map((c) => c.name)).toEqual(
-      expect.arrayContaining(["clear", "clear-view"]),
-    );
+    expect(
+      filterCommands(defaultCommands(englishText), "cl", baseFilterCtx()).map((c) => c.name),
+    ).toEqual(expect.arrayContaining(["clear", "clear-view"]));
     // alias "?" resolves /help
-    expect(filterCommands(defaultCommands, "?", baseFilterCtx()).map((c) => c.name)).toEqual([
-      "help",
-    ]);
+    expect(
+      filterCommands(defaultCommands(englishText), "?", baseFilterCtx()).map((c) => c.name),
+    ).toEqual(["help"]);
   });
 });
 
 describe("matchCommand + argHint", () => {
   test("matches by name and alias", () => {
-    expect(matchCommand(defaultCommands, "/goal pause")?.name).toBe("goal");
-    expect(matchCommand(defaultCommands, "/? ")?.name).toBe("help");
-    expect(matchCommand(defaultCommands, "/nope")).toBeNull();
+    expect(matchCommand(defaultCommands(englishText), "/goal pause")?.name).toBe("goal");
+    expect(matchCommand(defaultCommands(englishText), "/? ")?.name).toBe("help");
+    expect(matchCommand(defaultCommands(englishText), "/nope")).toBeNull();
   });
 
   test("renders required/optional arg hints", () => {
-    const goal = matchCommand(defaultCommands, "/goal pause")!;
+    const goal = matchCommand(defaultCommands(englishText), "/goal pause")!;
     expect(argHint(goal.args)).toBe("<pause|resume>");
     expect(argHint(undefined)).toBe("");
   });
 });
 
 describe("firstMissingRequiredArg", () => {
-  const goal = defaultCommands.find((c) => c.name === "goal")!;
+  const goal = defaultCommands(englishText).find((c) => c.name === "goal")!;
   test("flags an absent required arg", () => {
     expect(firstMissingRequiredArg(goal, [])?.name).toBe("action");
   });
@@ -158,11 +167,11 @@ function run(command: SlashCommand, args: string[], ctx: CommandContext) {
 }
 
 describe("default command handlers", () => {
-  const goal = defaultCommands.find((c) => c.name === "goal")!;
-  const clear = defaultCommands.find((c) => c.name === "clear")!;
-  const compact = defaultCommands.find((c) => c.name === "compact")!;
-  const help = defaultCommands.find((c) => c.name === "help")!;
-  const clearView = defaultCommands.find((c) => c.name === "clear-view")!;
+  const goal = defaultCommands(englishText).find((c) => c.name === "goal")!;
+  const clear = defaultCommands(englishText).find((c) => c.name === "clear")!;
+  const compact = defaultCommands(englishText).find((c) => c.name === "compact")!;
+  const help = defaultCommands(englishText).find((c) => c.name === "help")!;
+  const clearView = defaultCommands(englishText).find((c) => c.name === "clear-view")!;
 
   test("/goal pause calls updateGoal with paused", async () => {
     const calls: unknown[] = [];
@@ -320,7 +329,7 @@ describe("default command handlers", () => {
       description: "Ping.",
       run: () => ({ status: "ok", message: "pong" }),
     };
-    const commands = [...defaultCommands, ping];
+    const commands = [...defaultCommands(englishText), ping];
     expect(filterCommands(commands, "pi", baseFilterCtx()).map((c) => c.name)).toEqual(["ping"]);
     expect(matchCommand(commands, "/ping")?.name).toBe("ping");
   });

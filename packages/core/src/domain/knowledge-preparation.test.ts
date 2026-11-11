@@ -274,3 +274,66 @@ test("catalog rechecks current metadata after a collection changes", async () =>
     revisionId: current.revision.id,
   });
 });
+
+test("batch preparation keeps page order, current views and null filtering without scalar reads", async () => {
+  const original = group("Old name");
+  const current = {
+    ...original,
+    version: 2,
+    revision: {
+      ...original.revision,
+      id: crypto.randomUUID(),
+      entry: { ...original.revision.entry, title: "Current name" },
+    },
+  };
+  const revoked = group("Revoked");
+  const pending = group("Proposed");
+  pending.revision.outcome = "pending";
+  const batches: Array<{ ids: string[]; view: string | undefined }> = [];
+  const result = await prepareKnowledgeSave(db, context, { query: "subject" }, embedder, {
+    list: async (_db, _context, request) =>
+      request?.view === "needs_review"
+        ? { entries: [summary(pending)], nextCursor: null }
+        : request?.cursor
+          ? { entries: [summary(revoked)], nextCursor: null }
+          : { entries: [summary(original)], nextCursor: "next" },
+    get: async () => {
+      throw new Error("The batch path must not use scalar reads");
+    },
+    getMany: async (actualDb, actualContext, ids, options) => {
+      expect(actualDb).toBe(db);
+      expect(actualContext).toBe(context);
+      batches.push({ ids, view: options?.view });
+      return ids.map((id) => [current, pending].find((record) => record.id === id) ?? null);
+    },
+    search: async () => ({ entries: [], nextCursor: null, searchMode: "keyword" }),
+  });
+  expect(batches).toEqual([
+    { ids: [original.id], view: "published" },
+    { ids: [revoked.id], view: "published" },
+    { ids: [pending.id], view: "needs_review" },
+  ]);
+  expect(
+    result.collections.entries.map(({ title, revisionId }) => ({ title, revisionId })),
+  ).toEqual([
+    { title: "Current name", revisionId: current.revision.id },
+    { title: "Proposed", revisionId: pending.revision.id },
+  ]);
+  expect(result.collections.complete).toBe(true);
+});
+
+test("a failed batch fails preparation without falling back to stale catalog metadata", async () => {
+  const record = group("Collection");
+  await expect(
+    prepareKnowledgeSave(db, context, { query: "subject" }, embedder, {
+      list: async () => ({ entries: [summary(record)], nextCursor: null }),
+      get: async () => {
+        throw new Error("Scalar fallback must not mask a batch failure");
+      },
+      getMany: async () => {
+        throw new Error("access revoked");
+      },
+      search: async () => ({ entries: [], nextCursor: null, searchMode: "keyword" }),
+    }),
+  ).rejects.toThrow("access revoked");
+});

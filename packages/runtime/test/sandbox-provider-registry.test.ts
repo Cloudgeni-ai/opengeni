@@ -7,7 +7,7 @@ import {
   SandboxBackend,
   type SandboxBackend as SandboxBackendType,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   PROVIDER_REGISTRY,
   SandboxConfigError,
@@ -32,6 +32,17 @@ import {
   OPENSANDBOX_DIRECT_RESOURCE_LIMITS,
   OPENSANDBOX_DIRECT_RESOURCE_REQUESTS,
 } from "../src/sandbox/providers/opensandbox";
+import { BlaxelSandboxSession } from "@openai/agents-extensions/sandbox/blaxel";
+import { CloudflareSandboxSession } from "@openai/agents-extensions/sandbox/cloudflare";
+import { DaytonaSandboxSession } from "@openai/agents-extensions/sandbox/daytona";
+import { E2BSandboxSession } from "@openai/agents-extensions/sandbox/e2b";
+import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
+import { RunloopSandboxSession } from "@openai/agents-extensions/sandbox/runloop";
+import { VercelSandboxSession } from "@openai/agents-extensions/sandbox/vercel";
+import { DockerSandboxSession, UnixLocalSandboxSession } from "@openai/agents/sandbox/local";
+import { ComputeSandboxSession } from "../src/sandbox/compute/session";
+import { OpenSandboxSession } from "../src/sandbox/providers/opensandbox-adapter";
+import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
 
 // Per-provider credential stubs so build() can run without real creds. Only the
 // fields validateCredentials requires per backend are present.
@@ -54,6 +65,17 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
     openSandboxApiKey: "k",
     openSandboxImage:
       "registry.example.com/opengeni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
+  // compute needs the control service, its agent gateway and the relay its agents use.
+  compute: {
+    computeApiUrl: "https://compute.example.test",
+    computeApiKey: "k",
+    computeLinkUrl: "wss://opengeni.example.test/v1/compute/agent-link",
+    publicBaseUrl: "https://opengeni.example.test",
+    selfhostedRelayUrl: "wss://relay.example.test",
+    selfhostedRelayTokenSecret: "relay-token-secret",
+    selfhostedNatsUrl: "nats://nats.example.test:4222",
+    agentOpStreamEnabled: true,
   },
 };
 
@@ -79,10 +101,10 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
   });
 
   test("immutable provider image builds are explicit and unsupported by default", () => {
-    expect(providerSupportsImmutableImageBuild("modal")).toBe(true);
+    // Modal builds snapshot images; compute captures team templates.
+    const builders = new Set(["modal", "compute"]);
     for (const backend of SandboxBackend.options) {
-      if (backend === "modal") continue;
-      expect(providerSupportsImmutableImageBuild(backend)).toBe(false);
+      expect(providerSupportsImmutableImageBuild(backend)).toBe(builders.has(backend));
     }
   });
 
@@ -188,6 +210,46 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     prepareProviderForTeardownAfterCapture("vercel", tarSession);
     expect(tarSession.state).toEqual({ workspacePersistence: "tar", sandboxId: "box" });
   });
+
+  test("each provider's declared write_stdin support is what its live session answers", () => {
+    // A lazy turn binds its tools with the declared value; a turn whose box was
+    // resolved first binds with the live session's answer. They must agree or
+    // the tool list differs between turns. Conditional SDK answers are read
+    // with a configured session's fields.
+    const live = (
+      session: { prototype: { supportsPty(): boolean } },
+      fields: Record<string, unknown> = {},
+    ) => session.prototype.supportsPty.call(fields);
+    const answers: Record<SandboxBackendType, boolean> = {
+      docker: live(DockerSandboxSession),
+      local: live(UnixLocalSandboxSession),
+      modal: live(ModalSandboxSession),
+      cloudflare: live(CloudflareSandboxSession),
+      runloop: live(RunloopSandboxSession),
+      vercel: live(VercelSandboxSession),
+      e2b: live(E2BSandboxSession, { sandbox: { pty: { create: () => undefined } } }),
+      blaxel: live(BlaxelSandboxSession, { state: { sandboxUrl: "https://box" }, apiKey: "key" }),
+      daytona: live(DaytonaSandboxSession, {
+        sandbox: { process: { createPty: () => undefined } },
+      }),
+      opensandbox: live(OpenSandboxSession),
+      selfhosted: live(SelfhostedSession),
+      compute: live(ComputeSandboxSession),
+      none: false,
+    };
+    for (const backend of SandboxBackend.options) {
+      expect({ backend, supportsPty: PROVIDER_REGISTRY[backend].sessionSupportsPty }).toEqual({
+        backend,
+        supportsPty: answers[backend],
+      });
+    }
+    // The person's terminal is a separate capability: these backends give the
+    // person a PTY but run agent commands without stdin.
+    for (const backend of ["compute", "selfhosted", "opensandbox"] as const) {
+      expect(CAPABILITY_DESCRIPTORS[backend].capabilities.Terminal.pty).toBe(true);
+      expect(PROVIDER_REGISTRY[backend].sessionSupportsPty).toBe(false);
+    }
+  });
 });
 
 describe("Docker continuity image selection", () => {
@@ -257,8 +319,22 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     // sandbox-file-persistence: idleTimeoutMs is ALWAYS pinned; with no explicit
     // OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS it DEFAULTS to the hard lifetime so
     // Modal's short server-default idle-reap can never kill an idle box before the
-    // OpenGeni reaper snapshots /workspace.
+    // Opengeni reaper snapshots /workspace.
     expect(client.options?.idleTimeoutMs).toBe(3_600_000);
+    // No region is pinned unless configured: Modal keeps its own placement.
+    expect(client.options?.regions).toBeUndefined();
+  });
+
+  test("modal threads configured region placement into physical create options", () => {
+    const client = createSandboxClient(
+      testSettings({
+        sandboxBackend: "modal",
+        modalTokenId: "tok-id",
+        modalTokenSecret: "tok-secret",
+        modalRegions: ["eu"],
+      }),
+    ) as { options?: Record<string, unknown> };
+    expect(client.options?.regions).toEqual(["eu"]);
   });
 
   test("docker threads an explicit shared workspace base directory", () => {
@@ -417,6 +493,7 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       "blaxel",
       "cloudflare",
       "vercel",
+      "compute",
     ] as const) {
       const settings = testSettings({ sandboxBackend: backend });
       expect(() => createSandboxClient(settings)).toThrow(SandboxConfigError);
@@ -455,6 +532,22 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       testSettings({ sandboxBackend: "e2b", e2bApiKey: "k", e2bTimeoutSeconds: 120 }),
     ) as { options?: { timeout?: number } };
     expect(e2b.options?.timeout).toBe(120);
+
+    // The key, domain and addresses reach the adapter explicitly, for every
+    // create and resume against E2B's cloud or an E2B-compatible API.
+    const e2bCompatible = createSandboxClient(
+      testSettings({
+        sandboxBackend: "e2b",
+        e2bApiKey: "k",
+        e2bDomain: "sandboxes.example.com",
+        e2bApiUrl: "https://api.sandboxes.example.com",
+      }),
+    ) as { options?: { connection?: Record<string, unknown> } };
+    expect(e2bCompatible.options?.connection).toEqual({
+      apiKey: "k",
+      domain: "sandboxes.example.com",
+      apiUrl: "https://api.sandboxes.example.com",
+    });
 
     const cloudflare = createSandboxClient(
       testSettings({

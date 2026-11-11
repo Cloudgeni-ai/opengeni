@@ -1,8 +1,11 @@
 import {
   BlocksIcon,
+  BotIcon,
+  ChartColumnIcon,
   CodeIcon,
   CreditCardIcon,
   FingerprintIcon,
+  LayersIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
@@ -11,7 +14,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type { OrganizationAdminSection } from "@/lib/organization-admin";
+import type { OrganizationAdminSection } from "@opengeni/react/app/lib/organization-admin";
 
 type OrganizationSettingsItem = {
   id: OrganizationAdminSection;
@@ -22,28 +25,32 @@ type OrganizationSettingsItem = {
 /**
  * The organization's settings pages: one name and one icon each, in rail order.
  * A page that exists at both scopes wears the same icon in the workspace rail
- * (`settings-rail.tsx`): General, People/Access, Developer, Security. Models lives
- * here only: every model setting, a workspace's included, is on that one page.
+ * (`settings-rail.tsx`): General, People/Access, Shared/Available here,
+ * Developer, Security. Models lives here only: every model setting, a
+ * workspace's included, is on that one page.
  */
 export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "general", label: "General", icon: SlidersHorizontalIcon },
   { id: "people", label: "People", icon: UsersIcon },
   { id: "workspaces", label: "Workspaces", icon: SquareStackIcon },
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
+  { id: "shared", label: "Shared", icon: LayersIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
-  { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
+  { id: "agents", label: "Connected apps", icon: BotIcon },
+  { id: "insights", label: "Insights", icon: ChartColumnIcon },
+  { id: "billing", label: "Billing", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },
   { id: "security", label: "Security & data", icon: ShieldCheckIcon },
 ];
 
 /**
  * The rail's two unlabeled groups: the organization and its people, then what
- * it provides, pays for and protects.
+ * it provides (Shared first: all of it at a glance), pays for and protects.
  */
 export const ORGANIZATION_SETTINGS_GROUPS: readonly (readonly OrganizationAdminSection[])[] = [
   ["general", "people", "workspaces", "identity"],
-  ["models", "integrations", "billing", "developer", "security"],
+  ["shared", "models", "integrations", "agents", "insights", "billing", "developer", "security"],
 ];
 
 export function organizationSettingsLabel(section: OrganizationAdminSection): string {
@@ -54,27 +61,37 @@ export function organizationSettingsLabel(section: OrganizationAdminSection): st
 export function organizationSettingsDescription(
   section: OrganizationAdminSection,
   organizationName: string,
+  /** Members see People as names only, so its subtitle doesn't mention roles. */
+  canAdminister = true,
 ): string | undefined {
   switch (section) {
     case "general":
       // The rows (Name, Organization ID) say it; a description would restate them.
       return undefined;
     case "people":
-      return `Everyone in ${organizationName}, with one role each and a private Personal workspace.`;
+      return canAdminister
+        ? `Everyone in ${organizationName}, with one role each and a private Personal workspace.`
+        : `Everyone in ${organizationName}.`;
     case "workspaces":
       return `Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`;
+    case "shared":
+      return `Everything ${organizationName} shares with its workspaces, and where each works.`;
     case "models":
-      return `What pays for models in ${organizationName}, and what each workspace starts with and allows.`;
+      return `The models people in ${organizationName} can use, and the subscriptions and keys that pay for them.`;
     case "integrations":
-      // "Allowed integrations" and its one row say it all.
+      // "Connectors" and "Allowed integrations" each say what they are.
       return undefined;
+    case "agents":
+      return `Use ${organizationName} from Claude Code, Cursor, Codex or any MCP client. Each agent acts as you, with the access you choose when it signs in.`;
     case "identity":
       return "Who the organization is and what it does, for every agent.";
+    case "insights":
+      return `Spend, tokens and model calls across ${organizationName}.`;
     case "billing":
-      return "Credits, plan and usage by workspace.";
+      return "Credits, payments and workspace budgets.";
     case "developer":
       return "API keys, webhooks and a credential provider for products built on Opengeni.";
     case "security":
-      return "Private chats, how long data is kept, and recovery.";
+      return "Where models run, private chats, how long data is kept, and recovery.";
   }
 }

@@ -1,20 +1,31 @@
+import { assertGoogleConnectorSetupEnabled } from "./google-connector-availability";
+import { sql } from "drizzle-orm";
 import { safeReturnPath } from "./oauth-return-path";
 import { assertOrganizationIntegrationAllowed, stableJson } from "@opengeni/contracts";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/config";
+import {
+  findIntegrationsOauthClient,
+  parseIntegrationsOauthClientsJson,
+  type Settings,
+} from "@opengeni/config";
 import {
   OAuthStartResponse,
-  selectCanonicalPersonalSlackConnection,
   type ConnectionOwnership,
+  type ConnectionMetadata,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
-import { requireEnvironmentEncryption, integrationKeyForConnectProvider } from "@opengeni/core";
+import {
+  integrationKeyForConnectProvider,
+  legacyMcpClientError,
+  listOwnConnectionMetadata,
+  requireEnvironmentEncryption,
+  turnOnOwnLoginHere,
+  withMcpStreamableHttpClient,
+  type McpStreamableHttpClient,
+} from "@opengeni/core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type { Observability } from "@opengeni/observability";
 import {
@@ -39,6 +50,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { createSignedState, inspectSignedState, readSignedState } from "@opengeni/github";
+import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from "jose";
 import {
   DestinationPolicyError,
   McpOAuthDiscoveryError,
@@ -59,20 +71,26 @@ import {
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import { observeOAuthStart } from "../integration-connect-metrics";
 import {
   assertConnectionOwnershipAllowedForPrincipal,
+  connectOwnerStateFields,
+  PERSONAL_CONNECTION_PRINCIPAL_MESSAGE,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_CONNECTION_PRINCIPAL_MESSAGE,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   DEFAULT_OAUTH_PROFILE,
   OFFICIAL_GMAIL_MCP_URL,
+  OFFICIAL_DRIVE_MCP_URL,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
   DEPLOYMENT_MANAGED_CLIENTS,
   builtInOAuthProfileByKey,
+  accountIdentityKeysFor,
+  accountIdentityVerifierFor,
+  accountMcpUrlGroup,
   assertAuthorizationServerNotReserved,
   assertAuthorizationServerPins,
   builtInOAuthProfileFor,
@@ -80,10 +98,19 @@ import {
   defaultOwnershipFor,
   deploymentManagedClientFor,
   oauthProfileFromCatalog,
+  type AccountIdentityContext,
+  type AccountIdentityVerifier,
   type OAuthProviderProfile,
   type PinnableAuthorizationServer,
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
+import {
+  ACCOUNT_FAILURES,
+  decideOAuthAccountConnection,
+  oauthAccountFailureMessage,
+  type AccountFailure,
+} from "./oauth-account-identity";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
 
@@ -161,7 +188,7 @@ type OAuthClientDeps = {
 
 export type OAuthStartContext = {
   /** Server-selected dedicated adapter identity; never copied from request metadata. */
-  integrationKey?: "gmail" | "slack-personal";
+  integrationKey?: "gmail" | "google-drive" | "google-calendar" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   accountId: string;
@@ -185,6 +212,7 @@ export type OAuthCallbackResult = {
 type WwwAuthenticateChallenge = McpOAuthChallenge;
 type ProtectedResourceMetadata = McpProtectedResourceMetadata;
 type AuthorizationServerMetadata = McpAuthorizationServerMetadata;
+type OAuthDiscoveryMode = McpOAuthDiscoveryMode | "provider_oauth_metadata";
 
 type OAuthClientRegistration = {
   method: "operator" | "manual" | "cimd" | "dcr";
@@ -196,7 +224,7 @@ type OAuthClientRegistration = {
 };
 
 type OAuthStatePayload = {
-  integrationKey?: "gmail" | "slack-personal";
+  integrationKey?: "gmail" | "google-drive" | "google-calendar" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   returnUrl?: string;
@@ -216,10 +244,16 @@ type OAuthStatePayload = {
   tokenEndpoint: string;
   authorizationServer: string;
   issuer: string;
-  discoveryMode: McpOAuthDiscoveryMode;
+  discoveryMode: OAuthDiscoveryMode;
   discoveryMetadataSha256?: string;
   protectedResourceMetadataUrl?: string;
   authorizationServerMetadataUrl?: string;
+  /** OpenID Connect endpoints the authorization server advertised, for the
+   * generic account identity. Absent on older states and non-OIDC servers. */
+  oidcUserinfoEndpoint?: string;
+  oidcJwksUri?: string;
+  /** Sent with an OpenID Connect request; a returned id_token must carry it. */
+  oidcNonce?: string;
   clientRegistrationMethod: OAuthClientRegistration["method"];
   tokenEndpointAuthMethod: OAuthClientRegistration["tokenEndpointAuthMethod"];
   resourceParameterSupported: boolean;
@@ -403,41 +437,6 @@ export async function claimOAuthAcquisition(
   );
 }
 
-type IntegrationSourceSelection = Record<string, unknown> & {
-  id: string;
-  syncEnabled: boolean;
-  readPolicy: "allow" | "ask" | "block";
-};
-
-/** Compare server-bound selections, not provider classification. Removing a
- * source, disabling sync, or narrowing its read permission acquires no authority.
- * Generation/timestamp bookkeeping does not turn an unchanged save into setup. */
-export function integrationSourceSelectionRequiresAcquisition(
-  previous: readonly IntegrationSourceSelection[],
-  requested: readonly IntegrationSourceSelection[],
-): boolean {
-  const rank = { block: 0, ask: 1, allow: 2 };
-  const config = (source: IntegrationSourceSelection) => {
-    const {
-      selectedAt: _selectedAt,
-      configGeneration: _generation,
-      syncEnabled: _enabled,
-      readPolicy: _readPolicy,
-      ...binding
-    } = source;
-    return stableJson(binding);
-  };
-  return requested.some((source) => {
-    const existing = previous.find((candidate) => candidate.id === source.id);
-    return (
-      !existing ||
-      (!existing.syncEnabled && source.syncEnabled) ||
-      rank[source.readPolicy] > rank[existing.readPolicy] ||
-      config(existing) !== config(source)
-    );
-  });
-}
-
 export async function finishOAuthAcquisition(
   db: Database,
   scope: Parameters<typeof finishConnectOperation>[1],
@@ -459,6 +458,19 @@ export async function startMcpOAuth(
   deps: OAuthClientDeps,
   context: OAuthStartContext,
 ): Promise<OAuthStartResponse> {
+  const startTarget = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
+  if (
+    context.integrationKey === "google-drive" &&
+    (startTarget !== OFFICIAL_DRIVE_MCP_URL || context.payload.ownership !== "personal")
+  ) {
+    throw new HTTPException(422, {
+      message: "Google Drive setup requires its exact MCP endpoint and personal ownership",
+    });
+  }
+  assertGoogleMcpSetupEnabled(
+    deps.settings,
+    builtInOAuthProfileFor({ mcpUrl: startTarget }) ?? DEFAULT_OAUTH_PROFILE,
+  );
   await withOrganizationIntegrationAcquisition(
     deps.db,
     context,
@@ -467,13 +479,21 @@ export async function startMcpOAuth(
   );
   const deadline = new OAuthStartDeadline(deps.oauthStartDeadlineMs ?? OAUTH_START_DEADLINE_MS);
   try {
-    return await startMcpOAuthWithinDeadline(deps, context, deadline);
+    const started = await startMcpOAuthWithinDeadline(deps, context, deadline);
+    observeOAuthStart(deps.observability, { flow: "mcp_oauth", outcome: "success" });
+    return started;
   } catch (error) {
     const staged =
       error instanceof OAuthStartStageError
         ? error
         : new OAuthStartStageError("connection_lookup", oauthStartFailureReason(error), error);
     logOAuthStartFailure(deps.observability, staged);
+    observeOAuthStart(deps.observability, {
+      flow: "mcp_oauth",
+      outcome: "failure",
+      stage: staged.stage,
+      reason: staged.reason,
+    });
     throw oauthStartApiError(staged);
   } finally {
     deadline.dispose();
@@ -527,6 +547,7 @@ async function startMcpOAuthWithinDeadline(
   // Catalog defaults are setup preferences; an explicit ownership always wins.
   const requestedOwnership: ConnectionOwnership =
     context.payload.ownership ?? defaultOwnershipFor(profile);
+  assertProfileOwnership(profile, requestedOwnership);
   const returnPath = safeReturnPath(
     context.payload.returnPath ?? workspaceIntegrationsPath(context.workspaceId),
   );
@@ -539,11 +560,9 @@ async function startMcpOAuthWithinDeadline(
       subjectId: context.subjectId,
       providerDomain,
       mcpUrl,
-      connectionSelection: profile.connectionSelection,
-      exactMcpBinding: profile.exactMcpBinding,
       connectionId: context.payload.connectionId,
+      newAccount: context.payload.newAccount === true,
       requestedOwnership: context.payload.ownership,
-      newConnectionOwnership: requestedOwnership,
     }),
   );
   if (context.payload.connectionId && !existing) {
@@ -552,6 +571,7 @@ async function startMcpOAuthWithinDeadline(
   const ownership = existing
     ? ownershipForConnection(existing.subjectId, context.subjectId)
     : requestedOwnership;
+  assertProfileOwnership(profile, ownership);
   // Only a managed human can own a personal Connection: personal-authority
   // execution resolves through a delegation snapshot frozen on a human's causal
   // turn, and migration 0256 can mint the `user` authority scope only for a
@@ -559,20 +579,35 @@ async function startMcpOAuthWithinDeadline(
   // choice is never silently downgraded to workspace ownership.
   assertConnectionOwnershipAllowedForPrincipal(ownership, context.personalOwnershipAllowed);
 
-  const discovery = await discoverMcpOAuth(mcpUrl, settings, deadline);
+  const discovery = profile.providerOAuthDiscovery
+    ? await discoverProviderOAuth(mcpUrl, settings, deadline, profile)
+    : await discoverMcpOAuth(mcpUrl, settings, deadline);
   assertDiscoveredAuthorizationServer(settings, discovery.as, profile, providerDomain);
   const resourceParameterSupported =
     discovery.mode === "rfc9728_protected_resource" && profile.sendResourceParameter;
   const resource = discovery.resource;
   const verifier = randomPkceVerifier();
+  // Generic OpenID Connect identity: only where nothing else identifies the
+  // account and the authorization server itself advertises OpenID Connect.
+  const oidc =
+    profile.requestedScopes || profileIdentifiesAccounts(profile, mcpUrl)
+      ? null
+      : await advertisedOidc(discovery.as, settings, deadline.signal);
   // A profile's exact scope override wins outright: the reviewed connector
-  // never lets a caller widen the capability contract.
-  const authorizeScopes = chooseProfileAuthorizeScopes(profile, {
+  // never lets a caller widen the capability contract. An incremental profile
+  // adds access only when reconnecting an existing account.
+  const baseScopes = chooseProfileAuthorizeScopes(profile, {
     requested: context.payload.requestedScopes,
     challenged: discovery.challenge.scope,
     supported: discovery.prm.scopesSupported,
     authorizationServerScopesSupported: stringArray(discovery.as.raw.scopes_supported),
+    ...(existing ? { reconnectGrantedScopes: existing.grantedScopes } : {}),
   });
+  // Asking for "openid" (and "email") lets the server name the account. An empty
+  // scope request is left alone: on some servers it means every default scope.
+  const authorizeScopes =
+    oidc && baseScopes.length ? uniqueStrings([...baseScopes, ...oidc.scopes]) : baseScopes;
+  const oidcNonce = authorizeScopes.includes("openid") && oidc ? randomPkceVerifier() : undefined;
   const client = await deadline.run("client_registration", (signal) =>
     registerOAuthClient(
       db,
@@ -587,17 +622,28 @@ async function startMcpOAuthWithinDeadline(
       context,
     ),
   );
+  if (
+    profile.confidentialClientRequired &&
+    (!isConfidentialOAuthClient(client) ||
+      !discovery.as.tokenEndpointAuthMethodsSupported.includes(client.tokenEndpointAuthMethod))
+  ) {
+    throw new OAuthStartStageError(
+      "client_registration",
+      "configuration_missing",
+      new HTTPException(503, {
+        message:
+          "Google connector OAuth requires a registered Google Web application client with a secret and supported token authentication",
+      }),
+    );
+  }
   const key = requireEnvironmentEncryption(settings);
   const fullState = createSignedState(requireIntegrationsStateSecret(settings), {
     ...(context.integrationKey ? { integrationKey: context.integrationKey } : {}),
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
-    accountId: context.accountId,
-    workspaceId: context.workspaceId,
-    subjectId: context.subjectId,
-    ownership,
     // Signed record that a live principal was checked; the callback has no
     // principal of its own and enforces exactly this decision.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: context.personalOwnershipAllowed,
+    ...connectOwnerStateFields(context, context.personalOwnershipAllowed),
+    ownership,
     ...(externalContinuation
       ? {
           encryptedExternalContinuation: encryptEnvironmentValue(
@@ -627,6 +673,8 @@ async function startMcpOAuthWithinDeadline(
         }
       : {}),
     authorizationServerMetadataUrl: discovery.provenance.authorizationServerMetadataUrl,
+    ...(oidc?.endpoints ?? {}),
+    ...(oidcNonce ? { oidcNonce } : {}),
     clientRegistrationMethod: client.method,
     tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
     resourceParameterSupported,
@@ -639,28 +687,27 @@ async function startMcpOAuthWithinDeadline(
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const expiresAt = new Date(Date.now() + oauthStateTtlMs);
-  let state = fullState;
-  if (settings.integrationsOauthShortStateEnabled) {
-    const stateId = randomUUID();
-    state = createSignedState(requireIntegrationsStateSecret(settings), {
-      kind: "mcp_oauth_reference",
+  // Providers cap `state` length (Stripe at 1024 characters), so only a short
+  // signed reference leaves; the full context waits encrypted at rest.
+  const stateId = randomUUID();
+  const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    kind: "mcp_oauth_reference",
+    id: stateId,
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+  });
+  if (state.length > 512) {
+    throw new Error("MCP OAuth reference state exceeded its provider-safe length");
+  }
+  await deadline.run("state_persist", async () =>
+    storeIntegrationOAuthPendingState(db, {
       id: stateId,
       accountId: context.accountId,
       workspaceId: context.workspaceId,
-    });
-    if (state.length > 512) {
-      throw new Error("MCP OAuth reference state exceeded its provider-safe length");
-    }
-    await deadline.run("state_persist", async () =>
-      storeIntegrationOAuthPendingState(db, {
-        id: stateId,
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        stateEncrypted: encryptEnvironmentValue(key, fullState),
-        expiresAt,
-      }),
-    );
-  }
+      stateEncrypted: encryptEnvironmentValue(key, fullState),
+      expiresAt,
+    }),
+  );
   const authorizationUrl = buildAuthorizationUrl({
     endpoint: discovery.as.authorizationEndpoint,
     settings,
@@ -671,7 +718,14 @@ async function startMcpOAuthWithinDeadline(
     verifier,
     scopes: authorizeScopes,
     resourceParameterSupported,
-    ...(profile.extraAuthorizeParams ? { extraParams: profile.extraAuthorizeParams } : {}),
+    ...(profile.extraAuthorizeParams || oidcNonce
+      ? {
+          extraParams: {
+            ...profile.extraAuthorizeParams,
+            ...(oidcNonce ? { nonce: oidcNonce } : {}),
+          },
+        }
+      : {}),
   });
   return OAuthStartResponse.parse({
     state,
@@ -680,8 +734,26 @@ async function startMcpOAuthWithinDeadline(
   });
 }
 
-export function isHostedSlackMcpTarget(providerDomain: string, mcpUrl: string): boolean {
-  return builtInOAuthProfileFor({ mcpUrl, providerDomain })?.key === "hosted-slack-mcp";
+function assertGoogleMcpSetupEnabled(settings: Settings, profile: OAuthProviderProfile): void {
+  if (
+    profile.key === "official-gmail" ||
+    profile.key === "official-drive" ||
+    profile.key === "official-google-calendar"
+  ) {
+    assertGoogleConnectorSetupEnabled(settings);
+  }
+  if (profile.key === "official-drive" && !settings.googleDriveMcpEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "Google Drive MCP is unavailable until this deployment has completed Google's preview and OAuth setup.",
+    });
+  }
+  if (profile.key === "official-google-calendar" && !settings.googleCalendarEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "Google Calendar is unavailable until this deployment adds the Calendar scopes to its Google OAuth app.",
+    });
+  }
 }
 
 /** Start-time payload fences declared by the resolved profile. */
@@ -691,6 +763,7 @@ function assertOAuthStartProfile(
   mcpUrl: string,
   profile: OAuthProviderProfile,
 ): void {
+  assertGoogleMcpSetupEnabled(settings, profile);
   if (profile.rejectCallerOAuthClient && payload.oauthClient) {
     throw new HTTPException(422, { message: profile.rejectCallerOAuthClient.message });
   }
@@ -776,6 +849,12 @@ async function completeMcpOAuthCallbackWithinDeadline(
   let state: OAuthStatePayload | null = null;
   let integrationKey: string | null = "custom:mcp";
   let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
+  // A personal sign-in started with `connections:personal` finishes with it too.
+  let ownerPermission: ReturnType<typeof connectSetupPermission> = "connections:write";
+  // Set once the signed state is bound to its stored attempt, and once this
+  // callback holds the attempt's operation. Failures after the match settle it.
+  let attemptMatched = false;
+  let operationClaimed = false;
   if (!input.state) {
     const error = new OAuthCallbackStageError(
       "state_verify",
@@ -795,27 +874,44 @@ async function completeMcpOAuthCallbackWithinDeadline(
     integrationKey = state.integrationKey ?? "custom:mcp";
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
-      // Native Gmail setup uses its own provider id, but shares this callback.
-      // Bind that id to the exact reviewed Gmail destination before
-      // claiming an operation (including receipt replay), not to arbitrary MCP.
+      // Dedicated Google setup shares this callback. Bind each trusted provider
+      // id to its exact reviewed endpoint before claiming an operation or replay.
       const gmailAttemptMatches =
         stored.attempt.providerId === "gmail" &&
         state.mcpUrl === OFFICIAL_GMAIL_MCP_URL &&
         state.providerDomain === "gmailmcp.googleapis.com" &&
         builtInOAuthProfileFor(state)?.key === "official-gmail" &&
         personalOwnerStateAccepted(state);
+      const driveAttemptMatches =
+        stored.attempt.providerId === "google-drive" &&
+        state.integrationKey === "google-drive" &&
+        state.mcpUrl === OFFICIAL_DRIVE_MCP_URL &&
+        state.providerDomain === "drivemcp.googleapis.com" &&
+        builtInOAuthProfileFor(state)?.key === "official-drive" &&
+        personalOwnerStateAccepted(state);
+      const calendarAttemptMatches =
+        stored.attempt.providerId === "google-calendar" &&
+        state.integrationKey === "google-calendar" &&
+        state.mcpUrl === OFFICIAL_GOOGLE_CALENDAR_MCP_URL &&
+        state.providerDomain === "calendarmcp.googleapis.com" &&
+        builtInOAuthProfileFor(state)?.key === "official-google-calendar" &&
+        personalOwnerStateAccepted(state);
       if (
         (!["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) &&
-          !gmailAttemptMatches) ||
+          !gmailAttemptMatches &&
+          !driveAttemptMatches &&
+          !calendarAttemptMatches) ||
         stored.attempt.ownership !== state.ownership ||
         stored.returnUrl !== state.returnUrl
       )
         throw new HTTPException(403, { message: "OAuth attempt mismatch" });
+      ownerPermission = connectSetupPermission(stored.attempt);
       connectOperation = {
         attemptId: state.connectAttemptId,
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state).digest("hex"),
       };
+      attemptMatched = true;
       integrationKey = integrationKeyForConnectProvider(stored.attempt.providerId);
       const claim = await claimOAuthAcquisition(
         db,
@@ -824,12 +920,13 @@ async function completeMcpOAuthCallbackWithinDeadline(
           ...connectOperation,
           expectedRevision: stored.attempt.revision,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
         },
         integrationKey,
         Boolean(input.code),
       );
       if (claim.status === "replayed") return { redirectTo: stored.returnUrl, exactReturn: true };
+      operationClaimed = true;
     }
     // The callback enforces the signed start-time principal decision.
     // Workspace ownership requires no personal-owner claim.
@@ -849,7 +946,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         await finishConnectOperation(db, state, {
           ...connectOperation,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
@@ -877,7 +974,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       "state_verify",
       db,
       async (scopedDb) => {
-        await requireOAuthCallbackGrant(scopedDb, state!);
+        await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
         return await consumeIntegrationOAuthStateNonce(scopedDb, {
           accountId: state!.accountId,
           workspaceId: state!.workspaceId,
@@ -910,6 +1007,15 @@ async function completeMcpOAuthCallbackWithinDeadline(
         }),
       };
     }
+    if (connectOperation && attemptMatched) {
+      // The attempt is known, so the card must not keep waiting on it.
+      await settleFailedConnectAttempt(deps, state, connectOperation, {
+        claimed: operationClaimed,
+        stage: staged,
+        message:
+          "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+      });
+    }
     return callbackStateResult(state, "error", {
       stage: staged.stage,
       reason: staged.reason,
@@ -918,6 +1024,14 @@ async function completeMcpOAuthCallbackWithinDeadline(
 
   const ownerSubjectId = state.ownership === "personal" ? state.subjectId : null;
   try {
+    // A gate can change while the human is at Google. Claim the validated
+    // Connect operation first so this refusal has a durable terminal receipt,
+    // while still stopping before client lookup or any provider request.
+    try {
+      assertGoogleMcpSetupEnabled(settings, builtInOAuthProfileFor(state) ?? DEFAULT_OAUTH_PROFILE);
+    } catch (error) {
+      throw new OAuthCallbackStageError("client_lookup", "setup_unavailable", error);
+    }
     const baseUrl = integrationBaseUrl(settings.publicBaseUrl, input.requestUrl);
     const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
     const key = requireEnvironmentEncryption(settings);
@@ -925,6 +1039,16 @@ async function completeMcpOAuthCallbackWithinDeadline(
     const client = await runCallbackDatabaseStage(deadline, "client_lookup", db, (scopedDb) =>
       clientForState(scopedDb, settings, state),
     );
+    if (
+      builtInOAuthProfileFor(state)?.confidentialClientRequired &&
+      !isConfidentialOAuthClient(client)
+    ) {
+      throw new OAuthCallbackStageError(
+        "client_lookup",
+        "invalid_client",
+        new Error("Google connector OAuth client is unavailable"),
+      );
+    }
     const token = await deadline.run("token_exchange", (signal) =>
       exchangeAuthorizationCode(settings, {
         code: input.code!,
@@ -937,14 +1061,35 @@ async function completeMcpOAuthCallbackWithinDeadline(
         signal,
       }),
     );
+    const profile = builtInOAuthProfileFor(state);
+    if (profile?.freshRefreshTokenRequired && !token.refreshToken) {
+      // Never splice a previous account's refresh token into a new grant.
+      // Google can omit refresh_token even after another consent prompt.
+      throw new OAuthCallbackStageError(
+        "token_exchange",
+        "offline_access_unavailable",
+        new Error("Google did not grant offline access. Start a new connector connection attempt."),
+      );
+    }
+    const scopes = grantedScopes(token.scopeText, state.authorizeScopes, profile);
+    if (
+      profile?.fullRequestedScopesRequired &&
+      profile.requestedScopes?.some((scope) => !scopes.includes(scope))
+    ) {
+      throw new OAuthCallbackStageError(
+        "token_exchange",
+        "insufficient_scope",
+        new Error("Google did not grant the requested connector permissions."),
+      );
+    }
     const verification = await verifyMcpToolsListNonFatal(
       observability,
       settings,
       state,
       token,
       deadline,
+      scopes,
     );
-    const scopes = grantedScopes(token.scopeText, state.authorizeScopes);
     const credential = credentialBundle(token, state, client);
     const metadata = {
       resource: state.resource,
@@ -967,11 +1112,100 @@ async function completeMcpOAuthCallbackWithinDeadline(
           : {}),
       },
       mcpToolsVerification: verification.metadata,
+      ...(verification.identityMethod
+        ? { accountIdentityMethod: verification.identityMethod }
+        : {}),
+      ...(verification.providerIdentity ?? {}),
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
+    // The personal login this callback saved, to turn on where it was connected.
+    let persisted: ConnectionMetadata | null = null;
     const persist = async (scopedDb: Database) => {
-      await requireOAuthCallbackGrant(scopedDb, state!);
+      persisted = null;
+      const connection = await persistConnection(scopedDb);
+      persisted = connection ?? null;
+      return connection;
+    };
+    // Connecting your own login again, or reconnecting it, from a shared
+    // workspace turns it on there (D-54). A new login is already on where it
+    // was added. Best effort: the login is saved either way, and its row in
+    // this workspace can turn it on.
+    const turnOnPersistedLoginHere = async () => {
+      const connection = persisted as ConnectionMetadata | null;
+      if (!ownerSubjectId || !connection?.authorityId) return;
+      try {
+        await turnOnOwnLoginHere(db, {
+          accountId: state!.accountId,
+          workspaceId: state!.workspaceId,
+          subjectId: ownerSubjectId,
+          authorityId: connection.authorityId,
+        });
+      } catch (error) {
+        console.warn("[api] could not turn on an own login where it was connected", {
+          workspaceId: state!.workspaceId,
+          connectionId: connection.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    const persistConnection = async (scopedDb: Database) => {
+      await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
+      // Serialize the entire owner/resource bucket, including providers with no
+      // identity proof. Locking only a known identity lets unknown callbacks race it.
+      // A personal account follows its owner across workspaces, so its bucket does too.
+      // The one-account rule also compares the workspace's shared bucket with the
+      // requester's personal one, so both are locked, always shared first.
+      const resource = accountMcpUrlGroup(state.mcpUrl);
+      for (const bucket of [
+        [state.accountId, state.workspaceId, null, resource],
+        ...(state.subjectId ? [[state.accountId, null, state.subjectId, resource]] : []),
+      ]) {
+        await scopedDb.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`oauth-account:${JSON.stringify(bucket)}`}, 0))`,
+        );
+      }
+      const accounts = new Map<string, ConnectionMetadata>(
+        (await listConnectionsMetadata(scopedDb, state.workspaceId, state.subjectId)).map(
+          (connection) => [connection.id, connection] as const,
+        ),
+      );
+      // Connecting a personal account again from another of the owner's
+      // workspaces reuses it instead of adding a duplicate without its settings.
+      // A shared connection also sees the requester's own personal accounts.
+      for (const connection of await listOwnConnectionMetadata(scopedDb, {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        subjectId: state.subjectId,
+        reach: "anywhere",
+        includeInactive: true,
+      }))
+        accounts.set(connection.id, connection);
+      const decision = decideOAuthAccountConnection({
+        accounts: [...accounts.values()],
+        ownerSubjectId,
+        requesterSubjectId: state.subjectId,
+        providerDomain: state.providerDomain,
+        mcpUrl: state.mcpUrl,
+        metadata,
+        grantedScopes: scopes,
+        identityKeys: accountIdentityKeysFor(
+          profile,
+          state.mcpUrl,
+          verification.identityMethod === "oidc",
+        ),
+        requestedConnectionId: state.connectionId,
+      });
+      if (decision.kind === "reject") {
+        throw new OAuthCallbackStageError(
+          "persist",
+          decision.reason,
+          new Error(oauthAccountFailureMessage(decision.reason)),
+        );
+      }
+      // A repeated Add is a successful no-op. Do not rotate credentials, reset
+      // approvals or invalidate accepted work just because OAuth ran again.
+      if (decision.kind === "reuse") return decision.connection;
       return state!.connectionId
         ? await updateConnection(scopedDb, {
             workspaceId: state.workspaceId,
@@ -981,7 +1215,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
             subjectId: ownerSubjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
-            status: "active",
+            status: verification.connectionStatus ?? "active",
             credentialEncrypted,
             grantedScopes: scopes,
             expiresAt: token.expiresAt,
@@ -994,6 +1228,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
             subjectId: ownerSubjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
+            status: verification.connectionStatus ?? "active",
             credentialEncrypted,
             grantedScopes: scopes,
             expiresAt: token.expiresAt,
@@ -1009,7 +1244,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           {
             ...connectOperation!,
             authorize: (tx, _attempt, origin) =>
-              requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+              requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
             commit: async (tx, current) => {
               const connection = await persist(tx);
               if (!connection)
@@ -1029,7 +1264,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
                   providerId: current.providerId,
                   label: state!.providerDomain,
                   ownership: current.ownership,
-                  status: "connected",
+                  status: connection.status === "needs_reauth" ? "auth_needed" : "connected",
                 },
               };
             },
@@ -1037,6 +1272,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           integrationKey,
         ),
       );
+      await turnOnPersistedLoginHere();
       return { redirectTo: state.returnUrl!, exactReturn: true };
     }
     const connection = await runCallbackDatabaseStage(deadline, "persist", db, (scopedDb) =>
@@ -1047,6 +1283,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         message: "connection changed during OAuth reconnect; start again",
       });
     }
+    await turnOnPersistedLoginHere();
     // Carry the canonical providerDomain (not just the id) so the SPA can build
     // the enable connectionRef straight from the redirect, without a listConnections
     // round-trip that could fail (transient, or a grant lacking connections:read)
@@ -1063,10 +1300,84 @@ async function completeMcpOAuthCallbackWithinDeadline(
         ? error
         : new OAuthCallbackStageError("persist", "persist_failed", error);
     logOAuthCallbackFailure(observability, staged, state);
+    if (connectOperation) {
+      // The external return URL stays exact. Its caller reads the durable
+      // attempt result, which must not remain in flight after a rejected grant.
+      await settleFailedConnectAttempt(deps, state, connectOperation, {
+        claimed: true,
+        stage: staged,
+        message:
+          staged.reason === "setup_unavailable"
+            ? "Google connector setup is currently unavailable. Your previous connection is unchanged. Try a new connection attempt after setup is enabled."
+            : ACCOUNT_FAILURES.includes(staged.reason as AccountFailure)
+              ? oauthAccountFailureMessage(staged.reason as AccountFailure)
+              : staged.reason === "offline_access_unavailable"
+                ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
+                : staged.reason === "insufficient_scope"
+                  ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
+                  : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+      });
+    }
     return callbackStateResult(state, "error", {
       stage: staged.stage,
       reason: staged.reason,
     });
+  }
+}
+
+/**
+ * Settle a known connect attempt as failed after its callback could not finish.
+ *
+ * This deliberately skips the owner-authority check: a failure commits no
+ * credential or installation and only touches the signed state's own attempt,
+ * within its actor scope. Requiring the grant here would leave the attempt in
+ * flight exactly when the grant itself was the reason the callback failed.
+ * When this callback did not claim the operation, it claims it first, which
+ * refuses to take over another callback's in-flight operation.
+ */
+async function settleFailedConnectAttempt(
+  deps: OAuthClientDeps,
+  state: OAuthStatePayload,
+  operation: { attemptId: string; operationId: string; inputDigest: string },
+  input: { claimed: boolean; stage: OAuthCallbackStageError; message: string },
+): Promise<void> {
+  try {
+    await withDatabaseStatementTimeout(
+      deps.db,
+      OAUTH_CALLBACK_DB_STATEMENT_TIMEOUT_MS,
+      async (tx) => {
+        if (!input.claimed) {
+          const stored = await getConnectAttempt(tx, state, operation.attemptId);
+          if (
+            ["complete", "cancelled", "expired", "failed", "uncertain"].includes(
+              stored.attempt.state,
+            )
+          )
+            return;
+          const claim = await claimConnectOperation(tx, state, {
+            ...operation,
+            expectedRevision: stored.attempt.revision,
+          });
+          if (claim.status === "replayed") return;
+        }
+        await finishConnectOperation(tx, state, {
+          ...operation,
+          commit: async (_locked, current) => ({
+            ...current,
+            revision: current.revision + 1,
+            state: "failed",
+            nextAction: { type: "none" },
+            error: { code: input.stage.reason, message: input.message, retryable: true },
+          }),
+        });
+      },
+    );
+  } catch (settlementError) {
+    logOAuthCallbackFailure(
+      deps.observability,
+      new OAuthCallbackStageError(input.stage.stage, "persist_failed", settlementError),
+      state,
+    );
   }
 }
 
@@ -1114,8 +1425,12 @@ export function requireIntegrationsStateSecret(settings: Settings): string {
   return secret;
 }
 
-async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload): Promise<void> {
-  await requireConnectOwnerAuthority(db, state);
+async function requireOAuthCallbackGrant(
+  db: Database,
+  state: OAuthStatePayload,
+  permission: ReturnType<typeof connectSetupPermission>,
+): Promise<void> {
+  await requireConnectOwnerAuthority(db, state, permission);
 }
 
 /** The hosted-Slack profile's origin pins, kept exported for its tests. */
@@ -1158,7 +1473,7 @@ export async function inspectMcpAuthentication(
           params: {
             protocolVersion: "2025-03-26",
             capabilities: {},
-            clientInfo: { name: "OpenGeni", version: "1.0" },
+            clientInfo: { name: "Opengeni", version: "1.0" },
           },
         }),
         signal,
@@ -1215,10 +1530,13 @@ export async function inspectMcpAuthentication(
       await resolveMcpOAuthDiscovery({
         resourceUrl: resource,
         challenge,
-        fetchMetadata: async ({ url }) => {
+        fetchMetadata: async ({ kind, url }) => {
           try {
-            const result = await deadline.run("protected_resource_metadata", (signal) =>
-              fetchOAuthMetadata(url, settings, signal),
+            const result = await deadline.run(
+              kind === "protected_resource"
+                ? "protected_resource_metadata"
+                : "authorization_server_metadata",
+              (signal) => fetchOAuthMetadata(url, settings, signal),
             );
             metadataRead = true;
             if (result.status !== "absent") metadataAbsent = false;
@@ -1232,7 +1550,7 @@ export async function inspectMcpAuthentication(
         canonicalizeResource: canonicalOAuthResource,
       });
       return { kind: "oauth2" };
-    } catch {
+    } catch (failure) {
       // Public initialization does not exclude optional or tool-level OAuth.
       // Only explicit absence of metadata permits the unauthenticated path.
       if (
@@ -1245,18 +1563,29 @@ export async function inspectMcpAuthentication(
         return { kind: "none" };
       return {
         kind: "unknown",
-        message:
-          "This server's sign-in requirements could not be determined. Check its setup instructions.",
+        message: mcpAuthInspectionFailureMessage(failure),
       };
     }
-  } catch {
+  } catch (failure) {
     return {
       kind: "unknown",
-      message: "Could not check this server. Retry or consult its setup instructions.",
+      message: mcpAuthInspectionFailureMessage(failure),
     };
   } finally {
     deadline.dispose();
   }
+}
+
+function mcpAuthInspectionFailureMessage(failure: unknown): string {
+  if (failure instanceof OAuthStartStageError) {
+    if (failure.reason === "timeout") {
+      return "Checking how to sign in timed out. Try again.";
+    }
+    if (failure.cause instanceof OAuthMetadataUpstreamError) {
+      return `The provider returned HTTP ${failure.cause.upstreamStatus} while checking how to sign in. Retry or check the provider's setup instructions.`;
+    }
+  }
+  return "Could not determine how to sign in. Retry or check the provider's setup instructions.";
 }
 
 async function discoverMcpOAuth(
@@ -1314,6 +1643,70 @@ async function discoverMcpOAuth(
     }
     throw error;
   }
+}
+
+/** Exact built-in API bridge discovery never contacts its historical MCP identity. */
+async function discoverProviderOAuth(
+  resource: string,
+  settings: Settings,
+  deadline: OAuthStartDeadline,
+  profile: OAuthProviderProfile,
+) {
+  const pinned = profile.providerOAuthDiscovery;
+  if (!pinned || resource !== profile.requireExactMcpUrl?.url)
+    throw new HTTPException(422, { message: "invalid provider OAuth resource" });
+  const fetched = await deadline.run("authorization_server_metadata", (signal) =>
+    fetchOAuthMetadata(pinned.metadataUrl, settings, signal),
+  );
+  if (fetched.status !== "present")
+    throw new HTTPException(422, { message: "provider OAuth metadata is unavailable" });
+  const raw = fetched.document;
+  const issuer = normalizedIssuerKey(
+    oauthEndpointUrl(requiredString(raw.issuer, "OAuth issuer"), settings, "OAuth issuer"),
+  );
+  if (issuer !== pinned.issuer)
+    throw new HTTPException(422, { message: "provider OAuth issuer did not match its profile" });
+  const as: AuthorizationServerMetadata = {
+    issuer,
+    authorizationServer: pinned.issuer,
+    authorizationEndpoint: oauthEndpointUrl(
+      requiredString(raw.authorization_endpoint, "OAuth authorization endpoint"),
+      settings,
+      "OAuth authorization endpoint",
+    ),
+    tokenEndpoint: oauthEndpointUrl(
+      requiredString(raw.token_endpoint, "OAuth token endpoint"),
+      settings,
+      "OAuth token endpoint",
+    ),
+    clientIdMetadataDocumentSupported: false,
+    tokenEndpointAuthMethodsSupported: stringArray(raw.token_endpoint_auth_methods_supported),
+    codeChallengeMethodsSupported: stringArray(raw.code_challenge_methods_supported),
+    raw,
+    metadataUrl: fetched.url,
+  };
+  if (!as.codeChallengeMethodsSupported.includes("S256"))
+    throw new HTTPException(422, { message: "provider OAuth requires PKCE S256" });
+  return {
+    challenge: { scheme: null, scope: [] } as WwwAuthenticateChallenge,
+    prm: {
+      resource,
+      authorizationServers: [pinned.issuer],
+      scopesSupported: [...(profile.requestedScopes ?? [])],
+      raw: {},
+      metadataUrl: "",
+    } as ProtectedResourceMetadata,
+    as,
+    mode: "provider_oauth_metadata" as const,
+    resource,
+    provenance: {
+      protectedResourceMetadataUrl: null,
+      authorizationServerMetadataUrl: fetched.url,
+      metadataSha256: createHash("sha256")
+        .update(stableJson({ profile: profile.key, resource, metadataUrl: fetched.url, raw }))
+        .digest("hex"),
+    },
+  };
 }
 
 async function probeMcpChallenge(
@@ -1614,7 +2007,7 @@ function operatorClientForAs(
   settings: Settings,
   as: AuthorizationServerMetadata,
 ): OAuthClientRegistration | null {
-  const entry = operatorClientEntryFor(settings, [as.issuer, as.authorizationServer]);
+  const entry = operatorClientEntryFor(settings, as);
   if (!entry) {
     return null;
   }
@@ -1631,12 +2024,20 @@ function operatorClientForAs(
   };
 }
 
+/**
+ * The client pre-registered for an authorization server. Deployment-managed
+ * clients match by origin; their providers' profiles pin the issuer and OAuth
+ * endpoint origins and every other flow refuses those identities. Operator
+ * clients have no such pins, so they match only the authorization server whose
+ * metadata was actually fetched, and the issuer only when it names that same
+ * server: a metadata `issuer` is otherwise just a claim made by the server that
+ * also chooses the token endpoint the client secret is sent to.
+ */
 function operatorClientEntryFor(
   settings: Settings,
-  candidates: string[],
+  as: { issuer: string; authorizationServer: string },
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
-  const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
-  const candidateOrigins = candidates.flatMap((candidate) => {
+  const candidateOrigins = [as.issuer, as.authorizationServer].flatMap((candidate) => {
     try {
       return [new URL(candidate).origin];
     } catch {
@@ -1652,22 +2053,53 @@ function operatorClientEntryFor(
       return resolved;
     }
   }
-  const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
-  const exactKeys = uniqueStrings(
-    candidates.flatMap((candidate) => [candidate, normalizedIssuerKey(candidate)]),
+  return findIntegrationsOauthClient(
+    parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson),
+    normalizedIssuerKey(as.issuer) === normalizedIssuerKey(as.authorizationServer)
+      ? [as.issuer, as.authorizationServer]
+      : [as.authorizationServer],
   );
-  for (const key of exactKeys) {
-    const entry = configured[key];
-    if (entry) {
-      return entry;
-    }
-  }
-  for (const [key, entry] of Object.entries(configured)) {
-    if (normalizedCandidates.has(normalizedIssuerKey(key))) {
-      return entry;
-    }
-  }
-  return null;
+}
+
+/** Secret-free readiness for the exact registered client used by Gmail setup. */
+export function gmailOAuthClientConfigured(settings: Settings): boolean {
+  if (!settings.googleConnectorSetupEnabled) return false;
+  const entry = operatorClientEntryFor(settings, {
+    issuer: "https://accounts.google.com",
+    authorizationServer: "https://accounts.google.com",
+  });
+  return Boolean(
+    entry &&
+    isConfidentialOAuthClient({
+      ...entry,
+      tokenEndpointAuthMethod: tokenAuthMethod(
+        entry.tokenEndpointAuthMethod,
+        Boolean(entry.clientSecret),
+      ),
+    }),
+  );
+}
+
+/** Drive also requires preview readiness; sharing an issuer client is not verification. */
+export function googleDriveOAuthClientConfigured(settings: Settings): boolean {
+  return settings.googleDriveMcpEnabled && gmailOAuthClientConfigured(settings);
+}
+
+/** Calendar shares the Google client once the deployment has added the Calendar scopes to it. */
+export function googleCalendarOAuthClientConfigured(settings: Settings): boolean {
+  return settings.googleCalendarEnabled && gmailOAuthClientConfigured(settings);
+}
+
+function isConfidentialOAuthClient(client: {
+  clientId: string;
+  clientSecret?: string | undefined;
+  tokenEndpointAuthMethod: string;
+}): boolean {
+  return Boolean(
+    client.clientId.trim() &&
+    client.clientSecret?.trim() &&
+    ["client_secret_post", "client_secret_basic"].includes(client.tokenEndpointAuthMethod),
+  );
 }
 
 function normalizedIssuerKey(value: string): string {
@@ -1690,7 +2122,7 @@ async function dynamicClientRegistration(
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
-      client_name: "OpenGeni",
+      client_name: "Opengeni",
       redirect_uris: [redirectUri],
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],
@@ -1738,13 +2170,16 @@ async function existingOAuthConnectionForStart(
     subjectId: string;
     providerDomain: string;
     mcpUrl: string;
-    connectionSelection: OAuthProviderProfile["connectionSelection"];
-    exactMcpBinding: boolean;
     connectionId?: string | undefined;
+    newAccount?: boolean;
     requestedOwnership?: ConnectionOwnership | undefined;
-    newConnectionOwnership: ConnectionOwnership;
   },
 ) {
+  if (input.newAccount) {
+    // Resolve account identity after authorization; never choose credentials
+    // based only on the provider before we know who signed in.
+    return null;
+  }
   if (input.connectionId) {
     const connection = await getConnectionMetadata(
       db,
@@ -1762,23 +2197,13 @@ async function existingOAuthConnectionForStart(
       });
     }
     return connection.providerDomain === input.providerDomain &&
-      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl)
+      connection.metadata.mcpUrl === input.mcpUrl
       ? connection
       : null;
   }
-  const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
-  const ownerSubjectId = input.newConnectionOwnership === "personal" ? input.subjectId : null;
-  const matching = visible.filter(
-    (connection) =>
-      connection.subjectId === ownerSubjectId &&
-      connection.kind === "oauth2" &&
-      connection.providerDomain === input.providerDomain &&
-      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl),
-  );
-  if (input.connectionSelection === "canonical_personal") {
-    return selectCanonicalPersonalSlackConnection(matching);
-  }
-  return matching.find((connection) => connection.status === "active") ?? null;
+  // Only explicit Reconnect may replace a credential. Plain Connect and Add
+  // resolve the returned identity through the same atomic persistence policy.
+  return null;
 }
 
 function ownershipForConnection(
@@ -1878,6 +2303,8 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   if (
     payload.integrationKey !== undefined &&
     payload.integrationKey !== "gmail" &&
+    payload.integrationKey !== "google-drive" &&
+    payload.integrationKey !== "google-calendar" &&
     payload.integrationKey !== "slack-personal"
   ) {
     throw new HTTPException(400, { message: "invalid OAuth integration identity" });
@@ -1899,11 +2326,14 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   }
   const protectedResourceMetadataUrl = stringValue(payload.protectedResourceMetadataUrl);
   const authorizationServerMetadataUrl = stringValue(payload.authorizationServerMetadataUrl);
+  const oidcUserinfoEndpoint = stringValue(payload.oidcUserinfoEndpoint);
+  const oidcJwksUri = stringValue(payload.oidcJwksUri);
+  const oidcNonce = stringValue(payload.oidcNonce);
   if (
     encodedDiscoveryMode &&
     (!authorizationServerMetadataUrl ||
       (discoveryMode === "rfc9728_protected_resource" && !protectedResourceMetadataUrl) ||
-      (discoveryMode === "legacy_2025_03_26_metadata" && protectedResourceMetadataUrl))
+      (discoveryMode !== "rfc9728_protected_resource" && protectedResourceMetadataUrl))
   ) {
     throw new HTTPException(400, { message: "invalid OAuth discovery provenance state" });
   }
@@ -1943,7 +2373,13 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     // Absent on a legacy state, which therefore cannot land a personal owner.
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
     ...(payload.integrationKey
-      ? { integrationKey: payload.integrationKey as "gmail" | "slack-personal" }
+      ? {
+          integrationKey: payload.integrationKey as
+            | "gmail"
+            | "google-drive"
+            | "google-calendar"
+            | "slack-personal",
+        }
       : {}),
     providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
     mcpUrl: stringValue(payload.mcpUrl) ?? resource,
@@ -1990,6 +2426,19 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
           ),
         }
       : {}),
+    ...(oidcUserinfoEndpoint
+      ? {
+          oidcUserinfoEndpoint: oauthEndpointUrl(
+            oidcUserinfoEndpoint,
+            settings,
+            "OpenID Connect userinfo endpoint",
+          ),
+        }
+      : {}),
+    ...(oidcJwksUri
+      ? { oidcJwksUri: oauthEndpointUrl(oidcJwksUri, settings, "OpenID Connect JWKS") }
+      : {}),
+    ...(oidcNonce ? { oidcNonce } : {}),
     clientRegistrationMethod: registrationMethod(payload.clientRegistrationMethod),
     tokenEndpointAuthMethod: tokenAuthMethod(stringValue(payload.tokenEndpointAuthMethod), false),
     // States minted before provider-specific compatibility was introduced used
@@ -2004,6 +2453,29 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   };
   const connectionId = stringValue(payload.connectionId);
   const connectionVersion = numberValue(payload.connectionVersion);
+  assertProfileOwnership(builtInOAuthProfileFor(parsed), parsed.ownership);
+  if (
+    parsed.integrationKey === "google-drive" &&
+    (parsed.mcpUrl !== OFFICIAL_DRIVE_MCP_URL ||
+      parsed.resource !== OFFICIAL_DRIVE_MCP_URL ||
+      parsed.providerDomain !== "drivemcp.googleapis.com" ||
+      parsed.ownership !== "personal" ||
+      builtInOAuthProfileFor(parsed)?.key !== "official-drive")
+  ) {
+    throw new HTTPException(400, { message: "invalid Google Drive OAuth integration identity" });
+  }
+  if (
+    parsed.integrationKey === "google-calendar" &&
+    (parsed.mcpUrl !== OFFICIAL_GOOGLE_CALENDAR_MCP_URL ||
+      parsed.resource !== OFFICIAL_GOOGLE_CALENDAR_MCP_URL ||
+      parsed.providerDomain !== "calendarmcp.googleapis.com" ||
+      parsed.ownership !== "personal" ||
+      builtInOAuthProfileFor(parsed)?.key !== "official-google-calendar")
+  ) {
+    throw new HTTPException(400, {
+      message: "invalid Google Calendar OAuth integration identity",
+    });
+  }
   if (Boolean(connectionId) !== Boolean(connectionVersion)) {
     throw new HTTPException(400, { message: "invalid OAuth reconnect state" });
   }
@@ -2014,22 +2486,59 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   ) {
     throw new HTTPException(400, { message: "invalid OAuth discovery binding state" });
   }
+  if (parsed.discoveryMode === "provider_oauth_metadata") {
+    const profile = builtInOAuthProfileFor(parsed);
+    const discovery = profile?.providerOAuthDiscovery;
+    if (
+      !discovery ||
+      parsed.mcpUrl !== profile?.requireExactMcpUrl?.url ||
+      parsed.resource !== parsed.mcpUrl ||
+      parsed.providerDomain !== profile?.postDiscoveryProviderDomain?.domain ||
+      normalizedIssuerKey(parsed.issuer) !== discovery.issuer ||
+      parsed.authorizationServer !== discovery.issuer ||
+      parsed.authorizationServerMetadataUrl !== discovery.metadataUrl ||
+      parsed.resourceParameterSupported
+    ) {
+      throw new HTTPException(400, { message: "invalid provider OAuth discovery binding state" });
+    }
+    assertDiscoveredAuthorizationServer(
+      settings,
+      { ...parsed, authorizationEndpoint: discovery.issuer },
+      profile!,
+      parsed.providerDomain,
+    );
+  }
   return {
     ...parsed,
+    ...(parsed.discoveryMode === "provider_oauth_metadata"
+      ? { issuer: normalizedIssuerKey(parsed.issuer) }
+      : {}),
     ...(connectionId ? { connectionId } : {}),
     ...(connectionVersion !== undefined ? { connectionVersion } : {}),
   };
 }
 
-function discoveryModeValue(value: string | undefined): McpOAuthDiscoveryMode {
+function discoveryModeValue(value: string | undefined): OAuthDiscoveryMode {
   if (!value) {
     // Every state minted before discovery modes existed used RFC 9728 PRM.
     return "rfc9728_protected_resource";
   }
-  if (value === "rfc9728_protected_resource" || value === "legacy_2025_03_26_metadata") {
+  if (
+    value === "rfc9728_protected_resource" ||
+    value === "legacy_2025_03_26_metadata" ||
+    value === "provider_oauth_metadata"
+  ) {
     return value;
   }
   throw new HTTPException(400, { message: "invalid OAuth discovery mode state" });
+}
+
+function assertProfileOwnership(
+  profile: OAuthProviderProfile | null,
+  ownership: ConnectionOwnership,
+): void {
+  if (profile?.requiredOwnership && ownership !== profile.requiredOwnership.ownership)
+    throw new HTTPException(422, { message: profile.requiredOwnership.message });
 }
 
 function connectionOwnership(value: unknown): ConnectionOwnership | undefined {
@@ -2089,7 +2598,7 @@ async function clientForState(
       ),
     };
   }
-  const entry = operatorClientEntryFor(settings, [state.issuer, state.authorizationServer]);
+  const entry = operatorClientEntryFor(settings, state);
   if (!entry || entry.clientId !== state.clientId) {
     throw new HTTPException(400, {
       message: "operator OAuth client credentials are no longer available",
@@ -2366,10 +2875,6 @@ export function oauthPublicErrorFields(error: unknown): OAuthPublicErrorFields {
   return fields;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 async function oauthErrorFromResponse(
   response: Response,
   signal?: AbortSignal,
@@ -2400,13 +2905,19 @@ async function verifyMcpToolsList(
   resource: string,
   token: TokenResponse,
   signal: AbortSignal,
-): Promise<Array<{ name: string; description?: string }>> {
-  const client = new Client(
-    { name: "opengeni-integration-verify", version: "0.1.0" },
-    { capabilities: {} },
-  );
-  try {
-    const transport = new StreamableHTTPClientTransport(new URL(resource), {
+  verification?: OAuthProviderProfile["remoteToolVerification"],
+  identity?: AccountIdentityVerifier,
+  identityBudgetMs: () => number = () => 0,
+): Promise<{
+  tools: Array<{ name: string; description?: string }>;
+  identityCheck?: AccountIdentityCheck;
+}> {
+  const { listed, identityCheck } = await withMcpStreamableHttpClient(
+    {
+      url: resource,
+      clientName: "opengeni-integration-verify",
+      clientVersion: "0.1.0",
+      timeoutMs: 10_000,
       requestInit: {
         headers: {
           authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
@@ -2417,21 +2928,386 @@ async function verifyMcpToolsList(
           ...init,
           signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         }),
-    });
-    await client.connect(transport as unknown as Transport, {
-      timeout: 10_000,
-      maxTotalTimeout: 10_000,
-    });
-    const listed = await client.listTools(undefined, {
-      timeout: 10_000,
-      maxTotalTimeout: 10_000,
-    });
-    return listed.tools.map((tool) => ({
+    },
+    async (client) => {
+      const toolsResult = await client
+        .listTools(undefined, { timeout: 10_000, maxTotalTimeout: 10_000 })
+        .catch((error: unknown) => {
+          throw legacyMcpClientError(error);
+        });
+      if (verification) {
+        if (!toolsResult.tools.some((tool) => tool.name === verification.toolName))
+          throw new Error("Required connector verification tool is unavailable");
+        const result = await client.callTool(
+          { name: verification.toolName, arguments: verification.arguments },
+          { timeout: 10_000, maxTotalTimeout: 10_000 },
+        );
+        if (result.isError) throw new Error("Authenticated connector verification failed");
+        // Discard file metadata. Setup retains only the successful proof and tool descriptors.
+      }
+      // Identity only labels and de-duplicates accounts: a failure leaves it unknown.
+      const toolIdentity =
+        identity?.kind === "mcp_tool"
+          ? await mcpToolAccountIdentity(
+              client,
+              identity,
+              toolsResult.tools.map((tool) => tool.name),
+              identityBudgetMs(),
+              signal,
+              { tokenResponse: token.raw },
+            )
+          : undefined;
+      return { listed: toolsResult, identityCheck: toolIdentity };
+    },
+  );
+  return {
+    tools: listed.tools.map((tool) => ({
       name: tool.name,
       ...(tool.description ? { description: tool.description } : {}),
-    }));
-  } finally {
-    await client.close().catch(() => undefined);
+    })),
+    ...(identityCheck ? { identityCheck } : {}),
+  };
+}
+
+/** A verified identity, or the reason it stayed unknown (logged, never fatal). */
+type AccountIdentityCheck =
+  | { identity: Record<string, string>; failure?: never }
+  | { identity?: never; failure: string };
+
+/** Keep time for persisting the connection: identity never consumes the callback deadline. */
+const IDENTITY_MAX_MS = 5_000;
+const IDENTITY_RESERVE_MS = 5_000;
+
+/** Exported for tests. */
+export async function mcpToolAccountIdentity(
+  client: McpStreamableHttpClient,
+  identity: Extract<AccountIdentityVerifier, { kind: "mcp_tool" }>,
+  listedTools: readonly string[],
+  budgetMs: number,
+  signal: AbortSignal,
+  context: AccountIdentityContext = { tokenResponse: {} },
+): Promise<AccountIdentityCheck> {
+  if (identity.calls.some((call) => !call.optional && !listedTools.includes(call.toolName)))
+    return { failure: "tool_missing" };
+  if (budgetMs <= 0) return { failure: "budget_exhausted" };
+  // One budget covers every call; an optional call that cannot run adds nothing.
+  const deadline = Date.now() + budgetMs;
+  const budget = AbortSignal.any([signal, AbortSignal.timeout(budgetMs)]);
+  const payloads: Record<string, unknown>[] = [];
+  // Why an optional call added nothing, reported if identity then stays unknown.
+  let optionalFailure: string | undefined;
+  for (const call of identity.calls) {
+    const remainingMs = deadline - Date.now();
+    if (!listedTools.includes(call.toolName) || remainingMs <= 0) {
+      if (!call.optional) return { failure: "budget_exhausted" };
+      optionalFailure ??= remainingMs <= 0 ? "budget_exhausted" : "tool_missing";
+      payloads.push({});
+      continue;
+    }
+    try {
+      const result = await client.callTool(
+        { name: call.toolName, arguments: call.arguments },
+        { timeout: remainingMs, maxTotalTimeout: remainingMs, signal: budget },
+      );
+      if (result.isError && !call.optional) return { failure: "tool_error" };
+      if (result.isError) optionalFailure ??= "tool_error";
+      payloads.push(result.isError ? {} : mcpToolResultObject(result));
+    } catch (error) {
+      if (!call.optional) return { failure: identityFailureReason(error) };
+      optionalFailure ??= identityFailureReason(error);
+      payloads.push({});
+    }
+  }
+  try {
+    return { identity: identity.validateIdentity(payloads, context) };
+  } catch (error) {
+    // A required call answered, so its payload is what failed; only when every call is
+    // optional (Notion) does the optional failure explain the missing identity.
+    const allOptional = identity.calls.every((call) => call.optional);
+    return {
+      failure: (allOptional ? optionalFailure : undefined) ?? identityFailureReason(error),
+    };
+  }
+}
+
+function identityFailureReason(error: unknown): string {
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
+    return "timeout";
+  if (error instanceof Error && /verification failed/u.test(error.message))
+    return "invalid_identity";
+  // jose reports a rejected signature, issuer, audience or expiry with ERR_J* codes.
+  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+  if (typeof code === "string" && code.startsWith("ERR_J")) return "invalid_identity";
+  return "request_failed";
+}
+
+/** A tool result's object payload: structured content, else a JSON text block. */
+function mcpToolResultObject(result: {
+  structuredContent?: unknown;
+  content?: unknown;
+}): Record<string, unknown> {
+  if (isRecord(result.structuredContent)) return result.structuredContent;
+  const blocks = Array.isArray(result.content) ? result.content : [];
+  for (const block of blocks) {
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+    try {
+      const parsed: unknown = JSON.parse(block.text);
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      // Not JSON; try the next block.
+    }
+  }
+  return {};
+}
+
+/** Reviewed authenticated REST identity read; any failure leaves identity unknown. */
+async function verifyHttpAccountIdentity(
+  settings: Settings,
+  identity: Extract<AccountIdentityVerifier, { kind: "http" }>,
+  token: TokenResponse,
+  budgetMs: number,
+  outer: AbortSignal,
+): Promise<AccountIdentityCheck> {
+  if (budgetMs <= 0) return { failure: "budget_exhausted" };
+  const signal = AbortSignal.any([outer, AbortSignal.timeout(budgetMs)]);
+  try {
+    const response = await fetchOAuth(identity.url, settings, {
+      method: "GET",
+      signal,
+      headers: {
+        authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
+      },
+    });
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      return { failure: `http_${response.status}` };
+    }
+    const payload = await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      "Connector account verification",
+      { signal },
+    );
+    return { identity: identity.validateIdentity([payload], { tokenResponse: token.raw }) };
+  } catch (error) {
+    return { failure: identityFailureReason(error) };
+  }
+}
+
+/** OpenID Connect endpoints from authorization server metadata, when they pass
+ * the same endpoint checks as every other OAuth URL. */
+function advertisedOidcEndpoints(
+  metadata: Record<string, unknown>,
+  settings: Settings,
+): { oidcUserinfoEndpoint?: string; oidcJwksUri?: string } {
+  const endpoint = (value: unknown, label: string) => {
+    if (typeof value !== "string" || !value) return undefined;
+    try {
+      return oauthEndpointUrl(value, settings, label);
+    } catch {
+      return undefined;
+    }
+  };
+  const userinfo = endpoint(metadata.userinfo_endpoint, "OpenID Connect userinfo endpoint");
+  const jwks = endpoint(metadata.jwks_uri, "OpenID Connect JWKS");
+  return {
+    ...(userinfo ? { oidcUserinfoEndpoint: userinfo } : {}),
+    ...(jwks ? { oidcJwksUri: jwks } : {}),
+  };
+}
+
+/** A profile or reviewed verifier already identifies this connection's account. */
+function profileIdentifiesAccounts(
+  profile: OAuthProviderProfile | null | undefined,
+  mcpUrl: string,
+): boolean {
+  return Boolean(
+    profile?.accountIdentityMetadataKeys ||
+    profile?.localToolVerification ||
+    accountIdentityVerifierFor(mcpUrl),
+  );
+}
+
+const OIDC_DISCOVERY_MAX_MS = 3_000;
+
+/**
+ * The OpenID Connect scopes and endpoints an authorization server advertises:
+ * "openid" (plus "email" when listed) and its userinfo endpoint or signing keys.
+ * Some servers publish the keys only in their OpenID configuration, which is
+ * read once, bounded, and only when it names the same issuer. Never fatal.
+ * Exported for tests.
+ */
+export async function advertisedOidc(
+  as: AuthorizationServerMetadata,
+  settings: Settings,
+  outer: AbortSignal,
+): Promise<{
+  scopes: string[];
+  endpoints: { oidcUserinfoEndpoint?: string; oidcJwksUri?: string };
+} | null> {
+  const supported = stringArray(as.raw.scopes_supported);
+  if (!supported.includes("openid")) return null;
+  let endpoints = advertisedOidcEndpoints(as.raw, settings);
+  if (!endpoints.oidcUserinfoEndpoint && !endpoints.oidcJwksUri) {
+    const signal = AbortSignal.any([outer, AbortSignal.timeout(OIDC_DISCOVERY_MAX_MS)]);
+    const issuer = new URL(as.issuer);
+    const path = issuer.pathname.replace(/\/+$/u, "");
+    for (const url of uniqueStrings([
+      `${as.issuer.replace(/\/+$/u, "")}/.well-known/openid-configuration`,
+      `${issuer.origin}/.well-known/openid-configuration${path}`,
+    ])) {
+      try {
+        const fetched = await fetchOAuthMetadata(url, settings, signal);
+        if (fetched.status !== "present" || fetched.document.issuer !== as.issuer) continue;
+        endpoints = advertisedOidcEndpoints(fetched.document, settings);
+        break;
+      } catch {
+        if (signal.aborted) break;
+      }
+    }
+  }
+  if (!endpoints.oidcUserinfoEndpoint && !endpoints.oidcJwksUri) return null;
+  return {
+    scopes: ["openid", ...(supported.includes("email") ? ["email"] : [])],
+    endpoints,
+  };
+}
+
+/**
+ * Whether this sign-in can identify its account through OpenID Connect: no
+ * profile or reviewed verifier identifies it, the server advertised userinfo or
+ * signing keys, and "openid" was requested or granted (a server may leave it
+ * out of the scopes it reports). Exported for tests.
+ */
+export function oidcIdentityEligible(
+  state: Pick<
+    OAuthStatePayload,
+    "mcpUrl" | "oidcUserinfoEndpoint" | "oidcJwksUri" | "authorizeScopes"
+  >,
+  profile: OAuthProviderProfile | null | undefined,
+  scopes: readonly string[],
+): boolean {
+  if (profileIdentifiesAccounts(profile, state.mcpUrl)) return false;
+  return (
+    (scopes.includes("openid") || state.authorizeScopes.includes("openid")) &&
+    Boolean(state.oidcUserinfoEndpoint || state.oidcJwksUri)
+  );
+}
+
+const ID_TOKEN_ALGORITHMS = [
+  "RS256",
+  "RS384",
+  "RS512",
+  "PS256",
+  "PS384",
+  "PS512",
+  "ES256",
+  "ES384",
+  "ES512",
+  "EdDSA",
+  "Ed25519",
+];
+
+/** The stable subject plus display claims; never anything else from the token. */
+function oidcClaimsIdentity(claims: Record<string, unknown>): Record<string, string> {
+  const sub = claims.sub;
+  if (typeof sub !== "string" || !sub.trim() || sub.length > 255)
+    throw new Error("OpenID Connect account verification failed");
+  const text = (value: unknown) =>
+    typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const email = text(claims.email);
+  const name = text(claims.name) ?? text(claims.preferred_username);
+  return {
+    oidcSubject: sub,
+    ...(email ? { oidcEmail: email } : {}),
+    ...(name ? { oidcName: name } : {}),
+  };
+}
+
+/** An id_token signed by the issuer's advertised keys, for this client, unexpired. */
+async function verifiedIdTokenIdentity(
+  settings: Settings,
+  state: Pick<OAuthStatePayload, "issuer" | "clientId" | "oidcJwksUri" | "oidcNonce">,
+  idToken: string,
+  signal: AbortSignal,
+): Promise<Record<string, string>> {
+  const response = await fetchOAuth(state.oidcJwksUri!, settings, {
+    method: "GET",
+    signal,
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) {
+    await cancelResponseBody(response);
+    throw new Error(`OpenID Connect keys returned HTTP ${response.status}`);
+  }
+  const jwks = await readResponseJsonBounded<JSONWebKeySet>(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "OpenID Connect keys",
+    { signal },
+  );
+  const issuer = state.issuer.replace(/\/+$/u, "");
+  const { payload } = await jwtVerify(idToken, createLocalJWKSet(jwks), {
+    issuer: [issuer, `${issuer}/`],
+    audience: state.clientId,
+    algorithms: ID_TOKEN_ALGORITHMS,
+  });
+  // A nonce we sent must come back, so an id_token from another sign-in can't be replayed.
+  if (state.oidcNonce && payload.nonce !== state.oidcNonce)
+    throw new Error("OpenID Connect account verification failed");
+  return oidcClaimsIdentity(payload as Record<string, unknown>);
+}
+
+/**
+ * Generic OpenID Connect account identity: a verified id_token from the token
+ * response, else the advertised userinfo endpoint read with the new access
+ * token. Bounded like every identity read; any failure leaves it unknown.
+ * Exported for tests.
+ */
+export async function oidcAccountIdentity(
+  settings: Settings,
+  state: Pick<
+    OAuthStatePayload,
+    "issuer" | "clientId" | "oidcUserinfoEndpoint" | "oidcJwksUri" | "oidcNonce"
+  >,
+  token: Pick<TokenResponse, "accessToken" | "tokenType" | "raw">,
+  budgetMs: number,
+  outer: AbortSignal,
+): Promise<AccountIdentityCheck> {
+  if (budgetMs <= 0) return { failure: "budget_exhausted" };
+  const signal = AbortSignal.any([outer, AbortSignal.timeout(budgetMs)]);
+  let failure = "oidc_unavailable";
+  const idToken = token.raw.id_token;
+  if (typeof idToken === "string" && idToken && state.oidcJwksUri) {
+    try {
+      return { identity: await verifiedIdTokenIdentity(settings, state, idToken, signal) };
+    } catch (error) {
+      failure = `id_token_${identityFailureReason(error)}`;
+    }
+  }
+  if (!state.oidcUserinfoEndpoint) return { failure };
+  try {
+    const response = await fetchOAuth(state.oidcUserinfoEndpoint, settings, {
+      method: "GET",
+      signal,
+      headers: {
+        accept: "application/json",
+        authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
+      },
+    });
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      return { failure: `userinfo_http_${response.status}` };
+    }
+    const claims = await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      "OpenID Connect userinfo",
+      { signal },
+    );
+    return { identity: oidcClaimsIdentity(isRecord(claims) ? claims : {}) };
+  } catch (error) {
+    return { failure: `userinfo_${identityFailureReason(error)}` };
   }
 }
 
@@ -2441,16 +3317,77 @@ async function verifyMcpToolsListNonFatal(
   state: OAuthStatePayload,
   token: TokenResponse,
   deadline: OAuthCallbackDeadline,
+  scopes: readonly string[],
 ): Promise<{
   metadata:
     | { status: "ok"; checkedAt: string; toolCount: number }
     | { status: "failed"; checkedAt: string; reason: string };
   tools?: Array<{ name: string; description?: string }>;
+  providerIdentity?: Record<string, string>;
+  /** Set when this sign-in used generic OpenID Connect identity, even if it failed. */
+  identityMethod?: "oidc";
+  connectionStatus?: "needs_reauth";
 }> {
+  let grantRejected = false;
+  const oidc = oidcIdentityEligible(state, builtInOAuthProfileFor(state), scopes);
   try {
-    const tools = await deadline.run("tools_list", (signal) =>
-      verifyMcpToolsList(settings, state.mcpUrl, token, signal),
-    );
+    const profile = builtInOAuthProfileFor(state);
+    const local = profile?.localToolVerification;
+    let providerIdentity: Record<string, string> | undefined;
+    const tools = await deadline.run("tools_list", async (signal) => {
+      if (!local || state.mcpUrl !== profile?.requireExactMcpUrl?.url) {
+        const identity = local ? undefined : accountIdentityVerifierFor(state.mcpUrl);
+        const identityBudgetMs = () =>
+          Math.min(IDENTITY_MAX_MS, deadline.remainingMs() - IDENTITY_RESERVE_MS);
+        const verified = await verifyMcpToolsList(
+          settings,
+          state.mcpUrl,
+          token,
+          signal,
+          profile?.remoteToolVerification,
+          identity,
+          identityBudgetMs,
+        );
+        const identityCheck =
+          identity?.kind === "http"
+            ? await verifyHttpAccountIdentity(settings, identity, token, identityBudgetMs(), signal)
+            : oidc
+              ? await oidcAccountIdentity(settings, state, token, identityBudgetMs(), signal)
+              : verified.identityCheck;
+        providerIdentity = identityCheck?.identity;
+        if (identityCheck?.failure)
+          observability?.warn("MCP OAuth account identity stayed unknown", {
+            reason: identityCheck.failure,
+          });
+        return verified.tools;
+      }
+      const response = await fetchOAuth(local.url, settings, {
+        method: local.method ?? "POST",
+        signal,
+        headers: {
+          authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
+        },
+      });
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new Error("Connector token verification failed");
+      }
+      const payload = await readResponseJsonBounded<Record<string, unknown>>(
+        response,
+        OAUTH_MAX_RESPONSE_BYTES,
+        "Connector token verification",
+        { signal },
+      );
+      grantRejected = local.isRejectedGrant?.(payload) ?? false;
+      providerIdentity = local.validateIdentity(payload);
+      const verifiedTools = local.toolsForScopes(
+        grantedScopes(token.scopeText, state.authorizeScopes, profile),
+        settings,
+      );
+      if (local.required && verifiedTools.length === 0)
+        throw new Error("Connector verification did not report an authorized tool scope");
+      return verifiedTools;
+    });
     return {
       metadata: {
         status: "ok",
@@ -2458,6 +3395,8 @@ async function verifyMcpToolsListNonFatal(
         toolCount: tools.length,
       },
       tools,
+      ...(providerIdentity ? { providerIdentity } : {}),
+      ...(oidc ? { identityMethod: "oidc" as const } : {}),
     };
   } catch (error) {
     const staged =
@@ -2467,13 +3406,35 @@ async function verifyMcpToolsListNonFatal(
     if (staged.reason === "timeout" && deadline.signal.aborted) {
       throw staged;
     }
+    const profile = builtInOAuthProfileFor(state);
+    if (profile?.localToolVerification?.required || profile?.remoteToolVerification) throw staged;
     logOAuthVerificationWarning(observability, staged, state);
+    // OpenID Connect identity comes from the token response or the authorization
+    // server, so a failed tools check doesn't stop it from naming the account.
+    let providerIdentity: Record<string, string> | undefined;
+    if (oidc && !deadline.signal.aborted) {
+      const identityCheck = await oidcAccountIdentity(
+        settings,
+        state,
+        token,
+        Math.min(IDENTITY_MAX_MS, deadline.remainingMs() - IDENTITY_RESERVE_MS),
+        deadline.signal,
+      );
+      providerIdentity = identityCheck.identity;
+      if (identityCheck.failure)
+        observability?.warn("MCP OAuth account identity stayed unknown", {
+          reason: identityCheck.failure,
+        });
+    }
     return {
       metadata: {
         status: "failed",
         checkedAt: new Date().toISOString(),
         reason: staged.reason,
       },
+      ...(providerIdentity ? { providerIdentity } : {}),
+      ...(oidc ? { identityMethod: "oidc" as const } : {}),
+      ...(grantRejected ? { connectionStatus: "needs_reauth" as const } : {}),
     };
   }
 }
@@ -2668,6 +3629,7 @@ export function chooseMcpAuthorizeScopes(input: {
   challenged: string[] | undefined;
   supported: string[];
   authorizationServerScopesSupported?: string[];
+  reconnectGrantedScopes?: readonly string[];
 }): string[] {
   const profile = builtInOAuthProfileFor({ mcpUrl: input.mcpUrl }) ?? DEFAULT_OAUTH_PROFILE;
   return chooseProfileAuthorizeScopes(profile, input);
@@ -2680,19 +3642,47 @@ function chooseProfileAuthorizeScopes(
     challenged: string[] | undefined;
     supported: string[];
     authorizationServerScopesSupported?: string[];
+    /** The existing account's grants; present only when reconnecting it. */
+    reconnectGrantedScopes?: readonly string[];
   },
 ): string[] {
   // Reviewed profiles keep their exact scope contract. A generic long-running
   // connector also needs the AS-advertised refresh grant: the MCP resource's
   // challenge often advertises only its resource permission (e.g. mcp:use).
-  if (profile.requestedScopes) return [...profile.requestedScopes];
-  const scopes = chooseAuthorizeScopes(input.requested, input.challenged, input.supported);
+  if (profile.requestedScopes) {
+    const incremental = profile.incrementalScopes;
+    if (!incremental || !input.reconnectGrantedScopes) return [...profile.requestedScopes];
+    // Keep what the account already holds and add what the reconnect asked
+    // for, both bounded by the reviewed list; a first connection never widens.
+    const wanted = new Set([...input.reconnectGrantedScopes, ...(input.requested ?? [])]);
+    return uniqueStrings([
+      ...profile.requestedScopes,
+      ...incremental.filter((scope) => wanted.has(scope)),
+    ]);
+  }
+  // Reconnecting with more access (step-up) keeps what the account already
+  // holds: asking for only the new scope would narrow the account's grant.
+  const stepUp = input.reconnectGrantedScopes && input.requested?.length;
+  const scopes = stepUp
+    ? uniqueStrings([
+        ...(input.reconnectGrantedScopes?.length
+          ? input.reconnectGrantedScopes
+          : chooseAuthorizeScopes(undefined, input.challenged, input.supported)),
+        ...(input.requested ?? []),
+      ])
+    : chooseAuthorizeScopes(input.requested, input.challenged, input.supported);
   return input.authorizationServerScopesSupported?.includes("offline_access")
     ? uniqueStrings([...scopes, "offline_access"])
     : scopes;
 }
 
-function grantedScopes(scopeText: string | undefined, fallback: string[]): string[] {
+function grantedScopes(
+  scopeText: string | undefined,
+  fallback: string[],
+  profile?: OAuthProviderProfile | null,
+): string[] {
+  if (profile?.reportedScopesRequired && !scopeText) return [];
+  if (profile?.normalizeGrantedScopes) return profile.normalizeGrantedScopes(scopeText ?? fallback);
   if (scopeText) {
     return uniqueStrings(scopeText.split(/\s+/).filter(Boolean));
   }

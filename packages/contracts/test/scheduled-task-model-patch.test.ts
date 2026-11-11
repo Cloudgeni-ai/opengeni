@@ -4,6 +4,7 @@ import { UpdateScheduledTaskRequest } from "../src";
 describe("scheduled-task model patch", () => {
   test("retains only the explicitly supplied model settings without config defaults", () => {
     for (const agentConfigPatch of [
+      { prompt: "Revised message" },
       { model: "scripted-model" },
       { reasoningEffort: "high" },
       { model: "scripted-model", reasoningEffort: "high" },
@@ -14,7 +15,7 @@ describe("scheduled-task model patch", () => {
 
   test.each([
     {},
-    { prompt: "not a model patch" },
+    { prompt: "" },
     { model: "scripted-model", tools: [] },
     { model: "" },
     { model: "x".repeat(513) },

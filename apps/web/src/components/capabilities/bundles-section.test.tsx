@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -11,7 +12,7 @@ import type {
   CapabilityCatalogItem,
   InstalledSkillSummary,
   PluginInstallationSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -208,13 +209,13 @@ describe("BundlesSection", () => {
     }
   });
 
-  test("a viewer without administrator authority is told so, not shown live buttons", async () => {
+  test("a viewer who can't add integrations is told who can, not shown live buttons", async () => {
     const rendered = await renderSection({ canManage: false });
     try {
       expect(rendered.container.textContent).toContain(
-        "Workspace administrators can install, update, and remove these items.",
+        "Ask a workspace admin to install or update these items.",
       );
-      // Every header action is a workspace-administrator action; none of them
+      // Every header action needs a member's permission; none of them
       // may sit live directly under the sentence that says so.
       for (const label of ["Import plugin"]) {
         const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
@@ -222,6 +223,20 @@ describe("BundlesSection", () => {
         );
         expect(button?.disabled).toBe(true);
       }
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("someone who manages Skills but can't add integrations is told who installs plugins", async () => {
+    const rendered = await renderSection({ canManage: true, canManagePlugins: false });
+    try {
+      expect(rendered.container.textContent).toContain("Ask a workspace admin to install plugins.");
+      expect(rendered.container.textContent).not.toContain("these items");
+      const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
+        candidate.textContent?.includes("Import plugin"),
+      );
+      expect(button?.disabled).toBe(true);
     } finally {
       await rendered.unmount();
     }
@@ -248,6 +263,7 @@ async function renderSection(
   options: {
     section?: "skills" | "plugins" | "all";
     canManage?: boolean;
+    canManagePlugins?: boolean;
     empty?: boolean;
     loadError?: boolean;
 
@@ -263,6 +279,9 @@ async function renderSection(
       workspaceId="00000000-0000-4000-8000-000000000001"
       connections={[]}
       canManage={options.canManage ?? true}
+      {...(options.canManagePlugins === undefined
+        ? {}
+        : { canManagePlugins: options.canManagePlugins })}
       items={options.empty ? [] : catalogItems()}
       logoUrl={() => null}
       busyCatalogId={null}
@@ -292,7 +311,7 @@ async function render(element: ReactNode) {
   };
 }
 
-function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
+function stubClient(empty: boolean, failed = false): ChatClient<OpenGeniBrowserClient> {
   if (failed) {
     return {
       listCapabilities: async () => ({ items: [], installations: [] }),
@@ -304,7 +323,7 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
       listInstalledPlugins: async () => {
         throw new Error("network is down");
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
   }
   return {
     searchPublicSkills: async () => ({ items: [] }),
@@ -312,7 +331,7 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
     discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
     listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
     listInstalledPlugins: async () => ({ plugins: empty ? [] : [installedPlugin()] }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
 }
 
 function catalogItems(): CapabilityCatalogItem[] {

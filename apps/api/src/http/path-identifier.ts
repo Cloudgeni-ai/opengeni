@@ -1,6 +1,24 @@
+import type { Context } from "hono";
+import type { z } from "zod";
 import { ApiHttpError } from "./api-error";
 
 const UUID_SYNTAX_MESSAGE = /invalid input syntax for type uuid: "([^"]*)"/u;
+
+/**
+ * A path segment its route's schema rejects (an unknown kind, a malformed id)
+ * names no resource: a 404, never the 500 an uncaught `ZodError` becomes.
+ */
+export function parsePathParam<T>(c: Context, name: string, schema: z.ZodType<T>): T {
+  const raw = c.req.param(name);
+  const parsed = schema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  throw new ApiHttpError(404, {
+    code: "not_found",
+    message: `Not found: "${(raw ?? "").slice(0, 64)}" is not a valid ${name} for this route.`,
+    retryable: false,
+    details: { code: "invalid_path_identifier" },
+  });
+}
 
 /**
  * A resource id taken verbatim from the URL path that is not a UUID cannot

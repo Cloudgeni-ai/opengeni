@@ -10,6 +10,7 @@ import {
   type AllowanceLabels,
 } from "../usage/allowance-copy";
 import { useEntranceAnimation } from "./entrance";
+import { useOpenGeniText } from "../messages/runtime";
 
 /**
  * Replace the built-in "usage limit reached" row. Return `undefined` to keep
@@ -22,12 +23,13 @@ export type RenderAllowanceExhausted = (
 
 type AllowancePresentation = {
   render: RenderAllowanceExhausted | undefined;
-  labels: AllowanceLabels;
+  /** Host overrides; the defaults come from the active message catalog. */
+  labels: Partial<AllowanceLabels> | undefined;
 };
 
 const AllowancePresentationContext = createContext<AllowancePresentation>({
   render: undefined,
-  labels: allowanceLabels(),
+  labels: undefined,
 });
 
 export function AllowancePresentationProvider({
@@ -39,7 +41,7 @@ export function AllowancePresentationProvider({
   labels: Partial<AllowanceLabels> | undefined;
   children: ReactNode;
 }) {
-  const value = useMemo(() => ({ render, labels: allowanceLabels(labels) }), [render, labels]);
+  const value = useMemo(() => ({ render, labels }), [render, labels]);
   return (
     <AllowancePresentationContext.Provider value={value}>
       {children}
@@ -53,7 +55,9 @@ export function AllowancePresentationProvider({
  * resets. Never the server's prose or a member identifier.
  */
 export function AllowanceExhaustedRow({ refusal }: { refusal: AllowanceExhaustedRefusal }) {
-  const { render, labels } = useContext(AllowancePresentationContext);
+  const { render, labels: overrides } = useContext(AllowancePresentationContext);
+  const t = useOpenGeniText();
+  const labels = useMemo(() => allowanceLabels(t, overrides), [t, overrides]);
   const enter = useEntranceAnimation();
   const workspace = refusal.scope === "workspace";
   const defaultRow = (
@@ -73,7 +77,7 @@ export function AllowanceExhaustedRow({ refusal }: { refusal: AllowanceExhausted
         <p className="mt-0.5 text-og-fg-muted">
           {workspace ? labels.workspaceRemedy : labels.memberRemedy}{" "}
           <span
-            title={refusal.resetsAt ? formatAllowanceInstant(refusal.resetsAt) : undefined}
+            title={refusal.resetsAt ? formatAllowanceInstant(t, refusal.resetsAt) : undefined}
             className="whitespace-nowrap"
           >
             {allowanceResetSentence(labels, refusal.resetsAt)}

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import {
   FIRST_PARTY_CAPABILITY_LOGOS,
   capabilityLogoSource,
-} from "@/components/capabilities/capability-logo-source";
+} from "@opengeni/react/app/components/capabilities/capability-logo-source";
 
 const manifestUrl = new URL("../../../public/capability-logos/manifest.json", import.meta.url);
 
@@ -24,16 +24,20 @@ describe("capability logo source", () => {
       );
       expect(svg).toContain("<svg");
       expect(svg).not.toMatch(/<script|<image|<foreignObject|\bon[a-z]+=/i);
+      // The package ships exactly the committed, reviewed file.
+      expect(FIRST_PARTY_CAPABILITY_LOGOS[entry.capabilityId]).toBe(
+        `data:image/svg+xml,${encodeURIComponent(svg)}`,
+      );
     }
   });
 
   test("prefers a bundled first-party mark and otherwise uses the catalog asset resolver", () => {
     const resolve = (path: string | null) => (path ? `https://api.test/v1/${path}` : null);
     expect(capabilityLogoSource({ id: "api:x", logoAssetPath: null }, resolve)).toBe(
-      "/capability-logos/x.svg",
+      FIRST_PARTY_CAPABILITY_LOGOS["api:x"]!,
     );
     expect(capabilityLogoSource({ id: "api:github-app", logoAssetPath: null }, resolve)).toBe(
-      "/capability-logos/github.svg",
+      FIRST_PARTY_CAPABILITY_LOGOS["api:github-app"]!,
     );
     expect(
       capabilityLogoSource(

@@ -10,7 +10,7 @@ import {
   additionalOrganizationCreationOutcomeUnknown,
 } from "@/components/rail/switcher-block";
 import { WorkspaceSwitcherTrigger } from "@/components/rail/workspace-switcher";
-import type { Workspace } from "@/types";
+import type { Workspace } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();

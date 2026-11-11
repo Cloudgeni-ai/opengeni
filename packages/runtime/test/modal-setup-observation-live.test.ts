@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxClient } from "../src/sandbox";
 import type { ChannelASession } from "../src/sandbox/channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../src/sandbox/exec-banner";

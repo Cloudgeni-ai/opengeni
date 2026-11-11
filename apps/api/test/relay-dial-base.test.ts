@@ -5,7 +5,7 @@
 // normalization: pathless → `/stream`, explicit path honored, non-default port kept,
 // unconfigured → "" (graceful no-relay degrade), and producer/consumer agreement.
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { relayConfigFromSettings, relayDialBaseFromSettings } from "@opengeni/core";
 
 const base = (selfhostedRelayUrl: string | undefined) =>

@@ -1,16 +1,153 @@
-import { expect, test } from "bun:test";
-import type { SessionQueueSnapshot } from "@opengeni/sdk";
+import { expect, jest, test } from "bun:test";
+import {
+  OpenGeniApiError,
+  type SaveComposerDraftRequest,
+  type SessionQueueSnapshot,
+} from "@opengeni/sdk";
 import { SessionConversation } from "../src/components/session-conversation";
 import { Markdown } from "../src/components/markdown";
 import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
 import { conversationTimeline } from "../src/conversation-timeline";
 import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
+import type { TimelineItem } from "../src/timeline/types";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
 import { archivedTranscriptEvents } from "./fixtures/archived-transcript";
 
-registerDom();
+registerDom({ clock: "virtual" });
+
+test("an embedded existing chat loads history and live events and prepares an editable revision-fenced draft without sending", async () => {
+  const base = fakeClient({});
+  const saved: SaveComposerDraftRequest[] = [];
+  let sends = 0;
+  let draftReads = 0;
+  const event = (sequence: number, text: string) => ({
+    id: crypto.randomUUID(),
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type: "user.message",
+    payload: { text },
+    occurredAt: new Date().toISOString(),
+    turnId: null,
+    clientEventId: null,
+  });
+  const effectiveControl = {
+    state: "running",
+    directState: "running",
+    override: null,
+    primaryBlocker: null,
+    settlement: null,
+  };
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "idle", effectiveControl }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [], effectiveControl }) as never,
+    listHumanInputRequests: async () => [],
+    listEvents: async () => [event(1, "Existing chat history")],
+    streamEvents: async function* (_workspace, _session, options) {
+      yield event(2, "A live update in the same chat");
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted) resolve();
+        else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+    },
+    getComposerDraft: async (...args) => {
+      draftReads++;
+      return { ...(await base.getComposerDraft(...args)), revision: 7 };
+    },
+    saveComposerDraft: async (...args) => {
+      expect(args.slice(0, 2)).toEqual([WORKSPACE_ID, SESSION_ID]);
+      saved.push(args[2]);
+      return base.saveComposerDraft(...args);
+    },
+    submitComposerDraft: async () => {
+      sends++;
+      throw new Error("Must not send automatically");
+    },
+    sendMessage: async () => {
+      sends++;
+      throw new Error("Must not send automatically");
+    },
+  });
+  const text = "Prepared by the dashboard for review, not sent";
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+      composerOptions={{ initialDraft: { text, resources: [] } }}
+    />,
+  );
+  try {
+    await waitFor(() => saved.length === 1, "Prepared draft was not saved");
+    expect(draftReads).toBeGreaterThan(0);
+    expect(saved[0]).toMatchObject({ text, expectedRevision: 7, resources: [] });
+    const input = view.container.querySelector("textarea");
+    expect(input?.value).toBe(text);
+    expect(input?.readOnly).toBe(false);
+    expect(input?.disabled).toBe(false);
+    expect(view.container.textContent).toContain("Existing chat history");
+    expect(view.container.textContent).toContain("A live update in the same chat");
+    expect(sends).toBe(0);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("computer offers use the embedding product's app flow", async () => {
+  const client = fakeClient({
+    listEvents: async () => [
+      {
+        id: "computer-offer",
+        sequence: 1,
+        type: "tool.auth_needed",
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        turnId: "turn",
+        clientEventId: null,
+        occurredAt: new Date(0).toISOString(),
+        payload: {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          reason: "missing_connection",
+          providerDomain: "opengeni.ai",
+          capability: {
+            id: "api:connected-machine",
+            name: "Computer",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use the files on this computer",
+            requiredVariables: [],
+          },
+        },
+      },
+    ],
+    streamEvents: async function* () {},
+  });
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      computerConnection={{
+        productName: "Acme",
+        downloads: [{ label: "Download Acme", url: "https://example.com/download" }],
+        openAppUrl: "acme://connect?destination=current",
+      }}
+    />,
+  );
+  await waitFor(
+    () => Boolean(view.container.querySelector('a[href="acme://connect?destination=current"]')),
+    "The product's computer flow did not render",
+  );
+  expect(view.container.textContent).toContain("Download Acme");
+  expect(view.container.textContent).not.toContain("curl");
+  expect(view.container.querySelector('a[href*="app.opengeni.ai"]')).toBeNull();
+  await view.unmount();
+});
 
 async function waitFor(condition: () => boolean, message: string): Promise<void> {
   const deadline = Date.now() + 3_000;
@@ -302,6 +439,87 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
   ).toHaveLength(0);
 });
 
+test("a failed send stays above anything newer the person sent", () => {
+  const failedSend = {
+    clientEventId: "failed-at-17",
+    text: "shorten it",
+    annotations: [],
+    resources: [],
+    occurredAt: "2026-11-01T17:45:33Z",
+    state: "failed" as const,
+    delivery: "send" as const,
+    destination: "chat" as const,
+    error: "Service unavailable",
+  };
+  const earlier = {
+    kind: "user-message" as const,
+    id: "earlier",
+    reconciliationKey: "user-message:earlier",
+    text: "first",
+    resources: [],
+    tools: [],
+    occurredAt: "2026-10-30T12:09:27Z",
+  };
+  const answer = {
+    kind: "system" as const,
+    id: "answer",
+    text: "done",
+    occurredAt: "2026-10-30T12:40:00Z",
+  } as unknown as TimelineItem;
+  const newer = {
+    ...earlier,
+    id: "newer",
+    reconciliationKey: "user-message:newer",
+    text: "shorten it",
+    occurredAt: "2026-11-01T18:53:38Z",
+  };
+  const work = {
+    kind: "system" as const,
+    id: "work",
+    text: "working",
+    occurredAt: "2026-11-01T18:54:00Z",
+  } as unknown as TimelineItem;
+  const pending = { queue: [], snapshot: null };
+  const ids = (items: TimelineItem[]) => items.map((item) => item.id);
+
+  // Something newer was sent: the failure keeps its place before that message.
+  expect(
+    ids(
+      conversationTimeline([earlier, answer, newer, work], pending, {
+        optimisticMessages: [failedSend],
+      }),
+    ),
+  ).toEqual(["earlier", "answer", "optimistic:failed-at-17", "newer", "work"]);
+
+  // Nothing newer was sent, even with the agent still working: it stays last,
+  // next to the composer, where its recovery actions are seen.
+  expect(
+    ids(
+      conversationTimeline([earlier, answer, work], pending, {
+        optimisticMessages: [failedSend],
+      }),
+    ),
+  ).toEqual(["earlier", "answer", "work", "optimistic:failed-at-17"]);
+
+  // A send still on its way stays last; only the failure moves.
+  expect(
+    ids(
+      conversationTimeline([earlier, newer], pending, {
+        optimisticMessages: [
+          failedSend,
+          {
+            ...failedSend,
+            clientEventId: "sending-now",
+            state: "sending" as const,
+            occurredAt: "2026-11-01T19:00:00Z",
+            error: undefined,
+          },
+        ],
+      }),
+    ),
+  ).toEqual(["earlier", "optimistic:failed-at-17", "newer", "optimistic:sending-now"]);
+});
+
 test("definitively refused messages offer editing, not an unchanged retry", () => {
   let edits = 0;
   const items = conversationTimeline(
@@ -483,7 +701,16 @@ test("complete conversation surfaces tool approvals and wires attachments when u
           turnId: "44444444-4444-4444-8444-444444444444",
           occurredAt: "2026-09-07T00:00:00Z",
           payload: {
-            approvals: [{ rawItem: { callId: "call-1", name: "deploy" }, name: "deploy" }],
+            approvals: [
+              {
+                rawItem: {
+                  callId: "call-1",
+                  name: "deploy",
+                  arguments: { environment: "test" },
+                },
+                name: "deploy",
+              },
+            ],
           },
         },
       ] as never,
@@ -510,12 +737,129 @@ test("complete conversation surfaces tool approvals and wires attachments when u
     await flush(200);
     expect(view.container.querySelector("[aria-label='Attach files']")).not.toBeNull();
     const approve = [...view.container.querySelectorAll("button")].find(
-      (node) => node.textContent === "Approve",
+      (node) => node.textContent === "Approve action",
     );
     expect(approve).toBeDefined();
     await actRun(() => approve!.click());
     await flush(50);
     expect(decisions).toMatchObject([{ approvalId: "call-1", decision: "approve" }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Approve all names a refused approval, keeps it waiting and never sends a decided one again", async () => {
+  const sent: string[] = [];
+  const approval = (callId: string) => ({
+    rawItem: { callId, name: "deploy", arguments: { environment: callId } },
+    name: "deploy",
+  });
+  const client = fakeClient({
+    listEvents: async () =>
+      [
+        {
+          id: "33333333-3333-4333-8333-333333333335",
+          sessionId: SESSION_ID,
+          workspaceId: WORKSPACE_ID,
+          sequence: 1,
+          type: "session.requiresAction",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          occurredAt: "2026-09-07T00:00:00Z",
+          payload: { approvals: [approval("call-1"), approval("call-2"), approval("call-3")] },
+        },
+      ] as never,
+    getSession: async () => ({ id: SESSION_ID, status: "requires_action" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    listHumanInputRequests: async () => [],
+    sendApprovalDecision: async (_workspace, _session, decision) => {
+      sent.push(decision.approvalId);
+      if (decision.approvalId === "call-2")
+        throw new OpenGeniApiError(403, "Only the account's owner can approve this action.");
+      return {} as never;
+    },
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  const view = await renderComponent(
+    <SessionConversation sessionId={SESSION_ID} client={client} workspaceId={WORKSPACE_ID} />,
+  );
+  const button = (label: string) =>
+    [...view.container.querySelectorAll("button")].find((node) => node.textContent === label);
+  try {
+    await flush(200);
+    await actRun(() => button("Approve all 3")!.click());
+    await flush(200);
+    expect(sent).toEqual(["call-1", "call-2", "call-3"]);
+    // The refusal is named, its card is shown and can be decided again.
+    const alert = view.container.querySelector("[data-og-approval-surface] ul[role='alert']");
+    expect(alert?.textContent).toContain("Couldn't approve");
+    expect(view.container.querySelector("[data-approval-id='call-2']")).not.toBeNull();
+    // The decided ones are still listed until the server's events remove
+    // them, yet nothing offers them again.
+    expect(button("Approve all 3")).toBeUndefined();
+    expect(button("Approve all 2")).toBeUndefined();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Approve all shows no error when its last action was already decided elsewhere", async () => {
+  const sent: string[] = [];
+  const approval = (callId: string) => ({
+    rawItem: { callId, name: "deploy", arguments: { environment: callId } },
+    name: "deploy",
+  });
+  const client = fakeClient({
+    listEvents: async () =>
+      [
+        {
+          id: "33333333-3333-4333-8333-333333333335",
+          sessionId: SESSION_ID,
+          workspaceId: WORKSPACE_ID,
+          sequence: 1,
+          type: "session.requiresAction",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          occurredAt: "2026-09-07T00:00:00Z",
+          payload: { approvals: [approval("call-1"), approval("call-2"), approval("call-3")] },
+        },
+      ] as never,
+    getSession: async () => ({ id: SESSION_ID, status: "requires_action" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    listHumanInputRequests: async () => [],
+    sendApprovalDecision: async (_workspace, _session, decision) => {
+      sent.push(decision.approvalId);
+      if (decision.approvalId === "call-3")
+        throw new OpenGeniApiError(409, "This approval was already decided.");
+      return {} as never;
+    },
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  const view = await renderComponent(
+    <SessionConversation sessionId={SESSION_ID} client={client} workspaceId={WORKSPACE_ID} />,
+  );
+  const button = (label: string) =>
+    [...view.container.querySelectorAll("button")].find((node) => node.textContent === label);
+  try {
+    await flush(200);
+    await actRun(() => button("Approve all 3")!.click());
+    await flush(200);
+    expect(sent).toEqual(["call-1", "call-2", "call-3"]);
+    // Already decided is done, not a failure: neither the list nor the
+    // session's own error says otherwise.
+    expect(view.container.querySelector("[data-og-approval-surface] [role='alert']")).toBeNull();
   } finally {
     await view.unmount();
   }
@@ -547,22 +891,244 @@ test("the model picker follows the proxy's modelSelection flag and the modelPick
       "[aria-label='Model and effort'], [aria-label='Loading model catalog…']",
     );
   for (const [modelSelection, prop, expected] of [
-    [undefined, undefined, true],
+    // End users only see the picker on an explicit offer.
+    [undefined, undefined, false],
+    [true, undefined, true],
     [false, undefined, false],
     [false, true, true],
-    [undefined, false, false],
+    [undefined, true, true],
+    [true, false, false],
   ] as const) {
     const view = await renderComponent(
       <SessionConversation
         sessionId={SESSION_ID}
         client={clientWith(modelSelection)}
         workspaceId={WORKSPACE_ID}
+        modelPickerProps={{
+          messages: { label: "Model and effort" },
+          groupPresentation: { opengeni_credits: { label: "Host models" } },
+        }}
         {...(prop === undefined ? {} : { modelPicker: prop })}
       />,
     );
     try {
       await flush(150);
       expect(picker(view.container) !== null).toBe(expected);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("the complete conversation forwards only picker appearance without replacing policy callbacks", async () => {
+  let modelMutations = 0;
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "idle" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  for (const customized of [false, true]) {
+    // Extra JS properties must not take over the conversation's policy wiring.
+    const appearance = {
+      groupPresentation: {
+        opengeni_credits: { label: "Host models", icon: <svg data-testid="host-model-mark" /> },
+      },
+      messages: { label: "Choose a model" },
+      model: "untrusted/model",
+      onModelChange: () => {
+        modelMutations++;
+      },
+    };
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        modelPicker
+        {...(customized ? { modelPickerProps: appearance } : {})}
+      />,
+    );
+    try {
+      await flush(150);
+      const trigger = view.container.querySelector(
+        `button[aria-label="${customized ? "Choose a model" : "Model and effort"}"]`,
+      )!;
+      expect(trigger).not.toBeNull();
+      expect(trigger.textContent).toContain("Model X");
+      expect(trigger.textContent).not.toContain("untrusted/model");
+      expect(
+        trigger.querySelector(
+          customized
+            ? '[aria-label="Host models"] [data-testid="host-model-mark"]'
+            : '[aria-label="Models"] .lucide-sparkles',
+        ),
+      ).not.toBeNull();
+      expect(modelMutations).toBe(0);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("live voice is opt-in and needs an available voice model", async () => {
+  // Loading the actual voice boundary settles through React's native scheduler,
+  // not the logical clock used by the conversation's polling tests.
+  jest.useRealTimers();
+  const base = fakeClient({});
+  const voiceModel = {
+    id: "opengeni-azure/gpt-live-1",
+    label: "GPT Live 1",
+    provider: "OpenGeni",
+    description: "Realtime voice with session delegation",
+    available: true,
+    unavailableReason: null,
+    recommended: true,
+  } as const;
+  const effectiveControl = {
+    state: "active",
+    controlVersion: 0,
+    controlEtag: "active-0",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const scenario = (input: {
+    realtimeVoice?: boolean;
+    models?: Array<typeof voiceModel | Record<string, unknown>> | null;
+  }) => {
+    let catalogReads = 0;
+    const client = fakeClient({
+      getClientConfig: async () =>
+        ({
+          ...(await base.getClientConfig()),
+          ...(input.realtimeVoice === undefined ? {} : { realtimeVoice: input.realtimeVoice }),
+        }) as never,
+      getSession: async () => ({ id: SESSION_ID, status: "idle", effectiveControl }) as never,
+      getQueue: async () =>
+        ({ version: 1, effectiveControl, items: [], pendingInputs: [] }) as never,
+      listHumanInputRequests: async () => [],
+      streamEvents: async function* (
+        _workspace: string,
+        _session: string,
+        options?: { signal?: AbortSignal },
+      ) {
+        await new Promise<void>((resolve) =>
+          options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        yield* [];
+      },
+      ...(input.models === null
+        ? {}
+        : {
+            getWorkspaceRealtimeModelCatalog: async () => {
+              catalogReads++;
+              return { models: input.models ?? [voiceModel] } as never;
+            },
+          }),
+    } as never);
+    return { client, reads: () => catalogReads };
+  };
+  const voiceButton = (container: HTMLElement) =>
+    container.querySelector(
+      "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
+    );
+  for (const [label, input, prop, shown, read] of [
+    // Opt-in: a call spends credits and prompts for the microphone.
+    ["off by default", {}, undefined, false, false],
+    ["host prop on", {}, true, true, true],
+    ["proxy offers voice", { realtimeVoice: true }, undefined, true, true],
+    ["proxy turned voice off", { realtimeVoice: false }, undefined, false, false],
+    ["proxy off beats host prop", { realtimeVoice: false }, true, false, false],
+    ["host prop off beats proxy offer", { realtimeVoice: true }, false, false, false],
+    [
+      "only unavailable models",
+      { models: [{ ...voiceModel, available: false, unavailableReason: "Add credits" }] },
+      true,
+      false,
+      true,
+    ],
+    ["client without voice", { models: null }, true, false, false],
+  ] as const) {
+    const { client, reads } = scenario(input as never);
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        {...(prop === undefined ? {} : { realtimeVoice: prop })}
+      />,
+    );
+    try {
+      if (shown) {
+        await waitFor(() => voiceButton(view.container) !== null, `${label}: voice button`);
+        expect(voiceButton(view.container)!.getAttribute("aria-label")).toBe("Start voice");
+      } else {
+        await flush(200);
+        expect(voiceButton(view.container)).toBeNull();
+      }
+      expect(reads() > 0).toBe(read);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("the embedded working indicator uses neutral copy unless the host overrides it", async () => {
+  const turnId = "44444444-4444-4444-8444-444444444444";
+  const startedAt = new Date().toISOString();
+  const event = (sequence: number, type: string, payload: Record<string, unknown> = {}) => ({
+    id: `55555555-5555-4555-8555-${String(sequence).padStart(12, "0")}`,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type,
+    turnId,
+    occurredAt: startedAt,
+    payload,
+  });
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "running" }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* () {},
+    listEvents: async () =>
+      [
+        event(1, "user.message", { text: "Hi" }),
+        event(2, "turn.queued", { turnId }),
+        event(3, "turn.started"),
+      ] as never,
+  });
+  const phrase = (container: HTMLElement) =>
+    container.querySelector(".og-genie-phrase")?.textContent ?? null;
+  for (const [genieLoading, expected] of [
+    [undefined, "Thinking…"],
+    [{ phrases: [] }, "Thinking…"],
+    [{ phrases: ["Un instant…"] }, "Un instant…"],
+  ] as const) {
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        modelPicker={false}
+        {...(genieLoading ? { genieLoading } : {})}
+      />,
+    );
+    try {
+      await waitFor(() => phrase(view.container) !== null, "working indicator");
+      expect(phrase(view.container)).toBe(expected);
     } finally {
       await view.unmount();
     }

@@ -26,12 +26,9 @@ import {
   selectedSessionRemoteMcpTargets,
 } from "@opengeni/runtime";
 import { OpenGeniClient, verifyCredentialProviderRequest } from "@opengeni/sdk";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { bindRunCredentialResolver } from "../../worker/src/activities/run-credentials";
 import { prepareTurnToolPolicy } from "../../worker/src/activities/agent-turn/tool-environment";
 import { registerSessionRoutes } from "../src/routes/sessions";
@@ -237,7 +234,6 @@ test.each([
           effectiveTools: policy.turnTools,
           attemptId: crypto.randomUUID(),
           effectiveSandboxBackend: "docker",
-          variableSet: null,
         });
         const material = await resolver!.resolve({ purpose: "provision", forceRefresh: false });
         expect(requests.at(-1)).toMatchObject({ lane, mcpServers: [remote], turnId: turn.id });

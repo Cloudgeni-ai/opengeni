@@ -10,16 +10,11 @@ import {
   type KnowledgeContext,
 } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  startProcess,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   chromium,
   type Browser,
@@ -36,17 +31,6 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "knowledge-surfaces-owner" };
-const secretSentinel = "KNOWLEDGE-SECRET-MUST-NEVER-RENDER-7d9d5d";
-const longVariableNames = Array.from({ length: 18 }, (_, index) =>
-  `KNOWLEDGE_KEY_${String(index + 1).padStart(2, "0")}_${"RESPONSIVE_INSPECTABLE_VARIABLE_".repeat(4)}`.slice(
-    0,
-    128,
-  ),
-);
-const longVariableName = longVariableNames[0]!;
-const lastVariableName = longVariableNames[longVariableNames.length - 1]!;
-const longVariableSetName =
-  `Responsive production variable set ${"with long context ".repeat(6)}`.slice(0, 120);
 const longBaseName = `Long document base ${"inspectable-title-".repeat(7)}`;
 const activeKnowledgeText =
   "Saved knowledge: keep responsive knowledge surfaces compact, deeply inspectable, and keyboard operable. " +
@@ -84,7 +68,7 @@ const knowledgeTexts = knowledgeTopics.map(
 // Entry 20 holds the unbroken overflow sentinel.
 const tailKnowledgeText = unbrokenKnowledgeText;
 /**
- * The page frame that owns vertical scroll. Settings pages (Variable sets)
+ * The page frame that owns vertical scroll. Settings pages (Secrets)
  * render their own frame inside the settings column, where it is made
  * non-scrolling, so only the outermost frame is the scroll owner.
  */
@@ -132,8 +116,12 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);
+    const webPort = await freePort();
+    webBaseUrl = `http://127.0.0.1:${webPort}`;
     const app = createApp({
-      settings: { ...browserTestSettings, databaseUrl: shared.appUrl },
+      // The web app calls the unauthenticated local-mode API from its own
+      // origin, which local mode grants CORS only when configured.
+      settings: { ...browserTestSettings, databaseUrl: shared.appUrl, webBaseUrl },
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient,
@@ -146,8 +134,6 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     });
     apiBaseUrl = `http://127.0.0.1:${api.port}`;
 
-    const webPort = await freePort();
-    webBaseUrl = `http://127.0.0.1:${webPort}`;
     web = await startProcess(
       [
         "bun",
@@ -172,7 +158,11 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         timeoutMs: 45_000,
       },
     );
-    browser = await chromium.launch();
+    browser = await chromium.launch(
+      process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+        ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+        : undefined,
+    );
   }, 180_000);
 
   afterAll(async () => {
@@ -183,9 +173,10 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await shared?.release();
   }, 60_000);
 
-  test("ships responsive, accessible variable sets, files, and unified Knowledge", async () => {
+  test("ships responsive, accessible files and unified Knowledge", async () => {
     const bootstrap = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -224,7 +215,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         viewport: { width: 375, height: 812 },
         isMobile: true,
         hasTouch: true,
-        screenshotSurface: "variable-sets",
+        screenshotSurface: "documents",
       },
       {
         label: "768",
@@ -243,6 +234,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     for (const matrixCase of matrix) {
       const context = await configuredContext(
         browser,
+        apiBaseUrl,
         {
           viewport: matrixCase.viewport,
           isMobile: matrixCase.isMobile,
@@ -254,7 +246,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       try {
         const page = await context.newPage();
         for (const theme of ["light", "dark"] as const) {
-          for (const surface of ["variable-sets", "documents", "memory"] as const) {
+          for (const surface of ["documents", "memory"] as const) {
             await openSurface(page, webBaseUrl, workspaceId, fixtures, surface, {
               focusMemory: false,
             });
@@ -267,23 +259,11 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
             if (matrixCase.hasTouch) {
               await expectOwnedTouchTargets(page, surface);
             }
-            if (matrixCase.label === "desktop" && surface !== "variable-sets") {
+            if (matrixCase.label === "desktop") {
               for (const name of ["Library", "Instructions"])
                 await page.getByRole("tab", { name, exact: true }).waitFor();
             }
-            if (surface === "variable-sets") {
-              // The list is audited above; the set's own page holds the variables.
-              await openVariableSet(page, fixtures);
-              await expectNoPageOverflow(page);
-              await expectNoAxeViolations(page, contentPageSelector, `${audit}/detail`);
-              if (matrixCase.hasTouch) {
-                await expectOwnedTouchTargets(page, "variable-set");
-              }
-              await expectContentPageScrollAndFocus(
-                page,
-                page.getByRole("button", { name: `Actions for ${lastVariableName}`, exact: true }),
-              );
-            } else if (surface === "memory") {
+            if (surface === "memory") {
               await expectContentPageScrollAndFocus(page, lastLibraryRow(page));
             }
             if (surface === matrixCase.screenshotSurface) {
@@ -305,6 +285,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("keeps a long schedules list inside the workspace scroll owner", async () => {
     const desktop = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -326,6 +307,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
 
     const constrained = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 375, height: 720 },
         extraHTTPHeaders: ownerHeaders,
@@ -344,6 +326,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("scheduled learning changes remain drafts until Save and Cancel discards them", async () => {
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       false,
     );
@@ -388,8 +371,8 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
           { apiBaseUrl, workspaceId, taskId: task.id },
         );
       // Each schedule is its own page; Edit is a form page whose Agent learning
-      // controls live under Advanced.
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/schedules`);
+      // controls live under Settings.
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/automations`);
       await page.getByRole("link", { name: task.name, exact: true }).waitFor();
       await page
         .getByRole("button", { name: `More actions for ${task.name}`, exact: true })
@@ -397,8 +380,10 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
       const knowledgeMode = page.getByRole("combobox", { name: "Knowledge", exact: true });
       const openLearning = async () => {
-        await page.getByRole("heading", { level: 1, name: "Edit schedule", exact: true }).waitFor();
-        await page.getByRole("button", { name: /^Advanced/ }).click();
+        await page
+          .getByRole("heading", { level: 1, name: "Edit automation", exact: true })
+          .waitFor();
+        await page.getByRole("button", { name: /^Settings / }).click();
       };
       await openLearning();
       await knowledgeMode.selectOption("review_first");
@@ -455,6 +440,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("keeps the Agent Knowledge overview truthful across responsive breakpoints", async () => {
     const bootstrap = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -480,6 +466,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     for (const matrixCase of matrix) {
       const context = await configuredContext(
         browser,
+        apiBaseUrl,
         {
           viewport: matrixCase.viewport,
           isMobile: matrixCase.label === "desktop" ? undefined : true,
@@ -532,6 +519,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("browses nested collections as pages, opens entries and searches across collections", async () => {
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       browserTestSettings.sandboxSelfhostedEnabled,
     );
@@ -569,26 +557,36 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/state`);
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
-      // By collection: top-level collections are sections and a sub-collection
-      // is a row inside its parent, never a section of its own.
-      await page.getByRole("radio", { name: "By collection", exact: true }).click();
-      const acmeSection = page.getByRole("region", { name: "Acme tree", exact: true });
-      const billingSection = page.getByRole("region", { name: "Billing tree", exact: true });
-      await acmeSection.getByRole("button", { name: "Contracts tree", exact: true }).waitFor();
-      await billingSection.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
-      expect(await page.getByRole("region", { name: "Contracts tree", exact: true }).count()).toBe(
-        0,
-      );
-      // The nested entry is inside Contracts, which is a row; it is not listed in Acme.
+      // Collections lists only the top-level collections. A sub-collection
+      // opens from its parent's page, and entries are not listed here.
+      await page.getByRole("radio", { name: "Collections", exact: true }).click();
+      const collectionList = page.getByRole("list", { name: "Collections", exact: true });
+      const acmeRow = collectionList.getByRole("button", { name: "Acme tree", exact: true });
+      await acmeRow.waitFor();
+      await collectionList.getByRole("button", { name: "Billing tree", exact: true }).waitFor();
       expect(
-        await acmeSection.getByRole("button", { name: "Nested renewal", exact: true }).count(),
+        await collectionList.getByRole("button", { name: "Contracts tree", exact: true }).count(),
       ).toBe(0);
       expect(await page.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
-        1,
+        0,
       );
 
-      // A sub-collection opens as its own page from the keyboard.
-      const contractsRow = acmeSection.getByRole("button", { name: "Contracts tree", exact: true });
+      // A collection opens as its own page from the keyboard, with its
+      // sub-collections; the nested entry is inside Contracts, not Acme.
+      await acmeRow.focus();
+      await page.keyboard.press("Enter");
+      const acmeHeading = page.getByRole("heading", { level: 1, name: "Acme tree", exact: true });
+      await acmeHeading.waitFor();
+      const contractsRow = collectionList.getByRole("button", {
+        name: "Contracts tree",
+        exact: true,
+      });
+      await contractsRow.waitFor();
+      expect(await page.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
+        0,
+      );
+
+      // A sub-collection opens as its own page from the keyboard too.
       await contractsRow.focus();
       await page.keyboard.press("Enter");
       const contractsHeading = page.getByRole("heading", {
@@ -601,8 +599,10 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await collectionPath.getByText("Acme tree", { exact: true }).waitFor();
       const members = page.getByRole("list", { name: "Entries", exact: true });
       await members.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-      await acmeSection.getByRole("button", { name: "Contracts tree", exact: true }).waitFor();
+      await returnToLibraryFromEntry(page);
+      await acmeRow.click();
+      await acmeHeading.waitFor();
+      await contractsRow.waitFor();
 
       // A completed page must reauthorize on reopen, even when the browser's
       // local access-context identity has not changed. Never redisplay its old
@@ -622,7 +622,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       expect(unexpectedDiagnostics(context)).toEqual([]);
       const diagnosticsBeforeDenial = unexpectedDiagnostics(context).length;
       await page.route(collectionSearch, denyCollection);
-      await acmeSection.getByRole("button", { name: "Contracts tree", exact: true }).click();
+      await contractsRow.click();
       await contractsHeading.waitFor();
       await page.getByText("Couldn't load the entries", { exact: true }).waitFor();
       expect(deniedReopens).toBeGreaterThanOrEqual(1);
@@ -658,6 +658,8 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await collectionPath.getByText("Contracts tree", { exact: true }).waitFor();
       await page.goBack();
       await contractsHeading.waitFor();
+      await page.goBack();
+      await acmeHeading.waitFor();
       await page.goBack();
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
 
@@ -697,9 +699,10 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await expectNoPageOverflow(page);
       await expectNoAxeViolations(page, contentPageSelector, "nested-knowledge-collection-mobile");
 
-      // Search reaches entries inside nested collections from the By collection view.
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      // Search in Entries reaches entries inside nested collections.
+      await returnToLibraryFromEntry(page);
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
+      await page.getByRole("radio", { name: "Entries", exact: true }).click();
       await page
         .getByRole("searchbox", { name: "Search knowledge", exact: true })
         .fill("Nested renewal");
@@ -721,6 +724,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     const expectedMissingKnowledge = new Set<string>();
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       false,
       expectedMissingKnowledge,
@@ -1147,55 +1151,6 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     // Historical URLs still open the same Knowledge page.
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/memory`);
     await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
-    await page.goto(surfaceUrl(webBaseUrl, workspaceId, "variable-sets", fixtures));
-    // The whole row opens the set's own page from the keyboard.
-    const setRow = page.getByRole("button", { name: longVariableSetName, exact: true });
-    await setRow.focus();
-    await page.keyboard.press("Enter");
-    await page.getByRole("heading", { level: 1, name: longVariableSetName, exact: true }).waitFor();
-    expect(new URL(page.url()).pathname).toBe(
-      `/workspaces/${workspaceId}/variable-sets/${fixtures.variableSetId}`,
-    );
-    await page.getByText(longVariableName, { exact: true }).waitFor();
-    await expectContentPageScrollAndFocus(
-      page,
-      page.getByRole("button", { name: `Actions for ${lastVariableName}`, exact: true }),
-    );
-    // Values are write-only: every variable shows only that it is a secret.
-    const hiddenValues = page
-      .locator("[data-slot='secret-value'][data-kind='secret']")
-      .filter({ visible: true });
-    expect(await hiddenValues.count()).toBe(longVariableNames.length);
-    expect(await hiddenValues.first().textContent()).toBe("Secret");
-    await expectSecretNeverRendered(page);
-
-    // Replacing a value never prefills or reveals the old one.
-    await page
-      .getByRole("button", { name: `Actions for ${longVariableName}`, exact: true })
-      .click();
-    expect(await page.getByRole("menuitem", { name: /^(Reveal|Copy|Rotate)/ }).count()).toBe(0);
-    await page.getByRole("menuitem", { name: "Replace value", exact: true }).click();
-    const replace = page.getByRole("dialog");
-    await replace.waitFor();
-    await expectSecretNeverRendered(page);
-    await page.keyboard.press("Escape");
-    await replace.waitFor({ state: "hidden" });
-
-    // Add a variable inline at the bottom of the list.
-    const addForm = page.getByRole("form", {
-      name: `Add a variable to ${longVariableSetName}`,
-      exact: true,
-    });
-    await addForm.getByRole("textbox", { name: "Name", exact: true }).fill("BROWSER_ADDED_KEY");
-    await addForm.getByLabel("Value", { exact: true }).fill(secretSentinel);
-    await addForm.getByRole("button", { name: "Add", exact: true }).click();
-    await page.getByText("BROWSER_ADDED_KEY", { exact: true }).waitFor();
-    await page
-      .getByRole("button", { name: "Actions for BROWSER_ADDED_KEY", exact: true })
-      .waitFor();
-    await waitFor(async () => (await hiddenValues.count()) === longVariableNames.length + 1);
-    await expectSecretNeverRendered(page);
-
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "memory", fixtures));
     const card = page.getByRole("button", { name: "Retained entry 20", exact: true });
     await card.focus();
@@ -1203,7 +1158,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.getByRole("heading", { level: 1, name: "Retained entry 20", exact: true }).waitFor();
     await page.getByText(tailKnowledgeText, { exact: true }).waitFor();
     await expectNoPageOverflow(page);
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await returnToLibraryFromEntry(page);
     await page.getByRole("button", { name: "Add knowledge", exact: true }).click();
     await page.getByRole("heading", { level: 1, name: "Add knowledge", exact: true }).waitFor();
     await page
@@ -1217,7 +1172,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       .getByRole("heading", { level: 1, name: "Browser-created knowledge", exact: true })
       .waitFor();
     await page.getByText("A useful finding entered by a person.", { exact: true }).waitFor();
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await returnToLibraryFromEntry(page);
     await page.getByRole("button", { name: "Browser-created knowledge", exact: true }).waitFor();
     await expectContentPageScrollAndFocus(page, lastLibraryRow(page));
     await expectNoPageOverflow(page);
@@ -1227,7 +1182,6 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
 type SeededFixtures = {
   proposedMemoryId: string;
   tailMemoryId: string;
-  variableSetId: string;
 };
 
 type SeededScheduledTask = {
@@ -1235,7 +1189,7 @@ type SeededScheduledTask = {
   name: string;
 };
 
-type Surface = "variable-sets" | "documents" | "memory";
+type Surface = "documents" | "memory";
 
 type MatrixCase = {
   label: "320" | "375" | "768" | "desktop";
@@ -1249,11 +1203,21 @@ const diagnostics = new WeakMap<BrowserContext, string[]>();
 
 async function configuredContext(
   browser: Browser,
+  apiBaseUrl: string,
   options: BrowserContextOptions,
   sandboxSelfhostedEnabled: boolean,
   expectedMissingKnowledge: ReadonlySet<string> = new Set(),
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
+  // This local-mode fixture exercises real Knowledge APIs and PostgreSQL.
+  // Personal Inbox requires a managed browser identity and is outside its scope.
+  await context.route(`${apiBaseUrl}/v1/inbox`, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], needsYouCount: 0, unreadCount: 0 }),
+    });
+  });
   context.setDefaultTimeout(15_000);
   const problems: string[] = [];
   const expectedMachines404Urls = new Set<string>();
@@ -1381,21 +1345,6 @@ async function seedKnowledgeSurfaces(
         return (await response.json()) as T;
       }
 
-      const variableSet = await request<{ id: string }>(
-        `/v1/workspaces/${targetWorkspaceId}/variable-sets`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            name: fixture.longVariableSetName,
-            description:
-              "A deliberately long description that remains fully inspectable on compact viewports without widening the page.",
-            variables: fixture.longVariableNames.map((name) => ({
-              name,
-              value: fixture.secretSentinel,
-            })),
-          }),
-        },
-      );
       const memoryIds: string[] = [];
       for (const text of [
         ...fixture.knowledgeTexts,
@@ -1423,16 +1372,12 @@ async function seedKnowledgeSurfaces(
       return {
         proposedMemoryId: proposed.id,
         tailMemoryId: memoryIds[0]!,
-        variableSetId: variableSet.id,
       };
     },
     {
       apiBaseUrl,
       workspaceId,
       fixture: {
-        secretSentinel,
-        longVariableNames,
-        longVariableSetName,
         longBaseName,
         activeKnowledgeText,
         unbrokenKnowledgeText,
@@ -1492,14 +1437,14 @@ async function expectSchedulesScroll(
   workspaceId: string,
   tailTask: SeededScheduledTask,
 ): Promise<void> {
-  await page.goto(`${baseUrl}/workspaces/${workspaceId}/schedules`);
-  await page.getByRole("heading", { level: 1, name: "Schedules", exact: true }).waitFor();
+  await page.goto(`${baseUrl}/workspaces/${workspaceId}/automations`);
+  await page.getByRole("heading", { level: 1, name: "Automations", exact: true }).waitFor();
   // One flat list; every schedule is a row that links to its own page.
-  const schedules = page.getByRole("list", { name: "Schedules", exact: true });
+  const schedules = page.getByRole("list", { name: "Automations", exact: true });
   const tailRow = schedules.getByRole("listitem").last();
   await tailRow.getByRole("link", { name: tailTask.name, exact: true }).waitFor();
   expect(await tailRow.getByRole("link").getAttribute("href")).toBe(
-    `/workspaces/${workspaceId}/schedules/${tailTask.id}`,
+    `/workspaces/${workspaceId}/automations/${tailTask.id}`,
   );
   const scrollOwner = page.locator('[data-workspace-scroll-owner="page"]');
   expect(await scrollOwner.count()).toBe(1);
@@ -1523,12 +1468,7 @@ function surfaceUrl(
   fixtures: SeededFixtures,
 ): string {
   void fixtures;
-  const suffix =
-    surface === "variable-sets"
-      ? "variable-sets"
-      : surface === "documents"
-        ? "state?view=files"
-        : "state";
+  const suffix = surface === "documents" ? "state?view=files" : "state";
   return `${baseUrl}/workspaces/${workspaceId}/${suffix}`;
 }
 
@@ -1545,11 +1485,8 @@ async function openSurface(
       ? `${baseUrl}/workspaces/${workspaceId}/memory`
       : surfaceUrl(baseUrl, workspaceId, surface, fixtures);
   await page.goto(url);
-  const heading = surface === "variable-sets" ? "Variable sets" : "Knowledge";
-  await page.getByRole("heading", { level: 1, name: heading, exact: true }).waitFor();
-  if (surface === "variable-sets") {
-    await page.getByRole("button", { name: longVariableSetName, exact: true }).waitFor();
-  } else if (surface === "documents") {
+  await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
+  if (surface === "documents") {
     // Old Files links open the Library filtered to files. This fixture has
     // no object store, so file uploads are correctly unavailable.
     await page.getByRole("button", { name: "Remove filter Type: Files", exact: true }).waitFor();
@@ -1579,20 +1516,25 @@ function lastLibraryRow(page: Page): Locator {
     .locator("[data-row-action]");
 }
 
-/** Opens the fixture set's own page from its row in the list. */
-async function openVariableSet(page: Page, fixtures: SeededFixtures): Promise<void> {
-  await page.getByRole("button", { name: longVariableSetName, exact: true }).click();
-  await page.getByRole("heading", { level: 1, name: longVariableSetName, exact: true }).waitFor();
-  expect(new URL(page.url()).pathname.endsWith(`/variable-sets/${fixtures.variableSetId}`)).toBe(
-    true,
-  );
-  await page.getByText(longVariableName, { exact: true }).waitFor();
+/** An entry or collection returns to its Library tab, not a page named Knowledge. */
+async function returnToLibraryFromEntry(page: Page): Promise<void> {
+  const detailUrl = new URL(page.url());
+  expect(detailUrl.searchParams.get("entry")).not.toBeNull();
+  const back = page
+    .locator(contentPageSelector)
+    .getByRole("button", { name: "Library", exact: true });
+  expect(await back.count()).toBe(1);
+  await back.click();
+  await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
   expect(
-    await page
-      .getByRole("button", { name: `Actions for ${lastVariableName}`, exact: true })
-      .count(),
-  ).toBe(1);
-  await expectSecretNeverRendered(page);
+    await page.getByRole("tab", { name: "Library", exact: true }).getAttribute("aria-selected"),
+  ).toBe("true");
+  const libraryUrl = new URL(page.url());
+  expect(libraryUrl.pathname).toBe(detailUrl.pathname);
+  expect(libraryUrl.searchParams.get("view") ?? "library").toBe("library");
+  for (const key of ["entry", "revision", "page", "proposal", "collection"]) {
+    expect(libraryUrl.searchParams.get(key)).toBeNull();
+  }
 }
 
 /** Opens the Library's Filter menu and checks one option. */
@@ -1601,19 +1543,6 @@ async function applyLibraryFilter(page: Page, option: string): Promise<void> {
   await page.getByRole("menuitemcheckbox", { name: option, exact: true }).click();
   await page.keyboard.press("Escape");
   await page.getByRole("menu").waitFor({ state: "hidden" });
-}
-
-async function expectSecretNeverRendered(page: Page): Promise<void> {
-  expect(
-    await page.evaluate(
-      (sentinel) =>
-        (document.body.textContent ?? "").includes(sentinel) ||
-        [...document.querySelectorAll("input, textarea")].some((input) =>
-          (input as HTMLInputElement).value.includes(sentinel),
-        ),
-      secretSentinel,
-    ),
-  ).toBe(false);
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
@@ -1760,34 +1689,16 @@ async function expectNoAxeViolations(
   ).toEqual([]);
 }
 
-async function expectOwnedTouchTargets(
-  page: Page,
-  surface: Surface | "variable-set",
-): Promise<void> {
+async function expectOwnedTouchTargets(page: Page, surface: Surface): Promise<void> {
   const targets =
-    surface === "variable-sets"
-      ? [
-          page.getByRole("button", { name: "New variable set", exact: true }),
-          page
-            .getByRole("listitem")
-            .filter({ has: page.getByRole("button", { name: longVariableSetName, exact: true }) }),
-        ]
-      : surface === "variable-set"
-        ? [
-            page.getByRole("button", { name: "Variable sets", exact: true }),
-            page.getByRole("button", { name: `Actions for ${longVariableName}`, exact: true }),
-            page
-              .getByRole("form", { name: `Add a variable to ${longVariableSetName}`, exact: true })
-              .getByRole("button", { name: "Add", exact: true }),
-          ]
-        : surface === "documents"
-          ? [page.getByRole("button", { name: /^Filter/ })]
-          : [
-              page.getByRole("button", { name: "Add knowledge", exact: true }),
-              page.getByRole("button", { name: "More knowledge actions", exact: true }),
-              page.getByRole("button", { name: /^Filter/ }),
-              page.getByRole("button", { name: "More actions for Retained entry 20", exact: true }),
-            ];
+    surface === "documents"
+      ? [page.getByRole("button", { name: /^Filter/ })]
+      : [
+          page.getByRole("button", { name: "Add knowledge", exact: true }),
+          page.getByRole("button", { name: "More knowledge actions", exact: true }),
+          page.getByRole("button", { name: /^Filter/ }),
+          page.getByRole("button", { name: "More actions for Retained entry 20", exact: true }),
+        ];
   for (const target of targets) {
     const box = await target.boundingBox();
     expect(box).not.toBeNull();

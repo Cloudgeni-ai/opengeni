@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import legacyRoutines from "./runtime-posture-legacy-routines.json";
 import type { Database, RlsStrategy } from "./database";
 import {
   classifyRoleRelationships,
@@ -42,6 +43,389 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
+/**
+ * SECURITY DEFINER routines in `opengeni_private` the runtime calls: the event
+ * trigger dispatcher's identity-only due inventory and intake retention pass
+ * (0929), the recording recovery sweep's stalled-work inventory (0930), the
+ * MCP Events subscription pump's due inventory (0932), the source feed pump's
+ * due inventory (0935), the recording retention sweep's due inventory (0946),
+ * the lookup of whose personal machine a chat runs on (0978), the re-arm of
+ * the running commands a returning runner did not answer for (0984), the
+ * control worker's content-free queued-turn hold summary (0988), the API's
+ * inventory of browsers an agent session holds (1002), the only writer of
+ * the EU-only inference setting and its history (1060), the secret history
+ * scrub's reader and cell writer (1091), the subscription
+ * account-administrator grant (1103), which records a request's verified
+ * account:admin proof for one transaction, agent calls' device lookup,
+ * register, claim, device count, busy check and ring (1107), the lock-free
+ * read of a known external identity (1172), the list of every
+ * organization vault wherever it works (1218), the organization's
+ * names-only member list (1211), the Slack agent update sweeper's
+ * ids-only inventory of installations that send updates (1153) and the
+ * recording compaction sweep's inventory of meeting tracks not yet kept
+ * compact (1240), and the session storage pass's inventory of sessions with
+ * content to collect and its collector of unreferenced content blobs (1359).
+ * Each is
+ * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
+ * EXECUTE is required, except while a routine is in
+ * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
+ */
+export const RUNTIME_DEFINER_ROUTINES = [
+  "list_due_event_trigger_tasks_v1(integer)",
+  "prune_event_intake_v1(integer, integer, integer)",
+  "list_stalled_recording_work_v1(integer)",
+  "list_due_mcp_event_subscriptions_v1(integer)",
+  "list_due_event_source_feeds_v1(integer)",
+  "list_due_recording_retention_v1(integer)",
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+  "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "summarize_queued_turns_by_hold()",
+  "list_agent_held_browser_sessions(integer, bigint)",
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+  "redact_session_secret_cells_v1(uuid, text, jsonb)",
+  "grant_subscription_account_administrator(jsonb)",
+  "native_push_device_v2(text)",
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+  "claim_native_push_deliveries_v2(uuid, integer, integer)",
+  "agent_call_device_count_v1(text, boolean)",
+  "agent_call_ringing_v1(text)",
+  "ring_agent_call_v1(uuid, boolean)",
+  "read_external_identity_v1(uuid, text, text)",
+  "list_organization_vaults_v1(uuid, jsonb)",
+  "list_organization_member_names_v1(uuid)",
+  "list_due_slack_agent_update_installations_v1(integer)",
+  "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
+  "end_agent_call_rings_v1(uuid)",
+  "session_content_garbage_candidates_v1(integer)",
+  "collect_session_content_garbage_v1(uuid, uuid, integer)",
+] as const;
+
+/**
+ * Runtime definers whose EXECUTE is withheld for one release. A release that
+ * does not know a definer rejects a runtime EXECUTE grant on it, so the grant
+ * (and provisioning) waits until a binary that knows it is the previous
+ * release; until then readiness accepts the routine with or without runtime
+ * EXECUTE. 0937 withheld the first five and 0947 granted them; 0946 withheld
+ * the recording retention inventory and 0950 granted it. 0978 withholds the
+ * personal-machine owner lookup; until a later migration grants it, the
+ * runtime treats the lookup as unavailable and keeps the earlier behaviour.
+ * 0984 withheld the connected-command re-arm the same way and 1101 granted
+ * it. 0988 withheld the queued-turn hold summary and 1274 granted it.
+ * 1002 withheld the held-browser inventory and 1093 granted it.
+ * 1060 withheld the EU-only change function and 1210 granted it. 1091
+ * withholds the secret history scrub's
+ * reader and cell writer; until they are granted, a scrub reports the cells
+ * only they reach as pending. 1103 withheld the subscription
+ * account-administrator grant and 1149 granted it. 1107 withheld the agent
+ * call routines and the native push v2 functions that carry the iOS VoIP
+ * token; 1239 grants them.
+ * 1172 withholds the lock-free external identity read; until it is granted,
+ * authenticating an external user takes the organization membership fence
+ * exclusively, as before.
+ * 1218 withheld the organization vault list and 1224 the organization machine
+ * and rig list; 1272 granted both.
+ * 1211 withholds the names-only member list; until it is granted, members
+ * get no names (as before).
+ * 1153 withholds the Slack agent update sweeper's inventory; until it is
+ * granted, the sweeper finds nothing and sends no update messages.
+ * 1240 withheld the inventory of meeting tracks not yet kept compact, 1282
+ * granted it and 1283 withholds it again: the binary then in production
+ * (6327db2c) did not know the routine and rejects its runtime grant. Until a
+ * later migration grants it, existing meetings keep their audio as it is and
+ * only new transcripts keep it compact.
+ * 1344 withholds the end of a call's ring on the other phones; until it is
+ * granted, settling a call sends no ended push and those phones ring out.
+ * 1359 withholds the session content collector and its inventory; until they
+ * are granted, unreferenced content blobs stay until the session is archived.
+ */
+export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+  "redact_session_secret_cells_v1(uuid, text, jsonb)",
+  "list_organization_member_names_v1(uuid)",
+  "list_due_slack_agent_update_installations_v1(integer)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
+  "end_agent_call_rings_v1(uuid)",
+  "session_content_garbage_candidates_v1(integer)",
+  "collect_session_content_garbage_v1(uuid, uuid, integer)",
+] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+
+/**
+ * The tables each runtime definer reads or writes as its owner. Once they all
+ * exist, the routine must exist too. Target-schema tables are named bare,
+ * `opengeni_private` tables with their schema.
+ */
+const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
+  Record<(typeof RUNTIME_DEFINER_ROUTINES)[number], readonly string[]>
+> = {
+  "list_due_event_trigger_tasks_v1(integer)": ["scheduled_task_event_settings"],
+  "prune_event_intake_v1(integer, integer, integer)": ["event_deliveries", "inbound_events"],
+  "list_stalled_recording_work_v1(integer)": ["recording_transcript_versions", "recordings"],
+  "list_due_mcp_event_subscriptions_v1(integer)": ["mcp_event_subscriptions"],
+  "list_due_event_source_feeds_v1(integer)": ["event_source_feeds"],
+  "list_due_recording_retention_v1(integer)": [
+    "recordings",
+    "recording_transcript_versions",
+    "workspaces",
+  ],
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)": [
+    "sessions",
+    "sandboxes",
+    "enrollments",
+    "organization_memberships",
+  ],
+  "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
+  "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
+  "list_agent_held_browser_sessions(integer, bigint)": [
+    "browser_sessions",
+    "browser_session_associations",
+    "sessions",
+    "session_turns",
+  ],
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)": [
+    "organization_inference_residency",
+    "organization_inference_residency_events",
+    "organization_memberships",
+    "api_keys",
+  ],
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)": [
+    "task_notes",
+    "task_note_write_capabilities",
+    "host_export_outbox",
+    "mcp_operations",
+    "session_history_items_repair_audit",
+  ],
+  "redact_session_secret_cells_v1(uuid, text, jsonb)": [
+    "sessions",
+    "session_turns",
+    "session_goals",
+    "session_goal_revisions",
+    "session_events",
+    "session_message_search_texts",
+    "session_content_blobs",
+    "session_attempt_model_context_snapshots",
+    "session_attempt_tool_catalogs",
+    "session_system_updates",
+    "task_notes",
+    "task_note_write_capabilities",
+    "host_export_outbox",
+    "mcp_operations",
+    "session_history_items_repair_audit",
+  ],
+  "grant_subscription_account_administrator(jsonb)": ["organization_memberships"],
+  "native_push_device_v2(text)": ["opengeni_private.native_push_devices", "auth_sessions"],
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)": [
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
+  "claim_native_push_deliveries_v2(uuid, integer, integer)": [
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+  ],
+  "agent_call_device_count_v1(text, boolean)": [
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
+  "agent_call_ringing_v1(text)": ["agent_calls"],
+  "ring_agent_call_v1(uuid, boolean)": [
+    "agent_calls",
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
+  "read_external_identity_v1(uuid, text, text)": [
+    "external_identities",
+    "organization_memberships",
+  ],
+  "list_organization_vaults_v1(uuid, jsonb)": ["vaults", "vault_items"],
+  "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
+  "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
+  "list_organization_compute_v1(uuid, uuid, text)": ["enrollments", "rigs", "sandboxes"],
+  "list_uncompacted_recording_tracks_v1(integer, text)": [
+    "recordings",
+    "recording_tracks",
+    "recording_chunks",
+    "recording_transcript_versions",
+  ],
+  "end_agent_call_rings_v1(uuid)": [
+    "agent_calls",
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+  ],
+  "session_content_garbage_candidates_v1(integer)": [
+    "session_attempt_model_context_snapshots",
+    "sessions",
+    "opengeni_private.session_content_collections",
+  ],
+  "collect_session_content_garbage_v1(uuid, uuid, integer)": [
+    "sessions",
+    "session_attempt_model_context_snapshots",
+    "session_attempt_tool_catalogs",
+    "session_content_blobs",
+    "opengeni_private.session_content_collections",
+  ],
+};
+
+export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
+  "list_subscription_plan_maintenance_accounts(integer)";
+export const SUBSCRIPTION_PLAN_FREE_ANNIVERSARY_ROUTINE =
+  "subscription_plan_free_anniversary(timestamp with time zone, timestamp with time zone)";
+
+/** Read-only maintenance work checks (migrations 0730 and 0732) and the claim
+ * each one previews, which fixes its owner and runtime grant. */
+export const MAINTENANCE_WORK_PROBE_ROUTINES = [
+  ["session_workflow_wakes_due_v1()", "claim_session_workflow_wakes(integer)", "private"],
+  [
+    "automatic_session_title_fanout_due_v1()",
+    "claim_automatic_session_title_fanout_v1(integer)",
+    "private",
+  ],
+  [
+    "knowledge_index_due_v1(text, integer)",
+    "knowledge_index_claim(text, integer, integer)",
+    "target",
+  ],
+  [
+    "site_auth_maintenance_due_v1(bigint)",
+    "claim_site_auth_maintenance(bigint, integer)",
+    "private",
+  ],
+  [
+    "sandbox_lease_reaper_due_v1()",
+    "reap_sandbox_leases(bigint, bigint, bigint, bigint)",
+    "private",
+  ],
+  [
+    "sandbox_idle_checkpoint_due_v1(bigint)",
+    "list_idle_checkpoint_candidates(integer, bigint)",
+    "private",
+  ],
+  ["browser_deadline_checkpoint_due_v1()", "list_browser_deadline_checkpoints(integer)", "private"],
+  [
+    "session_system_update_outbox_due_v1()",
+    "claim_session_system_update_outbox_v2(integer)",
+    "private",
+  ],
+  [
+    "session_list_snapshots_expired_v1()",
+    "reap_expired_session_list_snapshots(integer)",
+    "private",
+  ],
+  [
+    "connected_command_reconciliation_due_v1()",
+    "claim_connected_machine_background_commands(uuid, integer, bigint, timestamp with time zone)",
+    "private",
+  ],
+  [
+    "connected_command_output_release_due_v1()",
+    "claim_connected_command_output_releases(uuid, integer, bigint, timestamp with time zone)",
+    "private",
+  ],
+  [
+    "terminal_retained_processes_due_v1()",
+    "claim_terminal_retained_processes(uuid, integer, bigint)",
+    "private",
+  ],
+  [
+    "sandbox_ended_epoch_blockers_due_v1()",
+    "list_sandbox_ended_epoch_blockers(integer)",
+    "private",
+  ],
+  [
+    "sandbox_checkpoint_artifact_gc_due_v1(bigint)",
+    "claim_sandbox_checkpoint_artifacts(uuid, integer, bigint)",
+    "private",
+  ],
+] as const;
+
+/** Private predicate projections; never runtime-readable or writable. */
+export const MAINTENANCE_PROBE_SOURCES = [
+  "session_workflow_wake_outbox",
+  "site_auth_connections",
+  "sandbox_leases",
+  "sandbox_lease_holders",
+  "browser_sessions",
+  "session_system_update_outbox",
+  "session_list_snapshots",
+  "session_background_commands",
+  "sandbox_retained_processes",
+  "sandbox_workspace_mutation_admissions",
+  "sandbox_checkpoint_artifacts",
+  "rig_versions",
+  "rig_changes",
+  "enrollments",
+  "sessions",
+  "session_turns",
+] as const;
+export const MAINTENANCE_PROBE_TABLES = MAINTENANCE_PROBE_SOURCES.map(
+  (name) => `maintenance_probe_${name}`,
+);
+export const MAINTENANCE_PRIVATE_TABLES = [
+  ...MAINTENANCE_PROBE_TABLES,
+  "maintenance_claim_capabilities",
+];
+export const MAINTENANCE_PROBE_OWNER_ROUTINES = [
+  ...MAINTENANCE_PROBE_TABLES.map((name) => `${name}_sync()`),
+  "maintenance_probe_output_runner_eligible_v1(uuid, uuid, text)",
+  "maintenance_claim_wakes_inner(integer)",
+  "maintenance_claim_snapshots_inner(integer)",
+  "maintenance_claim_titles_inner(integer)",
+  "maintenance_claim_site_auth_inner(bigint, integer)",
+  "maintenance_claim_updates_inner(integer)",
+  "maintenance_claim_checkpoint_gc_inner(uuid, integer, bigint)",
+  "maintenance_claim_checkpoint_settle_inner(uuid, uuid, boolean, text, bigint)",
+  "maintenance_claim_checkpoint_prune_inner(bigint, integer)",
+  "maintenance_claim_output_release_inner(uuid, integer, bigint, timestamp with time zone)",
+  "maintenance_claim_ended_blockers_inner(integer)",
+  "maintenance_claim_ended_setup_inner(integer)",
+  "maintenance_inventory_retained_inner()",
+  "maintenance_inventory_draining_inner()",
+  "maintenance_workspace_commands_prepare_inner(uuid, uuid)",
+  "maintenance_workspace_commands_prune_inner(uuid, uuid)",
+  "maintenance_schedule_cleanup_claim_inner(uuid, integer, integer)",
+  "maintenance_schedule_cleanup_settle_inner(uuid, uuid, text)",
+  "maintenance_schedule_cleanup_connector_inner(uuid, uuid)",
+  "validate_sandbox_checkpoint_refs()",
+  "validate_sandbox_checkpoint_artifact_refs()",
+];
+
+const MODEL_FACT_CAPABILITY_ROUTINES = [
+  [
+    "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
+    "Insights unified usage projection is missing or unsafe",
+  ],
+  [
+    "insights_scoped_calls_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, jsonb, timestamp with time zone, uuid, integer, uuid[], boolean)",
+    "Insights unified visible calls projection is missing or unsafe",
+  ],
+  [
+    "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
+    "Insights complete usage amount projection is missing or unsafe",
+  ],
+  [
+    "workspace_insights_amount_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+    "Insights amount fact projection is missing or unsafe",
+  ],
+  [
+    "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
+    "organization model usage aggregate is missing or unsafe",
+  ],
+  [
+    "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+    "Insights scoped fact projection is missing or unsafe",
+  ],
+  [
+    "private_scheduled_task_summaries(uuid, uuid, text, uuid, timestamp with time zone, integer)",
+    "private schedule summary capability is missing or unsafe",
+  ],
+  [
+    "pause_private_scheduled_task(uuid, uuid, text, uuid)",
+    "private schedule pause capability is missing or unsafe",
+  ],
+] as const;
+
 const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
   "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)";
 
@@ -51,13 +435,32 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fan
 export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "record_sandbox_file_publication(uuid, uuid, uuid, uuid)",
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
+  "file_private_to_another(uuid, uuid, uuid)",
 ] as const;
 const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
+export const ARTIFACT_PIN_RUNTIME_ROUTINES = [
+  "update_artifact_pin(uuid, uuid, text, text, boolean)",
+  "list_artifact_pins(uuid, uuid)",
+  "list_sandbox_file_publications_pinned(uuid, uuid, jsonb)",
+] as const;
+const ARTIFACT_PINS_TABLE = "artifact_catalog_pins";
 export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
+  "set_organization_slack_bot_access(uuid, uuid, uuid, text, boolean)",
+  "set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[])",
+  "read_slack_bot_workspace_access(uuid, uuid, uuid)",
+  "read_organization_slack_bot_access(uuid, uuid, uuid)",
+  "list_organization_slack_bots(uuid, uuid)",
+  "prepare_organization_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, uuid, bigint, text, text, text)",
+  "read_organization_slack_bot_message(uuid, uuid, uuid, uuid)",
 ] as const;
 const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+const ORGANIZATION_SLACK_BOT_ACCESS_TABLE = "organization_slack_bot_access";
+export const ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES = [
+  "record_organization_signup_use_case(uuid, text, text)",
+] as const;
+const ORGANIZATION_SIGNUP_USE_CASES_TABLE = "organization_signup_use_cases";
 export const SLACK_FILE_UPLOAD_OPERATIONS_TABLE = "slack_file_upload_operations";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
@@ -78,13 +481,115 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "wake_teams_route_for_session_event()",
+  // Migration 1213: clears a new session's archive marker; triggers fire
+  // without the inserting role holding EXECUTE.
+  "session_insert_not_archived()",
+  "sync_usage_maintenance_due()",
+  "arm_usage_allowances_for_membership()",
+  ...MAINTENANCE_PROBE_OWNER_ROUTINES,
+  "guard_session_title_operation()",
+  "subscription_plan_definition(text)",
+  "plan_period_usage(plan_credit_periods, timestamp with time zone)",
+  "plan_general_balance(uuid)",
+  "expire_refunded_plan_credit()",
+  "enforce_organization_plan_seats()",
+  // Migration 0598's Claude pool activation receipt. Readiness no longer
+  // requires it (the retirement migration 0751 dropped the pool routines);
+  // it stays as a receipt the runtime need not execute.
+  "claude_subscription_pool_protocol_v1_active()",
+  // M3 PR 2b: run only by the Codex Apps routines as their owner.
+  "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 3b: the owner capability internals the reset-credit fence calls
+  // and the revision-authority trigger function (triggers fire without the
+  // inserting role holding EXECUTE).
+  "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+  "drop_subscription_codex_owner_capabilities(uuid)",
+  "derive_scheduled_revision_subscription_authority()",
+  // Migration 0707: the provider-neutral writers' owner-only internals.
+  "subscription_core_writer_context(text, uuid, uuid, text)",
+  "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
+  "drop_subscription_core_owner_capabilities(text, uuid)",
+  "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 1103: the administration writer context the disconnect writer calls.
+  "subscription_core_administration_context(text, uuid, uuid, text)",
+  // Migration 0871: the usage-history capture triggers and the appender they
+  // run as their owner (triggers fire without the writing role holding EXECUTE).
+  "capture_usage_reading()",
+  "append_usage_reading(uuid, uuid, jsonb)",
+  "capture_usage_call()",
+  // Migration 0712: owner-only trigger functions of the provider cutover
+  // receipts and the provider-neutral cutover-row identity.
+  "guard_subscription_provider_cutover_receipts()",
+  "keep_subscription_cutover_identity()",
+  // Migration 0907: the invoker-rights trigger function that kept a
+  // workspace's own subscription connection serving only that workspace. Its
+  // triggers were dropped in migration 1166; the function stays until a later
+  // release removes it.
+  "guard_subscription_workspace_owner_reach()",
+  // Migration 0909: the invoker-rights trigger that mirrors a message event's
+  // text into session_message_search_texts (triggers fire without the
+  // writing role holding EXECUTE).
+  "index_session_message_search_text()",
+  // Migration 0716: the authority marker and compatibility guards, the
+  // per-path source resolvers and the deferred compatibility check. The
+  // triggers fire without the writing role holding EXECUTE.
+  "stamp_subscription_authority_inserted_at()",
+  "keep_subscription_authority_inserted_at()",
+  "subscription_authority_compat_entry_valid(jsonb)",
+  "guard_subscription_authority_compat()",
+  "subscription_compat_turn_human(uuid, uuid)",
+  "subscription_compat_v2_has_entry(jsonb, text)",
+  "subscription_compat_receiver_source(uuid, uuid)",
+  "subscription_compat_delivery_sources(uuid, uuid, uuid, uuid, text)",
+  "subscription_compat_compaction_source(uuid, uuid)",
+  "subscription_compat_scheduled_source(uuid, uuid)",
+  "subscription_compat_carrier_sources(text, uuid, uuid, bigint)",
+  "subscription_compat_carrier_state(text, uuid, uuid, bigint)",
+  "subscription_compat_record(text, text, uuid, uuid, bigint)",
+  "subscription_compat_expected(text, timestamp with time zone, uuid, text, uuid, bigint, text)",
+  "subscription_compat_carrier_expected(text, timestamp with time zone, text, uuid, uuid, bigint)",
+  "subscription_compat_enter_scope(uuid, uuid)",
+  "subscription_compat_leave_scope(text[])",
+  "subscription_compat_effective(text, text, uuid, uuid, bigint)",
+  "enforce_subscription_authority_compat()",
+  // Migration 0717: the fences' helpers (the v2 copy rule, a scheduled
+  // firing's v2 value and the personal-entry liveness check), called only by
+  // owner-run fences and functions.
+  "subscription_v2_copy_matches(jsonb, jsonb)",
+  "subscription_scheduled_firing_v2(uuid, uuid, uuid, bigint)",
+  "subscription_personal_entry_serviceable(uuid, jsonb)",
+  "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
+  // Migration 0689: the owner-only Codex cutover receipt and the trigger that
+  // seeds organizations created later onto the shared core.
+  "subscription_codex_cutover_v1_active()",
+  "seed_subscription_codex_cutover()",
+  "keep_subscription_codex_cutover_identity()",
+  // 0689's plan-change and auto-assignment trigger functions, under the
+  // provider-free names migration 0751 gives them.
+  "record_subscription_core_plan_change()",
+  "auto_assign_subscription_core_workspace()",
+  "auto_assign_subscription_core_personal_workspace()",
   "read_sender_connection(uuid, uuid, uuid, text)",
+  // Migration 0713: the provider-keyed auto-assignment apply path, run by
+  // the two auto-assignment trigger functions as their owner.
+  "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
+  // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
+  // functions and the migration-owner backfill. Runtime roles may still hold
+  // EXECUTE until a follow-up migration revokes it once no pre-0565 binary
+  // can run; this binary no longer requires it.
+  "capture_product_lifecycle_fact()",
+  "observe_credit_grant()",
+  "backfill_product_lifecycle_facts(text, integer)",
   "validate_mcp_account_bindings(jsonb, jsonb)",
   "fence_mcp_account_bindings()",
   "guard_mcp_operation_immutable()",
   "mcp_operation_command_scoped(jsonb, text, jsonb)",
   "guard_workspace_owned_skill_head_delete()",
   "guard_workspace_owned_skill_history_delete()",
+  // Migration 0782: the owner-run trigger that leaves a release hold when a
+  // published Site's hostname row is deleted (the app cannot write holds).
+  "hold_deleted_site_hostname()",
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
@@ -99,13 +604,9 @@ const GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE =
 const GOOGLE_DRIVE_AUTHORITY_TABLES = [
   "connections",
   "files",
-  "google_drive_object_acl_evidence",
-  "google_drive_object_acl_principals",
   "knowledge_document_versions",
   "knowledge_providers",
   "knowledge_source_objects",
-  "knowledge_source_sync_index_obligations",
-  "knowledge_source_sync_states",
   "knowledge_sources",
 ] as const;
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
@@ -136,6 +637,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "capture_legacy_codex_turn_sources(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
   "list_organization_codex_workspace_ids(uuid)",
+  "list_organization_subscription_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
   "authorize_organization_shared_workspace_administration(uuid, uuid, text)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
@@ -240,6 +742,10 @@ const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE = "organization_private_sess
 const VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE =
   "set_verified_signup_trial_credits_enabled(boolean, text, text)";
 const VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE = "verified_signup_trial_switch_revisions";
+/** Operator-only audited setter for the new-account sign-up switch (migration 0585). */
+const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE =
+  "set_managed_auth_new_signups_enabled(boolean, text, text)";
+const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE = "managed_auth_new_signups_switch_revisions";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -315,6 +821,13 @@ const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
 const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE = "scheduled_personal_resource_capabilities";
 const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE = "variable_set_authority_capability_active(text)";
 const VARIABLE_SET_CAPABILITY_TABLE = "variable_set_authority_capabilities";
+const SITE_CANCELLATION_CAPABILITY_TABLE = "site_session_cancellation_capabilities";
+const SITE_CANCELLATION_PREDICATE =
+  "site_session_cancellation_capability_active(uuid, uuid, uuid, uuid)";
+const SITE_CANCELLATION_PRIVATE_ROUTINES = [
+  "begin_site_session_cancellation(uuid, uuid, uuid, uuid)",
+  "end_site_session_cancellation(uuid)",
+] as const;
 const PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE =
   "personal_document_authority_capability_active(text)";
 const PERSONAL_DOCUMENT_CAPABILITY_TABLE = "personal_document_authority_capabilities";
@@ -347,6 +860,130 @@ const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
   "materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid)",
 ] as const;
+
+/**
+ * Release N of removed-feature retirement: these relations are no longer read
+ * by their application features. Keep their exact ACL/RLS contracts while
+ * present, but allow release N+1 to drop them. This inventory is deliberately
+ * explicit; a prefix match must never make a new, live table optional.
+ */
+export const RETIRING_FEATURE_TABLES = {
+  automations: [
+    "automation_run_event_links",
+    "automation_runs",
+    "automation_sources",
+    "automation_trigger_events",
+    "automation_trigger_revisions",
+    "automation_triggers",
+    "automation_webhook_endpoints",
+  ],
+  prReview: [
+    "pr_review_app_registrations",
+    "pr_review_managed_github_authority_nonces",
+    "pr_review_managed_github_routes",
+    "pr_review_repository_bindings",
+  ],
+  transcriptionRecordings: [
+    "transcription_recording_chunks",
+    "transcription_recording_objects",
+    "transcription_recording_segments",
+    "transcription_recordings",
+  ],
+  subscription: [
+    "claude_capacity_waiters",
+    "claude_credential_leases",
+    "claude_rotation_settings",
+    "claude_session_account_pins",
+    "claude_subscription_account_usage",
+    "claude_subscription_credentials",
+    "codex_capacity_waiters",
+    "codex_apps_settings",
+    "codex_credential_leases",
+    "codex_rotation_settings",
+    "codex_subscription_credentials",
+    "codex_turn_source_bindings",
+    "organization_codex_rotation_settings",
+    "subscription_provider_cutovers",
+    "workspace_codex_subscription_preferences",
+    "xai_capacity_waiters",
+    "xai_credential_leases",
+    "xai_rotation_settings",
+    "xai_session_account_pins",
+    "xai_subscription_credentials",
+  ],
+  variableSets: [
+    "session_variable_set_attachments",
+    "workspace_variable_set_variables",
+    "workspace_variable_sets",
+  ],
+  // Migration 1275 removes the retired Knowledge-source sync rows and stops
+  // every SQL routine from reading these tables; a later release drops them.
+  knowledgeSourceSync: [
+    "google_drive_object_acl_evidence",
+    "google_drive_object_acl_principals",
+    "knowledge_source_sync_index_obligations",
+    "knowledge_source_sync_item_outcomes",
+    "knowledge_source_sync_object_observations",
+    "knowledge_source_sync_states",
+    "knowledge_source_sync_wakes",
+  ],
+} as const;
+const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
+  Object.values(RETIRING_FEATURE_TABLES).flat(),
+);
+const RETIRING_VARIABLE_SET_ROUTINES: ReadonlySet<string> = new Set([
+  ...VARIABLE_SET_AUTHORITY_ROUTINES,
+  "scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+]);
+const RETIRING_SUBSCRIPTION_TARGET_ROUTINES: ReadonlySet<string> = new Set([
+  "resolve_workspace_codex_subscription_source(uuid, uuid)",
+  "capture_legacy_codex_turn_sources(uuid, uuid)",
+]);
+const VAULT_CAPABILITY_PREDICATE_ROUTINE = "vault_authority_capability_active(text)";
+const VAULT_CAPABILITY_TABLE = "vault_authority_capabilities";
+/** Vault routines (0739): the application role's only way into the vault tables. */
+export const VAULT_RUNTIME_ROUTINES = [
+  "list_vaults_for_subject(uuid, jsonb)",
+  "get_vault_for_subject(uuid, jsonb)",
+  "create_vault(jsonb, jsonb)",
+  "update_vault(uuid, bigint, jsonb, jsonb)",
+  "delete_vault(uuid, text, boolean, jsonb)",
+  "ensure_default_vault(uuid, text, jsonb)",
+  "ensure_task_vault(uuid, uuid, jsonb)",
+  "list_vault_items(uuid, text, text, boolean, text, integer, jsonb)",
+  "get_vault_item(uuid, jsonb)",
+  "upsert_vault_item(jsonb, jsonb)",
+  "archive_vault_item(uuid, jsonb)",
+  "restore_vault_item(uuid, jsonb)",
+  "delete_vault_item_permanently(uuid, jsonb)",
+  "move_vault_item(uuid, uuid, text, text, jsonb)",
+  "read_vault_field_ciphertext(uuid, integer, text, jsonb, jsonb)",
+  "list_vault_field_versions(uuid, jsonb)",
+  "resolve_secret_reference_candidates(jsonb, jsonb)",
+  "record_vault_secret_use(jsonb, jsonb, jsonb)",
+  "set_session_vault_policy(uuid, jsonb, jsonb)",
+  "session_secrets_view(uuid, jsonb)",
+  "update_passkey_sign_count(uuid, bigint, jsonb)",
+  "lease_vault_passkeys(jsonb, text, integer)",
+  "release_vault_passkey_leases(text, jsonb)",
+  "upsert_provider_vault_items(uuid, text, jsonb, jsonb)",
+  "set_vault_sync_status(uuid, jsonb, jsonb)",
+  "apply_secret_answers(uuid, uuid, jsonb, jsonb)",
+  "link_provider_vault(jsonb, jsonb)",
+  "provider_vault_sync_target(uuid, jsonb)",
+  "provider_vault_item_ref(uuid, uuid, text, jsonb)",
+  "provider_connection_home_workspace(uuid)",
+] as const;
+/** Vault tables (0739): FORCE row security, no application-role privileges. */
+export const VAULT_TABLES = [
+  "vaults",
+  "vault_items",
+  "vault_item_fields",
+  "vault_field_versions",
+  "vault_item_name_aliases",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+] as const;
 const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE = "scoped_compute_capability_active(text)";
 const SCOPED_COMPUTE_CAPABILITY_TABLE = "scoped_compute_capabilities";
 const CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE = "connection_tenancy_backfill_capabilities";
@@ -360,15 +997,21 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "finalize_scoped_enrollment(uuid, uuid, text, text, boolean, boolean, text, text, text, boolean)",
   "list_scoped_enrollments(uuid, uuid, uuid, text)",
   "get_scoped_sandbox(uuid, uuid, uuid)",
+  "get_session_machine_access(uuid, uuid, uuid)",
   "authorize_scoped_sandbox_attach(uuid, uuid, uuid)",
   "materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer)",
   "authorize_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
   "assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean)",
+  "consent_session_turn_personal_machine(uuid, uuid, uuid, uuid)",
+  "get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean)",
   "list_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
   "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
+  "preview_connected_machine_audience_change(uuid, uuid, uuid, text, text, boolean)",
+  "change_connected_machine_audience(uuid, uuid, uuid, bigint, text, text, boolean)",
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "mutate_managed_sign_in_method(text, text, jsonb)",
+  "mutate_managed_passkey(text, text, jsonb)",
   "assert_managed_sign_in_recovery(text, text, uuid, jsonb)",
   "replay_managed_sign_in_method(text, text, jsonb)",
   "claim_managed_sign_in_notification(uuid, text, text, integer)",
@@ -429,6 +1072,7 @@ const ORGANIZATION_RECOVERY_AUTHORITY_TABLES = [
 ] as const;
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
+const SESSION_PRIVATE_ACTOR_VISIBLE_KEYS_ROUTINE = "session_private_actor_visible_keys()";
 const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
 const TASK_NOTE_CAPABILITY_ROUTINES = [
   "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
@@ -528,6 +1172,12 @@ const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
 ] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer)";
+/** Migration 0768: owner-only read of what a private change would still refuse. */
+const SESSION_VISIBILITY_CHANGE_BLOCKER_ROUTINE =
+  "session_visibility_change_blocker(uuid, uuid, uuid)";
+/** Migration 0769: owner-only counts of other people's access a private change drops. */
+const SESSION_VISIBILITY_FOREIGN_AUTHORITY_ITEMS_ROUTINE =
+  "session_visibility_foreign_authority_items(uuid, uuid, uuid)";
 const LEGACY_FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer)";
 const FORK_SESSION_CONTENT_ROUTINE =
@@ -554,6 +1204,9 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  "create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb)",
+  "lock_live_native_original_origin_v2(jsonb)",
+  "modal_native_origin_member_read_active(uuid, text)",
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
   MESSAGE_FORK_SESSION_CONTENT_ROUTINE,
@@ -566,31 +1219,517 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   ...CONNECTION_AUTHORITY_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_PRIVATE_ACTOR_VISIBLE_KEYS_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
   ...PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
+  SESSION_VISIBILITY_CHANGE_BLOCKER_ROUTINE,
+  SESSION_VISIBILITY_FOREIGN_AUTHORITY_ITEMS_ROUTINE,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   ...WORK_CLAIM_CAPABILITY_ROUTINES,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
 ]);
-const XAI_CREATE_CREDENTIAL_ROUTINE =
-  "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
-const XAI_DISCONNECT_CREDENTIAL_ROUTINE =
-  "disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb)";
 const XAI_SNAPSHOT_VALIDATOR_ROUTINE = "xai_provider_account_authority_snapshot_v1_valid(jsonb)";
-const XAI_AUTHORITY_LIVE_ROUTINE =
-  "xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)";
-const XAI_POOL_VISIBLE_ROUTINE = "xai_subscription_pool_visible(uuid, uuid, text, text, uuid)";
-const XAI_RESOLVE_POOL_ROUTINE = "resolve_xai_authority_pool(uuid, uuid, text, jsonb)";
-const XAI_REVALIDATE_CREDENTIAL_ROUTINE =
-  "revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)";
-const XAI_AUTHORITY_TABLES = [
-  "organization_memberships",
-  "organization_user_resource_authorities",
-  "workspace_memberships",
-  "xai_subscription_credentials",
+const CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE =
+  "claude_provider_account_authority_snapshot_v1_valid(jsonb)";
+/**
+ * The immutable v1 snapshot CHECK validators. They outlive the retired pool
+ * routines (migration 0751): the v1 columns and their constraints stay until
+ * M6, so the runtime role keeps EXECUTE and PUBLIC does not.
+ */
+export const SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES = [
+  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+  CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
+] as const;
+/**
+ * Migration 0707: the provider-neutral subscription-core routines (the
+ * provider is their first argument). The runtime requires them; each is a
+ * SECURITY DEFINER routine the runtime role executes and PUBLIC does not.
+ */
+export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
+  "subscription_core_owner_capability_held(text, uuid, text[], text, uuid, boolean)",
+  "subscription_core_owner_membership_held(uuid, uuid)",
+  "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)",
+  "begin_subscription_core_refresh(text, uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_core_refresh(text, uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "persist_subscription_core_refresh_with_plan(text, uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+  "fail_subscription_core_refresh(text, uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  "quarantine_subscription_core_connection(text, uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+  "recover_subscription_core_connection_health(text, uuid, uuid, uuid, uuid)",
+  "subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)",
+  "subscription_core_task_authority_v2(text, uuid, uuid, uuid, text)",
+  "subscription_core_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "read_subscription_core_connection_credential(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_core_connection_refresh(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_core_connection_refresh(text, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_core_connection_refresh(text, uuid, uuid, uuid, bigint, text)",
+  "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_core_connection(text, uuid, uuid, text, uuid)",
+  "manage_subscription_core_personal(text, uuid, uuid, text, uuid, text, text, boolean, integer)",
+  "subscription_core_personal_connections(text, uuid, uuid, text)",
+  // Migration 0713: an organization connection's reach for workspaces
+  // created later, read and replaced by organization administrators.
+  "subscription_core_reach(text, uuid, uuid)",
+  "set_subscription_core_reach(text, uuid, uuid, boolean, boolean)",
+  // Migration 0714: the organization's rotation switch on the reach row alone.
+  "set_subscription_core_reach_allocator(text, uuid, uuid, boolean)",
+  // Migration 0728: the personal connect writer with the credential's format.
+  "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
+  // Migration 0730: the owner's personal connections with their row version.
+  "subscription_core_personal_connection_versions(text, uuid, uuid, text)",
+  "subscription_core_personal_sharing(text, uuid, text, uuid, integer)",
+  // Migration 0735: the owner's live usage read of their own personal
+  // connection (credential, refresh begin, quota write).
+  "read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)",
+  "begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)",
+  "record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)",
+  "read_subscription_usage_history(uuid, uuid, text, text, uuid[])",
+  "append_subscription_usage_reading(uuid, uuid, text, jsonb)",
+  "prune_subscription_usage_history()",
+  "subscription_usage_history_prune_due()",
+] as const;
+
+/** Migration 0707: the neutral writers' owner-only internals. */
+export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
+  "capture_usage_reading()",
+  "append_usage_reading(uuid, uuid, jsonb)",
+  "capture_usage_call()",
+  "subscription_core_writer_context(text, uuid, uuid, text)",
+  "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
+  "drop_subscription_core_owner_capabilities(text, uuid)",
+  "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0713: the auto-assignment apply path, run only by 0689's two
+  // auto-assignment trigger functions (triggers fire without the caller
+  // holding EXECUTE).
+  "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
+] as const;
+
+/**
+ * The Codex-named twins of the migration 0707 neutral routines. Migration
+ * 0707 kept them for binaries that still called them; the retirement
+ * migration 0751 drops them (with the owner-only writer context and
+ * connection target only they called), and the runtime posture requires them
+ * absent through SUBSCRIPTION_RETIRED_ROUTINES.
+ */
+export const SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES = [
+  "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  "quarantine_subscription_codex_connection(uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+  "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
+  "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+  "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
+  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
+  "subscription_codex_personal_connections(uuid, uuid, text)",
+  "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
+  "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+  "subscription_codex_reach(uuid, uuid)",
+  "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
+] as const;
+
+/** Where a retired routine lived: the data (target) schema or an owner schema. */
+export type RetiredSubscriptionRoutineSchema =
+  | "target"
+  | "opengeni_private"
+  | "opengeni_subscription_internal";
+
+/**
+ * M4 retirement (migration 0751, design 5.3 "R. Retirement"): every routine
+ * the drained retirement migration drops, by exact signature in
+ * `oidvectortypes` form. The SuperGrok and Claude pool writers, resolvers,
+ * revalidators, policy predicates and trigger functions, the Codex twins and
+ * their owner-only internals, and 0689's Codex auto-assignment apply path.
+ * The runtime posture requires every one absent, the real-PostgreSQL
+ * migration test checks the drop against it, and the no-legacy guard forbids
+ * runtime code from naming one.
+ */
+export const SUBSCRIPTION_RETIRED_ROUTINES: readonly {
+  schema: RetiredSubscriptionRoutineSchema;
+  signature: string;
+}[] = [
+  ...(["xai", "claude"] as const).flatMap((provider) => [
+    ...[
+      `create_${provider}_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)`,
+      `disconnect_${provider}_subscription_credential(uuid, uuid, text, uuid, jsonb)`,
+      `resolve_${provider}_authority_pool(uuid, uuid, text, jsonb)`,
+      `revalidate_${provider}_subscription_authority(uuid, text, uuid, jsonb)`,
+      `${provider}_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)`,
+      `${provider}_subscription_pool_visible(uuid, uuid, text, text, uuid)`,
+      `prevent_${provider}_authority_mutation()`,
+    ].map((signature) => ({ schema: "target" as const, signature })),
+    ...[
+      `enforce_${provider}_credential_pool_reference()`,
+      `enforce_${provider}_organization_runtime_update()`,
+      `prevent_organization_${provider}_live_disconnect()`,
+    ].map((signature) => ({ schema: "opengeni_private" as const, signature })),
+  ]),
+  ...[
+    ...SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
+    "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+    "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
+  ].map((signature) => ({ schema: "opengeni_private" as const, signature })),
+  {
+    schema: "opengeni_subscription_internal",
+    signature: "subscription_codex_writer_context(uuid, uuid, text)",
+  },
+];
+
+/**
+ * Migration 0751: the policies the retirement drops, all in the data schema.
+ * The pool and credential scopes on the legacy factory tables, the Claude
+ * usage scope, and the legacy routines' runtime-capability policies on the
+ * shared membership and authority tables.
+ */
+export const SUBSCRIPTION_RETIRED_POLICIES: readonly { table: string; policy: string }[] = [
+  ...(["xai", "claude"] as const).flatMap((provider) => [
+    { table: `${provider}_subscription_credentials`, policy: `${provider}_subscription_scope` },
+    ...["rotation_settings", "credential_leases", "session_account_pins", "capacity_waiters"].map(
+      (table) => ({
+        table: `${provider}_${table}`,
+        policy: `${provider}_subscription_pool_scope`,
+      }),
+    ),
+    ...["capability_read", "membership_lock"].map((suffix) => ({
+      table: "organization_memberships",
+      policy: `${provider}_subscription_${suffix}`,
+    })),
+    ...["capability_insert", "capability_read", "capability_revoke"].map((suffix) => ({
+      table: "organization_user_resource_authorities",
+      policy: `${provider}_subscription_${suffix}`,
+    })),
+    // Only Claude kept per-credential usage (0598).
+    ...(provider === "claude"
+      ? [
+          {
+            table: `${provider}_subscription_account_usage`,
+            policy: `${provider}_usage_account_scope`,
+          },
+        ]
+      : []),
+  ]),
+];
+
+/** Migration 0751: the legacy factory triggers the retirement drops (data schema). */
+export const SUBSCRIPTION_RETIRED_TRIGGERS: readonly { table: string; trigger: string }[] = (
+  ["xai", "claude"] as const
+).flatMap((provider) => [
+  {
+    table: `${provider}_subscription_credentials`,
+    trigger: `${provider}_subscription_credentials_authority_immutable_trg`,
+  },
+  {
+    table: `${provider}_subscription_credentials`,
+    trigger: `${provider}_organization_runtime_update_guard`,
+  },
+  {
+    table: `${provider}_subscription_credentials`,
+    trigger: `${provider}_organization_live_disconnect_guard`,
+  },
+  {
+    table: `${provider}_rotation_settings`,
+    trigger: `${provider}_organization_rotation_update_guard`,
+  },
+  { table: `${provider}_rotation_settings`, trigger: `${provider}_rotation_credential_pool_guard` },
+  { table: `${provider}_credential_leases`, trigger: `${provider}_lease_credential_pool_guard` },
+  { table: `${provider}_session_account_pins`, trigger: `${provider}_pin_credential_pool_guard` },
+]);
+
+/**
+ * Migration 0751's reach finalization (design 0713 note "Kept until
+ * retirement"): 0689's trigger functions in opengeni_private that take
+ * provider-free names. Their Codex names are retired with the dropped
+ * objects.
+ */
+export const SUBSCRIPTION_RENAMED_ROUTINES: readonly {
+  schema: "opengeni_private";
+  from: string;
+  to: string;
+}[] = [
+  ["auto_assign_subscription_codex_workspace()", "auto_assign_subscription_core_workspace()"],
+  [
+    "auto_assign_subscription_codex_personal_workspace()",
+    "auto_assign_subscription_core_personal_workspace()",
+  ],
+  ["record_subscription_codex_plan_change()", "record_subscription_core_plan_change()"],
+].map(([from, to]) => ({ schema: "opengeni_private" as const, from: from!, to: to! }));
+
+/** Migration 0751: 0689's triggers that take provider-free names (data schema). */
+export const SUBSCRIPTION_RENAMED_TRIGGERS: readonly { table: string; from: string; to: string }[] =
+  [
+    {
+      table: "workspaces",
+      from: "workspaces_subscription_codex_auto_assign",
+      to: "workspaces_subscription_core_auto_assign",
+    },
+    {
+      table: "organization_memberships",
+      from: "organization_memberships_subscription_codex_auto_assign",
+      to: "organization_memberships_subscription_core_auto_assign",
+    },
+    {
+      table: "subscription_connections",
+      from: "subscription_connections_codex_plan_change_trg",
+      to: "subscription_connections_core_plan_change_trg",
+    },
+  ];
+
+/**
+ * Migration 0751: 0689's two owner-only auto-assignment policies (data
+ * schema), which take provider-free names and read the provider-free
+ * setting SUBSCRIPTION_AUTO_ASSIGN_SETTING.
+ */
+export const SUBSCRIPTION_RENAMED_POLICIES: readonly { table: string; from: string; to: string }[] =
+  [
+    {
+      table: "subscription_connection_workspaces",
+      from: "subscription_connection_workspaces_codex_auto_assign",
+      to: "subscription_connection_workspaces_core_auto_assign",
+    },
+    {
+      table: "subscription_connection_assignment_policies",
+      from: "subscription_connection_assignment_policies_codex_auto_assign",
+      to: "subscription_connection_assignment_policies_core_auto_assign",
+    },
+  ];
+
+/** Migration 0751: the reach table takes the name of 0713's view over it. */
+export const SUBSCRIPTION_RENAMED_RELATIONS: readonly {
+  schema: "opengeni_private";
+  from: string;
+  to: string;
+}[] = [
+  {
+    schema: "opengeni_private",
+    from: "subscription_codex_auto_assignments",
+    to: "subscription_core_auto_assignments",
+  },
+];
+
+/**
+ * The setting the auto-assignment trigger functions set to the organization
+ * around each provider's apply, admitting their owner-only writes through the
+ * renamed policies (0689's `opengeni.subscription_codex_auto_assign` before
+ * migration 0751).
+ */
+export const SUBSCRIPTION_AUTO_ASSIGN_SETTING = "opengeni.subscription_core_auto_assign";
+
+/**
+ * Every retired routine: dropped by migration 0751, or renamed by it (the
+ * Codex name is retired). What the runtime posture requires absent.
+ */
+const RETIRED_ROUTINE_ENTRIES: readonly {
+  schema: RetiredSubscriptionRoutineSchema;
+  signature: string;
+}[] = [
+  ...SUBSCRIPTION_RETIRED_ROUTINES,
+  ...SUBSCRIPTION_RENAMED_ROUTINES.map(({ schema, from }) => ({ schema, signature: from })),
+];
+const RETIRED_POLICY_ENTRIES: readonly { table: string; policy: string }[] = [
+  ...SUBSCRIPTION_RETIRED_POLICIES,
+  ...SUBSCRIPTION_RENAMED_POLICIES.map(({ table, from }) => ({ table, policy: from })),
+];
+const RETIRED_TRIGGER_ENTRIES: readonly { table: string; trigger: string }[] = [
+  ...SUBSCRIPTION_RETIRED_TRIGGERS,
+  ...SUBSCRIPTION_RENAMED_TRIGGERS.map(({ table, from }) => ({ table, trigger: from })),
+];
+/** Retired opengeni_private routines still present are reported once, as retired. */
+const RETIRED_PRIVATE_ROUTINES = new Set(
+  RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "opengeni_private").map(
+    ({ signature }) => signature,
+  ),
+);
+
+/**
+ * The bare names of every retired routine, dropped or renamed (the
+ * no-legacy guard's identifiers).
+ */
+export const SUBSCRIPTION_RETIRED_ROUTINE_NAMES: readonly string[] = [
+  ...new Set(
+    RETIRED_ROUTINE_ENTRIES.map(({ signature }) => signature.slice(0, signature.indexOf("("))),
+  ),
+];
+
+/**
+ * Every retired subscription object as the posture inspection describes it
+ * (`routine schema.name(args)`, `policy table.name`, `trigger table.name`,
+ * `relation schema.name`), in the byte order inspection reports them: what a
+ * database that has not applied SUBSCRIPTION_RETIREMENT_MIGRATION still
+ * holds, dropped objects and the Codex names of renamed ones alike.
+ */
+export function retiredSubscriptionObjectDescriptions(targetSchema = "public"): string[] {
+  return [
+    ...RETIRED_ROUTINE_ENTRIES.map(
+      ({ schema, signature }) =>
+        `routine ${schema === "target" ? targetSchema : schema}.${signature}`,
+    ),
+    ...RETIRED_POLICY_ENTRIES.map(({ table, policy }) => `policy ${table}.${policy}`),
+    ...RETIRED_TRIGGER_ENTRIES.map(({ table, trigger }) => `trigger ${table}.${trigger}`),
+    ...SUBSCRIPTION_RENAMED_RELATIONS.map(({ schema, from }) => `relation ${schema}.${from}`),
+  ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
+/** The posture violation for a retired subscription object that is still present. */
+export function retiredSubscriptionObjectViolation(object: string): string {
+  return `retired subscription ${object} is present; apply the drained retirement migration ${SUBSCRIPTION_RETIREMENT_MIGRATION}`;
+}
+
+/**
+ * Migration 0712 (M4 generic precursor): the per-provider cutover receipt
+ * reader. The runtime calls it for readiness and its RLS policies call it.
+ */
+export const SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES = [
+  "subscription_provider_cutover_committed(text)",
+] as const;
+
+/** Migration 0712: owner-only trigger functions in opengeni_subscription_internal. */
+export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
+  "guard_subscription_provider_cutover_receipts()",
+  "keep_subscription_cutover_identity()",
+] as const;
+
+/**
+ * Every provider whose drained subscription-core cutover migration is in this
+ * binary's ledger. The binary refuses to start unless each has its receipt
+ * (`opengeni_private.subscription_provider_cutover_committed`). A provider's
+ * cutover PR adds its entry.
+ */
+export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
+  codex: "0689_subscription_core_codex_cutover.sql",
+  xai: "0747_subscription_core_xai_cutover.sql",
+  claude: "0748_subscription_core_claude_cutover.sql",
+};
+
+/**
+ * The drained M4 retirement migration (design 5.3 "R. Retirement"): it drops
+ * SUBSCRIPTION_RETIRED_ROUTINES, _POLICIES and _TRIGGERS and refuses unless
+ * every provider's cutover receipt is committed. A test database that
+ * withholds a provider cutover to characterize a legacy runtime withholds
+ * this migration too.
+ */
+export const SUBSCRIPTION_RETIREMENT_MIGRATION = "0751_subscription_core_legacy_retirement.sql";
+
+/**
+ * Migration 0716 (M4 PR 0b): accepted authority across a provider's cutover.
+ * The runtime role may call the copy routine (inert until a provider's
+ * writers call it), the reader, and the list of providers whose records can
+ * exist; it holds no privilege on the compatibility relation itself.
+ */
+export const SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES = [
+  "copy_subscription_authority_compat(text, text, uuid, uuid, bigint)",
+  "read_subscription_authority_compat(text, text, uuid, uuid, bigint)",
+  "subscription_authority_compat_providers()",
+  // Migration 0728: whether this transaction inserted a carrier the runtime
+  // role cannot read (a scheduled task revision).
+  "subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint)",
+] as const;
+
+/**
+ * Migration 0716: owner-only marker and guard triggers, the per-path source
+ * resolvers and the deferred compatibility check, in
+ * opengeni_subscription_internal.
+ */
+export const SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES = [
+  "stamp_subscription_authority_inserted_at()",
+  "keep_subscription_authority_inserted_at()",
+  "subscription_authority_compat_entry_valid(jsonb)",
+  "guard_subscription_authority_compat()",
+  "subscription_compat_turn_human(uuid, uuid)",
+  "subscription_compat_v2_has_entry(jsonb, text)",
+  "subscription_compat_receiver_source(uuid, uuid)",
+  "subscription_compat_delivery_sources(uuid, uuid, uuid, uuid, text)",
+  "subscription_compat_compaction_source(uuid, uuid)",
+  "subscription_compat_scheduled_source(uuid, uuid)",
+  "subscription_compat_carrier_sources(text, uuid, uuid, bigint)",
+  "subscription_compat_carrier_state(text, uuid, uuid, bigint)",
+  "subscription_compat_record(text, text, uuid, uuid, bigint)",
+  "subscription_compat_expected(text, timestamp with time zone, uuid, text, uuid, bigint, text)",
+  "subscription_compat_carrier_expected(text, timestamp with time zone, text, uuid, uuid, bigint)",
+  "subscription_compat_enter_scope(uuid, uuid)",
+  "subscription_compat_leave_scope(text[])",
+  "subscription_compat_effective(text, text, uuid, uuid, bigint)",
+  "enforce_subscription_authority_compat()",
+] as const;
+
+/**
+ * Migration 0717: the fences' owner-only helpers in
+ * opengeni_subscription_internal (the v2 copy rule, a scheduled firing's v2
+ * value and the personal-entry liveness check). Only owner-run fences and
+ * functions call them.
+ */
+export const SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES = [
+  "subscription_v2_copy_matches(jsonb, jsonb)",
+  "subscription_scheduled_firing_v2(uuid, uuid, uuid, bigint)",
+  "subscription_personal_entry_serviceable(uuid, jsonb)",
+  "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
+] as const;
+
+/**
+ * Migration 1103: the administration writer context in
+ * opengeni_subscription_internal (the writer context without the person-only
+ * subject rule). Only the owner-run disconnect writer calls it.
+ */
+export const SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES = [
+  "subscription_core_administration_context(text, uuid, uuid, text)",
+] as const;
+
+export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
+  "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+  "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+  // The Codex refresh-write capability check stays: the Codex refresh
+  // policies on subscription_connections call it.
+  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+  // M3 PR 2b: the Codex Apps designation on the core.
+  "resolve_subscription_codex_apps_designation(uuid, uuid)",
+  "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
+  "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
+  "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2c: the Codex reset-credit authority.
+  "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+  // M3 PR 3b: the cross-workspace reset-credit fence and the owner-only
+  // policies' capability helpers.
+  "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
+  "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
+  "subscription_codex_owner_membership_held(uuid, uuid)",
+  // Migration 0707: the provider-neutral equivalents the runtime calls.
+  ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+  ...SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES,
+] as const;
+
+/** Owner-only private helpers the runtime role must never be able to execute. */
+export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
+  // M3 PR 2b: returns a full connection row to the Apps routines that run as its owner.
+  "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 3b: the capability internals and the revision-authority trigger
+  // function (the writers' caller check and the connection-seam target went
+  // with the Codex twins in migration 0751).
+  "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+  "drop_subscription_codex_owner_capabilities(uuid)",
+  "derive_scheduled_revision_subscription_authority()",
+  // Migration 0689: the cutover receipt and the two owner-run trigger
+  // functions. Readiness only looks the receipt up; triggers fire without
+  // the caller holding EXECUTE. The plan-change and auto-assignment trigger
+  // functions carry the provider-free names migration 0751 gives them.
+  "subscription_codex_cutover_v1_active()",
+  "seed_subscription_codex_cutover()",
+  "record_subscription_core_plan_change()",
+  "keep_subscription_codex_cutover_identity()",
+  "auto_assign_subscription_core_workspace()",
+  "auto_assign_subscription_core_personal_workspace()",
+  ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+  ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+  ...SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -632,10 +1771,59 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "files",
   "documents",
 ] as const;
+/** Per-task usage limits: the only runtime entry points. */
+export const SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE =
+  "session_usage_limit_capability_active(uuid, uuid)";
+export const SESSION_USAGE_LIMIT_RUNTIME_ROUTINES = [
+  "maintain_session_usage_limits(integer, integer)",
+  "session_usage_limit_command(jsonb)",
+  SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE,
+] as const;
+export const SESSION_USAGE_LIMIT_STATE_ROUTINE = "session_usage_limit_state(jsonb, boolean)";
+/** Pure amount rules shared by the event trigger and the legacy import. */
+export const SESSION_USAGE_LIMIT_AMOUNT_ROUTINES = [
+  "session_usage_limit_meter_amount(numeric, text, numeric, numeric)",
+  "session_usage_limit_event_amount(jsonb)",
+] as const;
+/** Owner-internal helpers; never runtime-callable. */
+export const SESSION_USAGE_LIMIT_INTERNAL_ROUTINES = [
+  SESSION_USAGE_LIMIT_STATE_ROUTINE,
+  "session_usage_limit_apply_receipt(uuid, uuid, uuid, text, uuid, uuid, bigint, text, text, text)",
+  "session_usage_limit_import_page(uuid, uuid, uuid, integer)",
+  "session_usage_limit_import_step(uuid, uuid, uuid, integer)",
+  ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
+  "seed_session_usage_limit_root()",
+  "meter_session_usage_limit_event()",
+] as const;
+export const SUBSCRIPTION_PLAN_RUNTIME_ROUTINES = [
+  "free_plan_credit_eligible(uuid)",
+  "organization_plan_seats_used(uuid)",
+  "upsert_organization_plan(uuid, text, text, text, timestamp with time zone, timestamp with time zone, boolean)",
+  "expire_plan_credit_period(uuid, uuid, boolean)",
+  "grant_plan_credit_period(uuid, text, timestamp with time zone, timestamp with time zone, text)",
+  "replace_plan_credit_period(uuid, text, timestamp with time zone, timestamp with time zone, text)",
+  "read_organization_plan_balance(uuid, timestamp with time zone)",
+  "expire_ended_plan_credit_periods(uuid)",
+  "begin_plan_credit_settlement(uuid)",
+] as const;
+
+export const BILLING_SUBSCRIPTION_OPERATION_ROUTINES = [
+  "begin_billing_subscription_operation(uuid, uuid, text, jsonb, jsonb)",
+  "complete_billing_subscription_operation(uuid, uuid, jsonb)",
+] as const;
+
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb)",
+  ...BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
+  ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
+  "scheduled_task_is_exhausted(uuid)",
+  "lock_live_native_original_origin_v2(jsonb)",
+  "modal_native_origin_member_read_active(uuid, text)",
+  ...SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES,
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
   "usage_allowance_capability_active(uuid, uuid)",
+  ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
   ...UNIFIED_KNOWLEDGE_ROUTINES,
   MCP_OPERATION_CAPABILITY_ROUTINE,
   "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
@@ -650,9 +1838,6 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   REPLAY_APPLIED_SESSION_FORK_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
   SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
-  XAI_AUTHORITY_LIVE_ROUTINE,
-  XAI_CREATE_CREDENTIAL_ROUTINE,
-  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
   GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE,
   GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
@@ -664,6 +1849,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
+  ...VAULT_RUNTIME_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
   ...PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES,
   ...PERSONAL_DOCUMENT_AUTHORITY_ROUTINES,
@@ -676,13 +1862,12 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   ...WORK_CLAIM_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_PRIVATE_ACTOR_VISIBLE_KEYS_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
-  XAI_POOL_VISIBLE_ROUTINE,
-  XAI_RESOLVE_POOL_ROUTINE,
-  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
-  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+  SESSION_VISIBILITY_CHANGE_BLOCKER_ROUTINE,
+  SESSION_VISIBILITY_FOREIGN_AUTHORITY_ITEMS_ROUTINE,
 ] as const;
 
 /**
@@ -694,16 +1879,38 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
 export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
   CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
   "usage_allowance_capability_active(uuid, uuid)",
+  SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE,
 ] as const;
 const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
 );
 
+/**
+ * 1243/1244 agents: SECURITY INVOKER trigger functions. The legacy sync
+ * triggers mirror bot_templates and slack_agents writes into the agents
+ * tables; the guard keeps sessions.agent_id immutable once set.
+ */
+const AGENTS_TRIGGER_ROUTINES = [
+  "sync_agent_from_bot_template()",
+  "sync_agent_from_slack_agent()",
+  "guard_session_agent_id_immutable()",
+] as const;
+
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "guard_session_agent_creation_provenance()",
+  "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
+  "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
+  "live_session_turn_machine_consent(uuid)",
+  "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
+  "carry_session_attempt_machine_authorization(uuid, uuid, uuid)",
+  "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
+  "enable_organization_private_sessions_from_activation(uuid, text[])",
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
   "count_workspace_allowance_debit()",
+  "count_unbilled_model_allowance_debit()",
+  "count_unbilled_allowance_usage(uuid, uuid, text, bigint, text)",
   "capture_usage_allowance_attribution()",
   "reverse_video_allowance_refund()",
   "capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone)",
@@ -712,6 +1919,10 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...AGENTS_TRIGGER_ROUTINES,
+  // 1276: refuses agent-chat claims from workers without the agent layer.
+  "guard_agent_instructions_claim_protocol()",
+  ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
@@ -719,14 +1930,27 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
+  "set_credit_promotion_policy(jsonb, text, text)",
+  "set_subscription_plan_catalog(jsonb, text, text)",
+  MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "guard_session_agent_creation_provenance()",
+  "set_subscription_plan_catalog(jsonb, text, text)",
+  "scheduled_task_is_exhausted(uuid)",
+  "set_credit_promotion_policy(jsonb, text, text)",
+  CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...AGENTS_TRIGGER_ROUTINES,
+  // 1276: refuses agent-chat claims from workers without the agent layer.
+  "guard_agent_instructions_claim_protocol()",
+  SESSION_USAGE_LIMIT_STATE_ROUTINE,
+  ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
@@ -742,10 +1966,15 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  */
 export const FORCE_RLS_TABLES = [
   "additional_organization_creation_receipts",
+  "agent_call_host_phones",
+  "agent_calls",
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
+  "agent_revisions",
   "agent_run_states",
+  "agent_slack_installs",
+  "agents",
   "api_keys",
   "attached_browser_devices",
   "attached_browser_inventories",
@@ -754,14 +1983,25 @@ export const FORCE_RLS_TABLES = [
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
+  "automation_templates",
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
+  "billing_auto_top_up_mutations",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notification_recipients",
+  "billing_credit_notifications",
   "billing_customers",
+  "billing_subscription_operations",
+  "bot_templates",
   "browser_identities",
   "browser_revision_components",
   "browser_revisions",
   "browser_session_associations",
+  "browser_session_retained_downloads",
   "browser_sessions",
   "browser_state_artifacts",
   "browser_state_uploads",
@@ -784,6 +2024,12 @@ export const FORCE_RLS_TABLES = [
   "capability_skill_facets",
   "capability_skill_files",
   "channels",
+  "claude_capacity_waiters",
+  "claude_credential_leases",
+  "claude_rotation_settings",
+  "claude_session_account_pins",
+  "claude_subscription_account_usage",
+  "claude_subscription_credentials",
   "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
@@ -811,6 +2057,8 @@ export const FORCE_RLS_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credential_profiles",
+  "credit_debit_allocations",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_authority_reclassifications",
@@ -836,17 +2084,24 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
   "editable_artifacts",
+  "enrollment_token_redemptions",
   "enrollments",
+  "event_deliveries",
+  "event_source_feeds",
+  "event_sources",
+  "event_triggers",
   "external_identities",
   "external_identity_links",
   "external_link_task_authorities",
   "external_link_turn_authorities",
+  "external_workspace_member_revocations",
   "feedback_submissions",
   "file_uploads",
   "files",
   "generated_image_artifacts",
   "generated_video_artifacts",
   "github_installation_repositories",
+  "github_installation_repository_removals",
   "github_installations",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
@@ -866,6 +2121,7 @@ export const FORCE_RLS_TABLES = [
   "host_mcp_turn_authorities",
   "image_generation_operations",
   "import_batches",
+  "inbound_events",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_facet_definitions",
@@ -881,6 +2137,8 @@ export const FORCE_RLS_TABLES = [
   "knowledge_claim_relations",
   "knowledge_claim_reviews",
   "knowledge_claims",
+  "knowledge_collection_activity",
+  "knowledge_collection_activity_accounts",
   "knowledge_document_versions",
   "knowledge_entities",
   "knowledge_entity_aliases",
@@ -921,27 +2179,44 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
   "managed_sign_in_method_operations",
+  "mcp_event_subscriptions",
   "mcp_operations",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  "model_call_credit_holds",
+  "model_call_fact_reconciliation_candidates",
+  "model_call_fact_reconciliation_progress",
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_agent_admin_access",
+  "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_connectors",
   "organization_credential_providers",
+  "organization_identity_issuers",
+  "organization_inference_residency",
+  "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
+  "organization_mcp_assertion_replays",
+  "organization_mcp_trusted_issuer_events",
+  "organization_mcp_trusted_issuer_subjects",
+  "organization_mcp_trusted_issuers",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_model_defaults",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
+  "organization_plans",
+  "organization_privacy_preferences",
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
@@ -955,7 +2230,9 @@ export const FORCE_RLS_TABLES = [
   "organization_recovery_operations",
   "organization_recovery_policies",
   "organization_recovery_policy_heads",
+  "organization_service_accounts",
   "organization_shared_workspace_administration_capabilities",
+  "organization_skill_reach",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -975,6 +2252,7 @@ export const FORCE_RLS_TABLES = [
   "personal_github_repository_selection_operations",
   "personal_github_repository_selections",
   "personal_resource_once_consumption_receipts",
+  "plan_credit_periods",
   "pr_review_app_registrations",
   "pr_review_managed_github_authority_nonces",
   "pr_review_repository_bindings",
@@ -983,6 +2261,25 @@ export const FORCE_RLS_TABLES = [
   "preference_registry_revisions",
   "preference_registry_snapshots",
   "private_session_create_capabilities",
+  "promotion_decisions",
+  "promotion_enforcement",
+  "promotion_machine_proofs",
+  "recording_chunks",
+  "recording_events",
+  "recording_live_segments",
+  "recording_live_unbacked_hours",
+  "recording_notes",
+  "recording_people",
+  "recording_segment_edits",
+  "recording_speaker_assignments",
+  "recording_speaker_voices",
+  "recording_tracks",
+  "recording_transcript_piece_results",
+  "recording_transcript_segments",
+  "recording_transcript_versions",
+  "recording_voice_rejections",
+  "recording_voiceprints",
+  "recordings",
   "remember_knowledge_confirmation_receipts",
   "remember_knowledge_memory_materializations",
   "retained_screenshot_artifacts",
@@ -997,7 +2294,11 @@ export const FORCE_RLS_TABLES = [
   "sandbox_session_envelopes",
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
+  "scheduled_task_blocker_reviews",
   "scheduled_task_connection_authority_snapshots",
+  "scheduled_task_event_inbox",
+  "scheduled_task_event_occurrences",
+  "scheduled_task_event_settings",
   "scheduled_task_personal_resource_authorities",
   "scheduled_task_personal_resource_snapshots",
   "scheduled_task_reusable_connection_materializations",
@@ -1007,11 +2308,16 @@ export const FORCE_RLS_TABLES = [
   "scheduled_task_run_personal_resource_once_receipts",
   "scheduled_task_run_personal_resource_snapshots",
   "scheduled_task_runs",
+  "scheduled_task_schedule_outbox",
   "scheduled_tasks",
+  "secret_approval_rules",
+  "secret_use_approvals",
   "self_service_organization_setup_receipts",
+  "session_admin_access",
   "session_attempt_codemode_calls",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
+  "session_attempt_machine_consents",
   "session_attempt_model_context_snapshots",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
@@ -1020,6 +2326,7 @@ export const FORCE_RLS_TABLES = [
   "session_attempt_tool_catalogs",
   "session_background_commands",
   "session_command_receipts",
+  "session_content_blobs",
   "session_event_cursors",
   "session_events",
   "session_goal_revisions",
@@ -1028,6 +2335,7 @@ export const FORCE_RLS_TABLES = [
   "session_human_input_requests",
   "session_list_snapshots",
   "session_mcp_servers",
+  "session_message_search_texts",
   "session_pending_tool_calls",
   "session_pins",
   "session_realtime_connections",
@@ -1035,6 +2343,7 @@ export const FORCE_RLS_TABLES = [
   "session_realtime_entries",
   "session_realtime_modes",
   "session_recordings",
+  "session_share_links",
   "session_spawn_denials",
   "session_stream_acknowledgments",
   "session_system_update_outbox",
@@ -1042,7 +2351,10 @@ export const FORCE_RLS_TABLES = [
   "session_tenancy_activations",
   "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
+  "session_title_operations",
+  "session_turn_app_action_grants",
   "session_turn_attempts",
+  "session_turn_machine_consents",
   "session_turn_startup_milestones",
   "session_turns",
   "session_variable_set_attachments",
@@ -1052,11 +2364,52 @@ export const FORCE_RLS_TABLES = [
   "session_work_claims",
   "session_workflow_wake_outbox",
   "sessions",
+  "site_abuse_reports",
+  "site_auth_codes",
   "site_auth_connections",
+  "site_data_collections",
+  "site_data_files",
+  "site_data_rate_windows",
+  "site_data_record_values",
+  "site_data_records",
+  "site_data_usage",
+  "site_data_validation_windows",
+  "site_data_workspace_validation_windows",
+  "site_hostname_holds",
+  "site_hostnames",
+  "site_limit_profiles",
+  "site_opens",
+  "site_platform_brake",
+  "site_platform_storage",
+  "site_platform_totals",
+  "site_platform_usage",
+  "site_project_placements",
+  "site_publications",
+  "site_runtime_conversations",
+  "site_runtime_rate_windows",
+  "site_runtime_usage",
+  "site_session_access",
+  "site_sidebar_states",
+  "site_sql_databases",
+  "site_sql_migrations",
+  "site_sql_queries",
+  "site_sql_rate_windows",
+  "site_sql_usage",
+  "site_tool_allowances",
+  "site_viewer_sessions",
   "skill_config_conversion_receipts",
   "skill_source_bindings",
   "skill_write_receipts",
+  "slack_agent_intro_posts",
+  "slack_agent_proposals",
+  "slack_agent_suggestions",
+  "slack_agent_update_deliveries",
+  "slack_agent_update_recipients",
+  "slack_agent_update_settings",
+  "slack_agent_user_states",
+  "slack_agents",
   "slack_app_home_refreshes",
+  "slack_ask_forms",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
   "slack_bot_update_operations",
@@ -1078,11 +2431,38 @@ export const FORCE_RLS_TABLES = [
   "slack_user_link_access_requests",
   "social_connections",
   "social_posts",
+  "subscription_apps_designations",
+  "subscription_capacity_waiters",
+  "subscription_capacity_wake_outbox",
+  "subscription_connection_aliases",
+  "subscription_connection_assignment_policies",
+  "subscription_connection_people",
+  "subscription_connection_quota",
+  "subscription_connection_workspaces",
+  "subscription_connections",
+  "subscription_leases",
+  "subscription_operation_leases",
+  "subscription_person_preferences",
+  "subscription_provider_cutovers",
+  "subscription_session_bindings",
+  "subscription_settings",
+  "subscription_turn_failures",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
   "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
+  "teams_bot_context_cutoffs",
+  "teams_bot_context_messages",
+  "teams_bot_inbox",
+  "teams_bot_installations",
+  "teams_bot_links",
+  "teams_bot_onboarding_limits",
+  "teams_bot_outbox",
+  "teams_bot_proofs",
+  "teams_bot_reply_claims",
+  "teams_bot_routes",
+  "teams_bot_welcomes",
   "temporal_schedule_cleanup_outbox",
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
@@ -1095,9 +2475,18 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "turn_timing_profiles",
   "usage_events",
+  "vault_field_versions",
+  "vault_item_fields",
+  "vault_item_name_aliases",
+  "vault_items",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+  "vaults",
   "video_generation_operations",
   "video_generation_references",
+  "workspace_activity_events",
   "workspace_artifact_events",
   "workspace_artifact_uploads",
   "workspace_artifact_versions",
@@ -1119,6 +2508,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_learning_policy_heads",
   "workspace_learning_policy_revisions",
   "workspace_learning_policy_snapshots",
+  "workspace_member_execution_defaults",
   "workspace_model_policies",
   "workspace_screenshot_quotas",
   "workspace_session_activity_revisions",
@@ -1142,12 +2532,14 @@ export const FORCE_RLS_TABLES = [
  */
 export const NON_RLS_RUNTIME_TABLES = [
   "auth_identities",
+  "auth_passkeys",
   "auth_rate_limits",
   "auth_sessions",
   "auth_users",
   "auth_verifications",
   "automation_webhook_endpoints",
   "deployment_model_catalog",
+  "event_ingress_routes",
   "integration_oauth_clients",
   "managed_accounts",
   "mcp_oauth_access_tokens",
@@ -1157,6 +2549,7 @@ export const NON_RLS_RUNTIME_TABLES = [
   "mcp_oauth_refresh_tokens",
   "nested_agent_depth_configuration",
   "pr_review_managed_github_routes",
+  "slack_api_rate_limits",
   "stripe_webhook_events",
   "workspace_memberships",
   "workspaces",
@@ -1168,10 +2561,16 @@ export const NON_RLS_RUNTIME_TABLES = [
  * table must not silently grant it broader DML than its migration intended.
  */
 export const RUNTIME_FULL_DML_TABLES = [
+  // 1143_agent_call_host_phones: the phones a product embedding Opengeni rings for agent calls.
+  "agent_call_host_phones",
   "agent_run_states",
+  // 1243_agents: the agent directory and its Slack installations.
+  "agent_slack_installs",
+  "agents",
   "api_keys",
   "audit_events",
   "auth_identities",
+  "auth_passkeys",
   "auth_rate_limits",
   "auth_sessions",
   "auth_users",
@@ -1179,11 +2578,16 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
+  "automation_templates",
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
   "automation_webhook_endpoints",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notifications",
   "billing_customers",
+  "bot_templates",
   "browser_session_associations",
   "capability_catalog_items",
   "capability_component_owners",
@@ -1205,23 +2609,32 @@ export const RUNTIME_FULL_DML_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credential_profiles",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_bases",
   "document_chunks",
   "documents",
   "editable_artifact_replica_leases",
+  "enrollment_token_redemptions",
   "enrollments",
+  "event_deliveries",
+  "event_ingress_routes",
+  "event_source_feeds",
+  "event_sources",
+  "event_triggers",
   "file_uploads",
   "files",
   "generated_image_artifacts",
   "generated_video_artifacts",
   "github_installation_repositories",
+  "github_installation_repository_removals",
   "github_installations",
   "host_mcp_bindings",
   "host_mcp_delegations",
   "image_generation_operations",
   "import_batches",
+  "inbound_events",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_oauth_clients",
@@ -1236,6 +2649,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "machine_metrics_series",
   "machine_removal_operations",
   "managed_accounts",
+  "mcp_event_subscriptions",
   "mcp_oauth_access_tokens",
   "mcp_oauth_authorization_codes",
   "mcp_oauth_authorization_requests",
@@ -1244,18 +2658,49 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  // 1295_model_call_credit_holds: in-flight model call holds, deleted at settlement.
+  "model_call_credit_holds",
+  "model_call_fact_reconciliation_candidates",
+  "model_call_fact_reconciliation_progress",
   "model_call_facts",
   "new_session_drafts",
+  "organization_agent_admin_access",
+  "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
+  "organization_connectors",
   "organization_credential_providers",
+  "organization_identity_issuers",
+  "organization_mcp_assertion_replays",
+  "organization_mcp_trusted_issuer_events",
+  "organization_mcp_trusted_issuer_subjects",
+  "organization_mcp_trusted_issuers",
+  "organization_model_defaults",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
+  "organization_privacy_preferences",
+  "organization_service_accounts",
+  "organization_skill_reach",
   "organization_webhook_deliveries",
   "organization_webhooks",
   "pr_review_app_registrations",
   "pr_review_managed_github_routes",
   "pr_review_repository_bindings",
+  "recording_chunks",
+  "recording_live_segments",
+  "recording_live_unbacked_hours",
+  "recording_notes",
+  "recording_people",
+  "recording_segment_edits",
+  "recording_speaker_assignments",
+  "recording_speaker_voices",
+  "recording_tracks",
+  "recording_transcript_piece_results",
+  "recording_transcript_segments",
+  "recording_transcript_versions",
+  "recording_voice_rejections",
+  "recording_voiceprints",
+  "recordings",
   "retained_screenshot_artifacts",
   "rig_changes",
   "rig_versions",
@@ -1268,6 +2713,14 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sandbox_session_envelopes",
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
+  "scheduled_task_blocker_reviews",
+  "scheduled_task_event_inbox",
+  "scheduled_task_event_occurrences",
+  "scheduled_task_event_settings",
+  "scheduled_task_schedule_outbox",
+  "secret_approval_rules",
+  "secret_use_approvals",
+  "session_admin_access",
   "session_attempt_interruptions",
   "session_background_commands",
   "session_command_receipts",
@@ -1285,14 +2738,58 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_realtime_entries",
   "session_realtime_modes",
   "session_recordings",
+  "session_share_links",
   "session_stream_acknowledgments",
   "session_system_update_outbox",
   "session_system_updates",
+  "session_title_operations",
+  "session_turn_app_action_grants",
   "session_turn_attempts",
   "session_turns",
   "session_workflow_wake_outbox",
   "sessions",
+  "site_abuse_reports",
+  "site_auth_codes",
+  "site_data_collections",
+  "site_data_files",
+  "site_data_rate_windows",
+  "site_data_record_values",
+  "site_data_records",
+  "site_data_usage",
+  "site_data_validation_windows",
+  "site_data_workspace_validation_windows",
+  "site_hostnames",
+  "site_limit_profiles",
+  "site_opens",
+  "site_platform_brake",
+  "site_platform_storage",
+  "site_platform_totals",
+  "site_platform_usage",
+  "site_project_placements",
+  "site_publications",
+  "site_runtime_conversations",
+  "site_runtime_rate_windows",
+  "site_runtime_usage",
+  "site_session_access",
+  "site_sidebar_states",
+  "site_sql_databases",
+  "site_sql_migrations",
+  "site_sql_queries",
+  "site_sql_rate_windows",
+  "site_sql_usage",
+  "site_tool_allowances",
+  "site_viewer_sessions",
+  "slack_agent_intro_posts",
+  "slack_agent_proposals",
+  "slack_agent_suggestions",
+  "slack_agent_update_deliveries",
+  "slack_agent_update_recipients",
+  "slack_agent_update_settings",
+  "slack_agent_user_states",
+  "slack_agents",
+  "slack_api_rate_limits",
   "slack_app_home_refreshes",
+  "slack_ask_forms",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
   "slack_bot_update_operations",
@@ -1308,11 +2805,43 @@ export const RUNTIME_FULL_DML_TABLES = [
   "social_connections",
   "social_posts",
   "stripe_webhook_events",
+  "subscription_apps_designations",
+  "subscription_capacity_waiters",
+  "subscription_capacity_wake_outbox",
+  "subscription_connection_aliases",
+  "subscription_connection_assignment_policies",
+  "subscription_connection_people",
+  "subscription_connection_quota",
+  "subscription_connection_workspaces",
+  "subscription_connections",
+  "subscription_leases",
+  "subscription_operation_leases",
+  "subscription_person_preferences",
+  "subscription_provider_cutovers",
+  "subscription_session_bindings",
+  "subscription_settings",
+  "subscription_turn_failures",
+  "teams_bot_context_cutoffs",
+  "teams_bot_context_messages",
+  "teams_bot_inbox",
+  "teams_bot_installations",
+  "teams_bot_links",
+  // 1300_teams_bot_onboarding_limits: onboarding reply limits across replicas.
+  "teams_bot_onboarding_limits",
+  "teams_bot_outbox",
+  "teams_bot_proofs",
+  // 1301_teams_bot_reply_claims: bot-answered activities claimed once across replicas.
+  "teams_bot_reply_claims",
+  "teams_bot_routes",
+  // 1294_teams_bot_welcomes: install welcomes claimed once across replicas.
+  "teams_bot_welcomes",
   "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
+  // 1351_turn_timing_profiles: per-turn timing profiles written by the maintenance sweep.
+  "turn_timing_profiles",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -1325,6 +2854,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_gateway_custom_models",
   "workspace_inference_controls",
   "workspace_instruction_policy_heads",
+  "workspace_member_execution_defaults",
   "workspace_memberships",
   "workspace_model_policies",
   "workspace_screenshot_quotas",
@@ -1333,15 +2863,38 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_webhook_deliveries",
   "workspace_webhooks",
   "workspaces",
-  "xai_capacity_waiters",
-  "xai_credential_leases",
-  "xai_rotation_settings",
-  "xai_session_account_pins",
-  "xai_subscription_credentials",
 ] as const;
+
+/**
+ * A provider's legacy subscription tables once its drained cutover receipt
+ * exists: kept for forensics, read-only for the runtime role. Role
+ * provisioning grants them full DML only to a database without the receipt
+ * (an older binary's world); this binary requires the receipt, so its
+ * contract is SELECT only.
+ */
+export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, readonly string[]>> =
+  Object.freeze({
+    xai: Object.freeze([
+      "xai_capacity_waiters",
+      "xai_credential_leases",
+      "xai_rotation_settings",
+      "xai_session_account_pins",
+      "xai_subscription_credentials",
+    ]),
+    claude: Object.freeze([
+      "claude_capacity_waiters",
+      "claude_credential_leases",
+      "claude_rotation_settings",
+      "claude_session_account_pins",
+      "claude_subscription_account_usage",
+      "claude_subscription_credentials",
+    ]),
+  });
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "billing_credit_notification_recipients",
+  "billing_subscription_operations",
   "codex_turn_source_bindings",
   "company_profile_activation_events",
   "company_profile_heads",
@@ -1353,12 +2906,18 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
+  "organization_inference_residency",
   "organization_integration_policies",
   "organization_integration_policy_operations",
+  "organization_plans",
+  "plan_credit_periods",
   "preference_registry_events",
   "preference_registry_snapshots",
+  "promotion_decisions",
+  "promotion_enforcement",
   "session_tenancy_activations",
   "session_work_claims",
+  "site_hostname_holds",
   "skill_source_bindings",
   "skill_write_receipts",
   "slack_installation_bindings",
@@ -1374,13 +2933,20 @@ export const RUNTIME_READ_ONLY_TABLES = [
 ] as const;
 
 /** Existing runtime authorities that may be observed and advanced, never created or deleted. */
+// Rolling compatibility only: old replicas and legacy SQL lifecycle routines
+// still finalize this counter. New writers use sessions.activity_xid. Keep its
+// exact FORCE-RLS/grant posture until a later contract release retires it.
 export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions"] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  // 1243_agents: immutable agent revisions.
+  "agent_revisions",
+  "billing_auto_top_up_mutations",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
+  "credit_debit_allocations",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",
   "editable_artifact_live_outbox",
@@ -1418,12 +2984,20 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
+  "promotion_machine_proofs",
+  "recording_events",
   "session_attempt_tool_catalogs",
+  "session_content_blobs",
   "session_goal_revisions",
+  // Written by the invoker-rights 0909 trigger, admitted only as an exact
+  // mirror of a visible message event.
+  "session_message_search_texts",
   "session_spawn_denials",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
+  // Written by the invoker-rights 1105 triggers; read by the "This workspace" feed.
+  "workspace_activity_events",
   "workspace_artifact_events",
   "workspace_artifact_versions",
   "workspace_instruction_policy_activation_events",
@@ -1433,10 +3007,14 @@ export const RUNTIME_READ_INSERT_TABLES = [
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
+  "agent_calls",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
   "browser_identities",
+  "browser_session_retained_downloads",
   "browser_sessions",
   "browser_state_artifacts",
   "browser_state_uploads",
@@ -1452,6 +3030,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "editable_artifact_session_links",
   "editable_artifacts",
   "external_identity_links",
+  "external_workspace_member_revocations",
   "host_mcp_resolvers",
   "integration_facet_definitions",
   "integration_spec_revisions",
@@ -1505,6 +3084,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "knowledge_collection_activity",
+  "knowledge_collection_activity_accounts",
   "knowledge_entries",
   "knowledge_entry_decisions",
   "knowledge_entry_links",
@@ -1526,6 +3107,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_inference_residency_events",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
@@ -1576,12 +3158,14 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "scheduled_task_run_personal_resource_snapshots",
   "self_service_organization_setup_receipts",
   "session_attempt_connected_machine_authorizations",
+  "session_attempt_machine_consents",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
   "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
+  "session_turn_machine_consents",
   "session_variable_set_attachments",
   "session_visibility_write_capabilities",
   "session_work_claim_revisions",
@@ -1598,6 +3182,13 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "vault_field_versions",
+  "vault_item_fields",
+  "vault_item_name_aliases",
+  "vault_items",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+  "vaults",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
 ] as const;
@@ -1613,6 +3204,11 @@ const FULL_DML_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
 export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract = Object.freeze({
   ...Object.fromEntries(RUNTIME_FULL_DML_TABLES.map((table) => [table, FULL_DML_PRIVILEGES])),
   ...Object.fromEntries(RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const])),
+  ...Object.fromEntries(
+    Object.values(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
+      .flat()
+      .map((table) => [table, ["SELECT"] as const]),
+  ),
   ...Object.fromEntries(
     RUNTIME_READ_UPDATE_TABLES.map((table) => [table, ["SELECT", "UPDATE"] as const]),
   ),
@@ -1632,6 +3228,117 @@ export const RUNTIME_DML_TABLES = Object.freeze(
   Object.keys(RUNTIME_TABLE_PRIVILEGES).sort((a, b) => a.localeCompare(b)),
 );
 
+// Membership in ANY binary-owned contract means known, even if a caller uses
+// a narrower protectedTables/tablePrivileges override. In particular, adding
+// FORCE RLS to a known non-RLS or no-direct-DML table must not grant it an escape
+// from its exact ACL contract.
+const DECLARED_TARGET_TABLES = new Set<string>([
+  ...FORCE_RLS_TABLES,
+  ...NON_RLS_RUNTIME_TABLES,
+  ...RUNTIME_DML_TABLES,
+  ...PROTECTED_NO_DIRECT_DML_TABLES,
+  ...Object.values(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES).flat(),
+  "schema_migrations",
+  "connection_authority_convergence_audit_capabilities",
+  "document_migration_audit_capabilities",
+  "session_create_idempotency_guard",
+  "session_history_items_repair_audit",
+]);
+
+// Before the runtime-posture admission change, private routines had an implicit catalog-wide EXECUTE
+// requirement, while unnamed target routines were not inspected at all. Freeze
+// that existing inventory instead of reclassifying old capabilities as unknown
+// (or silently dropping their missing-EXECUTE violations). This is a signature
+// inventory, NOT a new grant list; all named checks below remain authoritative.
+// New private capabilities must be explicitly registered here as known and get
+// their own authority checks. Do not refresh this inventory from a live catalog.
+const DECLARED_PRIVATE_ROUTINES = new Set<string>([
+  ...legacyRoutines.private,
+  ...OWNER_INTERNAL_PRIVATE_ROUTINES,
+  ...RETIRED_PRIVATE_ROUTINES,
+  ...RUNTIME_DEFINER_ROUTINES,
+]);
+const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
+const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
+
+/**
+ * Whether this binary requires runtime EXECUTE on a private routine: every
+ * declared one except owner-internal, retired and deferred routines. A retired
+ * routine still present is reported once, as retired (it is never granted
+ * again, so its missing EXECUTE is not a second finding).
+ */
+function runtimeRequiresPrivateRoutineExecute(name: string): boolean {
+  return (
+    DECLARED_PRIVATE_ROUTINES.has(name) &&
+    !OWNER_INTERNAL_PRIVATE_ROUTINES.has(name) &&
+    !RETIRED_PRIVATE_ROUTINES.has(name) &&
+    !DEFERRED_PRIVATE_ROUTINE_NAMES.has(name)
+  );
+}
+const DECLARED_TARGET_ROUTINES = new Set<string>([
+  ...legacyRoutines.target,
+  ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
+    ({ signature }) => signature,
+  ),
+  ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+  ...RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+  ...RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  SITE_CANCELLATION_PREDICATE,
+]);
+
+function securelyShapedUnknownTable(
+  table: Pick<
+    RuntimePrivateTablePosture,
+    "owner" | "rlsEnabled" | "rlsForced" | "rlsActive" | "policyCount" | "hasInheritance"
+  >,
+  runtimeRole: string,
+): boolean {
+  return (
+    table.owner !== runtimeRole &&
+    table.rlsEnabled === true &&
+    table.rlsForced === true &&
+    table.rlsActive === true &&
+    (table.policyCount ?? 0) >= 1 &&
+    // Queries through a parent use the parent's ACL/RLS, not the child's.
+    // Conservatively require a standalone relation, including across schemas.
+    table.hasInheritance === false
+  );
+}
+
+function unknownRoutineViolations(
+  routine: RuntimeRoutinePosture,
+  schema: string,
+  runtimeRole: string,
+): string[] {
+  const violations: string[] = [];
+  if (routine.owner === runtimeRole) {
+    violations.push(`runtime role owns unknown routine ${schema}.${routine.name}`);
+  }
+  // SECURITY INVOKER cannot elevate the runtime's identity. Revoked EXECUTE
+  // alone does not make a definer inert: triggers do not check EXECUTE when
+  // firing. Reject trigger/event-trigger return types and pg_trigger bindings,
+  // including absent metadata, even if both runtime and PUBLIC ACLs are revoked.
+  // Aggregates and other catalog dependents can invoke their support functions
+  // without checking those functions' EXECUTE grants. An unknown definer is
+  // eligible only when no catalog object depends on it. Do not enumerate each
+  // indirect invocation mechanism or infer its caller ACL.
+  // A callable unknown definer is NOT proven
+  // safe by FORCE RLS, a trusted owner or a fixed search_path: its body could
+  // disable owner RLS or expose a capability. Require a prior explicit binary
+  // contract for it. Treat missing PUBLIC metadata as unknown, not revoked.
+  if (
+    routine.securityDefiner &&
+    (routine.execute ||
+      routine.publicExecute !== false ||
+      routine.triggerCallable !== false ||
+      routine.hasDependents !== false)
+  ) {
+    violations.push(`unknown routine ${schema}.${routine.name} exposes SECURITY DEFINER execution`);
+  }
+  return violations;
+}
+
 export type RuntimeDatabasePostureOptions = {
   rlsStrategy: RlsStrategy;
   expectedRole?: string;
@@ -1641,7 +3348,20 @@ export type RuntimeDatabasePostureOptions = {
   protectedNoDirectDmlTables?: readonly string[];
   targetSchemaCapabilityRoutines?: readonly string[];
   targetSchemaForbiddenRoutines?: readonly string[];
-  organizationTenancyCanonicalActivationEnabled?: boolean;
+  /** Frozen binary contract; current callers require both additive Insights capabilities. */
+  modelFactCapabilityRoutines?: readonly string[];
+  /**
+   * Only for checking a database migrated to an earlier point of the migration ledger, such as a
+   * migration test's predecessor state. Contract tables named here may be absent because a later
+   * migration creates them; when one is present it is checked like every other contract table.
+   */
+  tablesCreatedByLaterMigrations?: readonly string[];
+  /**
+   * The same, for runtime definers (named without their argument list): a definer a later
+   * migration creates may be absent even though every table it works on already exists. When
+   * one is present it is checked like every other definer.
+   */
+  routinesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -1683,6 +3403,10 @@ export type RuntimeTablePosture = {
   truncate: boolean;
   references: boolean;
   trigger: boolean;
+  /** Effective column ACLs, kept separate so they cannot satisfy table grants. */
+  columnPrivileges?: string[];
+  extraPrivileges?: string[];
+  hasInheritance?: boolean | undefined;
 };
 
 export type RuntimeRoutinePosture = {
@@ -1691,6 +3415,8 @@ export type RuntimeRoutinePosture = {
   execute: boolean;
   publicExecute?: boolean;
   securityDefiner: boolean;
+  triggerCallable?: boolean | undefined;
+  hasDependents?: boolean | undefined;
   configuration?: string[] | null;
 };
 
@@ -1712,6 +3438,10 @@ export type RuntimePrivateTablePosture = {
   truncate?: boolean;
   references?: boolean;
   trigger?: boolean;
+  /** Effective relation ACL privileges not represented by the named flags. */
+  extraPrivileges?: string[];
+  columnPrivileges?: string[];
+  hasInheritance?: boolean | undefined;
 };
 
 export type RuntimeDatabasePosture = {
@@ -1725,8 +3455,24 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
-  sessionTenancyProductActivationPresent: boolean;
+  /** Separate owner-only schema: not part of the previous binary's runtime API inventory. */
+  subscriptionOwnerRoutines?: RuntimeRoutinePosture[];
   sessionVariableSetAttachmentsCutoverPresent: boolean;
+  /**
+   * Retired subscription objects (SUBSCRIPTION_RETIRED_ROUTINES, _POLICIES and
+   * _TRIGGERS, and the Codex names of SUBSCRIPTION_RENAMED_*) the database
+   * still holds; empty once migration 0751 applied.
+   */
+  retiredSubscriptionObjects: string[];
+  /** Migration 0689: Codex runs on the shared subscription core. */
+  subscriptionCodexCutoverActivationPresent: boolean;
+  /**
+   * Providers of SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS whose cutover
+   * receipt the database holds (migration 0712's readiness function).
+   */
+  subscriptionProviderCutoverReceipts: string[];
+  /** Catalog evidence for dropping receipts only after their feature tables. */
+  retiringFeatureTablesPresent?: { subscription: boolean; variableSets: boolean };
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1801,14 +3547,18 @@ export async function inspectRuntimeDatabasePosture(
   options: RuntimeDatabasePostureOptions,
 ): Promise<RuntimeDatabasePosture> {
   const targetSchema = options.targetSchema?.trim() || "public";
-  const targetSchemaCapabilityRoutines =
-    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
-  const targetSchemaForbiddenRoutines =
-    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
 
   return await db.transaction(
     async (tx) => {
-      const identityRows = resultRows<IdentityRow>(
+      const identityRows = resultRows<
+        IdentityRow & {
+          variable_set_cutover_present: boolean;
+          codex_cutover_activation_present: boolean;
+          receipt_reader_present: boolean;
+          retiring_subscription_present: boolean;
+          retiring_variable_sets_present: boolean;
+        }
+      >(
         await tx.execute(sql`
           select
             current_user::text as current_user,
@@ -1823,7 +3573,27 @@ export async function inspectRuntimeDatabasePosture(
             r.rolcreaterole,
             r.rolcreatedb,
             r.rolreplication,
-            r.rolbypassrls
+            r.rolbypassrls,
+            to_regprocedure('opengeni_private.session_variable_set_attachments_protocol_v1_active()')
+              is not null as variable_set_cutover_present,
+            to_regprocedure('opengeni_private.subscription_codex_cutover_v1_active()')
+              is not null as codex_cutover_activation_present,
+            to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)')
+              is not null as receipt_reader_present,
+            exists (
+              select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = ${targetSchema} and c.relkind in ('r', 'p')
+                and c.relname in (
+                  select jsonb_array_elements_text(${JSON.stringify(RETIRING_FEATURE_TABLES.subscription)}::jsonb)
+                )
+            ) as retiring_subscription_present,
+            exists (
+              select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = ${targetSchema} and c.relkind in ('r', 'p')
+                and c.relname in (
+                  select jsonb_array_elements_text(${JSON.stringify(RETIRING_FEATURE_TABLES.variableSets)}::jsonb)
+                )
+            ) as retiring_variable_sets_present
           from pg_roles r
           join pg_database d on d.datname = current_database()
           where r.rolname = current_user
@@ -1850,23 +3620,82 @@ export async function inspectRuntimeDatabasePosture(
         bypassRls: identity.rolbypassrls,
       };
 
-      // The forward-only activation receipt outlives topology. Embedded/scoped
-      // deployments must enforce the same environment interlock as standalone
-      // FORCE-RLS deployments, so inspect the value-free predicate before the
-      // scoped catalog fast-path.
-      const activationRows = resultRows<{ activated: boolean }>(
-        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
-      );
-      const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
-      const variableSetCutoverRows = resultRows<{ present: boolean }>(
-        await tx.execute(sql`
-          select to_regprocedure(
-            'opengeni_private.session_variable_set_attachments_protocol_v1_active()'
-          ) is not null as present
-        `),
-      );
       const sessionVariableSetAttachmentsCutoverPresent =
-        variableSetCutoverRows[0]?.present === true;
+        identity.variable_set_cutover_present === true;
+      const retiringFeatureTablesPresent = {
+        subscription: identity.retiring_subscription_present,
+        variableSets: identity.retiring_variable_sets_present,
+      };
+      // Migration 0751: any retired subscription object still present (a
+      // dropped one, or the Codex name of a renamed one) means the drained
+      // retirement migration has not run. Read from the catalogs by name (no
+      // schema privilege needed); a routine counts by name, so an unexpected
+      // overload is reported too. Byte order, as
+      // retiredSubscriptionObjectDescriptions lists them.
+      const retiredSubscriptionObjects = resultRows<{ object: string }>(
+        await tx.execute(sql`
+          select object from (
+          select 'routine ' || n.nspname || '.' || p.proname || '('
+            || pg_catalog.oidvectortypes(p.proargtypes) || ')' as object
+          from pg_catalog.pg_proc p
+          join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+          join jsonb_to_recordset(${JSON.stringify(
+            RETIRED_ROUTINE_ENTRIES.map(({ schema, signature }) => ({
+              schema_name: schema === "target" ? targetSchema : schema,
+              routine_name: signature.slice(0, signature.indexOf("(")),
+            })),
+          )}::jsonb) as retired(schema_name text, routine_name text)
+            on retired.schema_name = n.nspname and retired.routine_name = p.proname
+          union all
+          select 'policy ' || c.relname || '.' || pol.polname
+          from pg_catalog.pg_policy pol
+          join pg_catalog.pg_class c on c.oid = pol.polrelid
+          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+          join jsonb_to_recordset(${JSON.stringify(
+            RETIRED_POLICY_ENTRIES,
+          )}::jsonb) as retired("table" text, policy text)
+            on retired."table" = c.relname and retired.policy = pol.polname
+          where n.nspname = ${targetSchema}
+          union all
+          select 'trigger ' || c.relname || '.' || t.tgname
+          from pg_catalog.pg_trigger t
+          join pg_catalog.pg_class c on c.oid = t.tgrelid
+          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+          join jsonb_to_recordset(${JSON.stringify(
+            RETIRED_TRIGGER_ENTRIES,
+          )}::jsonb) as retired("table" text, "trigger" text)
+            on retired."table" = c.relname and retired."trigger" = t.tgname
+          where n.nspname = ${targetSchema} and not t.tgisinternal
+          union all
+          select 'relation ' || n.nspname || '.' || c.relname
+          from pg_catalog.pg_class c
+          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+          join jsonb_to_recordset(${JSON.stringify(
+            SUBSCRIPTION_RENAMED_RELATIONS.map(({ schema, from }) => ({
+              schema_name: schema,
+              relation_name: from,
+            })),
+          )}::jsonb) as retired(schema_name text, relation_name text)
+            on retired.schema_name = n.nspname and retired.relation_name = c.relname
+          where c.relkind in ('r', 'p', 'v', 'm', 'f')
+          ) retired_objects
+          order by object collate "C"
+        `),
+      ).map((row) => row.object);
+      const subscriptionCodexCutoverActivationPresent =
+        identity.codex_cutover_activation_present === true;
+      // The receipt is read through its boolean readiness function only:
+      // committed_at is never read as a date ('-infinity' for Codex).
+      const subscriptionProviderCutoverReceipts =
+        identity.receipt_reader_present === true
+          ? resultRows<{ provider: string }>(
+              await tx.execute(sql`select provider from jsonb_array_elements_text(${JSON.stringify(
+                Object.keys(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS),
+              )}::jsonb) provider
+                where opengeni_private.subscription_provider_cutover_committed(provider)
+                order by provider`),
+            ).map((row) => row.provider)
+          : [];
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -1882,8 +3711,11 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
-          sessionTenancyProductActivationPresent,
           sessionVariableSetAttachmentsCutoverPresent,
+          retiredSubscriptionObjects,
+          subscriptionCodexCutoverActivationPresent,
+          subscriptionProviderCutoverReceipts,
+          retiringFeatureTablesPresent,
         };
       }
 
@@ -1936,7 +3768,10 @@ export async function inspectRuntimeDatabasePosture(
         `),
       ).map((row) => row.name);
 
-      const tables = resultRows<{
+      // Inspect both namespaces together: their catalog and privilege probes
+      // are identical. Keep evaluation live on every readiness check.
+      const tableRows = resultRows<{
+        private_schema: boolean;
         name: string;
         owner: string;
         rls_enabled: boolean;
@@ -1952,227 +3787,193 @@ export async function inspectRuntimeDatabasePosture(
         can_truncate: boolean;
         can_references: boolean;
         can_trigger: boolean;
+        column_privileges: string[];
+        extra_privileges: string[];
+        has_inheritance: boolean;
       }>(
         await tx.execute(sql`
           select
+            (n.nspname = 'opengeni_private') as private_schema,
             c.relname::text as name,
             pg_get_userbyid(c.relowner)::text as owner,
             c.relrowsecurity as rls_enabled,
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
-            (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            exists(
-              select 1 from pg_policy policy
-              where policy.polrelid = c.oid
-                and policy.polname = 'editable_artifact_outbox_dispatcher'
-            ) as artifact_outbox_dispatcher_policy,
-            exists(
-              select 1 from pg_policy policy
-              where policy.polrelid = c.oid
-                and policy.polname = 'editable_artifact_materializer_owner'
-            ) as artifact_materializer_policy,
+            coalesce(policies.policy_count, 0) as policy_count,
+            coalesce(policies.artifact_outbox_dispatcher_policy, false) as artifact_outbox_dispatcher_policy,
+            coalesce(policies.artifact_materializer_policy, false) as artifact_materializer_policy,
             has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
             has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
             has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
             has_table_privilege(current_user, c.oid, 'REFERENCES') as can_references,
-            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger
+            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
+            exists(select 1 from pg_inherits i where i.inhrelid = c.oid or i.inhparent = c.oid) as has_inheritance,
+            ARRAY(
+              SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
+              WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
+                AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
+              ORDER BY acl.privilege_type
+            ) AS extra_privileges,
+            -- Same answer as has_any_column_privilege(current_user, c.oid, privilege):
+            -- the table-level privilege, or that privilege on a live user column.
+            -- A column without its own ACL grants nothing beyond the table, so only
+            -- columns with an ACL need a check. has_any_column_privilege reads every
+            -- column through the catalog cache, which on a fresh connection loads
+            -- thousands of pg_attribute rows one by one on each readiness probe.
+            ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
+              WHERE has_table_privilege(current_user, c.oid, privilege)
+                OR EXISTS (SELECT 1 FROM unnest(column_acls.attnums) attnum
+                  WHERE has_column_privilege(current_user, c.oid, attnum, privilege))) as column_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = ${targetSchema}
+          left join (
+            select polrelid, count(*)::int as policy_count,
+              bool_or(polname = 'editable_artifact_outbox_dispatcher') as artifact_outbox_dispatcher_policy,
+              bool_or(polname = 'editable_artifact_materializer_owner') as artifact_materializer_policy
+            from pg_policy group by polrelid
+          ) policies on policies.polrelid = c.oid
+          left join (
+            select attrelid, array_agg(attnum) as attnums
+            from pg_attribute
+            where attnum > 0 and not attisdropped and attacl is not null
+            group by attrelid
+          ) column_acls on column_acls.attrelid = c.oid
+          where n.nspname in (${targetSchema}, 'opengeni_private')
             and c.relkind in ('r', 'p')
           order by c.relname
         `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        rlsEnabled: row.rls_enabled,
-        rlsForced: row.rls_forced,
-        rlsActive: row.rls_active,
-        policyCount: row.policy_count,
-        artifactOutboxDispatcherPolicy: row.artifact_outbox_dispatcher_policy,
-        artifactMaterializerPolicy: row.artifact_materializer_policy,
-        select: row.can_select,
-        insert: row.can_insert,
-        update: row.can_update,
-        delete: row.can_delete,
-        truncate: row.can_truncate,
-        references: row.can_references,
-        trigger: row.can_trigger,
-      }));
+      );
+      const tables = tableRows
+        .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          rlsEnabled: row.rls_enabled,
+          rlsForced: row.rls_forced,
+          rlsActive: row.rls_active,
+          policyCount: row.policy_count,
+          artifactOutboxDispatcherPolicy: row.artifact_outbox_dispatcher_policy,
+          artifactMaterializerPolicy: row.artifact_materializer_policy,
+          select: row.can_select,
+          insert: row.can_insert,
+          update: row.can_update,
+          delete: row.can_delete,
+          truncate: row.can_truncate,
+          references: row.can_references,
+          trigger: row.can_trigger,
+          columnPrivileges: row.column_privileges,
+          extraPrivileges: row.extra_privileges,
+          hasInheritance: row.has_inheritance,
+        }));
 
-      const privateTables = resultRows<{
-        name: string;
-        owner: string;
-        rls_enabled: boolean;
-        rls_forced: boolean;
-        rls_active: boolean;
-        policy_count: number;
-        can_select: boolean;
-        can_insert: boolean;
-        can_update: boolean;
-        can_delete: boolean;
-        can_truncate: boolean;
-        can_references: boolean;
-        can_trigger: boolean;
-      }>(
-        await tx.execute(sql`
-          select
-            c.relname::text as name,
-            pg_get_userbyid(c.relowner)::text as owner,
-            c.relrowsecurity as rls_enabled,
-            c.relforcerowsecurity as rls_forced,
-            row_security_active(c.oid) as rls_active,
-            (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            -- Column-only grants on the inventory stamp are also unsafe; in
-            -- particular INSERT can mint authority without a table grant.
-            (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
-                has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
-            (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
-                has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
-            (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
-                has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
-            has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
-            has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
-            (has_table_privilege(current_user, c.oid, 'REFERENCES') or
-              has_any_column_privilege(current_user, c.oid, 'REFERENCES')) as can_references,
-            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger
-          from pg_class c
-          join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = 'opengeni_private'
-            and c.relkind in ('r', 'p')
-            and c.relname in (
-              ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
-              ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
-              ${VARIABLE_SET_CAPABILITY_TABLE},
-              ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
-              ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
-              ${SCOPED_COMPUTE_CAPABILITY_TABLE},
-              ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
-              ${SANDBOX_FILE_PUBLICATIONS_TABLE},
-              ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
-              ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
-              'organization_usage_read_capabilities',
-              'usage_allowance_capabilities',
-              'workspace_usage_allowances',
-              'workspace_member_allowances',
-              'workspace_allowance_grants',
-              'workspace_allowance_counters',
-              'workspace_allowance_periods',
-              'workspace_allowance_notifications',
-              'usage_allowance_attribution_receipts',
-              'workspace_video_allowance_allocations',
-              'workspace_allowance_clear_receipts',
-              'session_file_attachments',
-              'session_file_read_capabilities',
-              'session_import_batches',
-              'modal_inventory_read_capabilities',
-              ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
-              ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE}
-            )
-        `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        rlsEnabled: row.rls_enabled,
-        rlsForced: row.rls_forced,
-        rlsActive: row.rls_active,
-        policyCount: row.policy_count,
-        select: row.can_select,
-        insert: row.can_insert,
-        update: row.can_update,
-        delete: row.can_delete,
-        truncate: row.can_truncate,
-        references: row.can_references,
-        trigger: row.can_trigger,
-      }));
+      const privateTables = tableRows
+        .filter((row) => row.private_schema)
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          rlsEnabled: row.rls_enabled,
+          rlsForced: row.rls_forced,
+          rlsActive: row.rls_active,
+          policyCount: row.policy_count,
+          select: row.can_select,
+          insert: row.can_insert,
+          update: row.can_update,
+          delete: row.can_delete,
+          truncate: row.can_truncate,
+          references: row.can_references,
+          trigger: row.can_trigger,
+          ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
+          columnPrivileges: row.column_privileges,
+          hasInheritance: row.has_inheritance,
+        }));
 
-      const targetRoutines = resultRows<{
+      // A lateral ACL probe lets PostgreSQL memoize equal (ACL, owner) pairs
+      // within this statement. Read the catalog tuple, not a privilege helper:
+      // those helpers can observe newer grants than our repeatable-read snapshot.
+      const routineRows = resultRows<{
+        private_schema: boolean;
         name: string;
         owner: string;
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        trigger_callable: boolean;
+        has_dependents: boolean;
+        configuration: string[] | null;
       }>(
         await tx.execute(sql`
           select
+            (n.nspname = 'opengeni_private') as private_schema,
             (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
             pg_get_userbyid(p.proowner)::text as owner,
             has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
-            exists (
-              select 1
-              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
-            ) as public_execute,
-            p.prosecdef as security_definer
+            coalesce(public_acl.public_execute, false) as public_execute,
+            p.prosecdef as security_definer,
+            (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
+              or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
+            exists(select 1 from pg_depend d where d.refclassid = 'pg_catalog.pg_proc'::regclass and d.refobjid = p.oid) as has_dependents,
+            p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = ${targetSchema}
+          left join lateral (
+            select true as public_execute
+            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            limit 1
+          ) public_acl on true
+          where n.nspname in (${targetSchema}, 'opengeni_private')
             and p.prokind in ('f', 'p')
-            and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
-              array[
-                ${sql.join(
-                  [...targetSchemaCapabilityRoutines, ...targetSchemaForbiddenRoutines].map(
-                    (name) => sql`${name}`,
-                  ),
-                  sql`, `,
-                )}
-              ]::text[]
-            )
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
         `),
-      )
+      );
+      const targetRoutines = routineRows
+        .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
         .map((row) => ({
           name: row.name,
           owner: row.owner,
           execute: row.can_execute,
           publicExecute: row.public_execute,
           securityDefiner: row.security_definer,
+          triggerCallable: row.trigger_callable,
+          hasDependents: row.has_dependents,
+          configuration: row.configuration,
         }))
         .sort((left, right) => left.name.localeCompare(right.name));
 
-      const privateRoutines = resultRows<{
-        name: string;
-        owner: string;
-        can_execute: boolean;
-        public_execute: boolean;
-        security_definer: boolean;
-        configuration: string[] | null;
-      }>(
-        await tx.execute(sql`
-          select
-            (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
-            pg_get_userbyid(p.proowner)::text as owner,
-            has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
-            exists (
-              select 1
-              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
-            ) as public_execute,
-            p.prosecdef as security_definer,
-            p.proconfig as configuration
-          from pg_proc p
-          join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'opengeni_private'
-            and p.prokind in ('f', 'p')
-          order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
-        `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        execute: row.can_execute,
-        publicExecute: row.public_execute,
-        securityDefiner: row.security_definer,
-        configuration: row.configuration,
-      }));
+      const privateRoutines = routineRows
+        .filter((row) => row.private_schema)
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          execute: row.can_execute,
+          publicExecute: row.public_execute,
+          securityDefiner: row.security_definer,
+          triggerCallable: row.trigger_callable,
+          hasDependents: row.has_dependents,
+          configuration: row.configuration,
+        }));
 
+      const subscriptionOwnerRoutines = resultRows<RuntimeRoutinePosture>(
+        await tx.execute(sql`
+          select (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
+            pg_get_userbyid(p.proowner)::text as owner,
+            (has_function_privilege(current_user, p.oid, 'EXECUTE')
+              or has_schema_privilege(current_user, n.oid, 'USAGE')
+              or has_schema_privilege(current_user, n.oid, 'CREATE')) as execute,
+            coalesce(public_acl.public_execute, false) as "publicExecute",
+            p.prosecdef as "securityDefiner", p.proconfig as configuration
+          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          left join lateral (
+            select true as public_execute
+            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            limit 1
+          ) public_acl on true
+          where n.nspname = 'opengeni_subscription_internal' and p.prokind = 'f'
+        `),
+      );
       return {
         identity: mappedIdentity,
         memberships,
@@ -2183,13 +3984,24 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
-        sessionTenancyProductActivationPresent,
+        subscriptionOwnerRoutines,
         sessionVariableSetAttachmentsCutoverPresent,
+        retiredSubscriptionObjects,
+        subscriptionCodexCutoverActivationPresent,
+        subscriptionProviderCutoverReceipts,
+        retiringFeatureTablesPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
 }
+
+/** Private per-task usage accounting; FORCE-RLS, owner-only. */
+export const RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES = [
+  "session_usage_limit_roots",
+  "session_usage_limit_receipts",
+  "session_usage_limit_config_receipts",
+] as const;
 
 /** Additive private inventory; absent from older binaries' exact data tables. */
 export const RUNTIME_ALLOWANCE_PRIVATE_TABLES = [
@@ -2204,25 +4016,140 @@ export const RUNTIME_ALLOWANCE_PRIVATE_TABLES = [
   "workspace_allowance_clear_receipts",
 ] as const;
 
-/** Pure deterministic evaluator used by startup/readiness and unit tests. */
+// This was the private-table inspection filter before forward compatibility.
+// Keep the exact named checks below for every member; only other private tables
+// are eligible for the generic additive rule.
+const DECLARED_PRIVATE_TABLES = new Set<string>([
+  // Provisioning explicitly grants this historical non-RLS rollout receipt
+  // SELECT; it is a known contract even though readiness did not inventory it.
+  "sandbox_recovery_rollout",
+  PERSONAL_RESOURCE_CAPABILITY_TABLE,
+  SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE,
+  VARIABLE_SET_CAPABILITY_TABLE,
+  SITE_CANCELLATION_CAPABILITY_TABLE,
+  VAULT_CAPABILITY_TABLE,
+  PERSONAL_DOCUMENT_CAPABILITY_TABLE,
+  DOCUMENT_MIGRATION_CAPABILITY_TABLE,
+  SCOPED_COMPUTE_CAPABILITY_TABLE,
+  CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE,
+  SANDBOX_FILE_PUBLICATIONS_TABLE,
+  ARTIFACT_PINS_TABLE,
+  SCHEDULED_SLACK_BOT_MESSAGES_TABLE,
+  ORGANIZATION_SLACK_BOT_ACCESS_TABLE,
+  ORGANIZATION_SIGNUP_USE_CASES_TABLE,
+  SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
+  AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE,
+  VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE,
+  MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE,
+  "organization_usage_read_capabilities",
+  "usage_allowance_capabilities",
+  "usage_maintenance_due",
+  "usage_allowance_membership_changes",
+  "session_usage_limit_capabilities",
+  "session_file_attachments",
+  "session_file_read_capabilities",
+  "session_import_batches",
+  "modal_inventory_read_capabilities",
+  "modal_native_origin_read_capabilities",
+  "credit_promotion_policy_revisions",
+  "subscription_plan_catalog_revisions",
+  ...MAINTENANCE_PRIVATE_TABLES,
+  ...RUNTIME_ALLOWANCE_PRIVATE_TABLES,
+  ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
+]);
+
+// These exact existing contracts forbid every SELECT/INSERT/UPDATE column
+// grant. Historically the inspector folded those ACLs into their deny flags.
+// Preserve their named violations while keeping required table grants (catalog,
+// credit policy, Slack ledger) separate from column grants in the inspector.
+const COLUMN_DENIED_PRIVATE_TABLES = new Set<string>([
+  "modal_native_origin_read_capabilities",
+  "modal_inventory_read_capabilities",
+  "usage_allowance_capabilities",
+  "usage_maintenance_due",
+  "usage_allowance_membership_changes",
+  "session_import_batches",
+  ARTIFACT_PINS_TABLE,
+  SITE_CANCELLATION_CAPABILITY_TABLE,
+  ...MAINTENANCE_PRIVATE_TABLES,
+  ...RUNTIME_ALLOWANCE_PRIVATE_TABLES,
+  ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
+  "session_usage_limit_capabilities",
+]);
+
+/**
+ * Pure deterministic evaluator used by startup/readiness and unit tests.
+ *
+ * Invariant for {@link classifyRuntimeDatabasePosture}: a missing runtime
+ * EXECUTE grant may only ADD findings. Never let `execute === false` skip,
+ * guard or select another check (for example `if (routine.execute) continue;`
+ * ahead of owner or search_path checks, or an unsafe check nested under
+ * `if (!routine.execute)`): the classifier would see that unsafe finding
+ * disappear once the grant is present and report it as degraded. Use
+ * `!execute` only as a direct term of the finding's own condition.
+ */
 export function evaluateRuntimeDatabasePosture(
-  posture: RuntimeDatabasePosture,
+  catalogPosture: RuntimeDatabasePosture,
   options: RuntimeDatabasePostureOptions,
 ): string[] {
+  // Local deny-only projection; never mutate the catalog snapshot or substitute
+  // column grants for a table-level requirement. Unknown objects are untouched.
+  const posture = {
+    ...catalogPosture,
+    privateTables: catalogPosture.privateTables.map((table) => {
+      if (!DECLARED_PRIVATE_TABLES.has(table.name)) return table;
+      const denyColumns = COLUMN_DENIED_PRIVATE_TABLES.has(table.name);
+      return {
+        ...table,
+        select:
+          table.select || (denyColumns && table.columnPrivileges?.includes("SELECT")) || false,
+        insert:
+          table.insert || (denyColumns && table.columnPrivileges?.includes("INSERT")) || false,
+        update:
+          table.update || (denyColumns && table.columnPrivileges?.includes("UPDATE")) || false,
+        references: table.references || table.columnPrivileges?.includes("REFERENCES") || false,
+      };
+    }),
+  };
   const violations: string[] = [];
   const identity = posture.identity;
 
-  if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
-    violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
+  // Exact posture of the M4 retirement: this release names none of the
+  // retired subscription objects, and the drained retirement migration
+  // (SUBSCRIPTION_RETIREMENT_MIGRATION) drops them.
+  for (const object of posture.retiredSubscriptionObjects) {
+    violations.push(retiredSubscriptionObjectViolation(object));
   }
 
-  if (
-    posture.sessionTenancyProductActivationPresent &&
-    options.organizationTenancyCanonicalActivationEnabled !== true
-  ) {
-    violations.push(
-      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
+  // Receipts remain mandatory while any legacy table survives. In particular,
+  // absence of a receipt must not admit the old full-DML provider posture.
+  const retiringSubscriptionPresent =
+    posture.retiringFeatureTablesPresent?.subscription !== false ||
+    posture.tables.some((table) =>
+      (RETIRING_FEATURE_TABLES.subscription as readonly string[]).includes(table.name),
     );
+  const retiringVariableSetsPresent =
+    posture.retiringFeatureTablesPresent?.variableSets !== false ||
+    posture.tables.some((table) =>
+      (RETIRING_FEATURE_TABLES.variableSets as readonly string[]).includes(table.name),
+    );
+  if (retiringSubscriptionPresent && !posture.subscriptionCodexCutoverActivationPresent)
+    violations.push(
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
+    );
+  for (const [provider, migration] of Object.entries(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
+    if (
+      retiringSubscriptionPresent &&
+      !posture.subscriptionProviderCutoverReceipts.includes(provider)
+    ) {
+      violations.push(
+        `database is missing the ${provider} subscription-core cutover receipt (${migration}); apply the pending migrations first`,
+      );
+    }
+  }
+
+  if (retiringVariableSetsPresent && !posture.sessionVariableSetAttachmentsCutoverPresent) {
+    violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
   }
 
   if (!identity.currentUser || !identity.sessionUser) {
@@ -2245,6 +4172,11 @@ export function evaluateRuntimeDatabasePosture(
   const targetSchema = options.targetSchema?.trim() || "public";
   const protectedTables = new Set(options.protectedTables ?? FORCE_RLS_TABLES);
   const tablePrivileges = options.tablePrivileges ?? RUNTIME_TABLE_PRIVILEGES;
+  const legacyTablesBeforeReceipt = new Set(
+    Object.entries(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
+      .filter(([provider]) => !posture.subscriptionProviderCutoverReceipts.includes(provider))
+      .flatMap(([, tables]) => tables),
+  );
   const directRuntimeTables = new Set(Object.keys(tablePrivileges));
   const protectedNoDirectDmlTables = new Set(
     options.protectedNoDirectDmlTables ??
@@ -2254,6 +4186,24 @@ export function evaluateRuntimeDatabasePosture(
     options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
   const targetSchemaForbiddenRoutines =
     options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
+  const knownTables = new Set([
+    ...DECLARED_TARGET_TABLES,
+    ...protectedTables,
+    ...directRuntimeTables,
+    ...protectedNoDirectDmlTables,
+  ]);
+  const knownTargetRoutines = new Set([
+    ...DECLARED_TARGET_ROUTINES,
+    ...targetSchemaCapabilityRoutines,
+    ...targetSchemaForbiddenRoutines,
+  ]);
+  const toleratedUnknownTables = new Set(
+    posture.tables
+      .filter(
+        (table) => !knownTables.has(table.name) && securelyShapedUnknownTable(table, expectedRole),
+      )
+      .map((table) => table.name),
+  );
 
   if (identity.currentUser !== expectedRole || identity.sessionUser !== expectedRole) {
     violations.push(
@@ -2298,6 +4248,171 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  // RUNTIME_DEFINER_ROUTINE_TABLES names private tables with their schema.
+  const definerTableByName = new Map<string, { owner: string }>([
+    ...tableByName,
+    ...posture.privateTables.map((table) => [`opengeni_private.${table.name}`, table] as const),
+  ]);
+  for (const table of posture.privateTables) {
+    if (DECLARED_PRIVATE_TABLES.has(table.name)) {
+      // Keep table-level flags exact for required-grant checks below. Column
+      // grants may add forbidden access but cannot satisfy a table contract.
+      const tableGrants = new Set([
+        ...(table.select ? ["SELECT"] : []),
+        ...(table.insert ? ["INSERT"] : []),
+        ...(table.update ? ["UPDATE"] : []),
+        ...(table.references ? ["REFERENCES"] : []),
+      ]);
+      if (table.columnPrivileges?.some((privilege) => !tableGrants.has(privilege))) {
+        violations.push(`private table ${table.name} has excess column privileges`);
+      }
+      continue;
+    }
+    if (table.hasInheritance) {
+      violations.push(
+        `unknown private table ${table.name} has an inheritance or partition relationship`,
+      );
+    }
+    if (table.owner === expectedRole) {
+      violations.push(`runtime role owns private table ${table.name}`);
+    }
+    if (
+      (table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger ||
+        table.extraPrivileges?.length ||
+        table.columnPrivileges?.length) &&
+      (!securelyShapedUnknownTable(table, expectedRole) ||
+        table.truncate ||
+        table.references ||
+        table.trigger ||
+        table.extraPrivileges?.length ||
+        table.columnPrivileges?.includes("REFERENCES"))
+    ) {
+      violations.push(`unknown private table ${table.name} has unsafe runtime privileges`);
+    }
+  }
+  if (
+    !options.protectedTables &&
+    !posture.privateRoutines.some(
+      (routine) => routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE,
+    )
+  ) {
+    violations.push("subscription plan maintenance inventory is missing");
+  }
+  if (
+    !options.protectedTables &&
+    !posture.privateRoutines.some(
+      (routine) => routine.name === SUBSCRIPTION_PLAN_FREE_ANNIVERSARY_ROUTINE,
+    )
+  ) {
+    violations.push("subscription plan Free anniversary helper is missing");
+  }
+  const privateSchemaOwner = posture.schemas.find(
+    (schema) => schema.name === "opengeni_private",
+  )?.owner;
+  const quotedTargetSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+  const precursorSearchPaths = new Set([
+    `search_path=pg_catalog, ${quotedTargetSchema}, opengeni_private, pg_temp`,
+    `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedTargetSchema}, opengeni_private, pg_temp`,
+  ]);
+  const safeSearchPath = (routine: RuntimeRoutinePosture) =>
+    routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+    routine.name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
+      ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
+      : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
+  const hardenedPrivateRoutine = (matches: RuntimeRoutinePosture[]) =>
+    matches.length === 1 &&
+    matches[0]!.execute &&
+    !matches[0]!.publicExecute &&
+    matches[0]!.securityDefiner &&
+    !(privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) &&
+    safeSearchPath(matches[0]!) === true;
+  for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
+    const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+    if (
+      matches.length === 0 &&
+      !retiringSubscriptionPresent &&
+      (SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(expectedRoutine)
+    )
+      continue;
+    if (!hardenedPrivateRoutine(matches)) {
+      violations.push(
+        `subscription M3 precursor private routine ${expectedRoutine} is missing or unsafe`,
+      );
+    }
+  }
+  for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
+    const routine = [...posture.privateRoutines, ...(posture.subscriptionOwnerRoutines ?? [])].find(
+      (candidate) => candidate.name === ownerOnly,
+    );
+    if (routine && (routine.execute || routine.publicExecute)) {
+      violations.push(`subscription M3 owner-only private routine ${ownerOnly} is executable`);
+    }
+  }
+  const privateRoutinePresent = (prefix: string) =>
+    posture.privateRoutines.some((routine) => routine.name.startsWith(prefix));
+  // Keyed on the neutral personal writer (the Codex twins are retired), so
+  // the owner checks below run on every database this release accepts.
+  if (
+    posture.subscriptionOwnerRoutines !== undefined &&
+    privateRoutinePresent("connect_subscription_core_personal(")
+  ) {
+    const required = [
+      // The reset-credit fence, which stays, calls these two.
+      "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+      "drop_subscription_codex_owner_capabilities(uuid)",
+      "derive_scheduled_revision_subscription_authority()",
+      ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("subscription_provider_cutover_committed("),
+      )
+        ? SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES
+        : []),
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("copy_subscription_authority_compat("),
+      )
+        ? SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES
+        : []),
+      // 0717 adds no runtime routine: once any of its helpers exists, all of
+      // them must, owner-only and with a safe search path.
+      ...(posture.subscriptionOwnerRoutines.some((routine) =>
+        (SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES as readonly string[]).includes(routine.name),
+      )
+        ? SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES
+        : []),
+      // 1103 creates the account-administrator grant and the administration
+      // context together.
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("grant_subscription_account_administrator("),
+      )
+        ? SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES
+        : []),
+    ];
+    for (const signature of required) {
+      const matches = posture.subscriptionOwnerRoutines.filter(
+        (routine) => routine.name === signature,
+      );
+      if (
+        matches.length !== 1 ||
+        matches[0]!.owner !== privateSchemaOwner ||
+        matches[0]!.execute ||
+        matches[0]!.publicExecute ||
+        !matches[0]!.configuration?.some(
+          (value) =>
+            precursorSearchPaths.has(value) ||
+            value === `search_path=pg_catalog, ${targetSchema}, pg_temp` ||
+            value === `search_path=pg_catalog, ${quotedTargetSchema}, pg_temp`,
+        )
+      ) {
+        violations.push(`subscription owner implementation ${signature} is missing or unsafe`);
+      }
+    }
+  }
   if (tableByName.has("organization_integration_policies")) {
     for (const name of [
       "update_organization_integration_policy(uuid, text, jsonb)",
@@ -2356,15 +4471,23 @@ export function evaluateRuntimeDatabasePosture(
     );
   }
   const catalogTables = new Set(tableByName.keys());
-  const missingRuntimeTables = difference(directRuntimeTables, catalogTables);
+  const notYetCreatedTables = new Set(options.tablesCreatedByLaterMigrations ?? []);
+  const missingRuntimeTables = difference(directRuntimeTables, catalogTables).filter(
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
+  );
   if (missingRuntimeTables.length > 0) {
     violations.push(`runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`);
   }
-  const missingTables = difference(protectedTables, catalogTables);
+  const missingTables = difference(protectedTables, catalogTables).filter(
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
+  );
   if (missingTables.length > 0) {
     violations.push(`protected tables are missing: ${missingTables.join(", ")}`);
   }
-  const undeclaredRlsTables = difference(actualRlsTables, protectedTables);
+  const undeclaredRlsTables = difference(
+    actualRlsTables,
+    new Set([...protectedTables, ...toleratedUnknownTables]),
+  );
   if (undeclaredRlsTables.length > 0) {
     violations.push(
       `RLS tables are absent from the declared contract: ${undeclaredRlsTables.join(", ")}`,
@@ -2372,6 +4495,11 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   for (const table of posture.tables) {
+    // Even an ungranted child can be read/written through a known parent.
+    // Relation-local ACL flags do not describe that indirect access path.
+    if (!knownTables.has(table.name) && table.hasInheritance) {
+      violations.push(`unknown table ${table.name} has an inheritance or partition relationship`);
+    }
     const privileges = [
       ["SELECT", table.select],
       ["INSERT", table.insert],
@@ -2382,6 +4510,17 @@ export function evaluateRuntimeDatabasePosture(
       ["TRIGGER", table.trigger],
     ] as const;
     const expectedPrivileges = new Set<string>(tablePrivileges[table.name] ?? []);
+    // Before a provider's receipt, provisioning still grants its legacy
+    // tables full DML (an older binary's world): tolerated, since the missing
+    // receipt is reported and refuses readiness on its own.
+    const toleratedPrivileges = new Set<string>(expectedPrivileges);
+    if (legacyTablesBeforeReceipt.has(table.name)) {
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
+    }
+    if (toleratedUnknownTables.has(table.name)) {
+      // RLS governs row DML, not TRUNCATE, REFERENCES, TRIGGER or MAINTAIN.
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
+    }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
     }
@@ -2393,9 +4532,14 @@ export function evaluateRuntimeDatabasePosture(
         `table ${table.name} lacks required runtime privileges: ${missingPrivileges.join(", ")}`,
       );
     }
-    const excessPrivileges = privileges
-      .filter(([privilege, granted]) => !expectedPrivileges.has(privilege) && granted)
+    const excessPrivileges: string[] = privileges
+      .filter(
+        ([privilege, granted]) =>
+          !toleratedPrivileges.has(privilege) &&
+          (granted || table.columnPrivileges?.includes(privilege)),
+      )
       .map(([privilege]) => privilege);
+    excessPrivileges.push(...(table.extraPrivileges ?? []));
     if (excessPrivileges.length > 0) {
       violations.push(
         `table ${table.name} grants excess runtime privileges: ${excessPrivileges.join(", ")}`,
@@ -2413,6 +4557,11 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  for (const routine of posture.targetRoutines) {
+    if (!knownTargetRoutines.has(routine.name)) {
+      violations.push(...unknownRoutineViolations(routine, targetSchema, expectedRole));
+    }
+  }
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
     if (matches.length !== 1) {
@@ -2443,6 +4592,18 @@ export function evaluateRuntimeDatabasePosture(
   }
   for (const expectedRoutine of targetSchemaCapabilityRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
+    if (
+      matches.length === 0 &&
+      !retiringVariableSetsPresent &&
+      RETIRING_VARIABLE_SET_ROUTINES.has(expectedRoutine)
+    )
+      continue;
+    if (
+      matches.length === 0 &&
+      !retiringSubscriptionPresent &&
+      RETIRING_SUBSCRIPTION_TARGET_ROUTINES.has(expectedRoutine)
+    )
+      continue;
     if (matches.length !== 1) {
       violations.push(
         `target-schema runtime capability ${expectedRoutine} is missing or ambiguous`,
@@ -2477,6 +4638,23 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} allowance authority owners do not match`,
         );
       }
+    } else if ((SESSION_USAGE_LIMIT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
+      const owners = new Set(
+        RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
+          (name) => posture.privateTables.find((table) => table.name === name)?.owner,
+        ),
+      );
+      if (
+        (!options.protectedTables ||
+          posture.privateTables.some(
+            (table) => table.name === "session_usage_limit_capabilities",
+          )) &&
+        (owners.size !== 1 || owners.has(undefined) || !owners.has(routine.owner))
+      ) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} session usage limit authority owners do not match`,
+        );
+      }
     } else if (
       routine.name === GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE ||
       routine.name === GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE
@@ -2502,6 +4680,31 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (
+      (BILLING_SUBSCRIPTION_OPERATION_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
+      const table = tableByName.get("billing_subscription_operations");
+      if ((!options.protectedTables || table) && (!table || table.owner !== routine.owner)) {
+        violations.push(
+          `subscription operation capability ${routine.name} authority table owner does not match`,
+        );
+      }
+    } else if ((SUBSCRIPTION_PLAN_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = [
+        "organization_plans",
+        "plan_credit_periods",
+        "credit_ledger_entries",
+      ];
+      if (
+        (!options.protectedTables || authorityTables.some((name) => tableByName.has(name))) &&
+        authorityTables.some(
+          (name) => !tableByName.has(name) || tableByName.get(name)!.owner !== routine.owner,
+        )
+      ) {
+        violations.push(
+          `subscription plan capability ${routine.name} authority table owners do not match`,
+        );
       }
     } else if (routine.name === MCP_OPERATION_CAPABILITY_ROUTINE) {
       const missing = MCP_OPERATION_AUTHORITY_TABLES.filter((name) => !tableByName.has(name));
@@ -2938,6 +5141,23 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
+    } else if ((VAULT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = VAULT_TABLES.map((tableName) => tableByName.get(tableName)).filter(
+        (table): table is RuntimeTablePosture => table !== undefined,
+      );
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} vault table owners do not match`,
+        );
+      } else {
+        const authorityOwner = authorityTables[0]?.owner ?? targetSchemaOwner;
+        if (authorityOwner && routine.owner !== authorityOwner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match vault authority owner ${authorityOwner}`,
+          );
+        }
+      }
     } else if ((SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = ["rigs", "rig_versions", "enrollments", "sandboxes"]
         .map((tableName) => tableByName.get(tableName))
@@ -2962,43 +5182,22 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
         );
       }
-    } else if (routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE) {
+    } else if (routine.name === "scheduled_task_is_exhausted(uuid)") {
+      // This scoped invoker predicate cannot mint authority or bypass RLS.
+      // Public-schema installations may have a different schema owner.
+      const taskOwner = tableByName.get("scheduled_tasks")?.owner;
+      if (taskOwner && routine.owner !== taskOwner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match scheduled task owner ${taskOwner}`,
+        );
+      }
+    } else if (
+      routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE ||
+      routine.name === CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE
+    ) {
       // The immutable SQL validator is invoker-rights and reads no table. Its
       // exact ACL is posture-checked above; it does not participate in the
       // SECURITY DEFINER same-owner authority graph.
-    } else if (
-      routine.name === XAI_CREATE_CREDENTIAL_ROUTINE ||
-      routine.name === XAI_DISCONNECT_CREDENTIAL_ROUTINE ||
-      routine.name === XAI_AUTHORITY_LIVE_ROUTINE ||
-      routine.name === XAI_POOL_VISIBLE_ROUTINE ||
-      routine.name === XAI_RESOLVE_POOL_ROUTINE ||
-      routine.name === XAI_REVALIDATE_CREDENTIAL_ROUTINE
-    ) {
-      if (!tableByName.has("xai_subscription_credentials")) {
-        continue;
-      }
-      const missingAuthorityTables = XAI_AUTHORITY_TABLES.filter(
-        (tableName) => !tableByName.has(tableName),
-      );
-      if (missingAuthorityTables.length > 0) {
-        violations.push(
-          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
-        );
-      } else {
-        const authorityTables = XAI_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
-        );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
-        if (authorityOwners.size !== 1) {
-          violations.push(
-            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
-          );
-        } else if (routine.owner !== authorityTables[0]!.owner) {
-          violations.push(
-            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
-          );
-        }
-      }
     } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
       violations.push(
         `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
@@ -3547,12 +5746,16 @@ export function evaluateRuntimeDatabasePosture(
     const variableSetCapabilityRoutines = posture.privateRoutines.filter(
       (routine) => routine.name === VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE,
     );
-    if (variableSetCapabilityTables.length !== 1) {
+    const variableSetCapabilityPresent =
+      retiringVariableSetsPresent ||
+      variableSetCapabilityTables.length > 0 ||
+      variableSetCapabilityRoutines.length > 0;
+    if (variableSetCapabilityPresent && variableSetCapabilityTables.length !== 1) {
       violations.push(
         `variable-set capability table ${VARIABLE_SET_CAPABILITY_TABLE} is missing or ambiguous`,
       );
     }
-    if (variableSetCapabilityRoutines.length !== 1) {
+    if (variableSetCapabilityPresent && variableSetCapabilityRoutines.length !== 1) {
       violations.push(
         `variable-set capability predicate ${VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
       );
@@ -3575,6 +5778,49 @@ export function evaluateRuntimeDatabasePosture(
       }
       if (routine.publicExecute) {
         violations.push(`PUBLIC has forbidden variable-set capability predicate ${routine.name}`);
+      }
+      const directPrivileges = [
+        ["SELECT", table.select],
+        ["INSERT", table.insert],
+        ["UPDATE", table.update],
+        ["DELETE", table.delete],
+      ].filter(([, granted]) => granted);
+      if (directPrivileges.length > 0) {
+        violations.push(
+          `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+        );
+      }
+    }
+    const vaultCapabilityTables = posture.privateTables.filter(
+      (table) => table.name === VAULT_CAPABILITY_TABLE,
+    );
+    const vaultCapabilityRoutines = posture.privateRoutines.filter(
+      (routine) => routine.name === VAULT_CAPABILITY_PREDICATE_ROUTINE,
+    );
+    if (vaultCapabilityTables.length !== 1) {
+      violations.push(`vault capability table ${VAULT_CAPABILITY_TABLE} is missing or ambiguous`);
+    }
+    if (vaultCapabilityRoutines.length !== 1) {
+      violations.push(
+        `vault capability predicate ${VAULT_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+      );
+    }
+    if (vaultCapabilityTables.length === 1 && vaultCapabilityRoutines.length === 1) {
+      const table = vaultCapabilityTables[0]!;
+      const routine = vaultCapabilityRoutines[0]!;
+      if (routine.owner !== table.owner) {
+        violations.push(
+          `vault capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+        );
+      }
+      if (!routine.securityDefiner) {
+        violations.push(`vault capability predicate ${routine.name} is not SECURITY DEFINER`);
+      }
+      if (!routine.execute) {
+        violations.push(`runtime role lacks vault capability predicate ${routine.name}`);
+      }
+      if (routine.publicExecute) {
+        violations.push(`PUBLIC has forbidden vault capability predicate ${routine.name}`);
       }
       const directPrivileges = [
         ["SELECT", table.select],
@@ -3646,6 +5892,37 @@ export function evaluateRuntimeDatabasePosture(
 
   // The trial-credit kill switch is operator state. Runtime roles may read it
   // for the gauge (SELECT is optional) but must never append or rewrite it.
+  const creditPolicyTable = posture.privateTables.find(
+    (table) => table.name === "credit_promotion_policy_revisions",
+  );
+  const planCatalogTable = posture.privateTables.find(
+    (table) => table.name === "subscription_plan_catalog_revisions",
+  );
+  if (!planCatalogTable?.select)
+    violations.push("runtime role cannot read the subscription plan catalog");
+  if (
+    planCatalogTable &&
+    (planCatalogTable.owner === expectedRole ||
+      planCatalogTable.insert ||
+      planCatalogTable.update ||
+      planCatalogTable.delete)
+  ) {
+    violations.push("runtime role has forbidden write authority on the subscription plan catalog");
+  }
+  if (!creditPolicyTable) {
+    violations.push("credit promotion policy table is missing");
+  } else if (!creditPolicyTable.select) {
+    violations.push("runtime role cannot read the credit promotion policy");
+  }
+  if (
+    creditPolicyTable &&
+    (creditPolicyTable.owner === expectedRole ||
+      creditPolicyTable.insert ||
+      creditPolicyTable.update ||
+      creditPolicyTable.delete)
+  ) {
+    violations.push("runtime role has forbidden write authority on the credit promotion policy");
+  }
   const trialSwitchTable = posture.privateTables.find(
     (table) => table.name === VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE,
   );
@@ -3658,6 +5935,23 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push(
       "runtime role has forbidden write authority on the verified signup trial switch",
+    );
+  }
+
+  // The new-account sign-up switch is operator state too. The API reads it on
+  // each sign-up decision but must never append or rewrite it.
+  const newSignupsSwitchTable = posture.privateTables.find(
+    (table) => table.name === MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE,
+  );
+  if (
+    newSignupsSwitchTable &&
+    (newSignupsSwitchTable.owner === expectedRole ||
+      newSignupsSwitchTable.insert ||
+      newSignupsSwitchTable.update ||
+      newSignupsSwitchTable.delete)
+  ) {
+    violations.push(
+      "runtime role has forbidden write authority on the managed auth new signups switch",
     );
   }
 
@@ -3759,6 +6053,47 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const pinTables = posture.privateTables.filter((table) => table.name === ARTIFACT_PINS_TABLE);
+  if (pinTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("artifact pin private relation is missing or ambiguous");
+  } else {
+    const table = pinTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("artifact pin relation lacks active FORCE-RLS workspace isolation");
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.truncate ||
+      table.references ||
+      table.trigger ||
+      table.extraPrivileges?.length ||
+      table.owner === expectedRole
+    )
+      violations.push("runtime role has forbidden direct artifact pin authority");
+    if (tableByName.get("files")?.owner && table.owner !== tableByName.get("files")!.owner)
+      violations.push("artifact pin owner does not match workspace authority");
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const searchPaths = new Set([
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+    ]);
+    for (const name of ARTIFACT_PIN_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      )
+        violations.push(`artifact pin capability ${name} is missing or unsafe`);
+    }
+  }
+
   const slackFileUploadTables = posture.privateTables.filter(
     (table) => table.name === SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   );
@@ -3823,6 +6158,74 @@ export function evaluateRuntimeDatabasePosture(
         !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
       ) {
         violations.push(`scheduled Slack bot message capability ${name} is missing or unsafe`);
+      }
+    }
+  }
+
+  const botAccessTables = posture.privateTables.filter(
+    (table) => table.name === ORGANIZATION_SLACK_BOT_ACCESS_TABLE,
+  );
+  if (botAccessTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("organization Slack bot access relation is missing or ambiguous");
+  } else {
+    const table = botAccessTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("organization Slack bot access lacks active FORCE-RLS isolation");
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.truncate ||
+      table.references ||
+      table.trigger ||
+      table.owner === expectedRole
+    )
+      violations.push("runtime role has forbidden direct organization Slack bot access authority");
+    if (table.owner !== scheduledSlackMessageTables[0]?.owner)
+      violations.push("organization Slack bot access owner does not match Slack post authority");
+  }
+
+  const signupUseCaseTables = posture.privateTables.filter(
+    (table) => table.name === ORGANIZATION_SIGNUP_USE_CASES_TABLE,
+  );
+  if (signupUseCaseTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("organization signup use case private relation is missing or ambiguous");
+  } else {
+    const table = signupUseCaseTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("organization signup use case relation lacks active FORCE-RLS isolation");
+    }
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has forbidden direct organization signup use case authority");
+    }
+    const sessionOwner = tableByName.get("sessions")?.owner;
+    if (sessionOwner && table.owner !== sessionOwner)
+      violations.push("organization signup use case owner does not match session authority");
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const searchPaths = new Set([
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+    ]);
+    for (const name of ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      ) {
+        violations.push(`organization signup use case capability ${name} is missing or unsafe`);
       }
     }
   }
@@ -3925,6 +6328,24 @@ export function evaluateRuntimeDatabasePosture(
   const usageAllowanceCapability = posture.privateTables.find(
     (table) => table.name === "usage_allowance_capabilities",
   );
+  for (const indexName of ["usage_maintenance_due", "usage_allowance_membership_changes"]) {
+    const usageMaintenanceIndex = posture.privateTables.find((table) => table.name === indexName);
+    if (
+      usageMaintenanceIndex &&
+      (usageMaintenanceIndex.owner === expectedRole ||
+        usageMaintenanceIndex.owner !== tableByName.get("workspaces")?.owner ||
+        usageMaintenanceIndex.select ||
+        usageMaintenanceIndex.insert ||
+        usageMaintenanceIndex.update ||
+        usageMaintenanceIndex.delete ||
+        usageMaintenanceIndex.truncate ||
+        usageMaintenanceIndex.references ||
+        usageMaintenanceIndex.trigger)
+    )
+      violations.push(
+        `usage maintenance index ${indexName} has unsafe owner or direct runtime privileges`,
+      );
+  }
   if (!options.protectedTables || usageAllowanceCapability) {
     const authorityOwner = tableByName.get("workspaces")?.owner;
     for (const name of RUNTIME_ALLOWANCE_PRIVATE_TABLES) {
@@ -3974,6 +6395,71 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push("usage allowance attribution receipts lack same-owner FORCE-RLS isolation");
   }
+  const sessionUsageLimitCapability = posture.privateTables.find(
+    (table) => table.name === "session_usage_limit_capabilities",
+  );
+  if (!options.protectedTables || sessionUsageLimitCapability) {
+    const authorityOwner = tableByName.get("workspaces")?.owner;
+    for (const name of RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES) {
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner === expectedRole ||
+        table.owner !== authorityOwner ||
+        !table.rlsEnabled ||
+        !table.rlsForced ||
+        !table.rlsActive ||
+        (table.policyCount ?? 0) < 1 ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger
+      ) {
+        violations.push(`session usage limit private table ${name} is missing or unsafe`);
+      }
+    }
+    if (
+      !sessionUsageLimitCapability ||
+      sessionUsageLimitCapability.owner === expectedRole ||
+      sessionUsageLimitCapability.owner !== authorityOwner ||
+      sessionUsageLimitCapability.select ||
+      sessionUsageLimitCapability.insert ||
+      sessionUsageLimitCapability.update ||
+      sessionUsageLimitCapability.delete ||
+      sessionUsageLimitCapability.truncate
+    ) {
+      violations.push(
+        "session usage limit capability has unsafe owner or direct runtime privileges",
+      );
+    }
+  }
+  const nativeOriginCapability = posture.privateTables.find(
+    (table) => table.name === "modal_native_origin_read_capabilities",
+  );
+  const nativeOriginRoutineInstalled = posture.targetRoutines.some(
+    (routine) => routine.name === "lock_live_native_original_origin_v2(jsonb)",
+  );
+  if (
+    (nativeOriginRoutineInstalled || nativeOriginCapability) &&
+    (!nativeOriginCapability ||
+      nativeOriginCapability.owner === expectedRole ||
+      nativeOriginCapability.owner !== tableByName.get("sessions")?.owner ||
+      nativeOriginCapability.owner !== tableByName.get("organization_memberships")?.owner ||
+      !nativeOriginCapability.rlsEnabled ||
+      !nativeOriginCapability.rlsForced ||
+      !nativeOriginCapability.rlsActive ||
+      nativeOriginCapability.select ||
+      nativeOriginCapability.insert ||
+      nativeOriginCapability.update ||
+      nativeOriginCapability.delete ||
+      nativeOriginCapability.truncate ||
+      nativeOriginCapability.references ||
+      nativeOriginCapability.trigger)
+  )
+    violations.push("Native LIVE-origin read capability has unsafe owner, RLS or privileges");
   const modalInventoryCapability = posture.privateTables.find(
     (table) => table.name === "modal_inventory_read_capabilities",
   );
@@ -4010,6 +6496,19 @@ export function evaluateRuntimeDatabasePosture(
     ) {
       violations.push("Modal create inventory has unsafe owner, ACL or runtime privileges");
     }
+    const enrollmentInventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_stale_compute_sandbox_enrollments(uuid)",
+    );
+    if (
+      enrollmentInventory &&
+      (!enrollmentInventory.execute ||
+        enrollmentInventory.publicExecute ||
+        !enrollmentInventory.securityDefiner ||
+        enrollmentInventory.owner !== capability.owner ||
+        !enrollmentInventory.configuration?.includes("search_path=pg_catalog"))
+    ) {
+      violations.push("Compute enrollment inventory has unsafe owner, ACL or runtime privileges");
+    }
   }
   if (organizationUsageCapability) {
     const capability = organizationUsageCapability;
@@ -4038,6 +6537,84 @@ export function evaluateRuntimeDatabasePosture(
       aggregateRoutine.owner !== capability.owner
     ) {
       violations.push("organization usage aggregate capability is missing or unsafe");
+    }
+  }
+  const siteCancellation = posture.privateTables.find(
+    (table) => table.name === SITE_CANCELLATION_CAPABILITY_TABLE,
+  );
+  const siteCancellationPredicate = posture.targetRoutines.filter(
+    (routine) => routine.name === SITE_CANCELLATION_PREDICATE,
+  );
+  const siteCancellationRoutines = posture.privateRoutines.filter((routine) =>
+    (SITE_CANCELLATION_PRIVATE_ROUTINES as readonly string[]).includes(routine.name),
+  );
+  // Require the current production contract; reduced fixture/embedding inventories
+  // may omit Sites, but any installed half must satisfy the complete capability.
+  if (
+    !options.protectedTables ||
+    siteCancellation ||
+    siteCancellationPredicate.length ||
+    siteCancellationRoutines.length
+  ) {
+    if (
+      !siteCancellation ||
+      siteCancellation.owner === expectedRole ||
+      siteCancellation.owner !== tableByName.get("sessions")?.owner ||
+      siteCancellation.select ||
+      siteCancellation.insert ||
+      siteCancellation.update ||
+      siteCancellation.delete ||
+      siteCancellation.truncate ||
+      siteCancellation.references ||
+      siteCancellation.trigger
+    )
+      violations.push("Site cancellation capability ledger is missing or unsafe");
+    const predicate = siteCancellationPredicate[0];
+    if (
+      siteCancellationPredicate.length !== 1 ||
+      !predicate?.securityDefiner ||
+      !predicate.execute ||
+      !predicate.publicExecute ||
+      predicate.owner !== siteCancellation?.owner ||
+      !predicate.configuration?.includes("search_path=pg_catalog")
+    )
+      violations.push("Site cancellation policy predicate is missing or unsafe");
+    for (const name of SITE_CANCELLATION_PRIVATE_ROUTINES) {
+      const matches = siteCancellationRoutines.filter((routine) => routine.name === name);
+      const routine = matches[0];
+      if (
+        matches.length !== 1 ||
+        !routine?.securityDefiner ||
+        !routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== siteCancellation?.owner ||
+        !(name.startsWith("end_")
+          ? routine.configuration?.includes("search_path=pg_catalog")
+          : safeSearchPath(routine))
+      )
+        violations.push(`Site cancellation routine ${name} is missing or unsafe`);
+    }
+  }
+  const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;
+  const modelFactCapabilityRoutines = new Set(
+    options.modelFactCapabilityRoutines ?? MODEL_FACT_CAPABILITY_ROUTINES.map(([name]) => name),
+  );
+  if (modelCallFactsOwner !== undefined) {
+    for (const [name, violation] of MODEL_FACT_CAPABILITY_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+      // An older binary does not require a later additive capability, but any
+      // installed capability must retain the same owner and ACL safety contract.
+      if (matches.length === 0 && !modelFactCapabilityRoutines.has(name)) continue;
+      const routine = matches[0];
+      if (
+        matches.length !== 1 ||
+        !routine?.securityDefiner ||
+        !routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== modelCallFactsOwner
+      ) {
+        violations.push(violation);
+      }
     }
   }
 
@@ -4079,6 +6656,81 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
   ];
+  // Read-only maintenance work checks hold exactly the authority of the claim
+  // each previews. Once that claim exists, its check must too, so a cadence
+  // never silently loses the ability to see work.
+  for (const [name, claimName, claimSchema] of MAINTENANCE_WORK_PROBE_ROUTINES) {
+    const claim = (
+      claimSchema === "target" ? posture.targetRoutines : posture.privateRoutines
+    ).find((entry) => entry.name === claimName);
+    if (!claim) continue;
+    const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+    const routine = matches[0];
+    if (
+      matches.length !== 1 ||
+      !routine ||
+      routine.owner !== claim.owner ||
+      !routine.securityDefiner ||
+      routine.publicExecute ||
+      !routine.execute ||
+      !routine.configuration?.includes("search_path=pg_catalog")
+    ) {
+      violations.push(`maintenance work check ${name} is missing or has unsafe posture`);
+    }
+  }
+  if (
+    !options.protectedTables ||
+    posture.privateTables.some((table) => MAINTENANCE_PROBE_TABLES.includes(table.name))
+  ) {
+    const owner = tableByName.get("workspaces")?.owner;
+    for (const name of MAINTENANCE_PRIVATE_TABLES) {
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner !== owner ||
+        table.owner === expectedRole ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger
+      ) {
+        violations.push(`maintenance probe index ${name} is missing or accessible to runtime`);
+      }
+    }
+    for (const name of MAINTENANCE_PROBE_OWNER_ROUTINES) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === name);
+      if (
+        !routine ||
+        routine.owner !== owner ||
+        routine.execute ||
+        routine.publicExecute ||
+        !routine.configuration?.some(
+          (value) => value === "search_path=pg_catalog" || integrationSearchPaths.includes(value),
+        )
+      ) {
+        violations.push(`maintenance probe helper ${name} is missing or unsafe`);
+      }
+    }
+    for (const name of [
+      "maintenance_claim_active(text, text)",
+      "maintenance_title_event_visible(text, uuid)",
+    ]) {
+      const capability = posture.privateRoutines.find((routine) => routine.name === name);
+      if (
+        !capability ||
+        capability.owner !== owner ||
+        !capability.securityDefiner ||
+        !capability.execute ||
+        capability.publicExecute ||
+        !capability.configuration?.includes("search_path=pg_catalog")
+      ) {
+        violations.push(`maintenance claim predicate ${name} is missing or unsafe`);
+      }
+    }
+  }
   if (tableByName.has("organization_credential_providers")) {
     for (const [name] of integrationRoutine) {
       if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {
@@ -4089,6 +6741,62 @@ export function evaluateRuntimeDatabasePosture(
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
+    }
+    if (!DECLARED_PRIVATE_ROUTINES.has(routine.name)) {
+      violations.push(...unknownRoutineViolations(routine, "opengeni_private", expectedRole));
+    }
+    if (RUNTIME_DEFINER_ROUTINE_NAMES.has(routine.name)) {
+      violations.push(
+        ...runtimeDefinerRoutineViolations(routine, definerTableByName, targetSchema),
+      );
+    }
+    if (routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE) {
+      if (
+        !routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        !routine.configuration?.includes("search_path=pg_catalog") ||
+        [
+          "managed_accounts",
+          "organization_plans",
+          "plan_credit_periods",
+          "credit_ledger_entries",
+        ].some((name) => routine.owner !== tableByName.get(name)?.owner)
+      ) {
+        violations.push("subscription plan maintenance inventory has unsafe capability posture");
+      }
+    }
+    if (
+      routine.name === SUBSCRIPTION_PLAN_FREE_ANNIVERSARY_ROUTINE &&
+      (!routine.execute ||
+        routine.publicExecute ||
+        routine.securityDefiner ||
+        !routine.configuration?.includes("search_path=pg_catalog") ||
+        routine.owner !== tableByName.get("managed_accounts")?.owner)
+    ) {
+      violations.push("subscription plan Free anniversary helper has unsafe capability posture");
+    }
+    if (
+      routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)" ||
+      routine.name === "list_exhausted_scheduled_tasks(integer)" ||
+      routine.name === "list_scheduled_task_schedule_reconciliations(integer)" ||
+      routine.name === "list_quiescence_receipt_wake_repairs_v1(integer, uuid, uuid)"
+    ) {
+      const dispatcher = posture.privateRoutines.find(
+        (entry) => entry.name === "claim_session_workflow_wakes(integer)",
+      );
+      if (
+        !dispatcher ||
+        routine.owner !== dispatcher.owner ||
+        !routine.securityDefiner ||
+        routine.publicExecute ||
+        !routine.execute ||
+        !routine.configuration?.includes("search_path=pg_catalog")
+      ) {
+        violations.push(
+          `wake repair inventory ${routine.name} has unsafe dispatcher capability posture`,
+        );
+      }
     }
     const integrationContract = integrationRoutine.find(([name]) => name === routine.name);
     if (integrationContract) {
@@ -4105,7 +6813,32 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     }
-    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      routine.name === "wake_teams_route_for_session_event()" &&
+      (routine.execute ||
+        routine.publicExecute ||
+        routine.securityDefiner ||
+        routine.owner !== tableByName.get("teams_bot_routes")?.owner ||
+        !routine.configuration?.some((value) => integrationSearchPaths.includes(value)))
+    )
+      violations.push("Teams wake trigger has unsafe execution, ownership or search path");
+    if (
+      ["sync_usage_maintenance_due()", "arm_usage_allowances_for_membership()"].includes(
+        routine.name,
+      ) &&
+      (routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        routine.owner !== tableByName.get("workspaces")?.owner ||
+        !routine.configuration?.some((value) =>
+          [
+            "search_path=pg_catalog, pg_temp",
+            `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+            `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
+          ].includes(value),
+        ))
+    )
+      violations.push(`usage maintenance helper ${routine.name} has unsafe posture`);
     if (
       ["validate_mcp_account_bindings(jsonb, jsonb)", "fence_mcp_account_bindings()"].includes(
         routine.name,
@@ -4161,11 +6894,70 @@ export function evaluateRuntimeDatabasePosture(
         `runtime or PUBLIC has forbidden EXECUTE on Skill cascade guard ${routine.name}`,
       );
     }
-    if (!routine.execute && !ownerInternalRoutine) {
+    if (!routine.execute && runtimeRequiresPrivateRoutineExecute(routine.name)) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
+  const notYetCreatedRoutines = new Set(options.routinesCreatedByLaterMigrations ?? []);
+  for (const name of RUNTIME_DEFINER_ROUTINES) {
+    if (
+      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => definerTableByName.has(table)) &&
+      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1 &&
+      !(
+        notYetCreatedRoutines.has(name.slice(0, name.indexOf("("))) &&
+        !posture.privateRoutines.some((routine) => routine.name === name)
+      )
+    ) {
+      violations.push(`runtime definer ${name} is missing or ambiguous`);
+    }
+  }
 
+  return violations;
+}
+
+/**
+ * Own checks for a runtime definer: owned by its tables' owner, never PUBLIC,
+ * not reachable from triggers or other catalog objects, and a pinned
+ * search_path (0929, 0930 and 0932 pin the migration's own path with
+ * `SET search_path FROM CURRENT`) naming only the target schema,
+ * `opengeni_private`, `public`, `pg_catalog` or `$user`, with `pg_temp` allowed
+ * only last. Runtime EXECUTE is checked with the other declared routines.
+ */
+function runtimeDefinerRoutineViolations(
+  routine: RuntimeRoutinePosture,
+  tableByName: ReadonlyMap<string, { owner: string }>,
+  targetSchema: string,
+): string[] {
+  const violations: string[] = [];
+  const label = `runtime definer ${routine.name}`;
+  if (!routine.securityDefiner) violations.push(`${label} is not SECURITY DEFINER`);
+  if (routine.publicExecute !== false) violations.push(`PUBLIC can execute ${label}`);
+  if (routine.triggerCallable !== false) violations.push(`${label} is trigger-callable`);
+  if (routine.hasDependents !== false) violations.push(`${label} has catalog dependents`);
+  const tables: readonly string[] =
+    RUNTIME_DEFINER_ROUTINE_TABLES[routine.name as keyof typeof RUNTIME_DEFINER_ROUTINE_TABLES] ??
+    [];
+  const owners = tables.map((name) => tableByName.get(name)?.owner);
+  if (owners.length === 0 || owners.some((owner) => owner !== routine.owner)) {
+    violations.push(`${label} owner ${routine.owner} does not match its tables' owner`);
+  }
+  const searchPath = routine.configuration
+    ?.find((value) => value.startsWith("search_path="))
+    ?.slice("search_path=".length);
+  const entries = (searchPath ?? "")
+    .split(",")
+    .map((entry) => entry.trim().replaceAll('"', ""))
+    .filter((entry) => entry.length > 0);
+  const allowed = new Set(["$user", targetSchema, "opengeni_private", "public", "pg_catalog"]);
+  const pinned =
+    entries.length > 0 &&
+    entries[0] !== "pg_temp" &&
+    entries.every(
+      (entry, index) => allowed.has(entry) || (entry === "pg_temp" && index === entries.length - 1),
+    );
+  if (!pinned) {
+    violations.push(`${label} has no pinned search_path`);
+  }
   return violations;
 }
 
@@ -4181,11 +6973,220 @@ export async function assertRuntimeDatabasePosture(
   return posture;
 }
 
+/**
+ * Findings of {@link evaluateRuntimeDatabasePosture}, split by what they mean
+ * for a running process. Together they are exactly the strict findings.
+ *
+ * - `fatal`: unsafe or unknowable posture (excess or PUBLIC privileges, wrong
+ *   owner, search_path or RLS, forbidden roles or memberships, missing CONNECT
+ *   or schema USAGE, missing or ambiguous objects, failed shape checks).
+ * - `degraded`: findings caused only by the runtime role lacking an EXECUTE
+ *   grant that this binary's contract requires. Only the features behind those
+ *   routines fail (PostgreSQL refuses the call); nothing is exposed.
+ */
+export type RuntimeDatabasePostureFindings = {
+  fatal: string[];
+  degraded: string[];
+};
+
+function countFindings(findings: readonly string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const finding of findings) counts.set(finding, (counts.get(finding) ?? 0) + 1);
+  return counts;
+}
+
+/**
+ * The posture with every EXECUTE grant the contract requires of the runtime
+ * role present: declared private routines it must execute, and the
+ * target-schema capabilities. Nothing else changes. Returns null when no such
+ * grant is missing.
+ */
+function withRequiredRuntimeExecuteGranted(
+  posture: RuntimeDatabasePosture,
+  options: RuntimeDatabasePostureOptions,
+): RuntimeDatabasePosture | null {
+  const targetCapabilities = new Set<string>(
+    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  );
+  let changed = false;
+  const grant = <T extends RuntimeRoutinePosture>(routine: T, required: boolean): T => {
+    if (routine.execute || !required) return routine;
+    changed = true;
+    return { ...routine, execute: true };
+  };
+  const granted = {
+    ...posture,
+    privateRoutines: posture.privateRoutines.map((routine) =>
+      grant(routine, runtimeRequiresPrivateRoutineExecute(routine.name)),
+    ),
+    targetRoutines: posture.targetRoutines.map((routine) =>
+      grant(routine, targetCapabilities.has(routine.name)),
+    ),
+  };
+  return changed ? granted : null;
+}
+
+/**
+ * Classifies the strict findings for runtime startup and readiness. A finding
+ * is degraded only when granting the missing contract-required EXECUTE grants
+ * removes it and raises no finding the actual catalog does not already have
+ * (a grant that would expose another problem means the missing grant was
+ * hiding it, so everything stays fatal). This holds for every check, present
+ * and future, without tagging individual messages.
+ *
+ * Release and CI gates (the posture CLI, the compatibility workflow, the
+ * previous-binary checks) keep using {@link evaluateRuntimeDatabasePosture},
+ * where every finding fails.
+ */
+export function classifyRuntimeDatabasePosture(
+  posture: RuntimeDatabasePosture,
+  options: RuntimeDatabasePostureOptions,
+): RuntimeDatabasePostureFindings {
+  const findings = evaluateRuntimeDatabasePosture(posture, options);
+  if (findings.length === 0) return { fatal: [], degraded: [] };
+  const granted = withRequiredRuntimeExecuteGranted(posture, options);
+  if (!granted) return { fatal: findings, degraded: [] };
+  const strict = countFindings(findings);
+  const remaining = countFindings(evaluateRuntimeDatabasePosture(granted, options));
+  for (const [finding, count] of remaining) {
+    if (count > (strict.get(finding) ?? 0)) return { fatal: findings, degraded: [] };
+  }
+  const fatal: string[] = [];
+  const degraded: string[] = [];
+  for (const finding of findings) {
+    const count = remaining.get(finding) ?? 0;
+    if (count > 0) {
+      fatal.push(finding);
+      remaining.set(finding, count - 1);
+    } else {
+      degraded.push(finding);
+    }
+  }
+  return { fatal, degraded };
+}
+
+/** Receives the degraded findings of every runtime readiness inspection (empty when none). */
+export type RuntimeDatabaseDegradedListener = (degraded: readonly string[]) => void;
+
+/**
+ * The startup and readiness form of {@link assertRuntimeDatabasePosture}: it
+ * throws {@link RuntimeDatabasePostureError} with the fatal findings only.
+ * Degraded findings (a missing required EXECUTE grant) go to `onDegraded`
+ * and do not make the process unready: one withheld or revoked grant must not
+ * take every pod out of service for one feature.
+ */
+export async function assertRuntimeDatabaseReadiness(
+  db: Database,
+  options: RuntimeDatabasePostureOptions,
+  onDegraded?: RuntimeDatabaseDegradedListener,
+): Promise<{ posture: RuntimeDatabasePosture; degraded: string[] }> {
+  const posture = await inspectRuntimeDatabasePosture(db, options);
+  const { fatal, degraded } = classifyRuntimeDatabasePosture(posture, options);
+  try {
+    onDegraded?.(degraded);
+  } catch {
+    // Reporting is best effort; it never decides readiness.
+  }
+  if (fatal.length > 0) {
+    throw new RuntimeDatabasePostureError(fatal);
+  }
+  return { posture, degraded };
+}
+
+export type RuntimeDatabaseDegradedObserver = {
+  warn(message: string, attributes: Record<string, string | number | boolean>): void;
+  info(message: string, attributes: Record<string, string | number | boolean>): void;
+  setGauge(input: { name: string; help?: string; value: number }): void;
+};
+
+/**
+ * Degraded findings of the latest completed posture inspection in this
+ * process. An inspection that throws (database unreachable, a fatal finding
+ * still reports first) leaves the previous value.
+ */
+export const RUNTIME_DATABASE_DEGRADED_GAUGE = "opengeni_runtime_database_degraded_findings";
+/** At most this many findings are named in one log line; the count is exact. */
+export const RUNTIME_DATABASE_DEGRADED_LOG_FINDINGS = 20;
+/** A persisting degraded posture is logged again at most this often. */
+export const RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Reports degraded runtime posture: the gauge holds the number of degraded
+ * findings of the latest completed inspection; a structured warning names them when
+ * they change, and again at most every
+ * {@link RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS} while they persist; an
+ * info line records recovery. Use one reporter per process for startup and
+ * readiness, so a pod logs a degraded posture once, not once per path.
+ */
+export function reportRuntimeDatabaseDegraded(
+  observability: RuntimeDatabaseDegradedObserver,
+  source: string,
+  options: { logIntervalMs?: number; now?: () => number } = {},
+): RuntimeDatabaseDegradedListener {
+  const interval = options.logIntervalMs ?? RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS;
+  const now = options.now ?? Date.now;
+  let last = "";
+  let lastCount = 0;
+  let loggedAt = 0;
+  return (degraded) => {
+    try {
+      observability.setGauge({
+        name: RUNTIME_DATABASE_DEGRADED_GAUGE,
+        help: "Runtime database posture findings that disable a feature (a missing required EXECUTE grant) without failing readiness, from the latest completed inspection.",
+        value: degraded.length,
+      });
+    } catch {
+      // Metrics are best effort.
+    }
+    const findings = sorted(degraded);
+    const current = findings.join("; ");
+    const changed = current !== last;
+    const previousCount = lastCount;
+    last = current;
+    lastCount = findings.length;
+    if (!changed && (findings.length === 0 || now() - loggedAt < interval)) return;
+    loggedAt = now();
+    try {
+      if (findings.length === 0) {
+        observability.info("Runtime database posture is no longer degraded", {
+          source,
+          previousFindingCount: previousCount,
+        });
+      } else {
+        const named = findings.slice(0, RUNTIME_DATABASE_DEGRADED_LOG_FINDINGS);
+        const omitted = findings.length - named.length;
+        observability.warn(
+          "Runtime database posture is degraded: features that need these grants will fail; readiness is unaffected",
+          {
+            source,
+            findingCount: findings.length,
+            findings: named.join("; ") + (omitted > 0 ? `; and ${omitted} more` : ""),
+          },
+        );
+      }
+    } catch {
+      // Logging is best effort.
+    }
+  };
+}
+
 export function runtimeDatabaseReadyCheck(
   db: Database,
   options: RuntimeDatabasePostureOptions,
+  onDegraded?: RuntimeDatabaseDegradedListener,
 ): () => Promise<void> {
-  return async () => {
-    await assertRuntimeDatabasePosture(db, options);
+  let inFlight: Promise<void> | undefined;
+  return () => {
+    // The HTTP timeout cannot cancel a driver query. Concurrent probes share
+    // the outstanding inspection, as the worker readiness check does, so slow
+    // database answers cannot pile up one pooled connection per probe. The
+    // next probe after it settles always runs a fresh inspection.
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      await assertRuntimeDatabaseReadiness(db, options, onDegraded);
+    })().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
 }

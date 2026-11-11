@@ -2,7 +2,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { clickSelfClosingPopup } from "./self-closing-popup";
 
 let browser: Browser, web: StartedProcess, baseUrl: string;
@@ -76,7 +77,9 @@ for (const theme of ["dark", "light"] as const) {
         try {
           await page.goto(`${baseUrl}/test/claude-subscription.html?scope=${scope}`);
           await page.getByRole("heading", { name: "Connect Claude subscription" }).waitFor();
-          await page.getByRole("button", { name: "Use a setup token", exact: false }).click();
+          const tokenMethod = page.getByRole("radio", { name: "Setup token", exact: true });
+          await tokenMethod.click();
+          expect(await tokenMethod.getAttribute("aria-checked")).toBe("true");
           expect(await page.locator('input[type="file"]').count()).toBe(0);
           expect(await page.getByLabel("Claude account UUID").count()).toBe(0);
           expect(await page.getByLabel("Claude device ID").count()).toBe(0);
@@ -84,7 +87,7 @@ for (const theme of ["dark", "light"] as const) {
             await page.getByLabel("Create a Claude setup token", { exact: true }).inputValue(),
           ).toBe("claude setup-token");
           const connect = page.getByRole("button", {
-            name: "Connect Claude subscription",
+            name: "Connect Claude",
             exact: true,
           });
           expect(await connect.isDisabled()).toBe(true);
@@ -104,7 +107,8 @@ for (const theme of ["dark", "light"] as const) {
           expect(receipt).toMatchObject({ action: "connect", scope, tokenOnly: true });
           expect(await page.locator('[data-slot="usage-meter-group"]').count()).toBe(1);
           expect(await page.getByText(/Resets /).count()).toBeGreaterThanOrEqual(2);
-          await page.getByRole("button", { name: "Check usage now" }).click();
+          // A manager's usage read is a live check, so a token that cannot
+          // check usage is known at once: the button is unavailable without a click.
           await page
             .locator('button[aria-label="Check usage now"][aria-disabled="true"]')
             .waitFor();
@@ -150,7 +154,10 @@ for (const theme of ["dark", "light"] as const) {
           await dialog.waitFor({ state: "detached" });
           await page.getByText("Claude hasn't reported usage yet.", { exact: true }).waitFor();
           expect(await page.getByText("50% left", { exact: true }).count()).toBe(0);
-          expect(await page.getByText("Not reported yet", { exact: true }).count()).toBe(2);
+          // Only windows Claude reports are shown: a new token has none yet,
+          // so no placeholder 5-hour or weekly meters are drawn.
+          expect(await page.getByText("Not reported yet", { exact: true }).count()).toBe(0);
+          expect(await page.locator('[data-slot="usage-meter"]').count()).toBe(0);
           await page.getByRole("button", { name: "Models", exact: true }).click();
           await page.getByRole("button", { name: "Claude subscription", exact: false }).waitFor();
           expect(errors).toEqual([]);

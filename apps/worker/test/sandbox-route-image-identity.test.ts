@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { resolveSandboxRoute } from "../src/activities/agent-turn/sandbox-establish";
 
 describe("managed sandbox logical image identity", () => {
@@ -20,6 +20,7 @@ describe("managed sandbox logical image identity", () => {
     const media: Record<string, unknown> = {};
 
     const route = await resolveSandboxRoute({
+      turn: { id: "turn-1", executionGeneration: 1 } as never,
       input: {
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",
@@ -55,6 +56,7 @@ describe("managed sandbox logical image identity", () => {
     const eventing = { modelRunSettings };
 
     const route = await resolveSandboxRoute({
+      turn: { id: "turn-1", executionGeneration: 1 } as never,
       input: {
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",
@@ -76,5 +78,35 @@ describe("managed sandbox logical image identity", () => {
     expect(eventing.modelRunSettings.sandboxBackend).toBe("modal");
     expect(eventing.modelRunSettings.modelContextWindowTokens).toBe(123_456);
     expect(runSettings.sandboxBackend).toBe("selfhosted");
+  });
+
+  test("a machine-home chat with no machine and no managed fallback asks for a machine", async () => {
+    const settings = testSettings({
+      sandboxBackend: "selfhosted",
+      sandboxSelfhostedEnabled: false,
+      sandboxOwnershipEnabled: false,
+    });
+    const runSettings: Settings = { ...settings, sandboxBackend: "selfhosted" };
+
+    await expect(
+      resolveSandboxRoute({
+        turn: { id: "turn-1", executionGeneration: 1 } as never,
+        input: {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+        } as never,
+        settings,
+        db: {} as never,
+        eventing: { modelRunSettings: runSettings } as never,
+        sandboxState: {} as never,
+        media: {} as never,
+        fileAuthoritySubjectId: null,
+        runSettings,
+        logicalSandboxSettings: settings,
+      }),
+    ).rejects.toThrow(
+      "This chat runs on a Connected Machine, but no machine is selected for it. Choose a machine for this chat, then send the message again.",
+    );
   });
 });

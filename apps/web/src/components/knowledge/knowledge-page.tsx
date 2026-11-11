@@ -1,5 +1,5 @@
 import type { KnowledgeEntryScope, KnowledgeEntrySummary } from "@opengeni/sdk";
-import { Navigate } from "@tanstack/react-router";
+import { Navigate, useNavigate } from "@tanstack/react-router";
 import {
   BrainCircuitIcon,
   FolderPlusIcon,
@@ -10,25 +10,24 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { MoreMenu } from "@/components/ui/page-actions";
-import { PageHeader } from "@/components/ui/page-header";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { orgLabel } from "@/lib/org";
+} from "@opengeni/react/ui/line-tabs";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
-  canManageWorkspaceSettings,
-  hasAccountPermission,
+  canContributeWorkspaceContent,
   hasWorkspacePermission,
-} from "@/lib/permissions";
+} from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";
@@ -41,13 +40,14 @@ import {
   useWorkspaceInstructions,
 } from "./knowledge-instructions";
 import {
-  LearningPage,
+  AGENT_LEARNING_TITLE,
   learningSummary,
   reviewEmptyLine,
   useLearningDefaults,
 } from "./knowledge-learning";
 import {
   initialLibraryView,
+  libraryFilesView,
   LibraryTab,
   type EntryRowActions,
   type LibraryView,
@@ -64,14 +64,15 @@ import { UploadFilesDialog } from "./knowledge-upload";
    Knowledge: one rail page with tabs Library, Instructions and Review (n),
    built like every resource page: a header with one primary action (Add
    knowledge) and a ⋯ menu, a toolbar, and flat lists of rows. Every entry,
-   each change waiting for review, the instructions, Learning, Add knowledge,
-   Edit and History open as their own pages in the content area with a back
+   each change waiting for review, the instructions, Add knowledge, Edit and
+   History open as their own pages in the content area with a back
    link. The URL says which one, so each page can be linked and the browser's
-   back button works.
+   back button works. Agent learning is a workspace settings page; the ⋯ menu
+   opens it there.
    -------------------------------------------------------------------------- */
 
 const TAB_LABEL: Record<KnowledgeTab, string> = {
-  library: "Knowledge",
+  library: "Library",
   instructions: "Instructions",
   review: "Review",
 };
@@ -89,23 +90,16 @@ export function KnowledgePage({
   const workspaceName = personal
     ? "your Personal workspace"
     : (workspace?.name ?? "this workspace");
-  const organizationName = workspace?.accountId
-    ? orgLabel(workspace.accountId, context.accessContext.accountGrants)
-    : null;
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
-  const canWriteOrganization = Boolean(
-    workspace?.accountId &&
-    hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
-  );
-  const canManageWorkspace = canManageWorkspaceSettings(
+  const canWriteOrganization = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspace?.accountId,
+  });
+  const canEditInstructions = canContributeWorkspaceContent(
     context.accessContext,
     workspace,
     context.managedSelfContext,
-  );
-  const canEditInstructions = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "workspace:admin",
   );
   const canUpload =
     context.clientConfig.fileUploads.enabled &&
@@ -113,24 +107,30 @@ export function KnowledgePage({
     hasWorkspacePermission(context.accessContext, workspaceId, "files:upload");
 
   const nav = useKnowledgeNavigation(workspaceId);
-  const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView(personal));
+  const navigate = useNavigate();
+  const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView());
   const [refresh, setRefresh] = useState(0);
   const changed = useCallback(() => setRefresh((value) => value + 1), []);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [collectionOpen, setCollectionOpen] = useState(false);
   const [libraryEmpty, setLibraryEmpty] = useState(false);
 
-  // Old links: Files is a Library filter now, the Review flag is a tab.
+  // Old links: Files is a Library filter now, the Review flag is a tab. A
+  // scope link (Organization documents) opens the Library filtered to it.
   const legacyFiles = search.view === "files";
   const legacyReview = search.review === true && search.view !== "review";
+  const scopeLink = search.scope;
   useEffect(() => {
     if (legacyFiles) {
-      setLibrary((current) => ({ ...current, filters: { type: ["source"] } }));
+      setLibrary(libraryFilesView);
       nav.replace(search.file ? { file: search.file } : {});
     } else if (legacyReview) {
       nav.replace({ view: "review" });
+    } else if (scopeLink) {
+      setLibrary((current) => ({ ...current, scope: scopeLink }));
+      nav.replace({});
     }
-  }, [legacyFiles, legacyReview, nav, search.file]);
+  }, [legacyFiles, legacyReview, scopeLink, nav, search.file]);
 
   const tab: KnowledgeTab =
     search.view === "instructions" || search.view === "review" || legacyReview
@@ -149,19 +149,14 @@ export function KnowledgePage({
       key ? nav.openProposal(key, { replace }) : nav.showTab("review", { replace }),
     onChanged: changed,
   });
-  const shared = useLearningDefaults(workspaceId, personal ? "personal" : "workspace");
-  const mine = useLearningDefaults(workspaceId, "personal");
+  const shared = useLearningDefaults(workspaceId, "workspace");
   const instructions = useWorkspaceInstructions(workspaceId);
   const archive = useArchiveKnowledge(workspaceId, changed);
 
   const createScope: KnowledgeEntryScope =
-    library.scope !== "all" &&
-    (library.scope !== "organization" || canWriteOrganization) &&
-    !(personal && library.scope !== "personal")
+    library.scope !== "all" && (library.scope !== "organization" || canWriteOrganization)
       ? library.scope
-      : personal
-        ? "personal"
-        : "workspace";
+      : "workspace";
 
   const entryLink = useCallback(
     (id: string) => `/workspaces/${workspaceId}/state?entry=${encodeURIComponent(id)}`,
@@ -257,24 +252,23 @@ export function KnowledgePage({
     );
   }
 
+  // Agent learning is a settings page now; old Knowledge links open it there.
+  if (search.page === "learning") {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/settings"
+        params={{ workspaceId }}
+        search={{ section: "learning" }}
+        replace
+      />
+    );
+  }
+
   const backToTab = () => nav.showTab(tab);
   const openEntry = (id: string, revision?: string) =>
     nav.openEntry(id, { ...(revision ? { revision } : {}), from: tab });
 
   const subpage = (() => {
-    if (search.page === "learning") {
-      return (
-        <LearningPage
-          workspaceName={workspace?.name ?? "this workspace"}
-          organizationName={organizationName}
-          personal={personal}
-          canManageWorkspace={canManageWorkspace}
-          shared={shared}
-          mine={mine}
-          onClose={backToTab}
-        />
-      );
-    }
     if (search.page === "instructions") {
       return (
         <InstructionsPage
@@ -336,7 +330,6 @@ export function KnowledgePage({
         <AddKnowledgePage
           workspaceId={workspaceId}
           workspaceName={workspace?.name ?? "this workspace"}
-          personal={personal}
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           {...(search.collection ? { collectionId: search.collection } : {})}
@@ -374,7 +367,7 @@ export function KnowledgePage({
           canEdit={canEdit}
           canWriteOrganization={canWriteOrganization}
           refresh={refresh}
-          backLabel={tab === "library" ? "Knowledge" : TAB_LABEL[tab]}
+          backLabel={TAB_LABEL[tab]}
           onBack={backToTab}
           onOpenEntry={openEntry}
           onEdit={(id) => nav.openPage("edit", { entry: id })}
@@ -411,7 +404,12 @@ export function KnowledgePage({
 
   const waiting = review.items.length;
   const showReview = waiting > 0 || tab === "review";
-  const openLearning = withScroll(() => nav.openPage("learning", { view: tab }));
+  const openLearning = () =>
+    void navigate({
+      to: "/workspaces/$workspaceId/settings",
+      params: { workspaceId },
+      search: { section: "learning" },
+    });
   const showAdd = canEdit && !(tab === "library" && libraryEmpty);
 
   return (
@@ -453,7 +451,7 @@ export function KnowledgePage({
                 {canEdit ? <DropdownMenuSeparator /> : null}
                 <DropdownMenuItem onSelect={openLearning}>
                   <GraduationCapIcon />
-                  Learning
+                  {AGENT_LEARNING_TITLE}
                   {shared.loading ? null : (
                     <span className="ml-auto pl-6 text-xs text-fg-subtle">
                       {learningSummary(shared.modes)}
@@ -465,8 +463,8 @@ export function KnowledgePage({
           }
           tabs={
             <LineTabsList aria-label="Knowledge">
-              <LineTabsTrigger value="library">Library</LineTabsTrigger>
-              <LineTabsTrigger value="instructions">Instructions</LineTabsTrigger>
+              <LineTabsTrigger value="library">{TAB_LABEL.library}</LineTabsTrigger>
+              <LineTabsTrigger value="instructions">{TAB_LABEL.instructions}</LineTabsTrigger>
               {showReview ? (
                 <LineTabsTrigger
                   value="review"
@@ -474,7 +472,7 @@ export function KnowledgePage({
                   countTone="attention"
                   countLabel={waiting ? `${waiting} waiting for review` : undefined}
                 >
-                  Review
+                  {TAB_LABEL.review}
                 </LineTabsTrigger>
               ) : null}
             </LineTabsList>
@@ -496,8 +494,8 @@ export function KnowledgePage({
             canUpload={canUpload}
             onAdd={withScroll(() => nav.openPage("add"))}
             onUpload={() => setUploadOpen(true)}
+            {...(canEdit ? { onNewCollection: () => setCollectionOpen(true) } : {})}
             onEmptyChange={setLibraryEmpty}
-            personal={personal}
           />
         </LineTabsContent>
         <LineTabsContent value="instructions">
@@ -534,11 +532,10 @@ export function KnowledgePage({
           onOpenChange={setUploadOpen}
           workspaceId={workspaceId}
           workspaceName={workspace?.name ?? "this workspace"}
-          personal={personal}
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           onUploaded={() => {
-            setLibrary((current) => ({ ...current, filters: { type: ["source"] } }));
+            setLibrary(libraryFilesView);
             changed();
           }}
         />

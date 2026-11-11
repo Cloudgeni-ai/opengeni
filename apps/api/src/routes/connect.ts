@@ -1,3 +1,5 @@
+import { integrationAvailable } from "../integrations/teams-rollout";
+import { GOOGLE_CONNECTOR_SETUP_UNAVAILABLE } from "../integrations/google-connector-availability";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -8,10 +10,14 @@ import {
   ConnectOperationRequest,
   ConnectProvider,
   ConnectAccount,
+  connectProviderAcceptsRequestedScopes,
+  preparedMcpHeaders,
 } from "@opengeni/contracts/connect";
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   InstallApiIntegrationRequest,
+  OPENGENI_DESKTOP_APP_HEADER,
+  desktopAppReturnUrl,
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
@@ -26,6 +32,7 @@ import {
   listPendingConnectAttempts,
   withWorkspaceSubjectRls,
   installApiIntegration,
+  IntegrationChangeRequiresAdminError,
   listConnectionsMetadata,
   getConnectionMetadata,
   createConnection,
@@ -33,7 +40,6 @@ import {
   encryptEnvironmentValue,
   normalizedCredentialHeaders,
   listGitHubInstallationAccessForWorkspace,
-  listPrReviewAppRegistrations,
   listSocialConnections,
   getSocialConnection,
 } from "@opengeni/db";
@@ -41,18 +47,24 @@ import {
   externalActorContinuationForAuthorization,
   requireAccessGrantAuthorization,
   hasPermission,
+  hasIntegrationAdminPermission,
+  requireMemberIntegrationSetupAllowed,
   requireEnvironmentEncryption,
   isFikenConnection,
   isOpenGeniSlackBotConnection,
   prepareCapabilityEnable,
+  prepareMcpConnectionActivation,
   buildCapabilityCatalog,
   integrationKeyForConnectProvider,
+  MissingPermissionRefusal,
+  WORKSPACE_SETTINGS_REFUSAL,
+  workspaceSettingsAuthorized,
+  type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
-import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
 import { prepareFikenTokenInstall, startFikenOAuth } from "../integrations/fiken";
-import { startAtlassianOAuth } from "../integrations/atlassian";
 import { startSlackBotInstall } from "../integrations/slack-install";
 import { startPersonalGitHubOAuth } from "../integrations/personal-github";
 import { socialOAuthClientFor, startSocialOAuth } from "../integrations/social-oauth";
@@ -60,42 +72,110 @@ import {
   githubAppConnectNavigation,
   prepareGitHubAppConnectAction,
 } from "../integrations/github-app-connect";
-import { githubAppMissingSettings, prReviewGitHubAppMissingSettings } from "@opengeni/github";
-import { requireGitHubLensConnect } from "../integrations/github-lens-connect";
+import { githubAppMissingSettings } from "@opengeni/github";
 import { isPersonalGitHubConnection } from "@opengeni/contracts/personal-github";
-import { startGoogleDriveOAuth } from "../integrations/google-drive";
-import {
-  GOOGLE_DRIVE_CREDENTIAL_ROLE,
-  googleDriveScopesAllowCapability,
-} from "@opengeni/contracts/google-drive";
-import { ATLASSIAN_CREDENTIAL_ROLE } from "@opengeni/contracts/atlassian";
+import { GOOGLE_DRIVE_CREDENTIAL_ROLE } from "@opengeni/contracts/google-drive";
+import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import {
   curatedOAuthReadiness,
+  microsoftOrganizationApprovalUrl,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
-import { executeConnectOperation } from "@opengeni/core";
+import {
+  curatedConnectFinishPermissions,
+  finishUnfinishedCuratedSetups,
+  isOwnAccountInstall,
+} from "../integrations/curated-connect-finish";
+import { assertMcpCredentialContentFlowAllowed, executeConnectOperation } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
-import { startMcpOAuth, requireIntegrationsStateSecret } from "../integrations/oauth-client";
-import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
+import {
+  startMcpOAuth,
+  integrationBaseUrl,
+  requireIntegrationsStateSecret,
+  gmailOAuthClientConfigured,
+  googleDriveOAuthClientConfigured,
+  googleCalendarOAuthClientConfigured,
+} from "../integrations/oauth-client";
+import { CONNECT_FINISHED_PATH, connectFinishedPage } from "../integrations/connect-finished-page";
+import {
+  OFFICIAL_GMAIL_MCP_URL,
+  OFFICIAL_DRIVE_MCP_URL,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+} from "../integrations/oauth-profiles";
 import { z } from "zod";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
 } from "@opengeni/config";
 import { parseRequestJson } from "../http/request-body";
+import { connectRequestActor, assertAgentPreparedConnect } from "../prepared-mcp-actor";
+
+type ConnectPermission = Parameters<typeof requireAccessGrantAuthorization>[3] & string;
+
+/**
+ * Whether a Connect step's permission is held. A workspace-owned social
+ * account (`workspace:admin`) is a workspace setting, which the owner of a
+ * Personal workspace manages too (requireWorkspaceSettingsGrant).
+ */
+/**
+ * Whether a Connect step's permission is held. `workspace:admin` is the
+ * workspace settings decision ({@link workspaceSettingsAuthorized}), worked out
+ * before the Connect transaction so it never queries while that holds locks.
+ */
+function connectPermissionHeld(
+  authorization: AccessGrantAuthorization,
+  settingsAuthorized: boolean,
+  permission: ConnectPermission,
+): boolean {
+  return permission === "workspace:admin"
+    ? settingsAuthorized
+    : hasPermission(authorization.grant.permissions, permission);
+}
+
+/** For the setups whose start step ran the full workspace settings check. */
+const PERSONAL_OWNER_SETTINGS = { personalOwnerSettings: true } as const;
+
+/** {@link requireAccessGrantAuthorization} for a Connect step's permission. */
+async function requireConnectAuthorization(
+  c: Parameters<typeof requireAccessGrantAuthorization>[0],
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  permission: ConnectPermission,
+): Promise<AccessGrantAuthorization> {
+  if (permission !== "workspace:admin") {
+    return await requireAccessGrantAuthorization(c, deps, workspaceId, permission);
+  }
+  const authorization = await requireAccessGrantAuthorization(
+    c,
+    deps,
+    workspaceId,
+    "workspace:read",
+  );
+  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return authorization;
+  throw new MissingPermissionRefusal("workspace:admin", {
+    message: WORKSPACE_SETTINGS_REFUSAL,
+  });
+}
 
 /** Shared durable setup entry. Provider completion is distinct from
  * subsequent preview/install; never report an OAuth token as a ready integration. */
 export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const canReadAttempt = (permissions: Parameters<typeof hasPermission>[0], providerId: string) =>
-    ["x", "reddit", "mcp-install"].includes(providerId)
+  const canReadAttempt = (
+    permissions: Parameters<typeof hasPermission>[0],
+    attempt: Parameters<typeof connectSetupPermission>[0],
+  ) => {
+    const providerId = attempt.providerId;
+    return ["x", "reddit", "mcp-install"].includes(providerId)
       ? hasPermission(permissions, "workspace:read")
       : providerId === "github-app"
         ? hasPermission(permissions, "github:use") || hasPermission(permissions, "github:manage")
-        : providerId === "github-lens"
-          ? hasPermission(permissions, "workspace:read")
-          : hasPermission(permissions, "connections:read");
+        : hasPermission(permissions, "connections:read") ||
+          // One's own sign-in attempt is readable with the permission that started it.
+          (connectSetupPermission(attempt) === "connections:personal" &&
+            hasPermission(permissions, "connections:personal"));
+  };
   app.get("/v1/workspaces/:workspaceId/connect/catalog", async (c) => {
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -110,7 +190,21 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       async (_tx, current) => current,
     );
     const canWrite = hasPermission(authorization.grant.permissions, "connections:write");
+    const personalSetup = hasPermission(authorization.grant.permissions, "connections:personal");
     const personal = isPersonalConnectionOwnerPrincipal(authorization);
+    // A workspace-owned social account is a workspace setting.
+    const workspaceSettings = await workspaceSettingsAuthorized(
+      deps,
+      authorization,
+      c.req.param("workspaceId"),
+    );
+    // Signing in to one's own account needs only what the attempt will check.
+    const canSignInPersonally = (providerId: string) =>
+      personal &&
+      hasPermission(
+        authorization.grant.permissions,
+        connectSetupPermission({ providerId, ownership: "personal" }),
+      );
     let mcpConfigured = false;
     let credentialConfigured = false;
     try {
@@ -130,9 +224,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           configured = false;
         }
         const ownership = [
-          ...(hasPermission(authorization.grant.permissions, "workspace:admin")
-            ? ["workspace" as const]
-            : []),
+          ...(workspaceSettings ? ["workspace" as const] : []),
           ...(personal ? ["personal" as const] : []),
         ];
         return ConnectProvider.parse({
@@ -154,7 +246,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Install MCP capability",
         family: "mcp",
         readiness:
-          !external || !hasPermission(authorization.grant.permissions, "capabilities:manage")
+          !external || !hasPermission(authorization.grant.permissions, "connections:write")
             ? "unsupported"
             : deps.settings.integrationsEnabled
               ? "available"
@@ -162,26 +254,34 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         ownership: ["workspace"],
         setup: ["installation"],
       }),
-      ...CORE_INTEGRATION_DEFINITIONS.map((definition) => {
+      ...CORE_INTEGRATION_DEFINITIONS.filter((definition) =>
+        integrationAvailable(deps.settings, c.req.param("workspaceId"), definition.id),
+      ).map((definition) => {
         const readiness = curatedOAuthReadiness(deps.settings, definition);
+        // Without connections:write, a person may still connect their own
+        // account (connections:personal), so only personal ownership is offered.
+        const ownership = readiness.ownership.filter(
+          (owner) => (owner !== "personal" || personal) && (owner === "personal" || canWrite),
+        );
+        const allowed = canWrite || (personalSetup && ownership.includes("personal"));
         return ConnectProvider.parse({
           id: definition.id,
           label: definition.name,
           family: definition.provider.id,
           readiness:
-            !external || !canWrite
+            !external || !allowed
               ? "unsupported"
               : readiness.configured
                 ? "available"
                 : "needs_configuration",
           ...(!external
             ? { reason: "A verified user is required by this Connect adapter" }
-            : !canWrite
+            : !allowed
               ? { reason: "connections:write permission required" }
               : !readiness.configured
                 ? { reason: "Deployment OAuth or encryption configuration is incomplete" }
                 : {}),
-          ownership: readiness.ownership.filter((owner) => owner !== "personal" || personal),
+          ownership,
           setup: ["oauth"],
         });
       }),
@@ -201,26 +301,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       ),
       ConnectProvider.parse({
-        id: "atlassian",
-        label: "Atlassian (Jira and Confluence)",
-        family: "atlassian",
-        readiness:
-          !external || !canWrite || !personal
-            ? "unsupported"
-            : mcpConfigured &&
-                deps.settings.atlassianClientId?.trim() &&
-                deps.settings.atlassianClientSecret?.trim()
-              ? "available"
-              : "needs_configuration",
-        ownership: personal ? ["personal"] : [],
-        setup: ["oauth"],
-      }),
-      ConnectProvider.parse({
         id: "slack-bot",
         label: "Slack workspace bot",
         family: "slack",
         readiness:
-          !external || !canWrite
+          !external || !hasPermission(authorization.grant.permissions, "capabilities:manage")
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
@@ -233,15 +318,60 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       ConnectProvider.parse({
         id: "gmail",
+        ...(!deps.settings.googleConnectorSetupEnabled
+          ? { reason: GOOGLE_CONNECTOR_SETUP_UNAVAILABLE }
+          : {}),
         label: "Gmail",
         family: "google",
         readiness:
-          !external || !canWrite
+          !external || !canSignInPersonally("gmail")
             ? "unsupported"
-            : mcpConfigured
+            : mcpConfigured && gmailOAuthClientConfigured(deps.settings)
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["workspace", "personal"] : ["workspace"],
+        ownership: personal ? ["personal"] : [],
+        setup: ["oauth"],
+      }),
+      ConnectProvider.parse({
+        id: "google-drive",
+        label: "Google Drive",
+        family: "google",
+        ...(!deps.settings.googleConnectorSetupEnabled
+          ? { reason: GOOGLE_CONNECTOR_SETUP_UNAVAILABLE }
+          : !deps.settings.googleDriveMcpEnabled
+            ? {
+                reason:
+                  "Google Drive setup is unavailable until this deployment completes Google's preview and OAuth requirements.",
+              }
+            : {}),
+        readiness:
+          !external || !canSignInPersonally("google-drive")
+            ? "unsupported"
+            : mcpConfigured && googleDriveOAuthClientConfigured(deps.settings)
+              ? "available"
+              : "needs_configuration",
+        ownership: personal ? ["personal"] : [],
+        setup: ["oauth"],
+      }),
+      ConnectProvider.parse({
+        id: "google-calendar",
+        label: "Google Calendar",
+        family: "google",
+        ...(!deps.settings.googleConnectorSetupEnabled
+          ? { reason: GOOGLE_CONNECTOR_SETUP_UNAVAILABLE }
+          : !deps.settings.googleCalendarEnabled
+            ? {
+                reason:
+                  "Google Calendar setup is unavailable until this deployment adds the Calendar scopes to its Google OAuth app.",
+              }
+            : {}),
+        readiness:
+          !external || !canWrite || !personal
+            ? "unsupported"
+            : mcpConfigured && googleCalendarOAuthClientConfigured(deps.settings)
+              ? "available"
+              : "needs_configuration",
+        ownership: personal ? ["personal"] : [],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
@@ -249,14 +379,20 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Slack account",
         family: "slack",
         readiness:
-          !external || !canWrite
+          !external || (!canWrite && !canSignInPersonally("slack-personal"))
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
                 deps.settings.slackClientSecret?.trim()
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["workspace", "personal"] : ["workspace"],
+        ownership: !canWrite
+          ? canSignInPersonally("slack-personal")
+            ? ["personal"]
+            : ["workspace"]
+          : personal
+            ? ["workspace", "personal"]
+            : ["workspace"],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
@@ -289,43 +425,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         ownership: ["workspace"],
         setup: ["oauth", "installation"],
       }),
-      ConnectProvider.parse({
-        id: "github-lens",
-        label: "OpenGeni Lens PR review",
-        family: "github-lens",
-        readiness:
-          !external ||
-          !hasPermission(authorization.grant.permissions, "workspace:admin") ||
-          !hasPermission(authorization.grant.permissions, "secrets:write")
-            ? "unsupported"
-            : credentialConfigured &&
-                deps.settings.sandboxBackend !== "selfhosted" &&
-                prReviewGitHubAppMissingSettings(deps.settings).length === 0
-              ? "available"
-              : "needs_configuration",
-        ownership: ["workspace"],
-        setup: ["oauth", "installation"],
-      }),
-      ...(["google-drive-knowledge", "google-drive-publish"] as const).map((id) =>
-        ConnectProvider.parse({
-          id,
-          label:
-            id === "google-drive-publish"
-              ? "Google Drive publishing"
-              : "Google Drive knowledge sources",
-          family: "google-drive",
-          readiness:
-            !external || !canWrite || !personal
-              ? "unsupported"
-              : mcpConfigured &&
-                  deps.settings.googleDriveClientId?.trim() &&
-                  deps.settings.googleDriveClientSecret?.trim()
-                ? "available"
-                : "needs_configuration",
-          ownership: personal ? ["personal"] : [],
-          setup: ["oauth"],
-        }),
-      ),
       ConnectProvider.parse({
         id: "fiken-token",
         label: "Fiken",
@@ -415,11 +514,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       hasPermission(grant.permissions, "github:manage")
         ? await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId)
         : [];
-    const lensRegistrations = await listPrReviewAppRegistrations(
-      deps.db,
-      grant.accountId,
-      workspaceId,
-    );
     const socialConnections = await listSocialConnections(
       deps.db,
       workspaceId,
@@ -442,17 +536,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 : connection.status === "disabled"
                   ? "disabled"
                   : "auth_needed",
-          }),
-        ),
-      ...lensRegistrations
-        .filter((registration) => registration.credentialKind === "managed_github_app")
-        .map((registration) =>
-          ConnectAccount.parse({
-            id: `lens-registration:${registration.id}`,
-            providerId: "github-lens",
-            label: registration.providerAccountLogin ?? "Lens installation",
-            ownership: "workspace",
-            status: registration.status === "active" ? "connected" : "disabled",
           }),
         ),
       ...githubInstallations.map((installation) =>
@@ -497,44 +580,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     : "auth_needed",
             }),
           ];
-        if (connection.metadata.credentialRole === GOOGLE_DRIVE_CREDENTIAL_ROLE)
-          return [
-            ConnectAccount.parse({
-              id: connection.id,
-              version: connection.version,
-              providerId: googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file")
-                ? "google-drive-publish"
-                : "google-drive-knowledge",
-              label: String(
-                connection.metadata.googleEmail ??
-                  connection.metadata.googleDisplayName ??
-                  "Google Drive",
-              ),
-              ownership: "personal",
-              status:
-                connection.status === "revoked"
-                  ? "disabled"
-                  : connection.status === "active"
-                    ? "connected"
-                    : "auth_needed",
-            }),
-          ];
-        if (connection.metadata.credentialRole === ATLASSIAN_CREDENTIAL_ROLE)
-          return [
-            ConnectAccount.parse({
-              id: connection.id,
-              version: connection.version,
-              providerId: "atlassian",
-              label: String(connection.metadata.displayName ?? "Atlassian"),
-              ownership: "personal",
-              status:
-                connection.status === "revoked"
-                  ? "disabled"
-                  : connection.status === "active"
-                    ? "connected"
-                    : "auth_needed",
-            }),
-          ];
+        // Retired native Google Drive source connections are not offered.
+        if (connection.metadata.credentialRole === GOOGLE_DRIVE_CREDENTIAL_ROLE) return [];
         if (isFikenConnection(connection))
           return [
             ConnectAccount.parse({
@@ -584,15 +631,25 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   ? "slack-personal"
                   : connection.metadata.mcpUrl === OFFICIAL_GMAIL_MCP_URL
                     ? "gmail"
-                    : "mcp-oauth",
+                    : connection.metadata.mcpUrl === OFFICIAL_DRIVE_MCP_URL
+                      ? "google-drive"
+                      : connection.metadata.mcpUrl === OFFICIAL_GOOGLE_CALENDAR_MCP_URL
+                        ? "google-calendar"
+                        : "mcp-oauth",
               label: connection.providerDomain,
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
                 connection.status === "revoked"
                   ? "disabled"
-                  : connection.status === "active"
-                    ? "connected"
-                    : "auth_needed",
+                  : [
+                        OFFICIAL_GMAIL_MCP_URL,
+                        OFFICIAL_DRIVE_MCP_URL,
+                        OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+                      ].includes(connection.metadata.mcpUrl) && connection.subjectId === null
+                    ? "auth_needed"
+                    : connection.status === "active"
+                      ? "connected"
+                      : "auth_needed",
             }),
           ];
         if (connection.metadata.credentialRole !== API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) return [];
@@ -600,6 +657,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (!Array.isArray(ids)) return [];
         return CORE_INTEGRATION_DEFINITIONS.filter(
           (definition) =>
+            integrationAvailable(deps.settings, c.req.param("workspaceId"), definition.id) &&
             ids.includes(definition.id) &&
             definition.provider.id === connection.metadata.providerFamily,
         ).map((definition) =>
@@ -633,9 +691,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const input = await parseRequestJson(c, AdvanceConnectRequest);
     const action = input.action;
     const workspaceId = c.req.param("workspaceId");
+    // Adding an MCP server or an API integration is member work
+    // (INTEGRATION_SETUP_PERMISSION); auto-approval and changing what is
+    // already on stay with integration admins.
     const permission =
       action.type === "install"
-        ? "capabilities:manage"
+        ? "connections:write"
         : action.type === "credentials"
           ? "connections:write"
           : "workspace:read";
@@ -646,21 +707,33 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const continuation = externalActorContinuationForAuthorization(authorization);
     if (!authorization.contextIntegrity)
       throw new HTTPException(403, { message: "Verified Connect authority required" });
-    const scope = {
-      accountId: authorization.grant.accountId,
-      workspaceId,
-      subjectId: authorization.grant.subjectId,
-      personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
-      ...(continuation ? { externalContinuation: continuation } : {}),
-    };
+    const actor = await connectRequestActor(deps, authorization);
+    const scope = actor.scope;
     // Reject invalid caller selections before taking a durable operation claim.
     // Older revisions still go through the receipt-aware claim path for replay.
     const stored = await getConnectAttempt(deps.db, scope, c.req.param("attemptId"));
     const before = stored.attempt;
+    assertAgentPreparedConnect(actor, before);
     const advancePermission =
-      before.providerId === "mcp-install" ? "capabilities:manage" : permission;
+      before.providerId === "mcp-install"
+        ? "connections:write"
+        : action.type === "credentials"
+          ? connectSetupPermission(before)
+          : action.type === "install" &&
+              (await isOwnAccountInstall(deps.db, deps.settings, scope, before))
+            ? "connections:personal"
+            : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
-      throw new HTTPException(403, { message: `${advancePermission} required` });
+      throw new MissingPermissionRefusal(advancePermission);
+    // A member adding an MCP server or a workspace integration needs their
+    // organization to let members turn on integrations.
+    const memberSetup = !hasIntegrationAdminPermission(authorization.grant);
+    if (
+      memberSetup &&
+      (before.providerId === "mcp-install" ||
+        (action.type === "install" && advancePermission !== "connections:personal"))
+    )
+      await requireMemberIntegrationSetupAllowed(deps.db, scope);
     if (before.providerId === "mcp-install") {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "Choose an MCP capability" });
@@ -677,7 +750,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           operationId: input.idempotencyKey,
           inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, scope, "capabilities:manage", origin),
+            requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
               throw new HTTPException(409, { message: "Reload MCP setup" });
@@ -688,7 +761,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               accountId: scope.accountId,
               workspaceId,
               capabilityId: values.capabilityId,
+              // Members turn a server on only if it is not on yet.
+              ...(memberSetup ? { memberSetup: true } : {}),
               payload: { config: {}, metadata: {}, headers: {} },
+              mcpServerLogoStorage: deps.objectStorage,
             });
             return {
               commit: async (tx, current) => {
@@ -707,14 +783,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       );
     }
-    if (["github-app", "github-lens"].includes(before.providerId)) {
-      const installationPermission =
-        before.providerId === "github-lens" ? "workspace:admin" : "github:manage";
-      if (
-        !hasPermission(authorization.grant.permissions, installationPermission) ||
-        (before.providerId === "github-lens" &&
-          !hasPermission(authorization.grant.permissions, "secrets:write"))
-      )
+    if (before.providerId === "github-app") {
+      const installationPermission = "github:manage";
+      if (!hasPermission(authorization.grant.permissions, installationPermission))
         throw new HTTPException(403, { message: "Installation management permission required" });
       return c.json(
         await executeConnectOperation({
@@ -726,10 +797,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
           authorize: async (tx, _attempt, origin) => {
             await requireConnectOwnerAuthority(tx, scope, installationPermission, origin);
-            if (before.providerId === "github-lens") {
-              await requireConnectOwnerAuthority(tx, scope, "secrets:write", origin);
-              await requireGitHubLensConnect({ ...deps, db: tx });
-            }
           },
           execute: async (attempt) =>
             prepareGitHubAppConnectAction(deps, scope, c.req.url, attempt, action),
@@ -892,26 +959,38 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (["mcp-bearer", "mcp-headers"].includes(before.providerId)) {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "MCP credentials required" });
-      const values =
-        before.providerId === "mcp-headers"
-          ? z
-              .object({
-                mcpUrl: z.string().url().max(4096),
-                headers: z.string().min(2).max(65_536),
-              })
-              .strict()
-              .parse(action.values)
-          : z
-              .object({
-                mcpUrl: z.string().url().max(4096),
-                token: z
-                  .string()
-                  .min(1)
-                  .max(16_384)
-                  .regex(/^[^\u0000-\u0020\u007f]+$/),
-              })
-              .strict()
-              .parse(action.values);
+      let values: { mcpUrl: string; headers: string } | { mcpUrl: string; token: string };
+      if (before.mcpSetup) {
+        try {
+          values = {
+            mcpUrl: before.mcpSetup.endpointUrl,
+            headers: JSON.stringify(preparedMcpHeaders(before.mcpSetup, action.values)),
+          };
+        } catch {
+          throw new HTTPException(422, { message: "Supply exactly the requested secret fields" });
+        }
+      } else {
+        values =
+          before.providerId === "mcp-headers"
+            ? z
+                .object({
+                  mcpUrl: z.string().url().max(4096),
+                  headers: z.string().min(2).max(65_536),
+                })
+                .strict()
+                .parse(action.values)
+            : z
+                .object({
+                  mcpUrl: z.string().url().max(4096),
+                  token: z
+                    .string()
+                    .min(1)
+                    .max(16_384)
+                    .regex(/^[^\u0000-\u0020\u007f]+$/),
+                })
+                .strict()
+                .parse(action.values);
+      }
       let credentialHeaders: Record<string, string>;
       try {
         credentialHeaders =
@@ -927,9 +1006,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const destination = new URL(values.mcpUrl);
       if (
-        [WORKSPACE_OPENROUTER_CONNECTION_DOMAIN, VERCEL_AI_GATEWAY_CONNECTION_DOMAIN].some(
-          (domain) => domain === destination.hostname,
-        )
+        [
+          WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+          VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+          WORKSPACE_OPPER_CONNECTION_DOMAIN,
+        ].some((domain) => domain === destination.hostname)
       )
         throw new HTTPException(422, {
           message: "Use the dedicated workspace provider credential flow",
@@ -945,6 +1026,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       const encryptionKey = requireEnvironmentEncryption(deps.settings);
       const mcpUrl = destination.toString();
+      // An Opengeni API key reads its organization: EU-only content stays in
+      // EU-only workspaces.
+      await assertMcpCredentialContentFlowAllowed(deps.db, {
+        target: { accountId: actor.grant.accountId, workspaceId: actor.grant.workspaceId },
+        url: mcpUrl,
+        headers: credentialHeaders,
+      });
       return c.json(
         await executeConnectOperation({
           db: deps.db,
@@ -953,11 +1041,44 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           expectedRevision: input.expectedRevision,
           operationId: input.idempotencyKey,
           inputDigest: createHmac("sha256", encryptionKey).update(stableJson(input)).digest("hex"),
-          authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
+          beforeOperation: actor.beforeOperation,
+          authorize: async (tx, attempt, origin) => {
+            // Finishing an agent-prepared key setup is member work: it saves a
+            // credential and turns the server on only if it is not on yet.
+            await requireConnectOwnerAuthority(tx, scope, "connections:write", origin);
+          },
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
               throw new HTTPException(409, { message: "Reload the current credential setup" });
+            let activation: Awaited<ReturnType<typeof prepareMcpConnectionActivation>> | undefined;
+            if (attempt.mcpSetup) {
+              try {
+                activation = await prepareMcpConnectionActivation({
+                  grant: actor.grant,
+                  settings: deps.settings,
+                  setup: attempt.mcpSetup,
+                  ownership: attempt.ownership,
+                  headers: credentialHeaders,
+                  ...(deps.mcpCapabilityProbe ? { probe: deps.mcpCapabilityProbe } : {}),
+                  logoStorage: deps.objectStorage,
+                });
+              } catch {
+                // No credential/catalog write has occurred. Settle this exact
+                // operation without recording provider text or secret values.
+                return {
+                  commit: async (_tx, current) => ({
+                    ...current,
+                    revision: current.revision + 1,
+                    error: {
+                      code: "mcp_verification_failed",
+                      message:
+                        "Could not verify the MCP connection. Check the key and server, then submit again.",
+                      retryable: false,
+                    },
+                  }),
+                };
+              }
+            }
             const credentialEncrypted = encryptEnvironmentValue(
               encryptionKey,
               JSON.stringify({ headers: credentialHeaders }),
@@ -1014,11 +1135,20 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       createdBySubjectId: scope.subjectId,
                     });
                 if (!connection) throw new HTTPException(409, { message: "MCP account changed" });
+                if (activation) await activation.commit(tx, connection);
+                const { error: _error, ...settled } = current;
                 return {
-                  ...current,
+                  ...settled,
                   revision: current.revision + 1,
                   state: "complete",
                   credentialsCommitted: true,
+                  ...(activation
+                    ? {
+                        integrationInstalled: true,
+                        completionRequirement: "integration" as const,
+                        mcpCapabilityId: activation.capabilityId,
+                      }
+                    : {}),
                   nextAction: { type: "none" },
                   account: {
                     id: connection.id,
@@ -1035,7 +1165,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       );
     }
-    if (["mcp-oauth", "slack-personal", "gmail"].includes(before.providerId)) {
+    if (
+      ["mcp-oauth", "slack-personal", "gmail", "google-drive", "google-calendar"].includes(
+        before.providerId,
+      )
+    ) {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "MCP OAuth requires a server URL" });
       const values =
@@ -1043,10 +1177,14 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? { mcpUrl: OPENGENI_PERSONAL_SLACK_MCP_URL }
           : before.providerId === "gmail"
             ? { mcpUrl: OFFICIAL_GMAIL_MCP_URL }
-            : z
-                .object({ mcpUrl: z.string().url().max(4096) })
-                .strict()
-                .parse(action.values);
+            : before.providerId === "google-drive"
+              ? { mcpUrl: OFFICIAL_DRIVE_MCP_URL }
+              : before.providerId === "google-calendar"
+                ? { mcpUrl: OFFICIAL_GOOGLE_CALENDAR_MCP_URL }
+                : z
+                    .object({ mcpUrl: z.string().url().max(4096) })
+                    .strict()
+                    .parse(action.values);
       return c.json(
         await executeConnectOperation({
           db: deps.db,
@@ -1058,13 +1196,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             .update(stableJson(input))
             .digest("hex"),
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, scope, connectSetupPermission(before), origin),
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
               throw new HTTPException(409, { message: "Reload the current connection setup" });
             const started = await startMcpOAuth(deps, {
               ...scope,
-              ...(before.providerId === "gmail" || before.providerId === "slack-personal"
+              ...(before.providerId === "gmail" ||
+              before.providerId === "google-drive" ||
+              before.providerId === "google-calendar" ||
+              before.providerId === "slack-personal"
                 ? { integrationKey: before.providerId }
                 : {}),
               ...(continuation ? { externalContinuation: continuation } : {}),
@@ -1072,11 +1213,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
               requestUrl: c.req.url,
               payload: {
-                requestedScopes: [],
+                requestedScopes: attempt.requestedScopes ? [...attempt.requestedScopes] : [],
                 mcpUrl: values.mcpUrl,
                 ownership: attempt.ownership,
                 returnUrl: stored.returnUrl,
-                ...(attempt.account ? { connectionId: attempt.account.id } : {}),
+                ...(attempt.account
+                  ? { connectionId: attempt.account.id }
+                  : { newAccount: true as const }),
               },
             });
             const authorizationUrl = started.authorizationUrl;
@@ -1130,7 +1273,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         operationId: input.idempotencyKey,
         inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
         authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, scope, permission, origin),
+          requireConnectOwnerAuthority(tx, scope, advancePermission, origin),
         execute: async (attempt) => {
           if (
             (!attempt.source && (!attempt.credentialsCommitted || !attempt.account)) ||
@@ -1199,12 +1342,19 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           });
           let installation: ReturnType<typeof validatedIntegrationInstallInput>;
           try {
-            installation = validatedIntegrationInstallInput(
-              authorization.grant,
-              workspaceId,
-              payload,
-              resolved,
-            );
+            installation = {
+              ...validatedIntegrationInstallInput(
+                authorization.grant,
+                workspaceId,
+                payload,
+                resolved,
+              ),
+              // A member's add is create only. Reconnecting one's own account
+              // (connections:personal) keeps its own rules.
+              ...(memberSetup && advancePermission !== "connections:personal"
+                ? { memberCreate: true }
+                : {}),
+            };
           } catch (error) {
             // The shared validator's 409 means the reviewed source changed.
             // No installation write has run; persist a fresh, unselected preview.
@@ -1214,7 +1364,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           return {
             commit: async (tx) => {
-              await installApiIntegration(tx, installation);
+              await installApiIntegration(tx, installation).catch((error: unknown) => {
+                if (error instanceof IntegrationChangeRequiresAdminError)
+                  throw new MissingPermissionRefusal("capabilities:manage", {
+                    message: error.message,
+                  });
+                throw error;
+              });
               return {
                 ...attempt,
                 error: undefined,
@@ -1233,16 +1389,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const input = await parseRequestJson(c, ConnectOperationRequest);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const continuation = externalActorContinuationForAuthorization(authorization);
-    if (!authorization.contextIntegrity)
-      throw new HTTPException(403, { message: "Verified Connect authority required" });
-    const scope = {
-      accountId: authorization.grant.accountId,
-      workspaceId,
-      subjectId: authorization.grant.subjectId,
-      personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
-      ...(continuation ? { externalContinuation: continuation } : {}),
-    };
+    const actor = await connectRequestActor(deps, authorization);
+    const scope = actor.scope;
+    const settingsAuthorized = await workspaceSettingsAuthorized(deps, authorization, workspaceId);
     return c.json(
       await executeConnectOperation({
         db: deps.db,
@@ -1254,28 +1403,33 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           .update(stableJson({ ...input, action: "cancel" }))
           .digest("hex"),
         purpose: "cancellation",
+        beforeOperation: actor.beforeOperation,
         authorize: async (tx, attempt, origin) => {
+          assertAgentPreparedConnect(actor, attempt);
           const permission =
             attempt.providerId === "mcp-install"
-              ? "capabilities:manage"
+              ? "connections:write"
               : ["x", "reddit"].includes(attempt.providerId)
                 ? attempt.ownership === "workspace"
                   ? "workspace:admin"
                   : "workspace:read"
                 : attempt.providerId === "github-app"
                   ? "github:manage"
-                  : attempt.providerId === "github-lens"
-                    ? "workspace:admin"
-                    : "connections:write";
-          if (
-            !hasPermission(authorization.grant.permissions, permission) ||
-            (attempt.providerId === "github-lens" &&
-              !hasPermission(authorization.grant.permissions, "secrets:write"))
-          )
-            throw new HTTPException(403, { message: "Connect management permission required" });
-          await requireConnectOwnerAuthority(tx, scope, permission, origin);
-          if (attempt.providerId === "github-lens")
-            await requireConnectOwnerAuthority(tx, scope, "secrets:write", origin);
+                  : attempt.providerId === "slack-bot"
+                    ? "capabilities:manage"
+                    : connectSetupPermission(attempt);
+          if (!connectPermissionHeld(authorization, settingsAuthorized, permission))
+            throw new MissingPermissionRefusal(
+              permission,
+              permission === "workspace:admin" ? { message: WORKSPACE_SETTINGS_REFUSAL } : {},
+            );
+          await requireConnectOwnerAuthority(
+            tx,
+            scope,
+            permission,
+            origin,
+            permission === "workspace:admin" ? PERSONAL_OWNER_SETTINGS : {},
+          );
         },
         execute: async () => ({
           commit: async (_tx, current) => ({
@@ -1288,33 +1442,66 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
     );
   });
+  // Public and content-free: the sign-in popup's last page (finishInPopup).
+  app.get(CONNECT_FINISHED_PATH, () => connectFinishedPage());
   app.post("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
     const workspaceId = c.req.param("workspaceId");
-    const input = await parseRequestJson(c, BeginConnectRequest);
+    const { finishInPopup, ...requested } = await parseRequestJson(c, BeginConnectRequest);
+    // A sign-in started in the desktop app finishes in the person's browser;
+    // return that browser to the console's hand-back page, which reopens the
+    // app. The browser's Origin names the console that made this request. A
+    // sign-in in a popup ends on a page that closes the popup, never on a
+    // second copy of the host page.
+    const input = c.req.header(OPENGENI_DESKTOP_APP_HEADER)
+      ? {
+          ...requested,
+          returnUrl: desktopAppReturnUrl(requested.returnUrl, c.req.header("origin") ?? null),
+        }
+      : finishInPopup
+        ? {
+            ...requested,
+            returnUrl: `${integrationBaseUrl(deps.settings.publicBaseUrl, c.req.url)}${CONNECT_FINISHED_PATH}`,
+          }
+        : requested;
     const setupPermission =
       input.providerId === "mcp-install"
-        ? "capabilities:manage"
+        ? "connections:write"
         : ["x", "reddit"].includes(input.providerId)
           ? input.ownership === "workspace"
             ? "workspace:admin"
             : "workspace:read"
           : input.providerId === "github-app"
             ? "github:manage"
-            : input.providerId === "github-lens"
-              ? "workspace:admin"
-              : "connections:write";
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      setupPermission,
-    );
+            : // The workspace Slack bot configures the whole workspace, so installing it is
+              // integration administration even though Members hold connections:write.
+              input.providerId === "slack-bot"
+              ? "capabilities:manage"
+              : connectSetupPermission(input);
+    const authorization = await requireConnectAuthorization(c, deps, workspaceId, setupPermission);
+    // requireConnectAuthorization ran the full settings check for workspace:admin.
+    const setupOwnerOptions = setupPermission === "workspace:admin" ? PERSONAL_OWNER_SETTINGS : {};
     const continuation = externalActorContinuationForAuthorization(authorization);
     if (!authorization.contextIntegrity)
       throw new HTTPException(403, {
         message: "Verified Connect authority required",
+      });
+    // The native Atlassian and Google Drive source connectors were removed with
+    // Integration Knowledge sync; their provider ids stay accepted until the
+    // next SDK major. Atlassian and Google Drive connect through MCP.
+    if (["atlassian", "google-drive-knowledge", "google-drive-publish"].includes(input.providerId))
+      throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
+    if (
+      ["gmail", "google-drive", "google-calendar"].includes(input.providerId) &&
+      input.ownership !== "personal"
+    )
+      throw new HTTPException(422, { message: "Google connections must be personal-owned" });
+    // Additional access is asked for only by reconnecting an OAuth MCP account;
+    // the OAuth start bounds it by the reviewed connector's permission list.
+    if (input.requestedScopes && !connectProviderAcceptsRequestedScopes(input.providerId))
+      throw new HTTPException(422, {
+        message: "This connector cannot ask for additional access when reconnecting",
       });
     let target: URL;
     try {
@@ -1329,13 +1516,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       /[\u0000-\u0020\u007f]/.test(input.returnUrl)
     )
       throw new HTTPException(400, { message: "invalid return URL" });
-    const scope = {
-      accountId: authorization.grant.accountId,
-      workspaceId,
-      subjectId: authorization.grant.subjectId,
-      personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
-      ...(continuation ? { externalContinuation: continuation } : {}),
-    };
+    const actor = await connectRequestActor(deps, authorization);
+    const scope = actor.scope;
+    assertAgentPreparedConnect(actor, input);
     return c.json(
       await (async () => {
         // Remote setup preparation stays outside the policy and actor transactions.
@@ -1343,12 +1526,19 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         const tx = deps.db;
         const admit = () =>
           withOrganizationIntegrationPolicyFence(deps.db, scope, async (policyTx, policy) => {
+            await actor.beforeOperation?.(policyTx);
             return withWorkspaceSubjectRls(
               policyTx,
               workspaceId,
               scope.subjectId,
               async (actorTx) => {
-                await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                await requireConnectOwnerAuthority(
+                  actorTx,
+                  scope,
+                  setupPermission,
+                  null,
+                  setupOwnerOptions,
+                );
                 const replay = await getConnectBeginReplay(actorTx, scope, {
                   idempotencyKey: input.idempotencyKey,
                   requestDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
@@ -1372,12 +1562,19 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           attemptInput: Parameters<typeof persistConnectAttempt>[2],
         ) =>
           withOrganizationIntegrationPolicyFence(deps.db, scope, async (policyTx, policy) => {
+            await actor.beforeOperation?.(policyTx);
             return withWorkspaceSubjectRls(
               policyTx,
               workspaceId,
               scope.subjectId,
               async (actorTx) => {
-                await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                await requireConnectOwnerAuthority(
+                  actorTx,
+                  scope,
+                  setupPermission,
+                  null,
+                  setupOwnerOptions,
+                );
                 return persistConnectAttempt(actorTx, scope, {
                   ...attemptInput,
                   authorizeAcquisition: async () => {
@@ -1521,7 +1718,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             },
           });
         }
-        if (["github-app", "github-lens"].includes(input.providerId)) {
+        if (input.providerId === "github-app") {
           if (
             input.ownership !== "workspace" ||
             input.installationTarget ||
@@ -1531,21 +1728,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               message:
                 "GitHub App setup requires workspace ownership and explicit installation selection",
             });
-          if (input.providerId === "github-lens") {
-            if (!hasPermission(authorization.grant.permissions, "secrets:write"))
-              throw new HTTPException(403, { message: "secrets:write required" });
-            await requireConnectOwnerAuthority(tx, scope, "secrets:write");
-            await requireGitHubLensConnect({ ...deps, db: tx });
-          }
-          const navigation = githubAppConnectNavigation(
-            deps,
-            scope,
-            id,
-            c.req.url,
-            "discover",
-            undefined,
-            input.providerId === "github-lens" ? "github-lens" : "github-app",
-          );
+          const navigation = githubAppConnectNavigation(deps, scope, id, c.req.url, "discover");
           return beginConnectAttempt(tx, scope, {
             ...(continuation ? { externalContinuation: continuation } : {}),
             idempotencyKey: input.idempotencyKey,
@@ -1569,7 +1752,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (["openapi", "graphql"].includes(input.providerId)) {
           if (input.reconnectAccountId)
             throw new HTTPException(422, { message: "Select the service connection during setup" });
-          if (input.ownership === "personal" && !isPersonalConnectionOwnerPrincipal(authorization))
+          if (input.ownership === "personal" && !scope.personalOwnerVerified)
             throw new HTTPException(403, { message: "personal ownership unavailable" });
           const choices = hasPermission(authorization.grant.permissions, "connections:read")
             ? (await listConnectionsMetadata(tx, workspaceId, scope.subjectId))
@@ -1639,13 +1822,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             "mcp-oauth",
             "slack-personal",
             "gmail",
+            "google-drive",
+            "google-calendar",
             "mcp-bearer",
             "mcp-headers",
             "fiken-token",
             "fiken-oauth",
-            "atlassian",
-            "google-drive-knowledge",
-            "google-drive-publish",
             "slack-bot",
             "github-personal",
           ].includes(input.providerId)
@@ -1658,6 +1840,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             "mcp-oauth",
             "slack-personal",
             "gmail",
+            "google-drive",
+            "google-calendar",
             "mcp-bearer",
             "mcp-headers",
             "fiken-token",
@@ -1666,7 +1850,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           if (input.providerId === "fiken-token" && input.ownership !== "workspace")
             throw new HTTPException(422, { message: "Fiken is workspace-owned" });
           requireEnvironmentEncryption(deps.settings);
-          if (["mcp-oauth", "slack-personal", "gmail"].includes(input.providerId))
+          if (
+            ["mcp-oauth", "slack-personal", "gmail", "google-drive", "google-calendar"].includes(
+              input.providerId,
+            )
+          )
             requireIntegrationsStateSecret(deps.settings);
           const existing = input.reconnectAccountId
             ? await getConnectionMetadata(
@@ -1681,19 +1869,29 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             (!existing ||
               (input.providerId === "fiken-token"
                 ? !isFikenConnection(existing)
-                : ["mcp-oauth", "slack-personal", "gmail"].includes(input.providerId)
+                : [
+                      "mcp-oauth",
+                      "slack-personal",
+                      "gmail",
+                      "google-drive",
+                      "google-calendar",
+                    ].includes(input.providerId)
                   ? existing.kind !== "oauth2" ||
                     !existing.metadata.oauthDiscovery ||
                     (input.providerId === "slack-personal" &&
                       existing.metadata.mcpUrl !== OPENGENI_PERSONAL_SLACK_MCP_URL) ||
                     (input.providerId === "gmail" &&
-                      existing.metadata.mcpUrl !== OFFICIAL_GMAIL_MCP_URL)
+                      existing.metadata.mcpUrl !== OFFICIAL_GMAIL_MCP_URL) ||
+                    (input.providerId === "google-drive" &&
+                      existing.metadata.mcpUrl !== OFFICIAL_DRIVE_MCP_URL) ||
+                    (input.providerId === "google-calendar" &&
+                      existing.metadata.mcpUrl !== OFFICIAL_GOOGLE_CALENDAR_MCP_URL)
                   : existing.kind !== "api_key" ||
                     existing.metadata.connectAdapter !== input.providerId) ||
               (existing.subjectId === null ? "workspace" : "personal") !== input.ownership)
           )
             throw new HTTPException(404, { message: "MCP account not found for this ownership" });
-          if (input.ownership === "personal" && !isPersonalConnectionOwnerPrincipal(authorization))
+          if (input.ownership === "personal" && !scope.personalOwnerVerified)
             throw new HTTPException(403, { message: "personal ownership unavailable" });
           return beginConnectAttempt(tx, scope, {
             ...(continuation ? { externalContinuation: continuation } : {}),
@@ -1709,7 +1907,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               state: "credential_input",
               credentialsCommitted: false,
               integrationInstalled: false,
-              completionRequirement: "connection",
+              completionRequirement: input.mcpSetup ? "integration" : "connection",
+              ...(input.mcpSetup ? { mcpSetup: input.mcpSetup } : {}),
+              ...(input.requestedScopes ? { requestedScopes: [...input.requestedScopes] } : {}),
               ...(existing
                 ? {
                     account: {
@@ -1724,50 +1924,59 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 : {}),
               nextAction: {
                 type: "credentials",
-                fields: ["slack-personal", "gmail"].includes(input.providerId)
-                  ? []
-                  : input.providerId === "fiken-token"
-                    ? [
-                        {
-                          name: "apiToken",
-                          label: "Fiken API token",
-                          required: true,
-                          secret: true,
-                        },
-                        {
-                          name: "defaultCompanySlug",
-                          label: "Default company slug (optional)",
-                          required: false,
-                          secret: false,
-                        },
-                      ]
-                    : [
-                        {
-                          name: "mcpUrl",
-                          label: "MCP server URL",
-                          required: true,
-                          secret: false,
-                        },
-                        ...(input.providerId === "mcp-bearer"
-                          ? [
-                              {
-                                name: "token",
-                                label: "Bearer credential",
-                                required: true,
-                                secret: true,
-                              },
-                            ]
-                          : input.providerId === "mcp-headers"
+                fields: input.mcpSetup
+                  ? input.mcpSetup.secretFields.map((field) => ({
+                      name: field.id,
+                      label: field.label,
+                      required: true,
+                      secret: true,
+                    }))
+                  : ["slack-personal", "gmail", "google-drive", "google-calendar"].includes(
+                        input.providerId,
+                      )
+                    ? []
+                    : input.providerId === "fiken-token"
+                      ? [
+                          {
+                            name: "apiToken",
+                            label: "Fiken API token",
+                            required: true,
+                            secret: true,
+                          },
+                          {
+                            name: "defaultCompanySlug",
+                            label: "Default company slug (optional)",
+                            required: false,
+                            secret: false,
+                          },
+                        ]
+                      : [
+                          {
+                            name: "mcpUrl",
+                            label: "MCP server URL",
+                            required: true,
+                            secret: false,
+                          },
+                          ...(input.providerId === "mcp-bearer"
                             ? [
                                 {
-                                  name: "headers",
-                                  label: "Credential headers (JSON)",
+                                  name: "token",
+                                  label: "Bearer credential",
                                   required: true,
                                   secret: true,
                                 },
                               ]
-                            : []),
-                      ],
+                            : input.providerId === "mcp-headers"
+                              ? [
+                                  {
+                                    name: "headers",
+                                    label: "Credential headers (JSON)",
+                                    required: true,
+                                    secret: true,
+                                  },
+                                ]
+                              : []),
+                        ],
               },
               expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
             },
@@ -1779,12 +1988,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         )
           throw new HTTPException(422, { message: "This connector is workspace-owned" });
         if (
-          [
-            "atlassian",
-            "google-drive-knowledge",
-            "google-drive-publish",
-            "github-personal",
-          ].includes(input.providerId) &&
+          ["github-personal"].includes(input.providerId) &&
           (input.ownership !== "personal" || !isPersonalConnectionOwnerPrincipal(authorization))
         )
           throw new HTTPException(422, { message: "This connector requires personal ownership" });
@@ -1804,73 +2008,68 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   { ...deps, db: tx },
                   {
                     ...scope,
+                    personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
                     requestUrl: c.req.url,
                     connectAttemptId: id,
                     ...(input.reconnectAccountId ? { connectionId: input.reconnectAccountId } : {}),
                   },
                 )
-              : ["google-drive-knowledge", "google-drive-publish"].includes(input.providerId)
-                ? await startGoogleDriveOAuth(
+              : input.providerId === "fiken-oauth"
+                ? await startFikenOAuth(
                     { ...deps, db: tx },
                     {
                       ...scope,
+                      personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
                       requestUrl: c.req.url,
                       connectAttemptId: id,
+                      payload: input.reconnectAccountId
+                        ? { connectionId: input.reconnectAccountId }
+                        : {},
+                    },
+                  )
+                : await startApiIntegrationProviderOAuth(
+                    { ...deps, db: tx },
+                    {
+                      ...scope,
+                      personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
+                      ...(continuation ? { externalContinuation: continuation } : {}),
+                      connectAttemptId: id,
+                      // Lets the callback finish setup with exactly this request's rights.
+                      finishPermissions: curatedConnectFinishPermissions((permission) =>
+                        permission === "capabilities:manage"
+                          ? hasIntegrationAdminPermission(authorization.grant)
+                          : hasPermission(
+                              authorization.grant.permissions,
+                              permission,
+                              authorization.grant.permissionMode,
+                            ),
+                      ),
+                      requestUrl: c.req.url,
                       payload: {
-                        capability:
-                          input.providerId === "google-drive-publish" ? "publish" : "source_read",
+                        definitionId: input.providerId,
+                        ownership: input.ownership,
                         ...(input.reconnectAccountId
                           ? { connectionId: input.reconnectAccountId }
                           : {}),
                       },
                     },
-                  )
-                : input.providerId === "atlassian"
-                  ? await startAtlassianOAuth(
-                      { ...deps, db: tx },
-                      {
-                        ...scope,
-                        requestUrl: c.req.url,
-                        connectAttemptId: id,
-                        payload: input.reconnectAccountId
-                          ? { connectionId: input.reconnectAccountId }
-                          : {},
-                      },
-                    )
-                  : input.providerId === "fiken-oauth"
-                    ? await startFikenOAuth(
-                        { ...deps, db: tx },
-                        {
-                          ...scope,
-                          requestUrl: c.req.url,
-                          connectAttemptId: id,
-                          payload: input.reconnectAccountId
-                            ? { connectionId: input.reconnectAccountId }
-                            : {},
-                        },
-                      )
-                    : await startApiIntegrationProviderOAuth(
-                        { ...deps, db: tx },
-                        {
-                          ...scope,
-                          personalOwnershipAllowed:
-                            isPersonalConnectionOwnerPrincipal(authorization),
-                          ...(continuation ? { externalContinuation: continuation } : {}),
-                          connectAttemptId: id,
-                          requestUrl: c.req.url,
-                          payload: {
-                            definitionId: input.providerId,
-                            ownership: input.ownership,
-                            ...(input.reconnectAccountId
-                              ? { connectionId: input.reconnectAccountId }
-                              : {}),
-                          },
-                        },
-                      );
+                  );
         if (!started.authorizationUrl)
           throw new HTTPException(502, { message: "provider did not return an authorization URL" });
         const reconnect = input.reconnectAccountId
           ? await getConnectionMetadata(tx, workspaceId, input.reconnectAccountId, scope.subjectId)
+          : null;
+        // One organization approval for every Microsoft service this workspace connects.
+        const definition = CORE_INTEGRATION_DEFINITIONS.find(
+          (candidate) => candidate.id === input.providerId,
+        );
+        const organizationApprovalUrl = definition
+          ? microsoftOrganizationApprovalUrl(
+              deps.settings,
+              workspaceId,
+              definition,
+              integrationBaseUrl(deps.settings.publicBaseUrl, c.req.url),
+            )
           : null;
         return beginConnectAttempt(tx, scope, {
           ...(continuation ? { externalContinuation: continuation } : {}),
@@ -1886,29 +2085,17 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             state: "requires_user_action",
             credentialsCommitted: false,
             integrationInstalled: false,
-            completionRequirement: [
-              "github-personal",
-              "slack-bot",
-              "fiken-oauth",
-              "atlassian",
-              "google-drive-knowledge",
-              "google-drive-publish",
-            ].includes(input.providerId)
+            completionRequirement: ["github-personal", "slack-bot", "fiken-oauth"].includes(
+              input.providerId,
+            )
               ? "connection"
               : "integration",
-            ...([
-              "github-personal",
-              "slack-bot",
-              "fiken-oauth",
-              "atlassian",
-              "google-drive-knowledge",
-              "google-drive-publish",
-            ].includes(input.providerId)
+            ...(["github-personal", "slack-bot", "fiken-oauth"].includes(input.providerId)
               ? {}
               : {
                   installationTarget: input.installationTarget ?? {
                     instanceKey: `account-${id}`,
-                    displayName: input.providerId,
+                    displayName: definition?.name ?? input.providerId,
                   },
                 }),
             ...(reconnect
@@ -1923,7 +2110,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   },
                 }
               : {}),
-            nextAction: { type: "authorize", url: started.authorizationUrl },
+            nextAction: {
+              type: "authorize",
+              url: started.authorizationUrl,
+              ...(organizationApprovalUrl ? { organizationApprovalUrl } : {}),
+            },
             expiresAt: started.expiresAt,
           },
         });
@@ -1932,26 +2123,45 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const actor = await connectRequestActor(deps, authorization);
+    const { grant } = actor;
     return c.json(
-      (
-        await listPendingConnectAttempts(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-        })
-      ).filter((attempt) => canReadAttempt(grant.permissions, attempt.providerId)),
+      (await listPendingConnectAttempts(deps.db, actor.scope)).filter(
+        (attempt) =>
+          canReadAttempt(grant.permissions, attempt) &&
+          (!actor.preparedOnly || (attempt.providerId === "mcp-headers" && attempt.mcpSetup)),
+      ),
     );
+  });
+  // Finishes the caller's built-in integration setups that saved an account
+  // but never added its tools (the app was closed before the last step),
+  // with exactly the caller's own rights. The app calls it when Capabilities
+  // opens; it returns the setups it completed.
+  app.post("/v1/workspaces/:workspaceId/connect/attempts/finish", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const actor = await connectRequestActor(deps, authorization);
+    if (actor.preparedOnly) return c.json([]);
+    const finishPermissions = curatedConnectFinishPermissions((permission) =>
+      permission === "capabilities:manage"
+        ? hasIntegrationAdminPermission(authorization.grant)
+        : hasPermission(
+            authorization.grant.permissions,
+            permission,
+            authorization.grant.permissionMode,
+          ),
+    );
+    return c.json(await finishUnfinishedCuratedSetups(deps, actor.scope, finishPermissions));
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts/:attemptId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const { attempt } = await getConnectAttempt(
-      deps.db,
-      { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-      c.req.param("attemptId"),
-    );
-    if (!canReadAttempt(grant.permissions, attempt.providerId))
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const actor = await connectRequestActor(deps, authorization);
+    const { grant } = actor;
+    const { attempt } = await getConnectAttempt(deps.db, actor.scope, c.req.param("attemptId"));
+    assertAgentPreparedConnect(actor, attempt);
+    if (!canReadAttempt(grant.permissions, attempt))
       throw new HTTPException(403, { message: "Connect read permission required" });
     return c.json(attempt);
   });

@@ -1,3 +1,4 @@
+import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import { sql } from "drizzle-orm";
 import { stableJson, type ScheduledTask } from "@opengeni/contracts";
 import { ExternalLinkWorkSnapshot } from "@opengeni/contracts/external-identities";
@@ -9,7 +10,7 @@ import { nestedPostgresSqlState } from "./persistence-errors";
 type Scope = { accountId: string; workspaceId: string };
 type Source =
   | { kind: "direct" }
-  | { kind: "causal" | "child"; turnId: string }
+  | { kind: "causal" | "child" | "agent"; turnId: string }
   | { kind: "scheduled"; taskId: string; taskRevision: number };
 
 /** Does not consult or resurrect the key used at creation. Its immutable
@@ -37,7 +38,7 @@ export async function externalLinkWorkSnapshotIsLive(db: Database, raw: unknown)
       resolved.link.nativeSubjectId === snapshot.actor.effectiveSubjectId &&
       snapshot.permissions.every(
         (permission) =>
-          resolved.link.permissions.includes(permission) ||
+          permissionSetCovers(resolved.link.permissions, permission) ||
           (permission !== "secrets:read" && resolved.link.permissions.includes("workspace:admin")),
       )
     );
@@ -52,25 +53,52 @@ export async function getExternalLinkTurnSnapshot(
   scope: Scope,
   turnId: string,
 ): Promise<ExternalLinkWorkSnapshot | null> {
-  return withWorkspaceRls(db, scope.workspaceId, async (tx) => {
-    const [row] = await rawRows<{ canonical_snapshot: unknown }>(
-      tx,
-      sql`select canonical_snapshot
+  return withWorkspaceRls(db, scope.workspaceId, (tx) =>
+    getExternalLinkTurnSnapshotInTransaction(tx, scope, turnId),
+  );
+}
+
+async function getExternalLinkTurnSnapshotInTransaction(
+  tx: Database,
+  scope: Scope,
+  turnId: string,
+): Promise<ExternalLinkWorkSnapshot | null> {
+  const [row] = await rawRows<{ canonical_snapshot: unknown }>(
+    tx,
+    sql`select canonical_snapshot
       from external_link_turn_authorities where account_id = ${scope.accountId}::uuid
         and workspace_id = ${scope.workspaceId}::uuid and turn_id = ${turnId}::uuid`,
-    );
-    return row ? ExternalLinkWorkSnapshot.parse(row.canonical_snapshot) : null;
-  });
+  );
+  return row ? ExternalLinkWorkSnapshot.parse(row.canonical_snapshot) : null;
 }
 
 /** null is an ordinary native/external turn; a revoked linked turn is false,
  * never null. Callers must not fall back to unlinked authority after denial. */
 export async function getExternalLinkTurnAuthorization(db: Database, scope: Scope, turnId: string) {
   const snapshot = await getExternalLinkTurnSnapshot(db, scope, turnId);
+  return authorizeExternalLinkTurnSnapshot(db, snapshot);
+}
+
+/** Caller already owns this exact tenant's RLS transaction. Only the snapshot
+ * read reuses that scope; identity, membership and link revocation stay live. */
+export async function getExternalLinkTurnAuthorizationInTransaction(
+  tx: Database,
+  scope: Scope,
+  turnId: string,
+) {
+  const snapshot = await getExternalLinkTurnSnapshotInTransaction(tx, scope, turnId);
+  return authorizeExternalLinkTurnSnapshot(tx, snapshot);
+}
+
+async function authorizeExternalLinkTurnSnapshot(
+  db: Database,
+  snapshot: ExternalLinkWorkSnapshot | null,
+) {
   if (!snapshot) return null;
   return {
     authorized: await externalLinkWorkSnapshotIsLive(db, snapshot),
     permissions: snapshot.permissions,
+    ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
   };
 }
 
@@ -105,7 +133,7 @@ export async function captureExternalLinkTurnAuthority(
         source_kind, source_turn_id, source_task_id, source_task_revision)
       values (${input.turnId}::uuid, ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
         ${snapshot.actor.linkId}::uuid, ${snapshot.actor.linkRevision}, ${JSON.stringify(snapshot)}::jsonb, ${source.kind},
-        ${source.kind === "causal" || source.kind === "child" ? source.turnId : null}::uuid,
+        ${"turnId" in source ? source.turnId : null}::uuid,
         ${source.kind === "scheduled" ? source.taskId : null}::uuid,
         ${source.kind === "scheduled" ? source.taskRevision : null})`);
     },
@@ -118,7 +146,7 @@ export async function inheritExternalLinkTurnAuthority(
     sessionId: string;
     turnId: string;
     sourceTurnId: string;
-    kind: "causal" | "child";
+    kind: "causal" | "child" | "agent";
   },
 ): Promise<void> {
   const snapshot = await getExternalLinkTurnSnapshot(db, input, input.sourceTurnId);

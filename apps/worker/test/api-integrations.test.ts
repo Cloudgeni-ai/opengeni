@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import type { ApiIntegrationRuntime, ResolveConnectionCredentialResult } from "@opengeni/db";
+import {
+  encryptEnvironmentValue,
+  type ApiIntegrationRuntime,
+  type ResolveConnectionCredentialResult,
+} from "@opengeni/db";
 import { prepareAgentTools } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import {
+  apiIntegrationAccountLabels,
   expandApiIntegrationAccountRoutes,
   expandMcpAccountRoutes,
 } from "../src/activities/mcp-account-routes";
@@ -81,6 +86,220 @@ const authority = {
 };
 
 describe("installed API Integration worker adapters", () => {
+  test("an organization key is decrypted per request, sent only to the API, and not retried when rejected", async () => {
+    const encryptionKey = new Uint8Array(32).fill(23);
+    const item: ApiIntegrationRuntime = {
+      ...integration(),
+      instanceKey: "organization",
+      authScheme: { kind: "api_key", carrier: "query", name: "api_key" },
+      connectionRef: null,
+      connectionAuthorityGeneration: null,
+      organizationConnector: {
+        id: "33333333-4444-4555-8666-777777777777",
+        generation: 2,
+        login: "organization_key",
+        auth: {
+          kind: "api_key",
+          providerDomain: "127.0.0.1",
+          carrier: "query",
+          name: "api_key",
+        },
+      },
+      organizationCredential: {
+        placements: [
+          {
+            carrier: "query",
+            name: "api_key",
+            valueEncrypted: encryptEnvironmentValue(encryptionKey, "org-key"),
+          },
+        ],
+      },
+    };
+    const settings = testSettings({
+      environmentsEncryptionKey: Buffer.from(encryptionKey).toString("base64"),
+      mcpServers: [
+        {
+          id: item.serverId,
+          name: item.name,
+          url: item.baseUrl,
+          allowedTools: item.allowedTools,
+          cacheToolsList: true,
+          requireApproval: item.requireApproval,
+        },
+      ],
+    });
+    const requests: string[] = [];
+    let status = 200;
+    const localMcpServers = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async () => {
+        throw new Error("An organization key never resolves a person's account");
+      },
+      fetchImpl: async (request) => {
+        requests.push(String(request));
+        return new Response(JSON.stringify({ items: [] }), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: item.serverId }], {
+      localMcpServers,
+    });
+    try {
+      const call = () => prepared.mcpServers[0]!.callToolResult!("inventory_api__list_items", {});
+      expect(await call()).toMatchObject({ isError: false });
+      expect(requests).toEqual(["https://127.0.0.1/v1/items?api_key=org-key"]);
+      status = 401;
+      // A rejected organization key is not refreshed or retried: the call fails
+      // once, as a tool error the model can read.
+      expect(await call()).toMatchObject({
+        isError: true,
+        structuredContent: { ok: false, error: { code: "authorization_rejected", status: 401 } },
+      });
+      expect(requests).toHaveLength(2);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  test("an organization's each-person selector runs only through the person's accepted account", () => {
+    const selector: ApiIntegrationRuntime = {
+      ...integration(),
+      instanceKey: "organization",
+      connectionRef: { providerDomain: "127.0.0.1", kind: "oauth2", subjectScope: "subject" },
+      connectionAuthorityGeneration: null,
+    };
+    const keyed: ApiIntegrationRuntime = {
+      ...integration(),
+      serverId: "ledger_api",
+      connectionRef: null,
+      connectionAuthorityGeneration: null,
+    };
+    const tools = [
+      { kind: "mcp" as const, id: selector.serverId },
+      { kind: "mcp" as const, id: keyed.serverId },
+      { kind: "mcp" as const, id: "inventory-account-alice" },
+    ];
+    // Without accepted accounts it never runs as it is; an integration with no account does.
+    expect(
+      expandApiIntegrationAccountRoutes({ integrations: [selector, keyed], bindings: null, tools }),
+    ).toEqual([keyed]);
+    const connectionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const routed = expandApiIntegrationAccountRoutes({
+      integrations: [selector, keyed],
+      bindings: [
+        {
+          serverId: "inventory-account-alice",
+          canonicalServerId: selector.serverId,
+          connectionId,
+          originWorkspaceId: "11111111-1111-4111-8111-111111111111",
+          subjectScope: "subject",
+          ownerSubjectId: "human:alice",
+          accountLabel: "Alice",
+          providerDomain: "127.0.0.1",
+          kind: "oauth2",
+          connectionRef: { ...selector.connectionRef!, connectionId },
+          connectionAuthorityGeneration: 4,
+        },
+      ],
+      tools,
+    });
+    expect(routed.map((entry) => [entry.serverId, entry.connectionRef?.connectionId])).toEqual([
+      ["inventory-account-alice", connectionId],
+      ["ledger_api", undefined],
+    ]);
+  });
+
+  test("an already prepared Teams tool cannot resolve credentials after rollout is disabled", async () => {
+    const item = { ...integration(), definitionId: "microsoft-teams" };
+    const settings = testSettings({ microsoftTeamsToolsEnabled: true });
+    let resolutions = 0;
+    let providerCalls = 0;
+    const [registration] = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async () => {
+        resolutions++;
+        throw new Error("must not resolve");
+      },
+      fetchImpl: async () => {
+        providerCalls++;
+        return Response.json({});
+      },
+    });
+    settings.microsoftTeamsToolsEnabled = false;
+    await expect(registration!.server.callTool("list_items", {}, null)).rejects.toMatchObject({
+      code: "integration_disabled",
+      outcome: "not_started",
+    });
+    expect(resolutions).toBe(0);
+    expect(providerCalls).toBe(0);
+  });
+
+  test("Teams rollout revocation during native credential or physical authorization prevents provider I/O", async () => {
+    for (const revokeAt of ["resolve", "authorize"] as const) {
+      const item = { ...integration(), definitionId: "microsoft-teams" };
+      const settings = testSettings({ microsoftTeamsAllowedWorkspaceIds: [authority.workspaceId] });
+      let providerCalls = 0;
+      let authorizations = 0;
+      const [registration] = buildApiIntegrationServersForTurn({
+        settings,
+        integrations: [item],
+        authority,
+        resolveCredential: async () => {
+          if (revokeAt === "resolve") settings.microsoftTeamsAllowedWorkspaceIds = [];
+          return {
+            status: "ok",
+            connectionId: item.connectionRef!.connectionId!,
+            headers: { Authorization: "Bearer fixture" },
+            authorizeProviderRequest: async () => {
+              authorizations++;
+              if (revokeAt === "authorize") settings.microsoftTeamsAllowedWorkspaceIds = [];
+              return true;
+            },
+          };
+        },
+        fetchImpl: async () => {
+          providerCalls++;
+          return Response.json({});
+        },
+      });
+      await expect(registration!.server.callTool("list_items", {}, null)).rejects.toMatchObject({
+        code: "authorization_rejected",
+        outcome: "not_started",
+      });
+      expect(authorizations).toBe(revokeAt === "resolve" ? 0 : 1);
+      expect(providerCalls).toBe(0);
+    }
+  });
+
+  test("Teams runtime remains unavailable after installation when rollout is disabled", () => {
+    const teams = {
+      ...integration(),
+      definitionId: "microsoft-teams",
+      definitionProvenance: "curated" as const,
+    };
+    const settings = testSettings({
+      microsoftTeamsToolsEnabled: false,
+      microsoftTeamsAllowedWorkspaceIds: ["pilot"],
+    });
+    const build = (workspaceId: string) =>
+      buildApiIntegrationServersForTurn({
+        settings,
+        integrations: [teams],
+        authority: { ...authority, workspaceId },
+        resolveCredential: async () => {
+          throw new Error("disabled server must not resolve credentials");
+        },
+      });
+    expect(build("other")).toEqual([]);
+    expect(build("pilot")).toHaveLength(1);
+  });
+
   test("one integration exposes personal and workspace routes with exact preflight generations", async () => {
     const item = integration();
     const bindings: McpConnectionAccountBinding[] = ["subject", "workspace"].map((scope, index) => {
@@ -108,6 +327,7 @@ describe("installed API Integration worker adapters", () => {
         mcpServers: [
           {
             id: item.serverId,
+            name: item.name,
             url: item.baseUrl,
             connectionRef: item.connectionRef!,
           },
@@ -156,7 +376,7 @@ describe("installed API Integration worker adapters", () => {
     try {
       for (const [index, server] of prepared.mcpServers.entries()) {
         const [tool] = await server.listTools();
-        expect(tool?.description).toContain(index === 0 ? "Personal: Alice" : "Workspace: Team");
+        expect(tool?.description).toContain(index === 0 ? "Alice · Yours" : "Team · Shared");
         await localMcpServers[index]!.preflightCall!("list_items", {});
         await server.callTool(tool!.name, {});
       }
@@ -173,6 +393,75 @@ describe("installed API Integration worker adapters", () => {
       expect(integrations.map((value) => value.serverId)).toEqual(
         bindings.map((binding) => binding.serverId),
       );
+      // Integration routes are labelled exactly like connector routes, so the
+      // model and people can tell the accounts apart, and the turn can name
+      // every connected account.
+      const labels = apiIntegrationAccountLabels({
+        integrations: [item],
+        bindings,
+        tools: routed.tools,
+      });
+      expect([...labels]).toEqual([...routed.accountLabels]);
+      expect(labels.get(bindings[0]!.serverId)).toEqual({
+        model: "Inventory API — Alice · Yours",
+        connector: "Inventory API",
+        providerDomain: item.providerDomain,
+        account: "Alice",
+      });
+      const single = apiIntegrationAccountLabels({
+        integrations: [item],
+        bindings: bindings.slice(0, 1),
+        tools: routed.tools,
+      });
+      expect(single.get(bindings[0]!.serverId)).not.toHaveProperty("account");
+      expect(
+        apiIntegrationAccountLabels({ integrations: [item], bindings: null, tools: routed.tools }),
+      ).toEqual(new Map());
+      // A reviewed definition's catalog category names the need its accounts
+      // serve; a workspace definition's is unknown.
+      const outlook = apiIntegrationAccountLabels({
+        integrations: [
+          { ...item, definitionId: "microsoft-outlook-mail", definitionProvenance: "curated" },
+        ],
+        bindings,
+        tools: routed.tools,
+      });
+      expect(outlook.get(bindings[0]!.serverId)?.kind).toBe("communication");
+      expect(labels.get(bindings[0]!.serverId)).not.toHaveProperty("kind");
+      // A reviewed definition without a chosen category has no kind, though
+      // its catalog entry shows the "productivity" fallback.
+      const uncategorized = apiIntegrationAccountLabels({
+        integrations: [
+          { ...item, definitionId: "unlisted-definition", definitionProvenance: "curated" },
+        ],
+        bindings,
+        tools: routed.tools,
+      });
+      expect(uncategorized.get(bindings[0]!.serverId)).not.toHaveProperty("kind");
+      // Connector routes take their catalog category; the default and the
+      // custom-server category say nothing.
+      for (const [category, kind] of [
+        ["files", "files"],
+        ["integrations", undefined],
+        ["custom", undefined],
+      ] as const) {
+        const categorized = expandMcpAccountRoutes({
+          settings: testSettings({
+            mcpServers: [
+              {
+                id: item.serverId,
+                name: item.name,
+                url: item.baseUrl,
+                connectionRef: item.connectionRef!,
+              },
+            ],
+          }),
+          tools: [{ kind: "mcp", id: item.serverId }],
+          bindings,
+          categories: new Map([[item.serverId, category]]),
+        });
+        expect(categorized.accountLabels.get(bindings[0]!.serverId)?.kind).toBe(kind);
+      }
       expect(() =>
         expandApiIntegrationAccountRoutes({
           integrations: [item],

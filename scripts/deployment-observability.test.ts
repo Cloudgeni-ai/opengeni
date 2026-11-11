@@ -90,6 +90,27 @@ describe("observability deployment plan", () => {
     expect(observabilityStackPlanFor().verifyCommands[0]).not.toContain("--opensandbox");
   });
 
+  test("keeps the OTLP receiver for compute host metrics opt-in", () => {
+    const values = Bun.YAML.parse(readFileSync("deploy/observability/values.yaml", "utf8"));
+    const overlay = Bun.YAML.parse(
+      readFileSync("deploy/observability/values.compute.yaml", "utf8"),
+    );
+
+    expect(
+      values["kube-prometheus-stack"].prometheus.prometheusSpec.enableOTLPReceiver,
+    ).toBeUndefined();
+    const spec = overlay["kube-prometheus-stack"].prometheus.prometheusSpec;
+    expect(spec.enableOTLPReceiver).toBe(true);
+    // The label the control service's compute_fleet_host_info shares, which
+    // scopes hosts to their release in alerts and the dashboard, and the only
+    // one: the service passes on no other resource attribute of a host's.
+    expect(spec.otlp.promoteResourceAttributes).toEqual(["host.name"]);
+    expect(observabilityStackPlanFor().compute).toBe(false);
+    const plan = observabilityStackPlanFor({ compute: true });
+    expect(plan.valuesFiles).toEqual(["deploy/observability/values.compute.yaml"]);
+    expect(plan.notes.some((note) => note.includes("computeControl.metrics.hostsTo"))).toBe(true);
+  });
+
   test("rejects unsupported profiles and shell-unsafe identifiers", () => {
     expect(() => observabilityStackPlanFor({ namespace: "observability;rm" })).toThrow();
     expect(() => observabilityStackPlanFor({ environment: "prod $(id)" })).toThrow();

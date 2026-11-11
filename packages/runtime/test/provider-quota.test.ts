@@ -282,9 +282,15 @@ const cases: Case[] = [
     expected: null,
   },
   {
-    name: "OpenGeni credit refusal is not provider evidence",
+    name: "platform credit refusal is not provider evidence",
     status: null,
-    texts: ["429 insufficient OpenGeni credits"],
+    texts: ["429 insufficient workspace credits"],
+    expected: null,
+  },
+  {
+    name: "older platform credit refusal wording is not provider evidence",
+    status: null,
+    texts: ["429 insufficient Opengeni credits"],
     expected: null,
   },
   {
@@ -379,6 +385,25 @@ describe("SDK retry veto", () => {
       .post("/chat/completions", { body: { model: "m", messages: [] } })
       .catch(() => undefined);
     expect(calls.count).toBe(4);
+  });
+
+  test("modern OpenAI spend and credit codes veto nested SDK retries", async () => {
+    for (const code of [
+      "credit_balance_exhausted",
+      "organization_spend_limit_exceeded",
+      "project_spend_limit_exceeded",
+      "organization_usage_limit_exceeded",
+    ]) {
+      const { sdk, calls } = client(
+        { error: { code, message: "Request refused" } },
+        { "retry-after-ms": "0" },
+      );
+      const error = await sdk
+        .post("/chat/completions", { body: { model: "m", messages: [] } })
+        .catch((caught: unknown) => caught);
+      expect(calls.count).toBe(1);
+      expect(error).toMatchObject({ status: 429, code });
+    }
   });
 
   test("a provider's own retry directive is never overridden", async () => {

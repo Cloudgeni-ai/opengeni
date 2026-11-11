@@ -1,6 +1,8 @@
 export {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
   MODULAR_LAYER_SEPARATOR,
+  agentInstructionsLayerContent,
   SESSION_INSTRUCTIONS_PREAMBLE,
   composeModularAgentInstructions,
   composeOperationalContract,
@@ -11,14 +13,25 @@ export { INSTRUCTION_PRECEDENCE, renderBaseBehavior } from "./base-behavior";
 export { renderRuntimeMechanics } from "./runtime-mechanics";
 export {
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
+  agentSharesWorkspace,
   identityFromLegacyTemplate,
   resolveAgentIdentity,
 } from "./identity";
-export { rigInstructions, workspaceEnvironmentInstructions } from "./modules/environment";
+export { workspaceEnvironmentInstructions } from "./legacy-environment";
+export { rigInstructions } from "./modules/rig";
+export { UNATTENDED_SESSION_GUIDANCE } from "./modules/unattended";
+export {
+  deriveAgentPromptToolAvailability,
+  type AgentPromptToolAvailabilityInput,
+} from "./tool-availability";
 export type {
   AgentPromptContext,
+  AgentPromptExperiments,
   AgentPromptModule,
+  AgentPromptRepositoryIdentity,
   AgentPromptResources,
+  AgentPromptToolAvailability,
   RigInstructionsContext,
   WorkspaceEnvironmentContext,
 } from "./types";

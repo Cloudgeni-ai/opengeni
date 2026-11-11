@@ -1,30 +1,37 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   BillingSummary,
+  BillingBalance,
   DefaultModelSelectionSource,
   ReasoningEffort,
   WorkspaceModelCatalogResponse,
 } from "@opengeni/sdk";
 
-import { confirmIncludedModel } from "./model-access-onboarding";
+import { confirmIncludedModel } from "@opengeni/react/app/lib/model-access-onboarding";
 
 // Onboarding-only helpers, kept apart from `model-access-onboarding.ts` because
 // the session route imports that module and these must stay out of its graph.
 
 /**
- * OpenGeni credits the organization already holds when the post-signup model
- * step opens (the one-time verified-signup trial grant, or any other credits).
+ * Opengeni credits the organization already holds when the post-signup model
+ * step opens (monthly Free plan funding, legacy promotions, or other credits).
  */
 export type StartingCreditsOnboarding = {
   /** The positive balance, or null when it could not be read. */
-  balance: { balanceMicros: number; currency: string } | null;
-  /** The server-resolved default new chats use, billed in OpenGeni credits. */
+  balance:
+    | ({ balanceMicros: number; currency: string } & Pick<
+        BillingBalance,
+        "promotionalCredits" | "generalBalanceMicros" | "plan"
+      >)
+    | null;
+  /** The server-resolved default new chats use, billed in Opengeni credits. */
   model: { id: string; label: string; reasoningEffort: ReasoningEffort };
 };
 
 /**
  * The server-resolved default for new chats (`defaultSelection`) when it is a
- * selectable model billed in OpenGeni credits. Null on older servers that
+ * selectable model billed in Opengeni credits. Null on older servers that
  * publish no resolved default, and whenever a subscription, saved workspace
  * default, or free model is what new chats use.
  */
@@ -35,6 +42,7 @@ export function creditsBilledDefaultModel(
   if (!selection) return null;
   const model = catalog.models.find((candidate) => candidate.id === selection.model);
   if (!model?.availability.selectable || model.cost !== "credits") return null;
+  if (model.creditFunding === "unavailable") return null;
   return {
     id: model.id,
     label: model.label,
@@ -45,7 +53,7 @@ export function creditsBilledDefaultModel(
 
 /**
  * What the post-signup model step says about credits the organization already
- * holds. It applies only while the resolved default is billed in OpenGeni
+ * holds. It applies only while the resolved default is billed in Opengeni
  * credits and the balance is positive, so the step describes the model new
  * chats actually use. When the balance cannot be read, a resolved default
  * whose source is `credits` (the server reports it only while the balance is
@@ -66,7 +74,15 @@ export function startingCreditsForOnboarding(input: {
   const { mode, balance } = input.billing;
   if (mode !== "stripe" || balance.balanceMicros <= 0) return null;
   return {
-    balance: { balanceMicros: balance.balanceMicros, currency: balance.currency },
+    balance: {
+      balanceMicros: balance.balanceMicros,
+      currency: balance.currency,
+      ...(balance.promotionalCredits ? { promotionalCredits: balance.promotionalCredits } : {}),
+      ...(balance.generalBalanceMicros !== undefined
+        ? { generalBalanceMicros: balance.generalBalanceMicros }
+        : {}),
+      ...(balance.plan ? { plan: balance.plan } : {}),
+    },
     model,
   };
 }
@@ -81,7 +97,7 @@ export function startingCreditsForOnboarding(input: {
  * choice screen.
  */
 export async function loadModelAccessOnboarding(
-  client: Pick<OpenGeniBrowserClient, "getWorkspaceModelCatalog" | "getBilling">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "getWorkspaceModelCatalog" | "getBilling">,
   input: {
     organizationId: string;
     workspaceId: string;

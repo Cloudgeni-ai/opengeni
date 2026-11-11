@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { Server, ServerCredentials, status, type ServiceDefinition } from "@grpc/grpc-js";
+import { Metadata, Server, ServerCredentials, status, type ServiceDefinition } from "@grpc/grpc-js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,11 +7,20 @@ import { spawnSync } from "node:child_process";
 import { Sandbox } from "modal";
 import { Manifest } from "@openai/agents/sandbox";
 import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
-import { verifySandboxExecReadiness, SandboxExecReadinessError } from "../src/sandbox";
-import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
+import {
+  verifySandboxExecReadiness,
+  SandboxExecReadinessError,
+  isSandboxExecReadinessProbeLostError,
+  isModalTaskExecStartPreDispatchUnavailableError,
+} from "../src/sandbox";
+import {
+  ModalCommandControl,
+  ModalExecReadinessProbeLostError,
+} from "../src/sandbox/providers/modal-command-control";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
 import {
   ModalCommandRouterWire,
+  ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
   modalRouterWire,
 } from "../src/sandbox/providers/modal-command-router-wire";
@@ -19,6 +28,14 @@ import {
   waitForSandboxExecReadiness,
   SandboxExecReadinessTimeoutError,
 } from "../../../apps/worker/src/sandbox-resume";
+import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+import type { ModalRouterProviderCommand, CommandSupervisionReceipt } from "@opengeni/contracts";
+import {
+  isProviderCommandObservationUnavailableError,
+  ProviderCommandObservationUnavailableError,
+  withCommandSupervisionReady,
+  withSupervisedLaunchReservation,
+} from "../src/sandbox/provider-command-session";
 
 const service = "/modal.task_command_router.TaskCommandRouter/";
 const definition = (method: string, input: string, output: string, streaming = false) => ({
@@ -42,11 +59,42 @@ type Mode =
   | "lost-read"
   | "unobservable"
   | "rejected"
-  | "nonzero";
+  | "nonzero"
+  | "lost-exec"
+  | "forgotten-exec"
+  | "precondition-other";
+// Verbatim production reply (2026-10-05, first shell command of a fresh session).
+const EXEC_NOT_FOUND_DETAILS =
+  "Failed to poll exec process: exec not found. If the exec already completed, its output and exit status were discarded; exec state is retained for 10 minutes after the exec completes. Read exec output promptly after completion.";
 let mode: Mode = "success";
 let starts: Array<{ execId: string; commandArgs: string[]; workdir: string; env: object }> = [];
 let observations: string[] = [];
 let failedRead = false;
+let preparations: string[] = [];
+let preparationPending = false;
+let preparationEntered: () => void;
+let completePreparation: () => void;
+let foregroundReadFailures = 0;
+/** A loaded provider answers a failing read late, after a retry's remaining
+ * slice budget has already elapsed on the client. */
+let foregroundReadFailureDelayMs = 0;
+let foregroundPollFailure = false;
+let foregroundPollPending = false;
+let foregroundPollCancelled = 0;
+let foregroundWrites = 0;
+let fixtureSequence = 0;
+let fixtureToken = "test-token";
+let supervised: {
+  receipt: CommandSupervisionReceipt | null;
+  commandExecId: string | null;
+  helpers: Map<string, string>;
+  reads: Array<{ execId: string; offset: number }>;
+  failCancelRead: boolean;
+  acked: boolean;
+} | null = null;
+function currentFixture(call: { metadata: { get(key: string): unknown[] } }): boolean {
+  return call.metadata.get("authorization")[0] === `Bearer ${fixtureToken}`;
+}
 beforeAll(async () => {
   directory = mkdtempSync(join(tmpdir(), "opengeni-readiness-"));
   const key = join(directory, "server.key"),
@@ -79,11 +127,25 @@ beforeAll(async () => {
       start: definition("TaskExecStart", "Start", "Empty"),
       read: definition("TaskExecStdioRead", "Read", "Data", true),
       poll: definition("TaskExecPoll", "Identity", "Poll"),
+      preparation: definition("ReadinessPreparation", "Identity", "Empty"),
+      write: definition("TaskExecStdinWrite", "Write", "Empty"),
     } as ServiceDefinition,
     {
       start(call: any, callback: any) {
-        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        if (!currentFixture(call)) {
+          callback(null, {});
+          return;
+        }
+        expect(call.metadata.get("authorization")).toEqual([`Bearer ${fixtureToken}`]);
         starts.push(call.request);
+        if (supervised) {
+          const actionIndex = call.request.commandArgs.indexOf("--action");
+          if (actionIndex >= 0) {
+            const action = call.request.commandArgs[actionIndex + 1];
+            supervised.helpers.set(call.request.execId, action);
+            if (action === "ack") supervised.acked = true;
+          } else supervised.commandExecId = call.request.execId;
+        }
         callback(
           mode === "rejected"
             ? { code: status.NOT_FOUND, details: "executable unavailable" }
@@ -92,7 +154,7 @@ beforeAll(async () => {
                   code: mode === "unknown-start" ? status.UNKNOWN : status.INTERNAL,
                   details: "accepted probe, lost response",
                 }
-              : mode === "lost-start" || mode === "unobservable"
+              : mode === "lost-start" || mode === "unobservable" || mode === "lost-exec"
                 ? {
                     code: status.UNAVAILABLE,
                     details: "Name resolution failed for target dns:task-spoof.w.modal.host:443",
@@ -102,15 +164,104 @@ beforeAll(async () => {
         );
       },
       read(call: any) {
+        // A client's cancelled promise may settle before the server receives
+        // its queued stream. Never let an older fixture consume this one's
+        // failure counter or satisfy its poll/cancellation synchronization.
+        if (!currentFixture(call)) {
+          call.end();
+          return;
+        }
         observations.push(call.request.execId);
+        if (supervised?.helpers.has(call.request.execId)) {
+          const action = supervised.helpers.get(call.request.execId);
+          const offset = Number(call.request.offset);
+          supervised.reads.push({ execId: call.request.execId, offset });
+          if (call.request.fileDescriptor !== 0) {
+            call.end();
+            return;
+          }
+          const response = Buffer.from(
+            JSON.stringify({ state: "quiescent", receipt: supervised.receipt }),
+          );
+          if (action === "cancel" && supervised.failCancelRead) {
+            if (offset === 0) {
+              // Commit a private response prefix before the next read fails.
+              // Leaving the stream open yields a bounded non-EOF page.
+              call.write({ data: response.subarray(0, 17) });
+            } else
+              call.emit("error", {
+                code: status.UNAVAILABLE,
+                details: "cancel helper read unavailable",
+              });
+            return;
+          }
+          call.write({ data: response.subarray(offset) });
+          call.end();
+          return;
+        }
+        if (foregroundReadFailures > 0) {
+          foregroundReadFailures--;
+          const fail = () =>
+            call.emit("error", { code: status.UNAVAILABLE, details: "read DNS unavailable" });
+          if (foregroundReadFailureDelayMs > 0) setTimeout(fail, foregroundReadFailureDelayMs);
+          else fail();
+          return;
+        }
         if (mode === "unobservable" || (mode === "lost-read" && !failedRead)) {
           failedRead = true;
           call.emit("error", { code: status.UNAVAILABLE, details: "read connection dropped" });
         } else call.end();
       },
       poll(call: any, callback: any) {
+        if (!currentFixture(call)) {
+          callback(null, { code: 0 });
+          return;
+        }
         observations.push(call.request.execId);
+        if (supervised) {
+          const action = supervised.helpers.get(call.request.execId);
+          if (action === "cancel" && supervised.failCancelRead) callback(null, {});
+          else if (action || supervised.acked) callback(null, { code: 0 });
+          else callback(null, {});
+          return;
+        }
+        if (foregroundPollPending) {
+          call.on("cancelled", () => foregroundPollCancelled++);
+          return;
+        }
+        if (foregroundPollFailure) {
+          callback({ code: status.UNAVAILABLE, details: "poll DNS unavailable" });
+          return;
+        }
+        if (mode === "lost-exec" || mode === "forgotten-exec") {
+          callback({ code: status.FAILED_PRECONDITION, details: EXEC_NOT_FOUND_DETAILS });
+          return;
+        }
+        if (mode === "precondition-other") {
+          callback({ code: status.FAILED_PRECONDITION, details: "Modal Sandbox is shutting down" });
+          return;
+        }
         callback(null, { code: mode === "nonzero" ? 127 : 0 });
+      },
+      write(call: any, callback: any) {
+        if (!currentFixture(call)) {
+          callback(null, {});
+          return;
+        }
+        foregroundWrites++;
+        callback(null, {});
+      },
+      preparation(call: any, callback: any) {
+        if (!currentFixture(call)) {
+          callback(null, {});
+          return;
+        }
+        expect(call.metadata.get("authorization")).toEqual([`Bearer ${fixtureToken}`]);
+        preparations.push(call.request.taskId);
+        completePreparation = () => callback(null, {});
+        preparationEntered();
+        if (!preparationPending)
+          callback({ code: status.UNAVAILABLE, details: "read-only preparation unavailable" });
       },
     },
   );
@@ -130,11 +281,30 @@ afterAll(() => {
   if (directory) rmSync(directory, { recursive: true, force: true });
 });
 
-function fixture(selected: Mode = "success", url = endpoint) {
+function fixture(
+  selected: Mode = "success",
+  url = endpoint,
+  preparation?: { stage: "task" | "access"; pending?: boolean },
+) {
+  const token = `test-token-${++fixtureSequence}`;
+  fixtureToken = token;
   mode = selected;
   starts = [];
   observations = [];
   failedRead = false;
+  preparations = [];
+  foregroundReadFailures = 0;
+  foregroundReadFailureDelayMs = 0;
+  foregroundPollFailure = false;
+  foregroundPollPending = false;
+  foregroundPollCancelled = 0;
+  foregroundWrites = 0;
+  supervised = null;
+  preparationPending = preparation?.pending ?? false;
+  const enteredPreparation = new Promise<void>((resolve) => {
+    preparationEntered = resolve;
+  });
+  completePreparation = () => undefined;
   let sdkStarts = 0;
   const sandbox = new Sandbox(
     {
@@ -143,7 +313,7 @@ function fixture(selected: Mode = "success", url = endpoint) {
       cpClient: {
         taskGetCommandRouterAccess: async () => ({
           url: "https://task-readiness.invalid",
-          jwt: "test-token",
+          jwt: token,
         }),
       },
     } as never,
@@ -166,25 +336,64 @@ function fixture(selected: Mode = "success", url = endpoint) {
     modal: { version: () => "0.9.0" },
     app: {},
   } as never);
+  const wire = new ModalCommandRouterWire({ url, jwt: token }, certificate);
+  const prepare = async (stage: "task" | "access", signal?: AbortSignal): Promise<void> => {
+    signal?.throwIfAborted();
+    const metadata = new Metadata();
+    metadata.set("authorization", `Bearer ${token}`);
+    await new Promise<void>((resolve, reject) => {
+      const client = (wire as any).client;
+      const call = client.makeUnaryRequest(
+        service + "ReadinessPreparation",
+        (value: object) =>
+          Buffer.from(modalRouterWire.lookupType("Identity").encode(value).finish()),
+        (bytes: Buffer) => modalRouterWire.lookupType("Empty").decode(bytes),
+        { taskId: stage },
+        metadata,
+        { deadline: Date.now() + 5_000 },
+        (error: Error | null) => {
+          signal?.removeEventListener("abort", abort);
+          if (signal?.aborted) reject(signal.reason);
+          else if (error) reject(error);
+          else resolve();
+        },
+      );
+      const abort = () => call.cancel();
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+  };
   const control = ModalCommandControl.forSandbox(
     {
       version: () => "0.9.0",
-      cpClient: { sandboxGetTaskId: async () => ({ taskId: "task-readiness" }) },
+      cpClient: {
+        sandboxGetTaskId: async (_request: unknown, options: { signal?: AbortSignal }) => {
+          if (preparation?.stage === "task") await prepare("task", options?.signal);
+          return { taskId: "task-readiness" };
+        },
+        taskGetCommandRouterAccess: async (
+          _request: unknown,
+          options: { signal?: AbortSignal },
+        ) => {
+          await prepare("access", options?.signal);
+          return { url, jwt: token };
+        },
+      },
     } as never,
     "sb-readiness",
     "/workspace",
   );
-  const wire = new ModalCommandRouterWire({ url, jwt: "test-token" }, certificate);
-  Object.defineProperty(control, "withRouter", {
-    value: async (
-      _task: string,
-      signal: AbortSignal,
-      run: (router: ModalCommandRouterWire) => Promise<unknown>,
-    ) => {
-      signal.throwIfAborted();
-      return await run(wire);
-    },
-  });
+  if (!preparation)
+    Object.defineProperty(control, "withRouter", {
+      value: async (
+        _task: string,
+        signal: AbortSignal | undefined,
+        run: (router: ModalCommandRouterWire) => Promise<unknown>,
+      ) => {
+        signal?.throwIfAborted();
+        return await run(wire);
+      },
+    });
   installModalCommandSession(session, control);
   const established = {
     backendId: "modal",
@@ -197,6 +406,9 @@ function fixture(selected: Mode = "success", url = endpoint) {
     established,
     session,
     wire,
+    control,
+    enteredPreparation,
+    completePreparation: () => completePreparation(),
     sdkStarts: () => sdkStarts,
     close: async () => {
       wire.close();
@@ -205,6 +417,530 @@ function fixture(selected: Mode = "success", url = endpoint) {
     },
   };
 }
+
+test("supervised cancellation uncertainty retains intent, writer and partial helper observation without Start replay", async () => {
+  const f = fixture();
+  const nativeState = {
+    receipt: null as CommandSupervisionReceipt | null,
+    commandExecId: null as string | null,
+    helpers: new Map<string, string>(),
+    reads: [] as Array<{ execId: string; offset: number }>,
+    failCancelRead: true,
+    acked: false,
+  };
+  supervised = nativeState;
+  let command!: ModalRouterProviderCommand;
+  let proof: CommandSupervisionReceipt | null = null;
+  let intent = false;
+  let retained = true;
+  let adoptions = 0;
+  let numericHelpers = 0;
+  const fence = createTurnToolCancellationController();
+  const [exec] = fence.wrapTools(
+    [
+      {
+        type: "function",
+        name: "exec_command",
+        invoke: async (_context: unknown, input: string) => {
+          await withSupervisedLaunchReservation(
+            {
+              reserve: async (original) => {
+                command = structuredClone(original);
+                nativeState.receipt = {
+                  protocol: "native-subreaper-v1",
+                  invocationId: original.supervision!.invocationId,
+                  receiptId: crypto.randomUUID(),
+                  leaderExitCode: 137,
+                };
+                f.session.bindProviderCommand!(73, command, {
+                  load: async () => structuredClone(command),
+                  reserveInput: async () => {
+                    throw new Error("no stdin permitted");
+                  },
+                  requestCancellation: async () => {
+                    intent = true;
+                  },
+                  cancellationRequested: async () => intent,
+                  loadSupervisionReceipt: async () => proof,
+                  recordSupervisionReceipt: async (next) => {
+                    proof = next;
+                  },
+                  captureRouterPage: async (page) => {
+                    command = page.command;
+                    return { command, captured: true };
+                  },
+                });
+              },
+            },
+            () =>
+              withCommandSupervisionReady(true, () =>
+                f.control.start({ cmd: JSON.parse(input).cmd }),
+              ),
+          );
+          return "Chunk ID: supervised-start\nWall time: 0 seconds\nProcess running with session ID 73\nOutput:\n";
+        },
+      },
+    ],
+    {
+      supportsPty: () => true,
+      hasRetainedProcess: () => retained,
+      canAdoptRetainedProcessAsBackgroundCommand: () => false,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions++;
+      },
+      cancelSupervisedCommand: (handle, reason) =>
+        f.session.cancelSupervisedCommand!(handle, reason),
+      execCommandForProcessControl: async () => {
+        numericHelpers++;
+        throw new Error("numeric fallback forbidden");
+      },
+      writeStdinForProcessControl: async (args) => {
+        const result = await f.session.writeStdin!(args);
+        if (result.includes("Process exited")) retained = false;
+        return result;
+      },
+    },
+  );
+  try {
+    const initial = await exec!.invoke(
+      {},
+      JSON.stringify({ cmd: "user-work", tty: false, yield_time_ms: 0 }),
+    );
+    expect(initial).toContain("Process running with session ID 73");
+    expect(adoptions).toBe(0);
+    const originalExecId = command.execId;
+    const began = performance.now();
+    fence.cancel("pause");
+    const failure = await fence.waitForQuiescence().catch((error) => error);
+    expect(performance.now() - began).toBeLessThan(6_500);
+    expect(failure).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+    expect(intent).toBe(true);
+    expect(retained).toBe(true);
+    expect(proof).toBeNull();
+    expect(command.execId).toBe(originalExecId);
+    const cancelStart = starts.find((start) => start.commandArgs.includes("cancel"))!;
+    expect(failure.command).toMatchObject({
+      sandboxId: command.sandboxId,
+      taskId: command.taskId,
+      execId: cancelStart.execId,
+    });
+    expect(failure.command.streams.stdout.byteOffset).toBe(17);
+    expect(failure.command.streams.stdout.eof).toBe(false);
+    expect(starts.filter((start) => start.commandArgs.includes("cancel"))).toHaveLength(1);
+    expect(
+      nativeState.reads.some((read) => read.execId === cancelStart.execId && read.offset === 17),
+    ).toBe(true);
+    expect(numericHelpers).toBe(0);
+    expect(adoptions).toBe(0);
+    expect(foregroundWrites).toBe(0);
+    nativeState.failCancelRead = false;
+    await fence.waitForQuiescence();
+    expect(starts.filter((start) => start.commandArgs.includes("cancel"))).toHaveLength(1);
+    expect(proof).toEqual(nativeState.receipt);
+    expect(retained).toBe(false);
+    expect(command.execId).toBe(originalExecId);
+    expect(numericHelpers).toBe(0);
+    expect(adoptions).toBe(0);
+    expect(foregroundWrites).toBe(0);
+  } finally {
+    await f.close();
+  }
+}, 15_000);
+
+function foregroundTools(
+  f: ReturnType<typeof fixture>,
+  stdoutOffset = 0,
+  recoverDuringCleanup = true,
+) {
+  let stored: ModalRouterProviderCommand;
+  let adoptions = 0;
+  let retained = true;
+  let cleanupHelpers = 0;
+  const fence = createTurnToolCancellationController();
+  const invoke = async (_context: unknown, input: string) => {
+    const args = JSON.parse(input);
+    stored = await f.control.start({ cmd: args.cmd, tty: args.tty }, AbortSignal.timeout(2_000));
+    stored.streams.stdout.byteOffset = stdoutOffset;
+    f.session.bindProviderCommand!(73, stored, {
+      load: async () => stored,
+      reserveInput: async () => 0,
+      captureRouterPage: async (page) => {
+        stored = page.command;
+        return { command: stored, captured: true };
+      },
+    });
+    return "Chunk ID: started\nWall time: 0 seconds\nProcess running with session ID 73\nOutput:\ninitial";
+  };
+  const tools = fence.wrapTools(
+    [
+      { type: "function", name: "exec_command", invoke },
+      {
+        type: "function",
+        name: "write_stdin",
+        invoke: async (_context: unknown, input: string) => {
+          const args = JSON.parse(input);
+          return f.session.writeStdin!({
+            sessionId: args.session_id,
+            chars: args.chars,
+            yieldTimeMs: args.yield_time_ms,
+          });
+        },
+      },
+    ],
+    {
+      hasRetainedProcess: () => retained,
+      retainedProcessIdentity: () => ({ id: "6b7df4e1-2f69-4bbd-95ea-0427ad72cd09" }),
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions++;
+      },
+      writeStdinForProcessRead: (args) => f.session.writeStdin!(args),
+      writeStdinForProcessMutation: (args) => f.session.writeStdin!(args),
+      cancelSupervisedCommand: async () => false,
+      execCommandForProcessControl: async (handle) => {
+        expect(handle).toBe(73);
+        cleanupHelpers++;
+        if (recoverDuringCleanup) {
+          foregroundPollPending = false;
+          foregroundPollFailure = false;
+        }
+        // Physical helper behavior is independently exercised by the real
+        // local-process cancellation suite; this fixture owns the RPC abort.
+        return "Chunk ID: cleanup\nWall time: 0 seconds\nProcess exited with code 0\nOutput:\n";
+      },
+      writeStdinForProcessControl: async (args) => {
+        const result = await f.session.writeStdin!(args);
+        if (result.includes("Process exited")) retained = false;
+        return result;
+      },
+    },
+  );
+  return {
+    exec: tools[0]!,
+    write: tools[1]!,
+    input: tools[2]!,
+    invoke,
+    fence,
+    adoptions: () => adoptions,
+    stored: () => stored,
+    cleanupHelpers: () => cleanupHelpers,
+  };
+}
+
+test.each(["aggregate", "cause", "unreadable"] as const)(
+  "the actual foreground wrapper contains %s provider read uncertainty without retry authority",
+  async (shape) => {
+    const f = fixture();
+    const tools = foregroundTools(f, 17);
+    const native = f.control as unknown as {
+      readRouterPage(...args: unknown[]): Promise<unknown>;
+    };
+    const readPage = native.readRouterPage.bind(f.control);
+    let reads = 0;
+    let getters = 0;
+    let wrapped: unknown;
+    Object.defineProperty(f.control, "readRouterPage", {
+      value: async (...args: unknown[]) => {
+        reads++;
+        try {
+          return await readPage(...args);
+        } catch (error) {
+          if (shape === "aggregate") wrapped = new AggregateError([error, { code: 404 }]);
+          else if (shape === "cause")
+            wrapped = Object.assign(
+              new Error("provider wrapper", {
+                cause: new Error("unclassified provider cause"),
+              }),
+              { code: 14 },
+            );
+          else {
+            wrapped = Object.assign(new Error("provider wrapper"), { code: 14 });
+            Object.defineProperty(wrapped, "cause", {
+              get: () => {
+                getters++;
+                throw new Error("must not inspect", { cause: error });
+              },
+            });
+          }
+          throw wrapped;
+        }
+      },
+    });
+    foregroundReadFailures = 100;
+    try {
+      const result = await tools.exec.invoke(
+        {},
+        JSON.stringify({ cmd: "work", yield_time_ms: 1_000 }),
+      );
+      expect(result).toContain("observation unavailable");
+      expect(result).toContain("Do not replay");
+      expect(result).not.toContain("Please try again");
+      expect(result).not.toContain("Process exited");
+      expect(reads).toBe(1);
+      expect(getters).toBe(0);
+      expect(starts).toHaveLength(1);
+      expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+      expect(tools.stored().streams.stdout.byteOffset).toBe(17);
+      expect(tools.stored().streams.stdout.eof).toBe(false);
+      expect(tools.adoptions()).toBe(1);
+      await tools.fence.waitForQuiescence();
+      expect(tools.cleanupHelpers()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["missing-handle", "persistence"] as const)(
+  "pure %s failure does not acquire provider-observation containment",
+  async (shape) => {
+    const f = fixture();
+    const tools = foregroundTools(f);
+    const failure = Object.assign(new Error(shape), {
+      code: shape === "missing-handle" ? 404 : "23505",
+    });
+    let reads = 0;
+    Object.defineProperty(f.control, "readRouterPage", {
+      value: async () => {
+        reads++;
+        throw failure;
+      },
+    });
+    try {
+      await expect(
+        tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 1_000 })),
+      ).rejects.toBe(failure);
+      expect(reads).toBe(1);
+      expect(starts).toHaveLength(1);
+      expect(tools.adoptions()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each([true, false])(
+  "post-start real gRPC UNAVAILABLE retries only the exact unsupervised foreground read (PTY=%s)",
+  async (tty) => {
+    const f = fixture();
+    const tools = foregroundTools(f);
+    foregroundReadFailures = 1;
+    try {
+      const result = await tools.exec.invoke(
+        {},
+        JSON.stringify({ cmd: "work", tty, yield_time_ms: 1_000 }),
+      );
+      expect(result).toContain("Process exited with code 0");
+      expect(result).toContain("initial");
+      expect(starts).toHaveLength(1);
+      expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+      expect(tools.stored().streams.stdout.eof).toBe(true);
+      expect(tools.stored().pty).toBe(tty ? true : undefined);
+      expect(tools.stored().supervision).toBeUndefined();
+      expect(tools.adoptions()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("foreground stdin read failure does not resend nonempty input", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f);
+  try {
+    await tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 0 }));
+    foregroundReadFailures = 100;
+    const recovery = setTimeout(() => {
+      foregroundReadFailures = 0;
+    }, 350);
+    const result = await tools.write.invoke(
+      {},
+      JSON.stringify({ session_id: 73, chars: "input", yield_time_ms: 1_000 }),
+    );
+    clearTimeout(recovery);
+    expect(result).toContain("Process exited with code 0");
+    expect(foregroundWrites).toBe(1);
+    expect(starts).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("command_input observation exhaustion contains uncertainty without resending input", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f);
+  try {
+    await tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 0 }));
+    foregroundPollFailure = true;
+    const result = await tools.input.invoke({}, JSON.stringify({ session_id: 73, chars: "input" }));
+    expect(result).toContain("observation unavailable");
+    expect(result).toContain("Do not replay");
+    expect(result).not.toContain("Process exited");
+    expect(foregroundWrites).toBe(1);
+    expect(starts).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([
+  [false, 0],
+  [true, 0],
+  [true, 120],
+])(
+  "lifecycle exact-read uncertainty is typed rather than a fake successful exit (exhausted=%s, failure latency=%sms)",
+  async (exhausted, failureLatencyMs) => {
+    const f = fixture();
+    const tools = foregroundTools(f);
+    const controller = createTurnToolCancellationController();
+    foregroundReadFailures = exhausted ? 100 : 1;
+    foregroundReadFailureDelayMs = failureLatencyMs;
+    try {
+      const session = {
+        execCommand: async (args: { cmd: string }) => tools.invoke({}, JSON.stringify(args)),
+        writeStdin: (args: Parameters<NonNullable<typeof f.session.writeStdin>>[0]) =>
+          f.session.writeStdin!(args),
+      };
+      const result = await controller
+        .runSandboxCommandStructured(session, { cmd: "work", yieldTimeMs: 1_000 })
+        .catch((error) => error);
+      if (exhausted) expect(isProviderCommandObservationUnavailableError(result)).toBe(true);
+      else expect(result).toMatchObject({ exitCode: 0, stdout: "initial" });
+      expect(starts).toHaveLength(1);
+      expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("foreground cancellation aborts an already-in-flight exact poll", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f);
+  foregroundPollPending = true;
+  try {
+    const pending = tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 5_000 }));
+    for (let attempt = 0; !observations.length && attempt < 100; attempt++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(observations.length).toBeGreaterThan(0);
+    const began = performance.now();
+    tools.fence.cancel("pause");
+    await expect(pending).rejects.toMatchObject({ name: "TurnSandboxCommandCancelledError" });
+    await tools.fence.waitForQuiescence();
+    expect(performance.now() - began).toBeLessThan(500);
+    expect(foregroundPollCancelled).toBeGreaterThan(0);
+    expect(tools.cleanupHelpers()).toBe(1);
+    expect(starts).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("post-start real gRPC poll exhaustion hands the unknown command off before finalization", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f, 0, false);
+  foregroundPollFailure = true;
+  const began = performance.now();
+  try {
+    const result = await tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 500 }));
+    expect(performance.now() - began).toBeGreaterThanOrEqual(450);
+    expect(result).toContain("observation unavailable");
+    expect(result).toContain("Do not replay");
+    expect(result).not.toContain("Process exited");
+    expect(result).not.toContain("Please try again");
+    expect(starts).toHaveLength(1);
+    expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+    expect(tools.stored().streams.stdout.byteOffset).toBe(0);
+    expect(tools.stored().streams.stdout.eof).toBe(false);
+    expect(
+      await Promise.race([
+        tools.fence.waitForQuiescence().then(() => "drained"),
+        Bun.sleep(100).then(() => "stalled"),
+      ]),
+    ).toBe("drained");
+    expect(tools.adoptions()).toBe(1);
+    expect(tools.cleanupHelpers()).toBe(0);
+    expect(starts).toHaveLength(1);
+    expect(tools.stored().streams.stdout.eof).toBe(false);
+  } finally {
+    // Also let the old implementation's deliberately stalled fence recover
+    // after the regression assertion, so it cannot leak into later tests.
+    foregroundPollFailure = false;
+    await tools.fence.waitForQuiescence();
+    await f.close();
+  }
+});
+
+test("a forgotten acknowledged exec is retained and adopted, never replayed or treated as physical exit", async () => {
+  const f = fixture("forgotten-exec");
+  const tools = foregroundTools(f);
+  try {
+    const result = await tools.exec.invoke(
+      {},
+      JSON.stringify({ cmd: "work", yield_time_ms: 1_000 }),
+    );
+    expect(result).toContain("observation unavailable");
+    expect(result).toContain("Command ID:");
+    expect(result).not.toContain("Process exited");
+    const failure = await f.control.read(tools.stored(), 1_000).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+    expect(failure).toMatchObject({
+      readRetryAllowed: false,
+      cause: { code: status.FAILED_PRECONDITION },
+    });
+    expect(tools.adoptions()).toBe(1);
+    await tools.fence.waitForQuiescence();
+    expect(tools.cleanupHelpers()).toBe(0);
+    expect(starts).toHaveLength(1);
+    expect(tools.stored().streams.stdout.eof).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each(["task", "access"] as const)(
+  "genuine %s preparation transport failure proves zero-Start non-dispatch",
+  async (stage) => {
+    const f = fixture("success", endpoint, { stage });
+    try {
+      const error = await f.control
+        .verifyExecReadiness(AbortSignal.timeout(2_000))
+        .catch((caught) => caught);
+      expect(error).toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+      expect(error.cause).toBeInstanceOf(Error);
+      expect(error.cause.code).toBe(status.UNAVAILABLE);
+      expect(isModalTaskExecStartPreDispatchUnavailableError(error)).toBe(true);
+      expect(preparations).toEqual([stage]);
+      expect(starts).toHaveLength(0);
+      expect(f.sdkStarts()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["task", "access"] as const)(
+  "owning cancellation fences a late %s preparation reply without retry authority",
+  async (stage) => {
+    const f = fixture("success", endpoint, { stage, pending: true });
+    const owner = new AbortController();
+    const reason = new Error("owning attempt cancelled during preparation");
+    try {
+      const result = f.control.verifyExecReadiness(owner.signal).catch((caught) => caught);
+      await f.enteredPreparation;
+      owner.abort(reason);
+      const error = await result;
+      expect(error).toBe(reason);
+      expect(isModalTaskExecStartPreDispatchUnavailableError(error)).toBe(false);
+      f.completePreparation();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(preparations).toEqual([stage]);
+      expect(starts).toHaveLength(0);
+      expect(f.sdkStarts()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test("worker readiness uses native pre-dispatch proof instead of the pinned SDK DNS failure", async () => {
   const f = fixture();
@@ -287,6 +1023,57 @@ test("persistent uncertainty times out without another Start or fallback to SDK"
     );
     expect(starts).toHaveLength(1);
     expect(f.sdkStarts()).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a probe exec the router no longer tracks is a typed lost probe, never a raw reply or a replayed Start", async () => {
+  // lost-exec: the Start reply was lost (ambiguous), then the exact probe's
+  // poll answers "exec not found". forgotten-exec: Start was acknowledged and
+  // the router later lost the exec state. Both are box-level readiness failure.
+  for (const selected of ["lost-exec", "forgotten-exec"] as const) {
+    const f = fixture(selected);
+    const begun = performance.now();
+    try {
+      const error = await waitForSandboxExecReadiness(f.established, 5_000).catch(
+        (caught) => caught,
+      );
+      expect(error).toBeInstanceOf(SandboxExecReadinessError);
+      expect(isSandboxExecReadinessProbeLostError(error)).toBe(true);
+      expect(error).toMatchObject({
+        code: "exec_probe_lost",
+        backend: "modal",
+        instanceId: "sb-readiness",
+      });
+      expect(error.message).not.toContain("FAILED_PRECONDITION");
+      expect(error.message).not.toContain("exec not found");
+      // The exact provider reply is retained for diagnostics on the cause chain.
+      expect(error.cause).toBeInstanceOf(ModalExecReadinessProbeLostError);
+      expect(error.cause.cause).toMatchObject({
+        code: status.FAILED_PRECONDITION,
+        details: EXEC_NOT_FOUND_DETAILS,
+      });
+      // Fails fast instead of burning the readiness budget, with exactly one
+      // Start (no replay) observed only by its own identity.
+      expect(performance.now() - begun).toBeLessThan(2_500);
+      expect(starts).toHaveLength(1);
+      expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+      expect(f.sdkStarts()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("other FAILED_PRECONDITION probe replies are not exec-state loss", async () => {
+  const f = fixture("precondition-other");
+  try {
+    const error = await waitForSandboxExecReadiness(f.established, 2_000).catch((caught) => caught);
+    expect(error).not.toBeInstanceOf(SandboxExecReadinessError);
+    expect(isSandboxExecReadinessProbeLostError(error)).toBe(false);
+    expect(error).toMatchObject({ code: status.FAILED_PRECONDITION });
+    expect(starts).toHaveLength(1);
   } finally {
     await f.close();
   }

@@ -5,7 +5,8 @@ import type {
   ConnectionMetadata,
   ConnectionOwnership,
   CreateConnectionRequest,
-} from "@/types";
+} from "@opengeni/react/app/types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type CustomApiProtocol = "auto" | "openapi" | "graphql";
 export type CustomApiAuthMethod = "bearer" | "basic" | "api_key";
@@ -277,7 +278,7 @@ export function customApiAuthenticationMayBeRequired(
   error: unknown,
 ): boolean {
   if (source.kind !== "graphql" && source.kind !== "auto") return false;
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return /graphql|introspection|supported openapi document/i.test(message);
 }
 
@@ -359,7 +360,8 @@ export function customApiConnectionLabel(connection: ConnectionMetadata): string
 }
 
 export function customApiConnectionRequest(input: {
-  preview: ApiIntegrationPreview | null;
+  /** Only how the API authenticates is read. */
+  preview: Pick<ApiIntegrationPreview, "auth"> | null;
   draft: CustomApiDraft;
   providerDomain: string;
 }): CreateConnectionRequest {
@@ -378,7 +380,7 @@ export function customApiConnectionRequest(input: {
     };
   }
 
-  const placement = credentialPlacement(preview, draft);
+  const placement = customApiCredentialPlacement(preview, draft);
   return {
     providerDomain,
     kind: "api_key",
@@ -393,9 +395,22 @@ export function customApiConnectionRequest(input: {
   };
 }
 
-function credentialPlacement(
-  preview: ApiIntegrationPreview | null,
-  draft: CustomApiDraft,
+/**
+ * Where a key goes and what is sent, as the API's authentication defines it
+ * (or as chosen when the API doesn't say). An organization's key for an API
+ * integration is placed the same way.
+ */
+export function customApiCredentialPlacement(
+  preview: Pick<ApiIntegrationPreview, "auth"> | null,
+  draft: Pick<
+    CustomApiDraft,
+    | "authMethod"
+    | "credentialName"
+    | "credentialCarrier"
+    | "credentialValue"
+    | "username"
+    | "password"
+  >,
 ): { carrier: "header" | "query" | "cookie"; name: string; value: string; prefix?: string } {
   if (preview?.auth.kind === "api_key") {
     return {
@@ -432,7 +447,7 @@ function credentialPlacement(
   };
 }
 
-function basicPlacement(draft: CustomApiDraft) {
+function basicPlacement(draft: Pick<CustomApiDraft, "username" | "password">) {
   const username = draft.username.trim();
   if (!username) throw new Error("Enter the HTTP Basic username.");
   const password = requiredSecret(draft.password, "Enter the HTTP Basic password.");

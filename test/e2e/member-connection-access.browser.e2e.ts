@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess } from "@opengeni/testing/process";
 
 test("the production connection-access notice is clear and bounded at desktop and mobile widths", async () => {
   const port = await freePort();

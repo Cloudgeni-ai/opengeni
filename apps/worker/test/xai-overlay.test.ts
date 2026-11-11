@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { configuredModels, parseModelProvidersJson, resolveModelProvider } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { withXaiSubscriptionProvider } from "../src/activities/capabilities";
 
 describe("withXaiSubscriptionProvider", () => {

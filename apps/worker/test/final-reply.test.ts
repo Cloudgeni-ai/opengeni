@@ -20,6 +20,13 @@ describe("same-turn final reply handoff", () => {
     expect(needsFinalReply({ ...empty, output: " \n\t" })).toBe(true);
     expect(needsFinalReply({ ...empty, toolsExecuted: false, completedGoal: true })).toBe(true);
   });
+  test("asks for a real answer when the only output was a hidden search-record copy", () => {
+    const quiet = { ...empty, toolsExecuted: false, completedGoal: false };
+    expect(needsFinalReply(quiet)).toBe(false);
+    expect(needsFinalReply({ ...quiet, suppressedEcho: true })).toBe(true);
+    expect(needsFinalReply({ ...quiet, suppressedEcho: true, inputWaitYielded: true })).toBe(false);
+    expect(needsFinalReply({ ...quiet, suppressedEcho: true, maintenance: true })).toBe(false);
+  });
   test("preserves deliberate waits, approvals, maintenance, and ordinary answers", () => {
     for (const patch of [
       { inputWaitYielded: true },

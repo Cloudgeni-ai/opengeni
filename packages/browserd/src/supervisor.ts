@@ -1,10 +1,10 @@
 import { EphemeralChromiumContextPool } from "./chromium-context-pool";
+import { UnsettledCleanupError } from "./cleanup-error";
 import { restoredTabUrl } from "./restored-tab-url";
 import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./headless-shell";
 import type { HeadlessSessionCookies } from "./headless-session-cookies";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
   BrowserActionCommand,
@@ -17,8 +17,8 @@ import type {
   BrowserDownload,
   BrowserExternalAuthCommand,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
-  BrowserProtectedAuthObservation,
+  BrowserPasskeySyncRequest,
+  BrowserPasskeySyncResponse,
   BrowserRevisionMaterialization,
   BrowserTarget,
   BrowserTargetState,
@@ -28,8 +28,10 @@ import type {
   BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
+import { RECENT_USE_UPDATE_HOLD_MS, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
+  BROWSER_WAIT_HOLD_MAX_MS,
   BrowserDownloadExportRequest,
   BrowserRevisionMaterialization as BrowserRevisionMaterializationSchema,
   NetworkRouteConsistency,
@@ -37,21 +39,45 @@ import {
 } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
-  BrowserProtectedAuthController,
   InteractionControllerError,
   InteractionDefiniteDriverError,
   type BrowserInteractionAuthority,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
-import { createAttachedChromeTransport } from "./attached-cdp";
+import {
+  connectAttachedBrowserBridge,
+  createAttachedChromeDriver,
+  createAttachedChromeTransport,
+  settleAttachedTabLedger,
+  type AttachedBrowserBridgeConnector,
+} from "./attached-cdp";
+import {
+  AttachedTabLedgerRecorder,
+  processRunning,
+  readAttachedTabLedger,
+  readAttachedTabLedgers,
+  removeAttachedTabLedger,
+  writeAttachedTabLedger,
+} from "./attached-tab-ledger";
 import { CdpConnection } from "./cdp";
-import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
+import {
+  AgentBrowserDriver,
+  type BrowserRuntimeSnapshot,
+  type BrowserTabNavigationOptions,
+} from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
+import {
+  readDetachedBrowserRecord,
+  readDetachedBrowserRecords,
+  removeDetachedBrowserRecord,
+  writeDetachedBrowserRecord,
+} from "./detached-browsers";
 import { uploadBrowserDownload } from "./download-upload";
-import type { ResolvedAgentBrowserBinary } from "./binary";
+import { BrowserRecording, type RecordingFrameSource, type RecordingSummary } from "./recording";
 import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
 import { LightpandaRunner } from "./lightpanda-runner";
 import { ExternalProviderCdpRunner } from "./external-provider-runner";
+import { BrowserPasskeyManager } from "./passkeys";
 import {
   type BrowserFrameStreamOptions,
   type BrowserFrameSubscription,
@@ -59,14 +85,62 @@ import {
   type BrowserScreenshotOptions,
 } from "./media";
 import {
-  AgentBrowserJsonRunner,
-  assertAgentBrowserSocketPath,
+  AgentBrowserCommandError,
+  ManagedBrowserRunner,
   browserProfileCryptoPolicy,
   reapManagedBrowserProcesses,
+  reapOrphanedAgentBrowserDaemons,
+  inspectOwnedManagedBrowserProcess,
+  stopEndedManagedBrowserProcess,
+  assertManagedBrowserProfileUnused,
+  type OwnedManagedBrowserProcess,
 } from "./runner";
+import {
+  SqliteBrowserWorkingRuntimeJournal,
+  adoptableSourceReceipt,
+  adoptedCopyNeedsResettle,
+  assertDirectory,
+  assertWorkingRuntimeReceipt,
+  boundedFailureCode,
+  currentBootId,
+  isAbandonedLaunchReceipt,
+  isInterruptedLaunchReceipt,
+  sameRecordedProfile,
+  unavailable as workingRuntimeUnavailable,
+  BrowserWorkingRuntimeUnavailableError,
+  type BrowserWorkingRuntimeAuthority,
+  type BrowserWorkingRuntimeReceipt,
+  type InterruptedRecovery,
+  recordedProcessReceipt,
+} from "./working-runtime-journal";
+import {
+  ADOPTION_IN_FLIGHT,
+  WorkingCopyAdoptionError,
+  activeAdoptionLocked,
+  adoptionAuthority,
+  adoptionLocked,
+  adoptWorkingCopy,
+  adoptionPaths,
+  assertWorkingCopyJournalsIntact,
+  emptyWorkingCopyEvidence,
+  observeActiveAdoption,
+  readActiveAdoption,
+  readAdoptionRecord,
+  revertWorkingCopyAdoption,
+  withWorkingDirectoryLock,
+  workingCopyAdoptionStatus,
+  workingCopyManifest,
+  workingCopyRefusalError,
+  type AdoptionBoundary,
+  type BrowserWorkingCopyAdoptionStatus,
+  type BrowserWorkingCopyAuthorityInput,
+  type BrowserWorkingCopyInspection,
+  type BrowserWorkingCopyRefusal,
+} from "./working-copy-adoption";
 import { SqliteBrowserOperationJournal } from "./journal";
-import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
+import { markProfileExitedCleanly } from "./profile-exit-state";
+import { reportUnexpectedDispatchError } from "./controller-diagnostics";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -89,6 +163,20 @@ import {
   validateUploadAuthority,
   type BrowserStateUploadAuthority,
 } from "./state-upload";
+import { BROWSER_WINDOW_PARK_IDLE_MS } from "./window-parking";
+import {
+  matchReopenedTabs,
+  readBrowserTabIds,
+  tabUrlHash,
+  takeStoppedBrowserTabs,
+  writeBrowserTabIds,
+  writeStoppedBrowserTabs,
+  type BrowserTabIdPair,
+  type BrowserRelaunchedTabs,
+  type BrowserRelaunchReason,
+  type StoppedBrowserTab,
+} from "./stopped-browser-tabs";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const DEFAULT_MAX_SESSIONS = 64;
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
@@ -104,9 +192,51 @@ function aggregateFailure(
   return new AggregateError(errors, message, { cause });
 }
 
+/** The same frame subscription, calling `release` once it is closed or its
+ * frames end. */
+function releaseOnClose(
+  subscription: BrowserFrameSubscription,
+  release: () => void,
+): BrowserFrameSubscription {
+  return {
+    async close() {
+      try {
+        await subscription.close();
+      } finally {
+        release();
+      }
+    },
+    [Symbol.asyncIterator]() {
+      const frames = subscription[Symbol.asyncIterator]();
+      return {
+        async next() {
+          const result = await frames.next();
+          if (result.done) release();
+          return result;
+        },
+        async return(value?: unknown) {
+          try {
+            return (await frames.return?.(value)) ?? { done: true as const, value: undefined };
+          } finally {
+            release();
+          }
+        },
+      };
+    },
+  };
+}
+
 export type BrowserSessionReference = {
   browserSessionId: string;
   controllerGeneration: string;
+};
+
+/** About the caller of one createSession, not the session itself. */
+export type BrowserSupervisorCreation = {
+  /** The caller can take a session with no observation (null): one that
+   * continued in the person's own browser with no tab of its own. Callers
+   * from before such sessions omit it and get a new tab instead. */
+  acceptsNoObservation?: boolean;
 };
 
 export type BrowserSupervisorSessionOptions = BrowserSessionReference & {
@@ -119,6 +249,8 @@ export type BrowserSupervisorSessionOptions = BrowserSessionReference & {
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
   networkRoute?: BrowserSupervisorNetworkRoute;
+  recoverExistingWorkingDirectory?: true;
+  workingRuntimeAuthority?: BrowserWorkingRuntimeAuthority;
 };
 
 export type BrowserSupervisorNetworkRoute = {
@@ -172,7 +304,15 @@ export type BrowserStateRestoreInput = {
 };
 
 export type BrowserSupervisorSession = BrowserSessionReference & {
-  observation: BrowserObservation;
+  /** Null only in the person's own browser, for a session that continued
+   * there with none of its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservation | null;
+  /** Returned only by the create that launched the browser. */
+  notice?: string;
+  /** How this headed managed browser shows on the machine as launched: in a
+   * native window, or offscreen with none. Absent for headless, remote and
+   * attached browsers. */
+  display?: "window" | "offscreen";
 };
 
 export type BrowserStateCaptureInput = BrowserSessionReference & {
@@ -184,12 +324,25 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
   upload: BrowserStateUploadAuthority;
 };
 
+/** Whether the caller asked for BrowserObservation.notice (see
+ * BROWSER_OBSERVATION_NOTICES_PARAMETER): the agent's own tools do, so a
+ * notice reaches the agent and nothing else uses it up. */
+export type BrowserObservationNoticeOptions = { notices?: boolean };
+
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
-  start(url?: string): Promise<BrowserObservation>;
+  readonly networkNotice?: string | null;
+  readonly display?: "window" | "offscreen" | null;
+  /** The load error of the page start() kept on the browser's error page. */
+  readonly startLoadError?: string | null;
+  start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
+  /** Start a session continuing in the person's browser in a tab it left
+   * there; null when it has none left, so it starts with no tab. */
+  resume?(): Promise<BrowserObservation | null>;
   listTargets(): Promise<BrowserTarget[]>;
-  openTarget(url?: string): Promise<BrowserObservation>;
+  openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
+  openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
   selectTarget(targetId: string): Promise<BrowserObservation>;
   closeTarget(targetId: string): Promise<BrowserTarget[]>;
   targetState(targetId: string): Promise<BrowserTargetState>;
@@ -212,33 +365,73 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   ): Promise<BrowserDiagnosticBatch>;
   readClipboard(): BrowserClipboard;
   runtimeSnapshot(): Promise<BrowserRuntimeSnapshot>;
+  /** Keeps the browser's windows presented until the returned release is
+   * called (drivers that park idle windows). */
+  acquirePresence?(): Promise<() => void>;
+  /** Change-driven JPEG frames of one tab, for recordings. */
+  recordFrames?(
+    targetId: string,
+    onFrame: (jpeg: Uint8Array, capturedAtMs: number) => void,
+    onEnd: (error: Error | null) => void,
+  ): Promise<() => Promise<void>>;
   /** Private state capture adjunct, never part of runtimeSnapshot/public JSON. */
   captureSessionCookies?(): Promise<HeadlessSessionCookies | null>;
   readonly requiresExplicitProfileRestore?: boolean;
-  protectedFill(command: BrowserProtectedAuthFillCommand): Promise<BrowserProtectedAuthObservation>;
   externalAuth?(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue>;
   /** Provider liveness probe used only after another operation reports a
    * failure. Managed Chromium implements it; unsupported providers fail
    * honestly without implicit recovery. */
   isAvailable?(): Promise<boolean>;
   isTerminal?(): boolean;
+  /** When the most recent JavaScript dialog still waiting for an answer in
+   * one of its tabs opened (epoch milliseconds), or null when none is.
+   * Releasing the browser then would lose it: a relaunched browser no longer
+   * has it, and in the person's own Chrome a debugger attached later can
+   * neither see nor answer it. */
+  openDialogSince?(): number | null;
+  ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
+  /** Release a failed reattach transport without closing its owned browser. */
+  detach?(): Promise<void>;
+  /** This browser replaced an earlier one and reopened its tabs: each
+   * reopened tab keeps its earlier ID, and calls naming an earlier tab that
+   * did not reopen say why it is gone. */
+  noteRelaunchedTabs?(relaunched: BrowserRelaunchedTabs): void;
+  /** The plain notice that a relaunch reloaded this tab's page, for the
+   * first result about it that reaches the caller; null when there is none
+   * or it was already given. */
+  takeReloadedTabNotice?(tabId: string): string | null;
+  /** The http(s) URL a tab showing the browser's error page failed to load:
+   * the address the browser reopens it at after a relaunch. Null when it
+   * can't be read. */
+  errorPageUrl?(tabId: string): Promise<string | null>;
+  /** Give open tabs the IDs callers already hold for them (an earlier
+   * controller on the same browser gave them those IDs). */
+  adoptTabIds?(tabs: readonly BrowserTabIdPair[]): void;
+  /** The tab IDs that differ from the browser's own IDs for its tabs. */
+  adoptedTabIds?(): BrowserTabIdPair[];
+  /** Ends this runtime's hold on the browser. In the person's own browser
+   * (attached Chrome) it also closes the tabs the session opened and left
+   * blank, and releases Chrome's debugger, however the runtime goes away. */
   close(): Promise<void>;
 };
 
 export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   sessionDirectory: string;
-  socketDirectory: string;
   profileDirectory: string;
   restoredProfile: boolean;
+  recoverOwnedProcess?: OwnedManagedBrowserProcess;
+  allowOwnedProcessLaunch?: boolean;
   headlessSessionCookies?: HeadlessSessionCookies;
   downloadDirectory: string;
-  screenshotDirectory: string;
   headed: boolean;
   transport: BrowserSupervisorTransport;
   browserExecutablePath?: string;
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
   networkRoute?: BrowserSupervisorNetworkRoute;
+  /** One per browser session; outlives driver restarts so loaded credentials
+   * and undelivered passkey events survive browser recovery. */
+  passkeys?: BrowserPasskeyManager;
   resolveWorkspaceFiles: (
     operationId: string,
     workspaceFileIds: readonly string[],
@@ -252,27 +445,78 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
 
 export type BrowserSupervisorOptions = {
   ephemeralContextPoolEnabled?: boolean;
+  /** Run managed Linux browsers in their own network namespace where the
+   * machine supports it (default true). A deployment whose browsers already
+   * own their network, such as a managed sandbox VM, turns it off. */
+  networkIsolation?: boolean;
+  /** Host a virtual WebAuthn authenticator in every page target (default true
+   * where the transport supports it). Passkey placements bring the acted-on
+   * tab to the front before each action, because Chromium refuses WebAuthn
+   * ceremonies in a background tab; disabling passkeys keeps managed input in
+   * the background. */
+  passkeys?: boolean;
   rootDirectory: string;
-  socketRootDirectory?: string;
   maxSessions?: number;
-  agentBrowserBinary?: ResolvedAgentBrowserBinary;
-  lightpandaBinary?: ResolvedLightpandaBinary;
+  /** Resolves the verified Lightpanda binary when a Lightpanda session first needs it. */
+  lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>;
   headlessShell?: VerifiedHeadlessShell;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   uploadDownload?: typeof uploadBrowserDownload;
+  /** Read-only identity seam; tests supply generated process receipts only. */
+  inspectOwnedProcess?: typeof inspectOwnedManagedBrowserProcess;
+  /** Stops a browser an explicitly ended, non-resident session left running;
+   * tests observe the exact recorded process instead of signalling it. */
+  stopEndedProcess?: typeof stopEndedManagedBrowserProcess;
+  /** Proves no process runs a browser on an exact private profile before an
+   * interrupted launch is set aside; tests supply the outcome. */
+  assertProfileUnused?: typeof assertManagedBrowserProfileUnused;
+  /** Called after each durable boundary of a working copy adoption or
+   * revert; tests use it to stop one at an exact boundary, as a crash would. */
+  afterAdoptionPhase?: (boundary: AdoptionBoundary) => Promise<void>;
+  /** Called once an end or launch holds a browser's working directory lock
+   * and has found no adoption owning the directory; tests use it to hold
+   * the lock while another controller tries to act. */
+  afterWorkingDirectoryClaim?: (
+    operation: "end" | "launch",
+    browserSessionId: string,
+  ) => Promise<void>;
+  /** Close a managed browser nobody used for this long, keeping its profile
+   * on disk; its next request relaunches it with the same tabs. A session in
+   * the person's own Chrome lets go of that browser after the same time and
+   * continues in its tab on its next request (default 10 minutes, 0
+   * disables). */
+  idleReleaseMs?: number;
+  /** Clock for idle release; tests advance it. */
+  now?: () => number;
+  /** Opens a bridge to an attached Chrome profile; tests substitute a
+   * fixture browser. */
+  connectAttachedBridge?: AttachedBrowserBridgeConnector;
 };
+
+/** Managed browsers stop after this long unused. The profile, tabs and
+ * downloads stay on disk, and the next request relaunches the browser on them,
+ * so an idle browser costs no memory or CPU while waiting. */
+export const BROWSER_IDLE_RELEASE_MS = 10 * 60_000;
+const IDLE_RELEASE_SWEEP_MS = 60_000;
+/** How long a handed-off browser gets to save its session and exit after a
+ * close request before it is stopped by signal. */
+const HANDED_OFF_CLOSE_TIMEOUT_MS = 10_000;
+/** How long cleanup in the person's own browser after a crashed controller is
+ * retried (the browser may be closed or disconnected meanwhile). After that
+ * its tab ids are no longer trusted to name the same tabs. */
+const ATTACHED_LEFTOVER_RETRY_MS = 24 * 60 * 60_000;
 
 type Runtime = {
   options: BrowserRuntimeOptions;
   sessionDirectory: string;
   driverContext: BrowserSupervisorDriverContext;
   journal: SqliteBrowserOperationJournal;
-  protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
   stateJournal: SqliteBrowserStateTransferJournal;
+  workingJournal: SqliteBrowserWorkingRuntimeJournal | null;
+  workingReceipt: BrowserWorkingRuntimeReceipt | null;
   driver: BrowserSupervisorDriver;
   controller: BrowserInteractionController;
-  protectedAuthController: BrowserProtectedAuthController;
   workspaceFileStager: BrowserWorkspaceFileStager;
   downloadStore: BrowserDownloadStore | null;
   lastSnapshot: BrowserRuntimeSnapshot;
@@ -281,10 +525,25 @@ type Runtime = {
    * returned once from createSession instead of immediately rebuilding the
    * same accessibility tree through a second controller round trip. */
   creationObservation: BrowserObservation | null;
+  /** The runtime continued a session that had no tab left, so it has none. */
+  startedWithoutTab: boolean;
   recovery: Promise<void> | null;
   externalAuthTail: Promise<void> | null;
+  /** Outstanding uses that keep the browser's windows presented. Each is
+   * bound to the current driver and moves to its replacement on recovery. */
+  presence: Set<PresenceHold>;
+  /** The session's current or last recording; one at a time. */
+  recording: BrowserRecording | null;
+  /** When a request last reached this browser (supervisor clock). */
+  lastUsedAt: number;
+  /** Until when the agent session using this browser keeps it while it
+   * works or deliberately waits (supervisor clock), or null; see
+   * `waitHoldEnds`. */
+  waitHoldUntil: number | null;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
+
+type PresenceHold = { driver: BrowserSupervisorDriver | null; release: () => void };
 
 type BrowserRuntimeOptions = Omit<
   BrowserSupervisorSessionOptions,
@@ -312,9 +571,9 @@ type ValidatedBrowserSupervisorSessionOptions = Omit<
 /** One placement-local authority hosting many independently fenced browser sessions. */
 export class BrowserSupervisor {
   readonly rootDirectory: string;
-  readonly socketRootDirectory: string;
   private readonly maxSessions: number;
   private readonly ephemeralContextPoolEnabled: boolean;
+  private readonly passkeysEnabled: boolean;
   private readonly contextPools = new Map<string, EphemeralChromiumContextPool>();
   private readonly createDriver: (
     context: BrowserSupervisorDriverContext,
@@ -324,26 +583,51 @@ export class BrowserSupervisor {
     authority: BrowserStateUploadAuthority,
   ) => Promise<void>;
   private readonly uploadDownload: typeof uploadBrowserDownload;
+  private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
+  private readonly stopEndedProcess: typeof stopEndedManagedBrowserProcess;
+  private readonly assertProfileUnused: typeof assertManagedBrowserProfileUnused;
+  private readonly afterAdoptionPhase: ((boundary: AdoptionBoundary) => Promise<void>) | undefined;
+  private readonly afterWorkingDirectoryClaim:
+    | ((operation: "end" | "launch", browserSessionId: string) => Promise<void>)
+    | undefined;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
+  /** Browsers whose working copy is being adopted by this process. */
+  private readonly adopting = new Set<string>();
+  /** Browsers whose preserved working copy is being ended, retired or set
+   * aside by this process; an adoption may not start meanwhile. */
+  private readonly endingWorkingCopies = new Set<string>();
   private readonly creationRequests = new Set<Promise<BrowserSupervisorSession>>();
   private readonly ending = new Map<string, Promise<void>>();
   private readonly stateTransferTails = new Map<string, Promise<void>>();
   private closed = false;
+  private closePromise: Promise<void> | null = null;
+  private cleanupUncertain = false;
+  /** Browsers whose failed reattach could not prove its transport detached. */
+  private readonly recoveryTransportsUncertain = new Set<string>();
+  private readonly idleReleaseMs: number;
+  private readonly now: () => number;
+  private idleReleaseTimer: ReturnType<typeof setInterval> | null = null;
+  /** Browsers an earlier controller handed off that this one is stopping. */
+  private readonly releasingDetached = new Map<string, Promise<unknown>>();
+  /** Wait holds on handed-off browsers this controller has not adopted, by
+   * browser session id (supervisor clock); see `holdForWait`. Read without
+   * yielding by the sweep, so a hold set before its claim always counts. */
+  private readonly detachedWaitHolds = new Map<string, number>();
+  /** Handed-off browsers the last sweep found still waiting for their idle
+   * time; the controller is not empty while any remain. */
+  private detachedWaiting = 0;
+  private detachedSweep: Promise<string[]> | null = null;
+  private attachedSweep: Promise<string[]> | null = null;
+  private readonly connectAttachedBridge: AttachedBrowserBridgeConnector;
+  /** Sessions whose failed attached cleanup was already reported. */
+  private readonly attachedLeftoverWarnings = new Set<string>();
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
-    this.socketRootDirectory = resolve(
-      options.socketRootDirectory ?? defaultSocketRoot(this.rootDirectory),
-    );
-    if (!options.createDriver) {
-      assertAgentBrowserSocketPath({
-        socketDirectory: join(this.socketRootDirectory, "0".repeat(16)),
-        namespace: "og",
-        sessionName: `b${"0".repeat(16)}`,
-      });
-    }
+    this.connectAttachedBridge = options.connectAttachedBridge ?? connectAttachedBrowserBridge;
     this.ephemeralContextPoolEnabled = options.ephemeralContextPoolEnabled === true;
+    this.passkeysEnabled = options.passkeys !== false;
     this.maxSessions = boundedPositiveInteger(
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       "maxSessions",
@@ -355,12 +639,290 @@ export class BrowserSupervisor {
           ? this.createEphemeralDriver(context, options)
           : createBrowserDriver(
               context,
-              options.agentBrowserBinary,
               options.lightpandaBinary,
               options.headlessShell,
+              options.networkIsolation !== false,
+              this.connectAttachedBridge,
             )));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
+    this.inspectOwnedProcess = options.inspectOwnedProcess ?? inspectOwnedManagedBrowserProcess;
+    this.stopEndedProcess = options.stopEndedProcess ?? stopEndedManagedBrowserProcess;
+    this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
+    this.afterAdoptionPhase = options.afterAdoptionPhase;
+    this.afterWorkingDirectoryClaim = options.afterWorkingDirectoryClaim;
+    this.now = options.now ?? Date.now;
+    this.idleReleaseMs = options.idleReleaseMs ?? BROWSER_IDLE_RELEASE_MS;
+    if (this.idleReleaseMs > 0) {
+      this.idleReleaseTimer = setInterval(
+        () => {
+          void this.releaseIdleBrowsers();
+          void this.releaseDetachedBrowsers();
+          void this.releaseAttachedLeftovers();
+        },
+        Math.min(IDLE_RELEASE_SWEEP_MS, this.idleReleaseMs),
+      );
+      this.idleReleaseTimer.unref?.();
+    }
+  }
+
+  /**
+   * Closes every managed browser nobody used for the idle release time.
+   * Each keeps its working directory and a recoverable working-runtime
+   * receipt, exactly as a controller shutdown leaves it, except that its
+   * browser process stops instead of running on. The session leaves this
+   * controller; its next request finds it missing, and the control plane
+   * recovers it from that directory: the same profile, relaunched with its
+   * last tabs.
+   *
+   * A session in the person's own Chrome is released the same way: the empty
+   * tabs it opened close and Chrome's debugger lets go of the browser, so
+   * Chrome stops showing that it is being debugged. Its recovery continues
+   * in the tab it was using. Returns the released browser session ids.
+   */
+  async releaseIdleBrowsers(): Promise<string[]> {
+    if (this.closed) return [];
+    return await this.releaseIdleRuntimes();
+  }
+
+  private async releaseIdleRuntimes(): Promise<string[]> {
+    if (this.idleReleaseMs <= 0) return [];
+    const idleBefore = this.now() - this.idleReleaseMs;
+    const released: string[] = [];
+    for (const runtime of [...this.sessions.values()]) {
+      if (!idleReleasable(runtime, idleBefore, this.now())) continue;
+      // A download still transferring is the browser at work with nobody
+      // calling it; stopping the browser would fail the download.
+      if (await downloadInProgress(runtime)) continue;
+      if (!idleReleasable(runtime, idleBefore, this.now())) continue;
+      const browserSessionId = runtime.options.browserSessionId;
+      if (this.sessions.get(browserSessionId) !== runtime || this.ending.has(browserSessionId))
+        continue;
+      runtime.lifecycle = "ending";
+      const ending = (async () => {
+        await runtime.controller.waitForIdle();
+        await this.disposeRuntime(runtime, false, false, true, true);
+      })();
+      this.ending.set(browserSessionId, ending);
+      try {
+        await ending;
+        if (this.sessions.get(browserSessionId) === runtime) this.sessions.delete(browserSessionId);
+        released.push(browserSessionId);
+      } catch (error) {
+        console.warn("browserd.idle_release_failed", {
+          browserSessionId,
+          error: errorMessage(error),
+        });
+      } finally {
+        if (this.ending.get(browserSessionId) === ending) this.ending.delete(browserSessionId);
+      }
+    }
+    return released;
+  }
+
+  /**
+   * Stops browsers an earlier controller left running at its shutdown (an
+   * agent update or restart) once they have gone unused for the idle release
+   * time. A handed-off browser is adopted again only when its session's next
+   * request arrives; without this, a browser whose session never returns
+   * would run forever. The browser's receipt already records a recoverable
+   * suspension, so its next request relaunches it on the same profile, as
+   * after any idle release. The recorded process is stopped only while its
+   * PID birth and exact profile still identify it. Returns the released ids.
+   */
+  async releaseDetachedBrowsers(): Promise<string[]> {
+    if (this.closed || this.idleReleaseMs <= 0) return [];
+    this.detachedSweep ??= this.sweepDetachedBrowsers().finally(() => {
+      this.detachedSweep = null;
+    });
+    return await this.detachedSweep;
+  }
+
+  /**
+   * Cleans up the person's own Chrome after attached browser sessions whose
+   * controller went away without doing it (it crashed, or the cleanup could
+   * not reach the browser): closes the tabs each opened that are still blank
+   * and releases Chrome's debugger attachments it held. Tabs that show a page,
+   * tabs the session did not open and attachments a live session holds are
+   * left alone. A session whose next request arrives meanwhile waits for its
+   * cleanup and then continues in the tab it was using. Returns the settled
+   * browser session ids.
+   */
+  async releaseAttachedLeftovers(): Promise<string[]> {
+    if (this.closed) return [];
+    this.attachedSweep ??= this.sweepAttachedLeftovers().finally(() => {
+      this.attachedSweep = null;
+    });
+    return await this.attachedSweep;
+  }
+
+  private async sweepAttachedLeftovers(): Promise<string[]> {
+    let ledgers;
+    try {
+      ledgers = await readAttachedTabLedgers(this.rootDirectory);
+    } catch (error) {
+      console.warn("browserd.attached_leftover_release_failed", {
+        error: errorMessage(error),
+      });
+      return [];
+    }
+    const settled: string[] = [];
+    for (const ledger of ledgers) {
+      if (this.closed) break;
+      if (ledger.settled || this.attachedSessionBusy(ledger.browserSessionId)) continue;
+      // Another live controller on this machine may still hold the session.
+      if (ledger.ownerPid !== process.pid && processRunning(ledger.ownerPid)) continue;
+      if (await this.settleAttachedLeftovers(ledger.browserSessionId)) {
+        settled.push(ledger.browserSessionId);
+      }
+    }
+    return settled;
+  }
+
+  private attachedSessionBusy(browserSessionId: string): boolean {
+    return (
+      this.sessions.has(browserSessionId) ||
+      this.creating.has(browserSessionId) ||
+      this.ending.has(browserSessionId) ||
+      this.adopting.has(browserSessionId) ||
+      this.releasingDetached.has(browserSessionId)
+    );
+  }
+
+  /** Settle one session's leftovers, claimed like a handed-off browser's
+   * release so that its recovery or end waits instead of racing it. The
+   * check and claim happen without yielding. Returns whether it settled; a
+   * session another live controller on this machine took over meanwhile is
+   * left to that controller. */
+  private async settleAttachedLeftovers(browserSessionId: string): Promise<boolean> {
+    if (this.attachedSessionBusy(browserSessionId)) return false;
+    const sessionDirectory = join(this.rootDirectory, "sessions", browserSessionId);
+    const release = (async (): Promise<boolean> => {
+      const ledger = readAttachedTabLedger(sessionDirectory);
+      if (!ledger || ledger.settled) return true;
+      if (ledger.ownerPid !== process.pid && processRunning(ledger.ownerPid)) return false;
+      let next;
+      try {
+        next = await settleAttachedTabLedger(ledger, this.connectAttachedBridge, Date.now());
+      } catch (error) {
+        if (Date.now() - ledger.updatedAt < ATTACHED_LEFTOVER_RETRY_MS) throw error;
+        next = {
+          ...ledger,
+          settled: true,
+          createdTabs: [],
+          attachedTabs: [],
+          updatedAt: Date.now(),
+        };
+      }
+      writeAttachedTabLedger(sessionDirectory, next);
+      if (!next.settled) throw new Error("some tabs could not be cleaned up yet");
+      return true;
+    })();
+    this.releasingDetached.set(browserSessionId, release);
+    try {
+      if (!(await release)) return false;
+      this.attachedLeftoverWarnings.delete(browserSessionId);
+      return true;
+    } catch (error) {
+      if (!this.attachedLeftoverWarnings.has(browserSessionId)) {
+        this.attachedLeftoverWarnings.add(browserSessionId);
+        console.warn("browserd.attached_leftover_release_failed", {
+          browserSessionId,
+          error: errorMessage(error),
+        });
+      }
+      return false;
+    } finally {
+      if (this.releasingDetached.get(browserSessionId) === release)
+        this.releasingDetached.delete(browserSessionId);
+    }
+  }
+
+  private async sweepDetachedBrowsers(): Promise<string[]> {
+    let records;
+    try {
+      records = await readDetachedBrowserRecords(this.rootDirectory);
+    } catch (error) {
+      console.warn("browserd.detached_release_failed", {
+        error: errorMessage(error),
+      });
+      return [];
+    }
+    const idleBefore = this.now() - this.idleReleaseMs;
+    const released: string[] = [];
+    let waiting = 0;
+    for (const record of records) {
+      const browserSessionId = record.browserSessionId;
+      const sessionDirectory = join(this.rootDirectory, "sessions", browserSessionId);
+      const profileDirectory = join(sessionDirectory, "profile");
+      if (
+        this.sessions.has(browserSessionId) ||
+        this.creating.has(browserSessionId) ||
+        this.ending.has(browserSessionId) ||
+        this.adopting.has(browserSessionId) ||
+        this.endingWorkingCopies.has(browserSessionId)
+      )
+        continue;
+      if (this.closed) break;
+      const waitHoldUntil =
+        this.detachedWaitHolds.get(browserSessionId) ?? record.waitHoldUntil ?? null;
+      if (idleSince(record.lastUsedAt, waitHoldUntil) > idleBefore) {
+        waiting += 1;
+        continue;
+      }
+      // Checked and claimed without yielding, so a request that recovers the
+      // same session waits for this stop instead of adopting a dying browser.
+      const release = (async () => {
+        if (record.process.profileDirectory === profileDirectory) {
+          await this.closeHandedOffBrowser(record.process);
+          await this.stopEndedProcess(profileDirectory, record.process);
+        }
+        await removeDetachedBrowserRecord(sessionDirectory);
+      })();
+      this.releasingDetached.set(browserSessionId, release);
+      try {
+        await release;
+        this.detachedWaitHolds.delete(browserSessionId);
+        released.push(browserSessionId);
+      } catch (error) {
+        waiting += 1;
+        console.warn("browserd.detached_release_failed", {
+          browserSessionId,
+          error: errorMessage(error),
+        });
+      } finally {
+        if (this.releasingDetached.get(browserSessionId) === release)
+          this.releasingDetached.delete(browserSessionId);
+      }
+    }
+    this.detachedWaiting = waiting;
+    return released;
+  }
+
+  /** Ask a handed-off browser to shut down over its own DevTools endpoint,
+   * as an idle release does, so Chromium saves its session and the next
+   * launch restores its tabs. Best effort: the identity-checked stop that
+   * follows ends it either way. */
+  private async closeHandedOffBrowser(owned: OwnedManagedBrowserProcess): Promise<void> {
+    if ((await this.inspectOwnedProcess(owned).catch(() => "exited")) !== "live") return;
+    let connection: CdpConnection;
+    try {
+      connection = await CdpConnection.connect(owned.cdpEndpoint, { timeoutMs: 2_000 });
+    } catch {
+      return;
+    }
+    try {
+      await connection.send("Browser.close", {}, { timeoutMs: 5_000 });
+    } catch {
+      // The browser may drop the connection while it closes.
+    } finally {
+      connection.close();
+    }
+    const deadline = Date.now() + HANDED_OFF_CLOSE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if ((await this.inspectOwnedProcess(owned).catch(() => "exited")) === "exited") return;
+      await Bun.sleep(100);
+    }
   }
 
   private async createEphemeralDriver(
@@ -388,8 +950,10 @@ export class BrowserSupervisor {
       .digest("hex");
     let pool = this.contextPools.get(key);
     if (!pool || pool.isTerminal()) {
+      // A failed terminal pool still owns the only cleanup proof. Do not
+      // replace it until its retained shutdown has positively completed.
+      if (pool) await pool.close();
       const poolDirectory = join(this.rootDirectory, "sessions", randomUUID());
-      const poolSocketDirectory = join(this.socketRootDirectory, shortDigest(poolDirectory));
       pool = new EphemeralChromiumContextPool({
         authorityKey: key,
         onTerminal: () => {
@@ -401,25 +965,19 @@ export class BrowserSupervisor {
           });
         },
         launch: async () => {
-          const runner = await AgentBrowserJsonRunner.create({
-            namespace: "og",
-            sessionName: `e${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-            socketDirectory: poolSocketDirectory,
+          const runner = await ManagedBrowserRunner.create({
             profileDirectory: join(poolDirectory, "profile"),
-            downloadDirectory: join(poolDirectory, "downloads"),
-            screenshotDirectory: join(poolDirectory, "screenshots"),
             headed: false,
+            ...(options.networkIsolation === false ? { networkIsolation: false } : {}),
             ...(context.browserExecutablePath
               ? { browserExecutablePath: context.browserExecutablePath }
               : {}),
-            ...(options.agentBrowserBinary ? { binary: options.agentBrowserBinary } : {}),
           });
           return {
             run: runner.run.bind(runner),
             terminate: async () => {
               await runner.terminate();
               await rm(poolDirectory, { recursive: true, force: true });
-              await rm(poolSocketDirectory, { recursive: true, force: true });
             },
           };
         },
@@ -432,6 +990,7 @@ export class BrowserSupervisor {
       resolveWorkspaceFiles: context.resolveWorkspaceFiles,
       downloadDirectory: context.downloadDirectory,
       ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
+      ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     });
   }
 
@@ -441,20 +1000,48 @@ export class BrowserSupervisor {
       recursive: true,
       mode: 0o700,
     });
-    await mkdir(supervisor.socketRootDirectory, {
-      recursive: true,
-      mode: 0o700,
-    });
     await chmod(supervisor.rootDirectory, 0o700);
-    await chmod(supervisor.socketRootDirectory, 0o700);
     if (!options.createDriver) {
-      await reapManagedBrowserProcesses(supervisor.rootDirectory);
+      await reapManagedBrowserProcesses(supervisor.rootDirectory, async (directory) => {
+        // A durable launch/retirement history can include an accepted unknown
+        // outcome. Startup has no current human admission to settle it. Keep
+        // that exact directory; explicit bound cleanup remains authoritative.
+        try {
+          await lstat(join(directory, "working-runtime.sqlite"));
+          return true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+          throw error;
+        }
+      });
+      // Launcher daemons an earlier release left behind after their browser
+      // ended serve nothing and never exit on their own. Startup must not
+      // fail because one of them could not be stopped.
+      await reapOrphanedAgentBrowserDaemons(supervisor.rootDirectory).catch(() => 0);
     }
+    // Browsers an earlier controller handed off and nobody used since are
+    // stopped now rather than at the first sweep; recent ones are counted so
+    // this controller is not stopped as empty before their idle time ends.
+    void supervisor.releaseDetachedBrowsers();
+    // Cleanup a crashed controller left undone in a person's own Chrome.
+    void supervisor.releaseAttachedLeftovers();
     return supervisor;
   }
 
+  /** A browser this controller launches always shows a tab. */
+  async createSession(
+    optionsInput: BrowserSupervisorSessionOptions & {
+      transport?: Exclude<BrowserSupervisorTransport, { kind: "attached_chrome" }>;
+    },
+    creation?: BrowserSupervisorCreation,
+  ): Promise<BrowserSupervisorSession & { observation: BrowserObservation }>;
   async createSession(
     optionsInput: BrowserSupervisorSessionOptions,
+    creation?: BrowserSupervisorCreation,
+  ): Promise<BrowserSupervisorSession>;
+  async createSession(
+    optionsInput: BrowserSupervisorSessionOptions,
+    creation: BrowserSupervisorCreation = {},
   ): Promise<BrowserSupervisorSession> {
     this.assertOpen();
     const options = validateSessionOptions(optionsInput);
@@ -468,7 +1055,7 @@ export class BrowserSupervisor {
         "ephemeral browser contexts are disabled by the operator",
       );
     }
-    const request = this.createValidatedSession(options);
+    const request = this.createValidatedSession(options, creation.acceptsNoObservation === true);
     this.creationRequests.add(request);
     try {
       return await request;
@@ -479,51 +1066,402 @@ export class BrowserSupervisor {
     }
   }
 
+  /** Read-only evidence about a preserved working copy that this controller
+   * holds no runtime for: its manifest digest, latest receipt and whether it
+   * can be adopted. Inspection never settles or changes an adoption, and
+   * writes nothing except SQLite's own shared-memory index of the
+   * controller journal, which is not part of the working copy. */
+  async inspectWorkingCopy(
+    input: BrowserWorkingCopyAuthorityInput,
+  ): Promise<BrowserWorkingCopyInspection> {
+    this.assertOpen();
+    const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    const blocking = this.adopting.has(input.browserSessionId)
+      ? ("in_flight" as const)
+      : await observeActiveAdoption(paths);
+    const evidence = await this.workingCopyEvidence(input);
+    return {
+      ...evidence,
+      platformSupported: process.platform === "linux",
+      activeAdoption:
+        blocking && typeof blocking !== "string"
+          ? await workingCopyAdoptionStatus(paths, blocking)
+          : null,
+      refusal:
+        process.platform !== "linux"
+          ? "unsupported_platform"
+          : blocking
+            ? "adoption_unresolved"
+            : evidence.refusal,
+    };
+  }
+
+  /** Adopt the exact approved bytes of a preserved working copy. See
+   * working-copy-adoption.ts for the durable protocol. A new adoption checks
+   * that the browser is stopped and its copy adoptable while it holds the
+   * working directory lock, so no launch or end can start in between. */
+  async adoptWorkingCopy(
+    input: BrowserWorkingCopyAuthorityInput & { operationId: string; manifestDigest: string },
+  ): Promise<BrowserWorkingCopyAdoptionStatus> {
+    this.assertOpen();
+    if (process.platform !== "linux") {
+      throw new WorkingCopyAdoptionError(
+        "unsupported_platform",
+        "working copy adoption is supported only on Linux controllers",
+      );
+    }
+    const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    if (this.adopting.has(input.browserSessionId))
+      throw workingCopyRefusalError("adoption_unresolved");
+    this.assertNotRunning(input.browserSessionId);
+    this.adopting.add(input.browserSessionId);
+    try {
+      return await workingCopyAdoptionStatus(paths, await this.performAdoption(paths, input));
+    } finally {
+      this.adopting.delete(input.browserSessionId);
+    }
+  }
+
+  /** Revert an unfinished adoption under the browser's current authority:
+   * the browser's own directory goes back to its live path and the staged
+   * copy is kept. See revertWorkingCopyAdoption. */
+  async revertWorkingCopyAdoption(
+    input: BrowserWorkingCopyAuthorityInput & { operationId: string },
+  ): Promise<{ inFlight: false; adoption: BrowserWorkingCopyAdoptionStatus }> {
+    this.assertOpen();
+    const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    if (this.adopting.has(input.browserSessionId))
+      throw workingCopyRefusalError("adoption_unresolved");
+    this.assertNotRunning(input.browserSessionId);
+    this.adopting.add(input.browserSessionId);
+    try {
+      // The same shape as workingCopyAdoptionStatus: this call held the
+      // browser's adoption claim until now, so nothing is in flight.
+      const adoption = await workingCopyAdoptionStatus(
+        paths,
+        await revertWorkingCopyAdoption(paths, {
+          operationId: input.operationId,
+          authority: adoptionAuthority(input),
+          ...(this.afterAdoptionPhase ? { afterPhase: this.afterAdoptionPhase } : {}),
+        }),
+      );
+      return { inFlight: false, adoption };
+    } finally {
+      this.adopting.delete(input.browserSessionId);
+    }
+  }
+
+  private assertNotRunning(browserSessionId: string) {
+    if (
+      this.endingWorkingCopies.has(browserSessionId) ||
+      this.sessions.has(browserSessionId) ||
+      this.creating.has(browserSessionId)
+    )
+      throw workingCopyRefusalError("browser_running");
+  }
+
+  private async performAdoption(
+    paths: ReturnType<typeof adoptionPaths>,
+    input: BrowserWorkingCopyAuthorityInput & { operationId: string; manifestDigest: string },
+  ) {
+    return await adoptWorkingCopy(paths, {
+      operationId: input.operationId,
+      browserSessionId: input.browserSessionId,
+      authority: adoptionAuthority(input),
+      manifestDigest: input.manifestDigest,
+      ...(this.afterAdoptionPhase ? { afterPhase: this.afterAdoptionPhase } : {}),
+      beforeIntent: async () => {
+        this.assertNotRunning(input.browserSessionId);
+        const evidence = await this.workingCopyEvidence(input);
+        if (evidence.refusal) throw workingCopyRefusalError(evidence.refusal);
+      },
+      appendReceipt: async (stagingDirectory) => {
+        await assertWorkingCopyJournalsIntact(stagingDirectory);
+        const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+          browserSessionId: input.browserSessionId,
+          controllerGeneration: input.controllerGeneration,
+          sessionDirectory: stagingDirectory,
+        });
+        try {
+          const latest = writer.latest();
+          if (!latest) throw workingCopyRefusalError("receipt_not_adoptable");
+          const source =
+            latest.intent === "adopt" && latest.adoption?.operationId === input.operationId
+              ? null
+              : latest;
+          if (source && !adoptableSourceReceipt(source))
+            throw workingCopyRefusalError("receipt_not_adoptable");
+          if (source && JSON.stringify(source.authority) !== JSON.stringify(input.authority))
+            throw workingCopyRefusalError("authority_changed");
+          writer.adopt({
+            source: source ?? latest,
+            operationId: input.operationId,
+            manifestDigest: input.manifestDigest,
+            sourceProfile: await assertDirectory(
+              join(this.rootDirectory, "sessions", input.browserSessionId, "profile"),
+            ),
+            profile: await assertDirectory(join(stagingDirectory, "profile")),
+          });
+        } finally {
+          writer.close();
+        }
+      },
+    });
+  }
+
+  /** Status of one adoption by its operation id, read without changing
+   * anything. A missing record proves the operation changed nothing here,
+   * because the record precedes every side effect. A recorded adoption that
+   * stopped part way is reported in its recorded phase; retrying the same
+   * adoption under the authority that approved it, or a launch under that
+   * authority, settles it, and a revert puts the browser's own directory
+   * back. It is in flight while it holds the browser's active claim and an
+   * operation in any process holds the working directory lock. */
+  async workingCopyAdoptionStatus(input: {
+    browserSessionId: string;
+    operationId: string;
+  }): Promise<{ inFlight: boolean; adoption: BrowserWorkingCopyAdoptionStatus | null }> {
+    this.assertOpen();
+    const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    const inFlight =
+      (this.adopting.has(input.browserSessionId) ||
+        (await readActiveAdoption(paths)) === input.operationId) &&
+      (await adoptionLocked(paths));
+    const record = await readAdoptionRecord(paths, input.operationId);
+    return {
+      inFlight,
+      adoption: record ? await workingCopyAdoptionStatus(paths, record) : null,
+    };
+  }
+
+  /** Run `body` as the single owner of a browser's working directory: it
+   * holds the directory lock (see withWorkingDirectoryLock) for its whole
+   * duration, after proving no adoption owns the directory. An adoption,
+   * revert, launch or end in any process that holds the lock makes this
+   * refuse as busy; a recorded adoption that is not finished makes it refuse
+   * as unresolved. With the launch's authority, a recorded adoption that
+   * authority approved is carried forward first. */
+  private async withOwnedWorkingDirectory<T>(
+    operation: "end" | "launch",
+    options: {
+      browserSessionId: string;
+      controllerGeneration?: string;
+      workingRuntimeAuthority?: BrowserWorkingRuntimeAuthority | undefined;
+    },
+    body: () => Promise<T>,
+  ): Promise<T> {
+    if (this.adopting.has(options.browserSessionId))
+      throw workingRuntimeUnavailable("working_directory_busy");
+    const paths = adoptionPaths(this.rootDirectory, options.browserSessionId);
+    const authority =
+      options.workingRuntimeAuthority && options.controllerGeneration !== undefined
+        ? adoptionAuthority({
+            controllerGeneration: options.controllerGeneration,
+            authority: options.workingRuntimeAuthority,
+          })
+        : null;
+    const result = await withWorkingDirectoryLock(paths, async () => {
+      if (await activeAdoptionLocked(paths, authority))
+        throw workingRuntimeUnavailable("adoption_unresolved");
+      await this.afterWorkingDirectoryClaim?.(operation, options.browserSessionId);
+      return { value: await body() };
+    });
+    if (result === ADOPTION_IN_FLIGHT) throw workingRuntimeUnavailable("working_directory_busy");
+    return result.value;
+  }
+
+  /** Run an end, retire or set-aside of a preserved working copy as the
+   * single owner of its directory (see withOwnedWorkingDirectory). The
+   * browser is also marked in this process, so an adoption here refuses as
+   * running before it even tries the lock. */
+  private async whileNoAdoption(browserSessionId: string, body: () => Promise<void>) {
+    const marked = !this.endingWorkingCopies.has(browserSessionId);
+    this.endingWorkingCopies.add(browserSessionId);
+    try {
+      await this.withOwnedWorkingDirectory("end", { browserSessionId }, body);
+    } finally {
+      if (marked) this.endingWorkingCopies.delete(browserSessionId);
+    }
+  }
+
+  private async workingCopyEvidence(
+    input: BrowserWorkingCopyAuthorityInput,
+  ): Promise<Omit<BrowserWorkingCopyInspection, "platformSupported" | "activeAdoption">> {
+    if (this.sessions.has(input.browserSessionId) || this.creating.has(input.browserSessionId)) {
+      return emptyWorkingCopyEvidence(input, "browser_running");
+    }
+    const sessionDirectory = join(this.rootDirectory, "sessions", input.browserSessionId);
+    const profileDirectory = join(sessionDirectory, "profile");
+    let profile: { device: number; inode: number };
+    try {
+      await assertDirectory(sessionDirectory);
+      profile = await assertDirectory(profileDirectory);
+    } catch {
+      return emptyWorkingCopyEvidence(input, "working_copy_invalid");
+    }
+    let receipt: BrowserWorkingRuntimeReceipt | null;
+    try {
+      const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+        { ...input, sessionDirectory },
+        true,
+      );
+      try {
+        receipt = reader.latest();
+      } finally {
+        reader.close();
+      }
+    } catch {
+      return {
+        ...emptyWorkingCopyEvidence(input, "working_copy_invalid"),
+        currentProfile: profile,
+      };
+    }
+    let profileInUse: boolean | null;
+    try {
+      await this.assertProfileUnused(profileDirectory);
+      profileInUse = false;
+    } catch {
+      profileInUse = process.platform === "linux" ? true : null;
+    }
+    const authorityMatches =
+      receipt !== null && JSON.stringify(receipt.authority) === JSON.stringify(input.authority);
+    const identityMatches =
+      receipt !== null &&
+      sameRecordedProfile(receipt, profile, {
+        profileDirectory,
+        bootId: await currentBootId(),
+      });
+    const refusal: BrowserWorkingCopyRefusal | null = !receipt
+      ? "receipt_not_adoptable"
+      : !adoptableSourceReceipt(receipt) ||
+          receipt.process?.profileDirectory !== resolve(profileDirectory)
+        ? "receipt_not_adoptable"
+        : !authorityMatches
+          ? "authority_changed"
+          : profileInUse !== false
+            ? "process_state_unknown"
+            : identityMatches
+              ? "adoption_not_needed"
+              : null;
+    const manifest = refusal === null ? await workingCopyManifest(sessionDirectory) : null;
+    return {
+      browserSessionId: input.browserSessionId,
+      controllerGeneration: input.controllerGeneration,
+      manifest,
+      currentProfile: profile,
+      receipt: receipt
+        ? {
+            operationId: receipt.operationId,
+            intent: receipt.intent,
+            state: receipt.state,
+            recordedProfile: receipt.profile,
+            restoreAuthorityDigest: receipt.restoreAuthorityDigest,
+            directoryLaunchAllowed: receipt.directoryLaunchAllowed,
+            authorityMatches,
+            adoption: receipt.adoption ?? null,
+          }
+        : null,
+      profileIdentityMatches: identityMatches,
+      profileInUse,
+      refusal,
+    };
+  }
+
   private async createValidatedSession(
     options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
   ): Promise<BrowserSupervisorSession> {
     await this.retireTerminalSessions();
+    // A handed-off browser being stopped for idleness is never adopted while
+    // it dies; its recovery relaunches it once the stop settles. The check
+    // must not yield when nothing is being stopped, so the claim below stays
+    // atomic with it.
+    for (
+      let releasing = this.releasingDetached.get(options.browserSessionId);
+      releasing;
+      releasing = this.releasingDetached.get(options.browserSessionId)
+    ) {
+      await releasing.catch(() => undefined);
+    }
     const active = this.sessions.get(options.browserSessionId);
     if (active) {
       this.assertSameBinding(active, options);
+      await this.recordWorkingAuthority(active, options);
       return {
         ...binding(active),
-        observation: await this.currentObservation(active),
+        ...displayOf(active),
+        observation: await this.currentObservation(active, acceptsNoObservation),
       };
     }
     const pending = this.creating.get(options.browserSessionId);
     if (pending) {
       const runtime = await pending;
       this.assertSameBinding(runtime, options);
+      await this.recordWorkingAuthority(runtime, options);
       return {
         ...binding(runtime),
-        observation: await this.currentObservation(runtime),
+        ...displayOf(runtime),
+        observation: await this.currentObservation(runtime, acceptsNoObservation),
       };
     }
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
       throw new InteractionControllerError(
-        "resource_unavailable",
-        "browser supervisor session capacity is exhausted",
-        true,
+        "capacity_exhausted",
+        `This machine is already running its limit of ${this.maxSessions} managed browsers. End browser sessions that are no longer needed, then open a new one; retrying will not help until one ends.`,
       );
     }
-    const creation = this.buildRuntime(options);
+    const creation = this.buildRuntime(options, acceptsNoObservation);
     this.creating.set(options.browserSessionId, creation);
     try {
       const runtime = await creation;
       if (this.closed) {
-        await this.disposeRuntime(runtime, false);
+        try {
+          await this.disposeRuntime(runtime, false);
+        } catch (error) {
+          this.cleanupUncertain = true;
+          throw error;
+        }
         throw new InteractionControllerError(
           "resource_unavailable",
           "browser supervisor is closed",
         );
       }
+      // This controller holds the browser now; an earlier handoff record
+      // must not outlive that.
+      await removeDetachedBrowserRecord(runtime.sessionDirectory).catch(() => undefined);
+      // A wait hold set on the handed-off browser carries over: another
+      // session's use does not end the waiting session's wait.
+      const detachedHold = this.detachedWaitHolds.get(options.browserSessionId);
+      this.detachedWaitHolds.delete(options.browserSessionId);
+      if (detachedHold !== undefined && runtime.waitHoldUntil === null) {
+        runtime.waitHoldUntil = detachedHold;
+      }
       this.sessions.set(options.browserSessionId, runtime);
-      const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
+      const observation =
+        runtime.creationObservation ??
+        (runtime.startedWithoutTab
+          ? null
+          : await this.currentObservation(runtime, acceptsNoObservation));
       runtime.creationObservation = null;
+      runtime.startedWithoutTab = false;
+      // The browser opened even if its first page did not load; say why in
+      // plain words rather than leave the caller to infer it from the
+      // browser's error page.
+      const loadError = runtime.driver.startLoadError;
+      const notice = [
+        loadError
+          ? `initialUrl did not load (${loadError}); the tab shows the browser's error page.`
+          : null,
+        runtime.driver.networkNotice,
+        runtime.driver.display === "offscreen" ? offscreenBrowserNotice(process.platform) : null,
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join(" ");
       return {
         ...binding(runtime),
+        ...displayOf(runtime),
         observation,
+        ...(notice ? { notice } : {}),
       };
     } finally {
       if (this.creating.get(options.browserSessionId) === creation) {
@@ -532,14 +1470,68 @@ export class BrowserSupervisor {
     }
   }
 
-  /** Update safety includes work hidden from the public active-session list. */
+  /** Update safety includes work hidden from the public active-session list.
+   * An open session does not by itself make a restart unsafe: a quiescent
+   * managed session with a completed working-runtime launch is preserved by
+   * graceful shutdown and reattached on its next causal request, and a session
+   * whose driver already ended has nothing left to lose. A quiescent attached
+   * Chrome session is likewise left intact in the user's browser. Any other
+   * session (external providers, launches without a durable working runtime),
+   * a JavaScript dialog an agent has yet to answer, or any admitted command
+   * still blocks. */
   isIdle(): boolean {
+    return this.updateBlockers().length === 0;
+  }
+
+  updateBlockers(): UpdateBlocker[] {
+    const blockers: UpdateBlocker[] = [];
+    if (this.cleanupUncertain) blockers.push({ kind: "browser_cleanup", count: 1 });
+    // Each admitted creation is also a creation request. These are overlapping
+    // ownership views, not two distinct openings.
+    const openings = Math.max(this.creationRequests.size, this.creating.size);
+    if (openings) blockers.push({ kind: "browser_creation", count: openings });
+    for (const resourceId of this.ending.keys())
+      blockers.push({ kind: "browser_closing", resourceId, count: 1 });
+    if (this.stateTransferTails.size)
+      blockers.push({ kind: "browser_state_transfer", count: this.stateTransferTails.size });
+    for (const runtime of this.sessions.values()) {
+      // A restart in the middle of a task fails the agent's next calls while
+      // it lasts, even for a session that survives it. A session used within
+      // the hold is mid-task, so the update waits for a pause.
+      if (
+        runtime.lifecycle === "active" &&
+        runtime.controller.isIdle() &&
+        this.now() - runtime.lastUsedAt < RECENT_USE_UPDATE_HOLD_MS
+      ) {
+        blockers.push({
+          kind: "browser_recent_use",
+          resourceId: runtime.options.browserSessionId,
+          count: 1,
+        });
+        continue;
+      }
+      if (restartPreservesRuntime(runtime, this.now())) continue;
+      const kind =
+        runtime.recovery !== null
+          ? "browser_recovery"
+          : runtime.externalAuthTail !== null
+            ? "browser_authentication"
+            : !runtime.controller.isIdle()
+              ? "browser_action"
+              : "browser_session";
+      blockers.push({ kind, resourceId: runtime.options.browserSessionId, count: 1 });
+    }
+    return blockers;
+  }
+
+  /** No session of any lifecycle remains and no work is in flight. */
+  isEmpty(): boolean {
     return (
-      this.creationRequests.size === 0 &&
       this.sessions.size === 0 &&
-      this.creating.size === 0 &&
-      this.ending.size === 0 &&
-      this.stateTransferTails.size === 0
+      this.detachedWaiting === 0 &&
+      this.detachedSweep === null &&
+      this.attachedSweep === null &&
+      this.isIdle()
     );
   }
 
@@ -568,19 +1560,45 @@ export class BrowserSupervisor {
       return await runtime.driver.openTarget(url);
     });
     this.rememberObservation(runtime, observation);
+    this.noteRecordingTarget(runtime, "open_tab", observation.target.id, {
+      url: observation.target.url,
+    });
     return observation;
+  }
+
+  async openTargetWithInventory(
+    reference: BrowserSessionReference,
+    url?: string,
+  ): Promise<BrowserTarget[]> {
+    const runtime = this.requireActive(reference);
+    const open = runtime.driver.openTargetWithInventory;
+    if (!open) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser driver does not support metadata-only tab opening",
+      );
+    }
+    const targets = await this.mutateWithRecovery(runtime, async () => {
+      return await open.call(runtime.driver, url);
+    });
+    this.rememberTargets(runtime, targets);
+    return targets;
   }
 
   async selectTarget(
     reference: BrowserSessionReference,
     targetId: string,
+    options: BrowserObservationNoticeOptions = {},
   ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.mutateWithRecovery(runtime, async () => {
       return await runtime.driver.selectTarget(targetId);
     });
     this.rememberObservation(runtime, observation);
-    return observation;
+    this.noteRecordingTarget(runtime, "select_tab", observation.target.id, {
+      url: observation.target.url,
+    });
+    return this.reported(runtime, observation, options);
   }
 
   async closeTarget(
@@ -595,13 +1613,17 @@ export class BrowserSupervisor {
     return targets;
   }
 
-  async observe(reference: BrowserSessionReference, targetId: string): Promise<BrowserObservation> {
+  async observe(
+    reference: BrowserSessionReference,
+    targetId: string,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.readWithRecovery(runtime, async () => {
       return await runtime.controller.observe(targetId);
     });
     this.rememberObservation(runtime, observation);
-    return observation;
+    return this.reported(runtime, observation, options);
   }
 
   async targetState(
@@ -631,12 +1653,20 @@ export class BrowserSupervisor {
     return this.requireActive(reference).driver.readClipboard();
   }
 
-  async action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
+  async action(
+    command: BrowserActionCommand,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserActionReceipt> {
     const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
     });
-    const receipt = await runtime.controller.run(command);
+    // Logged as the agent sent it: secret references are not resolved here.
+    this.noteRecordingTarget(runtime, "action", command.targetId, { action: command.action });
+    const ran = await this.presented(runtime, async () => await runtime.controller.run(command));
+    const receipt = ran.observation
+      ? { ...ran, observation: this.reported(runtime, ran.observation, options) }
+      : ran;
     if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
     if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
       await this.recoverIfUnavailable(runtime).catch(() => false);
@@ -658,17 +1688,20 @@ export class BrowserSupervisor {
     return await this.requireActive(reference).workspaceFileStager.stage(request);
   }
 
-  async protectedAuthFill(command: BrowserProtectedAuthFillCommand) {
+  /** Controller-private: load the session's passkeys and drain its events. */
+  async passkeySync(request: BrowserPasskeySyncRequest): Promise<BrowserPasskeySyncResponse> {
     const runtime = this.requireActive({
-      browserSessionId: command.browserSessionId,
-      controllerGeneration: command.controllerGeneration,
+      browserSessionId: request.browserSessionId,
+      controllerGeneration: request.controllerGeneration,
     });
-    const receipt = await runtime.protectedAuthController.run(command);
-    if (receipt.observation) this.rememberTarget(runtime, receipt.observation.target);
-    if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
-      await this.recoverIfUnavailable(runtime).catch(() => false);
+    const passkeys = runtime.driverContext.passkeys;
+    if (!passkeys) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "this browser placement does not support passkeys",
+      );
     }
-    return receipt;
+    return await passkeys.sync(request);
   }
 
   externalAuth(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue> {
@@ -678,7 +1711,10 @@ export class BrowserSupervisor {
       controllerGeneration: command.controllerGeneration,
     });
     const previous = runtime.externalAuthTail ?? Promise.resolve();
-    const operation = previous.then(async () => await this.performExternalAuth(runtime, command));
+    const operation = previous.then(
+      async () =>
+        await this.presented(runtime, async () => await this.performExternalAuth(runtime, command)),
+    );
     const tail = operation.then(
       () => undefined,
       () => undefined,
@@ -692,10 +1728,6 @@ export class BrowserSupervisor {
 
   receipt(reference: BrowserSessionReference, operationId: string): BrowserActionReceipt | null {
     return this.requireBound(reference).controller.receipt(operationId);
-  }
-
-  protectedAuthReceipt(reference: BrowserSessionReference, operationId: string) {
-    return this.requireBound(reference).protectedAuthController.receipt(operationId);
   }
 
   async screenshot(
@@ -715,9 +1747,17 @@ export class BrowserSupervisor {
     options?: BrowserFrameStreamOptions,
   ): Promise<BrowserFrameSubscription> {
     const runtime = this.requireActive(reference);
-    return await this.readWithRecovery(runtime, async () => {
-      return await runtime.driver.subscribeFrames(targetId, options);
-    });
+    // A live view keeps the windows presented for as long as it is open.
+    const release = await this.acquirePresence(runtime);
+    try {
+      const subscription = await this.readWithRecovery(runtime, async () => {
+        return await runtime.driver.subscribeFrames(targetId, options);
+      });
+      return releaseOnClose(subscription, release);
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   async debug(
@@ -740,7 +1780,7 @@ export class BrowserSupervisor {
     if (!store) {
       throw new InteractionControllerError(
         "unsupported",
-        "browser placement does not expose managed downloads",
+        "Lightpanda browsers do not expose downloads",
       );
     }
     return await store.list();
@@ -754,7 +1794,7 @@ export class BrowserSupervisor {
     if (!store) {
       throw new InteractionControllerError(
         "unsupported",
-        "browser placement does not expose managed downloads",
+        "Lightpanda browsers do not expose downloads",
       );
     }
     return await store.get(downloadId);
@@ -789,6 +1829,155 @@ export class BrowserSupervisor {
     return await store.export(request, this.uploadDownload);
   }
 
+  /** Starts recording the session's tab; the recording follows the agent to
+   * other tabs it acts on, opens or selects. One recording at a time. */
+  async startRecording(
+    reference: BrowserSessionReference,
+    targetId: string,
+  ): Promise<RecordingSummary> {
+    const runtime = this.requireActive(reference);
+    if (runtime.recording?.isRecording) {
+      throw new InteractionControllerError(
+        "operation_conflict",
+        "this browser is already recording; stop that recording first",
+      );
+    }
+    const source = this.recordingSourceFor(runtime);
+    const previous = runtime.recording;
+    runtime.recording = null;
+    await previous?.discard();
+    const release = await this.acquirePresence(runtime);
+    runtime.recording = await BrowserRecording.start({
+      directory: join(runtime.sessionDirectory, "recordings"),
+      targetId,
+      source,
+      releasePresence: release,
+    });
+    return runtime.recording.summary();
+  }
+
+  async stopRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+  ): Promise<RecordingSummary> {
+    return await this.requireRecording(reference, recordingId).stop("requested");
+  }
+
+  recordingStatus(reference: BrowserSessionReference, recordingId: string): RecordingSummary {
+    return this.requireRecording(reference, recordingId).summary();
+  }
+
+  /** Uploads a stopped recording's bundle through a narrow object grant and
+   * waits for it to land, however long that takes. */
+  async exportRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+    upload: BrowserDownloadExportRequestValue["upload"],
+  ): Promise<{ sizeBytes: number; sha256: string }> {
+    const recording = this.requireRecording(reference, recordingId);
+    const bundle = recording.exportable();
+    await this.recordingTransfer(recording, upload).done;
+    return { sizeBytes: bundle.sizeBytes, sha256: bundle.sha256 };
+  }
+
+  /** Starts or joins the bundle upload and waits at most `waitMs` for it. A
+   * slow link keeps uploading after this returns `uploading`; asking again
+   * with a grant for the same object joins that upload. */
+  async uploadRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+    upload: BrowserDownloadExportRequestValue["upload"],
+    waitMs: number,
+    replace = false,
+  ): Promise<{ state: "uploading" | "uploaded"; sizeBytes: number; sha256: string }> {
+    const recording = this.requireRecording(reference, recordingId);
+    const bundle = recording.exportable();
+    const transfer = this.recordingTransfer(recording, upload, replace);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = new Promise<"waited">((settle) => {
+      timer = setTimeout(() => settle("waited"), waitMs);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([transfer.done, waited]);
+    } finally {
+      clearTimeout(timer);
+    }
+    return {
+      state: transfer.state === "uploaded" ? "uploaded" : "uploading",
+      sizeBytes: bundle.sizeBytes,
+      sha256: bundle.sha256,
+    };
+  }
+
+  private recordingTransfer(
+    recording: BrowserRecording,
+    upload: BrowserDownloadExportRequestValue["upload"],
+    replace = false,
+  ) {
+    const bundle = recording.exportable();
+    const target = new URL(upload.url);
+    target.search = "";
+    return recording.transferTo(
+      target.toString(),
+      async () => {
+        await this.uploadDownload(bundle.path, upload, {
+          sizeBytes: bundle.sizeBytes,
+          sha256: bundle.sha256,
+        });
+      },
+      replace,
+    );
+  }
+
+  private requireRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+  ): BrowserRecording {
+    const recording = this.requireBound(reference).recording;
+    if (!recording || recording.recordingId !== recordingId) {
+      throw new InteractionControllerError("resource_not_found", "recording not found");
+    }
+    return recording;
+  }
+
+  private recordingSource(runtime: Runtime): RecordingFrameSource {
+    const driver = runtime.driver;
+    const record = driver.recordFrames;
+    if (!record) {
+      throw new InteractionControllerError("unsupported", "this browser cannot record video");
+    }
+    return async (targetId, onFrame, onEnd) => await record.call(driver, targetId, onFrame, onEnd);
+  }
+
+  /** Logs a tab the agent used and keeps the recording on the current
+   * browser after recovery replaced it. */
+  private noteRecordingTarget(
+    runtime: Runtime,
+    kind: "action" | "open_tab" | "select_tab",
+    targetId: string,
+    detail: { url?: string; action?: unknown } = {},
+  ): void {
+    const recording = runtime.recording;
+    if (!recording?.isRecording) return;
+    try {
+      recording.rebind(this.recordingSourceFor(runtime));
+    } catch {
+      /* The replacement browser cannot record; keep what was captured. */
+    }
+    recording.noteTarget(kind, targetId, detail);
+  }
+
+  private readonly recordingSources = new WeakMap<BrowserSupervisorDriver, RecordingFrameSource>();
+
+  private recordingSourceFor(runtime: Runtime): RecordingFrameSource {
+    const existing = this.recordingSources.get(runtime.driver);
+    if (existing) return existing;
+    const source = this.recordingSource(runtime);
+    this.recordingSources.set(runtime.driver, source);
+    return source;
+  }
+
   captureState(inputValue: BrowserStateCaptureInput): Promise<BrowserStateCaptureReceipt> {
     this.assertOpen();
     const input = validateCaptureInput(inputValue);
@@ -814,41 +2003,150 @@ export class BrowserSupervisor {
 
   async endSession(
     reference: BrowserSessionReference,
-    options: { removeState?: boolean } = {},
+    options: {
+      removeState?: boolean;
+      /** The person explicitly ends this browser after its controller lost
+       * it: discard a preserved working runtime instead of refusing. Cleanup
+       * paths (a failed or expired resume) never set this, so a possibly
+       * accepted launch stays preserved for recovery there. */
+      discardWorkingRuntime?: boolean;
+      /** The control plane is returning an expired resume to its checkpoint:
+       * when this generation's launch never recorded completion and no
+       * process runs its profile, move its whole session directory aside
+       * intact instead of refusing. Nothing is deleted. */
+      setAsideInterruptedLaunch?: boolean;
+    } = {},
   ): Promise<void> {
+    return await this.finishSession(reference, options, false);
+  }
+
+  private async finishSession(
+    reference: BrowserSessionReference,
+    options: {
+      removeState?: boolean;
+      discardWorkingRuntime?: boolean;
+      setAsideInterruptedLaunch?: boolean;
+    },
+    suspendForShutdown: boolean,
+  ): Promise<void> {
+    if (!isUuid(reference.browserSessionId)) throw new Error("browserSessionId must be a UUID");
     const pending = this.creating.get(reference.browserSessionId);
     if (pending) await pending;
     const stateTransfer = this.stateTransferTails.get(reference.browserSessionId);
     if (stateTransfer) await stateTransfer.catch(() => undefined);
+    if (!this.sessions.has(reference.browserSessionId)) {
+      for (
+        let releasing = this.releasingDetached.get(reference.browserSessionId);
+        releasing;
+        releasing = this.releasingDetached.get(reference.browserSessionId)
+      ) {
+        await releasing.catch(() => undefined);
+      }
+      const sessionDirectory = join(this.rootDirectory, "sessions", reference.browserSessionId);
+      // An attached session released earlier: its end still cleans up what
+      // the release could not, then forgets the session's tabs.
+      if (!suspendForShutdown) await this.endReleasedAttachedSession(sessionDirectory);
+      let workingRuntimePresent = true;
+      try {
+        await lstat(join(sessionDirectory, "working-runtime.sqlite"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        workingRuntimePresent = false;
+      }
+      // Missing memory cannot acknowledge cleanup of a possibly accepted
+      // launch. Its exact binding/holder must stay addressable for cleanup,
+      // unless this generation's latest launch provably never completed, or
+      // the control plane explicitly discards this exact generation: a
+      // person's end (removing its state) or the retirement of a browser
+      // whose task moved to another machine (keeping its state on disk).
+      if (workingRuntimePresent) {
+        await this.whileNoAdoption(reference.browserSessionId, async () => {
+          if (options.discardWorkingRuntime === true && !suspendForShutdown) {
+            await this.retireNonResidentWorkingRuntime(
+              reference,
+              sessionDirectory,
+              options.removeState === true,
+            );
+          } else if (
+            options.removeState === true &&
+            options.setAsideInterruptedLaunch === true &&
+            !suspendForShutdown
+          ) {
+            await this.setAsideInterruptedLaunch(reference, sessionDirectory);
+          } else {
+            await this.cleanupAbandonedLaunch(
+              reference,
+              sessionDirectory,
+              options.removeState === true,
+            );
+          }
+        });
+        return;
+      }
+    }
+    const usedAt = this.sessions.get(reference.browserSessionId)?.lastUsedAt;
     const runtime = this.requireBound(reference);
+    // A controller shutdown is not a use: the handoff record keeps the time
+    // of the browser's last real request.
+    if (suspendForShutdown && usedAt !== undefined) runtime.lastUsedAt = usedAt;
     if (runtime.externalAuthTail) await runtime.externalAuthTail;
     const existing = this.ending.get(reference.browserSessionId);
-    if (existing) return await existing;
+    if (existing) {
+      await existing;
+      // An explicit end must never acknowledge a recoverable shutdown as retirement.
+      if (!suspendForShutdown && runtime.workingReceipt?.intent === "suspend")
+        throw workingRuntimeUnavailable();
+      return;
+    }
     if (runtime.recovery) await runtime.recovery.catch(() => undefined);
     const raced = this.ending.get(reference.browserSessionId);
-    if (raced) return await raced;
+    if (raced) {
+      await raced;
+      if (!suspendForShutdown && runtime.workingReceipt?.intent === "suspend")
+        throw workingRuntimeUnavailable();
+      return;
+    }
     const driverAlreadyClosed = runtime.lifecycle === "captured";
+    const preserveWorkingRuntime = suspendForShutdown && hasPreservableWorkingRuntime(runtime);
     runtime.lifecycle = "ending";
     const ending = (async () => {
-      if (runtime.driver.isTerminal?.()) {
+      if (runtime.driver.isTerminal?.() || preserveWorkingRuntime) {
         // Settle already-dispatched commands before their durable journals close.
         // lifecycle=ending fences queued/new dispatches without replaying input.
-        await Promise.all([
-          runtime.controller.waitForIdle(),
-          runtime.protectedAuthController.waitForIdle(),
-        ]);
+        await runtime.controller.waitForIdle();
       }
-      await this.disposeRuntime(runtime, options.removeState ?? false, driverAlreadyClosed);
+      // Closing the driver also closes the empty tabs a session opened in the
+      // person's own Chrome, on every path: an end, a shutdown or a restart.
+      await this.disposeRuntime(
+        runtime,
+        options.removeState ?? false,
+        driverAlreadyClosed,
+        preserveWorkingRuntime,
+      );
     })();
     this.ending.set(reference.browserSessionId, ending);
     try {
       await ending;
       this.sessions.delete(reference.browserSessionId);
+      // An ended attached session will not continue in its tabs.
+      if (!suspendForShutdown && runtime.options.transport.kind === "attached_chrome") {
+        const ledger = readAttachedTabLedger(runtime.sessionDirectory);
+        if (ledger?.settled) removeAttachedTabLedger(runtime.sessionDirectory);
+      }
     } finally {
       if (this.ending.get(reference.browserSessionId) === ending) {
         this.ending.delete(reference.browserSessionId);
       }
     }
+  }
+
+  /** The end of an attached session no runtime holds (it was released): settle
+   * whatever cleanup its release left, and forget its tabs once settled. */
+  private async endReleasedAttachedSession(sessionDirectory: string): Promise<void> {
+    const ledger = readAttachedTabLedger(sessionDirectory);
+    if (!ledger) return;
+    if (!ledger.settled && !(await this.settleAttachedLeftovers(ledger.browserSessionId))) return;
+    removeAttachedTabLedger(sessionDirectory);
   }
 
   private async retireTerminalSessions(): Promise<void> {
@@ -860,39 +2158,238 @@ export class BrowserSupervisor {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closePromise) return await this.closePromise;
     this.closed = true;
-    await Promise.allSettled([...this.creationRequests]);
-    await Promise.allSettled([...this.creating.values()]);
-    const active = [...this.sessions.values()];
-    await Promise.allSettled(
-      active.map(async (runtime) => await this.endSession(binding(runtime))),
-    );
-    await Promise.all([...this.contextPools.values()].map((pool) => pool.close()));
-    this.contextPools.clear();
+    if (this.idleReleaseTimer) clearInterval(this.idleReleaseTimer);
+    this.idleReleaseTimer = null;
+    this.closePromise = this.performClose();
+    return await this.closePromise;
   }
 
-  private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
-    if (options.networkRoute?.kind === "proxy" && !options.networkRoute.proxyUrl) {
+  private async performClose(): Promise<void> {
+    await this.attachedSweep?.catch(() => undefined);
+    await Promise.allSettled([...this.creationRequests]);
+    await Promise.allSettled([...this.creating.values()]);
+    // A browser already unused for the idle release time is stopped, not
+    // handed off: its successor would only stop it later, and if its session
+    // never returns nothing would. Its next request relaunches it as usual.
+    await this.releaseIdleRuntimes().catch(() => undefined);
+    const active = [...this.sessions.values()];
+    const results = await Promise.allSettled(
+      active.map(async (runtime) => await this.finishSession(binding(runtime), {}, true)),
+    );
+    const poolResults = await Promise.allSettled(
+      [...this.contextPools.values()].map((pool) => pool.close()),
+    );
+    this.contextPools.clear();
+    const failures = [...results, ...poolResults].flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (this.cleanupUncertain)
+      failures.push(new Error("previous browser cleanup remains unsettled"));
+    if (failures.length > 0) {
+      this.cleanupUncertain = true;
+      throw new AggregateError(failures, "browser supervisor shutdown failed");
+    }
+  }
+
+  /** A launch is the single owner of its browser's working directory from
+   * the moment it decides which directory to use until its browser process
+   * runs (or the launch fails): no adoption or end in any controller can
+   * move the directory meanwhile. An adoption that owns the directory, and
+   * is not one this launch's authority carries forward, refuses the launch;
+   * the launch never falls back to anything else. */
+  private async buildRuntime(
+    options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
+  ): Promise<Runtime> {
+    try {
+      return await this.withOwnedWorkingDirectory(
+        "launch",
+        options,
+        async () => await this.buildOwnedRuntime(options, acceptsNoObservation),
+      );
+    } catch (error) {
+      throw browserLaunchFailure(error);
+    }
+  }
+
+  private async buildOwnedRuntime(
+    options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
+  ): Promise<Runtime> {
+    const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
+    const profileDirectory = join(sessionDirectory, "profile");
+    const downloadDirectory = join(sessionDirectory, "downloads");
+    const uploadDirectory = join(sessionDirectory, "uploads");
+    if (
+      !options.recoverExistingWorkingDirectory &&
+      !options.restore &&
+      eligibleWorkingRuntime(options) &&
+      options.workingRuntimeAuthority
+    ) {
+      try {
+        await lstat(join(sessionDirectory, "working-runtime.sqlite"));
+        // A retry with no private recovery intent cannot execute a durable
+        // completed or potentially accepted launch again after memory loss.
+        throw workingRuntimeUnavailable();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    let recoveredReceipt: BrowserWorkingRuntimeReceipt | null = null;
+    // Whether this launch starts a new browser on a profile a previous browser
+    // already ran, rather than reattaching to a live one.
+    let relaunchesProfile = false;
+    if (options.recoverExistingWorkingDirectory) {
+      try {
+        await assertDirectory(this.rootDirectory);
+        await assertDirectory(join(this.rootDirectory, "sessions"));
+        await assertDirectory(sessionDirectory);
+        const profile = await assertDirectory(profileDirectory).catch(() => {
+          throw workingRuntimeUnavailable("working_copy_invalid");
+        });
+        // Lets the same directory through after a reboot renumbered its device.
+        const restart = { profileDirectory, bootId: await currentBootId() };
+        const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+          { ...options, sessionDirectory },
+          true,
+        );
+        let receipt: BrowserWorkingRuntimeReceipt | null;
+        let interruptedRecovery: InterruptedRecovery | null;
+        try {
+          receipt = reader.latest();
+          interruptedRecovery = reader.interruptedRecovery(receipt);
+        } finally {
+          reader.close();
+        }
+        if (
+          interruptedRecovery &&
+          receipt &&
+          JSON.stringify(receipt.authority) === JSON.stringify(options.workingRuntimeAuthority) &&
+          receipt.launchDigest === workingLaunchDigest(options) &&
+          sameRecordedProfile(receipt, profile, restart)
+        ) {
+          // An earlier recovery of this browser was cut short, by a controller
+          // restart or a failure whose cleanup could not reinstate it. The
+          // receipt it started from is reinstated once its browser is provably
+          // the same live process, or provably gone with no process using the
+          // profile; an adopted copy whose browser is gone is resettled to its
+          // copy below instead. A transport this controller could not detach
+          // keeps the browser refused: another reattach would share it.
+          if (this.recoveryTransportsUncertain.has(options.browserSessionId))
+            throw workingRuntimeUnavailable("process_state_unknown");
+          const recorded =
+            interruptedRecovery.kind === "interrupted"
+              ? interruptedRecovery.base.process
+              : interruptedRecovery.receipt.process!;
+          const state = await this.inspectOwnedProcess(recorded).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+          if (state === "exited")
+            await this.assertProfileUnused(profileDirectory).catch(() => {
+              throw workingRuntimeUnavailable("process_state_unknown");
+            });
+          if (state === "live" || !receipt.adoption) {
+            const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+              ...options,
+              sessionDirectory,
+            });
+            try {
+              receipt = writer.reinstate(interruptedRecovery);
+            } finally {
+              writer.close();
+            }
+          }
+        }
+        if (
+          adoptedCopyNeedsResettle(receipt) &&
+          JSON.stringify(receipt.authority) === JSON.stringify(options.workingRuntimeAuthority) &&
+          receipt.launchDigest === workingLaunchDigest(options) &&
+          sameRecordedProfile(receipt, profile, restart)
+        ) {
+          // A launch from an adopted copy was cut short by a controller
+          // restart. Once no process provably uses the profile, the same
+          // adopted copy becomes launchable again; it is never set aside for
+          // an older checkpoint.
+          await this.assertProfileUnused(profileDirectory).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+          const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+            ...options,
+            sessionDirectory,
+          });
+          try {
+            receipt = writer.resettleAdoptedCopy(receipt);
+          } finally {
+            writer.close();
+          }
+        }
+        assertWorkingRuntimeReceipt(
+          receipt,
+          options.workingRuntimeAuthority!,
+          workingLaunchDigest(options),
+          profile,
+          restart,
+        );
+        if (receipt.process.profileDirectory !== resolve(profileDirectory))
+          throw workingRuntimeUnavailable("profile_identity_changed");
+        if (receipt.intent === "adopt") {
+          // An adopted copy is launched fresh in its own directory. The
+          // process it was copied from is history, never reattached; the
+          // exact profile must be unused by any process.
+          await this.assertProfileUnused(profileDirectory).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+          relaunchesProfile = true;
+        } else {
+          const state = await this.inspectOwnedProcess(receipt.process).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+          if (state === "exited" && !receipt.directoryLaunchAllowed)
+            throw workingRuntimeUnavailable("receipt_not_adoptable");
+          relaunchesProfile = state === "exited";
+        }
+        recoveredReceipt = receipt;
+        // Validate every path consumed by the existing writers before opening
+        // any journal RW or creating a driver. Missing adjunct directories may
+        // be recreated only after the exact profile/receipt proof above.
+        for (const path of [downloadDirectory, uploadDirectory, join(downloadDirectory, "files")])
+          await assertOptionalDirectory(path);
+        for (const path of ["operations.sqlite", "state-transfers.sqlite"])
+          await assertOptionalRegularFile(join(sessionDirectory, path));
+        await assertOptionalRegularFile(join(downloadDirectory, "downloads.sqlite"));
+      } catch (error) {
+        throw error instanceof BrowserWorkingRuntimeUnavailableError && error.reason
+          ? error
+          : workingRuntimeUnavailable(
+              error instanceof BrowserWorkingRuntimeUnavailableError
+                ? undefined
+                : "working_copy_invalid",
+            );
+      }
+    }
+    if (
+      options.networkRoute?.kind === "proxy" &&
+      !options.networkRoute.proxyUrl &&
+      (!recoveredReceipt ||
+        recoveredReceipt.intent === "adopt" ||
+        (await this.inspectOwnedProcess(recoveredReceipt.process!)) === "exited")
+    ) {
       throw new InteractionControllerError(
         "resource_unavailable",
         "proxy authority is unavailable for a new browser launch",
         true,
       );
     }
-    const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
-    const socketDirectory = join(this.socketRootDirectory, shortDigest(options.browserSessionId));
-    const profileDirectory = join(sessionDirectory, "profile");
-    const downloadDirectory = join(sessionDirectory, "downloads");
-    const uploadDirectory = join(sessionDirectory, "uploads");
-    const screenshotDirectory = join(sessionDirectory, "screenshots");
-    for (const directory of [
-      sessionDirectory,
-      socketDirectory,
-      downloadDirectory,
-      uploadDirectory,
-      screenshotDirectory,
-    ]) {
+    if (relaunchesProfile) {
+      // When the previous browser on this profile never shut down (it was
+      // lost, killed, or this is an adopted copy of a running one), Chromium
+      // would skip restoring its tabs. A failure here costs only the tabs,
+      // never the launch.
+      await markProfileExitedCleanly(profileDirectory).catch(() => false);
+    }
+    for (const directory of [sessionDirectory, downloadDirectory, uploadDirectory]) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
     }
@@ -927,7 +2424,7 @@ export class BrowserSupervisor {
       restoredManifest = restored.manifest;
       restoredCookies = restored.headlessSessionCookies;
       restoredProfileMaterialized = true;
-    } else {
+    } else if (!recoveredReceipt) {
       await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
       await chmod(profileDirectory, 0o700);
     }
@@ -939,17 +2436,6 @@ export class BrowserSupervisor {
       browserSessionId: options.browserSessionId,
       controllerGeneration: options.controllerGeneration,
     });
-    let protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
-    try {
-      protectedAuthJournal = await SqliteBrowserProtectedAuthJournal.open({
-        path: join(sessionDirectory, "protected-auth-operations.sqlite"),
-        browserSessionId: options.browserSessionId,
-        controllerGeneration: options.controllerGeneration,
-      });
-    } catch (error) {
-      journal.close();
-      throw error;
-    }
     let stateJournal: SqliteBrowserStateTransferJournal;
     try {
       stateJournal = await SqliteBrowserStateTransferJournal.open({
@@ -959,11 +2445,13 @@ export class BrowserSupervisor {
       });
     } catch (error) {
       journal.close();
-      protectedAuthJournal.close();
       throw error;
     }
     let downloadStore: BrowserDownloadStore | null = null;
-    if (options.transport.kind === "managed" && options.transport.engine !== "lightpanda") {
+    if (
+      options.transport.kind === "attached_chrome" ||
+      (options.transport.kind === "managed" && options.transport.engine !== "lightpanda")
+    ) {
       try {
         downloadStore = await BrowserDownloadStore.open({
           rootDirectory: downloadDirectory,
@@ -972,7 +2460,6 @@ export class BrowserSupervisor {
         });
       } catch (error) {
         journal.close();
-        protectedAuthJournal.close();
         stateJournal.close();
         throw error;
       }
@@ -981,12 +2468,16 @@ export class BrowserSupervisor {
       browserSessionId: options.browserSessionId,
       controllerGeneration: options.controllerGeneration,
       sessionDirectory,
-      socketDirectory,
       profileDirectory,
       restoredProfile: restoredProfileMaterialized,
+      ...(recoveredReceipt && recoveredReceipt.intent !== "adopt"
+        ? {
+            recoverOwnedProcess: recoveredReceipt.process!,
+            allowOwnedProcessLaunch: recoveredReceipt.directoryLaunchAllowed,
+          }
+        : {}),
       ...(restoredCookies ? { headlessSessionCookies: restoredCookies } : {}),
       downloadDirectory: downloadStore?.filesDirectory ?? downloadDirectory,
-      screenshotDirectory,
       headed: options.headed,
       transport: options.transport,
       resolveWorkspaceFiles: async (operationId, workspaceFileIds) =>
@@ -1006,23 +2497,55 @@ export class BrowserSupervisor {
       ...(options.linkedComputer ? { linkedComputer: options.linkedComputer } : {}),
       ...(options.launchEnvironment ? { launchEnvironment: options.launchEnvironment } : {}),
       ...(options.networkRoute ? { networkRoute: options.networkRoute } : {}),
+      ...(this.passkeysEnabled && supportsPasskeys(options.transport)
+        ? {
+            passkeys: new BrowserPasskeyManager({
+              browserSessionId: options.browserSessionId,
+              controllerGeneration: options.controllerGeneration,
+            }),
+          }
+        : {}),
     };
     let driver: BrowserSupervisorDriver | null = null;
+    let workingJournal: SqliteBrowserWorkingRuntimeJournal | null = null;
+    let workingReceipt: BrowserWorkingRuntimeReceipt | null = null;
+    let workingReceiptCompleted = false;
     try {
-      const initialProtectedAuthJournal = protectedAuthJournal.loadAndRecover();
+      if (eligibleWorkingRuntime(options) && options.workingRuntimeAuthority) {
+        workingJournal = await SqliteBrowserWorkingRuntimeJournal.open({
+          ...options,
+          sessionDirectory,
+        });
+        workingReceipt = workingJournal.begin(
+          {
+            browserSessionId: options.browserSessionId,
+            controllerGeneration: options.controllerGeneration,
+            intent: "launch",
+            authority: options.workingRuntimeAuthority,
+            launchDigest: workingLaunchDigest(options),
+            restoreAuthorityDigest:
+              recoveredReceipt?.restoreAuthorityDigest ?? restoreAuthorityDigest(options.restore),
+            profile: await assertDirectory(profileDirectory),
+            process: null,
+            directoryLaunchAllowed: recoveredReceipt?.directoryLaunchAllowed ?? false,
+            ...(recoveredReceipt?.adoption ? { adoption: recoveredReceipt.adoption } : {}),
+          },
+          recoveredReceipt?.operationId,
+        );
+      }
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
         options: runtimeOptions(options),
         sessionDirectory,
         driverContext,
         journal,
-        protectedAuthJournal,
         stateJournal,
+        workingJournal,
+        workingReceipt,
         driver,
         lifecycle: "active" as const,
         externalAuthTail: null,
         controller: null as unknown as BrowserInteractionController,
-        protectedAuthController: null as unknown as BrowserProtectedAuthController,
         workspaceFileStager,
         downloadStore,
         lastSnapshot: {
@@ -1037,38 +2560,113 @@ export class BrowserSupervisor {
         },
         lastTargets: [],
         creationObservation: null,
+        startedWithoutTab: false,
         recovery: null,
+        presence: new Set(),
+        recording: null,
+        lastUsedAt: this.now(),
+        waitHoldUntil: null,
       };
       runtime.controller = this.createController(runtime, driver);
-      runtime.protectedAuthController = this.createProtectedAuthController(
-        runtime,
-        driver,
-        initialProtectedAuthJournal,
-      );
-      if (restoredManifest) {
-        await restoreTabs(
-          driver,
-          options.initialUrl
-            ? [{ url: options.initialUrl, selected: true }]
-            : restoredManifest.tabs,
-        );
-        runtime.lastSnapshot = await driver.runtimeSnapshot();
-        assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
-        runtime.lastTargets = await driver.listTargets();
-        runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
-      } else {
-        const observation = await driver.start(options.initialUrl);
-        runtime.creationObservation = observation;
-        runtime.lastTargets = [observation.target];
-        runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+      // Startup and tab restoration are a use of the browser: nothing may park
+      // its windows before they finish.
+      const startupPresence = await this.acquirePresence(runtime);
+      try {
+        if (restoredManifest) {
+          await restoreTabs(
+            driver,
+            options.initialUrl
+              ? [{ url: options.initialUrl, selected: true }]
+              : restoredManifest.tabs,
+          );
+          runtime.lastSnapshot = await driver.runtimeSnapshot();
+          assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
+          runtime.lastTargets = await driver.listTargets();
+          runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        } else {
+          // The browser opens even when its first page fails to load: the tab
+          // shows the browser's error page, which names the failure.
+          // A session continuing in the person's browser carries on in a
+          // tab it left there, and opens none when it has none left. A
+          // caller that cannot take a session without an observation (one
+          // from before such sessions) gets a new tab, as before.
+          const observation =
+            options.initialUrl === undefined && driver.resume && acceptsNoObservation
+              ? await driver.resume()
+              : await driver.start(options.initialUrl, { keepTabOnLoadError: true });
+          runtime.creationObservation = observation;
+          runtime.startedWithoutTab = observation === null;
+          runtime.lastTargets = observation ? [observation.target] : [];
+          runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        }
+      } finally {
+        startupPresence();
       }
       delete driverContext.headlessSessionCookies;
+      if (workingJournal && workingReceipt) {
+        let ownedProcess: OwnedManagedBrowserProcess | null = null;
+        try {
+          ownedProcess = (await driver.ownedProcessIdentity?.()) ?? null;
+        } catch (error) {
+          if (recoveredReceipt) throw error;
+        }
+        if (recoveredReceipt && !ownedProcess) throw workingRuntimeUnavailable();
+        workingReceipt = {
+          ...workingReceipt,
+          directoryLaunchAllowed: driver.requiresExplicitProfileRestore !== true,
+        };
+        runtime.workingReceipt = workingJournal.complete(workingReceipt, ownedProcess);
+        workingReceiptCompleted = true;
+        if (recoveredReceipt)
+          runtime.options.restoreAuthorityDigest = recoveredReceipt.restoreAuthorityDigest;
+      }
+      // The tabs the previous browser on this profile had when it was stopped
+      // or let go. Every successful launch takes the record, so it never
+      // outlives the launch right after the stop it describes, while a failed
+      // launch leaves it for its retry. A relaunch reopened those tabs, which
+      // keep their IDs; a reattached browser kept its tabs, so the record no
+      // longer applies, and its tabs get the IDs its last controller gave them.
+      const stoppedTabs = await takeStoppedBrowserTabs(sessionDirectory);
+      const reattached =
+        recoveredReceipt !== null && recoveredReceipt.intent !== "adopt" && !relaunchesProfile;
+      let adopted = false;
+      if (reattached) {
+        adopted = await adoptRecordedTabIds(driver, sessionDirectory);
+      } else if (stoppedTabs && relaunchesProfile && !restoredManifest) {
+        adopted = await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
+          ...(stoppedTabs.idleReleaseMinutes !== undefined
+            ? { idleReleaseMinutes: stoppedTabs.idleReleaseMinutes }
+            : {}),
+        });
+      }
+      await recordTabIds(driver, sessionDirectory);
+      if (adopted) {
+        // Read before the tabs took their earlier IDs.
+        runtime.creationObservation = null;
+        try {
+          runtime.lastTargets = await driver.listTargets();
+          runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        } catch {
+          // The next tab list reads them.
+        }
+      }
       return runtime;
     } catch (error) {
+      if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
       let driverClosed = driver === null;
+      let restoredProfileRemoved = false;
+      // A launch from an adopted copy started a new process; it is closed,
+      // never detached, so the copy is provably unused again. So is a
+      // recovery that relaunched the profile because its recorded browser had
+      // exited: detaching would leave that new browser running with nothing
+      // tracking it, and every later recovery refused because the profile
+      // could not be proven unused. Once it is closed, the next recovery
+      // reinstates the receipt it started from and relaunches the profile.
+      const adoptedLaunch = recoveredReceipt?.intent === "adopt";
       try {
-        await driver?.close();
+        if (recoveredReceipt && !adoptedLaunch && !relaunchesProfile) await driver?.detach?.();
+        else await driver?.close();
         driverClosed = true;
       } catch (cleanupError) {
         failures.push(cleanupError);
@@ -1076,17 +2674,106 @@ export class BrowserSupervisor {
       if (restoredProfileMaterialized && driverClosed) {
         try {
           await rm(profileDirectory, { recursive: true, force: true });
+          restoredProfileRemoved = true;
         } catch (cleanupError) {
           failures.push(cleanupError);
         }
       }
+      // A fresh launch (not a reattach) whose driver closed and whose restored
+      // profile is gone can never be adopted. Settle its receipt failed so the
+      // exact binding can be cleaned up and restored again from durable state.
+      let launchReceiptSettled = false;
+      if (
+        workingJournal &&
+        workingReceipt &&
+        !workingReceiptCompleted &&
+        !recoveredReceipt &&
+        driverClosed &&
+        (!restoredProfileMaterialized || restoredProfileRemoved)
+      ) {
+        try {
+          workingReceipt = workingJournal.fail(workingReceipt, launchFailureCode(error));
+          launchReceiptSettled = true;
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      // A failed launch from an adopted copy keeps the copy: once its driver
+      // closed, the launch is settled failed and the adopt receipt becomes the
+      // latest again, so the next attempt uses the same copy and never an
+      // older checkpoint. An unsettled close leaves the launch receipt as the
+      // honest unknown state.
+      if (
+        adoptedLaunch &&
+        workingJournal &&
+        workingReceipt &&
+        !workingReceiptCompleted &&
+        driverClosed
+      ) {
+        try {
+          workingReceipt = workingJournal.fail(workingReceipt, launchFailureCode(error));
+          launchReceiptSettled = true;
+          workingJournal.readopt(recoveredReceipt!, workingReceipt);
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      // A failed reattach left the browser running untouched once its
+      // transport detached. While it is provably the same live process, the
+      // receipt it was reattached from becomes the latest again, so the
+      // browser can be continued or ended instead of staying refused.
+      let recoveryReinstated = false;
+      if (
+        recoveredReceipt &&
+        !adoptedLaunch &&
+        !relaunchesProfile &&
+        recordedProcessReceipt(recoveredReceipt) &&
+        workingJournal &&
+        workingReceipt &&
+        !workingReceiptCompleted &&
+        driverClosed
+      ) {
+        try {
+          if ((await this.inspectOwnedProcess(recoveredReceipt.process)) === "live") {
+            workingJournal.reinstate({
+              kind: "interrupted",
+              base: recoveredReceipt,
+              interrupted: workingReceipt,
+            });
+            recoveryReinstated = true;
+          }
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      // A relaunch whose browser would not close is caught by the next
+      // recovery's own check that no process still uses the profile.
+      if (recoveredReceipt && !adoptedLaunch && !driverClosed && !relaunchesProfile)
+        this.recoveryTransportsUncertain.add(options.browserSessionId);
+      if (workingReceipt) {
+        console.error("browser launch failed before its working-runtime receipt completed", {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          operationId: workingReceipt.operationId,
+          restoredProfile: restoredProfileMaterialized,
+          receiptState: workingReceiptCompleted
+            ? "completed"
+            : launchReceiptSettled
+              ? "failed"
+              : recoveryReinstated
+                ? "reinstated"
+                : "dispatched",
+          failureCode: launchFailureCode(error),
+          error,
+        });
+      }
       try {
-        journal.close();
+        workingJournal?.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
       try {
-        protectedAuthJournal.close();
+        journal.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
@@ -1101,6 +2788,7 @@ export class BrowserSupervisor {
         failures.push(cleanupError);
       }
       if (failures.length > 1) {
+        this.cleanupUncertain = true;
         throw aggregateFailure(failures, "browser session creation did not clean up safely", error);
       }
       throw error;
@@ -1167,16 +2855,17 @@ export class BrowserSupervisor {
         );
       }
       runtime.lifecycle = "capturing";
-      await Promise.all([
-        runtime.controller.waitForIdle(),
-        runtime.protectedAuthController.waitForIdle(),
-      ]);
+      await runtime.controller.waitForIdle();
       await runtime.downloadStore?.interruptInProgress("browser_restarted");
       snapshot = await runtime.driver.runtimeSnapshot();
       const cookies = await runtime.driver.captureSessionCookies?.();
       if (cookies) runtime.driverContext.headlessSessionCookies = cookies;
+      this.retireWorkingRuntime(runtime);
       await runtime.driver.close();
       driverClosed = true;
+      if (runtime.workingJournal && runtime.workingReceipt?.intent === "retire") {
+        runtime.workingReceipt = runtime.workingJournal.complete(runtime.workingReceipt, null);
+      }
       const manifest = profileManifest(runtime, snapshot);
       const artifact = await captureEncryptedBrowserProfile({
         profileDirectory: runtime.driverContext.profileDirectory,
@@ -1187,7 +2876,7 @@ export class BrowserSupervisor {
         ...(cookies ? { headlessSessionCookies: cookies } : {}),
       });
       if (input.afterCapture === "restart") {
-        await this.restartRuntime(runtime, snapshot);
+        await this.restartRuntime(runtime, snapshot, "state_capture");
         driverClosed = false;
         runtime.lifecycle = "active";
       }
@@ -1211,7 +2900,7 @@ export class BrowserSupervisor {
       const failures: unknown[] = [error];
       if (driverClosed && snapshot) {
         try {
-          await this.restartRuntime(runtime, snapshot);
+          await this.restartRuntime(runtime, snapshot, "state_capture");
           driverClosed = false;
           runtime.lifecycle = "active";
         } catch (restartError) {
@@ -1238,25 +2927,64 @@ export class BrowserSupervisor {
     }
   }
 
-  private async restartRuntime(runtime: Runtime, snapshot: BrowserRuntimeSnapshot): Promise<void> {
+  private async restartRuntime(
+    runtime: Runtime,
+    snapshot: BrowserRuntimeSnapshot,
+    reason: Extract<BrowserRelaunchReason, "browser_lost" | "state_capture">,
+  ): Promise<void> {
+    delete runtime.driverContext.recoverOwnedProcess;
+    delete runtime.driverContext.allowOwnedProcessLaunch;
+    const previousTabs = stoppedTabsOf(runtime.lastTargets);
+    const launch =
+      runtime.workingJournal && runtime.workingReceipt
+        ? runtime.workingJournal.begin({
+            ...runtime.workingReceipt,
+            intent: "launch",
+            process: null,
+          })
+        : null;
     const driver = await this.createDriver(runtime.driverContext);
+    // The replacement stays presented while it restores tabs and until every
+    // outstanding use has moved to it.
+    const restorePresence = (await driver.acquirePresence?.()) ?? (() => undefined);
     try {
       await restoreTabs(driver, snapshot.tabs);
       const currentSnapshot = await driver.runtimeSnapshot();
-      const currentTargets = await driver.listTargets();
+      let currentTargets = await driver.listTargets();
+      if (await noteRelaunchedTabs(driver, reason, previousTabs, {}, currentTargets))
+        currentTargets = await driver.listTargets();
+      await recordTabIds(driver, runtime.sessionDirectory);
       runtime.driver = driver;
+      for (const hold of runtime.presence) await this.bindPresence(runtime, hold);
       runtime.controller = this.createController(runtime, driver);
-      runtime.protectedAuthController = this.createProtectedAuthController(
-        runtime,
-        driver,
-        runtime.protectedAuthJournal.loadAndRecover(),
-      );
       runtime.lastTargets = currentTargets;
       runtime.lastSnapshot = snapshotWithTargets(currentSnapshot, currentTargets);
       delete runtime.driverContext.headlessSessionCookies;
+      if (launch && runtime.workingJournal) {
+        let process: OwnedManagedBrowserProcess | null = null;
+        try {
+          process = (await driver.ownedProcessIdentity?.()) ?? null;
+        } catch {
+          /* No recovery proof. */
+        }
+        runtime.workingReceipt = runtime.workingJournal.complete(
+          { ...launch, directoryLaunchAllowed: driver.requiresExplicitProfileRestore !== true },
+          process,
+        );
+      }
     } catch (error) {
-      await driver.close().catch(() => undefined);
+      try {
+        await driver.close();
+      } catch (cleanupError) {
+        this.cleanupUncertain = true;
+        throw new UnsettledCleanupError(
+          [error, cleanupError],
+          "replacement browser cleanup failed",
+        );
+      }
       throw error;
+    } finally {
+      restorePresence();
     }
   }
 
@@ -1286,10 +3014,7 @@ export class BrowserSupervisor {
     }
     runtime.lifecycle = "reconfiguring";
     try {
-      await Promise.all([
-        runtime.controller.waitForIdle(),
-        runtime.protectedAuthController.waitForIdle(),
-      ]);
+      await runtime.controller.waitForIdle();
       const result = await runtime.driver.externalAuth(command);
       if (result.profileLoaded) {
         const [snapshot, targets] = await Promise.all([
@@ -1306,31 +3031,81 @@ export class BrowserSupervisor {
   }
 
   private async readWithRecovery<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
-    try {
-      return await operation();
-    } catch (error) {
-      if (error instanceof InteractionDefiniteDriverError) throw error;
-      if (!(await this.recoverIfUnavailable(runtime))) throw error;
-      return await operation();
-    }
+    return await this.presented(runtime, async () => {
+      try {
+        return await operation();
+      } catch (error) {
+        if (error instanceof InteractionDefiniteDriverError) throw error;
+        if (!(await this.recoverIfUnavailable(runtime))) throw error;
+        return await operation();
+      }
+    });
   }
 
   private async mutateWithRecovery<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
+    return await this.presented(runtime, async () => {
+      try {
+        return await operation();
+      } catch (error) {
+        try {
+          await this.recoverIfUnavailable(runtime);
+        } catch (recoveryError) {
+          throw aggregateFailure(
+            [error, recoveryError],
+            "browser mutation failed and its runtime could not recover",
+            error,
+          );
+        }
+        // Never replay a mutation whose dispatch boundary is not represented by
+        // the durable action journal. Recovery only makes later calls usable.
+        throw error;
+      }
+    });
+  }
+
+  /** Runs one use of the browser with its windows presented. Idle windowed
+   * browsers park their windows so pages nobody uses stop rendering. */
+  private async presented<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
+    const release = await this.acquirePresence(runtime);
     try {
       return await operation();
-    } catch (error) {
+    } finally {
+      release();
+    }
+  }
+
+  private async acquirePresence(runtime: Runtime): Promise<() => void> {
+    const hold: PresenceHold = { driver: null, release: () => undefined };
+    runtime.presence.add(hold);
+    await this.bindPresence(runtime, hold);
+    return () => {
+      if (!runtime.presence.delete(hold)) return;
+      runtime.lastUsedAt = this.now();
+      hold.driver = null;
+      hold.release();
+    };
+  }
+
+  /** Moves a presence hold onto the runtime's current driver. Presenting is
+   * best effort, so this never fails an operation. */
+  private async bindPresence(runtime: Runtime, hold: PresenceHold): Promise<void> {
+    while (runtime.presence.has(hold) && hold.driver !== runtime.driver) {
+      const driver = runtime.driver;
+      let release: () => void = () => undefined;
       try {
-        await this.recoverIfUnavailable(runtime);
-      } catch (recoveryError) {
-        throw aggregateFailure(
-          [error, recoveryError],
-          "browser mutation failed and its runtime could not recover",
-          error,
-        );
+        release = (await driver.acquirePresence?.()) ?? release;
+      } catch {
+        /* Best effort. */
       }
-      // Never replay a mutation whose dispatch boundary is not represented by
-      // the durable action journal. Recovery only makes later calls usable.
-      throw error;
+      // Released, or recovery replaced the driver, while acquiring.
+      if (!runtime.presence.has(hold) || runtime.driver !== driver) {
+        release();
+        continue;
+      }
+      const previous = hold.release;
+      hold.driver = driver;
+      hold.release = release;
+      previous();
     }
   }
 
@@ -1376,13 +3151,11 @@ export class BrowserSupervisor {
     const previousDriver = runtime.driver;
     const snapshot = runtime.lastSnapshot;
     try {
-      await Promise.all([
-        runtime.controller.waitForIdle(),
-        runtime.protectedAuthController.waitForIdle(),
-      ]);
+      await runtime.controller.waitForIdle();
       await runtime.downloadStore?.interruptInProgress("browser_restarted");
+      this.retireWorkingRuntime(runtime);
       await previousDriver.close();
-      await this.restartRuntime(runtime, snapshot);
+      await this.restartRuntime(runtime, snapshot, "browser_lost");
       runtime.lifecycle = "active";
     } catch (error) {
       // Keep the binding addressable so a later request can retry recovery;
@@ -1394,6 +3167,20 @@ export class BrowserSupervisor {
 
   private rememberObservation(runtime: Runtime, observation: BrowserObservation): void {
     this.rememberTarget(runtime, observation.target);
+  }
+
+  /** An observation for a caller that asked for notices says, once, that a
+   * relaunch reloaded its tab's page. Other callers (a person's viewer, auth
+   * checks, API clients) neither see the notice nor use it up. */
+  private reported(
+    runtime: Runtime,
+    observation: BrowserObservation,
+    options: BrowserObservationNoticeOptions,
+  ): BrowserObservation {
+    const notice = options.notices
+      ? runtime.driver.takeReloadedTabNotice?.(observation.target.id)
+      : null;
+    return notice ? { ...observation, notice } : observation;
   }
 
   private rememberTarget(runtime: Runtime, target: BrowserTarget): void {
@@ -1427,6 +3214,8 @@ export class BrowserSupervisor {
           initialJournal,
           onJournalRecord: (record) => runtime.journal.write(record),
           loadJournalRecord: (operationId) => runtime.journal.read(operationId),
+          onUnexpectedDispatchError: (error, command) =>
+            reportUnexpectedDispatchError("browser", error, command),
           authority: {
             authorizeDispatch: async (command) => {
               if (runtime.lifecycle !== "active") {
@@ -1443,51 +3232,21 @@ export class BrowserSupervisor {
     );
   }
 
-  private createProtectedAuthController(
+  /** The selected tab's observation. In the person's own browser, its other
+   * tabs are theirs, not this session's: with no tab selected the session
+   * has none, and it is given none when the caller can take that (null), or
+   * else a new tab of its own. */
+  private async currentObservation(
     runtime: Runtime,
-    driver: BrowserSupervisorDriver,
-    initialJournal: ReturnType<SqliteBrowserProtectedAuthJournal["loadAndRecover"]>,
-  ): BrowserProtectedAuthController {
-    return new BrowserProtectedAuthController({
-      browserSessionId: runtime.options.browserSessionId,
-      controllerGeneration: runtime.options.controllerGeneration,
-      initialJournal,
-      onJournalRecord: (record) => runtime.protectedAuthJournal.write(record),
-      loadJournalRecord: (operationId) => runtime.protectedAuthJournal.read(operationId),
-      driver: {
-        target: async (targetId) => await driver.target(targetId),
-        observe: async (targetId) => {
-          const target = await driver.target(targetId);
-          if (!target) {
-            throw new InteractionDefiniteDriverError(
-              "target_not_found",
-              "protected-fill browser target does not exist",
-            );
-          }
-          return { target, status: "working" };
-        },
-        dispatch: async (command) => await driver.protectedFill(command),
-      },
-      authority: {
-        authorizeDispatch: () => {
-          if (runtime.lifecycle !== "active") {
-            throw new InteractionControllerError(
-              "resource_unavailable",
-              "browser session is changing state",
-              true,
-            );
-          }
-        },
-      },
-    });
-  }
-
-  private async currentObservation(runtime: Runtime): Promise<BrowserObservation> {
+    acceptsNoObservation: boolean,
+  ): Promise<BrowserObservation | null> {
     const targets = await this.readWithRecovery(runtime, async () => {
       return await runtime.driver.listTargets();
     });
     this.rememberTargets(runtime, targets);
-    const selected = targets.find((target) => target.selected) ?? targets[0];
+    const personsBrowser = runtime.options.transport.kind === "attached_chrome";
+    const selected =
+      targets.find((target) => target.selected) ?? (personsBrowser ? undefined : targets[0]);
     if (selected) {
       const observation = await this.readWithRecovery(runtime, async () => {
         return await runtime.controller.observe(selected.id);
@@ -1495,6 +3254,7 @@ export class BrowserSupervisor {
       this.rememberObservation(runtime, observation);
       return observation;
     }
+    if (personsBrowser && acceptsNoObservation) return null;
     const observation = await this.mutateWithRecovery(runtime, async () => {
       return await runtime.driver.openTarget();
     });
@@ -1515,11 +3275,13 @@ export class BrowserSupervisor {
     if (
       runtime.options.headed !== requested.headed ||
       runtime.options.browserExecutablePath !== requested.browserExecutablePath ||
-      runtime.options.initialUrl !== requested.initialUrl ||
+      (!requested.recoverExistingWorkingDirectory &&
+        runtime.options.initialUrl !== requested.initialUrl) ||
       canonicalJson(runtime.options.transport) !== canonicalJson(requested.transport) ||
       canonicalJson(runtime.options.linkedComputer ?? null) !==
         canonicalJson(requested.linkedComputer ?? null) ||
-      runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore) ||
+      (!requested.recoverExistingWorkingDirectory &&
+        runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore)) ||
       runtime.options.networkRouteAuthorityDigest !==
         (requested.networkRoute?.authorityDigest ?? null) ||
       ((requested.networkRoute?.proxyUrl !== undefined ||
@@ -1531,6 +3293,191 @@ export class BrowserSupervisor {
         "operation_conflict",
         "browser session is already active with different launch options",
       );
+    }
+  }
+
+  private async recordWorkingAuthority(
+    runtime: Runtime,
+    options: ValidatedBrowserSupervisorSessionOptions,
+  ) {
+    if (!runtime.workingJournal || !runtime.workingReceipt || !options.workingRuntimeAuthority) {
+      if (options.recoverExistingWorkingDirectory) throw workingRuntimeUnavailable();
+      return;
+    }
+    const previous = runtime.workingReceipt.authority;
+    const current = options.workingRuntimeAuthority;
+    if (
+      current.placementDigest !== previous.placementDigest ||
+      current.tokenGeneration < previous.tokenGeneration ||
+      (current.tokenGeneration === previous.tokenGeneration &&
+        JSON.stringify(current) !== JSON.stringify(previous))
+    ) {
+      throw workingRuntimeUnavailable();
+    }
+    if (current.tokenGeneration === previous.tokenGeneration) return;
+    const receipt = runtime.workingJournal.begin({
+      ...runtime.workingReceipt,
+      authority: current,
+      process: null,
+    });
+    let ownedProcess: OwnedManagedBrowserProcess | null = null;
+    try {
+      ownedProcess = (await runtime.driver.ownedProcessIdentity?.()) ?? null;
+    } catch {
+      /* An unattested receipt cannot be used for directory recovery. */
+    }
+    runtime.workingReceipt = runtime.workingJournal.complete(receipt, ownedProcess);
+  }
+
+  /** Cleanup for a non-resident session whose latest working-runtime receipt,
+   * in this exact controller generation, is a launch that provably never
+   * completed. Any other history stays preserved for exact recovery. With
+   * removeState the session directory is removed so the next resume restores
+   * from durable state; nothing outside this session is touched. */
+  private async cleanupAbandonedLaunch(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+    removeState: boolean,
+  ): Promise<void> {
+    let abandoned = false;
+    try {
+      const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+        {
+          sessionDirectory,
+          browserSessionId: reference.browserSessionId,
+          controllerGeneration: reference.controllerGeneration,
+        },
+        true,
+      );
+      try {
+        abandoned = await isAbandonedLaunchReceipt(
+          reader.latest(),
+          join(sessionDirectory, "profile"),
+        );
+      } finally {
+        reader.close();
+      }
+    } catch {
+      abandoned = false;
+    }
+    if (!abandoned) throw workingRuntimeUnavailable();
+    if (!removeState) return;
+    await rm(sessionDirectory, { recursive: true, force: true });
+  }
+
+  /** An explicit end of a session this controller no longer holds in memory
+   * (it restarted, or the browser's runtime was lost), for the exact
+   * controller generation the control plane still binds. Ending discards the
+   * runtime, so nothing here needs preserving for recovery: any browser still
+   * running the session's private profile is stopped by verified identity
+   * and the working runtime is retired. With removeState the session's state
+   * is removed; without it (a browser whose task moved to another machine)
+   * the profile and downloads stay on disk. After an agent restart such a
+   * browser keeps running detached until something ends it here. History
+   * that belongs to another generation stays preserved. */
+  private async retireNonResidentWorkingRuntime(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+    removeState: boolean,
+  ): Promise<void> {
+    let journal: SqliteBrowserWorkingRuntimeJournal;
+    let latest: BrowserWorkingRuntimeReceipt | null;
+    try {
+      journal = await SqliteBrowserWorkingRuntimeJournal.open({
+        sessionDirectory,
+        browserSessionId: reference.browserSessionId,
+        controllerGeneration: reference.controllerGeneration,
+      });
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    try {
+      try {
+        latest = journal.latest();
+      } catch {
+        throw workingRuntimeUnavailable();
+      }
+      await this.stopEndedProcess(join(sessionDirectory, "profile"), latest?.process ?? null);
+      if (latest && latest.intent !== "retire") {
+        const retiring = journal.retire(latest);
+        // A kept directory must record that its runtime ended, so no later
+        // recovery adopts it as a live browser.
+        if (!removeState) journal.complete(retiring, null);
+      } else if (latest?.intent === "retire" && latest.state !== "completed" && !removeState) {
+        journal.complete(latest, null);
+      }
+    } finally {
+      journal.close();
+    }
+    if (removeState) await rm(sessionDirectory, { recursive: true, force: true });
+  }
+
+  /** Move an interrupted launch of this exact generation out of the session's
+   * path so the same browser can be restored from its checkpoint under a new
+   * generation. Only a launch that never recorded completion (no owned
+   * process) qualifies; a completed launch must be adopted instead. The move
+   * is a same-filesystem rename of the whole session directory, so its
+   * profile, journals and receipts are kept byte for byte under
+   * `set-aside/<browserSessionId>/<controllerGeneration>`. It happens only
+   * after a complete process inventory proves no browser runs that profile. */
+  private async setAsideInterruptedLaunch(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+  ): Promise<void> {
+    // The generation names the set-aside directory: one plain path segment.
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(reference.controllerGeneration) ||
+      reference.controllerGeneration.includes("..")
+    )
+      throw workingRuntimeUnavailable();
+    let latest: BrowserWorkingRuntimeReceipt | null;
+    try {
+      const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+        {
+          sessionDirectory,
+          browserSessionId: reference.browserSessionId,
+          controllerGeneration: reference.controllerGeneration,
+        },
+        true,
+      );
+      try {
+        latest = reader.latest();
+      } finally {
+        reader.close();
+      }
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    // A launch from an adopted copy is never set aside: the adopted copy is
+    // the browser's chosen state, and setting it aside would let an older
+    // checkpoint replace it. Its next recovery re-settles it instead.
+    if (!isInterruptedLaunchReceipt(latest) || latest.adoption) throw workingRuntimeUnavailable();
+    try {
+      await this.assertProfileUnused(join(sessionDirectory, "profile"));
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    const setAsideParent = join(this.rootDirectory, "set-aside", reference.browserSessionId);
+    await mkdir(setAsideParent, { recursive: true, mode: 0o700 });
+    await chmod(setAsideParent, 0o700);
+    const target = join(setAsideParent, reference.controllerGeneration);
+    try {
+      await lstat(target);
+      // A generation is set aside at most once; never overwrite evidence.
+      throw workingRuntimeUnavailable();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await rename(sessionDirectory, target);
+  }
+
+  private retireWorkingRuntime(runtime: Runtime) {
+    if (
+      runtime.workingJournal &&
+      runtime.workingReceipt?.intent !== "retire" &&
+      runtime.workingReceipt
+    ) {
+      runtime.workingReceipt = runtime.workingJournal.retire(runtime.workingReceipt);
     }
   }
 
@@ -1572,20 +3519,173 @@ export class BrowserSupervisor {
         "browser request targets a stale controller generation",
       );
     }
+    runtime.lastUsedAt = this.now();
     return runtime;
+  }
+
+  /**
+   * Keeps a browser while the agent session using it works or deliberately
+   * waits: the control plane renews a short hold every few minutes for as long
+   * as that lasts, and the idle release leaves the browser running, page
+   * state and all, until the latest hold (see `waitHoldEnds` for the cap). The
+   * normal idle time then counts from the hold's end, so a session that just
+   * stopped still finds its browser for a while. A hold only ever extends: no
+   * renewal, from whichever API process, shortens another, and nothing ever
+   * needs to end one. This is not a use of the browser. A time already past
+   * changes nothing.
+   *
+   * A browser handed off by an earlier controller and not adopted yet is
+   * held too, so a wait right after a restart or update keeps it. A browser
+   * this controller does not hold is left alone, never launched for this.
+   * Returns whether the browser is held.
+   */
+  async holdForWait(reference: BrowserSessionReference, hold: WaitHold): Promise<boolean> {
+    const runtime = this.sessions.get(reference.browserSessionId);
+    if (runtime) {
+      if (runtime.options.controllerGeneration !== reference.controllerGeneration) return false;
+      runtime.waitHoldUntil = nextWaitHold(runtime.waitHoldUntil, hold, this.now());
+      return this.now() < waitHoldEnds(runtime.lastUsedAt, runtime.waitHoldUntil);
+    }
+    return await this.holdDetachedForWait(reference.browserSessionId, hold);
+  }
+
+  private detachedUnsettled(browserSessionId: string): boolean {
+    return (
+      this.closed ||
+      this.sessions.has(browserSessionId) ||
+      this.creating.has(browserSessionId) ||
+      this.ending.has(browserSessionId) ||
+      this.adopting.has(browserSessionId) ||
+      this.endingWorkingCopies.has(browserSessionId) ||
+      this.releasingDetached.has(browserSessionId)
+    );
+  }
+
+  /** The hold for a handed-off browser: kept in memory for the sweep and in
+   * its record, so a further restart keeps it too (best effort). */
+  private async holdDetachedForWait(browserSessionId: string, hold: WaitHold): Promise<boolean> {
+    if (this.detachedUnsettled(browserSessionId)) return false;
+    const sessionDirectory = join(this.rootDirectory, "sessions", browserSessionId);
+    const record = await readDetachedBrowserRecord(sessionDirectory, browserSessionId);
+    if (!record || this.detachedUnsettled(browserSessionId)) return false;
+    const current = this.detachedWaitHolds.get(browserSessionId) ?? record.waitHoldUntil ?? null;
+    const next = nextWaitHold(current, hold, this.now());
+    if (next === null) this.detachedWaitHolds.delete(browserSessionId);
+    else this.detachedWaitHolds.set(browserSessionId, next);
+    const { waitHoldUntil: _previous, ...unheld } = record;
+    await writeDetachedBrowserRecord(
+      sessionDirectory,
+      next === null ? unheld : { ...unheld, waitHoldUntil: next },
+    ).catch((error: unknown) => {
+      console.warn("browserd.detached_record_failed", {
+        browserSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return this.now() < waitHoldEnds(record.lastUsedAt, next);
+  }
+
+  /** Keep the tabs a managed browser has as its controller stops it or lets
+   * it go, so a browser launched on its profile later can say what became of
+   * each. Best effort: without the record a missing tab is only unexplained. */
+  private async recordStoppedTabs(
+    runtime: Runtime,
+    reason: "idle_release" | "controller_restart",
+    driverAvailable: boolean,
+  ): Promise<void> {
+    const transport = runtime.options.transport;
+    if (transport.kind !== "managed" || transport.ephemeralPartition) return;
+    let targets: readonly BrowserTarget[] = runtime.lastTargets;
+    if (driverAvailable) {
+      try {
+        targets = await restorableTargets(runtime.driver, await runtime.driver.listTargets());
+      } catch {
+        // The last tabs this controller saw.
+      }
+    }
+    try {
+      await writeStoppedBrowserTabs(runtime.sessionDirectory, {
+        version: 2,
+        reason,
+        ...(reason === "idle_release"
+          ? { idleReleaseMinutes: Math.max(1, Math.round(this.idleReleaseMs / 60_000)) }
+          : {}),
+        stoppedAt: new Date(this.now()).toISOString(),
+        tabs: stoppedTabsOf(targets),
+      });
+    } catch (error) {
+      console.warn("browserd.stopped_tabs_record_failed", {
+        browserSessionId: runtime.options.browserSessionId,
+        error: errorMessage(error),
+      });
+    }
   }
 
   private async disposeRuntime(
     runtime: Runtime,
     removeState: boolean,
     driverAlreadyClosed = false,
+    suspendForShutdown = false,
+    /** Suspend recoverably but stop the browser too (idle release). */
+    stopSuspendedBrowser = false,
   ): Promise<void> {
     const failures: unknown[] = [];
     let driverClosed = driverAlreadyClosed;
+    let workingReceiptSettled =
+      runtime.workingJournal === null ||
+      (runtime.workingReceipt?.intent === "retire" && runtime.workingReceipt.state === "completed");
+    let workingJournalClosed = runtime.workingJournal === null;
     let actionJournalClosed = false;
-    let protectedAuthJournalClosed = false;
     let stateJournalClosed = false;
     let downloadStoreClosed = runtime.downloadStore === null;
+    // Shutdown intent becomes durable before process cleanup; only confirmed
+    // suspension permits recovery. Explicit end/capture still retires the runtime.
+    // Failed acceptance preserves the live driver and all journals.
+    let keepBrowserRunning = false;
+    if (
+      suspendForShutdown &&
+      runtime.workingJournal &&
+      runtime.workingReceipt?.intent === "launch" &&
+      runtime.workingReceipt.state === "completed" &&
+      runtime.workingReceipt.process &&
+      runtime.workingReceipt.directoryLaunchAllowed
+    ) {
+      runtime.workingReceipt = runtime.workingJournal.suspend(runtime.workingReceipt);
+      // A controller restart (upgrade, crash recovery) must not cost the page
+      // state an agent is working in. Release only this controller's transport;
+      // the successor adopts the same live browser from the suspended receipt.
+      keepBrowserRunning = !stopSuspendedBrowser && runtime.driver.detach !== undefined;
+      // Its tabs get new IDs if a browser is launched on this profile again.
+      await this.recordStoppedTabs(
+        runtime,
+        stopSuspendedBrowser ? "idle_release" : "controller_restart",
+        !driverAlreadyClosed,
+      );
+    } else {
+      this.retireWorkingRuntime(runtime);
+    }
+    if (keepBrowserRunning && runtime.workingReceipt?.process) {
+      // Tell the successor about the browser it inherits, so it stops it once
+      // unused for the idle release time even if its session never returns.
+      // Best effort: a missing record only means the browser waits for its
+      // session, as before.
+      try {
+        await writeDetachedBrowserRecord(runtime.sessionDirectory, {
+          version: 1,
+          browserSessionId: runtime.options.browserSessionId,
+          // A live view, recording or request still open at shutdown is a use
+          // that has not ended yet, so the successor's idle time starts now.
+          lastUsedAt: runtime.presence.size > 0 ? this.now() : runtime.lastUsedAt,
+          ...(runtime.waitHoldUntil !== null ? { waitHoldUntil: runtime.waitHoldUntil } : {}),
+          process: runtime.workingReceipt.process,
+        });
+      } catch (error) {
+        console.warn("browserd.detached_record_failed", {
+          browserSessionId: runtime.options.browserSessionId,
+          error: errorMessage(error),
+        });
+      }
+    }
     if (!driverAlreadyClosed) {
       try {
         await runtime.downloadStore?.interruptInProgress("browser_ended");
@@ -1593,8 +3693,35 @@ export class BrowserSupervisor {
         failures.push(error);
       }
       try {
-        await runtime.driver.close();
+        if (keepBrowserRunning) await runtime.driver.detach!();
+        else await runtime.driver.close();
         driverClosed = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (
+      driverClosed &&
+      runtime.workingJournal &&
+      (runtime.workingReceipt?.intent === "retire" ||
+        runtime.workingReceipt?.intent === "suspend") &&
+      runtime.workingReceipt.state !== "completed"
+    ) {
+      try {
+        runtime.workingReceipt = runtime.workingJournal.complete(
+          runtime.workingReceipt,
+          runtime.workingReceipt.intent === "suspend" ? runtime.workingReceipt.process : null,
+        );
+        workingReceiptSettled = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    // An unsettled retirement keeps this journal open for the exact cleanup retry.
+    if (driverClosed && workingReceiptSettled) {
+      try {
+        runtime.workingJournal?.close();
+        workingJournalClosed = true;
       } catch (error) {
         failures.push(error);
       }
@@ -1602,12 +3729,6 @@ export class BrowserSupervisor {
     try {
       runtime.journal.close();
       actionJournalClosed = true;
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      runtime.protectedAuthJournal.close();
-      protectedAuthJournalClosed = true;
     } catch (error) {
       failures.push(error);
     }
@@ -1625,21 +3746,15 @@ export class BrowserSupervisor {
     } catch (error) {
       failures.push(error);
     }
-    if (driverClosed) {
-      try {
-        await rm(join(this.socketRootDirectory, shortDigest(runtime.options.browserSessionId)), {
-          recursive: true,
-          force: true,
-        });
-      } catch (error) {
-        failures.push(error);
-      }
-    }
+    const recording = runtime.recording;
+    runtime.recording = null;
+    await recording?.discard();
     if (
       removeState &&
       driverClosed &&
+      workingReceiptSettled &&
+      workingJournalClosed &&
       actionJournalClosed &&
-      protectedAuthJournalClosed &&
       stateJournalClosed &&
       downloadStoreClosed
     ) {
@@ -1680,31 +3795,101 @@ function browserActionUsesWorkspaceFiles(action: BrowserActionCommand["action"])
   );
 }
 
+/** The program a managed Chromium launch executes for this driver context.
+ *
+ * A recovered working runtime records its browser's process image (the
+ * resolved `/proc/<pid>/exe`) only as ownership evidence. That image is not a
+ * launcher: distribution wrappers (NixOS, Debian and Google Chrome's own
+ * script) prepare the sandbox helper, flags and environment and then exec it,
+ * and a Chromium started from its bare image can abort before DevTools starts.
+ * A relaunch after the recorded browser exited therefore uses the same
+ * launcher as every other launch of this profile, and reattaching a live
+ * browser launches nothing. The record decides only whether this exact
+ * directory may be reattached or relaunched. Undefined selects the platform
+ * default launcher. */
+export async function managedChromiumLaunchExecutable(
+  context: Pick<
+    BrowserSupervisorDriverContext,
+    | "headed"
+    | "profileDirectory"
+    | "restoredProfile"
+    | "browserExecutablePath"
+    | "recoverOwnedProcess"
+    | "allowOwnedProcessLaunch"
+  >,
+  headlessShell?: VerifiedHeadlessShell,
+): Promise<{ browserExecutablePath: string | undefined; useHeadlessShell: boolean }> {
+  const browserExecutablePath = await selectManagedChromiumExecutable({
+    headed: context.headed,
+    profileDirectory: context.profileDirectory,
+    restoredProfile: context.restoredProfile,
+    ...(context.browserExecutablePath
+      ? { browserExecutablePath: context.browserExecutablePath }
+      : {}),
+    ...(headlessShell ? { headlessShell } : {}),
+  });
+  // Without directory launch permission only a verified headless shell, whose
+  // daemon lineage is proven before reattaching, may recover.
+  if (
+    context.recoverOwnedProcess &&
+    context.allowOwnedProcessLaunch !== true &&
+    (!headlessShell ||
+      (await realpath(headlessShell.path)) !== context.recoverOwnedProcess.executablePath)
+  ) {
+    throw workingRuntimeUnavailable();
+  }
+  return {
+    browserExecutablePath,
+    useHeadlessShell: headlessShell !== undefined && browserExecutablePath === headlessShell.path,
+  };
+}
+
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
-  binary?: ResolvedAgentBrowserBinary,
-  lightpandaBinary?: ResolvedLightpandaBinary,
+  lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>,
   headlessShell?: VerifiedHeadlessShell,
+  networkIsolation = true,
+  connectAttachedBridge: AttachedBrowserBridgeConnector = connectAttachedBrowserBridge,
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
-    const attached = await createAttachedChromeTransport({
-      deviceId: context.transport.deviceId,
-      connectionGeneration: context.transport.connectionGeneration,
-      browserName: context.transport.browserName,
-      browserVersion: context.transport.browserVersion,
-      ...(context.transport.authorityFile
-        ? { authorityFile: context.transport.authorityFile }
-        : {}),
-    });
-    return new AgentBrowserDriver({
+    const transport = context.transport;
+    // The session's tabs and attachments in the person's browser outlive
+    // this runtime; a later runtime of the session, or a later controller
+    // after a crash, continues from this record.
+    const ledger = AttachedTabLedgerRecorder.open(context.sessionDirectory, {
       browserSessionId: context.browserSessionId,
-      controllerGeneration: context.controllerGeneration,
-      runner: attached.runner,
-      targetLifecycle: "cdp",
-      connect: async () => attached.connection,
-      engine: "chrome",
-      permissionControl: false,
+      deviceId: transport.deviceId,
+      connectionGeneration: transport.connectionGeneration,
+      ...(transport.authorityFile ? { authorityFile: transport.authorityFile } : {}),
     });
+    let attached: Awaited<ReturnType<typeof createAttachedChromeTransport>>;
+    try {
+      attached = await createAttachedChromeTransport({
+        deviceId: transport.deviceId,
+        connectionGeneration: transport.connectionGeneration,
+        browserName: transport.browserName,
+        browserVersion: transport.browserVersion,
+        ...(transport.authorityFile ? { authorityFile: transport.authorityFile } : {}),
+        connectBridge: connectAttachedBridge,
+        inheritedAttachments: ledger.inheritedAttachments,
+        onAttachmentsChange: (tabs) => ledger.attachmentsChanged(tabs),
+      });
+    } catch (error) {
+      ledger.abandon();
+      throw error;
+    }
+    const connection = attached.connection;
+    return createAttachedChromeDriver(
+      context,
+      attached,
+      context.resolveWorkspaceFiles,
+      context.downloadEvents,
+      {
+        previous: ledger.previous,
+        onChange: (tabs) => ledger.tabsChanged(tabs),
+        onClosed: (tabsSettled) => ledger.closed(tabsSettled, connection.leftoverAttachments()),
+      },
+    );
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {
@@ -1714,7 +3899,7 @@ async function createBrowserDriver(
       );
     }
     const runner = await LightpandaRunner.create({
-      binary: lightpandaBinary,
+      binary: await lightpandaBinary(),
       sessionDirectory: join(context.sessionDirectory, "lightpanda"),
     });
     return new AgentBrowserDriver({
@@ -1750,6 +3935,8 @@ async function createBrowserDriver(
       runner,
       connect: async (endpoint) => await CdpConnection.connect(endpoint, { allowRemote: true }),
       targetLifecycle: "cdp",
+      focusEmulation: true,
+      ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     });
   }
   const route = context.networkRoute;
@@ -1766,37 +3953,51 @@ async function createBrowserDriver(
   if (context.linkedComputer) {
     launchArguments.push("--force-renderer-accessibility=complete");
   }
-  const browserExecutablePath = await selectManagedChromiumExecutable({
-    headed: context.headed,
-    profileDirectory: context.profileDirectory,
-    restoredProfile: context.restoredProfile,
-    ...(context.browserExecutablePath
-      ? { browserExecutablePath: context.browserExecutablePath }
-      : {}),
-    ...(headlessShell ? { headlessShell } : {}),
-  });
-  const useHeadlessShell = headlessShell && browserExecutablePath === headlessShell.path;
+  const { browserExecutablePath, useHeadlessShell } = await managedChromiumLaunchExecutable(
+    context,
+    headlessShell,
+  );
   if (context.headlessSessionCookies && !useHeadlessShell) {
     throw new Error("Headless cookie state requires its matching verified profile launcher");
   }
-  const runner = await AgentBrowserJsonRunner.create({
-    namespace: "og",
-    // A close followed immediately by another daemon using the same socket
-    // name races agent-browser's asynchronous socket teardown. Every physical
-    // driver lifecycle therefore gets a private socket identity; durable state
-    // lives solely in the explicitly supplied profile directory.
-    sessionName: `b${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-    socketDirectory: context.socketDirectory,
+  // A managed browser on macOS runs on the person's own desktop. A window
+  // would appear in front of them, take focus and intercept their typing;
+  // the agent and the person's live view work through CDP, so it stays
+  // offscreen. A linked ComputerSession drives the native window itself.
+  // A Linux host without a graphical display (a server, or an agent running
+  // outside the desktop session) cannot open a window at all: windowed Chrome
+  // would exit before DevTools starts. There a headed browser is offscreen too.
+  const offscreen =
+    context.headed &&
+    !context.linkedComputer &&
+    (process.platform === "darwin" || (process.platform === "linux" && !linuxGraphicalDisplay()));
+  const runner = await ManagedBrowserRunner.create({
     profileDirectory: context.profileDirectory,
-    downloadDirectory: context.downloadDirectory,
-    screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
+    ...(networkIsolation ? {} : { networkIsolation: false }),
+    ...(offscreen ? { offscreen: true } : {}),
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
     ...(browserExecutablePath ? { browserExecutablePath } : {}),
+    ...(context.recoverOwnedProcess
+      ? {
+          recoverOwnedProcess: context.recoverOwnedProcess,
+          allowOwnedProcessLaunch: context.allowOwnedProcessLaunch,
+        }
+      : {}),
     ...(context.launchEnvironment ? { environment: context.launchEnvironment } : {}),
-    ...(binary ? { binary } : {}),
+  }).catch((error: unknown) => {
+    // Recovery proves the previous browser's state before reattaching or
+    // relaunching. A proof that cannot be completed is a definite refusal
+    // with the browser's state preserved, not an internal failure.
+    if (
+      context.recoverOwnedProcess &&
+      error instanceof AgentBrowserCommandError &&
+      error.code === "process_failed"
+    )
+      throw workingRuntimeUnavailable("process_state_unknown");
+    throw error;
   });
   return new AgentBrowserDriver({
     browserSessionId: context.browserSessionId,
@@ -1810,13 +4011,25 @@ async function createBrowserDriver(
             : {}),
         }
       : {}),
-    foregroundManagedTabs: context.headed,
-    ...(headlessShell && browserExecutablePath === headlessShell.path
-      ? { userAgentMetadataSource: "intercepted_local" as const }
+    focusEmulation: true,
+    // Linux has no window occlusion tracking: every window of a windowed
+    // browser counts as visible and its animated pages render continuously.
+    // Park idle windows so browsers nobody is using stop drawing frames. A
+    // linked ComputerSession works on the native window itself, so it stays.
+    ...(process.platform === "linux" && context.headed && !offscreen && !context.linkedComputer
+      ? { parkIdleWindowsAfterMs: BROWSER_WINDOW_PARK_IDLE_MS }
       : {}),
+    // Headless and offscreen Chrome on this machine launch with an ordinary
+    // User-Agent switch, which empties their high-entropy Client Hints.
+    ...((process.platform === "darwin" || process.platform === "linux") &&
+    (!context.headed || offscreen)
+      ? { completeClientHints: true }
+      : {}),
+    ...(useHeadlessShell ? { userAgentMetadataSource: "intercepted_local" as const } : {}),
     downloadDirectory: context.downloadDirectory,
     ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+    ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     ...(route
       ? {
           emulation: {
@@ -1829,11 +4042,151 @@ async function createBrowserDriver(
   });
 }
 
+/** Whether this host offers a graphical display a browser window could open
+ * on. A browser launch environment exists only for a linked ComputerSession,
+ * which always brings its own display. */
+export function linuxGraphicalDisplay(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(environment.DISPLAY || environment.WAYLAND_DISPLAY);
+}
+
+/** Graceful shutdown keeps this owned browser running and its next causal
+ * request reattaches it from the completed working-runtime launch receipt. */
+function hasPreservableWorkingRuntime(runtime: Runtime): boolean {
+  return (
+    runtime.lifecycle === "active" &&
+    !runtime.driver.isTerminal?.() &&
+    runtime.workingJournal !== null &&
+    runtime.workingReceipt?.intent === "launch" &&
+    runtime.workingReceipt.state === "completed" &&
+    runtime.workingReceipt.process !== null &&
+    runtime.workingReceipt.directoryLaunchAllowed
+  );
+}
+
+/** A browser nobody is using that its next request can bring back: no
+ * request, live view, recording, recovery or recent unanswered JavaScript
+ * dialog in progress (an agent waiting on a dialog is still using the
+ * browser, and releasing it would lose the dialog). A managed browser
+ * needs a stopped profile its next request can relaunch. A session in the
+ * person's own Chrome needs nothing kept here: its tabs live on in Chrome, and
+ * its next request continues in the tab it was using. */
+function idleReleasable(runtime: Runtime, idleBefore: number, now: number): boolean {
+  const transport = runtime.options.transport.kind;
+  return (
+    (transport === "managed" || transport === "attached_chrome") &&
+    idleSince(runtime.lastUsedAt, runtime.waitHoldUntil) <= idleBefore &&
+    runtime.presence.size === 0 &&
+    runtime.recording?.summary().state !== "recording" &&
+    runtime.recovery === null &&
+    runtime.externalAuthTail === null &&
+    runtime.controller.isIdle() &&
+    !awaitsDialogAnswer(runtime, now) &&
+    (transport === "attached_chrome"
+      ? runtime.lifecycle === "active" && runtime.driver.isTerminal?.() !== true
+      : hasPreservableWorkingRuntime(runtime))
+  );
+}
+
+/**
+ * Until when the session using a browser keeps it past the idle release
+ * time: the hold's time (a wait's deadline, or far off while the session
+ * works), but never more than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's
+ * last use, so a long turn or repeated waits cannot keep a browser nobody
+ * uses. Without a hold, never (negative infinity).
+ */
+export function waitHoldEnds(lastUsedAt: number, waitHoldUntil: number | null): number {
+  if (waitHoldUntil === null) return Number.NEGATIVE_INFINITY;
+  return Math.min(waitHoldUntil, lastUsedAt + BROWSER_WAIT_HOLD_MAX_MS);
+}
+
+/** Since when a browser counts as unused for its idle release: its last use,
+ * or the end of a wait hold after it, so the turn a wait resumes gets the
+ * normal idle time to use its browser again. */
+export function idleSince(lastUsedAt: number, waitHoldUntil: number | null): number {
+  return Math.max(lastUsedAt, waitHoldEnds(lastUsedAt, waitHoldUntil));
+}
+
+/** A hold sent by the control plane: keep the browser until `until`. */
+export type WaitHold = { until: number };
+
+function nextWaitHold(current: number | null, hold: WaitHold, now: number): number | null {
+  if (hold.until <= now) return current;
+  return current === null ? hold.until : Math.max(current, hold.until);
+}
+
+/** Whether the browser is still receiving a download. A store that cannot be
+ * read counts as busy, so an idle sweep never fails a download it cannot see. */
+async function downloadInProgress(runtime: Runtime): Promise<boolean> {
+  if (!runtime.downloadStore) return false;
+  try {
+    const downloads = await runtime.downloadStore.list();
+    return downloads.some((download) => download.status === "in_progress");
+  } catch {
+    return true;
+  }
+}
+
+/** How long an unanswered JavaScript dialog keeps its session's browser from
+ * an idle release or an agent restart. A dialog nobody answered in that time
+ * is taken as forgotten (or its close was never reported); losing it then is
+ * better than holding the browser, and the machine's updates, indefinitely. */
+const DIALOG_HOLD_MS = 30 * 60_000;
+
+/** Whether the session has a JavaScript dialog an agent may still answer. */
+function awaitsDialogAnswer(runtime: Runtime, now: number): boolean {
+  const since = runtime.driver.openDialogSince?.() ?? null;
+  return since !== null && now - since < DIALOG_HOLD_MS;
+}
+
+/** A restart now loses neither admitted work nor unrecoverable session state. */
+function restartPreservesRuntime(runtime: Runtime, now: number): boolean {
+  if (runtime.recovery !== null || runtime.externalAuthTail !== null) return false;
+  if (!runtime.controller.isIdle()) return false;
+  // A session whose driver already ended has no live state left to lose.
+  if (runtime.driver.isTerminal?.()) return true;
+  // A restart would lose a dialog the agent has yet to answer.
+  if (awaitsDialogAnswer(runtime, now)) return false;
+  // Attached Chrome lives outside this controller: its tabs and pages survive
+  // our restart (only the empty tabs the session opened close, and Chrome's
+  // debugger is released), and the session's next request continues in the
+  // tab it was using. The agent keeps the profile's placement stable across
+  // the restart only for extensions that report a live-state generation. The
+  // agent's own update gate refuses older ones.
+  if (runtime.options.transport.kind === "attached_chrome") return runtime.lifecycle === "active";
+  return hasPreservableWorkingRuntime(runtime);
+}
+
 function binding(runtime: Runtime): BrowserSessionReference {
   return {
     browserSessionId: runtime.options.browserSessionId,
     controllerGeneration: runtime.options.controllerGeneration,
   };
+}
+
+/** The display the running browser was launched with, for the caller to
+ * report instead of inferring it from the requested mode. */
+function displayOf(runtime: Runtime): { display?: "window" | "offscreen" } {
+  const display = runtime.driver.display;
+  return display ? { display } : {};
+}
+
+/** One short line for the agent when a headed browser was launched offscreen
+ * (the session line already says it has no window): what a person at the
+ * machine can see, and what to use for a step only they can do. On macOS a
+ * managed browser is offscreen so it never takes over the person's screen; on
+ * Linux only when there is no display. */
+export function offscreenBrowserNotice(platform: NodeJS.Platform): string {
+  return platform === "darwin"
+    ? "A person sees it only in the live view; for a step they must do at this Mac, use placement attached_device, or computer_open then browser_open with linkedComputerSessionId."
+    : "A person sees it only in the live view; for a step that needs a real window, use placement attached_device.";
+}
+
+/** Virtual WebAuthn needs the CDP WebAuthn domain and browser-level target
+ * auto-attach: managed Chromium and remote Chromium providers have both. The
+ * attached user Chrome (extension debugger) and Lightpanda do not. */
+function supportsPasskeys(transport: BrowserSupervisorTransport): boolean {
+  if (transport.kind === "attached_chrome") return false;
+  return !(transport.kind === "managed" && transport.engine === "lightpanda");
 }
 
 function validateSessionOptions(
@@ -1847,6 +4200,28 @@ function validateSessionOptions(
     throw new Error("initialUrl exceeds its byte envelope");
   }
   const transport = validateBrowserTransport(options.transport ?? { kind: "managed" });
+  if (
+    options.recoverExistingWorkingDirectory !== undefined &&
+    (options.recoverExistingWorkingDirectory !== true ||
+      options.initialUrl !== undefined ||
+      options.restore ||
+      !eligibleWorkingRuntime({ transport }) ||
+      !options.workingRuntimeAuthority)
+  ) {
+    throw workingRuntimeUnavailable();
+  }
+  if (options.workingRuntimeAuthority) {
+    const authority = options.workingRuntimeAuthority;
+    if (
+      !Number.isSafeInteger(authority.tokenGeneration) ||
+      authority.tokenGeneration < 1 ||
+      ![authority.placementDigest, authority.controlDigest, authority.viewDigest].every((value) =>
+        SHA256_PATTERN.test(value),
+      )
+    ) {
+      throw workingRuntimeUnavailable();
+    }
+  }
   if (
     transport.kind === "managed" &&
     transport.ephemeralPartition &&
@@ -2266,6 +4641,48 @@ function runtimeOptions(options: ValidatedBrowserSupervisorSessionOptions): Brow
   };
 }
 
+function eligibleWorkingRuntime(options: { transport: BrowserSupervisorTransport }) {
+  return (
+    options.transport.kind === "managed" &&
+    options.transport.engine !== "lightpanda" &&
+    !options.transport.ephemeralPartition
+  );
+}
+
+function workingLaunchDigest(options: ValidatedBrowserSupervisorSessionOptions): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        driverId: BROWSER_DRIVER_ID,
+        driverSchemaVersion: BROWSER_DRIVER_SCHEMA_VERSION,
+        headed: options.headed,
+        executable: options.browserExecutablePath ?? null,
+        transport: options.transport,
+        linkedComputer: options.linkedComputer ?? null,
+        networkRoute: options.networkRoute
+          ? networkRouteMaterialDigest(options.networkRoute)
+          : null,
+      }),
+    )
+    .digest("hex");
+}
+
+async function assertOptionalDirectory(path: string) {
+  try {
+    await assertDirectory(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+async function assertOptionalRegularFile(path: string) {
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) throw workingRuntimeUnavailable();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 function networkRouteMaterialDigest(route: BrowserSupervisorNetworkRoute): string {
   return createHash("sha256")
     .update(
@@ -2386,6 +4803,8 @@ function assertRestoredManifestAuthority(
   }
   const platform = browserRuntimePlatform();
   const architecture = browserRuntimeArchitecture();
+  // Its cookies and saved passwords are encrypted for the operating system
+  // that saved them, so the profile opens only where the same one runs.
   if (
     !platform ||
     !architecture ||
@@ -2393,23 +4812,69 @@ function assertRestoredManifestAuthority(
     manifest.architecture !== architecture ||
     manifest.profileCrypto !== browserProfileCryptoPolicy(process.platform)
   ) {
+    const saved = `${PLATFORM_NAMES[manifest.platform]} ${manifest.architecture}`;
+    const samePlace = manifest.platform === platform && manifest.architecture === architecture;
     throw new InteractionControllerError(
       "unsupported",
-      "saved browser state is incompatible with this placement",
+      samePlace
+        ? "saved browser state is incompatible with this placement: its sign-ins are encrypted in a way this placement's browser cannot read. Open a new browser here and sign in again"
+        : `saved browser state is incompatible with this placement: it was saved on ${saved}${
+            platform && architecture
+              ? `, and this placement is ${PLATFORM_NAMES[platform]} ${architecture}`
+              : ""
+          }. Open it on a ${saved} placement, or open a new browser here and sign in again`,
     );
   }
 }
 
+const PLATFORM_NAMES: Record<BrowserProfileManifest["platform"], string> = {
+  linux: "Linux",
+  macos: "macOS",
+  windows: "Windows",
+};
+
+/**
+ * A saved profile continues in the build that saved it or a newer one of the
+ * same engine: Chromium migrates a profile forward when a newer build opens
+ * it (as when the browser updates itself), but an older build cannot read
+ * what a newer one wrote. The saved revision itself is never touched: it was
+ * materialized into this browser's own directory, and the next save records
+ * the build that runs now. A version that does not read as dotted numbers
+ * must match exactly.
+ */
 function assertRestoredRuntimeCompatible(
   manifest: BrowserProfileManifest,
   snapshot: BrowserRuntimeSnapshot,
 ): void {
-  if (snapshot.engine !== manifest.engine || snapshot.engineVersion !== manifest.engineVersion) {
-    throw new InteractionControllerError(
-      "unsupported",
-      "saved browser state requires another Chromium build",
-    );
+  if (
+    snapshot.engine === manifest.engine &&
+    engineContinuesProfile(snapshot.engineVersion, manifest.engineVersion)
+  )
+    return;
+  const saved = manifest.engineVersion ? ` ${manifest.engineVersion}` : "";
+  const running = snapshot.engineVersion ? ` ${snapshot.engineVersion}` : "";
+  throw new InteractionControllerError(
+    "unsupported",
+    snapshot.engine === manifest.engine
+      ? `saved browser state was saved by Chromium${saved} and needs that build or a newer one, but this placement runs Chromium${running}; open it on a placement with a newer Chromium, or update Chromium here`
+      : "saved browser state requires another Chromium build",
+  );
+}
+
+export function engineContinuesProfile(running: string | null, saved: string | null): boolean {
+  if (running === saved) return true;
+  const parse = (version: string | null) =>
+    version !== null && /^\d{1,9}(\.\d{1,9}){0,3}$/.test(version)
+      ? version.split(".").map(Number)
+      : null;
+  const runningParts = parse(running);
+  const savedParts = parse(saved);
+  if (!runningParts || !savedParts) return false;
+  for (let index = 0; index < Math.max(runningParts.length, savedParts.length); index += 1) {
+    const difference = (runningParts[index] ?? 0) - (savedParts[index] ?? 0);
+    if (difference !== 0) return difference > 0;
   }
+  return true;
 }
 
 function browserManifestDigest(manifest: BrowserProfileManifest): string {
@@ -2459,13 +4924,45 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
 }
 
-function defaultSocketRoot(rootDirectory: string): string {
-  const base = process.platform === "win32" ? tmpdir() : "/tmp";
-  return join(base, "ogb-s", shortDigest(resolve(rootDirectory)));
+/** Bounded, content-free cause for a launch receipt; never page data or secrets. */
+function launchFailureCode(error: unknown): string {
+  if (error instanceof InteractionControllerError) return boundedFailureCode(error.code);
+  if (error instanceof AggregateError) return "cleanup_failed";
+  const code = (error as { code?: unknown } | null)?.code;
+  return boundedFailureCode(typeof code === "string" ? code : "internal");
 }
 
-function shortDigest(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+const BROWSER_LAUNCH_REASON_MAX_CHARS = 1_000;
+const BROWSER_MISSING_PATH_MAX_CHARS = 500;
+/** Ends both missing-browser messages: the browser tool only finds a browser
+ * installed system-wide, so one unpacked into a project folder never helps it
+ * and clutters the user's project. */
+const BROWSER_NOT_IN_PROJECT = "Do not install a browser or its libraries inside a project folder.";
+
+/** A browser that cannot start says why, so the caller can act on it instead
+ * of retrying an opaque failure. The driver's own launch message (a missing
+ * Chrome, a crash on startup with its stderr) is already bounded to one line;
+ * every other failure keeps its original type and contract. */
+export function browserLaunchFailure(error: unknown): unknown {
+  if (!(error instanceof AgentBrowserCommandError) || !error.driverMessage) return error;
+  if (/^Chrome not found\b/u.test(error.driverMessage)) {
+    // "Chrome not found at <path>." names the executable this machine resolved
+    // or was configured with, which vanished before launch.
+    const missingPath = /^Chrome not found at (.+?)\.?$/u
+      .exec(error.driverMessage)?.[1]
+      ?.slice(0, BROWSER_MISSING_PATH_MAX_CHARS);
+    return new InteractionDefiniteDriverError(
+      "unsupported",
+      missingPath
+        ? `The browser this machine is set up to use (${missingPath}) is missing, so a browser cannot start here. Reinstall it there, or open the browser on another placement. ${BROWSER_NOT_IN_PROJECT}`
+        : `No Google Chrome or Chromium is installed on this machine, so a browser cannot start here. Install Google Chrome or Chromium system-wide in its standard location, with the official installer or the system package manager, and open the browser again, or open it on another placement. ${BROWSER_NOT_IN_PROJECT}`,
+    );
+  }
+  const reason = error.driverMessage.slice(0, BROWSER_LAUNCH_REASON_MAX_CHARS);
+  return new InteractionDefiniteDriverError(
+    "driver_failed",
+    `The browser could not start on this machine: ${reason}`,
+  );
 }
 
 function boundedPositiveInteger(value: number, label: string): number {
@@ -2601,7 +5098,102 @@ function profileManifest(
   };
 }
 
-async function restoreTabs(
+function stoppedTabsOf(targets: readonly BrowserTarget[]): StoppedBrowserTab[] {
+  return targets
+    .filter((target) => target.kind === "page" || target.kind === "popup")
+    .map((target) => ({
+      targetId: target.id,
+      urlHash: tabUrlHash(target.url),
+      selected: target.selected,
+    }));
+}
+
+/** Tabs as the browser reopens them after a relaunch: a tab showing the
+ * browser's error page is reopened at the address it failed to load, so it is
+ * recorded and matched under that address. Only for pairing tabs across a
+ * relaunch; what callers are shown keeps the browser's own URL. */
+async function restorableTargets(
+  driver: BrowserSupervisorDriver,
+  targets: readonly BrowserTarget[],
+): Promise<BrowserTarget[]> {
+  return await Promise.all(
+    targets.map(async (target) => {
+      if (!driver.errorPageUrl || !target.url.toLowerCase().startsWith("chrome-error:"))
+        return target;
+      const url = await driver.errorPageUrl(target.id).catch(() => null);
+      return url ? { ...target, url } : target;
+    }),
+  );
+}
+
+/** Tell a relaunched browser's driver which of its tabs reopened each tab of
+ * the browser before it, so they keep their IDs. True when any did. Best
+ * effort: a failure only leaves an old tab ID unexplained. */
+async function noteRelaunchedTabs(
+  driver: BrowserSupervisorDriver,
+  reason: BrowserRelaunchReason,
+  previous: readonly StoppedBrowserTab[],
+  details: { idleReleaseMinutes?: number },
+  current?: readonly BrowserTarget[],
+): Promise<boolean> {
+  if (!driver.noteRelaunchedTabs || previous.length === 0) return false;
+  try {
+    const reopened = await restorableTargets(driver, current ?? (await driver.listTargets()));
+    const tabs = matchReopenedTabs(previous, reopened);
+    if (tabs.length > 0) {
+      driver.noteRelaunchedTabs({
+        reason,
+        ...details,
+        tabs,
+        restoredTargetIds: reopened.map((target) => target.id),
+      });
+    }
+    return tabs.some((tab) => tab.replacementId !== null);
+  } catch {
+    // Unexplained, not failed.
+    return false;
+  }
+}
+
+/** A reattached browser's tabs take the IDs its last controller gave them,
+ * those whose tab is still open. True when any did. Best effort. */
+async function adoptRecordedTabIds(
+  driver: BrowserSupervisorDriver,
+  sessionDirectory: string,
+): Promise<boolean> {
+  if (!driver.adoptTabIds) return false;
+  try {
+    const recorded = await readBrowserTabIds(sessionDirectory);
+    if (recorded.length === 0) return false;
+    const open = new Set((await driver.listTargets()).map((target) => target.id));
+    const live = recorded.filter((pair) => open.has(pair.browserTargetId));
+    driver.adoptTabIds(live);
+    return live.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Keep the tab IDs this browser's tabs have beside its profile, for a
+ * controller that later reattaches to it; a browser without any removes an
+ * earlier browser's. Best effort. */
+async function recordTabIds(
+  driver: BrowserSupervisorDriver,
+  sessionDirectory: string,
+): Promise<void> {
+  if (!driver.adoptedTabIds) return;
+  try {
+    await writeBrowserTabIds(sessionDirectory, driver.adoptedTabIds());
+  } catch {
+    // A later reattach gives these tabs the browser's own IDs.
+  }
+}
+
+/** Rebuild a checkpoint's tab set on a freshly launched restored profile. A
+ * saved tab whose page can't load right now (its host is down or no longer
+ * resolves) is still reopened on the browser's error page, so one unreachable
+ * site never makes the whole browser unrecoverable. */
+export async function restoreTabs(
   driver: BrowserSupervisorDriver,
   capturedTabs: BrowserRuntimeSnapshot["tabs"],
 ): Promise<void> {
@@ -2614,20 +5206,22 @@ async function restoreTabs(
     tabs.findIndex((tab) => tab.selected),
   );
   const ordered = [tabs[primaryIndex]!, ...tabs.filter((_, index) => index !== primaryIndex)];
-  const first = await driver.start(ordered[0]!.url);
+  const reopen = { keepTabOnLoadError: true } satisfies BrowserTabNavigationOptions;
+  const first = await driver.start(ordered[0]!.url, reopen);
   const available = (await driver.listTargets()).filter(
     (target) => target.kind === "page" || target.kind === "popup",
   );
   const used = new Set<string>();
   let selectedTargetId: string | null = null;
   for (const [index, tab] of ordered.entries()) {
-    let target = available.find(
-      (candidate) => !used.has(candidate.id) && candidate.url === tab.url,
-    );
-    if (!target) {
-      const opened = index === 0 ? first : await driver.openTarget(tab.url);
-      target = opened.target;
-    }
+    // Startup chose a live tab for the primary and navigated it there. A
+    // reopened tab with the same URL may have a dead renderer, so the primary
+    // is always the tab startup returned, never a URL look-alike.
+    const target =
+      index === 0
+        ? first.target
+        : (available.find((candidate) => !used.has(candidate.id) && candidate.url === tab.url) ??
+          (await driver.openTarget(tab.url, reopen)).target);
     used.add(target.id);
     if (index === 0) selectedTargetId = target.id;
   }

@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import type { ChatClient } from "@opengeni/sdk";
 import { CheckIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
@@ -10,13 +11,14 @@ import {
   fetchAuthSession,
   previewOrganizationUserSetup,
 } from "@/api";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { Notice } from "@opengeni/react/ui/notice";
 import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 import { setupAccountTokenFromUrl, takeBootstrappedSetupAccountToken } from "@/setup-account-token";
-import type { AuthSession, OrganizationInvitation } from "@/types";
+import type { AuthSession, OrganizationInvitation } from "@opengeni/react/app/types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export { setupAccountTokenFromUrl } from "@/setup-account-token";
 
@@ -140,7 +142,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
       });
       setCompletion("created");
     } catch (caught) {
-      const raw = caught instanceof Error ? caught.message : String(caught);
+      const raw = errorMessage(caught);
       setError(
         /invalid|expired|belongs|404/i.test(raw)
           ? "This setup link is invalid or has expired. Ask your organization administrator for a new invitation."
@@ -279,7 +281,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             }}
           >
             <InvitationSummary preview={preview} />
-            <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3">
+            <div className="mb-4 rounded-md border border-border bg-surface-2 p-3">
               <p className="text-sm font-medium">Already have an Opengeni account?</p>
               <p className="mt-1 text-xs leading-5 text-fg-subtle">
                 This invitation is for {preview.targetEmail}. Sign in with that account and
@@ -409,7 +411,7 @@ function InvitationSummary({
   preview: Extract<OrganizationUserSetupPreview, { state: "pending" }>;
 }) {
   return (
-    <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3 text-sm">
+    <div className="mb-4 rounded-md border border-border bg-surface-2 p-3 text-sm">
       <p>
         <span className="font-medium">{preview.organizationName}</span> invited{" "}
         <span className="font-medium">{preview.targetEmail}</span> as{" "}
@@ -432,7 +434,7 @@ function InvitationSummary({
 }
 
 async function findMatchingPendingInvitation(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   preview: Extract<OrganizationUserSetupPreview, { state: "pending" }>,
 ): Promise<OrganizationInvitation | null> {
   const seenCursors = new Set<string>();

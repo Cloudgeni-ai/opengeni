@@ -5,16 +5,90 @@ traces keep their existing attribute projection; adding a diagnostic field does
 not make it public. Raw exceptions, prompts, tool content, SQL and parameters
 must not be serialized into telemetry.
 
+Reviewed operational failures retain their closed `errorClass`, `errorCode`,
+HTTP status and origin. Their `errorMessage` is a fixed description of the
+reviewed code, not the original exception message. Parallel session-title
+generation and persistence have distinct reviewed classes/codes, so these
+nonfatal sidecar failures no longer collapse to `OperationError`. Unknown
+classes still collapse and unknown codes/messages are omitted. Caller-supplied
+`errorMessage`, provider bodies, SQL and customer content remain excluded;
+protected diagnostics below are the separate cause-investigation boundary.
+
+Where each finished turn's wall time went (queue, startup, model inference,
+provider and network time, tools, sandbox, waits and gaps) is stored per turn
+in SQL and exported as metrics; see [turn timing profiles](turn-timing-profiles.md).
+
+### Temporal SDK logs
+
+The worker process installs the Temporal Runtime with
+`createTemporalSdkLogger`, and forwards Rust core records to it, so SDK worker,
+activity and workflow records and `workflow.log` calls are written as ordinary
+structured lines (one JSON object per line). Records below INFO are dropped, the
+SDK default. Each record keeps only `sdkComponent`, the code-registered
+`activity` and `workflowType` names, `attempt` and `durationMs`. Task tokens,
+namespaces, task queues, workflow/run/activity identifiers, core fields and the
+raw error never cross the boundary. A record that carries an error becomes
+`TemporalSdkOperationError` / `temporal_sdk_failure_logged`. The message is kept
+only when it is one of the SDK's reviewed constant messages or comes from
+Opengeni workflow code. Anything else, including SDK messages that interpolate
+exception text and core messages, is published as `Temporal SDK log record`.
+
 ## Context and timing
 
 `withTraceContext` scopes identity through asynchronous calls. `startSpan`
 inherits that identity and exports `parentSpanId`; explicitly passing
 `parent: null` starts an independent root. The context contains only validated
 nonzero trace/span IDs and optional W3C trace flags, not baggage or customer attributes. Links are limited
-to eight validated identities. W3C traceparent helpers are provided for trusted
-adapters; public HTTP headers are not automatically admitted as trusted context.
+to eight validated identities. `parseTraceparent` follows W3C Trace Context
+level 1 (lowercase hex, no version `ff`, no all-zero IDs, repeated headers
+rejected); parsing never makes remote context a parent by itself.
 
-API requests and physical worker attempts each establish isolated roots.
+Physical worker attempts establish isolated roots. Each API request span
+(kind SERVER) reads the request's `traceparent` header:
+
+- By default a valid header becomes a span link and the request starts its own
+  trace. An untrusted client therefore cannot choose Opengeni's trace ID, join
+  an unrelated trace or grow one without bound, while a trace viewer can still
+  follow the link to the caller's span.
+- With `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` the request
+  span is the caller's child, in the caller's trace. Use it only when every
+  client that can reach the API is trusted, such as a backend that embeds
+  Opengeni or a trusted edge that strips client headers.
+- A missing, malformed or repeated header starts a plain root. `tracestate`
+  and baggage are never read.
+
+### Child spans under API requests
+
+An API request span is started with a child-span budget (256 spans per
+request, exported only when an OTLP endpoint is configured). Code running
+while the request is served records children through `startChildSpan`; outside
+such a scope (workers, background loops) it records nothing and costs only an
+async-local lookup. The budget stops at the request span's end, and a request
+that spends it exports `opengeni.child_spans_dropped` instead of more spans.
+
+- Database: one CLIENT span per statement, named from the statement's shape
+  (`SELECT sessions`, `SELECT list_stalled_recording_work_v1`), with
+  `db.system.name`, `db.operation.name`, `db.collection.name`, the returned row
+  count and, on failure, the SQLSTATE in `db.response.status_code`. Each
+  transaction or savepoint is a `db transaction` / `db savepoint` span over
+  its statements, so time spent waiting for a pooled connection shows as the
+  gap before its first statement. SQL text, bound parameters, rows and error
+  messages are never recorded (`packages/db/src/database-spans.ts`).
+- Outbound HTTP: the standalone API process wraps its global `fetch`; each call
+  is an `HTTP <METHOD>` CLIENT span with the method and response status only,
+  never the URL, host, headers or body. The wrapper is transparent (same
+  arguments, same response, called synchronously), and code that admits only a
+  specific fetch, such as the administered usage reads' native-fetch check
+  (`packages/db/src/usage-read-transport.ts`), must compare
+  `tracedFetchTarget(fetchImpl)`, never the wrapper itself.
+- Clients: the API's object storage and workflow clients are wrapped with
+  `traceClientCalls`, so each call is a `<client> <method>` CLIENT span
+  (`object_storage getFileBytes`, `temporal wakeSessionWorkflow`) with work
+  inside it nested beneath.
+
+Telemetry export itself always runs outside any trace, so exporting spans
+never records more spans.
+
 Model-call, MCP-tool-call and startup-phase measurements export child spans
 under the physical attempt. Completed duration measurements are siblings, not
 claims that one completed operation caused another. Existing first-startup
@@ -91,12 +165,115 @@ Wait observations do not increment physical provider-operation counters.
 measure physical warm capture/publication through gate cleanup, including late
 settlement after the initiating caller times out. Capture/publication failure or
 fenced publication is not reported as successful. Collector deployments must
-retain these exact names to preserve attribution.
+retain these exact names to preserve attribution. The turn-end logical revision
+capture (`opengeni_workspace_capture_total{result}`) reports its committed
+duration as the unlabeled
+`opengeni_workspace_capture_revision_duration_seconds`; it must never reuse the
+physical histogram name, because one metric name has exactly one label set in a
+process registry.
+
+`opengeni_workspace_capture_skipped_total{backend,reason}` counts warm
+checkpoint attempts that could not start, by a closed reason (the capture-claim
+refusal such as `holder_in_progress` or `mutation_in_progress`, `lease_not_warm`,
+`capture_policy`, `no_persist_primitive`). A blocked checkpoint is retried on
+every turn heartbeat, so a sustained blocker increments it repeatedly. An attempt
+that is not due yet or whose archive already covers the current generation is not
+counted.
+
+`opengeni_sandbox_setup_operation_duration_seconds{backend,op,purpose,outcome}`
+times platform setup operations on the raw provider session. A read-only probe
+(`listDir`, `readFile`, `pathExists`) whose provider proves the path absent, such
+as repository skill discovery listing a missing `.agents/skills`, is
+`outcome="not_found"`, the same label the routed per-operation metric uses; only
+other errors are `failed`. `opengeni_repository_skill_discovery_failures_total{backend,error_class,handling}`
+counts failed discovery runs by a closed error class; `handling` is `degraded` or
+`unreachable` when the turn continued without repository skills and `propagated`
+when the error reached turn recovery. A single skipped search path or skill
+folder does not fail the run; it counts once in
+`opengeni_repository_skill_entries_skipped_total{backend,error_class}` (entries,
+not runs) and is logged as `Repository skill skipped` with its `reason` (a
+symlinked search path whose sibling search path is indexed is not shown to the
+model and logs `Repository skill folder skipped`). The `not_found` rule is
+shared with the routed metric and applies to every setup `purpose`; for
+purposes other than `repository_skills` a miss may still matter to its caller.
+
+`opengeni_sandbox_checkpoint_staleness{kind}` (`dirty`, `stale_4h`,
+`stale_12h`) and `opengeni_sandbox_checkpoint_age_max_seconds` are a fresh,
+content-free reaper inventory (`opengeni_private.sandbox_checkpoint_staleness()`,
+migrations 0672 and 0683) of live Modal sandboxes with a write their last
+checkpoint did not capture: a mutation admission on that exact box newer than
+the archive generation, any captured write that is still open or settled
+after the checkpoint (a background command the checkpoint ran around), or a
+viewer or interaction (a desktop or terminal tab, a browser or computer
+controller) attached now or since the last capture that did not run around one
+(`untracked_writer_since`), which can write without an admission. A generation
+bump with no write behind it, such as a fresh or restored box or a capture that
+published one generation behind, does not count on its own. Age runs from the
+first uncaptured write, or for a writer from the later of the checkpoint and its
+first attach, clamped to the box's creation. `OpenGeniSandboxCheckpointStale` warns when any box has held such a
+write for more than 12 hours, half the default provider lifetime: an unplanned
+provider loss would lose it. Boxes kept warm between turns by a tab, a
+controller or a background command (supervised or not, migration 0685) are
+checkpointed by the idle checkpoint sweep (migration 0680).
+
+To find the leases behind the alert, run this as a role that bypasses row-level
+security (a superuser or a `BYPASSRLS` role); under forced row-level security an
+ordinary role silently sees no rows. It ages boxes the way the inventory does,
+checking every captured write for a settlement after the checkpoint:
+
+```sql
+with live as (
+  select lease.id, lease.workspace_id, lease.sandbox_group_id, lease.liveness,
+    lease.instance_id,
+    coalesce(lease.archive_generation, 0) as archived_generation,
+    coalesce(lease.provider_created_at, lease.created_at) as box_created_at,
+    opengeni_private.sandbox_checkpoint_staleness_at(
+      lease.resume_state #>> '{sessionState,workspaceArchiveAt}') as checkpoint_at,
+    (select min(holder.created_at) from sandbox_lease_holders holder
+      where holder.lease_id = lease.id
+        and holder.kind in ('viewer', 'interaction')) as writer_attached_at,
+    lease.untracked_writer_since
+  from sandbox_leases lease
+  where lease.backend = 'modal' and lease.liveness in ('warm', 'draining')
+    and lease.instance_id is not null
+), evidence as (
+  select live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
+    live.box_created_at, live.checkpoint_at,
+    least(live.untracked_writer_since, live.writer_attached_at) as writer_since,
+    min(admission.admitted_at) filter (
+      where admission.workspace_generation > live.archived_generation
+    ) as newer_write_at,
+    bool_or(admission.workspace_generation <= live.archived_generation
+      and (admission.settled_at is null
+        or admission.settled_at > live.checkpoint_at)) as spanning_write
+  from live
+  left join sandbox_workspace_mutation_admissions admission
+    on admission.lease_id = live.id
+   and admission.provider_instance_id = live.instance_id
+  group by live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
+    live.box_created_at, live.checkpoint_at, live.untracked_writer_since,
+    live.writer_attached_at
+)
+select id, workspace_id, sandbox_group_id, liveness,
+  greatest(
+    least(newer_write_at,
+      case when spanning_write then coalesce(checkpoint_at, box_created_at) end,
+      case when writer_since is not null then greatest(writer_since,
+        coalesce(checkpoint_at, box_created_at)) end),
+    box_created_at) as unsaved_since
+from evidence
+where newer_write_at is not null or spanning_write or writer_since is not null
+order by unsaved_since
+limit 20;
+```
 
 Consistent workspace capture intentionally fences new writing operations; a
 shell command is conservatively a potential writer even when its text looks
 read-only. Capture waits must not be removed by bypassing that fence or by
-disabling recovery snapshots. Compare gate wait and physical capture duration
+disabling recovery snapshots. The one deliberate exception is an already-running
+retained background command under a point-in-time (Modal native) capture: warm
+checkpoints run around it and record the archive one generation behind the
+workspace (see `docs/run-lifecycle.md`). Compare gate wait and physical capture duration
 before changing capture strategy; filesystem and directory-only persistence
 have different recovery semantics.
 
@@ -158,12 +335,14 @@ at zero on API start. `reason` is `invalid`, `too_large`, `origin` or
 `rate_limited`. A `rate_limited` refusal keeps the report's `kind`, so accepted
 plus rate-limited is the true per-kind arrival rate while a bucket is empty; the
 other reasons use `kind="unknown"` because the report was not read or not valid.
-The strict body is the kind, a route pattern and a bundle revision, under 512
-bytes; the limit is enforced on the streamed body, so a chunked request is
-refused after 512 bytes instead of being buffered, and the generic request-body
-ceiling does not apply to this exact route. The wire grammar is shared by the
-browser, the route and the log projection through
-`@opengeni/contracts/client-error-report`.
+The strict body is the kind, a route pattern, a bundle revision and optional
+error diagnostics (`error.name`, `error.message`, `error.stack`,
+`error.componentStack`), under 20 KiB; the limit is enforced on the streamed
+body, so a chunked request is refused at 20 KiB instead of being buffered, and
+the generic request-body ceiling does not apply to this exact route. The wire
+grammar, the scrubbing and the per-field bounds (name 128 bytes, message 1 KiB,
+stack and component stack 4 KiB) are shared by the browser, the route and the
+log projection through `@opengeni/contracts/client-error-report`.
 
 A request whose `Origin` header is present but is not one of the deployment's
 own web origins (the CORS allowlist, `OPENGENI_PUBLIC_BASE_URL` or
@@ -173,7 +352,24 @@ in each API process (burst 30, then one every two seconds), so a hostile or
 looping client cannot inflate the counter or the log without bound. Each
 accepted report writes one `Web client error reported` warning whose public
 fields are `surface`, `reason` (the kind), and the grammar-validated opaque
-`clientRoute` and `clientRevision`. No message, stack or URL is accepted.
+`clientRoute` and `clientRevision`, plus the error diagnostics as
+`clientErrorName`, `clientErrorMessage`, `clientErrorStack` and
+`clientComponentStack`.
+
+The diagnostics are the one deliberate free-text exception to the public log
+projection, so that a crash report says why a page failed and not only where.
+They are error text, which can occasionally quote user content. The route
+re-applies the shared projection to every report: URL query strings and
+fragments are removed (except on React's error-decoder links, whose query holds
+only the error's arguments), authorization values, JWTs, well-known API token
+formats, `token=`/`password:`-style assignment values and long opaque
+letter-and-digit strings become `[redacted]`, control characters are removed,
+and each field is cut to its bound. The log projection then admits these four
+names only when the value is already exactly what that projection produces, so
+raw text passed under them by any other caller is omitted. Structured stdout
+logs carry each field in full; OTLP log export cuts every string attribute to
+512 bytes, as for all attributes. The route is anonymous, so treat the text as
+untrusted input when reading it.
 
 The route is anonymous and a non-browser client can omit or forge `Origin`, so
 the counter can be spoofed up to the admission ceiling (about 43,000 reports per
@@ -182,6 +378,68 @@ kind per API process per day). Alert on rates and on ratios such as
 rising `rate_limited` series as either a real incident or abuse. See
 `apps/web/docs/browser-analytics.md` for the browser side, the `chunk_load`
 semantics and the coverage limits.
+
+## Unclassified API errors
+
+An API request that fails with an internal error no route mapped to a response
+(status 500, `errorCode` `internal_error`, not an `ApiHttpError` or
+`HTTPException`) adds `causeMessage` to its `HTTP request failed` line: the
+message of the first error under any response wrapper, or for a query-builder
+error the database error under it (never the query or its parameters). This is
+the second deliberate free-text exception, so that an unexpected 500 says why
+and not only `causeName: Error`. The message gets the same scrubbing and 1 KiB
+bound as a web client error message, and the log projection admits
+`causeMessage` only on `internal_error` HTTP lines whose value is already
+exactly that projection. It is server-log only: the response, metrics and
+failure diagnostics are unchanged.
+
+### Web client failure and health signals
+
+The same route admits closed operational signals, discriminated by a `signal`
+field. A body without `signal` is an error report as above; an older API refuses
+a signal body as `invalid`, so the extension is backward compatible.
+
+| `signal`                 | Series                                                               | Labels (closed values)                                                                                                                                                                                                               |
+| ------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `request_failure`        | `opengeni_client_request_failures_total` (counter)                   | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
+| `stream`                 | `opengeni_client_stream_events_total` (counter)                      | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect`                                                                                                                                     |
+| `web_vital`              | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...)                                                                                           |
+| `desktop_bridge_missing` | `opengeni_client_desktop_bridge_missing_total` (counter)             | `platform`: `macos`, `windows`, `linux`                                                                                                                                                                                              |
+
+The counters are published at zero for every label value on API start, and a
+rate-limited signal is counted in
+`opengeni_client_error_reports_rejected_total{reason="rate_limited",kind=<signal>}`.
+Request-failure and stream signals use the same token-bucket bounds as the
+error kinds (burst 30, then one every two seconds per process) in separate
+buckets, one per request action and per stream event, so a burst of one signal
+never spends the error budget. Web vitals arrive from every sampled page load,
+so each vital metric has a larger dedicated bucket (burst 1,200, then 20 a
+second per process). The browser sends vitals for 25% of page loads by default
+(`VITE_OPENGENI_WEB_VITALS_SAMPLE_RATE`), so multiply
+`opengeni_client_web_vital_count` by `1 / rate` to estimate page loads; quantiles
+need no scaling. A request failure and a degraded stream (`reconnect_exhausted`
+or `long_disconnect`) write one warning (`Web client request failed before a
+response` / `Web client live stream degraded`) with `surface`, `op` (the action
+or stream), `reason`, `clientRoute` and `clientRevision`; reconnects and vitals
+do not log. Histogram buckets cover the published thresholds: CLS 0.1/0.25, INP
+0.2/0.5 s, TTFB 0.8/1.8 s, LCP 2.5/4 s.
+
+`desktop_bridge_missing` is sent at most once per page load when the page runs
+in the Opengeni desktop app's own window (its user agent says
+`Opengeni/<version> … Electron/…`, with no opener and no frame) but the shell's
+preload bridge (`window.opengeniDesktop`) is missing. The page then takes its
+desktop layout from the user agent, but desktop features that need the bridge
+are off. It uses the failure-signal bucket for its platform and writes one
+`Desktop app page without the shell bridge` warning with `surface: "desktop"`,
+`op` (the platform), `reason: "bridge_missing"`, `clientAppVersion` (the app
+version from the user agent, or `unknown`; never a metric label),
+`clientRoute` and `clientRevision`. Any non-zero rate is worth a look: read the
+log's versions and routes to see which builds and views lose the bridge.
+
+Automated browsers (`navigator.webdriver`) do not send signals. Useful ratios: `opengeni_client_request_failures_total` against the matching
+HTTP request rate for that route, `long_disconnect` per active session view, and
+p75 of each vital per page from the histogram. Every series is a lower bound for
+the same reasons as the error counter.
 
 ## Analytics consent
 
@@ -254,3 +512,50 @@ occurs before bounded flush and required exit(1). Session-event persistence
 capture occurs before failure-settlement DB recovery work, so a second DB error
 cannot prevent its enqueue. Startup failures before an observer is attached
 still have only the existing safe fallback diagnostic.
+
+
+### Platform versus customer-provider failures
+
+`opengeni_turns_total`, `opengeni_model_calls_total`, and the canonical startup
+milestone histogram carry bounded `failure_origin` values: `none`, `platform`,
+and `customer_provider`. Platform includes unclassified failures: missing
+labels from older workers also remain in platform alerts during rolling updates.
+
+Turn attribution uses the accepted execution policy's upstream payer identity
+and the typed failure committed by the winning settlement. It never infers
+ownership from a model name or from the failure's display text. Only known
+provider quota, rate, billing, plan and capacity refusals (including a failed
+compaction request's closed `quotaScope`) and the closed
+`providerAccountRefusal` marker are excluded. That marker is set from the
+provider's own response when the customer's provider account refused to serve:
+`byok_capacity_restricted` for an OpenRouter account restricted to its own
+provider keys with no key eligible for the request (a 404 whose body carries
+OpenRouter's restriction wording, since OpenRouter sends no structured code),
+`customer_verification_required` for a Vercel AI Gateway 403 with that
+structured type, and `key_limit_exceeded` for an OpenRouter 403 refusing the
+customer's own key at the credit or budget limit the customer set on it. Vercel AI Gateway credit and budget refusals (402) are already
+exhausted quota. Other 404s, including other "No endpoints found" refusals, stay
+platform failures. Generic provider-unavailable
+turn failures remain unclassified because they can also represent our transport
+or stream handling. Invalid tool
+names, malformed requests, internal lease errors, persistence failures and
+unknown errors remain platform failures even on a customer's connection.
+Transport-call attribution uses reserved connected-provider identities (including
+the workspace's direct and organization compatible connections) and
+provider HTTP responses (401/402/403/429/5xx, and a 404 whose bounded body clone
+carries the same account refusal); statusless failures remain unclassified. A
+404 call is counted once its body clone is classified, off the request path; a
+body that does not arrive within five seconds is counted as an unclassified 404. It
+does not change retries, copy, billing, history or session outcomes.
+
+The canonical turn-failure, model-call-failure and first-byte-availability alerts
+exclude `failure_origin="customer_provider"` from both sides of their ratios
+and their traffic gates. Runtime Failures keeps all outcomes and a separate
+customer-provider failure series. Customer connection problems still belong in
+the session and connection UI; they are not proof of a platform outage.
+
+Custom dashboards and locally installed alert rules must adopt the same filter
+only after deploying the instrumentation. Never subtract model-call counts from
+turn failures: several calls can belong to one turn. Synthetic subscription
+capacity checks should be reported separately from a platform-funded end-to-end
+probe; a quota-exhausted subscription does not establish platform unavailability.

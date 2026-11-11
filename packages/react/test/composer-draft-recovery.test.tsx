@@ -9,7 +9,7 @@ import { useComposer } from "../src/hooks/use-composer";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderHook } from "./render-hook";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 for (const initialLoad of [true, false]) {
   test(`draft timeout recovers automatically during ${initialLoad ? "initial hydration" : "same-revision refresh"}`, async () => {

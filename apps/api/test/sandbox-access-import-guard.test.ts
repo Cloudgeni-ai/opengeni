@@ -25,10 +25,20 @@ const FORBIDDEN_SPECIFIERS = new Set([
 ]);
 
 const ALLOWED_RUNTIME_SUBPATHS = new Set([
+  // EU-only calling-workspace host matching shared with the runtime's remote
+  // MCP transport. This leaf imports only @opengeni/config and contracts.
+  "@opengeni/runtime/calling-workspace",
   // Bounded first-party Gmail transport adapter. Its only Agents dependency is
   // an erased MCPServer type import; it does not import or execute the loop.
   "@opengeni/runtime/gmail-rest-mcp",
+  // Bounded first-party Google Calendar transport adapter, shaped like Gmail's:
+  // only an erased MCPServer type import from the Agents SDK.
+  "@opengeni/runtime/google-calendar-rest-mcp",
   "@opengeni/runtime/mcp-network",
+  // Stateless single model calls (the Chat Completions endpoint). Exposes one
+  // bounded model request, provider binding resolution and usage
+  // normalization; never Agent/run/Runner/RunState, tools or sandbox APIs.
+  "@opengeni/runtime/model-call",
   "@opengeni/runtime/sandbox",
   // Immutable curated Skill metadata/artifact reader. This leaf imports only
   // Node filesystem/crypto utilities and does not import the agent loop.

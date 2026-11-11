@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { BrainCircuitIcon } from "lucide-react";
 import { ActivityDisclosure, BodyNote } from "./shared";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type KnowledgeActivityActions = {
   onInspect?: ((entryId: string) => void) | undefined;
@@ -23,22 +24,23 @@ export function KnowledgeReceiptRow(props: {
   title?: string | undefined;
   source?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const actions = useContext(KnowledgeActions);
   const [retrying, setRetrying] = useState(false);
   const [retrySent, setRetrySent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const label =
     props.outcome === "pending"
-      ? "Knowledge saved for review"
+      ? t("timeline.knowledgeReceipt.knowledgeSavedForReview")
       : props.outcome === "failed"
-        ? "Source preparation failed"
+        ? t("timeline.knowledgeReceipt.sourcePreparationFailed")
         : props.outcome === "rejected"
-          ? "Source remains rejected"
+          ? t("timeline.knowledgeReceipt.sourceRemainsRejected")
           : props.outcome === "archived"
-            ? "Knowledge archived"
+            ? t("timeline.knowledgeReceipt.knowledgeArchived")
             : props.source
-              ? "Source saved to Knowledge"
-              : "Saved to Knowledge";
+              ? t("timeline.knowledgeReceipt.sourceSavedToKnowledge")
+              : t("timeline.knowledgeReceipt.savedToKnowledge");
   const actionClass =
     "rounded-og-sm px-1 py-0.5 text-og-sm text-og-fg-muted hover:text-og-fg focus-visible:outline-2 focus-visible:outline-og-accent disabled:opacity-50";
   return (
@@ -49,17 +51,13 @@ export function KnowledgeReceiptRow(props: {
       preview={props.title}
     >
       {props.outcome === "pending" ? (
-        <BodyNote>
-          Saved in Needs review. This task continues; future tasks can use it after approval.
-        </BodyNote>
+        <BodyNote>{t("timeline.knowledgeReceipt.savedInNeedsReviewThis")}</BodyNote>
       ) : null}
       {props.outcome === "failed" ? (
-        <BodyNote>
-          The original file remains attached. Searchable text has not been retained.
-        </BodyNote>
+        <BodyNote>{t("timeline.knowledgeReceipt.theOriginalFileRemainsAttached")}</BodyNote>
       ) : null}
       {props.outcome === "rejected" ? (
-        <BodyNote>Processing the file again leaves the review decision unchanged.</BodyNote>
+        <BodyNote>{t("timeline.knowledgeReceipt.processingTheFileAgainLeaves")}</BodyNote>
       ) : null}
       {props.entryId && actions.onInspect ? (
         <button
@@ -67,7 +65,9 @@ export function KnowledgeReceiptRow(props: {
           type="button"
           onClick={() => actions.onInspect?.(props.entryId!)}
         >
-          {props.outcome === "pending" ? "Review in Knowledge" : "View in Knowledge"}
+          {props.outcome === "pending"
+            ? t("timeline.knowledgeReceipt.reviewInKnowledge")
+            : t("timeline.knowledgeReceipt.viewInKnowledge")}
         </button>
       ) : null}
       {props.outcome === "failed" && props.fileId && actions.onRetryFile ? (
@@ -81,13 +81,17 @@ export function KnowledgeReceiptRow(props: {
             void actions.onRetryFile!(props.fileId!)
               .then((sent) => {
                 if (sent !== false) setRetrySent(true);
-                else setError("Could not start the retry. Try again when the chat is ready.");
+                else setError(t("timeline.knowledgeReceipt.couldNotStartTheRetry"));
               })
-              .catch(() => setError("Could not start the retry. Please try again."))
+              .catch(() => setError(t("timeline.knowledgeReceipt.couldNotStartTheRetry2")))
               .finally(() => setRetrying(false));
           }}
         >
-          {retrying ? "Starting retry…" : retrySent ? "Retry requested" : "Retry preparation"}
+          {retrying
+            ? t("timeline.knowledgeReceipt.startingRetry")
+            : retrySent
+              ? t("timeline.knowledgeReceipt.retryRequested")
+              : t("timeline.knowledgeReceipt.retryPreparation")}
         </button>
       ) : null}
       {error ? (

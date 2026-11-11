@@ -10,10 +10,12 @@ import {
 import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
+import type { ComposerQueuedRecall } from "../hooks/use-queued-prompt-recall";
 import type { SlashCommandContext } from "../hooks/use-slash-commands";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import {
   Actions,
+  AlternateSendButton,
   AttachButton,
   Attachments,
   CommandPalette,
@@ -26,15 +28,18 @@ import {
   Input,
   ModelPicker,
   PauseButton,
+  PauseButtonSlot,
   PausedState,
   RestoredResources,
   Root,
   SendButton,
   Status,
+  StopButton,
   Surface,
   useChatComposerController,
   type ChatComposerMessages,
   type ComposerControlLinks,
+  type ComposerRunControl,
   type ResponsiveBasis,
 } from "./composer";
 import {
@@ -103,6 +108,28 @@ export type ChatComposerProps = {
   onClearView?: (() => void) | undefined;
   /** Partial overrides for all composer-owned visible and accessible copy. */
   messages?: Partial<ChatComposerMessages> | undefined;
+  /**
+   * Run control: `pause` (default) shows the workstream Pause control while
+   * the agent works (or `running`) and the paused strip; `stop` shows Stop
+   * only while `running`, and the next message continues a stopped
+   * conversation; `none` shows neither.
+   */
+  runControl?: ComposerRunControl | undefined;
+  /**
+   * A response is in progress (drives the Stop control). Under `pause` it
+   * keeps Pause available while the conversation itself is idle, for
+   * example while work it started is still running or a wake (an agent's
+   * timed wait or a scheduled run) is pending.
+   */
+  running?: boolean | undefined;
+  /** Up in an empty composer pulls the latest waiting prompt back (`useQueuedPromptRecall`). */
+  queuedRecall?: ComposerQueuedRecall | undefined;
+  /**
+   * Opt-in: each attached image gets a numbered tag, `[Image 1]`, in the text
+   * where the person was writing, so they can say which comment goes with
+   * which image. Off by default.
+   */
+  imageTags?: boolean | undefined;
 };
 
 /**
@@ -143,6 +170,10 @@ export function ChatComposer({
   focusRef,
   inputProps,
   surfaceClassName,
+  runControl,
+  running,
+  queuedRecall,
+  imageTags,
 }: ChatComposerProps) {
   const controller = useChatComposerController({
     delivery: composer,
@@ -159,6 +190,10 @@ export function ChatComposer({
     onClearView,
     onPaste,
     messages,
+    runControl,
+    running,
+    queuedRecall,
+    imageTags,
   });
   const hasControls = Boolean(
     attachments || models || controlsLeading || controlsStart || transcription,
@@ -242,6 +277,8 @@ export function ChatComposer({
                           {controlsStart}
                         </motion.span>
                       ) : null}
+                      {/* Pause's room while it is hidden, so the controls keep one width. */}
+                      <PauseButtonSlot />
                     </Controls>
                   ) : (
                     <Hint>{hint}</Hint>
@@ -253,6 +290,8 @@ export function ChatComposer({
                   >
                     {actionsStart}
                     <PauseButton />
+                    <StopButton />
+                    <AlternateSendButton />
                     <SendButton />
                   </Actions>
                 </LayoutGroup>

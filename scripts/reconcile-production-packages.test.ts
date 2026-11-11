@@ -85,3 +85,18 @@ test("publication uses immutable candidate versions, not latest tags", () => {
     ),
   ).toThrow();
 });
+test("a deploy without a release candidate is skipped, other release errors still fail", async () => {
+  const request = (async () =>
+    Response.json({ ok: true, service: "opengeni", deploymentRevision: sha })) as typeof fetch;
+  const calls: string[][] = [];
+  const missing = (...args: string[]) => {
+    calls.push(args);
+    throw new Error("release not found\n");
+  };
+  await expect(reconcile(missing, request)).resolves.toBeUndefined();
+  expect(calls.map((args) => args[0])).toEqual(["release"]);
+  const broken = () => {
+    throw new Error("HTTP 502: Bad Gateway");
+  };
+  await expect(reconcile(broken, request)).rejects.toThrow("HTTP 502");
+});

@@ -134,6 +134,12 @@ import {
   ProposeRigChangeRequest as ContractProposeRigChangeRequest,
   UpdateWorkspaceMemberRequest as ContractUpdateWorkspaceMemberRequest,
   WorkspaceMember as ContractWorkspaceMember,
+  SaveWorkspaceSkillRequest as ContractSaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest as ContractApplyWorkspaceSkillRevisionRequest,
+  RemoveWorkspaceSkillRequest as ContractRemoveWorkspaceSkillRequest,
+  OrganizationInferenceResidency as ContractOrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest as ContractUpdateOrganizationInferenceResidencyRequest,
+  InferenceFeatureAvailability as ContractInferenceFeatureAvailability,
 } from "@opengeni/contracts";
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
@@ -273,8 +279,16 @@ import type {
   ViewerHeartbeatResponse,
   ViewerHolder,
   WorkspaceMember,
+  OrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest,
+  InferenceFeatureAvailability,
 } from "../src/types";
 import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/transcription";
+import type {
+  ApplyWorkspaceSkillRevisionRequest,
+  RemoveWorkspaceSkillRequest,
+  SaveWorkspaceSkillRequest,
+} from "../src/skills";
 
 // The SDK ships hand-written general wire types so ordinary entries do not
 // import the contracts runtime. This suite pins them to `@opengeni/contracts`:
@@ -530,13 +544,14 @@ describe("SDK / contracts parity", () => {
       "vercel",
       "selfhosted",
       "opensandbox",
+      "compute",
     ];
     const contracts = [...ContractSandboxBackend.options].sort();
     const deployment = [...DeploymentSandboxBackend.options].sort();
     const sdk = [...sdkBackends].sort();
     expect(contracts).toEqual(deployment);
     expect(contracts).toEqual(sdk);
-    expect(contracts).toHaveLength(12);
+    expect(contracts).toHaveLength(13);
   });
 
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
@@ -704,7 +719,7 @@ describe("SDK / contracts parity", () => {
     ).toBe(false);
   });
 
-  test("established-session submit requires one exact policy snapshot", () => {
+  test("established-session submit carries one whole policy snapshot or none", () => {
     const submit: SubmitComposerDraftRequest = {
       expectedDraftRevision: 4,
       clientEventId: "submit-draft-4",
@@ -720,6 +735,9 @@ describe("SDK / contracts parity", () => {
     expect(ContractSubmitComposerDraftRequest.safeParse(submit).success).toBe(true);
     const { latencyMode: _latencyMode, ...missingLatency } = submit;
     expect(ContractSubmitComposerDraftRequest.safeParse(missingLatency).success).toBe(false);
+    // A draft that follows the chat's settings is submitted without any.
+    const { model: _model, reasoningEffort: _effort, ...following } = missingLatency;
+    expect(ContractSubmitComposerDraftRequest.safeParse(following).success).toBe(true);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {
@@ -749,6 +767,40 @@ describe("SDK / contracts parity", () => {
     expect(ContractScheduledTaskAgentConfigInput.parse(machineConfig).machineTarget).toEqual(
       machineConfig.machineTarget,
     );
+    // Every field the contract accepts or returns is typed in the SDK.
+    const inputFieldsCovered: Exclude<
+      keyof z.input<typeof ContractScheduledTaskAgentConfigInput>,
+      keyof ScheduledTaskAgentConfigInput
+    > extends never
+      ? true
+      : false = true;
+    const taskFieldsCovered: Exclude<
+      keyof z.infer<typeof ContractScheduledTask>,
+      keyof ScheduledTask
+    > extends never
+      ? true
+      : false = true;
+    const chatConfig: ScheduledTaskAgentConfigInput = {
+      prompt: "Review the open findings",
+      mcpServers: [{ id: "product", name: "Product", url: "https://mcp.example.com/mcp" }],
+      memoryScope: "off",
+      agentAccess: "session",
+      skills: [
+        {
+          activationMode: "session_selected",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: review\ndescription: Review findings.\n---\nReview them.",
+            },
+          ],
+        },
+      ],
+    };
+    const parsedChatConfig = ContractScheduledTaskAgentConfigInput.parse(chatConfig);
+    expect(parsedChatConfig.mcpServers).toEqual(chatConfig.mcpServers);
+    expect(parsedChatConfig.skills).toEqual(chatConfig.skills);
+    expect(inputFieldsCovered && taskFieldsCovered).toBe(true);
     expect(
       [acceptScheduledTask, acceptScheduledTaskMachineTarget].every(
         (fn) => typeof fn === "function",
@@ -777,7 +829,6 @@ describe("SDK / contracts parity", () => {
       setupScript: "apt-get install -y ripgrep",
       checks: [{ name: "rg", command: "rg --version" }],
       credentialHooks: ["azure-cli-login"],
-      defaultVariableSetIds: [],
     };
     const update: UpdateRigRequest = {
       name: "dev-machine-2",
@@ -1363,8 +1414,21 @@ describe("SDK / contracts parity", () => {
       source: null,
       refreshStatus: "scope_required",
       refreshCheckedAt: null,
+      requestStatus: {
+        status: "rejected",
+        resetsAt: "2030-01-01T01:00:00Z",
+        representativeClaim: "five_hour",
+        overageStatus: null,
+        overageResetsAt: null,
+        upstreamModelId: "claude-opus-5-5",
+        observedAt: "2030-01-01T00:00:00Z",
+        source: "response_headers",
+      },
+      requestRestrictions: [],
     };
-    expect(acceptClaudeUsage(acceptContractUsage(usage))).toEqual(usage);
+    expect(
+      acceptClaudeUsage(ContractClaudeSubscriptionUsage.parse(acceptContractUsage(usage))),
+    ).toEqual(usage);
     const acceptModel = (
       value: z.infer<typeof ContractWorkspaceGatewayCustomModel>,
     ): WorkspaceGatewayCustomModel => value;
@@ -1432,4 +1496,60 @@ test("workspace timer wire types match contracts", async () => {
       WorkspacePauseTimerRequest.safeParse({ ...request, pauseInSeconds: seconds }).success,
     ).toBe(false);
   }
+});
+
+test("Skill write requests the SDK sends are the ones the API validates", () => {
+  // Client -> server: every SDK request satisfies the contract's input.
+  const toContract = {
+    save: (value: SaveWorkspaceSkillRequest): z.input<typeof ContractSaveWorkspaceSkillRequest> =>
+      value,
+    apply: (
+      value: ApplyWorkspaceSkillRevisionRequest,
+    ): z.input<typeof ContractApplyWorkspaceSkillRevisionRequest> => value,
+    remove: (
+      value: RemoveWorkspaceSkillRequest,
+    ): z.input<typeof ContractRemoveWorkspaceSkillRequest> => value,
+  };
+  expect(Object.keys(toContract)).toEqual(["save", "apply", "remove"]);
+  const save: SaveWorkspaceSkillRequest = {
+    operationId: "00000000-0000-4000-8000-000000000001",
+    skillId: "00000000-0000-4000-8000-000000000002",
+    expectedRevisionId: null,
+    expectedScopeVersion: 0,
+    stableKey: "release-operator",
+    files: [{ path: "SKILL.md", content: "---\nname: release-operator\n---\n" }],
+    reason: "Create",
+  };
+  expect(ContractSaveWorkspaceSkillRequest.parse(save).scope).toBe("workspace");
+});
+
+test("EU-only inference shapes match the contracts both ways", () => {
+  const fromContract = {
+    setting: (
+      value: z.infer<typeof ContractOrganizationInferenceResidency>,
+    ): OrganizationInferenceResidency => value,
+    feature: (
+      value: z.infer<typeof ContractInferenceFeatureAvailability>,
+    ): InferenceFeatureAvailability => value,
+  };
+  const toContract = {
+    setting: (
+      value: OrganizationInferenceResidency,
+    ): z.infer<typeof ContractOrganizationInferenceResidency> => value,
+    update: (
+      value: UpdateOrganizationInferenceResidencyRequest,
+    ): z.input<typeof ContractUpdateOrganizationInferenceResidencyRequest> => value,
+    feature: (
+      value: InferenceFeatureAvailability,
+    ): z.infer<typeof ContractInferenceFeatureAvailability> => value,
+  };
+  expect(Object.keys(fromContract)).toEqual(["setting", "feature"]);
+  expect(Object.keys(toContract)).toEqual(["setting", "update", "feature"]);
+  expect(
+    ContractInferenceFeatureAvailability.parse({
+      id: "web_search",
+      available: false,
+      unavailableReason: "region_restricted",
+    } satisfies InferenceFeatureAvailability).unavailableReason,
+  ).toBe("region_restricted");
 });

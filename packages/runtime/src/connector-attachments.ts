@@ -12,7 +12,11 @@ import {
   type ConnectorAttachmentTransfer,
 } from "@opengeni/contracts";
 import { assertMcpPayloadWithinBytes } from "./mcp-network";
-import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import {
+  isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
+} from "./sandbox/routing/routing-session";
+import { isRecord } from "@opengeni/contracts/values";
 
 export const CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES = 128 * 1024;
 export const CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES = 64 * 1024;
@@ -32,6 +36,40 @@ export type ConnectorAttachmentMaterializationRequest = Readonly<{
 export type ConnectorAttachmentMaterializer = (
   request: ConnectorAttachmentMaterializationRequest,
 ) => Promise<ConnectorAttachmentReceiptEnvelopeValue>;
+
+/**
+ * Exact bytes one reviewed connector tool downloaded from its provider. The
+ * host stages them privately and materializes them as a connector attachment;
+ * neither bytes nor transfer URLs ever enter a model-visible result.
+ */
+export type ConnectorFileMaterializationRequest = Readonly<{
+  serverId: string;
+  toolName: string;
+  connectionId: string;
+  operationId: string;
+  providerAttachmentId: { provider: string; kind: "attachment"; value: string };
+  fileName: string;
+  mediaType: string;
+  bytes: Uint8Array;
+  authorizeProviderRequest: () => Promise<boolean>;
+}>;
+
+/** A portable leaf filename accepted by the connector attachment contract. */
+export function connectorAttachmentFileName(value: string, fallback = "attachment.bin"): string {
+  let name = value
+    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/gu, "_")
+    .replace(/[ .]+$/u, "")
+    .trim();
+  if (
+    !name ||
+    name === "." ||
+    name === ".." ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name)
+  )
+    name = fallback;
+  while (Buffer.byteLength(name) > 240) name = [...name].slice(0, -1).join("");
+  return name;
+}
 
 export type ConnectorAttachmentTransferProjectionOptions = Readonly<{
   serverId: string;
@@ -83,10 +121,6 @@ export function connectorAttachmentSandboxPath(
     digest,
     attachment.fileName,
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function containsPrivateSourceUrl(value: unknown, sourceUrls: readonly string[]): boolean {
@@ -212,7 +246,8 @@ export async function projectConnectorAttachmentTransfers(
     );
     return projected;
   } catch (error) {
-    if (isRoutingMutationOutcomeUnknownError(error)) throw error;
+    if (isRoutingMutationOutcomeUnknownError(error) || isRoutingMutationOutputRejectedError(error))
+      throw error;
     throw new ConnectorAttachmentTransferError();
   }
 }

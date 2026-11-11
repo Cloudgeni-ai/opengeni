@@ -1,35 +1,64 @@
-import type { Session } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type {
+  ChatSession as Session,
+  Session as FullSession,
+  OpenGeniClient,
+  SessionListEntry,
+  SessionListTotals,
+  SiteConversationGroup,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useRef } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
-export type UseWorkspaceSessionsOptions = ClientOverride & {
-  limit?: number | undefined;
-  parentSessionId?: string | null | undefined;
-  cursor?: string | undefined;
-  search?: string | undefined;
-  /** Return only the complete personal pinned projection. */
-  pinsOnly?: boolean | undefined;
-  archivedOnly?: boolean | undefined;
-  sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
-  archiveStatus?: "active" | "archived" | "all" | undefined;
-  /** Refresh interval (ms) for fleet/manager views. Off by default. */
-  pollIntervalMs?: number | undefined;
-  enabled?: boolean | undefined;
-  /** Optional shared causal clock invoked when each network read starts. */
-  beginRead?: (() => number) | undefined;
-};
+export type UseWorkspaceSessionsOptions<Client extends ChatClient = OpenGeniClient> =
+  ClientOverride<Client> & {
+    includeTotals?: boolean | undefined;
+    needsYouOnly?: boolean | undefined;
+    /** Only read-only sessions moved to the idle-session archive. */
+    contentArchivedOnly?: boolean | undefined;
+    /** Only workstreams the signed-in person started or messaged. */
+    mineOnly?: boolean | undefined;
+    /** Compact list records; detail reads remain full sessions. */
+    projection?: "summary" | undefined;
+    limit?: number | undefined;
+    parentSessionId?: string | null | undefined;
+    cursor?: string | undefined;
+    search?: string | undefined;
+    /** Return only the complete personal pinned projection. */
+    pinsOnly?: boolean | undefined;
+    /** Skip pinned details when the pinned section is loaded separately. */
+    includePinned?: boolean | undefined;
+    archivedOnly?: boolean | undefined;
+    sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
+    archiveStatus?: "active" | "archived" | "all" | undefined;
+    /**
+     * Conversations that run inside a Site: `include` lists them as rows,
+     * `group` (root pages) returns them as `siteGroups` instead.
+     */
+    siteConversations?: "include" | "group" | undefined;
+    /** Refresh interval (ms) for fleet/manager views. Off by default. */
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+    /** Optional shared causal clock invoked when each network read starts. */
+    beginRead?: (() => number) | undefined;
+  };
 
-export type UseWorkspaceSessionsResult = {
+export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = FullSession> = {
   /**
    * All visible rows, with pins first. This preserves the pre-pinning hook
    * contract for consumers that only read `sessions`.
    */
-  sessions: Session[];
+  sessions: T[];
   /** The complete personal pinned section, also present in `sessions`. */
-  pinned: Session[];
+  pinned: T[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated: boolean;
+  totals: SessionListTotals | null;
+  /** Complete Site rows for a `group` page; null when not requested or unsupported. */
+  siteGroups: SiteConversationGroup[] | null;
+  /** True when the server omitted Site rows beyond its bound. */
+  siteGroupsTruncated: boolean;
   nextCursor: string | null;
   loading: boolean;
   error: Error | null;
@@ -42,31 +71,62 @@ export type UseWorkspaceSessionsResult = {
 
 /** List the workspace's sessions — the data behind fleet and manager views. */
 export function useWorkspaceSessions(
-  options: UseWorkspaceSessionsOptions = {},
-): UseWorkspaceSessionsResult {
+  options: UseWorkspaceSessionsOptions<ChatClient> & { projection: "summary" },
+): UseWorkspaceSessionsResult<SessionListEntry>;
+export function useWorkspaceSessions(
+  options?: UseWorkspaceSessionsOptions & {
+    projection?: undefined;
+  },
+): UseWorkspaceSessionsResult;
+export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions<ChatClient> & { projection?: undefined },
+): UseWorkspaceSessionsResult<Session>;
+export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions,
+): UseWorkspaceSessionsResult<FullSession | SessionListEntry>;
+export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions<ChatClient>,
+): UseWorkspaceSessionsResult<Session | SessionListEntry>;
+export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions<ChatClient> = {},
+): UseWorkspaceSessionsResult<Session | SessionListEntry> {
   const { client, workspaceId } = useOpenGeni(options);
+  const projection = options.projection;
+  const includeTotals = options.includeTotals;
+  const needsYouOnly = options.needsYouOnly;
+  const contentArchivedOnly = options.contentArchivedOnly;
+  const mineOnly = options.mineOnly;
   const limit = options.limit;
   const parentSessionId = options.parentSessionId;
   const cursor = options.cursor;
   const search = options.search;
   const pinsOnly = options.pinsOnly;
+  const includePinned = options.includePinned;
   const archivedOnly = options.archivedOnly;
   const sortBy = options.sortBy;
   const archiveStatus = options.archiveStatus;
+  const siteConversations = options.siteConversations;
   const enabled = options.enabled ?? true;
   const nextReadRevision = useRef(0);
   const nextReadGeneration = useRef(0);
   const beginRead = options.beginRead;
   const queryKey = [
     workspaceId,
+    projection ?? "full",
+    includeTotals ? "totals" : "",
+    needsYouOnly ? "needs-you" : "",
+    contentArchivedOnly ? "read-only" : "",
+    mineOnly ? "mine" : "",
     limit ?? "",
     parentSessionId === null ? "null" : (parentSessionId ?? ""),
     cursor ?? "",
     search ?? "",
     pinsOnly ? "1" : "",
+    includePinned === false ? "no-pins" : "",
     archivedOnly ? "archived" : "active",
     sortBy ?? "",
     archiveStatus ?? "",
+    siteConversations ?? "",
   ].join("\u0000");
   const previousQueryKey = useRef(queryKey);
   const queryKeyTransition = previousQueryKey.current !== queryKey;
@@ -76,17 +136,36 @@ export function useWorkspaceSessions(
   const load = useCallback(
     async (signal?: AbortSignal) => {
       const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
-      const page = await client.listSessionPage(workspaceId, {
+      const query = {
+        ...(includeTotals ? { includeTotals: true } : {}),
+        ...(needsYouOnly ? { needsYouOnly: true } : {}),
+        ...(contentArchivedOnly ? { contentArchivedOnly: true } : {}),
+        ...(mineOnly ? { mineOnly: true } : {}),
         ...(limit !== undefined ? { limit } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(cursor !== undefined ? { cursor } : {}),
         ...(search !== undefined ? { search } : {}),
         ...(pinsOnly ? { pinsOnly: true } : {}),
+        ...(includePinned === false ? { includePinned: false } : {}),
         ...(archivedOnly ? { archivedOnly: true } : {}),
         ...(sortBy ? { sortBy } : {}),
         ...(archiveStatus ? { archiveStatus } : {}),
+        ...(siteConversations ? { siteConversations } : {}),
         signal,
-      });
+      };
+      const page =
+        projection === "summary"
+          ? client.listSessionSummaryPage
+            ? await client.listSessionSummaryPage(workspaceId, query)
+            : await client.listSessionPage(workspaceId, query).then(async (full) => {
+                const { sessionListEntry } = await import("@opengeni/sdk/session-list-entries");
+                return {
+                  ...full,
+                  pinned: full.pinned.map(sessionListEntry),
+                  sessions: full.sessions.map(sessionListEntry),
+                };
+              })
+          : await client.listSessionPage(workspaceId, query);
       return {
         queryKey,
         page,
@@ -98,14 +177,21 @@ export function useWorkspaceSessions(
       beginRead,
       client,
       workspaceId,
+      projection,
+      includeTotals,
+      needsYouOnly,
+      contentArchivedOnly,
+      mineOnly,
       limit,
       parentSessionId,
       cursor,
       search,
       pinsOnly,
+      includePinned,
       archivedOnly,
       sortBy,
       archiveStatus,
+      siteConversations,
       queryKey,
     ],
   );
@@ -126,6 +212,9 @@ export function useWorkspaceSessions(
     sessions: [...pinned, ...ordinary],
     pinned,
     pinnedTruncated: page?.pinnedTruncated ?? false,
+    totals: page?.totals ?? null,
+    siteGroups: page?.siteGroups ?? null,
+    siteGroupsTruncated: page?.siteGroupsTruncated === true,
     nextCursor: page?.nextCursor ?? null,
     // `usePolledValue` clears the old data and starts the new request in an
     // effect. During that query-key transition render, its old loading flag

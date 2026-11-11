@@ -1,18 +1,42 @@
+import {
+  ComputerNativeCommand,
+  ComputerNativeReceipt,
+  ComputerOperationReceipt,
+  parseInteractionDriverDiagnostic,
+  type InteractionDriverDiagnostic,
+} from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
+import { olderBrowserControllerMessage } from "./browser-controller-compatibility";
 import {
+  BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
+  BROWSER_ACTION_RECEIPT_NOTES_VERSION,
+  BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
+  BROWSER_OBSERVATION_NOTICES_PARAMETER,
+  BROWSER_SESSION_NO_OBSERVATION_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
+  COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
+  COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+  INTERACTION_ACTION_DEADLINE_MAX_MS,
+  browserActionDeadlineMs,
+  computerActionDeadlineMs,
   BrowserActionCommand,
   BrowserActionReceipt,
   BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadExportReceipt,
+  BrowserRecordingExportReceipt,
+  BrowserRecordingExportRequest,
+  BrowserRecordingStartRequest,
+  BrowserRecordingSummary,
+  BrowserRecordingUploadRequest,
+  BrowserRecordingUploadStatus,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
@@ -20,13 +44,14 @@ import {
   BrowserExternalAuthCommand,
   BrowserExternalAuthResult,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
-  BrowserProtectedAuthFillReceipt,
   BrowserRevisionMaterialization,
   BrowserTarget,
+  BrowserTargetListResponse,
   BrowserTargetState,
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
+  BrowserPasskeySyncRequest,
+  BrowserPasskeySyncResponse,
   ComputerActionCommand,
   ComputerActionReceipt,
   ComputerClipboard,
@@ -42,6 +67,11 @@ import {
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  type BrowserRecordingExportReceipt as BrowserRecordingExportReceiptValue,
+  type BrowserRecordingExportRequest as BrowserRecordingExportRequestValue,
+  type BrowserRecordingSummary as BrowserRecordingSummaryValue,
+  type BrowserRecordingUploadRequest as BrowserRecordingUploadRequestValue,
+  type BrowserRecordingUploadStatus as BrowserRecordingUploadStatusValue,
   type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
   type BrowserDomReadRequest as BrowserDomReadRequestValue,
@@ -49,14 +79,15 @@ import {
   type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
   type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
   type BrowserDiagnosticKind,
+  type BrowserTargetListResponse as BrowserTargetListResponseValue,
   type BrowserObservation as BrowserObservationValue,
-  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
-  type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type BrowserTarget as BrowserTargetValue,
   type BrowserTargetState as BrowserTargetStateValue,
   type BrowserWorkspaceFileStageRequest as BrowserWorkspaceFileStageRequestValue,
   type BrowserWorkspaceFileStageResponse as BrowserWorkspaceFileStageResponseValue,
+  type BrowserPasskeySyncRequest as BrowserPasskeySyncRequestValue,
+  type BrowserPasskeySyncResponse as BrowserPasskeySyncResponseValue,
   type ComputerActionCommand as ComputerActionCommandValue,
   type ComputerActionReceipt as ComputerActionReceiptValue,
   type ComputerClipboard as ComputerClipboardValue,
@@ -78,6 +109,8 @@ import {
   type EnsureBrowserControlServerResult,
 } from "./browser-control-server";
 import { parseExecResponseBanner } from "./exec-banner";
+import { controllerStreamRequest, parseControllerStreamResponse } from "./browser-control-stream";
+import type { BrowserControlHttpCall, BrowserControlHttpOutcome } from "./browser-control-http";
 import {
   buildStreamUrl,
   exposedPortAllowsHostFetch,
@@ -86,6 +119,7 @@ import {
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
 } from "./stream-port";
+import { isRecord } from "@opengeni/contracts/values";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
@@ -93,8 +127,12 @@ const NATIVE_PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
 export const BROWSER_CONTROL_ADMIN_TOKEN_FILE = "/tmp/opengeni-browserd/authority/admin-token";
 const COMMAND_OK = "OPENGENI_BROWSER_CONTROL_CLIENT_OK";
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
-const MAX_REQUEST_TIMEOUT_MS = 20 * 60_000;
+const MAX_REQUEST_TIMEOUT_MS = INTERACTION_ACTION_DEADLINE_MAX_MS;
 const BROWSER_STATE_TRANSFER_TIMEOUT_MS = 20 * 60_000;
+/** Stopping writes the recording's bundle (up to 200 MB) to local disk. */
+const BROWSER_RECORDING_STOP_TIMEOUT_MS = 2 * 60_000;
+/** Slack for the controller to answer after its bounded upload wait. */
+const BROWSER_RECORDING_UPLOAD_RESPONSE_MARGIN_MS = 15_000;
 const PRIVATE_READ_CHUNK_BYTES = 512 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
@@ -114,6 +152,18 @@ type ExecResultLike = {
 };
 
 export type BrowserControlPlacementSession = {
+  /** Connected Machine command stdin is byte-exact and private. Optional so
+   * older placement adapters retain their existing file-based transport. */
+  execWithInput?: (args: {
+    cmd: string;
+    stdin: Uint8Array;
+    shell: string;
+    login: boolean;
+    workdir: string;
+  }) => Promise<ExecResultLike>;
+  /** Host family of a Connected Machine. Windows hosts have no POSIX shell,
+   * /tmp or base64, so the controller transport uses its Windows form there. */
+  controllerHostOs?: () => "posix" | "windows";
   exec?: (args: {
     cmd: string;
     workdir?: string;
@@ -156,6 +206,8 @@ export type BrowserControlPlacementSession = {
   ensureBrowserControl?: (
     request: BrowserControlEnsureRequest,
   ) => Promise<BrowserControlEnsureResponse>;
+  /** Agent-native controller transport, addressed by authority scope. */
+  browserControlHttp?: (request: BrowserControlHttpCall) => Promise<BrowserControlHttpOutcome>;
   openBrowserFrames?: (
     request: BrowserFramesOpenRequest,
   ) => Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }>;
@@ -177,6 +229,8 @@ export type BrowserControlFrame = {
   mediaType: "image/jpeg" | "image/png";
   metadataHeader: string;
   metadata: BrowserFrameMetadata;
+  /** Set when a full-page capture could not keep every scrollbar's space. */
+  inexactScrollbars?: true;
 };
 
 export type BrowserControlScreenshotOptions = {
@@ -233,9 +287,10 @@ export type ExpectedComputerFrameEvidence = {
  * session directory may disappear; managed sandboxes must use /workspace
  * because provider exec confines workdir to the workspace root. */
 function placementControllerWorkdir(session: BrowserControlPlacementSession): string {
-  return session.ensureBrowserControl
-    ? NATIVE_PLACEMENT_CONTROLLER_WORKDIR
-    : MANAGED_PLACEMENT_CONTROLLER_WORKDIR;
+  if (!session.ensureBrowserControl) return MANAGED_PLACEMENT_CONTROLLER_WORKDIR;
+  // A Windows machine has no /tmp. The relative "." resolves to its reported
+  // workspace root, which exists for the connection's lifetime.
+  return session.controllerHostOs?.() === "windows" ? "." : NATIVE_PLACEMENT_CONTROLLER_WORKDIR;
 }
 
 export type PlacementBrowserSessionReference = {
@@ -244,7 +299,16 @@ export type PlacementBrowserSessionReference = {
 };
 
 export type PlacementBrowserSession = PlacementBrowserSessionReference & {
-  observation: BrowserObservationValue;
+  /** Null when a session continued in the person's own browser with none of
+   * its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservationValue | null;
+  /** The tab inventory at creation, when the controller reports it. */
+  targets?: BrowserTargetValue[];
+  /** A plain line about how the controller launched this browser. */
+  notice?: string;
+  /** How a headed managed browser shows on its machine as launched: in a
+   * native window, or offscreen with none. An older controller omits it. */
+  display?: "window" | "offscreen";
 };
 
 export type PlacementComputerSessionReference = {
@@ -262,6 +326,7 @@ export type PlacementComputerSession = PlacementComputerSessionReference & {
 };
 
 export type CreatePlacementComputerSessionInput = PlacementComputerSessionReference & {
+  cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
   tokenGeneration: number;
   controlToken: string;
   viewToken: string;
@@ -273,6 +338,8 @@ export type CreatePlacementBrowserSessionInput = PlacementBrowserSessionReferenc
   viewToken: string;
   headed: boolean;
   initialUrl?: string;
+  /** Private same-runtime recovery intent; never restores a saved revision. */
+  recoverExistingWorkingDirectory?: true;
   restore?: RestorePlacementBrowserStateInput;
   transport?: PlacementBrowserTransport;
   linkedComputer?: PlacementComputerSessionReference;
@@ -327,6 +394,8 @@ export type BrowserViewGrant = {
   grantId: string;
   expiresAt: string;
 };
+
+export type ComputerViewGrant = BrowserViewGrant & { scopedRfbInput: boolean };
 
 export type BrowserStateUploadGrant = {
   url: string;
@@ -386,6 +455,73 @@ export type PlacementBrowserStateCaptureReceipt = PlacementBrowserSessionReferen
   };
 };
 
+/** The exact controller authority a preserved working copy was launched
+ * under; the controller refuses any other. */
+export type PlacementBrowserWorkingCopyAuthority = PlacementBrowserSessionReference & {
+  tokenGeneration: number;
+  controlToken: string;
+  viewToken: string;
+};
+
+export const BROWSER_WORKING_COPY_REFUSALS = [
+  "unsupported_platform",
+  "browser_running",
+  "working_copy_invalid",
+  "receipt_not_adoptable",
+  "authority_changed",
+  "process_state_unknown",
+  "adoption_not_needed",
+  "adoption_unresolved",
+] as const;
+export type PlacementBrowserWorkingCopyRefusal = (typeof BROWSER_WORKING_COPY_REFUSALS)[number];
+
+export const BROWSER_WORKING_COPY_ADOPTION_PHASES = [
+  "intent",
+  "copied",
+  "receipt",
+  "source_preserved",
+  "adopted",
+  "interrupted",
+  "failed",
+  "collision",
+  "reverting",
+  "reverted",
+] as const;
+export type PlacementBrowserWorkingCopyAdoptionPhase =
+  (typeof BROWSER_WORKING_COPY_ADOPTION_PHASES)[number];
+
+export type PlacementBrowserWorkingCopyAdoption = PlacementBrowserSessionReference & {
+  operationId: string;
+  manifestDigest: string;
+  phase: PlacementBrowserWorkingCopyAdoptionPhase;
+  failureCode: string | null;
+  /** Directories this adoption kept beside the browser's own, by name. */
+  retainedDirectories: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PlacementBrowserWorkingCopyInspection = PlacementBrowserSessionReference & {
+  platformSupported: boolean;
+  refusal: PlacementBrowserWorkingCopyRefusal | null;
+  /** Exact digest of the bytes an adoption would take; null when refused. */
+  manifest: { digest: string; entries: number; bytes: number; excluded: string[] } | null;
+  profileIdentityMatches: boolean;
+  /** false only when no process provably uses the profile. */
+  profileInUse: boolean | null;
+  receipt: {
+    operationId: string;
+    intent: "launch" | "suspend" | "retire" | "adopt";
+    state: string;
+    directoryLaunchAllowed: boolean;
+    authorityMatches: boolean;
+    /** True when this working copy was first launched from a saved checkpoint. */
+    launchedFromCheckpoint: boolean;
+    adoption: { operationId: string; manifestDigest: string } | null;
+  } | null;
+  activeAdoption: PlacementBrowserWorkingCopyAdoption | null;
+};
+
 export type ProvisionBrowserControlClientInput = {
   adminToken: string;
   adminTokenFile?: string;
@@ -410,6 +546,65 @@ export class BrowserControlTransportError extends Error {
   readonly retryable = true;
 }
 
+/**
+ * An action request outlived the deadline derived from its own declared waits
+ * (browserActionDeadlineMs / computerActionDeadlineMs). The controller may
+ * still be running it, so it is neither a transport outage nor safe to replay:
+ * callers report it as is and never retry it.
+ */
+export class BrowserControlActionDeadlineError extends Error {
+  readonly name = "BrowserControlActionDeadlineError";
+  readonly retryable = false;
+
+  constructor(
+    readonly surface: "browser" | "computer",
+    readonly deadlineMs: number,
+    options?: ErrorOptions,
+  ) {
+    super(`${surface} action did not finish within its ${deadlineMs} ms deadline`, options);
+  }
+}
+
+/** Every transport bounds a request by its timeoutMs and then fails with a
+ * transport error (curl max-time, the fetch abort, the runner's own deadline
+ * or its reply timer). A transport failure that arrives once the deadline has
+ * elapsed is that deadline; an earlier one remains an ordinary transport fault. */
+const ACTION_DEADLINE_DETECTION_SLACK_MS = 1_000;
+/** Connected Machine runners released before the 20-minute request maximum
+ * clamp every request to 15 minutes, so on them a longer deadline ends there. */
+const LEGACY_RUNNER_REQUEST_MAX_MS = 15 * 60_000;
+
+/** The deadline a transport failure after `elapsedMs` proves was reached, if any. */
+function reachedActionDeadline(deadlineMs: number, elapsedMs: number): number | null {
+  if (elapsedMs >= deadlineMs - ACTION_DEADLINE_DETECTION_SLACK_MS) return deadlineMs;
+  if (
+    deadlineMs > LEGACY_RUNNER_REQUEST_MAX_MS &&
+    elapsedMs >= LEGACY_RUNNER_REQUEST_MAX_MS - ACTION_DEADLINE_DETECTION_SLACK_MS
+  )
+    return LEGACY_RUNNER_REQUEST_MAX_MS;
+  return null;
+}
+
+async function withActionDeadline<T>(
+  surface: "browser" | "computer",
+  deadlineMs: number,
+  request: (timeoutMs: number) => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await request(deadlineMs);
+  } catch (error) {
+    const reached =
+      error instanceof BrowserControlTransportError
+        ? reachedActionDeadline(deadlineMs, Date.now() - startedAt)
+        : null;
+    if (reached !== null) {
+      throw new BrowserControlActionDeadlineError(surface, reached, { cause: error });
+    }
+    throw error;
+  }
+}
+
 export class BrowserControlProtocolError extends Error {
   readonly name = "BrowserControlProtocolError";
   readonly retryable = false;
@@ -428,6 +623,9 @@ export class BrowserControlRequestError extends Error {
   constructor(
     readonly status: number,
     readonly error: InteractionErrorValue,
+    /** Operator-only context the controller sent beside a driver failure;
+     * logged, never shown to callers. */
+    readonly diagnostic: InteractionDriverDiagnostic | null = null,
   ) {
     super(error.message);
     this.retryable = error.retryable;
@@ -438,12 +636,30 @@ export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
 }
 
-function browserControllerCompatibilityError(feature: string): BrowserControlRequestError {
+function browserControllerCompatibilityError(
+  feature: string,
+  controllerInAgent: boolean,
+): BrowserControlRequestError {
   return new BrowserControlRequestError(409, {
     code: "unsupported",
-    message: `browser controller does not support ${feature}; update the placement's controller image to match this OpenGeni release`,
+    // A controller embedded in the Opengeni agent updates with that agent;
+    // only image-backed placements have a controller image.
+    message: controllerInAgent
+      ? `browser controller does not support ${feature}; it runs in an older Opengeni agent, and updating the agent adds support`
+      : `browser controller does not support ${feature}; update the placement's controller image to match this release`,
     retryable: false,
   });
+}
+
+/** The controller's route table rejected a request before dispatch: its release
+ *  predates this route. Distinct from a missing target or session. */
+function isLegacyRouteMiss(error: unknown): boolean {
+  return (
+    error instanceof BrowserControlRequestError &&
+    error.status === 404 &&
+    error.error.code === "resource_not_found" &&
+    error.error.message === "route not found"
+  );
 }
 
 /** Install one placement-stable admin credential and start the pinned controller. */
@@ -549,6 +765,13 @@ export class BrowserControlClient {
     this.nativeAuthority = options.nativeAuthority;
   }
 
+  /** True when the controller ships inside the placement's Opengeni agent
+   *  (connected machines, attached devices, compute sandboxes) rather than a
+   *  controller image pinned to this release. */
+  controllerRunsInAgent(): boolean {
+    return typeof this.session.ensureBrowserControl === "function";
+  }
+
   async addAllowedOrigins(origins: readonly string[]): Promise<readonly string[]> {
     if (origins.length === 0 || origins.length > 64) {
       throw new RangeError("browser controller origin list size is invalid");
@@ -568,12 +791,22 @@ export class BrowserControlClient {
 
   async createSession(input: CreatePlacementBrowserSessionInput): Promise<PlacementBrowserSession> {
     const reference = parseReference(input);
+    if (
+      input.recoverExistingWorkingDirectory !== undefined &&
+      (input.recoverExistingWorkingDirectory !== true ||
+        input.restore ||
+        input.initialUrl !== undefined)
+    ) {
+      throw new BrowserControlProtocolError(
+        "working directory recovery cannot restore or navigate",
+      );
+    }
     const restore = input.restore ? browserStateRestoreRequest(input.restore) : null;
     let data: unknown;
     try {
       data = await this.requestJson({
         method: "POST",
-        path: "/v1/browser-sessions",
+        path: `/v1/browser-sessions?${BROWSER_SESSION_NO_OBSERVATION_PARAMETER}=1`,
         token: this.adminToken,
         body: {
           ...reference,
@@ -581,6 +814,9 @@ export class BrowserControlClient {
           controlToken: requireToken(input.controlToken, "browser control token"),
           viewToken: requireToken(input.viewToken, "browser view token"),
           headed: input.headed,
+          ...(input.recoverExistingWorkingDirectory
+            ? { recoverExistingWorkingDirectory: true }
+            : {}),
           ...(input.initialUrl === undefined ? {} : { initialUrl: boundedUrl(input.initialUrl) }),
           ...(input.transport ? { transport: placementBrowserTransport(input.transport) } : {}),
           ...(input.linkedComputer
@@ -609,7 +845,10 @@ export class BrowserControlClient {
     }
     return {
       ...returnedReference,
-      observation: BrowserObservation.parse(data.observation),
+      observation: data.observation === null ? null : BrowserObservation.parse(data.observation),
+      ...creationTargets(data.targets, returnedReference),
+      ...creationNotice(data.notice),
+      ...creationDisplay(data.display),
     };
   }
 
@@ -617,7 +856,7 @@ export class BrowserControlClient {
     input: CreatePlacementComputerSessionInput,
   ): Promise<PlacementComputerSession> {
     const reference = parseComputerReference(input);
-    const data = await this.requestJson({
+    const request = {
       method: "POST",
       path: "/v1/computer-sessions",
       token: this.adminToken,
@@ -626,8 +865,27 @@ export class BrowserControlClient {
         tokenGeneration: positiveSafeInteger(input.tokenGeneration, "token generation"),
         controlToken: requireToken(input.controlToken, "computer control token"),
         viewToken: requireToken(input.viewToken, "computer view token"),
+        ...(input.cursorIdentity ? { cursorIdentity: input.cursorIdentity } : {}),
       },
-    });
+    } as const;
+    let data: unknown;
+    try {
+      data = await this.requestJson(request);
+    } catch (error) {
+      // Older agents reject the new field in their request parser, before
+      // creating a session. Only this exact, definite pre-dispatch rejection
+      // permits a metadata-free retry; never replay an uncertain create.
+      if (
+        !input.cursorIdentity ||
+        !(error instanceof BrowserControlRequestError) ||
+        error.status !== 400 ||
+        error.error.code !== "invalid_action" ||
+        error.error.message !== "request contains unknown fields"
+      )
+        throw error;
+      const { cursorIdentity: _identity, ...body } = request.body;
+      data = await this.requestJson({ ...request, body });
+    }
     if (!isRecord(data) || !Array.isArray(data.targets)) {
       throw new BrowserControlProtocolError(
         "interaction controller returned malformed computer session data",
@@ -661,7 +919,11 @@ export class BrowserControlClient {
 
   async endSession(
     reference: PlacementBrowserSessionReference,
-    options: { removeState: boolean },
+    options: {
+      removeState: boolean;
+      discardWorkingRuntime?: boolean;
+      setAsideInterruptedLaunch?: boolean;
+    },
   ): Promise<void> {
     const binding = parseReference(reference);
     const data = await this.requestJson({
@@ -671,11 +933,48 @@ export class BrowserControlClient {
       body: {
         controllerGeneration: binding.controllerGeneration,
         removeState: options.removeState,
+        // Older controllers reject unknown keys, so send it only when set.
+        ...(options.discardWorkingRuntime ? { discardWorkingRuntime: true } : {}),
+        ...(options.setAsideInterruptedLaunch ? { setAsideInterruptedLaunch: true } : {}),
       },
     });
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError("browser controller returned malformed end receipt");
     }
+  }
+
+  /**
+   * Tells the controller that the agent session using this browser is still
+   * working or deliberately waiting, so its idle release keeps the browser
+   * running at least until `until` (capped by the controller; a hold only
+   * extends). Advisory: it never launches, recovers or counts as a use of the
+   * browser. Returns whether the controller holds the browser; false when it
+   * no longer runs this exact generation or predates holds (an older agent or
+   * controller image, which keeps its plain idle release).
+   */
+  async holdForWait(reference: PlacementBrowserSessionReference, until: Date): Promise<boolean> {
+    const binding = parseReference(reference);
+    let data: unknown;
+    try {
+      data = await this.requestJson({
+        method: "POST",
+        path: `/v1/browser-sessions/${binding.browserSessionId}/wait-hold`,
+        token: this.adminToken,
+        body: {
+          controllerGeneration: binding.controllerGeneration,
+          until: until.toISOString(),
+        },
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return false;
+      throw error;
+    }
+    if (!isRecord(data) || typeof data.held !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "browser controller returned malformed wait hold receipt",
+      );
+    }
+    return data.held;
   }
 
   async endComputerSession(
@@ -740,8 +1039,13 @@ export class BrowserControlClient {
 
   async createComputerViewGrant(
     reference: PlacementComputerSessionReference,
-    input: { grantId: string; token: string; expiresAt: string },
-  ): Promise<BrowserViewGrant> {
+    input: {
+      grantId: string;
+      token: string;
+      expiresAt: string;
+      rfbScope?: { targetId: string; targetGeneration: string; inputAllowed: boolean };
+    },
+  ): Promise<ComputerViewGrant> {
     const binding = parseComputerReference(reference);
     const grantId = requireUuid(input.grantId, "computer view grant id");
     const expiresAt = timestamp(input.expiresAt, "computer view grant expiry");
@@ -754,6 +1058,13 @@ export class BrowserControlClient {
         controllerGeneration: binding.controllerGeneration,
         token: requireToken(input.token, "computer view grant token"),
         expiresAt,
+        ...(input.rfbScope
+          ? {
+              targetId: requireOpaqueId(input.rfbScope.targetId, "RFB target id"),
+              targetGeneration: requireGeneration(input.rfbScope.targetGeneration),
+              inputAllowed: input.rfbScope.inputAllowed,
+            }
+          : {}),
       },
     });
     if (!isRecord(data) || data.grantId !== grantId || data.expiresAt !== expiresAt) {
@@ -761,7 +1072,23 @@ export class BrowserControlClient {
         "interaction controller returned malformed computer view grant",
       );
     }
-    return { grantId, expiresAt };
+    if (data.scopedRfbInput !== undefined && typeof data.scopedRfbInput !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "interaction controller returned invalid RFB scope capability",
+      );
+    }
+    if (
+      input.rfbScope &&
+      (data.scopedRfbInput !== true ||
+        data.targetId !== input.rfbScope.targetId ||
+        data.targetGeneration !== input.rfbScope.targetGeneration ||
+        data.inputAllowed !== input.rfbScope.inputAllowed)
+    ) {
+      throw new BrowserControlProtocolError(
+        "interaction controller did not bind the requested RFB scope",
+      );
+    }
+    return { grantId, expiresAt, scopedRfbInput: data.scopedRfbInput === true };
   }
 
   /** Quiesce one exact controller, upload its encrypted working profile, and
@@ -803,6 +1130,103 @@ export class BrowserControlClient {
       );
     }
     return receipt;
+  }
+
+  /** Read-only evidence about a preserved working copy whose controller
+   * memory was lost: the exact digest of its bytes and whether it can be
+   * adopted. Hashing a large profile can take minutes. */
+  async inspectWorkingCopy(
+    input: PlacementBrowserWorkingCopyAuthority,
+  ): Promise<PlacementBrowserWorkingCopyInspection> {
+    const reference = parseReference(input);
+    const data = await this.requestJson({
+      method: "POST",
+      path: `/v1/browser-sessions/${reference.browserSessionId}/working-copy/inspection`,
+      token: this.adminToken,
+      body: workingCopyAuthorityBody(reference, input),
+      timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
+    });
+    return parseWorkingCopyInspection(data, reference);
+  }
+
+  /** Adopt the exact inspected bytes of a preserved working copy. A lost reply
+   * is checked with {@link workingCopyAdoption}. Sending the same operation id
+   * again never repeats a side effect: it only settles what that operation
+   * already did, under the authority that approved it. */
+  async adoptWorkingCopy(
+    input: PlacementBrowserWorkingCopyAuthority & { operationId: string; manifestDigest: string },
+  ): Promise<PlacementBrowserWorkingCopyAdoption> {
+    const reference = parseReference(input);
+    const operationId = requireUuid(input.operationId, "working copy adoption id");
+    const data = await this.requestJson({
+      method: "POST",
+      path: `/v1/browser-sessions/${reference.browserSessionId}/working-copy/adoptions`,
+      token: this.adminToken,
+      body: {
+        ...workingCopyAuthorityBody(reference, input),
+        operationId,
+        manifestDigest: sha256(input.manifestDigest, "working copy manifest digest"),
+      },
+      timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
+    });
+    const adoption = parseWorkingCopyAdoption(data, reference, "current");
+    if (adoption.operationId !== operationId) {
+      throw new BrowserControlProtocolError("browser controller returned another adoption");
+    }
+    return adoption;
+  }
+
+  /** The recorded state of one adoption, read without changing it. */
+  async workingCopyAdoption(
+    reference: PlacementBrowserSessionReference,
+    operationId: string,
+  ): Promise<{ inFlight: boolean; adoption: PlacementBrowserWorkingCopyAdoption | null }> {
+    const binding = parseReference(reference);
+    const id = requireUuid(operationId, "working copy adoption id");
+    const data = await this.requestJson({
+      method: "GET",
+      path: `/v1/browser-sessions/${binding.browserSessionId}/working-copy/adoptions/${id}`,
+      token: this.adminToken,
+    });
+    if (!isRecord(data) || typeof data.inFlight !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "browser controller returned malformed adoption status",
+      );
+    }
+    const adoption =
+      data.adoption === null ? null : parseWorkingCopyAdoption(data.adoption, binding, "recorded");
+    if (adoption && adoption.operationId !== id) {
+      throw new BrowserControlProtocolError("browser controller returned another adoption");
+    }
+    return { inFlight: data.inFlight, adoption };
+  }
+
+  /** Revert one unfinished adoption under the browser's current authority:
+   * its own directory goes back to the live path and the staged copy is
+   * kept. Retrying the same revert finishes one that stopped part way. */
+  async revertWorkingCopyAdoption(
+    input: PlacementBrowserWorkingCopyAuthority & { operationId: string },
+  ): Promise<{ inFlight: boolean; adoption: PlacementBrowserWorkingCopyAdoption | null }> {
+    const reference = parseReference(input);
+    const id = requireUuid(input.operationId, "working copy adoption id");
+    const data = await this.requestJson({
+      method: "POST",
+      path: `/v1/browser-sessions/${reference.browserSessionId}/working-copy/adoptions/${id}/revert`,
+      token: this.adminToken,
+      body: workingCopyAuthorityBody(reference, input),
+      timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
+    });
+    if (!isRecord(data) || typeof data.inFlight !== "boolean") {
+      throw new BrowserControlProtocolError("browser controller returned malformed revert status");
+    }
+    const adoption =
+      data.adoption === null
+        ? null
+        : parseWorkingCopyAdoption(data.adoption, reference, "recorded");
+    if (adoption && adoption.operationId !== id) {
+      throw new BrowserControlProtocolError("browser controller returned another adoption");
+    }
+    return { inFlight: data.inFlight, adoption };
   }
 
   sessionClient(input: {
@@ -1102,6 +1526,47 @@ export class BrowserControlClient {
       );
     }
 
+    const native = await this.requestNative(input, BROWSER_CONTROL_MAX_JSON_BYTES);
+    if (native) {
+      let text: string;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(native.body);
+      } catch (error) {
+        throw new BrowserControlProtocolError("browser controller response is not UTF-8", {
+          cause: error,
+        });
+      }
+      return parseEnvelope(text, native.status);
+    }
+
+    if (
+      this.session.execWithInput &&
+      (input.body === undefined || Buffer.byteLength(JSON.stringify(input.body)) <= 32 * 1024)
+    ) {
+      try {
+        const response = await this.requestStream(input, BROWSER_CONTROL_MAX_JSON_BYTES);
+        return parseEnvelope(
+          new TextDecoder("utf-8", { fatal: true }).decode(response.data),
+          response.status,
+        );
+      } catch (error) {
+        if (
+          retryNativeEndpoint &&
+          input.method === "GET" &&
+          this.nativeAuthority &&
+          this.session.ensureBrowserControl &&
+          error instanceof BrowserControlTransportError
+        ) {
+          nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
+          await this.controllerPort();
+          return await this.requestJson(input, false);
+        }
+        throw error;
+      } finally {
+        await this.session.finalizeOpStreamOps?.().catch(() => undefined);
+      }
+    }
+
     const controllerPort = await this.controllerPort();
     const directory = `${CLIENT_ROOT}/${randomUUID()}`;
     const configPath = `${directory}/curl.conf`;
@@ -1255,6 +1720,46 @@ export class BrowserControlClient {
       );
     }
 
+    const nativeFrame = await this.requestNative(
+      input,
+      input.surface === "browser" ? 24 * 1024 * 1024 : COMPUTER_SCREENSHOT_MAX_BYTES,
+    );
+    if (nativeFrame) {
+      if (nativeFrame.status < 200 || nativeFrame.status >= 300) {
+        parseEnvelope(new TextDecoder().decode(nativeFrame.body), nativeFrame.status);
+        throw new BrowserControlProtocolError("browser controller image response is invalid");
+      }
+      return controllerImageFrame(nativeFrame.body, nativeFrame.headers, input);
+    }
+
+    if (this.session.execWithInput) {
+      try {
+        const response = await this.requestStream(
+          input,
+          input.surface === "browser" ? 24 * 1024 * 1024 : COMPUTER_SCREENSHOT_MAX_BYTES,
+        );
+        if (response.status < 200 || response.status >= 300) {
+          parseEnvelope(new TextDecoder().decode(response.data), response.status);
+          throw new BrowserControlProtocolError("browser controller image response is invalid");
+        }
+        return controllerImageFrame(response.data, response.headers, input);
+      } catch (error) {
+        if (
+          retryNativeEndpoint &&
+          this.nativeAuthority &&
+          this.session.ensureBrowserControl &&
+          error instanceof BrowserControlTransportError
+        ) {
+          nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
+          await this.controllerPort();
+          return await this.requestBytes(input, false);
+        }
+        throw error;
+      } finally {
+        await this.session.finalizeOpStreamOps?.().catch(() => undefined);
+      }
+    }
+
     const controllerPort = await this.controllerPort();
     const directory = `${CLIENT_ROOT}/${randomUUID()}`;
     const configPath = `${directory}/curl.conf`;
@@ -1347,9 +1852,104 @@ export class BrowserControlClient {
     }
   }
 
+  private async requestStream(
+    input: { method: string; path: string; token: string; body?: unknown; timeoutMs?: number },
+    maxBytes: number,
+  ): Promise<ReturnType<typeof parseControllerStreamResponse>> {
+    const port = await this.controllerPort();
+    const request = controllerStreamRequest({
+      method: input.method,
+      url: localControllerUrl(port, input.path),
+      token: requireToken(input.token, "browser controller token"),
+      ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+      timeoutMs: boundedTimeout(input.timeoutMs ?? this.timeoutMs),
+      maxBytes,
+      host: this.session.controllerHostOs?.() ?? "posix",
+    });
+    try {
+      const result = await this.session.execWithInput!({
+        cmd: request.cmd,
+        stdin: request.stdin,
+        shell: request.shell,
+        login: false,
+        workdir: placementControllerWorkdir(this.session),
+      });
+      if (result.exitCode !== 0 || result.stdout === undefined) {
+        throw new BrowserControlTransportError("browser controller command failed");
+      }
+      return parseControllerStreamResponse(result.stdout, request.marker, maxBytes);
+    } catch (error) {
+      if (error instanceof RangeError || error instanceof BrowserControlTransportError) throw error;
+      throw new BrowserControlTransportError("browser controller request transport failed", {
+        cause: error,
+      });
+    }
+  }
+
   private async controllerPort(): Promise<number> {
     if (!this.nativeAuthority || !this.session.ensureBrowserControl) return this.port;
+    return await this.ensureControllerPort(false);
+  }
+
+  /** The agent-native transport: one in-process loopback request on the
+   * Connected Machine, addressed by authority scope, with no process started.
+   * Null when the placement does not serve it; the caller then keeps its
+   * command transport. A controller that is not running receives nothing, so
+   * it is ensured and the request sent once more whatever its method. */
+  private async requestNative(
+    input: { method: string; path: string; token: string; body?: unknown; timeoutMs?: number },
+    maxResponseBytes: number,
+    retry = true,
+  ): Promise<{ status: number; headers: Map<string, string>; body: Uint8Array } | null> {
+    const authority = this.nativeAuthority;
+    if (!authority || !this.session.browserControlHttp || !this.session.ensureBrowserControl) {
+      return null;
+    }
+    const method = input.method;
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "DELETE") {
+      throw new BrowserControlProtocolError("browser controller request method is invalid");
+    }
+    // Validates the path exactly as the command transport does.
+    localControllerUrl(this.port, input.path);
+    const body =
+      input.body === undefined ? undefined : new TextEncoder().encode(JSON.stringify(input.body));
+    if (body !== undefined && body.byteLength > BROWSER_CONTROL_MAX_JSON_BYTES) {
+      throw new RangeError("browser controller request body is too large");
+    }
+    let outcome: BrowserControlHttpOutcome;
+    try {
+      outcome = await this.session.browserControlHttp({
+        scopeId: authority.scopeId,
+        scopeGeneration: authority.scopeGeneration,
+        method,
+        path: input.path,
+        bearerToken: requireToken(input.token, "browser controller token"),
+        ...(body === undefined ? {} : { body }),
+        timeoutMs: boundedTimeout(input.timeoutMs ?? this.timeoutMs),
+        maxResponseBytes,
+      });
+    } catch (error) {
+      if (retry && method === "GET") {
+        await this.ensureControllerPort(true);
+        return await this.requestNative(input, maxResponseBytes, false);
+      }
+      throw new BrowserControlTransportError("browser controller request transport failed", {
+        cause: error,
+      });
+    }
+    if (outcome.kind === "unsupported") return null;
+    if (outcome.kind === "controller_absent") {
+      if (!retry) throw new BrowserControlTransportError("browser controller is not running");
+      await this.ensureControllerPort(true);
+      return await this.requestNative(input, maxResponseBytes, false);
+    }
+    return outcome;
+  }
+
+  private async ensureControllerPort(replace: boolean): Promise<number> {
+    if (!this.nativeAuthority || !this.session.ensureBrowserControl) return this.port;
     const key = nativeControllerKey(this.nativeAuthority);
+    if (replace) nativeControllerPorts.delete(key);
     const cached = nativeControllerPorts.get(key);
     if (cached !== undefined) return cached;
     const ensured = await this.session.ensureBrowserControl({
@@ -1459,6 +2059,100 @@ export class BrowserControlSessionClient {
     return receipt;
   }
 
+  async startRecording(targetId: string): Promise<BrowserRecordingSummaryValue> {
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("recordings"),
+        token: this.controlToken,
+        body: BrowserRecordingStartRequest.parse({ targetId }),
+      });
+    } catch (error) {
+      // A controller older than browser recording has no such route; say so
+      // instead of surfacing a bare "route not found".
+      if (isLegacyRouteMiss(error))
+        throw browserControllerCompatibilityError(
+          "browser recording",
+          this.parent.controllerRunsInAgent(),
+        );
+      throw error;
+    }
+    return BrowserRecordingSummary.parse(data);
+  }
+
+  async recording(recordingId: string): Promise<BrowserRecordingSummaryValue> {
+    const id = requireUuid(recordingId, "recording id");
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path(`recordings/${id}`),
+        token: this.viewToken,
+      }),
+    );
+  }
+
+  async stopRecording(recordingId: string): Promise<BrowserRecordingSummaryValue> {
+    const id = requireUuid(recordingId, "recording id");
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${id}/stop`),
+        token: this.controlToken,
+        body: {},
+        timeoutMs: BROWSER_RECORDING_STOP_TIMEOUT_MS,
+      }),
+    );
+  }
+
+  /** Waits for the whole bundle upload. Controllers that support it are asked
+   * through `uploadRecording` instead, which never outlives a slow link. */
+  async exportRecording(
+    requestInput: BrowserRecordingExportRequestValue,
+    options: { timeoutMs?: number } = {},
+  ): Promise<BrowserRecordingExportReceiptValue> {
+    const request = BrowserRecordingExportRequest.parse(requestInput);
+    const receipt = BrowserRecordingExportReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${request.recordingId}/exports`),
+        token: this.controlToken,
+        body: request,
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      }),
+    );
+    if (receipt.recordingId !== request.recordingId) {
+      throw new BrowserControlProtocolError("browser controller returned another recording");
+    }
+    return receipt;
+  }
+
+  /** Starts or joins the bundle upload and waits at most `waitMs` for it to
+   * land. Returns null from a controller that predates resumable uploads. */
+  async uploadRecording(
+    requestInput: BrowserRecordingUploadRequestValue,
+  ): Promise<BrowserRecordingUploadStatusValue | null> {
+    const request = BrowserRecordingUploadRequest.parse(requestInput);
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${request.recordingId}/uploads`),
+        token: this.controlToken,
+        body: request,
+        timeoutMs: request.waitMs + BROWSER_RECORDING_UPLOAD_RESPONSE_MARGIN_MS,
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return null;
+      throw error;
+    }
+    const status = BrowserRecordingUploadStatus.parse(data);
+    if (status.recordingId !== request.recordingId) {
+      throw new BrowserControlProtocolError("browser controller returned another recording");
+    }
+    return status;
+  }
+
   async openTarget(url?: string): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
@@ -1470,11 +2164,77 @@ export class BrowserControlSessionClient {
     );
   }
 
-  async selectTarget(targetId: string): Promise<BrowserObservationValue> {
+  async openTargetWithInventory(url?: string): Promise<BrowserTargetListResponseValue> {
+    let response: BrowserTargetListResponseValue;
+    try {
+      response = BrowserTargetListResponse.parse(
+        await this.parent.requestForSession({
+          method: "POST",
+          path: this.path("targets/open-with-inventory"),
+          token: this.controlToken,
+          body: url === undefined ? {} : { url: boundedUrl(url) },
+        }),
+      );
+    } catch (error) {
+      // A controller image older than this release has no such route. Its
+      // route table rejects the request before dispatch, so no tab was opened
+      // and the original open route is safe to use instead. Every other
+      // failure, including an uncertain open outcome, is never re-sent.
+      if (!isLegacyRouteMiss(error)) throw error;
+      const opened = await this.openTarget(url);
+      if (
+        opened.target.browserSessionId !== this.reference.browserSessionId ||
+        opened.target.controllerGeneration !== this.reference.controllerGeneration
+      ) {
+        throw new BrowserControlProtocolError(
+          "browser controller opened a tab for another session binding",
+        );
+      }
+      let targets: BrowserTargetValue[];
+      try {
+        targets = await this.listTargets();
+      } catch {
+        // The tab is open. A raw inventory error (for example a missing or
+        // re-tokened session) would let a caller's recovery replay the open.
+        throw new BrowserControlRequestError(409, {
+          code: "outcome_unknown",
+          message:
+            "browser tab was opened, but the tab list could not be read; list tabs before opening it again",
+          retryable: false,
+        });
+      }
+      response = {
+        browserSessionId: this.reference.browserSessionId,
+        controllerGeneration: this.reference.controllerGeneration,
+        targets,
+      };
+    }
+    if (
+      response.browserSessionId !== this.reference.browserSessionId ||
+      response.controllerGeneration !== this.reference.controllerGeneration ||
+      response.targets.some(
+        (target) =>
+          target.browserSessionId !== this.reference.browserSessionId ||
+          target.controllerGeneration !== this.reference.controllerGeneration,
+      )
+    ) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned inventory for another session binding",
+      );
+    }
+    return response;
+  }
+
+  /** notices: the caller is the agent and receives (and so uses up) any
+   * notice about the tab; see BROWSER_OBSERVATION_NOTICES_PARAMETER. */
+  async selectTarget(
+    targetId: string,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.targetPath(targetId, "select"),
+        path: withObservationNotices(this.targetPath(targetId, "select"), options),
         token: this.controlToken,
         body: {},
       }),
@@ -1493,11 +2253,14 @@ export class BrowserControlSessionClient {
     return data.map((target) => BrowserTarget.parse(target));
   }
 
-  async observe(targetId: string): Promise<BrowserObservationValue> {
+  async observe(
+    targetId: string,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "GET",
-        path: this.targetPath(targetId, "observation"),
+        path: withObservationNotices(this.targetPath(targetId, "observation"), options),
         token: this.viewToken,
       }),
     );
@@ -1561,13 +2324,11 @@ export class BrowserControlSessionClient {
     } catch (error) {
       // Protocol v1 predates focused DOM reads. Distinguish that exact legacy
       // route response from a missing target/session; neither is safe to retry.
-      if (
-        error instanceof BrowserControlRequestError &&
-        error.status === 404 &&
-        error.error.code === "resource_not_found" &&
-        error.error.message === "route not found"
-      ) {
-        throw browserControllerCompatibilityError("focused DOM reads");
+      if (isLegacyRouteMiss(error)) {
+        throw browserControllerCompatibilityError(
+          "focused DOM reads",
+          this.parent.controllerRunsInAgent(),
+        );
       }
       throw error;
     }
@@ -1625,7 +2386,10 @@ export class BrowserControlSessionClient {
     );
   }
 
-  async action(command: BrowserActionCommandValue): Promise<BrowserActionReceiptValue> {
+  async action(
+    command: BrowserActionCommandValue,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserActionReceiptValue> {
     const parsed = BrowserActionCommand.parse(command);
     if (
       parsed.browserSessionId !== this.reference.browserSessionId ||
@@ -1635,23 +2399,43 @@ export class BrowserControlSessionClient {
     }
     let data: unknown;
     try {
-      data = await this.parent.requestForSession({
-        method: "POST",
-        path: this.path("actions"),
-        token: this.controlToken,
-        body: parsed,
-      });
+      data = await withActionDeadline(
+        "browser",
+        browserActionDeadlineMs(parsed.action),
+        async (timeoutMs) =>
+          await this.parent.requestForSession({
+            method: "POST",
+            // Controllers that predate resolved targets, notes or notices
+            // ignore these parameters.
+            path: withObservationNotices(
+              `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}`,
+              options,
+            ),
+            token: this.controlToken,
+            body: parsed,
+            timeoutMs,
+          }),
+      );
     } catch (error) {
       // This command already passed the release's schema. The controller's
       // exact parser rejection proves a schema mismatch, not invalid tool use.
       // Do not replay the action, restart the controller, or lose live tabs.
+      // The controller parses before it runs anything, so nothing ran; name the
+      // newer option it did not know.
       if (
         error instanceof BrowserControlRequestError &&
         error.status === 400 &&
         error.error.code === "invalid_action" &&
         error.error.message === "browser action is invalid"
       ) {
-        throw browserControllerCompatibilityError("this browser action");
+        throw new BrowserControlRequestError(409, {
+          code: "unsupported",
+          message: olderBrowserControllerMessage(
+            parsed.action,
+            this.parent.controllerRunsInAgent(),
+          ),
+          retryable: false,
+        });
       }
       throw error;
     }
@@ -1685,36 +2469,29 @@ export class BrowserControlSessionClient {
     );
   }
 
-  /** Broker-only credential path. Callers must never pass this command through
-   * model-visible tool arguments, events, logs, or durable session history. */
-  async protectedAuthFill(
-    command: BrowserProtectedAuthFillCommandValue,
-  ): Promise<BrowserProtectedAuthFillReceiptValue> {
-    const parsed = BrowserProtectedAuthFillCommand.parse(command);
+  /** Controller-private passkey exchange (design §10B.4): load the
+   * principal's passkeys into every authenticator and pull registration and
+   * assertion events. Controllers that predate it answer 404. */
+  async passkeySync(
+    request: BrowserPasskeySyncRequestValue,
+  ): Promise<BrowserPasskeySyncResponseValue> {
+    const parsed = BrowserPasskeySyncRequest.parse(request);
     if (
       parsed.browserSessionId !== this.reference.browserSessionId ||
       parsed.controllerGeneration !== this.reference.controllerGeneration
     ) {
-      throw new BrowserControlProtocolError(
-        "protected fill targets another browser controller binding",
-      );
+      throw new BrowserControlProtocolError("passkey sync targets another controller binding");
     }
-    return BrowserProtectedAuthFillReceipt.parse(
+    // The owner rides in the query: controllers that predate it parse the
+    // body strictly and ignore unknown query parameters.
+    const { owner, ...body } = parsed;
+    const query = owner ? `backupFlags=1&owner=${encodeURIComponent(owner)}` : "backupFlags=1";
+    return BrowserPasskeySyncResponse.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("protected-auth-fills"),
+        path: this.path(`passkeys/sync?${query}`),
         token: this.controlToken,
-        body: parsed,
-      }),
-    );
-  }
-
-  async protectedAuthReceipt(operationId: string): Promise<BrowserProtectedAuthFillReceiptValue> {
-    return BrowserProtectedAuthFillReceipt.parse(
-      await this.parent.requestForSession({
-        method: "GET",
-        path: this.path(`protected-auth-operations/${requireUuid(operationId, "operation id")}`),
-        token: this.controlToken,
+        body,
       }),
     );
   }
@@ -1865,6 +2642,23 @@ export class ComputerControlSessionClient {
     );
   }
 
+  async nativeCall(command: ComputerNativeCommand): Promise<ComputerNativeReceipt> {
+    const parsed = ComputerNativeCommand.parse(command);
+    if (
+      parsed.computerSessionId !== this.reference.computerSessionId ||
+      parsed.controllerGeneration !== this.reference.controllerGeneration
+    )
+      throw new BrowserControlProtocolError("native call targets another controller binding");
+    return ComputerNativeReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("native-calls"),
+        token: this.controlToken,
+        body: parsed,
+      }),
+    );
+  }
+
   async action(command: ComputerActionCommandValue): Promise<ComputerActionReceiptValue> {
     const parsed = ComputerActionCommand.parse(command);
     if (
@@ -1874,17 +2668,25 @@ export class ComputerControlSessionClient {
       throw new BrowserControlProtocolError("computer action targets another controller binding");
     }
     return ComputerActionReceipt.parse(
-      await this.parent.requestForSession({
-        method: "POST",
-        path: this.path("actions"),
-        token: this.controlToken,
-        body: parsed,
-      }),
+      await withActionDeadline(
+        "computer",
+        computerActionDeadlineMs(parsed.action),
+        async (timeoutMs) =>
+          await this.parent.requestForSession({
+            method: "POST",
+            // Controllers that predate role stand-ins or unconfirmed input
+            // ignore these parameters.
+            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1&${COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER}=1`,
+            token: this.controlToken,
+            body: parsed,
+            timeoutMs,
+          }),
+      ),
     );
   }
 
-  async receipt(operationId: string): Promise<ComputerActionReceiptValue> {
-    return ComputerActionReceipt.parse(
+  async receipt(operationId: string): Promise<ComputerOperationReceipt> {
+    return ComputerOperationReceipt.parse(
       await this.parent.requestForSession({
         method: "GET",
         path: this.path(`operations/${requireUuid(operationId, "operation id")}`),
@@ -2013,6 +2815,10 @@ async function requestExposedController(
         ...(body === undefined ? {} : { body }),
         redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
+        // The signal is this request's whole deadline. The runtime's default
+        // five-minute socket idle timer would otherwise end a longer action
+        // batch, whose controller sends nothing until the batch finishes.
+        timeout: false,
       }),
   );
   const responseText = await controllerTransport(async () => await response.text());
@@ -2178,7 +2984,15 @@ function browserControlFrame(
   ) {
     throw new BrowserControlProtocolError("browser frame evidence does not match its request");
   }
-  return { data, mediaType, metadataHeader, metadata };
+  return {
+    data,
+    mediaType,
+    metadataHeader,
+    metadata,
+    ...(get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
+      ? { inexactScrollbars: true as const }
+      : {}),
+  };
 }
 
 function computerControlFrame(
@@ -2384,7 +3198,17 @@ function parseEnvelope(body: string, status: number): unknown {
   if (value.ok === true && status >= 200 && status < 300 && "data" in value) return value.data;
   if (value.ok === false && status >= 400 && status <= 599) {
     const parsed = InteractionError.safeParse(value.error);
-    if (parsed.success) throw new BrowserControlRequestError(status, parsed.data);
+    if (parsed.success) {
+      throw new BrowserControlRequestError(
+        status,
+        parsed.data,
+        // A driver failure, or a read that kept failing for an unclassified
+        // reason, carries the driver's error class and frame for logs.
+        parsed.data.code === "driver_failed" || parsed.data.code === "resource_unavailable"
+          ? parseInteractionDriverDiagnostic(value.diagnostic)
+          : null,
+      );
+    }
   }
   throw new BrowserControlProtocolError("browser controller response envelope is invalid");
 }
@@ -2402,6 +3226,42 @@ function parseReference(value: unknown): PlacementBrowserSessionReference {
     browserSessionId: requireUuid(value.browserSessionId, "browser session id"),
     controllerGeneration: requireGeneration(value.controllerGeneration),
   };
+}
+
+/** A create's tab inventory is a convenience: an older controller omits it,
+ * and an inventory that does not validate, or that belongs to another
+ * binding, is dropped rather than failing a browser that did launch. */
+function creationTargets(
+  value: unknown,
+  reference: PlacementBrowserSessionReference,
+): { targets?: BrowserTargetValue[] } {
+  if (!Array.isArray(value) || value.length > 10_000) return {};
+  const targets: BrowserTargetValue[] = [];
+  for (const entry of value) {
+    const parsed = BrowserTarget.safeParse(entry);
+    if (
+      !parsed.success ||
+      parsed.data.browserSessionId !== reference.browserSessionId ||
+      parsed.data.controllerGeneration !== reference.controllerGeneration
+    )
+      return {};
+    targets.push(parsed.data);
+  }
+  return { targets };
+}
+
+/** A launch notice is advisory text; an older controller omits it and a
+ * malformed one is dropped rather than failing a browser that did launch. */
+function creationNotice(value: unknown): { notice?: string } {
+  if (typeof value !== "string") return {};
+  const notice = value.replace(/\s+/gu, " ").trim();
+  return notice.length > 0 && notice.length <= 1_024 ? { notice } : {};
+}
+
+/** The launched display is a report, not authority: anything but a known
+ * value is dropped, as from an older controller that sends none. */
+function creationDisplay(value: unknown): { display?: "window" | "offscreen" } {
+  return value === "window" || value === "offscreen" ? { display: value } : {};
 }
 
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {
@@ -2577,6 +3437,140 @@ function boundedProxyUrl(value: string): string {
     throw new BrowserControlProtocolError("browser proxy authority is invalid");
   }
   return url.toString();
+}
+
+function workingCopyAuthorityBody(
+  reference: PlacementBrowserSessionReference,
+  input: PlacementBrowserWorkingCopyAuthority,
+) {
+  return {
+    controllerGeneration: reference.controllerGeneration,
+    tokenGeneration: positiveSafeInteger(input.tokenGeneration, "token generation"),
+    controlToken: requireToken(input.controlToken, "control token"),
+    viewToken: requireToken(input.viewToken, "view token"),
+  };
+}
+
+/**
+ * An adoption record. `generation: "current"` (a new adoption) requires the
+ * record to belong to the requesting controller generation. `"recorded"`
+ * (status, revert, inspection) keeps the generation the adoption was recorded
+ * under: recovering an unfinished adoption after a controller restart means
+ * reading and reverting a record made by an earlier generation, under the
+ * browser's legitimate current control. The browser and operation always
+ * have to match exactly.
+ */
+function parseWorkingCopyAdoption(
+  value: unknown,
+  reference: PlacementBrowserSessionReference,
+  generation: "current" | "recorded",
+): PlacementBrowserWorkingCopyAdoption {
+  if (
+    !isRecord(value) ||
+    value.browserSessionId !== reference.browserSessionId ||
+    (generation === "current" && value.controllerGeneration !== reference.controllerGeneration) ||
+    !BROWSER_WORKING_COPY_ADOPTION_PHASES.includes(
+      value.phase as PlacementBrowserWorkingCopyAdoptionPhase,
+    ) ||
+    !(value.failureCode === null || typeof value.failureCode === "string") ||
+    !Array.isArray(value.retainedDirectories) ||
+    value.retainedDirectories.length > 64 ||
+    !value.retainedDirectories.every(
+      (name) => typeof name === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u.test(name),
+    )
+  ) {
+    throw new BrowserControlProtocolError("browser controller returned a malformed adoption");
+  }
+  return {
+    browserSessionId: reference.browserSessionId,
+    controllerGeneration:
+      generation === "current"
+        ? reference.controllerGeneration
+        : requireGeneration(value.controllerGeneration),
+    operationId: requireUuid(value.operationId, "working copy adoption id"),
+    manifestDigest: sha256(value.manifestDigest, "working copy manifest digest"),
+    phase: value.phase as PlacementBrowserWorkingCopyAdoptionPhase,
+    failureCode:
+      value.failureCode === null ? null : requireOpaqueId(value.failureCode, "failure code"),
+    retainedDirectories: value.retainedDirectories as string[],
+    createdAt: timestamp(value.createdAt, "adoption created at"),
+    updatedAt: timestamp(value.updatedAt, "adoption updated at"),
+  };
+}
+
+function parseWorkingCopyInspection(
+  value: unknown,
+  reference: PlacementBrowserSessionReference,
+): PlacementBrowserWorkingCopyInspection {
+  if (
+    !isRecord(value) ||
+    value.browserSessionId !== reference.browserSessionId ||
+    value.controllerGeneration !== reference.controllerGeneration ||
+    typeof value.platformSupported !== "boolean" ||
+    typeof value.profileIdentityMatches !== "boolean" ||
+    !(value.profileInUse === null || typeof value.profileInUse === "boolean") ||
+    !(
+      value.refusal === null ||
+      BROWSER_WORKING_COPY_REFUSALS.includes(value.refusal as PlacementBrowserWorkingCopyRefusal)
+    )
+  ) {
+    throw new BrowserControlProtocolError("browser controller returned a malformed inspection");
+  }
+  let manifest: PlacementBrowserWorkingCopyInspection["manifest"] = null;
+  if (value.manifest !== null) {
+    if (!isRecord(value.manifest)) {
+      throw new BrowserControlProtocolError("browser controller returned a malformed manifest");
+    }
+    manifest = {
+      digest: sha256(value.manifest.digest, "working copy manifest digest"),
+      entries: nonnegativeSafeInteger(value.manifest.entries, "working copy entries"),
+      bytes: nonnegativeSafeInteger(value.manifest.bytes, "working copy bytes"),
+      excluded: excludedWorkingCopyEntries(value.manifest.excluded),
+    };
+  }
+  let receipt: PlacementBrowserWorkingCopyInspection["receipt"] = null;
+  if (value.receipt !== null) {
+    const raw = value.receipt;
+    if (
+      !isRecord(raw) ||
+      !["launch", "suspend", "retire", "adopt"].includes(raw.intent as string) ||
+      typeof raw.state !== "string" ||
+      typeof raw.directoryLaunchAllowed !== "boolean" ||
+      typeof raw.authorityMatches !== "boolean" ||
+      !(raw.restoreAuthorityDigest === null || typeof raw.restoreAuthorityDigest === "string") ||
+      !(raw.adoption === null || isRecord(raw.adoption))
+    ) {
+      throw new BrowserControlProtocolError("browser controller returned a malformed receipt");
+    }
+    receipt = {
+      operationId: requireUuid(raw.operationId, "working runtime receipt id"),
+      intent: raw.intent as "launch" | "suspend" | "retire" | "adopt",
+      state: requireOpaqueId(raw.state, "working runtime receipt state"),
+      directoryLaunchAllowed: raw.directoryLaunchAllowed,
+      authorityMatches: raw.authorityMatches,
+      launchedFromCheckpoint: raw.restoreAuthorityDigest !== null,
+      adoption: isRecord(raw.adoption)
+        ? {
+            operationId: requireUuid(raw.adoption.operationId, "working copy adoption id"),
+            manifestDigest: sha256(raw.adoption.manifestDigest, "working copy manifest digest"),
+          }
+        : null,
+    };
+  }
+  return {
+    browserSessionId: reference.browserSessionId,
+    controllerGeneration: reference.controllerGeneration,
+    platformSupported: value.platformSupported,
+    refusal: value.refusal as PlacementBrowserWorkingCopyRefusal | null,
+    manifest,
+    profileIdentityMatches: value.profileIdentityMatches,
+    profileInUse: value.profileInUse,
+    receipt,
+    activeAdoption:
+      value.activeAdoption === null || value.activeAdoption === undefined
+        ? null
+        : parseWorkingCopyAdoption(value.activeAdoption, reference, "recorded"),
+  };
 }
 
 function parseStateCaptureReceipt(value: unknown): PlacementBrowserStateCaptureReceipt {
@@ -2823,7 +3817,11 @@ function requirePlacementRequestSurface(session: BrowserControlPlacementSession)
     typeof session.writePlacementPrivate === "function" ||
     typeof session.writeFile === "function" ||
     (hasExec && typeof session.writeStdin === "function");
-  if (typeof session.resolveExposedPort !== "function" && (!hasExec || !hasPrivateWrite)) {
+  if (
+    typeof session.execWithInput !== "function" &&
+    typeof session.resolveExposedPort !== "function" &&
+    (!hasExec || !hasPrivateWrite)
+  ) {
     throw new BrowserControlUnsupportedError(
       "browser placement requires a controller endpoint or exec and a private file transport",
     );
@@ -3272,6 +4270,15 @@ function requireBoundedText(
   return value;
 }
 
+/** Whether a request returns BrowserObservation.notice to its caller, the
+ * agent; other callers neither receive nor use one up. */
+export type BrowserObservationNoticeRequest = { notices?: boolean };
+
+function withObservationNotices(path: string, options: BrowserObservationNoticeRequest): string {
+  if (!options.notices) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}${BROWSER_OBSERVATION_NOTICES_PARAMETER}=1`;
+}
+
 function boundedUrl(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value) > 16_384) {
     throw new BrowserControlProtocolError("browser URL is invalid");
@@ -3383,6 +4390,19 @@ function nonnegativeSafeInteger(value: unknown, label: string): number {
   return value;
 }
 
+function excludedWorkingCopyEntries(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 16 ||
+    !value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 256)
+  ) {
+    throw new BrowserControlProtocolError(
+      "browser controller returned malformed working copy exclusions",
+    );
+  }
+  return [...value];
+}
+
 function parseUnsignedInteger(value: string, label: string): number {
   const trimmed = value.trim();
   if (!/^(0|[1-9][0-9]*)$/u.test(trimmed)) {
@@ -3401,8 +4421,4 @@ function parseHttpStatus(value: string): number {
     throw new BrowserControlProtocolError("HTTP status is invalid");
   }
   return status;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

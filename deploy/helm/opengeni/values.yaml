@@ -1,6 +1,22 @@
+# Optional independent operator job; never uses application/runtime credentials.
+# Stores nightly recovery points in a restic repository (7 daily and 4 weekly
+# by default). See docs/backups.md.
+backup:
+  enabled: false
+  schedule: "15 3 * * *"
+  checkSchedule: "0 12 * * *"
+  timeZone: UTC
+  existingSecret: ""
+  existingClaim: ""
+  image:
+    repository: opengeni-backup
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
 global:
   # Default to the public GHCR images so a vanilla `helm install` pulls the
-  # released OpenGeni images with no extra config. Per-cloud example values
+  # released Opengeni images with no extra config. Per-cloud example values
   # override this with their own registry. The image tags below are left empty
   # and resolve to the chart appVersion (see the opengeni.image helper).
   imageRegistry: "ghcr.io/cloudgeni-ai"
@@ -25,7 +41,7 @@ opensandbox:
     namespace: opensandbox
 
 # Optional release-local Pod priority tiers. They do not reserve or cap CPU or
-# memory. They tell the kubelet which OpenGeni roles to evict first when the
+# memory. They tell the kubelet which Opengeni roles to evict first when the
 # node is under pressure. `Never` keeps priority from preempting a running pod
 # merely to admit another one.
 priorityClasses:
@@ -49,7 +65,7 @@ networkPolicy:
   enabled: false
   egress:
     enabled: false
-    # Environment-specific rules appended after OpenGeni's canonical recording
+    # Environment-specific rules appended after Opengeni's canonical recording
     # and alert rules. This list never replaces the built-in safety catalog.
     rules: []
   ingressController:
@@ -57,8 +73,9 @@ networkPolicy:
     podSelector: {}
   # Optional: allow a metrics scraper (Prometheus) to reach GET /metrics on the
   # relay's internal relay.metricsPort (its wss port when that is null) and the
-  # API's internal api.metricsPort. Leave unset to omit those rules (the relay
-  # has no other ingress source than the ingress controller). When the
+  # API's internal api.metricsPort, and on computeControl.metrics.port. Leave
+  # unset to omit those rules (the relay has no other ingress source than the
+  # ingress controller). When the
   # kube-prometheus ServiceMonitor scrapes from a separate namespace, set both
   # selectors here.
   monitoring: {}
@@ -76,6 +93,9 @@ config:
   MIMALLOC_PURGE_DECOMMITS: "1"
   OPENGENI_SERVICE_NAME: opengeni
   OPENGENI_ENVIRONMENT: production
+  # Comma-separated exact hosts, optionally host:port, allowed to resolve privately.
+  # Example: "admin-api.example.com:443,auth.example.com:8443". No wildcards or URLs.
+  OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS: ""
   OPENGENI_DEPLOYMENT_REVISION: dev
   OPENGENI_API_HOST: 0.0.0.0
   OPENGENI_API_PORT: "8000"
@@ -103,34 +123,24 @@ config:
   # release/config change, set this to "query" for mail-gateway-compatible
   # invitation links. See docs/deployment.md before rollback.
   OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: fragment
-  # Keep full MCP OAuth state during the first API rollout. Once every API pod
-  # can resolve short references, set true in a separate config rollout.
-  OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED: "false"
   # Query transport additionally requires a separately proven controller/edge
   # error-log policy. Access-log and OpenTelemetry annotations do not sanitize
   # ingress-nginx's error_log request line. Query mode also requires the chart's
   # dedicated setupAccountIngress to remain enabled so the request cannot fall
   # through the ordinarily logged/traced primary Ingress.
   OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"
-  # Canonical organization-tenancy authority activation. Pinned to the
-  # reversible pre-activation posture so an upgrade can never cross the one-way
-  # boundary implicitly. Flip to "true" only after proving the preconditions in
-  # docs/organization-tenancy.md; setting it back to "false" afterwards is not a
-  # rollback.
-  OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: "false"
-  # Explicit host-owned MCP connection refs use rolling protocol admission.
-  # Keep false for the image rollout, then flip true only after API, worker, and
-  # web replicas all understand the host authority discriminator.
-  OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false"
-  # Agent configuration (sessions.agent_config, migration 0559). Readers first:
-  # roll every worker onto the 0559-aware image with both switches off, then
-  # set ADMISSION to "true" so the API accepts `agent` inputs (and PUT
-  # .../agent, workspace defaults, scheduled/automation `agent`). DEFAULT makes
-  # new top-level sessions that omit `agent` resolve { capabilities: "all" }.
   # See docs/deployment.md.
-  OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED: "false"
-  OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS: "false"
   OPENGENI_BILLING_MODE: disabled
+  # OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING (default "true", unset here): with
+  # credit billing active, hosted web search and OpenAI hosted image generation
+  # cost credit on turns whose model Opengeni pays for. Set "false" to restore
+  # free hosted search and images, for example without the Gateway image
+  # credential. See docs/web-search.md.
+  # OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED (default "false", unset here):
+  # set "true" to let API-origin work (organization access keys, embedded
+  # products) use the organization's own connected subscriptions. Only for an
+  # operator who owns the subscriptions it connects and accepts its provider's
+  # terms. See docs/deployment.md.
   # The offer and both new resource charges require separate operator activation.
   OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"
   OPENGENI_SANDBOX_WARM_BILLING_MODE: usage_only
@@ -141,18 +151,20 @@ config:
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none
   # Reviewed code/env catalog by default. Before changing this to "database",
-  # apply the drained maintenance migration
-  # 0389_model_catalog_and_gateway_custom_models.sql and follow the
-  # compatibility-first catalog cutover in docs/deployment.md; do not expose
+  # follow the compatibility-first catalog cutover in docs/deployment.md; do not expose
   # database-only membership during a mixed code/database rollout.
   OPENGENI_MODEL_CATALOG_SOURCE: code
   # Optional non-secret JSON values may be supplied here:
   # OPENGENI_MODEL_COST_POLICY_JSON: '{"model-id":"free"}'
   # OPENGENI_MODEL_NOTES_JSON: '{"model-id":"One-line agent guidance."}'
-  # Default for new work while an organization holds OpenGeni credits and has
+  # Code-mode replacement for the managed Gateway/OpenRouter/Opper model lists
+  # (catalog-document entry schemas, no pricing; ignored in database mode).
+  # See docs/model-providers.md "Code-mode managed model lists":
+  # OPENGENI_MANAGED_MODELS_JSON: '{"opperModels":[{"upstreamModelId":"aws/claude-opus-5-5",...}]}'
+  # Default for new work while an organization holds Opengeni credits and has
   # no connected subscription (see docs/model-providers.md):
   # OPENGENI_CREDITS_DEFAULT_MODEL: gpt-6-luna
-  # OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT: xhigh
+  # OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT: medium
   OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
   OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
@@ -163,11 +175,26 @@ config:
   OPENGENI_SANDBOX_BACKEND: modal
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
 
-# Digest-pinned Modal Computer/Browser box. Defaults to OpenGeni's public image
+# Digest-pinned Modal Computer/Browser box. Defaults to Opengeni's public image
 # and overwrites config.OPENGENI_MODAL_IMAGE_REF. Override it with another image
 # built from docker/desktop.Dockerfile, never the headless opengeni-sandbox image.
+# Packaged release and canary charts replace this default with the desktop image
+# built from their own source (scripts/package-release-chart.ts); the value here
+# is the fallback for unpackaged checkouts and equals DEFAULT_MODAL_IMAGE_REF.
 desktop:
-  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:554d5b324a580071dd669e7c1190931e498eb1b397412a27c7de84a430ef393a"
+  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:fca875a68cdce099fabaf2ffd97b99fac77578efd6ad0b422425aa2a174e973f"
+
+# Rotate the runtime database login's password without restarting pods. When
+# enabled, the api, worker-control and worker-turns pods mount the optional keys
+# OPENGENI_DATABASE_PASSWORD and OPENGENI_DATABASE_PREVIOUS_PASSWORD of the
+# runtime Secret (or secretName) as files under /var/run/opengeni/database and
+# read the password from them on every new connection. While the keys are
+# absent the pods use the password in OPENGENI_DATABASE_URL, as before. See
+# docs/deployment.md, "Rotating the runtime database password".
+runtimeDatabasePasswordFiles:
+  enabled: false
+  # Defaults to the runtime Secret (secret.existingSecret or the chart's Secret).
+  secretName: ""
 
 secret:
   create: false
@@ -181,12 +208,11 @@ secret:
   # an ExternalSecret. Never commit real secrets in values.
   # OPENGENI_OPENROUTER_API_KEY enables the deployment-managed reviewed
   # OpenRouter catalog. It belongs here, never in config or catalog JSON.
-  # Google Drive release-readiness configuration is demonstrated in
-  # values.google-drive-readiness.example.yaml. When enabled, this Secret must
-  # provide OPENGENI_INTEGRATIONS_STATE_SECRET,
-  # OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY, OPENGENI_GOOGLE_DRIVE_CLIENT_ID, and
-  # OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET. Never pass those values through Helm
-  # values or command-line --set arguments.
+  # OPENGENI_OPPER_API_KEY likewise enables the reviewed Opper catalog
+  # (default: Claude Opus 5.5 EU).
+  # When integrations are enabled, this Secret must provide
+  # OPENGENI_INTEGRATIONS_STATE_SECRET and OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY.
+  # Never pass those values through Helm values or command-line --set arguments.
   # For Temporal Cloud, configure OPENGENI_TEMPORAL_HOST and
   # OPENGENI_TEMPORAL_NAMESPACE, then place OPENGENI_TEMPORAL_API_KEY in this
   # secret; the API key automatically enables TLS.
@@ -235,11 +261,13 @@ api:
   extraVolumeMounts: []
   enabled: true
   replicaCount: 2
+  # Surge a replacement before removing a serving pod so capacity never drops during a
+  # rollout, and drain each terminating pod (preStop) before the server stops.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: opengeni-api
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -272,7 +300,14 @@ api:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
+  # After SIGTERM the API drains: responses close their keep-alive connections, idle
+  # ones close, live streams end and in-flight requests finish, all within the grace
+  # left after preStop (rendered as OPENGENI_API_SHUTDOWN_GRACE_MS). It must exceed
+  # preStopDrainSeconds.
   terminationGracePeriodSeconds: 30
+  # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
+  # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
+  preStopDrainSeconds: 10
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -359,11 +394,27 @@ worker:
   turns:
     replicaCount: 4
     priorityClassName: ""
+    # Surge a replacement before removing an old pod, so turn capacity never
+    # drops while old pods drain their in-flight turns.
     strategy:
       type: RollingUpdate
       rollingUpdate:
-        maxSurge: 0
-        maxUnavailable: 1
+        maxSurge: 1
+        maxUnavailable: 0
+    # Kubernetes grace for turn pods; null uses worker.terminationGracePeriodSeconds.
+    # A draining turn worker stops polling at once, lets in-flight turns finish
+    # naturally for shutdown.graceSeconds, then cancels the rest with
+    # WORKER_SHUTDOWN (recoverable checkpoint), force-stops at
+    # shutdown.forceSeconds and exits within 10s of that, before this grace.
+    terminationGracePeriodSeconds: null
+    shutdown:
+      # null derives both from the pod grace, keeping 15s between each phase:
+      # force = grace period - 15, natural drain = force - 15 (90s / 105s at
+      # the default 120s). Explicit values must keep the natural drain at least
+      # 10s before the force time and the force time more than 10s before the
+      # pod grace. A key in `config` owns that variable instead.
+      graceSeconds: null
+      forceSeconds: null
     resources:
       requests:
         cpu: 500m
@@ -373,9 +424,8 @@ worker:
         memory: 4Gi
     podDisruptionBudget:
       enabled: true
-      # Bound voluntary node drains to one turn pod. At the 16-turn hard
-      # density this limits simultaneous graceful checkpoint pressure to 16
-      # logical turns regardless of current HPA replica count.
+      # Bound voluntary eviction to one turn pod. This does not govern HPA or
+      # Deployment deletion and does not guarantee checkpoint completion.
       maxUnavailable: 1
     autoscaling:
       enabled: false
@@ -390,6 +440,15 @@ worker:
         enabled: false
         name: opengeni_turn_slot_saturation_ratio
         targetAverageValue: "750m"
+      # Schema-v1 source contract. Requires the new SDK all-activity producer,
+      # Prometheus Operator, UID-complete kube-state-metrics and a verified
+      # Namespace custom.metrics adapter. Adds demand8/queued8/busy1 alongside
+      # CPU70/memory80/agent-inflight8; fixes up0,+4/30s and disables downscale.
+      # This target is experimental, not demonstrated mixed-activity capacity.
+      queueDemand:
+        enabled: false
+        schemaVersion: 1
+        targetAverageValue: "8"
       customMetrics: []
       behavior: {}
   podSecurityContext:
@@ -404,14 +463,13 @@ worker:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
-  # Worker pods checkpoint in-flight agent turns on SIGTERM (graceful
-  # preemption: final conversation-truth reconcile, sandbox envelope,
-  # turn requeue). The Temporal worker cancels in-flight activities
-  # immediately on shutdown and then waits for them to finish, so this pod
-  # grace period is the only bound on the checkpoint window — give it real
-  # room. A SIGKILL after this period surfaces as a heartbeat-timeout
-  # activity failure, which the session workflow survives by re-dispatching
-  # the turn (bounded), but the graceful path loses less.
+  # Worker shutdown stops polling at once. Turn workers then let in-flight
+  # turns finish naturally (default 90s, worker.turns.shutdown) before the
+  # recoverable WORKER_SHUTDOWN checkpoint and force-stop at 105s; control
+  # workers keep 5s natural completion and a 100s force time. Both exit before
+  # this 120s Kube grace. The checkpoint does not prove writer quiescence:
+  # forced termination may leave uncertain writers and delayed receipt-gated
+  # recovery. See docs/worker-autoscaling.md before enabling downscale.
   terminationGracePeriodSeconds: 120
   topologySpreadConstraints:
     enabled: true
@@ -614,11 +672,13 @@ web:
   # entries. It is mounted read-only; do not reuse the full runtime Secret.
   demoApiCredentialsSecret: ""
   replicaCount: 2
+  # Surge a replacement before removing a serving pod so capacity never drops during a
+  # rollout, and drain each terminating pod (preStop) before the server stops.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: opengeni-web
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -646,6 +706,34 @@ web:
   podAnnotations: {}
   priorityClassName: ""
   terminationGracePeriodSeconds: 30
+  # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
+  # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
+  preStopDrainSeconds: 10
+  # Keep serving the content-hashed assets (lazy route chunks, stylesheets) of
+  # previous web builds after a rollout, so a tab still running an older build
+  # does not fail to load them. Each previous image runs once per pod as an init
+  # container that copies its asset directories into a pod-local emptyDir; the
+  # server answers an asset it lacks from there, newest build first. `helm
+  # upgrade` finds the previous images by looking up the live web Deployment:
+  # its image plus the images it already carried (annotation
+  # opengeni.ai/previous-web-images). Offline renders (`helm template`) cannot
+  # look up, so they carry nothing unless `images` is set; `helm rollback`
+  # restores the earlier revision's chain. Every new web pod (scale-ups, node
+  # replacement) pulls the carried images, so keep them in the registry. During
+  # the rollout itself see ingress.webAssetsIngress.
+  previousAssets:
+    enabled: true
+    # Most previous builds carried, newest first. 0 disables carrying.
+    maxImages: 2
+    # Explicit previous web image references, newest first, for offline
+    # renders. A non-empty list replaces the live lookup; it is still
+    # de-duplicated, capped at maxImages and never includes the deployed image.
+    images: []
+    # Where a web image keeps its built dist.
+    distPath: /app/apps/web/dist
+    # Optional size limit for the shared emptyDir, for example 1Gi. Empty
+    # leaves it unbounded.
+    sizeLimit: ""
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -843,6 +931,9 @@ migrations:
   # The pre-upgrade hook is the rollout gate: schema first, then exact runtime
   # grants, then a connection through the restricted runtime identity. Helm
   # does not begin replacing API/worker pods unless all three steps succeed.
+  # Job-scoped config (and chart-managed runtime Secret) snapshots follow these
+  # hook events at weight -1 relative to this Job, using incoming release values.
+  # Externally managed Secrets must be updated before invoking Helm.
   command:
     - /bin/sh
     - -ec
@@ -895,8 +986,35 @@ postgres:
   priorityClassName: ""
   image:
     repository: pgvector/pgvector
-    tag: pg17
+    # PostgreSQL 18 on Debian bookworm: the same OS release (and so the same
+    # glibc collations) as the earlier pg17 default, which keeps text indexes
+    # valid across an in-place upgrade.
+    tag: pg18-bookworm
     pullPolicy: IfNotPresent
+  # In-place major-version upgrade of an existing data directory. A data
+  # directory from an older major refuses to start until this is enabled (or
+  # postgres.image.tag is set back to that major). When enabled, an init
+  # container runs pg_upgrade --link from fromImage's binaries, keeps the old
+  # directory beside the new one as pgdata.pre-upgrade-from-<major>, and then
+  # starts the new server. Plan a short outage and a backup first. fromImage
+  # must be the old major on the same OS release as postgres.image, and every
+  # extension library the old databases use must exist in postgres.image.
+  # Before Helm changes the StatefulSet, a pre-upgrade hook Job rehearses the
+  # upgrade: it copies the running server's schema (no rows) into a scratch
+  # cluster of the old major and runs the new pg_upgrade --check against it.
+  # If the check fails, the release fails and the running server keeps
+  # serving; the Job's log names the objects to change.
+  # After the upgrade, run `vacuumdb --all --analyze-in-stages
+  # --missing-stats-only`, then `vacuumdb --all --analyze-only`, and ALTER
+  # EXTENSION ... UPDATE for each extension, then turn this off again.
+  majorUpgrade:
+    enabled: false
+    fromImage:
+      repository: pgvector/pgvector
+      tag: pg17
+    preflight:
+      activeDeadlineSeconds: 1800
+      resources: {}
   auth:
     database: opengeni
     username: opengeni
@@ -908,6 +1026,10 @@ postgres:
     # this Secret instead of constructing an owner URL from postgres.auth.
     existingSecret: ""
     databaseUrlKey: OPENGENI_DATABASE_URL
+  # Server settings, as `postgres` arguments, for example
+  # ["-c", "max_connections=400"] when Temporal, the API, the workers and
+  # computeControl share this server.
+  args: []
   service:
     port: 5432
   persistence:
@@ -924,6 +1046,17 @@ postgres:
   podSecurityContext:
     fsGroup: 999
   securityContext: {}
+  # PostgreSQL server settings passed as `-c name=value`, in name order. Empty
+  # keeps the image defaults, which suit only small disposable stacks; a
+  # persistent single-node install should size memory and planner settings for
+  # its host, for example:
+  #   max_connections: 200
+  #   shared_buffers: 4GB
+  #   effective_cache_size: 12GB
+  #   random_page_cost: 1.1
+  #   shared_preload_libraries: pg_stat_statements
+  # Raise postgres.resources.limits.memory with shared_buffers.
+  parameters: {}
 
 # Embedded Temporal for disposable conformance stacks and the persistent non-HA
 # single-machine profile. Multi-node deployments should use Temporal Cloud, an
@@ -1056,6 +1189,12 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
+  # The largest request body the primary Ingress passes on, as
+  # nginx.ingress.kubernetes.io/proxy-body-size (unless annotations set one).
+  # The API refuses bodies over 32 MiB itself (API_MAX_REQUEST_BODY_BYTES);
+  # ingress-nginx's own default of 1m would refuse sandbox file writes, voice
+  # uploads and imports the API accepts. "" leaves the controller's default.
+  maxRequestBody: 32m
   hosts:
     - host: opengeni.local
       paths:
@@ -1089,6 +1228,10 @@ ingress:
         - path: /agent
           pathType: Prefix
           service: api
+        # Desktop app downloads: the installer and redirects to the release.
+        - path: /desktop
+          pathType: Prefix
+          service: api
   tls: []
   # Managed invitation emails use a query bearer because mail security
   # gateways may discard URL fragments. A separate exact route lets
@@ -1109,6 +1252,29 @@ ingress:
   # the primary Ingress with auth annotations must repeat them here.
   mcpOAuthIngress:
     enabled: true
+    annotations: {}
+  # During a web rollout old and new web pods serve side by side and every
+  # request is balanced separately, so a page from one build can ask a pod of
+  # the other build for a hashed asset it does not have. This extra Ingress
+  # routes only the hashed asset paths (/assets, /office/assets,
+  # /react-demo/assets) of hosts that already send them to the web service, and
+  # has ingress-nginx retry a 404, connection error or timeout on another web
+  # pod. It balances through its own `<release>-web-assets` Service with EWMA,
+  # which never retries an endpoint the request already tried while an untried
+  # one remains. It keeps the primary Ingress class, TLS and rendered
+  # annotations, except cert-manager, external-dns, canary, rewrite-target,
+  # app-root, server-snippet and server-alias annotations; `annotations` here
+  # are applied last.
+  webAssetsIngress:
+    enabled: true
+    # Render only when ingress.className contains "nginx". Set false to render
+    # it for an ingress-nginx controller registered under another class name.
+    requireNginxClassName: true
+    # Attempts for one asset request, including the first. Keep it above the
+    # most web pods of one build that can serve at once during a rollout
+    # (replicas, or the autoscaler maximum): a page of the new build may first
+    # try every old pod.
+    nextUpstreamTries: 3
     annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
   # unauthenticated-by-design public paths. Used by edge-gated deployments
@@ -1149,6 +1315,10 @@ ingress:
             pathType: Prefix
             service: api
           - path: /agent/v
+            pathType: Prefix
+            service: api
+          # Desktop app downloads (installer + release redirects, no secrets).
+          - path: /desktop
             pathType: Prefix
             service: api
           # Device-flow enrollment BOOTSTRAP endpoints a not-yet-credentialed
@@ -1222,6 +1392,17 @@ nats:
     controlPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
     calloutPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD
 
+# Idle-session archive (docs/session-storage-lifecycle.md). On by default.
+# The control worker moves the bulky content of sessions that
+# have been quiet for idleDays to the configured object storage as a verified
+# bundle and purges it from PostgreSQL. Archived sessions stay readable but are
+# read-only; sessions marked keep-live, waiting on a person, a timer, a queue or
+# a schedule are never archived. Requires object storage; set enabled: false to
+# keep every session in PostgreSQL.
+sessionArchive:
+  enabled: true
+  idleDays: 30
+
 # Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring threaded
 # into the api/worker configmap. The SECRET values live in the runtime secret
 # (see the DEPLOY NOTES / secret keys below). Disabled by default so existing
@@ -1239,6 +1420,318 @@ selfhosted:
   natsCalloutAccountName: APP
   natsControlUser: control
   natsCalloutUser: auth
+
+# Optional control service of Opengeni compute, Opengeni's own sandbox system (compute/ in
+# this repository): compute-control, which owns compute's hosts, places and
+# moves sandboxes, and serves the API the `compute` sandbox backend calls.
+# Disabled by default; enabling it changes no session's backend
+# (config.OPENGENI_SANDBOX_BACKEND stays as set). The hosts themselves run
+# outside the cluster (compute/deploy). See compute/docs/operations.md.
+computeControl:
+  enabled: false
+  replicaCount: 2
+  priorityClassName: ""
+  image:
+    repository: opengeni-compute-control
+    # Required when enabled: the compute release tags (sha-<commit>, a
+    # compute version) are not the chart's appVersion. Production pins the
+    # digest as well.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  # The service's store: its own schema and login role in Opengeni's
+  # Postgres, which hold nothing of Opengeni's and are granted nothing of it.
+  database:
+    # Secret holding the role's password (passwordKey), or a whole
+    # connection string (urlKey) for a database the chart does not run.
+    # The password reaches the service in a variable of its own, so any
+    # password works unquoted.
+    existingSecret: ""
+    passwordKey: COMPUTE_DATABASE_PASSWORD
+    urlKey: ""
+    # Pods read the password only at start: after changing it in the
+    # Secret, raise the revision (a whole number) so the upgrade rolls them
+    # and runs a new database Job, which gives the role the new password;
+    # the new pods wait for it before they start. A Job of a lower revision
+    # never sets the role's password after a higher one's has.
+    passwordRevision: 0
+    role: compute
+    schema: compute
+    # Defaults: the chart's Postgres, its database, and sslmode disable.
+    # host is required when the chart runs no Postgres.
+    # sslmode is disable, prefer or require. With require the service and
+    # its sweep connect over TLS and check the database's certificate
+    # against the image's system authorities; for a private authority,
+    # mount it (extraVolumes, extraVolumeMounts) and name it in extraEnv as
+    # COMPUTE_CONTROL_DATABASE_CA, which both read.
+    host: ""
+    port: 5432
+    name: ""
+    sslmode: ""
+    # A Job creates the role (login, password from the Secret, search path
+    # the schema) and the schema it owns, with the migration owner URL
+    # (OPENGENI_MIGRATIONS_DATABASE_URL in the migration Secret), as an
+    # ordinary resource of the release, never a hook: the service's pods
+    # wait until the role can log in with their password. Only for the
+    # chart's own Postgres; turn it off for any other database, or where a
+    # DBA provisions them.
+    provision: true
+    connections: 16
+  # Keys of the API, one `team key` per line, from a Secret's `keys` entry.
+  # Opengeni's compute backend uses one of them (OPENGENI_COMPUTE_API_KEY in
+  # the runtime Secret); the operator team's keys manage hosts.
+  keys:
+    existingSecret: ""
+    key: keys
+  operatorTeam: operator
+  # The URL hosts reach the service at (https://name:port), exactly as they
+  # are given it (the Terraform module's control_url): the service's own
+  # certificate is for its host name, and hosts' identity tokens are for
+  # this URL.
+  hostUrl: ""
+  # Mutual TLS with the hosts. The service is the hosts' certificate
+  # authority: the Secret holds the authority's certificate (ca.crt) and
+  # key (ca.key, PKCS#8 PEM), as the Terraform module's host_authority_pem
+  # and host_authority_key_pem outputs or `compute-control
+  # new-host-authority` make them. ca.crt may hold further authorities after
+  # the first, trusted beside it while one is rotated out. The service
+  # issues its own short-lived certificate from it, for hostUrl's host and
+  # extraNames, and renews it in memory.
+  hostsTls:
+    secretName: ""
+    extraNames: []
+  # Google Compute Engine instances of this project, running as this
+  # service account, get host certificates for their own instance name by
+  # proving it with an instance identity token (the Terraform module's
+  # identity_tokens output). Empty: hosts renew only with their current
+  # certificate, and first certificates come from `compute-control
+  # issue-host-certificate`.
+  hostIdentity:
+    gcpProject: ""
+    gcpAccount: ""
+  # HTTPS for the public API (tls.crt, tls.key naming apiTls.host, and the
+  # ca.crt that signed it), required outside local development: Opengeni
+  # sends the API key to it and refuses plain HTTP there. When set, the API,
+  # control-worker and turn-worker pods trust ca.crt (NODE_EXTRA_CA_CERTS)
+  # and OPENGENI_COMPUTE_API_URL is https://<apiTls.host>:<apiPort>.
+  apiTls:
+    # Optional public CA bundles in same-namespace ConfigMaps (name/key).
+    # Composed with compute ca.crt once at pod initialization, using the same
+    # workload image. Empty preserves the existing compute-only trust path.
+    # Source CA changes require a normal pod rollout; no live reload is implied.
+    additionalCaConfigMaps: []
+    secretName: ""
+    # Default: the API Service's cluster name, <name>.<namespace>.svc.
+    host: ""
+  # Agent links (ADR 21): the Ed25519 key (PKCS#8 PEM) the service signs
+  # hosts' link tokens with, from a Secret's `link.pem` entry, never baked
+  # into an image; `openssl genpkey -algorithm ed25519` makes one. Keys
+  # being rotated out stay verifiable as previousKeys entries of the same
+  # Secret. Empty: no agent links, and teamLinks must be empty.
+  link:
+    existingSecret: ""
+    key: link.pem
+    previousKeys: []
+    issuer: opengeni-compute
+  # Each team's agent gateway, the Opengeni API's public WSS endpoint, for
+  # example {opengeni: "wss://opengeni.example.com/v1/compute/agent-link"}.
+  # Hosts dial it, so it must be reachable from them with a certificate
+  # they trust.
+  teamLinks: {}
+  # The team this release's own compute backend belongs to: the team of its
+  # OPENGENI_COMPUTE_API_KEY. Its teamLinks entry is also the release's
+  # OPENGENI_COMPUTE_LINK_URL, the audience of its hosts' link tokens, so
+  # the two never differ.
+  opengeniTeam: opengeni
+  # Where hosts archive sandboxes (gs://bucket/prefix, az://, s3://). The
+  # service reads stored copies' pointers there; credentials come from the
+  # pod's identity (serviceAccount.annotations, such as GKE Workload
+  # Identity) or the environment. Off Google Cloud, mount a service account
+  # key through extraVolumes and extraVolumeMounts and name it in
+  # GOOGLE_APPLICATION_CREDENTIALS through extraEnv: the archive, gcpGroup
+  # and the sweep all use it.
+  archive: ""
+  # The image creates start from when they name none, and the stored images
+  # creates may name (name: image id, as `compute-host build-image` prints).
+  defaultImage: base
+  storedImages: {}
+  # The OCI image, pinned by digest, this release's sandboxes of each image
+  # name start from (name: registry/repository@sha256:<hex>), normally the
+  # release's sandbox and desktop images. When none was built from it, the
+  # service has a host build it into a stored image and new creates of the
+  # name start from that; until then from the image the name had before, or
+  # its storedImages entry. Existing sandboxes keep the image they have.
+  imageSources: {}
+  diskMib: 1024
+  # Grow and fence a GCP managed instance group of hosts:
+  # projects/P/zones/Z/instanceGroupManagers/N. Empty: hosts are added and
+  # removed by hand, and a lost host is fenced only by its own guard.
+  gcpGroup: ""
+  # How the service grows gcpGroup. hostMemoryMib, the memory a new host
+  # offers sandboxes (the Terraform module's host_memory_mib output), is
+  # required with gcpGroup; min and max bound the group's size. Other
+  # --scale-* flags go in extraArgs.
+  scaling:
+    hostMemoryMib: 0
+    min: 1
+    max: 10
+  # The E2B-compatible front door (compute/docs/adr/0019): E2B's REST API and
+  # the sandboxes' envd behind it, on a port of its own of the pods and of
+  # the API Service. Clients name a sandbox with E2b-Sandbox-Id and
+  # E2b-Sandbox-Port headers, as runner pools do; reaching one by host name
+  # (<port>-<id>.<domain>) needs a certificate for *.<domain> and DNS the
+  # chart does not make. With apiTls it serves HTTPS with the API's
+  # certificate; without it plain HTTP. Network policy admits the release's
+  # runner pools (computeRunners) and the peers in ingressFrom.
+  e2b:
+    enabled: false
+    port: 3000
+    # Default: the API's host name (apiTls.host, or the Service's).
+    domain: ""
+    # Templates by id, as `image:VCPUSxMEMORY_MIB`, or with a disk size
+    # `image:VCPUSxMEMORY_MIBxDISK_MIB` (default diskMib), for example
+    # {base: "base:2x1024", github-runner: "runner:4x8192x30720"}. Either
+    # may end in `,memory-request=MIB` and `,cpu-request=MILLIS`: sandboxes
+    # guaranteed only that much, using more when their host has it free, so
+    # a host runs more of them at once
+    # ("runner:8x24576x65536,memory-request=8192"). Empty: `base`, the
+    # default image at 2x1024.
+    templates: {}
+    # More NetworkPolicy peers that may reach it.
+    ingressFrom: []
+  # Further `compute-control serve` flags, for example --scale-* settings
+  # or other --e2b-* ones.
+  extraArgs: []
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  serviceAccount:
+    # A ServiceAccount of its own, for the cloud identity that reads the
+    # archive and manages the host group; nothing else in the chart uses it.
+    create: true
+    name: ""
+    annotations: {}
+  service:
+    # Opengeni's API and workers call the API here, in the cluster.
+    apiPort: 8080
+  metrics:
+    # The service's metrics, GET /metrics in Prometheus's text format, on
+    # this port of its pods and of the API Service (never the hosts
+    # Service), for example 9464. observability.serviceMonitor.enabled
+    # scrapes it, and networkPolicy.monitoring admits the scraper. null (the
+    # default): no metrics.
+    port: null
+    # Where the service passes its hosts' metrics on to: an OTLP/HTTP
+    # metrics endpoint that takes JSON, such as Prometheus's OTLP receiver
+    # (http://<prometheus>:9090/api/v1/otlp/v1/metrics, with the receiver
+    # turned on; deploy/observability does). Hosts send them over their
+    # mutual TLS with the service when they run with
+    # --otlp-metrics-to-control, so they need no route or credentials of
+    # their own to the store. With networkPolicy.egress.enabled, the egress
+    # rules must admit this endpoint. Empty: the service refuses hosts'
+    # metrics, and the host alerts are left out.
+    hostsTo: ""
+  hostsService:
+    # Hosts dial this endpoint from outside the cluster: a LoadBalancer
+    # (annotations for an internal one) or a NodePort.
+    type: ClusterIP
+    port: 8443
+    nodePort: null
+    annotations: {}
+    loadBalancerSourceRanges: []
+  # The store's hourly sweep (`compute-control sweep --delete`, ADR 17, 25,
+  # 28 and 29), from the same image, with the same identity and database. It
+  # deletes on any archive: gs://, az:// and s3:// alike. Replaced copies
+  # (each sandbox's earlier checkpoints) stay stored until a sweep at least
+  # an hour after the hour they were written in, so run it hourly. Each run
+  # lists only the hours new since the last, and everything once a day.
+  sweep:
+    enabled: true
+    schedule: "17 * * * *"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  podSecurityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# GitHub Actions runner pools on Opengeni compute (compute/docs/adr/0023):
+# each pool is a Deployment of `compute-runners serve`, from the compute
+# control image, that registers a runner scale set with GitHub and gives
+# every job a fresh sandbox from the pool's template, deleted after the job.
+# Pools reach compute through its E2B front door, so they need
+# computeControl.enabled and computeControl.e2b.enabled. Optionally a pool
+# keeps a warm template of a repository (cloned and prepared, refreshed from
+# its branch) and serves a Turborepo remote cache from object storage that
+# its runners reach at cache.url. Every job of a pool shares its cache:
+# workflows from untrusted forks need a pool of their own.
+computeRunners:
+  # Default: computeControl.image.
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    # A ServiceAccount of its own, for the cloud identity that reads and
+    # writes the pools' caches.
+    create: true
+    name: ""
+    annotations: {}
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  podSecurityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  pools: []
+  # - name: ci                  # the scale set, and `runs-on: ci`
+  #   scope: my-org             # an organization, or owner/repo
+  #   runnerGroup: default
+  #   labels: []
+  #   template: github-runner   # a computeControl.e2b.templates id
+  #   minIdle: 0
+  #   max: 10
+  #   timeoutSeconds: 21600
+  #   env: {}                   # more environment for every runner
+  #   replicaCount: 1           # more stand by to take over the scale set
+  #   github:
+  #     url: https://github.com
+  #     apiUrl: https://api.github.com
+  #     existingSecret: ci-github
+  #     tokenKey: GITHUB_TOKEN  # an admin token, or with appId:
+  #     appId: ""
+  #     appInstallation: ""
+  #     appKeyKey: app.pem      # the App's private key in the same Secret
+  #   compute:
+  #     existingSecret: ci-compute
+  #     key: COMPUTE_API_KEY    # a key of computeControl.keys
+  #   warm:
+  #     repo: my-org/monorepo
+  #     branch: ""              # default: the repository's default branch
+  #     prepare: bun install --frozen-lockfile
+  #     everySeconds: 3600
+  #     withinSeconds: 3600
+  #   cache:
+  #     store: gs://bucket/runner-cache
+  #     url: https://runner-cache.example.com
+  #     existingSecret: ci-cache
+  #     tokenKey: COMPUTE_RUNNERS_CACHE_TOKEN
+  #     days: 14
+  #     service:                # how runners, outside the cluster, reach it
+  #       type: ClusterIP
+  #       port: 8080
+  #       nodePort: null        # with type NodePort, the node's port
+  #       annotations: {}
+  #       loadBalancerSourceRanges: []
+  #   resources: {}             # default: computeRunners.resources
 
 # Optional self-hosted HashiCorp Terraform MCP server. Agents reach it by adding
 # an OPENGENI_MCP_SERVERS entry that points at
@@ -1278,10 +1771,18 @@ observability:
     # Must cover at least three configured sandbox reaper periods; Helm rejects
     # an incompatible pairing before generating a rule that would age out live data.
     inventoryFreshnessSeconds: 300
-    # Cumulative p95 startup SLOs, measured from the durable turn queue time.
-    # Keep these aligned with the canonical Turn Startup dashboard annotations.
-    turnStartupQueueP95Seconds: 5
-    turnStartupProviderDispatchP95Seconds: 60
+    # Age of the oldest runnable prompt (not held behind an active turn, a
+    # Pause, a capacity wait or a required human action). Prompts queued behind
+    # a running turn in their own chat are normal and never alert.
+    turnReadyPromptAgeSeconds: 60
+    turnReadyPromptAgeCriticalSeconds: 300
+    # Startup p95s measured from the start of the turn attempt, so they exclude
+    # time behind an earlier turn, capacity waits and recovery gaps. Attempt
+    # start -> first provider dispatch is Opengeni-owned preparation, so it gets
+    # tight tiers: a warning (investigate) and a paging critical tier that
+    # replaces it. Normal p95 is a few seconds.
+    turnStartupProviderDispatchP95Seconds: 20
+    turnStartupProviderDispatchCriticalP95Seconds: 60
     turnStartupFirstByteP95Seconds: 120
     # Exclusive logical-turn first-byte completions divided by completed plus
     # terminal failed-without-byte milestones over the alert window. A failed
@@ -1289,6 +1790,24 @@ observability:
     # latency quantiles; later tool-loop failures cannot downgrade a success.
     turnStartupFirstByteAvailabilityRatio: 0.95
     turnStartupMinSamples: 5
+    # Per model request: SDK model entry -> literal provider dispatch (admission,
+    # durable history/audit checkpoints, credit revalidation). Ours; sub-second
+    # when healthy.
+    modelRequestPreDispatchP95Seconds: 2
+    modelRequestMinSamples: 20
+    # Provider time-to-first-token (dispatch -> first streamed delta) alerts only
+    # relative to that provider's own trailing 24h p90, never on an absolute
+    # number: the 30m p90 must exceed ratio x baseline AND the floor, with
+    # enough recent and baseline requests.
+    providerTtftRegressionRatio: 2
+    providerTtftRegressionFloorSeconds: 5
+    providerTtftRecentMinSamples: 30
+    providerTtftBaselineMinSamples: 200
+    # Streaming p99 alerts (session event append and live publish) need at
+    # least this many observations in their window. Below 100 the p99 is just
+    # the slowest single observation, so one slow write on a quiet deployment
+    # would page.
+    sessionEventMinSamples: 100
     labels: {}
     annotations: {}
     rules: []

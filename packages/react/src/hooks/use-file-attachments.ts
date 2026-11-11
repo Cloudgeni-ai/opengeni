@@ -1,11 +1,14 @@
-import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type { AppShotCapture, FileAsset, FileResourceRef } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   useEmbeddedFileAttachments,
   type EmbeddedFileAttachmentClientOverride,
 } from "../session-context";
+import { useErrorMessage } from "../lib/error-message";
+import { readStoredFilePreviewUrl } from "../stored-file-preview";
 
-export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
+export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride<ChatClient> & {
   /**
    * Only files matching this predicate are accepted by {@link
    * UseFileAttachmentsResult.addFromPaste} (the clipboard path). Defaults to
@@ -14,7 +17,7 @@ export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
    * bypasses it.
    */
   /** Retain original uploads in the chat owner’s personal scope when private. */
-  scope?: "workspace" | "personal";
+  scope?: "workspace" | "personal" | undefined;
   pasteFilter?: ((file: File) => boolean) | undefined;
 };
 
@@ -31,6 +34,18 @@ export type FileAttachment = {
   /** Stable SDK failure code for UI behavior that must not parse error copy. */
   errorCode?: "secure_context_required" | undefined;
   error?: string | undefined;
+  /** Original diagnostic failure; presentation copy is kept separately in `error`. */
+  errorCause?: unknown;
+  /**
+   * An app-shot: a screenshot of another app's window with the window it
+   * shows and the text it exposed, sent to the agent with the image.
+   */
+  appShot?: AppShotCapture | undefined;
+  /**
+   * Brought back with a saved draft (`restoreReadyFiles`) rather than added
+   * by the person just now.
+   */
+  restored?: true | undefined;
 };
 
 export type UseFileAttachmentsResult = {
@@ -50,16 +65,31 @@ export type UseFileAttachmentsResult = {
   hasUnresolved: boolean;
   /** Explicit picker / drop path — uploads every file, no filter. */
   addFiles: (files: Iterable<File>) => void;
+  /**
+   * Attach a window screenshot as an app-shot: the image plus the window it
+   * shows and the text it exposed, stored with the file. Optional so custom
+   * attachment stores written before app-shots keep satisfying this type.
+   */
+  addAppShot?: ((image: File, appShot: AppShotCapture) => void) | undefined;
   /** Clipboard path — applies `pasteFilter` (default `image/*`) then uploads. */
   addFromPaste: (event: { clipboardData: DataTransfer | null }) => void;
   /** Restore already-ready server assets without recreating browser-local bytes. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
   /**
-   * Resolve a ready image's short-lived server preview URL on demand. Optional
-   * for upload-only embedded clients; local object-URL previews remain usable
-   * without it.
+   * Resolve a ready image's short-lived server preview URL on demand: how a
+   * restored draft, another device or a broken local preview still shows the
+   * picture. Optional for upload-only embedded clients; local object-URL
+   * previews remain usable without it.
    */
   loadPreview?: ((id: string, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
+  /**
+   * Look up a workspace file's content type by its file id, for files a
+   * restored draft names without their metadata. Optional: present when the
+   * client can read file metadata.
+   */
+  loadFileContentType?:
+    | ((fileId: string, signal?: AbortSignal) => Promise<string | undefined>)
+    | undefined;
   /**
    * Re-run the upload for a `failed` attachment, in place (same id, same
    * source file). No-op for an id that isn't a known failed upload.
@@ -85,6 +115,27 @@ export type UseFileAttachmentsResult = {
 };
 
 const isImage = (file: File): boolean => file.type.startsWith("image/");
+
+/**
+ * Where an attachment for this chat is stored: Only me (`personal`) in a private
+ * chat or one with personal memory, otherwise the workspace. `undefined` while
+ * the chat is unknown, so the server (or a session proxy's `chats` setting)
+ * decides instead of the browser guessing.
+ */
+export function uploadScopeForSession(
+  session:
+    | {
+        tenancy?: { visibility?: string | undefined } | null | undefined;
+        memoryScope?: string | null | undefined;
+      }
+    | null
+    | undefined,
+): "workspace" | "personal" | undefined {
+  if (!session) return undefined;
+  return session.tenancy?.visibility === "private" || session.memoryScope === "user"
+    ? "personal"
+    : "workspace";
+}
 
 let fallbackAttachmentId = 0;
 
@@ -120,6 +171,7 @@ export function useFileAttachments(
   options: UseFileAttachmentsOptions = {},
 ): UseFileAttachmentsResult {
   const { client, workspaceId } = useEmbeddedFileAttachments(options);
+  const formatError = useErrorMessage();
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const attachmentsRef = useRef(attachments);
@@ -127,6 +179,7 @@ export function useFileAttachments(
   // Keep the source File per attachment id so a failed upload can be retried
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
+  const appShots = useRef<Map<string, AppShotCapture>>(new Map());
   // Object URLs must be owned synchronously: React may discard an attachment
   // state update when its component unmounts in the same batch that minted the
   // preview. The registry remains available to cleanup even before a render.
@@ -190,6 +243,7 @@ export function useFileAttachments(
     previousScope.current = { client, workspaceId };
     scopeGeneration.current += 1;
     sources.current.clear();
+    appShots.current.clear();
     revokeAllPreviews();
     setAttachments([]);
   }, [client, revokeAllPreviews, workspaceId]);
@@ -215,6 +269,7 @@ export function useFileAttachments(
           contentType: file.type || "application/octet-stream",
           data: file,
           ...(options.scope ? { scope: options.scope } : {}),
+          ...(appShots.current.has(id) ? { appShot: appShots.current.get(id) } : {}),
         })
         .then((asset) => {
           if (scopeGeneration.current !== generation) return;
@@ -222,6 +277,7 @@ export function useFileAttachments(
           // Drop the source File immediately; restored/ready attachments must
           // never retain browser-local byte authority.
           sources.current.delete(id);
+          appShots.current.delete(id);
           setAttachments((current) =>
             current.map((attachment) =>
               attachment.id === id
@@ -234,6 +290,7 @@ export function useFileAttachments(
                     sizeBytes: asset.sizeBytes,
                     errorCode: undefined,
                     error: undefined,
+                    errorCause: undefined,
                   }
                 : attachment,
             ),
@@ -248,14 +305,15 @@ export function useFileAttachments(
                     ...attachment,
                     status: "failed",
                     errorCode: secureContextRequiredErrorCode(error),
-                    error: error instanceof Error ? error.message : String(error),
+                    error: formatError(error),
+                    errorCause: error,
                   }
                 : attachment,
             ),
           );
         });
     },
-    [client, workspaceId, options.scope],
+    [client, workspaceId, options.scope, formatError],
   );
 
   const addFiles = useCallback(
@@ -282,6 +340,30 @@ export function useFileAttachments(
     [startUpload],
   );
 
+  const addAppShot = useCallback(
+    (image: File, appShot: AppShotCapture) => {
+      const id = createAttachmentId();
+      sources.current.set(id, image);
+      appShots.current.set(id, appShot);
+      const previewUrl = URL.createObjectURL(image);
+      previewUrls.current.set(id, previewUrl);
+      setAttachments((current) => [
+        ...current,
+        {
+          id,
+          name: image.name || `${appShot.app}.png`,
+          contentType: image.type || "image/png",
+          sizeBytes: image.size,
+          status: "uploading",
+          previewUrl,
+          appShot,
+        },
+      ]);
+      startUpload(id, image);
+    },
+    [startUpload],
+  );
+
   const retry = useCallback(
     (id: string) => {
       const file = sources.current.get(id);
@@ -291,7 +373,13 @@ export function useFileAttachments(
       setAttachments((current) =>
         current.map((attachment) =>
           attachment.id === id
-            ? { ...attachment, status: "uploading", errorCode: undefined, error: undefined }
+            ? {
+                ...attachment,
+                status: "uploading",
+                errorCode: undefined,
+                error: undefined,
+                errorCause: undefined,
+              }
             : attachment,
         ),
       );
@@ -341,8 +429,10 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                appShot: file.appShot ?? existing.appShot,
                 errorCode: undefined,
                 error: undefined,
+                errorCause: undefined,
               }
             : {
                 id: `restored:${file.id}`,
@@ -351,6 +441,8 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                restored: true,
+                ...(file.appShot ? { appShot: file.appShot } : {}),
                 // No source File and no object URL: server metadata is the
                 // only authority restored across page/device boundaries.
               };
@@ -368,23 +460,34 @@ export function useFileAttachments(
     async (id: string, signal?: AbortSignal): Promise<string | undefined> => {
       const generation = scopeGeneration.current;
       const attachment = attachmentsRef.current.find((candidate) => candidate.id === id);
-      const createDownloadUrl = client.createFileDownloadUrl;
       if (
         !attachment ||
         attachment.status !== "ready" ||
         !attachment.file ||
         !attachment.contentType.startsWith("image/") ||
-        typeof createDownloadUrl !== "function" ||
+        typeof client.createFileDownloadUrl !== "function" ||
         signal?.aborted
       ) {
         return undefined;
       }
       const fileId = attachment.file.id;
-      const signed = await createDownloadUrl.call(client, workspaceId, fileId, { signal });
+      // One shared, cached read for every surface showing this file; an abort
+      // only discards this caller's result.
+      const url = await readStoredFilePreviewUrl({ client, workspaceId }, fileId);
       if (scopeGeneration.current !== generation || signal?.aborted) return undefined;
       const current = attachmentsRef.current.find((candidate) => candidate.id === id);
       if (current?.status !== "ready" || current.file?.id !== fileId) return undefined;
-      return signed.url;
+      return url;
+    },
+    [client, workspaceId],
+  );
+
+  const loadFileContentType = useCallback(
+    async (fileId: string, signal?: AbortSignal): Promise<string | undefined> => {
+      const getFile = client.getFile;
+      if (typeof getFile !== "function") return undefined;
+      const file = await getFile.call(client, workspaceId, fileId, { signal });
+      return file.contentType;
     },
     [client, workspaceId],
   );
@@ -392,6 +495,7 @@ export function useFileAttachments(
   const remove = useCallback(
     (id: string) => {
       sources.current.delete(id);
+      appShots.current.delete(id);
       revokePreview(id);
       setAttachments((current) => current.filter((attachment) => attachment.id !== id));
     },
@@ -414,6 +518,7 @@ export function useFileAttachments(
 
   const clear = useCallback(() => {
     sources.current.clear();
+    appShots.current.clear();
     revokeAllPreviews();
     setAttachments([]);
   }, [revokeAllPreviews]);
@@ -428,9 +533,11 @@ export function useFileAttachments(
     uploading: attachments.some((attachment) => attachment.status === "uploading"),
     hasUnresolved: attachments.some((attachment) => attachment.status !== "ready"),
     addFiles,
+    addAppShot,
     addFromPaste,
     restoreReadyFiles,
     ...(typeof client.createFileDownloadUrl === "function" ? { loadPreview } : {}),
+    ...(typeof client.getFile === "function" ? { loadFileContentType } : {}),
     retry,
     retainPreview,
     remove,

@@ -3,8 +3,11 @@ import type {
   ArtifactCatalogListOptions,
   RetainedArtifactReference,
 } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
-import { filterArtifactCatalog, defaultArtifactFilters } from "../src/lib/artifact-catalog";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
+import {
+  filterArtifactCatalog,
+  defaultArtifactFilters,
+} from "@opengeni/react/app/lib/artifact-catalog";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const sessionId = "33333333-3333-4333-8333-333333333333";
@@ -16,6 +19,7 @@ export const fixtureActivity = {
   signedUrls: [] as string[],
   prompts: [] as string[],
   siteHtml: [] as string[],
+  pins: [] as { kind: string; id: string; pinned: boolean }[],
 };
 Object.assign(window, { artifactLibraryFixture: fixtureActivity });
 const retained: RetainedArtifactReference = {
@@ -63,6 +67,11 @@ items.push({
   title: "Generated cover",
   file: { ...retained, artifactId: generatedImageId, kind: "generated_image" },
 });
+// Preview-only persistence stands in for the server; no production pin state
+// is stored in the browser. Keep fixture state across reloads for acceptance.
+const pinStorageKey = "opengeni:test:artifact-pins";
+const savedPins: string[] = JSON.parse(sessionStorage.getItem(pinStorageKey) ?? "[]");
+for (const item of items) item.pinned = savedPins.includes(`${item.kind}:${item.id}`);
 const gallery: ArtifactCatalogItem[] = Array.from({ length: 60 }, (_, index) => ({
   id: `77777777-7777-4777-8777-${String(index).padStart(12, "0")}`,
   kind: "image",
@@ -77,8 +86,51 @@ const siteVersion = {
   revision: 3,
   requestedTools: [],
 };
-const client = {
+export const client = {
   tools: { forWorkspace: () => ({}) },
+  // New artifact puts its prompt in the new-chat composer draft; the fixture
+  // records the drafted text.
+  async getNewSessionDraft(_workspaceId: string) {
+    return {
+      text: "",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: null,
+      reasoningEffort: null,
+      latencyMode: null,
+      options: {},
+      revision: fixtureActivity.prompts.length,
+    };
+  },
+  async saveNewSessionDraft(_workspaceId: string, draft: { text: string }) {
+    fixtureActivity.prompts.push(draft.text);
+    return { ...draft, revision: fixtureActivity.prompts.length };
+  },
+  async updateArtifactPin(
+    _workspaceId: string,
+    kind: ArtifactCatalogItem["kind"],
+    id: string,
+    pinned: boolean,
+  ) {
+    fixtureActivity.pins.push({ kind, id, pinned });
+    const params = new URLSearchParams(location.search);
+    if (params.has("pin-pending")) return new Promise<never>(() => {});
+    if (params.has("pin-error"))
+      throw Object.assign(new Error("Unable to save artifact pin."), { status: 503 });
+    const item = items.find((candidate) => candidate.kind === kind && candidate.id === id);
+    if (!item) throw Object.assign(new Error("Artifact not found."), { status: 404 });
+    item.pinned = pinned;
+    sessionStorage.setItem(
+      pinStorageKey,
+      JSON.stringify(
+        items
+          .filter((candidate) => candidate.pinned)
+          .map((candidate) => `${candidate.kind}:${candidate.id}`),
+      ),
+    );
+    return { pinned };
+  },
   async getWorkspaceArtifact(_workspaceId: string, id: string) {
     const item = items.find((candidate) => candidate.id === id && candidate.kind === "site");
     if (!item) throw Object.assign(new Error("Site not found."), { status: 404 });
@@ -97,28 +149,33 @@ const client = {
   },
   async getWorkspaceArtifactHtml(_workspaceId: string, id: string) {
     fixtureActivity.siteHtml.push(id);
-    // A still must render the markup without running the script or loading the image.
-    return `<!doctype html><html><head><style>body{font:15px system-ui;margin:32px;color:#1f2328}h1{font-size:28px}.bar{height:14px;border-radius:7px;background:#2f6feb;margin:10px 0}</style></head><body><h1>Product analytics</h1><p>Weekly active teams by plan.</p><div class="bar" style="width:80%"></div><div class="bar" style="width:55%"></div><div class="bar" style="width:30%"></div><img src="https://example.com/pixel.png" alt=""><script>document.body.style.background="red";parent.postMessage("site-ran","*")</script></body></html>`;
+    // A still must render the markup without running the script or loading the
+    // image. The browser harness serves this image origin and logs every hit.
+    const outside = Reflect.get(window, "artifactLibraryOutsideOrigin") ?? "https://example.com";
+    return `<!doctype html><html><head><style>body{font:15px system-ui;margin:32px;color:#1f2328}h1{font-size:28px}.bar{height:14px;border-radius:7px;background:#2f6feb;margin:10px 0}</style></head><body><h1>Product analytics</h1><p>Weekly active teams by plan.</p><div class="bar" style="width:80%"></div><div class="bar" style="width:55%"></div><div class="bar" style="width:30%"></div><img src="${outside}/pixel.png" alt=""><script>document.body.style.background="red";parent.postMessage("site-ran","*")</script></body></html>`;
   },
   async listArtifactCatalog(_workspaceId: string, options: ArtifactCatalogListOptions = {}) {
     const state = new URLSearchParams(location.search).get("state");
     if (state === "loading") return new Promise<never>(() => {});
     if (state === "error")
       throw Object.assign(new Error("Unable to reach the artifact catalog."), { status: 503 });
+    const filtered =
+      state === "empty"
+        ? []
+        : filterArtifactCatalog(
+            new URLSearchParams(location.search).has("many") ? gallery : items,
+            {
+              ...defaultArtifactFilters,
+              ...options,
+              q: options.q ?? "",
+              kind: options.kind ?? "all",
+            },
+          );
+    const paginated = new URLSearchParams(location.search).has("pages");
+    const offset = Number(options.cursor ?? 0);
     return {
-      items:
-        state === "empty"
-          ? []
-          : filterArtifactCatalog(
-              new URLSearchParams(location.search).has("many") ? gallery : items,
-              {
-                ...defaultArtifactFilters,
-                ...options,
-                q: options.q ?? "",
-                kind: options.kind ?? "all",
-              },
-            ),
-      nextCursor: null,
+      items: paginated ? filtered.slice(offset, offset + 20) : filtered,
+      nextCursor: paginated && offset + 20 < filtered.length ? String(offset + 20) : null,
     };
   },
   async getRetainedArtifact(_workspaceId: string, id: string) {
@@ -174,6 +231,9 @@ const client = {
     };
   },
 };
+export async function updateFixtureArtifactPin(item: ArtifactCatalogItem, pinned: boolean) {
+  await client.updateArtifactPin(workspaceId, item.kind, item.id, pinned);
+}
 export function useAppContext() {
   return {
     client,
@@ -186,12 +246,18 @@ export function useAppContext() {
     workspaces: [{ id: workspaceId, accountId: "99999999-9999-4999-8999-999999999999" }],
     accessContext: {
       subjectId: "fixture",
+      accountGrants: [],
       workspaceGrants: [
         {
           workspaceId,
           accountId: "99999999-9999-4999-8999-999999999999",
           subjectId: "fixture",
-          permissions: ["sessions:create"],
+          permissions: [
+            "sessions:create",
+            "artifacts:read",
+            "files:read",
+            ...(new URLSearchParams(location.search).has("readonly") ? [] : ["artifacts:publish"]),
+          ],
         },
       ],
     },

@@ -1,0 +1,2927 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
+import {
+  acceptOrganizationInvitation,
+  appendRecordingLiveSegments,
+  beginRecordingAudioExpiry,
+  checkWorkspaceAllowance,
+  browserRecordingActionLogObjectKey,
+  browserRecordingBundleObjectKey,
+  browserRecordingVideoObjectKey,
+  claimBrowserRecordingVideo,
+  claimRecordingTranscriptVersion,
+  completeBrowserRecordingVideo,
+  completeRecordingAudioExpiry,
+  completeRecordingTranscriptVersion,
+  createBrowserRecording,
+  createDb,
+  createOrganizationInvitation,
+  createRecording,
+  createRecordingPerson,
+  createRecordingTranscriptVersion,
+  deleteWorkspace,
+  ensureManagedAccessForUser,
+  failBrowserRecordingVideo,
+  failRecordingTranscriptVersion,
+  fillRecordingUnrecordedStretches,
+  finalizeRecording,
+  findBrowserRecording,
+  forgetRecordingPersonVoice,
+  forgetWorkspaceRecordingVoices,
+  getBrowserRecordingVideo,
+  getRecording,
+  getRecordingSearchDetails,
+  getRecordingTranscriptPage,
+  getWorkspaceUsage,
+  listDeletingRecordingObjectKeys,
+  listDueRecordingRetention,
+  listRecordingLiveSegments,
+  listRecordingNotes,
+  listRecordingPeople,
+  listRecordings,
+  listStalledRecordingWork,
+  markRecordingChunksUploaded,
+  markRecordingDeleting,
+  purgeDeletingRecording,
+  RecordingConflictError,
+  RecordingForbiddenError,
+  RecordingNotFoundError,
+  recordUsageEvent,
+  releaseRecordingLiveGrant,
+  rememberRecordingPersonVoice,
+  reserveRecordingChunks,
+  saveRecordingNote,
+  setCurrentRecordingTranscriptVersion,
+  setWorkspaceAllowance,
+  startRecordingLiveTrack,
+  updateRecordingSegments,
+  updateRecordingSpeakers,
+  updateWorkspaceSettings,
+  workspaceMemberDisplayName,
+  LIVE_GRANT_REFUSED_MESSAGE,
+  LIVE_SESSION_MAX_MILLISECONDS,
+  LIVE_UNBACKED_DAILY_MAX_MILLISECONDS,
+  withWorkspaceSubjectRls,
+  type Database,
+  type DbClient,
+  type RecordingLiveModel,
+  type RecordingLiveRange,
+} from "../src";
+import * as schema from "../src/schema";
+
+// The production posture: a NOSUPERUSER NOBYPASSRLS migration owner and FORCE
+// RLS, so the owner-run recovery inventory is bound by row security exactly as
+// deployed. A superuser-owned database would hide a missing owner policy.
+let shared: RestrictedRuntimeTestDatabase | null = null;
+let client: DbClient | null = null;
+const workspaceIds: string[] = [];
+
+beforeAll(async () => {
+  shared = await acquireRestrictedRuntimeTestDatabase("recordings-postgres");
+  if (!shared) return;
+  client = createDb(shared.appUrl, { searchPath: shared.schema });
+}, 180_000);
+
+afterAll(async () => {
+  if (client) {
+    for (const workspaceId of workspaceIds) {
+      await deleteWorkspace(client.db, workspaceId).catch(() => undefined);
+    }
+  }
+  await client?.close().catch(() => undefined);
+  await shared?.release();
+}, 180_000);
+
+/** A live model nobody's credits pay for: its list-price cost counts toward allowances. */
+/** A live model not charged in credits, listed at 100 micros a second. */
+const listPrice = (milliseconds: number) => Math.round(milliseconds / 10);
+const unbilled = () => ({ listPriceMicros: listPrice, charge: null });
+
+/** A shared workspace with its owner and one more member. */
+async function workspace() {
+  const db = client!.db;
+  const ownerUserId = `recording-owner-${crypto.randomUUID()}`;
+  const memberUserId = `recording-member-${crypto.randomUUID()}`;
+  const owner = `user:${ownerUserId}`;
+  const member = `user:${memberUserId}`;
+  const ownerAccess = await ensureManagedAccessForUser(db, {
+    userId: ownerUserId,
+    email: `${ownerUserId}@example.test`,
+    name: "Recording owner",
+  });
+  await ensureManagedAccessForUser(db, {
+    userId: memberUserId,
+    email: `${memberUserId}@example.test`,
+    name: "Recording member",
+  });
+  workspaceIds.push(...ownerAccess.workspaceGrants.map((grant) => grant.workspaceId));
+  const grant = ownerAccess.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === ownerAccess.defaultWorkspaceId,
+  )!;
+  const { accountId, workspaceId } = grant;
+  const invitation = await createOrganizationInvitation(db, {
+    organizationId: accountId,
+    actorSubjectId: owner,
+    operationId: crypto.randomUUID(),
+    targetSubjectId: member,
+    targetEmail: `${memberUserId}@example.test`,
+    role: "member",
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  await acceptOrganizationInvitation(db, {
+    organizationId: accountId,
+    actorSubjectId: member,
+    operationId: crypto.randomUUID(),
+    invitationId: invitation.id,
+    expectedRevision: invitation.revision,
+  });
+  await shared!.admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+    values (${accountId}, ${workspaceId}, ${member}, 'member', '["sessions:read"]'::jsonb)
+    on conflict do nothing`;
+  return { accountId, workspaceId, owner, member };
+}
+
+const sha = (seed: string) => seed.repeat(64).slice(0, 64);
+const transcription = { providerId: "elevenlabs", model: "scribe_v2", options: {} };
+
+/** A finalized two-track recording whose version 1 is queued. */
+async function finalizedRecording(
+  scope: Awaited<ReturnType<typeof workspace>>,
+  visibility: "private" | "workspace",
+) {
+  const db = client!.db;
+  const recordingId = crypto.randomUUID();
+  const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+  await createRecording(db, {
+    ...actor,
+    accountId: scope.accountId,
+    recordingId,
+    title: "Weekly sync",
+    visibility,
+    externalRef: `project:${recordingId}`,
+    tracks: [
+      { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+      { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+    ],
+  });
+  for (const trackNumber of [0, 1]) {
+    await reserveRecordingChunks(db, {
+      ...actor,
+      recordingId,
+      trackNumber,
+      chunks: [
+        {
+          chunkNumber: 0,
+          byteLength: 100,
+          sha256: sha(`${trackNumber}a`),
+          startMilliseconds: 0,
+          durationMilliseconds: 5_000,
+        },
+        {
+          chunkNumber: 1,
+          byteLength: 100,
+          sha256: sha(`${trackNumber}b`),
+          startMilliseconds: 5_000,
+          durationMilliseconds: 5_000,
+        },
+      ],
+    });
+    await markRecordingChunksUploaded(db, {
+      ...actor,
+      recordingId,
+      trackNumber,
+      chunkNumbers: [0, 1],
+    });
+  }
+  const versionId = crypto.randomUUID();
+  const finalized = await finalizeRecording(db, {
+    ...actor,
+    recordingId,
+    tracks: [
+      { trackNumber: 0, chunkCount: 2 },
+      { trackNumber: 1, chunkCount: 2 },
+    ],
+    transcription,
+    versionId,
+  });
+  return { recordingId, versionId, actor, finalized };
+}
+
+describe("recordings", () => {
+  test("private recordings are Only me; shared ones are visible to the workspace", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const mine = await finalizedRecording(scope, "private");
+    const ours = await finalizedRecording(scope, "workspace");
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+
+    const ownerList = await listRecordings(db, mine.actor);
+    expect(ownerList.recordings.map((recording) => recording.id).sort()).toEqual(
+      [mine.recordingId, ours.recordingId].sort(),
+    );
+    const memberList = await listRecordings(db, memberActor);
+    expect(memberList.recordings.map((recording) => recording.id)).toEqual([ours.recordingId]);
+    await expect(
+      getRecording(db, { ...memberActor, recordingId: mine.recordingId }),
+    ).rejects.toBeInstanceOf(RecordingNotFoundError);
+    const visible = await getRecording(db, { ...memberActor, recordingId: ours.recordingId });
+    expect(visible.visibility).toBe("workspace");
+    expect(visible.state).toBe("processing");
+    expect(
+      visible.tracks.map((track) => [track.source, track.chunkCount, track.durationMilliseconds]),
+    ).toEqual([
+      ["microphone", 2, 10_000],
+      ["system", 2, 10_000],
+    ]);
+  });
+
+  test("finalizing keeps where a track has no audio: a lost microphone, and after it stopped", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+        { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+      ],
+    });
+    // The microphone records 0-10 s, is unplugged, comes back for 14-19 s
+    // and is never heard again; the shared audio runs for 30 s. A reopened
+    // microphone's moment of setup (19-20.5 s) is not missing audio.
+    const pieces: Record<number, Array<[number, number]>> = {
+      0: [
+        [0, 5_000],
+        [5_000, 5_000],
+        [14_000, 5_000],
+      ],
+      1: [0, 1, 2, 3, 4, 5].map((index) => [index * 5_000, 5_000] as [number, number]),
+    };
+    for (const [trackNumber, chunks] of Object.entries(pieces).map(
+      ([key, value]) => [Number(key), value] as const,
+    )) {
+      await reserveRecordingChunks(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunks: chunks.map(([startMilliseconds, durationMilliseconds], chunkNumber) => ({
+          chunkNumber,
+          byteLength: 100,
+          sha256: sha(`${trackNumber}${chunkNumber}`),
+          startMilliseconds,
+          durationMilliseconds,
+        })),
+      });
+      await markRecordingChunksUploaded(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunkNumbers: chunks.map((_, chunkNumber) => chunkNumber),
+      });
+    }
+    const finalized = await finalizeRecording(db, {
+      ...actor,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, chunkCount: 3 },
+        { trackNumber: 1, chunkCount: 6 },
+      ],
+      transcription,
+      versionId: crypto.randomUUID(),
+    });
+    const expected = [
+      [
+        { startMilliseconds: 10_000, endMilliseconds: 14_000 },
+        { startMilliseconds: 19_000, endMilliseconds: null },
+      ],
+      [],
+    ];
+    expect(finalized.recording.tracks.map((track) => track.unrecorded)).toEqual(expected);
+    const view = await getRecording(db, { ...actor, recordingId });
+    expect(view.tracks.map((track) => track.unrecorded)).toEqual(expected);
+
+    // A meeting finalized before tracks kept this gets it when next transcribed.
+    await shared!
+      .admin`update recording_tracks set unrecorded = null where recording_id = ${recordingId}`;
+    expect(
+      (await getRecording(db, { ...actor, recordingId })).tracks.map((track) => track.unrecorded),
+    ).toEqual([[], []]);
+    expect(await fillRecordingUnrecordedStretches(db, { ...actor, recordingId })).toBe(true);
+    expect(
+      (await getRecording(db, { ...actor, recordingId })).tracks.map((track) => track.unrecorded),
+    ).toEqual(expected);
+    expect(await fillRecordingUnrecordedStretches(db, { ...actor, recordingId })).toBe(false);
+  });
+
+  test("creating, reserving and finalizing again are idempotent; a reused id is refused", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "private");
+    const again = await createRecording(db, {
+      ...recording.actor,
+      accountId: scope.accountId,
+      recordingId: recording.recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(again.created).toBe(false);
+    const refinalized = await finalizeRecording(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      tracks: [
+        { trackNumber: 0, chunkCount: 2 },
+        { trackNumber: 1, chunkCount: 2 },
+      ],
+      transcription,
+      versionId: crypto.randomUUID(),
+    });
+    expect(refinalized.finalized).toBe(false);
+    expect(refinalized.version.id).toBe(recording.versionId);
+    await expect(
+      createRecording(db, {
+        workspaceId: scope.workspaceId,
+        subjectId: scope.member,
+        accountId: scope.accountId,
+        recordingId: recording.recordingId,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+      }),
+    ).rejects.toBeInstanceOf(RecordingConflictError);
+  });
+
+  test("transcript versions, speaker naming and carried-over track speakers", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "workspace");
+    const owner = crypto.randomUUID();
+    const job = await claimRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      leaseSeconds: 600,
+    });
+    expect(job?.chunks).toHaveLength(4);
+    expect(
+      await claimRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner: crypto.randomUUID(),
+        leaseSeconds: 600,
+      }),
+    ).toBeNull();
+    // The same workflow takes its own lease back after a crash.
+    expect(
+      (
+        await claimRecordingTranscriptVersion(db, {
+          ...recording.actor,
+          versionId: recording.versionId,
+          processingOwner: owner,
+          leaseSeconds: 600,
+        })
+      )?.version.id,
+    ).toBe(recording.versionId);
+    const completed = await completeRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      languages: ["en"],
+      diarized: true,
+      diarization: "provider",
+      audioMilliseconds: 10_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 2_000,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "Hi all.",
+        },
+        {
+          startMilliseconds: 2_100,
+          endMilliseconds: 4_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_0",
+          text: "Hello.",
+        },
+        {
+          startMilliseconds: 4_100,
+          endMilliseconds: 6_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_1",
+          text: "Budget is fine.",
+        },
+      ],
+      trackSpeakers: [{ label: "track-0", displayName: "Recording owner" }],
+    });
+    expect(completed?.state).toBe("complete");
+    expect(completed?.isCurrent).toBe(true);
+
+    const page = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
+    expect(page.segments.map((segment) => segment.text)).toEqual([
+      "Hi all.",
+      "Hello.",
+      "Budget is fine.",
+    ]);
+    expect(page.speakers.find((speaker) => speaker.label === "track-0")?.name).toBe(
+      "Recording owner",
+    );
+
+    const { person } = await createRecordingPerson(db, {
+      ...recording.actor,
+      accountId: scope.accountId,
+      personId: crypto.randomUUID(),
+      displayName: "Kari",
+    });
+    const speakers = await updateRecordingSpeakers(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      assignments: [
+        { label: "speaker_0", personId: person.id },
+        { label: "speaker_1", name: "Ola" },
+      ],
+      segmentOverrides: [{ segmentIndex: 2, label: "speaker_0" }],
+    });
+    expect(speakers.find((speaker) => speaker.label === "speaker_0")?.name).toBe("Kari");
+    const renamed = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
+    expect(renamed.segments[2]?.speakerLabel).toBe("speaker_0");
+
+    // Text corrections are a layer: the original comes back when cleared.
+    const corrected = await updateRecordingSegments(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      edits: [{ segmentIndex: 1, text: "Hello there." }],
+    });
+    expect(corrected[0]).toMatchObject({
+      text: "Hello there.",
+      edited: true,
+      speakerLabel: "speaker_0",
+    });
+    await updateRecordingSegments(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      edits: [{ segmentIndex: 1, text: "Hello." }],
+    });
+    const reverted = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
+    expect(reverted.segments[1]).toMatchObject({ text: "Hello.", edited: false });
+    expect(reverted.segments[2]?.speakerLabel).toBe("speaker_0");
+
+    // A member of a shared recording may name speakers too, but only the owner deletes.
+    await updateRecordingSpeakers(db, {
+      workspaceId: scope.workspaceId,
+      subjectId: scope.member,
+      recordingId: recording.recordingId,
+      assignments: [{ label: "speaker_1", name: "Ola Nordmann" }],
+    });
+    await expect(
+      markRecordingDeleting(db, {
+        workspaceId: scope.workspaceId,
+        subjectId: scope.member,
+        recordingId: recording.recordingId,
+      }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+
+    // Notes link the voices of the version they were written about.
+    const at = { ...recording.actor, recordingId: recording.recordingId };
+    const notesSession = crypto.randomUUID();
+    const written = await saveRecordingNote(db, {
+      ...at,
+      kind: "notes",
+      body: [
+        "[Recording owner](speaker:track-0) opened.",
+        `[Kari](speaker:speaker_0) and [Kari](person:${person.id}) said hello.`,
+        "[Ola Nordmann](speaker:speaker_1) left early.",
+        "[Someone](speaker:speaker_7) was never heard.",
+      ].join("\n"),
+      sessionId: notesSession,
+    });
+    expect(written.revision).toBe(1);
+    const notesNow = async () =>
+      (await listRecordingNotes(db, at)).find((note) => note.kind === "notes")!;
+
+    // Version 2 on another model: the microphone owner's name carries over by
+    // label, and Kari carries over to the new label that overlaps her speech.
+    const version2 = await createRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      versionId: crypto.randomUUID(),
+      transcription: { providerId: "elevenlabs", model: "scribe_v3", options: {} },
+    });
+    expect(version2.versionNumber).toBe(2);
+    const owner2 = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: version2.id,
+      processingOwner: owner2,
+      leaseSeconds: 600,
+    });
+    await completeRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: version2.id,
+      processingOwner: owner2,
+      languages: ["en"],
+      diarized: true,
+      diarization: "provider",
+      audioMilliseconds: 10_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 2_000,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "Hi, all.",
+        },
+        {
+          startMilliseconds: 2_000,
+          endMilliseconds: 4_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_9",
+          text: "Hello.",
+        },
+        {
+          startMilliseconds: 4_000,
+          endMilliseconds: 6_100,
+          trackNumber: 1,
+          speakerLabel: "speaker_9",
+          text: "Budget's fine.",
+        },
+        {
+          startMilliseconds: 8_000,
+          endMilliseconds: 9_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_4",
+          text: "New voice.",
+        },
+      ],
+    });
+    const current = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
+    expect(current.version.versionNumber).toBe(2);
+    expect(current.speakers.find((speaker) => speaker.label === "track-0")?.name).toBe(
+      "Recording owner",
+    );
+    expect(current.speakers.find((speaker) => speaker.label === "speaker_9")).toMatchObject({
+      name: "Kari",
+      personId: person.id,
+      source: "carried_over",
+    });
+    // A label nobody named gets the default name every client also shows.
+    expect(current.speakers.find((speaker) => speaker.label === "speaker_4")).toMatchObject({
+      name: "Speaker 5",
+      personId: null,
+      source: null,
+    });
+    const first = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      versionId: recording.versionId,
+    });
+    expect(first.version.isCurrent).toBe(false);
+    expect(first.segments).toHaveLength(3);
+
+    // The notes' links follow the voices into version 2: Kari's speech is now
+    // speaker_9. Ola's segment was moved to Kari, and speaker_7 was never
+    // heard, so neither has a voice to point at and both become plain text.
+    // Who wrote the notes and when stays; the revision moves on.
+    const relinked = await notesNow();
+    expect(relinked).toMatchObject({
+      revision: 2,
+      updatedAt: written.updatedAt,
+      updatedBy: { sessionId: notesSession },
+    });
+    expect(relinked.body).toBe(
+      [
+        "[Recording owner](speaker:track-0) opened.",
+        `[Kari](speaker:speaker_9) and [Kari](person:${person.id}) said hello.`,
+        "Ola Nordmann left early.",
+        "Someone was never heard.",
+      ].join("\n"),
+    );
+    await expect(
+      saveRecordingNote(db, { ...at, kind: "notes", body: "stale", expectedRevision: 1 }),
+    ).rejects.toMatchObject({ code: "notes_changed" });
+
+    // Switching back makes version 1 current again, and the links follow.
+    const switched = await setCurrentRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      versionId: recording.versionId,
+    });
+    expect(switched.isCurrent).toBe(true);
+    const after = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
+    expect(after.version.versionNumber).toBe(1);
+    const back = await notesNow();
+    expect(back.revision).toBe(3);
+    expect(back.body).toContain(`[Kari](speaker:speaker_0) and [Kari](person:${person.id})`);
+    const relinkEvents = await shared!.admin<{ data: Record<string, unknown> }[]>`
+      select data from recording_events
+      where recording_id = ${recording.recordingId} and type = 'recording.notes.updated'
+      order by occurred_at`;
+    expect(
+      relinkEvents.map(({ data }) => [data.noteKind, data.noteRevision, data.sessionId]),
+    ).toEqual([
+      ["notes", 1, notesSession],
+      ["notes", 2, null],
+      ["notes", 3, null],
+    ]);
+  });
+
+  test("beside computer audio the microphone is the person recording, until someone renames it", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    await updateWorkspaceSettings(db, scope.workspaceId, { recordings: { voiceprints: true } });
+    const ownerActor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    // Their profile name, else what their membership is labelled (here the email).
+    expect(await workspaceMemberDisplayName(db, ownerActor)).toContain("@example.test");
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${scope.owner.slice("user:".length)}, 'Recording owner', ${`${crypto.randomUUID()}@example.test`}, true)`;
+    const ownerName = await workspaceMemberDisplayName(db, ownerActor);
+    expect(ownerName).toBe("Recording owner");
+    const recording = await finalizedRecording(scope, "workspace");
+    const voice = [0.9, 0.1, 0.05, 0];
+    async function transcribe(versionId: string) {
+      const lease = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db, {
+        ...ownerActor,
+        versionId,
+        processingOwner: lease,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db, {
+        ...ownerActor,
+        versionId,
+        processingOwner: lease,
+        languages: ["en"],
+        diarized: true,
+        diarization: "ours",
+        audioMilliseconds: 60_000,
+        segments: [
+          {
+            startMilliseconds: 0,
+            endMilliseconds: 9_000,
+            trackNumber: 0,
+            speakerLabel: "track-0",
+            text: "Let's start.",
+          },
+          {
+            startMilliseconds: 10_000,
+            endMilliseconds: 19_000,
+            trackNumber: 1,
+            speakerLabel: "speaker_0",
+            text: "Sounds good.",
+          },
+        ],
+        trackSpeakers: [{ label: "track-0", memberSubjectId: scope.owner, displayName: ownerName }],
+        // Even a voice kept for the microphone teaches nothing by itself.
+        voices: [
+          {
+            label: "track-0",
+            channel: "microphone",
+            model: "test-model",
+            embedding: voice,
+            speechMilliseconds: 30_000,
+          },
+        ],
+      });
+      return (
+        await getRecordingTranscriptPage(db, {
+          ...ownerActor,
+          recordingId: recording.recordingId,
+          versionId,
+        })
+      ).speakers;
+    }
+
+    // The owner is added to the directory, as "It's me" would, and named.
+    const first = await transcribe(recording.versionId);
+    const people = await listRecordingPeople(db, ownerActor);
+    const me = people.find((person) => person.memberSubjectId === scope.owner);
+    expect(me).toMatchObject({ displayName: "Recording owner", voice: null });
+    expect(first.find((speaker) => speaker.label === "track-0")).toMatchObject({
+      name: "Recording owner",
+      personId: me!.id,
+      source: "track",
+      confidence: null,
+    });
+    // The microphone is named, so it is never offered as a voice suggestion.
+    expect(first.filter((speaker) => speaker.source === "suggested")).toEqual([]);
+
+    // Nobody agreed, so no voiceprint; agreeing later doesn't learn from a
+    // speaker nobody confirmed.
+    const prints = async () =>
+      (
+        await shared!.admin<{ prints: number; learned: number }[]>`
+          select
+            (select count(*)::int from recording_voiceprints where person_id = ${me!.id}) as prints,
+            (select count(*)::int from recording_speaker_voices where learned_person_id = ${me!.id}) as learned`
+      )[0];
+    expect(await prints()).toEqual({ prints: 0, learned: 0 });
+    const remembered = await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: me!.id,
+      consent: "self",
+    });
+    expect(remembered.voice).toMatchObject({ consent: "self", learned: false });
+    expect(await prints()).toEqual({ prints: 0, learned: 0 });
+
+    // A new version names them again, reusing their person.
+    const version2 = await createRecordingTranscriptVersion(db, {
+      ...ownerActor,
+      recordingId: recording.recordingId,
+      versionId: crypto.randomUUID(),
+      transcription,
+    });
+    expect(
+      (await transcribe(version2.id)).find((speaker) => speaker.label === "track-0"),
+    ).toMatchObject({ personId: me!.id, source: "track" });
+
+    // A name someone gives the microphone stays through every later version.
+    await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: recording.recordingId,
+      assignments: [{ label: "track-0", name: "Kari" }],
+    });
+    for (let round = 0; round < 2; round += 1) {
+      const next = await createRecordingTranscriptVersion(db, {
+        ...ownerActor,
+        recordingId: recording.recordingId,
+        versionId: crypto.randomUUID(),
+        transcription,
+      });
+      expect(
+        (await transcribe(next.id)).find((speaker) => speaker.label === "track-0"),
+      ).toMatchObject({ name: "Kari", personId: null, source: "carried_over" });
+    }
+    expect(
+      (await listRecordingPeople(db, ownerActor)).filter(
+        (person) => person.memberSubjectId === scope.owner,
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("starting a recording with computer audio adds its owner to the speaker directory", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const ownerActor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const start = async (sources: Array<"microphone" | "system">) =>
+      await createRecording(db, {
+        ...ownerActor,
+        accountId: scope.accountId,
+        recordingId: crypto.randomUUID(),
+        ownerName: "Recording owner",
+        tracks: sources.map((source, trackNumber) => ({
+          trackNumber,
+          source,
+          mimeType: "audio/webm",
+        })),
+      });
+    // A microphone alone may be a whole room: nobody is assumed.
+    await start(["microphone"]);
+    expect(await listRecordingPeople(db, ownerActor)).toEqual([]);
+    await start(["microphone", "system"]);
+    await start(["microphone", "system"]);
+    const people = await listRecordingPeople(db, ownerActor);
+    expect(people.map((person) => [person.displayName, person.memberSubjectId])).toEqual([
+      ["Recording owner", scope.owner],
+    ]);
+    expect(people[0]?.voice).toBeNull();
+  });
+
+  test("search finds title words, transcript word prefixes and corrected words", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "private");
+    const owner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      leaseSeconds: 600,
+    });
+    await completeRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      languages: ["en"],
+      diarized: true,
+      diarization: "provider",
+      audioMilliseconds: 10_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 2_000,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "The onboarding numbers are up.",
+        },
+        {
+          startMilliseconds: 2_100,
+          endMilliseconds: 4_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_0",
+          text: "Pricing page next.",
+        },
+      ],
+      trackSpeakers: [{ label: "track-0", displayName: "Recording owner" }],
+    });
+    const found = async (query: string) =>
+      (await listRecordings(db, { ...recording.actor, query })).recordings.map((entry) => entry.id);
+    expect(await found("weekly sy")).toEqual([recording.recordingId]);
+    // While someone is still typing a word, and with words out of order.
+    expect(await found("onboard")).toEqual([recording.recordingId]);
+    expect(await found("numbers ONBOARD")).toEqual([recording.recordingId]);
+    expect(await found("onboarding budget")).toEqual([]);
+    // Punctuation alone searches titles only, and quotes can't break the query.
+    expect(await found("!!")).toEqual([]);
+    expect(await found("o'nboard & pricing")).toEqual([]);
+    expect(await found("'pricing'")).toEqual([recording.recordingId]);
+    // A corrected segment is found by its new words and no longer by the old ones.
+    await updateRecordingSegments(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+      edits: [{ segmentIndex: 1, text: "Packaging page next." }],
+    });
+    expect(await found("packag")).toEqual([recording.recordingId]);
+    expect(await found("pricing")).toEqual([]);
+  });
+
+  test("a failed first version fails the recording and records the event", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "private");
+    const owner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      leaseSeconds: 600,
+    });
+    const failed = await failRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      errorCode: "provider_rejected",
+    });
+    expect(failed?.state).toBe("failed");
+    const view = await getRecording(db, { ...recording.actor, recordingId: recording.recordingId });
+    expect(view.state).toBe("failed");
+    const events = await shared.admin<{ type: string }[]>`
+      select type from recording_events where recording_id = ${recording.recordingId} order by occurred_at`;
+    expect(events.map((event) => event.type)).toEqual([
+      "recording.started",
+      "recording.finished",
+      "recording.transcript.failed",
+    ]);
+  });
+
+  test("recording events reach workspace and organization webhooks without titles", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const [workspaceHook] = await shared.admin<{ id: string }[]>`
+      insert into workspace_webhooks (account_id, workspace_id, url, secret_encrypted, event_types, enabled)
+      values (${scope.accountId}, ${scope.workspaceId}, 'https://hooks.example.test/ws', 'x',
+        array['recording.finished','recording.deleted'], true)
+      returning id`;
+    const [organizationHook] = await shared.admin<{ id: string }[]>`
+      insert into organization_webhooks (account_id, url, secret_encrypted, event_types, enabled)
+      values (${scope.accountId}, 'https://hooks.example.test/org', 'x',
+        array['recording.finished'], true)
+      returning id`;
+    const recording = await finalizedRecording(scope, "workspace");
+    const workspaceDeliveries = await shared.admin<
+      { event_type: string; payload: Record<string, unknown> }[]
+    >`
+      select event_type, payload from workspace_webhook_deliveries where webhook_id = ${workspaceHook!.id}`;
+    expect(workspaceDeliveries.map((delivery) => delivery.event_type)).toEqual([
+      "recording.finished",
+    ]);
+    const payload = workspaceDeliveries[0]!.payload as {
+      type: string;
+      lane: string;
+      workspaceId: string;
+      data: Record<string, unknown>;
+    };
+    expect(payload.lane).toBe("workspace");
+    expect(payload.workspaceId).toBe(scope.workspaceId);
+    expect(payload.data).toMatchObject({
+      recordingId: recording.recordingId,
+      visibility: "workspace",
+      versionId: recording.versionId,
+      externalRef: `project:${recording.recordingId}`,
+    });
+    expect(JSON.stringify(payload)).not.toContain("Weekly sync");
+    const organizationDeliveries = await shared.admin<{ payload: { lane: string } }[]>`
+      select payload from organization_webhook_deliveries where webhook_id = ${organizationHook!.id}`;
+    expect(organizationDeliveries.map((delivery) => delivery.payload.lane)).toEqual([
+      "organization",
+    ]);
+
+    await markRecordingDeleting(db, { ...recording.actor, recordingId: recording.recordingId });
+    const afterDelete = await shared.admin<{ event_type: string }[]>`
+      select event_type from workspace_webhook_deliveries where webhook_id = ${workspaceHook!.id}
+      order by created_at`;
+    expect(afterDelete.map((delivery) => delivery.event_type)).toEqual([
+      "recording.finished",
+      "recording.deleted",
+    ]);
+  });
+
+  test("deleting hides the recording at once, lists its media, then purges its rows", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "workspace");
+    expect(
+      await listDeletingRecordingObjectKeys(db, {
+        ...recording.actor,
+        recordingId: recording.recordingId,
+      }),
+    ).toBeNull();
+    expect(
+      await purgeDeletingRecording(db, { ...recording.actor, recordingId: recording.recordingId }),
+    ).toBe(false);
+
+    await markRecordingDeleting(db, { ...recording.actor, recordingId: recording.recordingId });
+    await markRecordingDeleting(db, { ...recording.actor, recordingId: recording.recordingId });
+    await expect(
+      getRecording(db, { ...recording.actor, recordingId: recording.recordingId }),
+    ).rejects.toBeInstanceOf(RecordingNotFoundError);
+    expect((await listRecordings(db, recording.actor)).recordings).toHaveLength(0);
+    await expect(
+      claimRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner: crypto.randomUUID(),
+        leaseSeconds: 600,
+      }),
+    ).resolves.toBeNull();
+
+    const keys = await listDeletingRecordingObjectKeys(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
+    // Two uploaded pieces per track, and each audio track's speaker scan.
+    expect(keys).toHaveLength(6);
+    expect(keys).toEqual(
+      expect.arrayContaining(
+        [0, 1].map(
+          (trackNumber) =>
+            `workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/prepared/track-${trackNumber}.speakers`,
+        ),
+      ),
+    );
+    expect(
+      keys!.every((key) =>
+        key.startsWith(`workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/`),
+      ),
+    ).toBe(true);
+    expect(
+      await purgeDeletingRecording(db, { ...recording.actor, recordingId: recording.recordingId }),
+    ).toBe(true);
+    const [rows] = await shared.admin<{ recordings: number; chunks: number; events: number }[]>`
+      select
+        (select count(*)::int from recordings where id = ${recording.recordingId}) as recordings,
+        (select count(*)::int from recording_chunks where recording_id = ${recording.recordingId}) as chunks,
+        (select count(*)::int from recording_events where recording_id = ${recording.recordingId}) as events`;
+    expect(rows).toEqual({ recordings: 0, chunks: 0, events: 3 });
+  });
+
+  test("the recovery sweep finds stalled transcripts and deletions", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "private");
+    const mine = async () =>
+      (await listStalledRecordingWork(db, 200)).filter(
+        (work) => work.recordingId === recording.recordingId,
+      );
+    expect(await mine()).toEqual([]);
+    await shared.admin`
+      update recording_transcript_versions set created_at = now() - interval '5 minutes'
+      where id = ${recording.versionId}`;
+    expect(await mine()).toEqual([
+      {
+        kind: "transcript",
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        recordingId: recording.recordingId,
+        versionId: recording.versionId,
+        ownerSubjectId: scope.owner,
+      },
+    ]);
+    await markRecordingDeleting(db, { ...recording.actor, recordingId: recording.recordingId });
+    await shared.admin`
+      update recordings set updated_at = now() - interval '5 minutes'
+      where id = ${recording.recordingId}`;
+    expect(await mine()).toEqual([
+      {
+        kind: "deletion",
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        recordingId: recording.recordingId,
+        versionId: null,
+        ownerSubjectId: scope.owner,
+      },
+    ]);
+  });
+
+  test("retention deletes old audio and keeps the transcript, then deletes old meetings", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "private");
+    const id = recording.recordingId;
+    const mine = async () =>
+      (await listDueRecordingRetention(db, 200)).filter((due) => due.recordingId === id);
+    const due = (kind: "audio" | "recording") => ({
+      kind,
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      recordingId: id,
+      ownerSubjectId: scope.owner,
+    });
+    // Ten days old, transcribed, with prepared audio for playback.
+    await shared.admin`
+      update recordings set state = 'ready',
+        capture_ended_at = now() - interval '10 days', started_at = now() - interval '10 days'
+      where id = ${id}`;
+    await shared.admin`
+      update recording_transcript_versions set state = 'complete', completed_at = now(), is_current = true
+      where id = ${recording.versionId}`;
+    await shared.admin`
+      update recording_tracks set prepared_bytes = 100,
+        prepared_object_key = ${`workspaces/${scope.workspaceId}/recordings/${id}/prepared/0.ogg`}
+      where recording_id = ${id} and track_number = 0`;
+    // Nothing is due until the workspace sets a period that has passed.
+    expect(await mine()).toEqual([]);
+    await updateWorkspaceSettings(db, scope.workspaceId, {
+      recordings: { retention: { audioDays: 30, transcriptDays: 365 } },
+    });
+    expect(await mine()).toEqual([]);
+    await updateWorkspaceSettings(db, scope.workspaceId, {
+      recordings: { retention: { audioDays: 7, transcriptDays: 365 } },
+    });
+    expect(await mine()).toEqual([due("audio")]);
+
+    // Only the owner acts on it; the audio objects come back for deletion.
+    const keys = await beginRecordingAudioExpiry(db, { ...recording.actor, recordingId: id });
+    expect(keys?.sort()).toEqual(
+      [
+        ...(
+          await shared.admin<{ object_key: string }[]>`
+          select object_key from recording_chunks where recording_id = ${id}`
+        ).map((row) => row.object_key),
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/0.ogg`,
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-0.speakers`,
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-1.speakers`,
+      ].sort(),
+    );
+    // Stamped but interrupted before the objects were gone: offered again,
+    // and beginning again returns the same objects.
+    expect(await mine()).toEqual([due("audio")]);
+    expect(
+      (await beginRecordingAudioExpiry(db, { ...recording.actor, recordingId: id }))?.sort(),
+    ).toEqual(keys?.sort());
+    await completeRecordingAudioExpiry(db, { ...recording.actor, recordingId: id });
+    const after = await getRecording(db, { ...recording.actor, recordingId: id });
+    expect(after.audioDeletedAt).not.toBeNull();
+    expect(
+      await shared.admin`select 1 from recording_chunks where recording_id = ${id}`,
+    ).toHaveLength(0);
+    expect(after.tracks.some((track) => track.playable)).toBe(false);
+    expect(after.transcript?.state).toBe("complete");
+    expect(await mine()).toEqual([]);
+    // Without the audio, it can't be transcribed again.
+    await expect(
+      createRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        recordingId: id,
+        versionId: crypto.randomUUID(),
+        transcription,
+      }),
+    ).rejects.toMatchObject({ code: "audio_deleted" });
+
+    // Past the transcript period, the whole meeting is due for deletion.
+    await updateWorkspaceSettings(db, scope.workspaceId, {
+      recordings: { retention: { audioDays: 1, transcriptDays: 5 } },
+    });
+    expect(await mine()).toEqual([due("recording")]);
+    await markRecordingDeleting(db, { ...recording.actor, recordingId: id });
+    expect(await mine()).toEqual([]);
+  });
+
+  test("remembered voices: consent, learning from confirmed speakers, suggestions and forgetting", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    await updateWorkspaceSettings(db, scope.workspaceId, { recordings: { voiceprints: true } });
+    const ownerActor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+    const ingrid = (
+      await createRecordingPerson(db, {
+        ...ownerActor,
+        accountId: scope.accountId,
+        personId: crypto.randomUUID(),
+        displayName: "Ingrid",
+      })
+    ).person;
+    const me = (
+      await createRecordingPerson(db, {
+        ...ownerActor,
+        accountId: scope.accountId,
+        personId: crypto.randomUUID(),
+        displayName: "Recording owner",
+        memberSubjectId: scope.owner,
+      })
+    ).person;
+    expect(ingrid.voice).toBeNull();
+
+    // Members agree only for themselves; someone attests for an outsider.
+    await expect(
+      rememberRecordingPersonVoice(db, { ...memberActor, personId: me.id, consent: "self" }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    await expect(
+      rememberRecordingPersonVoice(db, { ...ownerActor, personId: me.id, consent: "attested" }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    await expect(
+      rememberRecordingPersonVoice(db, { ...ownerActor, personId: ingrid.id, consent: "self" }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    expect(
+      (await rememberRecordingPersonVoice(db, { ...ownerActor, personId: me.id, consent: "self" }))
+        .voice,
+    ).toMatchObject({ consent: "self", learned: false });
+
+    const model = "test-model";
+    const ingridVoice = [0.9, 0.1, 0.05, 0];
+    const otherVoice = [0, 0.2, 1, 0.1];
+    async function transcribe(
+      recording: { recordingId: string; actor: typeof ownerActor },
+      versionId: string,
+      voices: Array<[string, number[]]>,
+    ) {
+      const lease = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId,
+        processingOwner: lease,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId,
+        processingOwner: lease,
+        languages: ["en"],
+        diarized: true,
+        diarization: "ours",
+        audioMilliseconds: 60_000,
+        segments: voices.map(([label], index) => ({
+          startMilliseconds: index * 10_000,
+          endMilliseconds: index * 10_000 + 9_000,
+          trackNumber: 1,
+          speakerLabel: label,
+          text: `Line ${index}.`,
+        })),
+        voices: voices.map(([label, embedding]) => ({
+          label,
+          channel: "call",
+          model,
+          embedding,
+          speechMilliseconds: 30_000,
+        })),
+      });
+      return (
+        await getRecordingTranscriptPage(db, {
+          ...recording.actor,
+          recordingId: recording.recordingId,
+          versionId,
+        })
+      ).speakers;
+    }
+
+    // Nobody is remembered yet, so nothing is suggested.
+    const first = await finalizedRecording(scope, "workspace");
+    const firstSpeakers = await transcribe(first, first.versionId, [
+      ["speaker_0", ingridVoice],
+      ["speaker_1", otherVoice],
+    ]);
+    expect(firstSpeakers.filter((speaker) => speaker.source === "suggested")).toEqual([]);
+
+    // Confirming Ingrid before she is remembered teaches nothing; agreeing
+    // afterwards learns from the speakers already confirmed as her.
+    await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: first.recordingId,
+      assignments: [{ label: "speaker_0", personId: ingrid.id }],
+    });
+    const remembered = await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: ingrid.id,
+      consent: "attested",
+    });
+    expect(remembered.voice).toMatchObject({ consent: "attested", learned: true });
+
+    // A later meeting suggests her for the voice that sounds like her.
+    const second = await finalizedRecording(scope, "workspace");
+    const secondSpeakers = await transcribe(second, second.versionId, [
+      ["speaker_0", otherVoice],
+      ["speaker_1", [0.88, 0.12, 0.02, 0.01]],
+    ]);
+    const suggested = secondSpeakers.find((speaker) => speaker.label === "speaker_1");
+    expect(suggested).toMatchObject({ personId: ingrid.id, name: "Ingrid", source: "suggested" });
+    expect(suggested?.confidence).toBeGreaterThan(0.9);
+    expect(secondSpeakers.find((speaker) => speaker.label === "speaker_0")?.source).toBeNull();
+
+    // "Not them" is remembered for that voice, across versions.
+    const turnedDown = await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: second.recordingId,
+      rejectSuggestions: [{ label: "speaker_1" }],
+    });
+    expect(turnedDown.find((speaker) => speaker.label === "speaker_1")?.source).toBeNull();
+    const again = await createRecordingTranscriptVersion(db, {
+      ...ownerActor,
+      recordingId: second.recordingId,
+      versionId: crypto.randomUUID(),
+      transcription,
+    });
+    const againSpeakers = await transcribe(second, again.id, [
+      ["speaker_0", [0.87, 0.13, 0.03, 0]],
+      ["speaker_1", otherVoice],
+    ]);
+    expect(againSpeakers.filter((speaker) => speaker.source === "suggested")).toEqual([]);
+
+    // Renaming the confirmed speaker takes the voice back out of her print.
+    await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: first.recordingId,
+      assignments: [{ label: "speaker_0", name: "Someone else" }],
+    });
+    const peopleAfterRename = await listRecordingPeople(db, ownerActor);
+    expect(peopleAfterRename.find((person) => person.id === ingrid.id)?.voice).toMatchObject({
+      learned: false,
+    });
+    await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: first.recordingId,
+      assignments: [{ label: "speaker_0", personId: ingrid.id }],
+    });
+    expect(
+      (await listRecordingPeople(db, ownerActor)).find((person) => person.id === ingrid.id)?.voice,
+    ).toMatchObject({ learned: true });
+
+    // Members forget only their own voice; anyone may forget an outsider's.
+    await expect(
+      forgetRecordingPersonVoice(db, { ...memberActor, personId: me.id }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    expect(
+      (await forgetRecordingPersonVoice(db, { ...memberActor, personId: ingrid.id })).voice,
+    ).toBeNull();
+    const [afterForget] = await shared.admin<{ prints: number }[]>`
+      select count(*)::int as prints from recording_voiceprints where person_id = ${ingrid.id}`;
+    expect(afterForget).toEqual({ prints: 0 });
+
+    // Turning recognition off forgets every voice in the workspace.
+    await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: ingrid.id,
+      consent: "attested",
+    });
+    await forgetWorkspaceRecordingVoices(db, ownerActor);
+    const [afterOff] = await shared.admin<
+      { prints: number; voices: number; rejections: number; consents: number }[]
+    >`
+      select
+        (select count(*)::int from recording_voiceprints where workspace_id = ${scope.workspaceId}) as prints,
+        (select count(*)::int from recording_speaker_voices where workspace_id = ${scope.workspaceId}) as voices,
+        (select count(*)::int from recording_voice_rejections where workspace_id = ${scope.workspaceId}) as rejections,
+        (select count(*)::int from recording_people where workspace_id = ${scope.workspaceId} and voice_consent is not null) as consents`;
+    expect(afterOff).toEqual({ prints: 0, voices: 0, rejections: 0, consents: 0 });
+  });
+
+  test("deleting a recording takes the voices it taught back out of the voiceprints", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    await updateWorkspaceSettings(db, scope.workspaceId, { recordings: { voiceprints: true } });
+    const ownerActor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const ingrid = (
+      await createRecordingPerson(db, {
+        ...ownerActor,
+        accountId: scope.accountId,
+        personId: crypto.randomUUID(),
+        displayName: "Ingrid",
+      })
+    ).person;
+    await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: ingrid.id,
+      consent: "attested",
+    });
+    const model = "test-model";
+    async function transcribe(
+      recording: { recordingId: string; versionId: string; actor: typeof ownerActor },
+      embedding: number[],
+    ) {
+      const lease = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner: lease,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner: lease,
+        languages: ["en"],
+        diarized: true,
+        diarization: "ours",
+        audioMilliseconds: 60_000,
+        segments: [
+          {
+            startMilliseconds: 0,
+            endMilliseconds: 9_000,
+            trackNumber: 1,
+            speakerLabel: "speaker_0",
+            text: "Line 0.",
+          },
+        ],
+        voices: [
+          { label: "speaker_0", channel: "call", model, embedding, speechMilliseconds: 30_000 },
+        ],
+      });
+      return (
+        await getRecordingTranscriptPage(db, {
+          ...recording.actor,
+          recordingId: recording.recordingId,
+          versionId: recording.versionId,
+        })
+      ).speakers;
+    }
+    async function teach(embedding: number[]) {
+      const recording = await finalizedRecording(scope, "workspace");
+      await transcribe(recording, embedding);
+      await updateRecordingSpeakers(db, {
+        ...ownerActor,
+        recordingId: recording.recordingId,
+        assignments: [{ label: "speaker_0", personId: ingrid.id }],
+      });
+      return recording;
+    }
+    const voiceprint = async () => [
+      ...(await shared!.admin<{ embedding: number[]; speech: number; samples: number }[]>`
+        select embedding, speech_milliseconds::int as speech, sample_count as samples
+        from recording_voiceprints where person_id = ${ingrid.id}`),
+    ];
+    const learned = async () =>
+      (await listRecordingPeople(db, ownerActor)).find((person) => person.id === ingrid.id)?.voice
+        ?.learned;
+
+    const first = await teach([0.9, 0.1, 0.05, 0]);
+    const second = await teach([0.8, 0.3, 0, 0.1]);
+    expect((await voiceprint())[0]?.samples).toBe(2);
+
+    // Without the first recording, the print is just the second voice.
+    await markRecordingDeleting(db, { ...first.actor, recordingId: first.recordingId });
+    const norm = Math.hypot(0.8, 0.3, 0, 0.1);
+    const [remaining] = await voiceprint();
+    expect(remaining).toMatchObject({ speech: 30_000, samples: 1 });
+    remaining!.embedding.forEach((value, index) =>
+      expect(value).toBeCloseTo([0.8, 0.3, 0, 0.1][index]! / norm, 5),
+    );
+    // A retried deletion subtracts nothing more.
+    await markRecordingDeleting(db, { ...first.actor, recordingId: first.recordingId });
+    expect(await voiceprint()).toEqual([remaining!]);
+    expect(await learned()).toBe(true);
+
+    // Deleting the only recording left that taught it forgets the voice.
+    await markRecordingDeleting(db, { ...second.actor, recordingId: second.recordingId });
+    expect(await voiceprint()).toEqual([]);
+    expect(await learned()).toBe(false);
+    const [left] = await shared.admin<{ voices: number }[]>`
+      select count(*)::int as voices from recording_speaker_voices
+      where recording_id in (${first.recordingId}, ${second.recordingId})`;
+    expect(left).toEqual({ voices: 0 });
+
+    // Agreeing again does not learn from deleted recordings, and nothing is suggested.
+    await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: ingrid.id,
+      consent: "attested",
+    });
+    expect(await voiceprint()).toEqual([]);
+    const third = await finalizedRecording(scope, "workspace");
+    const thirdSpeakers = await transcribe(third, [0.88, 0.12, 0.02, 0.01]);
+    expect(thirdSpeakers.filter((speaker) => speaker.source === "suggested")).toEqual([]);
+  });
+
+  test("notes: the notepad and the notes, revisions, conflicts and who can see them", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const [hook] = await shared!.admin<{ id: string }[]>`
+      insert into workspace_webhooks (account_id, workspace_id, url, secret_encrypted, event_types, enabled)
+      values (${scope.accountId}, ${scope.workspaceId}, 'https://hooks.example.test/notes', 'x',
+        array['recording.notes.updated'], true)
+      returning id`;
+    const ours = await finalizedRecording(scope, "workspace");
+    const mine = await finalizedRecording(scope, "private");
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+    const at = { ...ours.actor, recordingId: ours.recordingId };
+
+    expect(await listRecordingNotes(db, at)).toEqual([]);
+    const jotted = await saveRecordingNote(db, {
+      ...at,
+      kind: "notepad",
+      body: "- ask about the budget",
+      expectedRevision: 0,
+    });
+    expect(jotted).toMatchObject({
+      kind: "notepad",
+      revision: 1,
+      updatedBy: { subjectId: scope.owner, sessionId: null },
+    });
+    const sessionId = crypto.randomUUID();
+    const written = await saveRecordingNote(db, {
+      ...at,
+      kind: "notes",
+      body: "## Summary\n\nBudget approved.",
+      sessionId,
+    });
+    expect(written).toMatchObject({ kind: "notes", revision: 1, updatedBy: { sessionId } });
+
+    // A stale revision is refused; the same text again changes nothing.
+    const stale = saveRecordingNote(db, {
+      ...at,
+      kind: "notepad",
+      body: "- something else",
+      expectedRevision: 0,
+    });
+    await expect(stale).rejects.toBeInstanceOf(RecordingConflictError);
+    await expect(stale).rejects.toMatchObject({ code: "notes_changed" });
+    const same = await saveRecordingNote(db, {
+      ...at,
+      kind: "notepad",
+      body: "- ask about the budget",
+      expectedRevision: 1,
+    });
+    expect(same.revision).toBe(1);
+    const edited = await saveRecordingNote(db, {
+      ...at,
+      kind: "notepad",
+      body: "- ask about the budget\n- book the room",
+      expectedRevision: 1,
+    });
+    expect(edited.revision).toBe(2);
+
+    // Anyone who can see the meeting reads and writes its notes; a private one stays hidden.
+    const memberView = await listRecordingNotes(db, {
+      ...memberActor,
+      recordingId: ours.recordingId,
+    });
+    expect(memberView.map((note) => [note.kind, note.revision])).toEqual([
+      ["notepad", 2],
+      ["notes", 1],
+    ]);
+    await expect(
+      listRecordingNotes(db, { ...memberActor, recordingId: mine.recordingId }),
+    ).rejects.toBeInstanceOf(RecordingNotFoundError);
+    await expect(
+      saveRecordingNote(db, {
+        ...memberActor,
+        recordingId: mine.recordingId,
+        kind: "notes",
+        body: "x",
+      }),
+    ).rejects.toBeInstanceOf(RecordingNotFoundError);
+
+    // Only the notes are an event, once per change.
+    const events = await shared!.admin<{ type: string; data: Record<string, unknown> }[]>`
+      select type, data from recording_events
+      where recording_id = ${ours.recordingId} and type = 'recording.notes.updated'`;
+    expect(events).toHaveLength(1);
+    expect(events[0]!.data).toMatchObject({ noteKind: "notes", noteRevision: 1, sessionId });
+    expect(JSON.stringify(events[0]!.data)).not.toContain("Budget");
+    const deliveries = await shared!.admin<{ event_type: string }[]>`
+      select event_type from workspace_webhook_deliveries where webhook_id = ${hook!.id}`;
+    expect(deliveries.map((delivery) => delivery.event_type)).toEqual(["recording.notes.updated"]);
+
+    // Deleting the meeting deletes its notes.
+    await markRecordingDeleting(db, at);
+    expect(await purgeDeletingRecording(db, at)).toBe(true);
+    const [left] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from recording_notes where recording_id = ${ours.recordingId}`;
+    expect(left!.count).toBe(0);
+  });
+
+  test("deleting the workspace removes its recordings", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "workspace");
+    await deleteWorkspace(client.db, scope.workspaceId);
+    const [rows] = await shared.admin<{ recordings: number; events: number }[]>`
+      select
+        (select count(*)::int from recordings where id = ${recording.recordingId}) as recordings,
+        (select count(*)::int from recording_events where recording_id = ${recording.recordingId}) as events`;
+    expect(rows).toEqual({ recordings: 0, events: 0 });
+  });
+
+  test("a browser recording: one video track from its bundle, kept out of meetings", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const recordingId = crypto.randomUUID();
+    const input = {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      visibility: "workspace" as const,
+      startedAt: new Date("2026-10-24T08:00:00.000Z"),
+      durationMilliseconds: 12_345.6,
+      bundle: { byteLength: 4_096, sha256: sha("e") },
+    };
+    expect(await findBrowserRecording(db, { ...actor, recordingId })).toBeNull();
+    const created = await createBrowserRecording(db, input);
+    expect(created.created).toBe(true);
+    expect(created.recording).toMatchObject({
+      purpose: "browser",
+      state: "processing",
+      visibility: "workspace",
+      durationMilliseconds: 12_346,
+      errorCode: null,
+      captureEndedAt: "2026-10-24T08:00:12.346Z",
+    });
+    expect(created.recording.tracks).toEqual([
+      expect.objectContaining({
+        trackNumber: 0,
+        kind: "video",
+        source: "browser_tab",
+        chunkCount: 1,
+        totalBytes: 4_096,
+        video: null,
+      }),
+    ]);
+    // Creating it again changes nothing; another bundle under the same id is refused.
+    expect((await createBrowserRecording(db, input)).created).toBe(false);
+    await expect(
+      createBrowserRecording(db, { ...input, bundle: { byteLength: 4_096, sha256: sha("f") } }),
+    ).rejects.toMatchObject({ code: "recording_id_taken" });
+    // Meeting lists and transcripts are for meetings only.
+    expect((await listRecordings(db, actor)).recordings).toHaveLength(0);
+    expect(
+      (await listRecordings(db, { ...actor, purpose: "browser" })).recordings.map(
+        (recording) => recording.id,
+      ),
+    ).toEqual([recordingId]);
+    await expect(
+      createRecordingTranscriptVersion(db, {
+        ...actor,
+        recordingId,
+        versionId: crypto.randomUUID(),
+        transcription,
+      }),
+    ).rejects.toMatchObject({ code: "not_a_meeting" });
+
+    const job = await claimBrowserRecordingVideo(db, { ...actor, recordingId });
+    expect(job?.bundle).toEqual({
+      objectKey: browserRecordingBundleObjectKey({ ...actor, recordingId, sha256: sha("e") }),
+      sha256: sha("e"),
+    });
+    expect(await getBrowserRecordingVideo(db, { ...actor, recordingId })).toBeNull();
+    const videoKey = browserRecordingVideoObjectKey({ ...actor, recordingId });
+    const video = {
+      objectKey: videoKey,
+      bytes: 2_000,
+      sha256: sha("a"),
+      durationMilliseconds: 12_000,
+      width: 1280,
+      height: 720,
+      frameCount: 60,
+    };
+    expect(await completeBrowserRecordingVideo(db, { ...actor, recordingId, video })).toBe(true);
+    expect(await completeBrowserRecordingVideo(db, { ...actor, recordingId, video })).toBe(false);
+    expect(await claimBrowserRecordingVideo(db, { ...actor, recordingId })).toBeNull();
+    const readyVideo = await getBrowserRecordingVideo(db, { ...actor, recordingId });
+    expect(readyVideo).toEqual({
+      objectKey: videoKey,
+      actionLogObjectKey: browserRecordingActionLogObjectKey({ ...actor, recordingId }),
+      bytes: 2_000,
+      sha256: sha("a"),
+      durationMilliseconds: 12_000,
+      width: 1280,
+      height: 720,
+      frameCount: 60,
+      readyForMilliseconds: expect.any(Number),
+    });
+    // How long ago it became ready, by the database's own clock.
+    expect(readyVideo!.readyForMilliseconds).toBeGreaterThanOrEqual(0);
+    expect(readyVideo!.readyForMilliseconds).toBeLessThan(60_000);
+    const ready = await findBrowserRecording(db, {
+      workspaceId: scope.workspaceId,
+      subjectId: scope.member,
+      recordingId,
+    });
+    expect(ready?.recording.state).toBe("ready");
+    expect(ready?.recording.tracks[0]).toMatchObject({
+      kind: "video",
+      playable: true,
+      video: { width: 1280, height: 720, frameCount: 60 },
+    });
+
+    await markRecordingDeleting(db, { ...actor, recordingId });
+    expect((await listDeletingRecordingObjectKeys(db, { ...actor, recordingId }))?.sort()).toEqual(
+      [
+        browserRecordingBundleObjectKey({ ...actor, recordingId, sha256: sha("e") }),
+        videoKey,
+        browserRecordingActionLogObjectKey({ ...actor, recordingId }),
+      ].sort(),
+    );
+  });
+
+  test("a browser recording whose video failed says why", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const recordingId = crypto.randomUUID();
+    await createBrowserRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      visibility: "private",
+      startedAt: new Date(),
+      durationMilliseconds: 1_000,
+      bundle: { byteLength: 10, sha256: sha("c") },
+    });
+    const message = "the recording captured no frames; the page may not have been visible";
+    expect(
+      await failBrowserRecordingVideo(db, {
+        ...actor,
+        recordingId,
+        errorCode: "no_frames",
+        errorMessage: message,
+      }),
+    ).toBe(true);
+    expect(
+      await failBrowserRecordingVideo(db, {
+        ...actor,
+        recordingId,
+        errorCode: "encode_failed",
+        errorMessage: "late",
+      }),
+    ).toBe(false);
+    const failed = await findBrowserRecording(db, { ...actor, recordingId });
+    expect(failed?.recording).toMatchObject({ state: "failed", errorCode: "no_frames" });
+    expect(failed?.errorMessage).toBe(message);
+    // Only me: the member cannot see it.
+    expect(
+      await findBrowserRecording(db, {
+        workspaceId: scope.workspaceId,
+        subjectId: scope.member,
+        recordingId,
+      }),
+    ).toBeNull();
+  });
+
+  test("deleting the workspace removes its browser recordings too", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    const recordingId = crypto.randomUUID();
+    await createBrowserRecording(client.db, {
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner,
+      accountId: scope.accountId,
+      recordingId,
+      visibility: "workspace",
+      startedAt: new Date(),
+      durationMilliseconds: 1_000,
+      bundle: { byteLength: 10, sha256: sha("d") },
+    });
+    await deleteWorkspace(client.db, scope.workspaceId);
+    const [rows] = await shared.admin<{ recordings: number }[]>`
+      select (select count(*)::int from recordings where id = ${recordingId}) as recordings`;
+    expect(rows).toEqual({ recordings: 0 });
+  });
+
+  test("the live preview: only the recorder streams, everyone who can see it reads, a transcript ends it", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      visibility: "workspace",
+      transcription: { language: "nb" },
+      tracks: [
+        { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+        { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+      ],
+    });
+    const live = { providerId: "elevenlabs", model: "scribe_v2_realtime" };
+    const moved = (addedMilliseconds: number) => ({ live, addedMilliseconds, charged: null });
+    await expect(
+      startRecordingLiveTrack(db, { ...memberActor, recordingId, trackNumber: 0, ...live }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+    await expect(
+      appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 1_000,
+        pricing: unbilled,
+        segments: [],
+      }),
+    ).rejects.toMatchObject({ code: "no_live_session" });
+    expect(
+      await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live }),
+    ).toEqual({ language: "nb" });
+    await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 1, ...live });
+    const segment = (segmentNumber: number, start: number, text: string) => ({
+      segmentNumber,
+      startMilliseconds: start,
+      endMilliseconds: start + 900,
+      text,
+    });
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 4_000,
+        pricing: unbilled,
+        segments: [segment(0, 100, "Hei alle."), segment(1, 2_000, "Kan dere høre meg?")],
+      }),
+    ).toEqual({ saved: 2, ended: false, ...moved(4_000) });
+    // A retry keeps the first copy, and an older total never lowers the stored one.
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 3_000,
+        pricing: unbilled,
+        segments: [segment(1, 2_000, "changed")],
+      }),
+    ).toEqual({ saved: 0, ended: false, ...moved(0) });
+    // Only audio past the stored total counts, once: the live charge's measure.
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 5_500,
+        pricing: unbilled,
+        segments: [],
+      }),
+    ).toEqual({ saved: 0, ended: false, ...moved(1_500) });
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 5_500,
+        pricing: unbilled,
+        segments: [],
+      }),
+    ).toEqual({ saved: 0, ended: false, ...moved(0) });
+    await appendRecordingLiveSegments(db, {
+      ...actor,
+      recordingId,
+      trackNumber: 1,
+      streamedMilliseconds: 4_000,
+      pricing: unbilled,
+      segments: [segment(0, 1_000, "Ja, fint.")],
+    });
+    await expect(
+      appendRecordingLiveSegments(db, {
+        ...memberActor,
+        recordingId,
+        trackNumber: 1,
+        streamedMilliseconds: 5_000,
+        pricing: unbilled,
+        segments: [segment(1, 3_000, "not mine")],
+      }),
+    ).rejects.toBeInstanceOf(RecordingForbiddenError);
+
+    const all = await listRecordingLiveSegments(db, { ...memberActor, recordingId });
+    expect(all.ended).toBe(false);
+    expect(all.segments.map((row) => [row.trackNumber, row.segmentNumber, row.text])).toEqual([
+      [0, 0, "Hei alle."],
+      [0, 1, "Kan dere høre meg?"],
+      [1, 0, "Ja, fint."],
+    ]);
+    const newer = await listRecordingLiveSegments(db, {
+      ...actor,
+      recordingId,
+      after: all.segments[1]!.sequence,
+    });
+    expect(newer.segments.map((row) => row.text)).toEqual(["Ja, fint."]);
+    expect(newer.after).toBe(all.after);
+    const viewed = await getRecording(db, { ...actor, recordingId });
+    expect(viewed.tracks.map((track) => track.live)).toEqual([
+      { ...live, streamedMilliseconds: 5_500, costUsd: 0.00055 },
+      { ...live, streamedMilliseconds: 4_000, costUsd: 0.0004 },
+    ]);
+
+    // A recording stopped mid-stream still takes its last live text, then a
+    // ready transcript ends the preview and removes it.
+    for (const trackNumber of [0, 1]) {
+      await reserveRecordingChunks(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: 100,
+            sha256: sha(`${trackNumber}c`),
+            startMilliseconds: 0,
+            durationMilliseconds: 5_000,
+          },
+        ],
+      });
+      await markRecordingChunksUploaded(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunkNumbers: [0],
+      });
+    }
+    const versionId = crypto.randomUUID();
+    await finalizeRecording(db, {
+      ...actor,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, chunkCount: 1 },
+        { trackNumber: 1, chunkCount: 1 },
+      ],
+      transcription,
+      versionId,
+    });
+    await expect(
+      startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live }),
+    ).rejects.toMatchObject({ code: "not_capturing" });
+    expect(
+      (
+        await appendRecordingLiveSegments(db, {
+          ...actor,
+          recordingId,
+          trackNumber: 0,
+          streamedMilliseconds: 5_000,
+          pricing: unbilled,
+          segments: [segment(2, 4_000, "Ha det.")],
+        })
+      ).saved,
+    ).toBe(1);
+    const processingOwner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...actor,
+      versionId,
+      processingOwner,
+      leaseSeconds: 600,
+    });
+    await completeRecordingTranscriptVersion(db, {
+      ...actor,
+      versionId,
+      processingOwner,
+      languages: ["nb"],
+      diarized: false,
+      diarization: "tracks",
+      audioMilliseconds: 5_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 900,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "Hei alle.",
+        },
+      ],
+    });
+    const ended = await listRecordingLiveSegments(db, { ...memberActor, recordingId });
+    expect(ended).toMatchObject({ segments: [], ended: true });
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 6_000,
+        pricing: unbilled,
+        segments: [segment(3, 5_000, "late")],
+      }),
+    ).toEqual({ saved: 0, ended: true, live: null, addedMilliseconds: 0, charged: null });
+    const [rows] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from recording_live_segments where recording_id = ${recordingId}`;
+    expect(rows!.count).toBe(0);
+  });
+
+  test("finding meetings by words, speaker and date, with the lines that match", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+    async function transcribed(
+      visibility: "private" | "workspace",
+      segments: Array<{ at: number; label: string; text: string }>,
+    ) {
+      const recording = await finalizedRecording(scope, visibility);
+      const processingOwner = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner,
+        languages: ["en"],
+        diarized: true,
+        diarization: "provider",
+        audioMilliseconds: 600_000,
+        segments: segments.map((segment) => ({
+          startMilliseconds: segment.at,
+          endMilliseconds: segment.at + 4_000,
+          trackNumber: 1,
+          speakerLabel: segment.label,
+          text: segment.text,
+        })),
+      });
+      return recording;
+    }
+    const budget = await transcribed("workspace", [
+      { at: 0, label: "speaker_0", text: "Welcome everyone." },
+      { at: 5_000, label: "speaker_1", text: "The budget for the roof is tight." },
+      { at: 60_000, label: "speaker_0", text: "Then we cut the budget elsewhere." },
+      { at: 120_000, label: "speaker_1", text: "Agreed." },
+    ]);
+    const other = await transcribed("workspace", [
+      { at: 0, label: "speaker_0", text: "Nothing about money here." },
+    ]);
+    const mine = await transcribed("private", [
+      { at: 0, label: "speaker_0", text: "My private budget notes." },
+    ]);
+    const { person } = await createRecordingPerson(db, {
+      ...budget.actor,
+      accountId: scope.accountId,
+      personId: crypto.randomUUID(),
+      displayName: "Ingrid Solberg",
+    });
+    await updateRecordingSpeakers(db, {
+      ...budget.actor,
+      recordingId: budget.recordingId,
+      assignments: [
+        { label: "speaker_0", personId: person.id },
+        { label: "speaker_1", name: "Tomas" },
+      ],
+    });
+    // A corrected line is found by its corrected words.
+    await updateRecordingSegments(db, {
+      ...budget.actor,
+      recordingId: budget.recordingId,
+      edits: [{ segmentIndex: 3, text: "Agreed, the scaffolding can wait." }],
+    });
+
+    const ids = async (input: Parameters<typeof listRecordings>[1]) =>
+      (await listRecordings(db, input)).recordings.map((recording) => recording.id).sort();
+    expect(await ids({ ...memberActor, query: "budget" })).toEqual([budget.recordingId]);
+    expect(await ids({ ...budget.actor, query: "budget" })).toEqual(
+      [budget.recordingId, mine.recordingId].sort(),
+    );
+    expect(await ids({ ...memberActor, person: "ingrid" })).toEqual([budget.recordingId]);
+    expect(await ids({ ...memberActor, person: person.id })).toEqual([budget.recordingId]);
+    expect(await ids({ ...memberActor, person: "Tom" })).toEqual([budget.recordingId]);
+    expect(await ids({ ...memberActor, person: "nobody" })).toEqual([]);
+    const now = Date.now();
+    expect(
+      await ids({
+        ...memberActor,
+        startedFrom: new Date(now - 3_600_000),
+        startedTo: new Date(now + 60_000),
+      }),
+    ).toEqual([budget.recordingId, other.recordingId].sort());
+    expect(await ids({ ...memberActor, startedFrom: new Date(now + 60_000) })).toEqual([]);
+
+    const details = await getRecordingSearchDetails(db, {
+      ...memberActor,
+      recordingIds: [budget.recordingId, other.recordingId, mine.recordingId],
+      query: "budget",
+      matchesPerRecording: 1,
+    });
+    // Someone else's Only me recording stays invisible, even by id.
+    expect(details.has(mine.recordingId)).toBe(false);
+    expect(details.get(other.recordingId)).toMatchObject({ matches: [] });
+    expect(details.get(budget.recordingId)?.speakers.map((speaker) => speaker.name)).toEqual([
+      "Ingrid Solberg",
+      "Tomas",
+    ]);
+    expect(details.get(budget.recordingId)?.matches).toEqual([
+      { startMilliseconds: 5_000, speaker: "Tomas", text: "The budget for the roof is tight." },
+    ]);
+    const corrected = await getRecordingSearchDetails(db, {
+      ...memberActor,
+      recordingIds: [budget.recordingId],
+      query: "scaffolding",
+    });
+    expect(corrected.get(budget.recordingId)?.matches).toEqual([
+      { startMilliseconds: 120_000, speaker: "Tomas", text: "Agreed, the scaffolding can wait." },
+    ]);
+
+    const stretch = await getRecordingTranscriptPage(db, {
+      ...memberActor,
+      recordingId: budget.recordingId,
+      fromMilliseconds: 6_000,
+      toMilliseconds: 120_000,
+    });
+    expect(stretch.segments.map((segment) => segment.startMilliseconds)).toEqual([5_000, 60_000]);
+  });
+});
+
+describe("recordings and usage allowances", () => {
+  async function completeVersion(
+    recording: Awaited<ReturnType<typeof finalizedRecording>>,
+    costUsdMicros: number,
+  ) {
+    const db = client!.db;
+    const owner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      leaseSeconds: 600,
+    });
+    return await completeRecordingTranscriptVersion(db, {
+      ...recording.actor,
+      versionId: recording.versionId,
+      processingOwner: owner,
+      languages: ["en"],
+      diarized: false,
+      diarization: "none",
+      costUsdMicros,
+      audioMilliseconds: 10_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 2_000,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "Hi.",
+        },
+      ],
+    });
+  }
+
+  test("a transcript and a live preview count once, at list price, for the person", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const usageScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    await setWorkspaceAllowance(db, {
+      ...usageScope,
+      actorSubjectId: scope.owner,
+      includedCredits: 1_000,
+      period: "monthly",
+      memberDefault: "equal_share",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const recording = await finalizedRecording(scope, "private");
+    await completeVersion(recording, 300);
+    let usage = await getWorkspaceUsage(db, usageScope);
+    expect(usage.workspace.used).toBe(300);
+    expect(usage.members.find((member) => member.subjectId === scope.owner)?.used).toBe(300);
+
+    // The live preview's cost grows while it streams; each increase counts once.
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const live = { providerId: "elevenlabs", model: "scribe_v2_realtime" };
+    await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live });
+    const stream = async (streamedMilliseconds: number) =>
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds,
+        pricing: unbilled,
+        segments: [],
+      });
+    await stream(1_000);
+    await stream(3_000);
+    // A late, older total changes nothing.
+    await stream(2_000);
+    await stream(3_000);
+    usage = await getWorkspaceUsage(db, usageScope);
+    expect(usage.workspace.used).toBe(600);
+
+    await completeVersion(await finalizedRecording(scope, "workspace"), 600);
+    expect(
+      await checkWorkspaceAllowance(db, {
+        ...usageScope,
+        subjectId: scope.owner,
+        fundedWithoutCredits: true,
+      }),
+    ).toMatchObject({ code: "allowance_exhausted", scope: "workspace" });
+  });
+
+  test("live audio charged in credits is charged in its save's transaction, once per range, and an allowance never counts it twice", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const admin = shared.admin;
+    const scope = await workspace();
+    const usageScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    await setWorkspaceAllowance(db, {
+      ...usageScope,
+      actorSubjectId: scope.owner,
+      includedCredits: 1_000_000,
+      period: "monthly",
+      memberDefault: "equal_share",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const live = { providerId: "azure-openai", model: "gpt-4o-transcribe" };
+    await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live });
+    const asked: unknown[] = [];
+    let fail = false;
+    let entered: (() => void) | null = null;
+    let hold: Promise<void> | null = null;
+    // The charge records its usage receipt in the save's own transaction.
+    const charged = (current: RecordingLiveModel) => {
+      asked.push(current);
+      return {
+        listPriceMicros: listPrice,
+        charge: async (tx: Database, range: RecordingLiveRange) => {
+          const sourceId = `${recordingId}:live:0:${range.fromMilliseconds}-${range.toMilliseconds}`;
+          await recordUsageEvent(tx, {
+            ...usageScope,
+            eventType: "model.cost",
+            quantity: range.toMilliseconds - range.fromMilliseconds,
+            unit: "usd_micros",
+            sourceResourceType: "voice_transcription",
+            sourceResourceId: sourceId,
+            idempotencyKey: `voice.transcription_cost:${sourceId}`,
+          });
+          entered?.();
+          if (hold) await hold;
+          if (fail) throw new Error("the ledger is unavailable");
+        },
+      };
+    };
+    const segment = (segmentNumber: number) => ({
+      segmentNumber,
+      startMilliseconds: segmentNumber * 1_000,
+      endMilliseconds: segmentNumber * 1_000 + 900,
+      text: `Line ${segmentNumber}.`,
+    });
+    const stream = async (
+      streamedMilliseconds: number,
+      pricing: Parameters<typeof appendRecordingLiveSegments>[1]["pricing"] = charged,
+      segments: ReturnType<typeof segment>[] = [],
+    ) =>
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds,
+        pricing,
+        segments,
+      });
+    const receipts = async () =>
+      (
+        await admin<{ source: string }[]>`
+          select source_resource_id as source from usage_events
+          where workspace_id = ${scope.workspaceId} and source_resource_type = 'voice_transcription'`
+      )
+        .map((row) => row.source.split(":").at(-1))
+        .sort();
+    const used = async () => (await getWorkspaceUsage(db, usageScope)).workspace.used;
+    // Streamed before charging began (an older release): it counts at list
+    // price, and charging starts after it.
+    await stream(2_000, unbilled);
+    expect(await used()).toBe(200);
+    // The receipt commits with the text (the nested receipt leaves the save's
+    // own scope in place for the text after it).
+    expect(await stream(5_000, charged, [segment(0)])).toMatchObject({
+      saved: 1,
+      live,
+      addedMilliseconds: 3_000,
+      charged: { fromMilliseconds: 2_000, toMilliseconds: 5_000 },
+    });
+    // The pricing is asked with the model the track streams to, under the lock.
+    expect(asked).toEqual([live]);
+    // A charge that fails fails the whole save: no receipt, no text, no
+    // total; the retry charges the same audio once.
+    fail = true;
+    await expect(stream(8_000, charged, [segment(1)])).rejects.toThrow("the ledger is unavailable");
+    fail = false;
+    expect(await receipts()).toEqual(["2000-5000"]);
+    expect((await getRecording(db, { ...actor, recordingId })).tracks[0]!.live).toMatchObject({
+      streamedMilliseconds: 5_000,
+    });
+    expect(await stream(8_000, charged, [segment(1)])).toMatchObject({
+      saved: 1,
+      charged: { fromMilliseconds: 5_000, toMilliseconds: 8_000 },
+    });
+    // Overlapping saves (a client retrying a save whose response was lost):
+    // the second waits for the first's charge, then charges only what's new.
+    let release: () => void = () => undefined;
+    hold = new Promise((done) => (release = done));
+    const inCharge = new Promise<void>((done) => (entered = done));
+    const first = stream(12_000);
+    await inCharge;
+    entered = null;
+    hold = null;
+    const second = stream(15_000);
+    await Bun.sleep(100);
+    release();
+    expect((await first).charged).toEqual({ fromMilliseconds: 8_000, toMilliseconds: 12_000 });
+    expect((await second).charged).toEqual({ fromMilliseconds: 12_000, toMilliseconds: 15_000 });
+    expect(await stream(15_000)).toMatchObject({ addedMilliseconds: 0, charged: null });
+    expect(await receipts()).toEqual(["12000-15000", "2000-5000", "5000-8000", "8000-12000"]);
+    // Charged audio never counts at list price as well.
+    expect(await used()).toBe(200);
+    // A pod of the previous release writes the list price of the whole total:
+    // only its new audio counts.
+    await admin`
+      update recording_tracks set live_streamed_milliseconds = 16000, live_cost_usd_micros = 1600
+      where recording_id = ${recordingId} and track_number = 0`;
+    expect(await used()).toBe(300);
+    // A switch to a model not charged in credits counts only its new audio,
+    // and moves the mark past it so it's never charged as well.
+    await stream(18_000, unbilled);
+    expect(await used()).toBe(500);
+    expect(await stream(20_000)).toMatchObject({
+      charged: { fromMilliseconds: 18_000, toMilliseconds: 20_000 },
+    });
+    expect(await used()).toBe(500);
+    const [row] = await admin<
+      {
+        live_cost_usd_micros: string;
+        live_charged_cost_usd_micros: string;
+        live_charged_milliseconds: number;
+      }[]
+    >`
+      select live_cost_usd_micros, live_charged_cost_usd_micros, live_charged_milliseconds
+      from recording_tracks where recording_id = ${recordingId} and track_number = 0`;
+    expect(row).toEqual({
+      live_cost_usd_micros: "2000",
+      live_charged_cost_usd_micros: "1500",
+      live_charged_milliseconds: 20_000,
+    });
+  });
+
+  /** A meeting with two tracks streaming live, and its recorder's moves. */
+  async function liveMeeting(existing?: Awaited<ReturnType<typeof workspace>>, subjectId?: string) {
+    const db = client!.db;
+    const scope = existing ?? (await workspace());
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: subjectId ?? scope.owner };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+        { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+      ],
+    });
+    const live = { providerId: "azure-openai", model: "gpt-4o-transcribe" };
+    const streamed = new Map<number, number>();
+    return {
+      recordingId,
+      start: async (trackNumber = 0, bounded = true) =>
+        await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber, ...live, bounded }),
+      release: async (trackNumber = 0) =>
+        await releaseRecordingLiveGrant(db, { ...actor, recordingId, trackNumber }),
+      /**
+       * Report the track's total, `more` milliseconds past its last report;
+       * charged in credits (the charge itself left out) unless `billed` is false.
+       */
+      report: async (more: number, trackNumber = 0, billed = true) => {
+        const total = (streamed.get(trackNumber) ?? 0) + more;
+        streamed.set(trackNumber, total);
+        await appendRecordingLiveSegments(db, {
+          ...actor,
+          recordingId,
+          trackNumber,
+          streamedMilliseconds: total,
+          pricing: billed
+            ? () => ({ listPriceMicros: listPrice, charge: async () => undefined })
+            : unbilled,
+          segments: [],
+        });
+      },
+      /**
+       * Let `minutes` pass: every live timestamp of the recording's tracks,
+       * and the workspace's hours of unbacked live time, move back.
+       */
+      elapse: async (minutes: number) => {
+        await shared!.admin`
+          update recording_tracks set
+            live_granted_at = live_granted_at - make_interval(secs => ${minutes * 60}),
+            live_reported_at = live_reported_at - make_interval(secs => ${minutes * 60}),
+            live_counted_at = live_counted_at - make_interval(secs => ${minutes * 60})
+          where recording_id = ${recordingId}`;
+        // Through a century ago, so no hour lands on one not yet moved.
+        for (const by of [minutes * 60 + 3_155_760_000, -3_155_760_000]) {
+          await shared!.admin`
+            update recording_live_unbacked_hours
+            set hour_start = hour_start - make_interval(secs => ${by})
+            where workspace_id = ${scope.workspaceId}`;
+        }
+        await shared!.admin`
+          update recording_tracks
+          set live_provisional_hour = live_provisional_hour - make_interval(secs => ${minutes * 60})
+          where workspace_id = ${scope.workspaceId}`;
+      },
+    };
+  }
+  const refused = (code: string) => ({ code, message: LIVE_GRANT_REFUSED_MESSAGE });
+
+  test("an honest recorder's quick pause and resume cycles early on are never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // Each resume is a new session that streams a few seconds, reported on
+    // pausing and on resuming.
+    for (let cycle = 0; cycle < 12; cycle++) {
+      await meeting.start(0);
+      await meeting.report(5_000);
+      await meeting.report(0);
+    }
+    await meeting.start(0);
+  });
+
+  test("an honest silent track reconnecting after 14 minutes is never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // Silence streams too, and the recorder reports it every minute, then
+    // before asking again. That the SDK does is its regression test ("a
+    // silent track reports its audio every minute ..." in the SDK's
+    // recording-live tests); here, the server accepts it.
+    await meeting.start(0);
+    for (let minute = 0; minute < 14; minute++) {
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+    await meeting.report(0);
+    await meeting.start(0);
+    // The same track without the reports, as an SDK that reports only
+    // finished lines would leave it, is refused.
+    await meeting.start(1);
+    await meeting.elapse(14);
+    await expect(meeting.start(1)).rejects.toMatchObject(refused("live_streamed_behind"));
+  });
+
+  test("an honest recorder resuming after a long pause is never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // Five minutes streamed, then an hour paused (reported on pausing and on
+    // resuming), and the session drops right after: the pause isn't counted.
+    await meeting.start(0);
+    for (let minute = 0; minute < 5; minute++) {
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+    await meeting.elapse(60);
+    await meeting.report(0);
+    await meeting.elapse(0.5);
+    await meeting.report(30_000);
+    await meeting.start(0);
+  });
+
+  test("long pauses after a little speech, not reported as pauses, are never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // Five minutes of speech, then cycles of 20 seconds of speech, a 20
+    // minute pause the recorder doesn't report (as the mobile recorder
+    // didn't), and 2 minutes of speech after a new session. The report on
+    // resuming has 20 seconds more audio after over 20 minutes: only that
+    // audio and a minute count against it.
+    await meeting.start(0);
+    for (let minute = 0; minute < 5; minute++) {
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+    for (let cycle = 0; cycle < 10; cycle++) {
+      await meeting.elapse(20 / 60);
+      await meeting.elapse(20);
+      await meeting.report(20_000);
+      await meeting.start(0);
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+  });
+
+  test("a recorder that doesn't report the audio its live sessions stream is refused more", async () => {
+    if (!client || !shared) return;
+    // Sessions never reported on: four, then no more until it reports.
+    const silent = await liveMeeting();
+    for (let session = 0; session < 4; session++) await silent.start(0);
+    await expect(silent.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    await silent.report(1_000);
+    await silent.start(0);
+    // A session never reported on counts all its time: half an hour of it
+    // with nothing reported is past the 10 minutes plus a quarter allowed.
+    await silent.start(1);
+    await silent.elapse(30);
+    await expect(silent.start(1)).rejects.toMatchObject(refused("live_streamed_behind"));
+    // Audio not charged in credits is counted, never refused.
+    await silent.start(1, false);
+
+    // Reporting far less audio than the time between reports: a second each
+    // minute.
+    const under = await liveMeeting();
+    await under.start(0);
+    for (let report = 0; report < 8; report++) {
+      await under.elapse(1);
+      await under.report(1_000);
+    }
+    await under.start(0);
+    for (let report = 0; report < 6; report++) {
+      await under.elapse(1);
+      await under.report(1_000);
+    }
+    await expect(under.start(0)).rejects.toMatchObject(refused("live_streamed_behind"));
+    // Each track is bounded on its own.
+    await under.start(1);
+
+    // Twenty sessions, then one more for every five minutes reported.
+    const many = await liveMeeting();
+    for (let session = 0; session < 20; session++) {
+      await many.start(0);
+      await many.report(1_000);
+    }
+    await expect(many.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // A session the provider never started gives its place back.
+    await many.release(0);
+    await many.start(0);
+    await many.report(300_000);
+    await many.start(0);
+    await expect(many.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    const rows = await shared.admin<{ live_grants: number; live_unreported_grants: number }[]>`
+      select live_grants, live_unreported_grants from recording_tracks
+      where recording_id = ${many.recordingId} and track_number = 0`;
+    expect([...rows]).toEqual([{ live_grants: 21, live_unreported_grants: 0 }]);
+  });
+
+  test("a person's live time no reported audio accounts for is bounded across recordings, for a day", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // Each session streams 29 minutes, ended by a report of no new audio:
+    // per track that is far from its own limits, but each new recording
+    // adds to the person's day, and no session starts whose hour would take
+    // the day past four hours.
+    const recordings = [];
+    for (let index = 0; index < 3; index++) {
+      const meeting = await liveMeeting(scope);
+      recordings.push(meeting);
+      for (let session = 0; session < 3; session++) {
+        if (index === 2 && session === 1) {
+          const [day] = await shared.admin<{ unbacked: string }[]>`
+            select coalesce(sum(unbacked_milliseconds), 0)::text as unbacked
+            from recording_live_unbacked_hours where workspace_id = ${scope.workspaceId}`;
+          expect(Number(day!.unbacked) + LIVE_SESSION_MAX_MILLISECONDS).toBeGreaterThan(
+            LIVE_UNBACKED_DAILY_MAX_MILLISECONDS,
+          );
+          await expect(meeting.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+          // Another track of the same recording is refused too.
+          await expect(meeting.start(1)).rejects.toMatchObject(refused("live_grant_limit"));
+          // Audio not charged in credits (a legacy account, billing off) is
+          // never refused.
+          await meeting.start(0, false);
+          break;
+        }
+        await meeting.start(0);
+        await meeting.elapse(29);
+        await meeting.report(0);
+      }
+      // A last session the provider never started is taken back; the
+      // recording's time still counts for the day.
+      if (index < 2) {
+        await meeting.start(0);
+        await meeting.release(0);
+      }
+    }
+    // Another person in another workspace isn't affected.
+    await (await liveMeeting()).start(0);
+    // A day later, the earlier recordings no longer count.
+    await recordings[0]!.elapse(24 * 60);
+    await recordings[2]!.start(0);
+  });
+
+  test("an honest recorder talking ten minutes, then paused five hours, again and again, is never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // The pause is reported on pausing and on resuming. The session stays
+    // open (muted) until the provider ends it an hour after it began, and the
+    // recorder asks for no new one while paused: of each pause only what is
+    // left of that hour counts.
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await meeting.start(0);
+      for (let minute = 0; minute < 10; minute++) {
+        await meeting.elapse(1);
+        await meeting.report(60_000);
+      }
+      await meeting.report(0);
+      await meeting.elapse(5 * 60);
+      await meeting.report(0);
+    }
+    await meeting.start(0);
+    const [row] = await shared.admin<{ unbacked: string }[]>`
+      select live_unbacked_milliseconds::text as unbacked from recording_tracks
+      where recording_id = ${meeting.recordingId} and track_number = 0`;
+    // Fifty minutes of each pause (less the test's own few milliseconds).
+    expect(Number(row!.unbacked)).toBeLessThanOrEqual(3 * 50 * 60_000);
+    expect(Number(row!.unbacked)).toBeGreaterThan(3 * 50 * 60_000 - 10_000);
+  });
+
+  test("the workspace's API keys share one daily bound, so a new key doesn't reset it", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // A key's sessions, each streaming 29 minutes ended by a report of no
+    // new audio, reach the day's four hours: the last's hour wouldn't fit.
+    const first = await liveMeeting(scope, `api_key:${crypto.randomUUID()}`);
+    for (let session = 0; session < 7; session++) {
+      await first.start(0);
+      await first.elapse(29);
+      await first.report(0);
+    }
+    await expect(first.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // Another key of the workspace, as a new one made to start over, is
+    // refused too.
+    const second = await liveMeeting(scope, `api_key:${crypto.randomUUID()}`);
+    await expect(second.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // A person of the workspace has their own bound, and sees none of the
+    // keys' time.
+    await (await liveMeeting(scope)).start(0);
+    const visible = await withWorkspaceSubjectRls(
+      client.db,
+      scope.workspaceId,
+      scope.owner,
+      async (tx) => await tx.select().from(schema.recordingLiveUnbackedHours),
+    );
+    expect(visible.map((row) => row.boundSubjectId)).toEqual([scope.owner]);
+  });
+
+  test("a recorder that never reports pays each session's hour against the day, a new recording at a time", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // A session on each of two tracks, an hour, another asked for (refused,
+    // as the tracks are behind), then a new recording.
+    const codes: string[] = [];
+    for (let index = 0; index < 4; index++) {
+      const meeting = await liveMeeting(scope);
+      for (const track of [0, 1]) {
+        try {
+          await meeting.start(track);
+        } catch (error) {
+          codes.push((error as { code: string }).code);
+        }
+      }
+      await meeting.elapse(60);
+      await expect(meeting.start(0)).rejects.toMatchObject({ message: LIVE_GRANT_REFUSED_MESSAGE });
+    }
+    // Two recordings' four sessions are the day's four hours: the next
+    // ones are refused.
+    expect(codes).toEqual([
+      "live_grant_limit",
+      "live_grant_limit",
+      "live_grant_limit",
+      "live_grant_limit",
+    ]);
+    const day = await shared.admin<{ unbacked: string }[]>`
+      select coalesce(sum(unbacked_milliseconds), 0)::text as unbacked
+      from recording_live_unbacked_hours where workspace_id = ${scope.workspaceId}`;
+    expect(Number(day[0]!.unbacked)).toBe(4 * LIVE_SESSION_MAX_MILLISECONDS);
+  });
+
+  test("a session counts its hour up front, given back as audio is reported or the provider never starts it", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    const day = async () => {
+      const [row] = await shared!.admin<{ unbacked: string; charged: string }[]>`
+        select coalesce(sum(h.unbacked_milliseconds), 0)::text as unbacked,
+          coalesce(sum(h.charged_milliseconds), 0)::text as charged
+        from recording_live_unbacked_hours h
+        join recordings r on r.workspace_id = h.workspace_id
+        where r.id = ${meeting.recordingId}`;
+      return { unbacked: Number(row!.unbacked), charged: Number(row!.charged) };
+    };
+    await meeting.start(0);
+    expect((await day()).unbacked).toBe(LIVE_SESSION_MAX_MILLISECONDS);
+    // Ten minutes streamed and reported: ten minutes of the hour are used.
+    for (let minute = 0; minute < 10; minute++) {
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+    const after = await day();
+    expect(after.unbacked).toBeLessThanOrEqual(50 * 60_000);
+    expect(after.unbacked).toBeGreaterThan(50 * 60_000 - 10_000);
+    expect(after.charged).toBe(10 * 60_000);
+    // A session the provider never started gives its hour back.
+    await meeting.start(1);
+    await meeting.release(1);
+    expect((await day()).unbacked).toBe(after.unbacked);
+  });
+
+  test("an honest day of half-hour meetings on two tracks is never refused", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // Each meeting's sessions end with what they could still run counted,
+    // and its charged audio adds as much to the day.
+    for (let index = 0; index < 10; index++) {
+      const meeting = await liveMeeting(scope);
+      await meeting.start(0);
+      await meeting.start(1);
+      for (let report = 0; report < 10; report++) {
+        await meeting.elapse(3);
+        await meeting.report(180_000, 0);
+        await meeting.report(180_000, 1);
+      }
+      await meeting.elapse(15);
+    }
+    await (await liveMeeting(scope)).start(0);
+  }, 60_000);
+
+  test("live time not charged in credits (billing off, a legacy account) isn't counted toward the day", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // A session ended by a report of no new audio, and one never reported on.
+    await meeting.start(0, false);
+    await meeting.elapse(30);
+    await meeting.report(0, 0, false);
+    await meeting.start(0, false);
+    await meeting.elapse(30);
+    await meeting.start(0, false);
+    const [track] = await shared.admin<{ unbacked: string }[]>`
+      select live_unbacked_milliseconds::text as unbacked from recording_tracks
+      where recording_id = ${meeting.recordingId} and track_number = 0`;
+    expect(Number(track!.unbacked)).toBeGreaterThanOrEqual(60 * 60_000);
+    const rows = await shared.admin`
+      select 1 from recording_live_unbacked_hours h
+      join recordings r on r.workspace_id = h.workspace_id
+      where r.id = ${meeting.recordingId}`;
+    expect(rows.length).toBe(0);
+  });
+
+  test("an honest heavy day, eight hours of audio across recordings with pauses, is never refused", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    for (let index = 0; index < 4; index++) {
+      const meeting = await liveMeeting(scope);
+      // Two hours each, in half-hour sessions reported every three minutes,
+      // with a quarter-hour pause (reported on pausing and resuming) in the
+      // middle of the first and third sessions.
+      for (let session = 0; session < 4; session++) {
+        // The recorder reports before asking for another session.
+        if (session > 0) await meeting.report(0);
+        await meeting.start(0);
+        for (let report = 0; report < 10; report++) {
+          await meeting.elapse(3);
+          await meeting.report(180_000);
+          if (report === 4 && session % 2 === 0) {
+            await meeting.elapse(15);
+            await meeting.report(0);
+          }
+        }
+      }
+      await meeting.report(0);
+    }
+  }, 60_000);
+
+  test("honest short meetings all day, reported every minute, are never refused", async () => {
+    if (!client || !shared) return;
+    // Each meeting's sessions count their hour up front and keep what they
+    // could still run, but the audio charged allows six times as much.
+    for (const { minutes, tracks } of [
+      { minutes: 10, tracks: [0, 1] },
+      { minutes: 15, tracks: [0, 1] },
+      { minutes: 20, tracks: [0, 1] },
+      { minutes: 10, tracks: [0] },
+    ]) {
+      const scope = await workspace();
+      for (let index = 0; index < 12; index++) {
+        const meeting = await liveMeeting(scope);
+        for (const track of tracks) await meeting.start(track);
+        for (let minute = 0; minute < minutes; minute++) {
+          await meeting.elapse(1);
+          for (const track of tracks) await meeting.report(60_000, track);
+        }
+        for (const track of tracks) await meeting.report(0, track);
+        await meeting.elapse(10);
+      }
+    }
+  }, 180_000);
+
+  test("a recorder reporting a trickle of audio pays the rest of the time against the day", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // An hour's session per recording, reporting a second of audio each
+    // minute: only that second accounts for the minute toward the day (the
+    // track's own slack doesn't), so the day fills a recording at a time.
+    let refusedAt: number | null = null;
+    for (let index = 0; index < 8 && refusedAt === null; index++) {
+      const meeting = await liveMeeting(scope);
+      try {
+        await meeting.start(0);
+      } catch (error) {
+        expect(error).toMatchObject(refused("live_grant_limit"));
+        refusedAt = index;
+        break;
+      }
+      for (let minute = 0; minute < 60; minute++) {
+        await meeting.elapse(1);
+        await meeting.report(1_000);
+      }
+    }
+    // Four hours, less the second each minute, plus six times the four
+    // minutes charged: a fifth recording's hour doesn't fit.
+    expect(refusedAt).toBe(4);
+  }, 180_000);
+
+  test("a burst of first sessions at once grants no more than one after another", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    const meetings = [];
+    for (let index = 0; index < 16; index++) meetings.push(await liveMeeting(scope));
+    const results = await Promise.allSettled(
+      meetings.map(async (meeting) => await meeting.start(0)),
+    );
+    // Four hours a day, an hour each: the same four as one after another.
+    expect(results.filter((result) => result.status === "fulfilled").length).toBe(4);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        expect(result.reason).toMatchObject(refused("live_grant_limit"));
+      }
+    }
+    const [day] = await shared.admin<{ unbacked: string }[]>`
+      select coalesce(sum(unbacked_milliseconds), 0)::text as unbacked
+      from recording_live_unbacked_hours where workspace_id = ${scope.workspaceId}`;
+    expect(Number(day!.unbacked)).toBe(LIVE_UNBACKED_DAILY_MAX_MILLISECONDS);
+  }, 60_000);
+
+  test("concurrent saves, starts and releases of a person, with old hours to drop, never deadlock", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    let meeting = await liveMeeting(scope);
+    // Each round: sessions on both tracks of a meeting (a new one every 50
+    // rounds, within a track's 100 sessions), two hours older than two days
+    // waiting to be dropped, then at once saves on both tracks (each giving
+    // back its session's provisional time), a release followed by another
+    // save, and a new recording's first sessions on both tracks.
+    // The database error's code (40P01 for a deadlock), or the refusal's.
+    const failures: string[] = [];
+    for (let round = 0; round < 150; round++) {
+      if (round > 0 && round % 50 === 0) meeting = await liveMeeting(scope);
+      await meeting.start(0);
+      await meeting.start(1);
+      for (const days of [3, 4]) {
+        await shared.admin`
+          insert into recording_live_unbacked_hours
+            (account_id, workspace_id, bound_subject_id, hour_start, unbacked_milliseconds)
+          values (${scope.accountId}, ${scope.workspaceId}, ${scope.owner},
+            date_trunc('hour', now()) - make_interval(days => ${days}), 1000)
+          on conflict do nothing`;
+      }
+      const next = await liveMeeting(scope);
+      const results = await Promise.allSettled([
+        meeting.report(600_000, 0),
+        next.start(0),
+        meeting.report(600_000, 1),
+        (async () => {
+          await meeting.release(1);
+          await meeting.report(600_000, 0);
+        })(),
+        next.start(1),
+      ]);
+      for (const result of results) {
+        if (result.status !== "rejected") continue;
+        const reason = result.reason as { code?: string; cause?: { code?: string } };
+        failures.push(reason.cause?.code ?? reason.code ?? String(result.reason));
+      }
+    }
+    expect(failures).toEqual([]);
+  }, 240_000);
+
+  test("a save or new session a day after a session's hour leaves that day's time where it was", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    const day = async () => {
+      const [row] = await shared!.admin<{ unbacked: string }[]>`
+        select coalesce(sum(h.unbacked_milliseconds), 0)::text as unbacked
+        from recording_live_unbacked_hours h
+        join recordings r on r.workspace_id = h.workspace_id
+        where r.id = ${meeting.recordingId}
+          and h.hour_start > clock_timestamp() - interval '24 hours'`;
+      return Number(row!.unbacked);
+    };
+    await meeting.start(0);
+    await meeting.start(1);
+    // Track 1 reports its audio, so it isn't behind when it asks again.
+    await meeting.report(50 * 60_000, 1);
+    await meeting.elapse(25 * 60);
+    expect(await day()).toBe(0);
+    // The sessions' time belongs to the hour they began in, which no longer
+    // counts: a report adds nothing to today, and a new session only its own
+    // hour.
+    await meeting.report(0);
+    expect(await day()).toBe(0);
+    await meeting.start(1);
+    expect(await day()).toBeGreaterThanOrEqual(LIVE_SESSION_MAX_MILLISECONDS);
+    expect(await day()).toBeLessThan(LIVE_SESSION_MAX_MILLISECONDS + 10_000);
+  });
+
+  test("a save on a session with no provisional time waits its turn, as a start does", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    const meeting = await liveMeeting(scope);
+    // A session a previous release started (or one before credits were
+    // billed) has no provisional time, so a charged save adds its gap and
+    // what it could still run to the day.
+    await meeting.start(0, false);
+    await meeting.elapse(30);
+    let saved = false;
+    let save: Promise<void> | undefined;
+    await shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${`recording-live-day:${scope.workspaceId}:${scope.owner}`}, 0))`;
+      save = meeting.report(60_000).then(() => {
+        saved = true;
+      });
+      await Bun.sleep(500);
+      expect(saved).toBe(false);
+    });
+    await save;
+    expect(saved).toBe(true);
+    const [row] = await shared.admin<{ unbacked: string }[]>`
+      select coalesce(sum(unbacked_milliseconds), 0)::text as unbacked
+      from recording_live_unbacked_hours where workspace_id = ${scope.workspaceId}`;
+    // 29 of the 30 minutes, and the half hour the session could still run.
+    expect(Number(row!.unbacked)).toBeGreaterThan(59 * 60_000 - 10_000);
+    expect(Number(row!.unbacked)).toBeLessThanOrEqual(59 * 60_000);
+  });
+
+  test("an allowance that ignores unbilled usage doesn't count recordings", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const usageScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    await setWorkspaceAllowance(db, {
+      ...usageScope,
+      actorSubjectId: scope.owner,
+      includedCredits: 1_000,
+      period: "monthly",
+      expectedVersion: 0,
+    });
+    await completeVersion(await finalizedRecording(scope, "private"), 300);
+    expect((await getWorkspaceUsage(db, usageScope)).workspace.used).toBe(0);
+  });
+});

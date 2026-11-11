@@ -1,4 +1,8 @@
-import type { McpServerConnectionRef, ToolAuthNeededPayload } from "@opengeni/contracts";
+import {
+  TOOL_REVIEW_SELECTION_LABELS_MAX,
+  type McpServerConnectionRef,
+  type ToolAuthNeededPayload,
+} from "@opengeni/contracts";
 import {
   defineLocalMcpBridgeDescriptor,
   type LocalMcpBridgeAdapter,
@@ -8,6 +12,22 @@ import {
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import type { MCPServer } from "@openai/agents";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import PostalMime, { addressParser, decodeWords } from "postal-mime";
+import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import { connectorAttachmentFileName } from "./connector-attachments";
+import { projectGmailToolResultForModel } from "./gmail-model-projection";
+import {
+  GMAIL_EXTRA_TOOLS,
+  GMAIL_EXTRA_MUTATIONS,
+  GMAIL_COMPOSE_PROPERTIES,
+  GMAIL_ATTACHMENT_SOURCE_PROPERTIES,
+  gmailToolAvailableOnDeployment,
+  gmailToolRequiredScope,
+  gmailToolSupportsScopes,
+} from "./gmail-rest-tools";
+export { gmailToolAvailableOnDeployment, gmailToolSupportsScopes } from "./gmail-rest-tools";
 
 export const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
 export const GMAIL_REST_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -15,9 +35,18 @@ export const GMAIL_REST_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/
 const GOOGLE_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_BODY_CHARS = 256 * 1024;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const GMAIL_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+const GMAIL_BINARY_RESPONSE_MAX_BYTES = Math.ceil((GMAIL_DOWNLOAD_MAX_BYTES * 4) / 3) + 1024 * 1024;
 const MAX_PAGE_SIZE = 50;
 const REQUEST_TIMEOUT_MS = 15_000;
+/** Messages described on the approval card itself. */
+const SAMPLE_LABELS = 3;
+/** Stays under Gmail's per-user quota (metadata reads cost 5 units, 250 units/s). */
+const SELECTION_LABEL_CONCURRENCY = 8;
+/** Labelling the whole selection must not hold up the approval for long. */
+const SELECTION_LABELS_BUDGET_MS = 45_000;
 const MUTATION_TOOLS = new Set([
+  ...GMAIL_EXTRA_MUTATIONS,
   "create_draft",
   "send_message",
   "send_draft",
@@ -26,13 +55,20 @@ const MUTATION_TOOLS = new Set([
   "unlabel_message",
   "unlabel_thread",
 ]);
-const SENSITIVE_ADD_LABELS = new Set(["TRASH", "SPAM"]);
+/**
+ * The account was connected with less access than this tool needs. The person
+ * is asked in the chat to allow more, through the same connect card.
+ */
+const GMAIL_MORE_ACCESS_NEEDED =
+  "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; try again after they do.";
 
 type ResolveCredentialResult =
   | {
       status: "ok";
       headers: Record<string, string>;
       connectionId: string;
+      /** The provider's actual grants, when the connection broker knows them. */
+      grantedScopes?: string[];
       authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
@@ -67,6 +103,25 @@ export type GmailRestMcpServerOptions = {
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => void | Promise<void>;
   onResolvedConnectionId?: (connectionId: string) => void;
   fetchImpl?: FetchLike;
+  /** Private host callbacks; bytes and transfer URLs never enter model results. */
+  materializeGmailFile?: (request: GmailFileMaterializationRequest) => Promise<unknown>;
+  readGmailFile?: (request: {
+    path: string;
+    sha256: string;
+    maxBytes: number;
+  }) => Promise<Uint8Array>;
+  watchTopicName?: string;
+};
+
+export type GmailFileMaterializationRequest = {
+  serverId: string;
+  connectionId: string;
+  operationId: string;
+  providerAttachmentId: { provider: "google-gmail"; kind: "attachment"; value: string };
+  fileName: string;
+  mediaType: string;
+  bytes: Uint8Array;
+  authorizeProviderRequest: () => Promise<boolean>;
 };
 
 export type GmailRestMcpBridgeConfig = {
@@ -93,6 +148,7 @@ export const GMAIL_REST_MCP_BRIDGE_DESCRIPTOR = defineLocalMcpBridgeDescriptor({
 
 type GmailHeader = { name?: string; value?: string };
 type GmailPart = {
+  partId?: string;
   mimeType?: string;
   filename?: string;
   headers?: GmailHeader[];
@@ -100,6 +156,8 @@ type GmailPart = {
   parts?: GmailPart[];
 };
 type GmailMessage = {
+  historyId?: string;
+  raw?: string;
   id?: string;
   threadId?: string;
   labelIds?: string[];
@@ -117,7 +175,14 @@ type GmailLabel = {
   threadsUnread?: number;
 };
 
-type GmailTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
+type GmailTool = Awaited<ReturnType<MCPServer["listTools"]>>[number] & {
+  annotations?: {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: boolean;
+  };
+};
 
 const messageFormatSchema = {
   type: "string",
@@ -168,7 +233,7 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   {
     name: "send_message",
     description:
-      "Sends a new email immediately from the connected Gmail account. Requires human approval before it runs; there is no way to un-send.",
+      "Sends a new email immediately from the connected Gmail account. Uses the selected approval setting; sending cannot be undone.",
     inputSchema: {
       type: "object",
       required: ["to"],
@@ -200,7 +265,7 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   {
     name: "send_draft",
     description:
-      "Sends an existing Gmail draft as-is. Requires human approval before it runs; there is no way to un-send. Use get_message on the draft's message ID to review its content first.",
+      "Sends an existing Gmail draft as-is. Uses the selected approval setting; sending cannot be undone. Use get_message on the draft's message ID to review its content first.",
     inputSchema: {
       type: "object",
       required: ["draftId"],
@@ -250,7 +315,8 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   },
   {
     name: "search_threads",
-    description: "Searches Gmail threads using Gmail query syntax.",
+    description:
+      "Searches Gmail threads using Gmail query syntax. IDS_ONLY returns thread IDs with one request per page and no message reads.",
     inputSchema: {
       type: "object",
       required: [],
@@ -262,14 +328,19 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
         includeTrash: { type: "boolean" },
         view: {
           type: "string",
-          enum: ["THREAD_VIEW_UNSPECIFIED", "THREAD_VIEW_METADATA_ONLY", "THREAD_VIEW_MINIMAL"],
+          enum: [
+            "THREAD_VIEW_UNSPECIFIED",
+            "THREAD_VIEW_METADATA_ONLY",
+            "THREAD_VIEW_MINIMAL",
+            "IDS_ONLY",
+          ],
         },
       },
     },
   },
   {
     name: "label_thread",
-    description: "Adds non-sensitive labels to a Gmail thread.",
+    description: "Adds labels to a Gmail thread.",
     inputSchema: {
       type: "object",
       required: ["threadId", "labelIds"],
@@ -302,7 +373,7 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   },
   {
     name: "label_message",
-    description: "Adds non-sensitive labels to a Gmail message.",
+    description: "Adds labels to a Gmail message.",
     inputSchema: {
       type: "object",
       required: ["messageId", "labelIds"],
@@ -322,6 +393,73 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   },
 ];
 
+GMAIL_REST_MCP_TOOLS.push(...GMAIL_EXTRA_TOOLS);
+for (const tool of GMAIL_REST_MCP_TOOLS) {
+  const schema = tool.inputSchema as { properties: Record<string, any>; required: string[] };
+  if (["create_draft", "send_message", "update_draft"].includes(tool.name)) {
+    const original = GMAIL_REST_MCP_TOOLS.find((item) => item.name === "create_draft")!
+      .inputSchema as typeof schema;
+    schema.properties = {
+      ...original.properties,
+      ...schema.properties,
+      ...GMAIL_COMPOSE_PROPERTIES,
+    };
+    const attachments = schema.properties.attachments;
+    attachments.items = {
+      ...attachments.items,
+      required: [],
+      additionalProperties: false,
+      properties: { ...attachments.items.properties, ...GMAIL_ATTACHMENT_SOURCE_PROPERTIES },
+    };
+    if (tool.name === "send_message") schema.required = [];
+  }
+  if (tool.name === "send_draft") {
+    schema.properties.expectedContentSha256 = {
+      type: "string",
+      description:
+        "SHA-256 returned by get_draft. Required to bind sending to reviewed draft bytes.",
+    };
+    schema.required.push("expectedContentSha256");
+    tool.description =
+      "Sends the exact reviewed draft bytes. Obtain contentSha256 from get_draft; changed draft content is rejected before submission. Uses the selected approval setting.";
+  }
+  if (tool.name === "list_labels") {
+    schema.properties.includeSystem = {
+      type: "boolean",
+      description:
+        "Include INBOX, UNREAD, STARRED, IMPORTANT, SPAM, TRASH and other system labels.",
+    };
+  }
+  tool.annotations = {
+    readOnlyHint: !MUTATION_TOOLS.has(tool.name),
+    // These are provider-effect hints, never permission decisions or replay authorization.
+    destructiveHint:
+      MUTATION_TOOLS.has(tool.name) &&
+      !["create_draft", "create_label", "import_message", "insert_message"].includes(tool.name),
+    idempotentHint:
+      !MUTATION_TOOLS.has(tool.name) ||
+      [
+        "update_draft",
+        "delete_draft",
+        "update_label",
+        "delete_label",
+        "modify_message",
+        "modify_thread",
+        "batch_modify_messages",
+        "trash_message",
+        "restore_message",
+        "trash_thread",
+        "restore_thread",
+        "label_message",
+        "label_thread",
+        "unlabel_message",
+        "unlabel_thread",
+        "stop_watch",
+      ].includes(tool.name),
+    openWorldHint: true,
+  };
+}
+
 export function isOfficialGmailMcpConfig(
   url: string,
   connectionRef: McpServerConnectionRef | undefined,
@@ -338,6 +476,11 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
   readonly cacheToolsList = false;
   readonly bridge: LocalMcpBridgeDescriptor = GMAIL_REST_MCP_BRIDGE_DESCRIPTOR;
   private readonly fetchImpl: FetchLike;
+  private pinnedConnectionId?: string;
+  private readonly requestContext = new AsyncLocalStorage<{
+    signal: AbortSignal | undefined;
+    mutationSubmitted: boolean;
+  }>();
 
   constructor(private readonly options: GmailRestMcpServerOptions) {
     this.name = `opengeni-gmail-rest-${safeIdentity(options.serverId)}`;
@@ -363,30 +506,232 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
   async invalidateToolsCache(): Promise<void> {}
 
   async listTools(): Promise<GmailTool[]> {
-    return GMAIL_REST_MCP_TOOLS.map((tool) => ({ ...tool }));
+    return structuredClone(
+      GMAIL_REST_MCP_TOOLS.filter((tool) =>
+        gmailToolAvailableOnDeployment(tool.name, this.options),
+      ),
+    );
+  }
+
+  async reviewContext(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Partial<import("@opengeni/contracts").ToolReviewContext>> {
+    // Ask for missing access before the person is asked to approve the action.
+    await this.resolveForTool(toolName, `${GMAIL_REST_API_BASE}/profile`, false);
+    if (["send_draft", "send_message", "create_draft", "update_draft"].includes(toolName)) {
+      const raw =
+        toolName === "send_draft"
+          ? await this.readDraftRaw(requiredId(args.draftId, "draftId"), toolName)
+          : await this.composeMime(args, await this.readReply(args, toolName), toolName);
+      if (toolName === "send_draft") assertContentHash(raw, args.expectedContentSha256);
+      const parsed = await PostalMime.parse(raw, {
+        maxHeadersSize: 128 * 1024,
+        maxNestingDepth: 128,
+      });
+      if (
+        (parsed.text?.length ?? 0) > MAX_BODY_CHARS ||
+        (parsed.html?.length ?? 0) > MAX_BODY_CHARS ||
+        parsed.attachments.length > 100
+      )
+        throw new GmailRestInputError("Email exceeds the review size limit");
+      const headers = headerMap(
+        parsed.headers.map((header) => ({ name: header.originalKey, value: header.value })),
+      );
+      const clean = (value: string) =>
+        value.replaceAll("\u0000", "").replace(/\p{Surrogate}/gu, "�");
+      return {
+        protectedFields: ["raw"],
+        email: {
+          from: clean(headers.from ?? ""),
+          to: clean(headers.to ?? ""),
+          cc: clean(headers.cc ?? ""),
+          bcc: clean(headers.bcc ?? ""),
+          subject: clean(parsed.subject ?? ""),
+          textBody: clean(parsed.text ?? ""),
+          htmlBody: clean(parsed.html ?? ""),
+          contentSha256: sha256(raw),
+          attachments: parsed.attachments.map((attachment) => ({
+            name: clean(attachment.filename ?? "(Unnamed attachment)"),
+            mediaType: attachment.mimeType,
+            bytes:
+              typeof attachment.content === "string"
+                ? Buffer.byteLength(attachment.content)
+                : attachment.content.byteLength,
+          })),
+        },
+      };
+    }
+    if (
+      !["batch_modify_messages", "modify_message", "trash_message", "restore_message"].includes(
+        toolName,
+      )
+    )
+      return {};
+    const ids = Array.isArray(args.messageIds)
+      ? args.messageIds
+      : args.messageId
+        ? [args.messageId]
+        : [];
+    const selected = [...new Set(ids.filter((id): id is string => typeof id === "string"))].slice(
+      0,
+      TOOL_REVIEW_SELECTION_LABELS_MAX,
+    );
+    const clean = (value: string) =>
+      value
+        .replaceAll("\u0000", "")
+        .replace(/\p{Surrogate}/gu, "�")
+        .slice(0, 256);
+    const describe = async (id: string, skippable: (error: unknown) => boolean) => {
+      const url = new URL(
+        `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(requiredId(id, "messageId"))}`,
+      );
+      url.searchParams.set("format", "metadata");
+      url.searchParams.set("fields", "id,payload(headers)");
+      for (const name of ["Subject", "From"]) url.searchParams.append("metadataHeaders", name);
+      let message: GmailMessage;
+      try {
+        message = await this.request<GmailMessage>("get_message", url, {}, true);
+      } catch (error) {
+        if (skippable(error)) return null;
+        throw error;
+      }
+      if (message.id !== id)
+        throw new GmailRestProviderError(
+          "Gmail review metadata did not match the selected message",
+        );
+      const headers = headerMap(message.payload?.headers);
+      return {
+        id,
+        title: clean(headers.subject ? decodeWords(headers.subject) : "(No subject)"),
+        ...(headers.from ? { subtitle: clean(headers.from) } : {}),
+        provenance: "provider_metadata" as const,
+      };
+    };
+    // Samples only enrich the review card. A message Gmail cannot read for
+    // the card (missing, malformed id, rate limit, outage, transport) is
+    // left out, and the action itself reports any real problem when it
+    // runs. Authentication and access refusals still fail closed: the
+    // grant cannot act on this message either.
+    const samples = await Promise.all(
+      selected
+        .slice(0, SAMPLE_LABELS)
+        .map((id) =>
+          describe(
+            id,
+            (error) =>
+              error instanceof GmailRestProviderError &&
+              error.status !== 401 &&
+              error.status !== 403,
+          ),
+        ),
+    );
+    // The rest only label the full list in details, so they are best effort:
+    // bounded concurrency and time. A missing message is skipped; any other
+    // failure (often a rate limit) stops further reads and leaves the
+    // remaining rows as ids.
+    const rest: Array<Awaited<ReturnType<typeof describe>>> = [];
+    const queue = selected.slice(SAMPLE_LABELS);
+    const deadline = Date.now() + SELECTION_LABELS_BUDGET_MS;
+    let next = 0;
+    let stopped = false;
+    await Promise.all(
+      Array.from({ length: Math.min(SELECTION_LABEL_CONCURRENCY, queue.length) }, async () => {
+        while (!stopped && next < queue.length && Date.now() < deadline) {
+          const index = next++;
+          try {
+            rest[index] = await describe(
+              queue[index]!,
+              (error) => error instanceof GmailRestProviderError && error.status === 404,
+            );
+          } catch {
+            stopped = true;
+          }
+        }
+      }),
+    );
+    const labels = [...samples, ...rest].filter((label) => label != null);
+    return {
+      samples: samples.filter((sample) => sample !== null),
+      ...(labels.length > 0 ? { selectionLabels: labels } : {}),
+    };
+  }
+
+  projectModelToolResult(
+    toolName: string,
+    result: import("@opengeni/contracts").AttemptToolResult,
+    budget: { readonly maxTextBytes: number },
+  ): import("@opengeni/contracts").AttemptToolResult {
+    return projectGmailToolResultForModel(toolName, result, budget);
   }
 
   async callTool(toolName: string, args: Record<string, unknown> | null): Promise<any> {
     return (await this.callToolResult(toolName, args)).content;
   }
 
-  async callToolResult(toolName: string, args: Record<string, unknown> | null): Promise<any> {
+  async callToolResult(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<any> {
+    const requestContext = { signal: options?.signal, mutationSubmitted: false };
     try {
       const input = args ?? {};
-      const output = await this.execute(toolName, input);
+      if (options?.signal?.aborted) throw new GmailRestInputError("Gmail operation cancelled");
+      const operation = async () => await this.execute(toolName, input, meta, options?.signal);
+      const output = await this.requestContext.run(requestContext, operation);
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
         structuredContent: output,
       };
     } catch (error) {
+      if (
+        isRoutingMutationOutcomeUnknownError(error) ||
+        error instanceof GmailRestOutcomeUnknownError
+      )
+        throw error;
+      const refused =
+        error instanceof GmailRestProviderError && error.status !== undefined && error.status < 500;
+      if (requestContext.mutationSubmitted && !refused)
+        throw new GmailRestOutcomeUnknownError(
+          "Gmail mutation was submitted but its result could not be delivered; outcome is uncertain",
+        );
       return {
         isError: true,
         content: [{ type: "text", text: safeErrorMessage(error) }],
+        structuredContent: {
+          error: {
+            connectorActionOutcome: "not_executed",
+            outcomeUnknown: false,
+            ...(error instanceof GmailRestProviderError
+              ? {
+                  status: error.status ?? null,
+                  code: error.code,
+                  retryable: error.retryable,
+                  ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+                }
+              : {
+                  code:
+                    error instanceof GmailRestAuthError
+                      ? "authentication_required"
+                      : error instanceof GmailRestInputError
+                        ? "invalid_input"
+                        : "tool_failed",
+                  retryable: false,
+                }),
+          },
+        },
       };
     }
   }
 
-  private async execute(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+  private async execute(
+    toolName: string,
+    args: Record<string, unknown>,
+    meta?: Record<string, unknown> | null,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     switch (toolName) {
       case "list_labels":
         return await this.listLabels(args);
@@ -413,7 +758,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       case "unlabel_thread":
         return await this.modifyLabels("threads", args, false, true);
       default:
-        throw new GmailRestInputError(`Unsupported Gmail tool: ${toolName}`);
+        return await this.executeExtra(toolName, args, meta, signal);
     }
   }
 
@@ -427,10 +772,15 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       true,
     );
     const labels = (payload.labels ?? [])
-      .filter((label) => label.type?.toLowerCase() === "user" && Boolean(label.id))
+      .filter(
+        (label) =>
+          (args.includeSystem === true || label.type?.toLowerCase() === "user") &&
+          Boolean(label.id),
+      )
       .map((label) => ({
         labelId: label.id!,
         name: label.name ?? "",
+        ...(args.includeSystem === true ? { type: label.type ?? null } : {}),
         ...(label.color
           ? {
               color: {
@@ -460,7 +810,14 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     if (view !== "full") {
       for (const header of MESSAGE_HEADERS) url.searchParams.append("metadataHeaders", header);
     }
-    const message = await this.request<GmailMessage>("get_message", url, {}, true);
+    const message = await this.request<GmailMessage>(
+      "get_message",
+      url,
+      {},
+      true,
+      GMAIL_BINARY_RESPONSE_MAX_BYTES,
+    );
+    if (view === "full") await this.hydrateBody(message, "get_message");
     return projectMessage(message, view);
   }
 
@@ -476,7 +833,9 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       id?: string;
       historyId?: string;
       messages?: GmailMessage[];
-    }>("get_thread", url, {}, true);
+    }>("get_thread", url, {}, true, GMAIL_BINARY_RESPONSE_MAX_BYTES);
+    if (view === "full")
+      for (const message of thread.messages ?? []) await this.hydrateBody(message, "get_thread");
     return {
       id: thread.id ?? threadId,
       historyId: thread.historyId ?? null,
@@ -486,7 +845,8 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
 
   private async searchThreads(args: Record<string, unknown>): Promise<unknown> {
     const pageSize = boundedPageSize(args.pageSize);
-    const view = threadView(args.view);
+    const idsOnly = args.view === "IDS_ONLY";
+    const view = idsOnly ? "minimal" : threadView(args.view);
     const url = new URL(`${GMAIL_REST_API_BASE}/threads`);
     url.searchParams.set("maxResults", String(pageSize));
     const query = optionalString(args.query, "query", 4_096);
@@ -494,11 +854,21 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     const pageToken = optionalString(args.pageToken, "pageToken", 4_096);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
     if (args.includeTrash === true) url.searchParams.set("includeSpamTrash", "true");
+    if (idsOnly) url.searchParams.set("fields", "threads(id),nextPageToken,resultSizeEstimate");
     const listed = await this.request<{
       threads?: Array<{ id?: string; snippet?: string; historyId?: string }>;
       nextPageToken?: string;
       resultSizeEstimate?: number;
     }>("search_threads", url, {}, true);
+    if (idsOnly)
+      return {
+        threads: (listed.threads ?? []).map((thread) => ({
+          id: requiredId(thread.id, "provider thread ID"),
+        })),
+        ...(listed.nextPageToken ? { nextPageToken: listed.nextPageToken } : {}),
+        resultCountEstimate:
+          listed.resultSizeEstimate === undefined ? null : String(listed.resultSizeEstimate),
+      };
     const threads = await boundedMap(listed.threads ?? [], 5, async (thread) => {
       if (!thread.id) return null;
       const detailUrl = new URL(`${GMAIL_REST_API_BASE}/threads/${encodeURIComponent(thread.id)}`);
@@ -510,6 +880,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         detailUrl,
         {},
         true,
+        GMAIL_BINARY_RESPONSE_MAX_BYTES,
       );
       return {
         id: detail.id ?? thread.id,
@@ -553,10 +924,14 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         detailUrl,
         {},
         true,
+        full ? GMAIL_BINARY_RESPONSE_MAX_BYTES : GOOGLE_RESPONSE_MAX_BYTES,
       );
+      if (full && detail.message) await this.hydrateBody(detail.message, "list_drafts");
       return {
         ...(detail.message ? projectMessage(detail.message, full ? "full" : "metadata") : {}),
         id: detail.id ?? draft.id,
+        draftId: detail.id ?? draft.id,
+        messageId: detail.message?.id ?? null,
       };
     });
     return {
@@ -577,7 +952,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         url.searchParams.append("metadataHeaders", header);
       reply = await this.request<GmailMessage>("create_draft", url, {}, true);
     }
-    const mime = buildDraftMime(args, reply);
+    const mime = await this.composeMime(args, reply, "create_draft");
     const created = await this.request<{
       id?: string;
       message?: { id?: string; threadId?: string };
@@ -596,7 +971,12 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       },
       false,
     );
-    return { id: created.id ?? null };
+    return {
+      id: created.id ?? null,
+      draftId: created.id ?? null,
+      messageId: created.message?.id ?? null,
+      threadId: created.message?.threadId ?? null,
+    };
   }
 
   /**
@@ -606,8 +986,17 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
    */
   private async sendMessage(args: Record<string, unknown>): Promise<unknown> {
     const to = optionalEmailArray(args.to, "to");
-    if (to.length === 0) {
-      throw new GmailRestInputError("to is required to send a message");
+    if (
+      !args.raw &&
+      !args.rawFile &&
+      to.length +
+        optionalEmailArray(args.cc, "cc").length +
+        optionalEmailArray(args.bcc, "bcc").length ===
+        0
+    ) {
+      throw new GmailRestInputError(
+        "At least one To, Cc or Bcc recipient is required to send a message",
+      );
     }
     const replyToMessageId = optionalString(args.replyToMessageId, "replyToMessageId", 256);
     let reply: GmailMessage | null = null;
@@ -620,7 +1009,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         url.searchParams.append("metadataHeaders", header);
       reply = await this.request<GmailMessage>("send_message", url, {}, true);
     }
-    const mime = buildDraftMime(args, reply);
+    const mime = await this.composeMime(args, reply, "send_message");
     const sent = await this.request<{ id?: string; threadId?: string }>(
       "send_message",
       `${GMAIL_REST_API_BASE}/messages/send`,
@@ -640,13 +1029,16 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
   /** Sends an existing draft exactly as stored; the draft's own content is the review surface. */
   private async sendDraft(args: Record<string, unknown>): Promise<unknown> {
     const draftId = requiredId(args.draftId, "draftId");
+    const raw = await this.readDraftRaw(draftId, "send_draft");
+    assertContentHash(raw, args.expectedContentSha256);
+    await this.validateRawSender(raw, "send_draft");
     const sent = await this.request<{ id?: string; threadId?: string }>(
       "send_draft",
       `${GMAIL_REST_API_BASE}/drafts/send`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: draftId }),
+        body: JSON.stringify({ id: draftId, message: { raw: raw.toString("base64url") } }),
       },
       false,
     );
@@ -662,9 +1054,6 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     const idKey = thread ? "threadId" : "messageId";
     const id = requiredId(args[idKey], idKey);
     const labelIds = requiredStringArray(args.labelIds, "labelIds", 100, 256);
-    if (add && labelIds.some((label) => SENSITIVE_ADD_LABELS.has(label.toUpperCase()))) {
-      throw new GmailRestInputError("TRASH and SPAM cannot be added by this reviewed tool");
-    }
     const toolName = `${add ? "label" : "unlabel"}_${thread ? "thread" : "message"}`;
     const output = await this.request<GmailMessage>(
       toolName,
@@ -681,6 +1070,646 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       threadId: output.threadId ?? (thread ? id : null),
       labelIds: output.labelIds ?? [],
     };
+  }
+
+  private async executeExtra(
+    tool: string,
+    args: Record<string, unknown>,
+    meta?: Record<string, unknown> | null,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const json = (body: unknown, method = "POST"): RequestInit => ({
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      ...(signal ? { signal: signal ?? null } : {}),
+    });
+    const urlFor = (path: string) => new URL(`${GMAIL_REST_API_BASE}/${path}`);
+    if (tool === "get_profile")
+      return await this.request(tool, urlFor("profile"), { signal: signal ?? null }, true);
+    if (tool === "search_messages") {
+      const url = urlFor("messages");
+      addPagination(url, args);
+      const query = optionalString(args.query, "query", 4096);
+      if (query) url.searchParams.set("q", query);
+      for (const id of optionalStrings(args.labelIds, "labelIds"))
+        url.searchParams.append("labelIds", id);
+      if (booleanArg(args.includeSpamTrash, "includeSpamTrash"))
+        url.searchParams.set("includeSpamTrash", "true");
+      const idsOnly = args.messageFormat === "IDS_ONLY";
+      if (idsOnly)
+        url.searchParams.set("fields", "messages(id,threadId),nextPageToken,resultSizeEstimate");
+      const listed = await this.request<{
+        messages?: GmailMessage[];
+        nextPageToken?: string;
+        resultSizeEstimate?: number;
+      }>(tool, url, { signal: signal ?? null }, true);
+      if (idsOnly)
+        return {
+          messages: (listed.messages ?? []).map((message) => ({
+            id: requiredId(message.id, "provider message ID"),
+            ...(message.threadId ? { threadId: message.threadId } : {}),
+          })),
+          ...(listed.nextPageToken ? { nextPageToken: listed.nextPageToken } : {}),
+          resultCountEstimate: listed.resultSizeEstimate ?? null,
+        };
+      const view = args.messageFormat === undefined ? "minimal" : messageView(args.messageFormat);
+      const messages = await boundedMap(listed.messages ?? [], 5, async (message) => {
+        const detailUrl = urlFor(
+          `messages/${encodeURIComponent(requiredId(message.id, "provider message ID"))}`,
+        );
+        detailUrl.searchParams.set("format", view === "full" ? "full" : "metadata");
+        if (view !== "full") {
+          for (const header of MESSAGE_HEADERS)
+            detailUrl.searchParams.append("metadataHeaders", header);
+          detailUrl.searchParams.set(
+            "fields",
+            "id,threadId,labelIds,snippet,internalDate,sizeEstimate,historyId,payload(headers)",
+          );
+        }
+        const detail = await this.request<GmailMessage>(
+          tool,
+          detailUrl,
+          { signal: signal ?? null },
+          true,
+          GMAIL_BINARY_RESPONSE_MAX_BYTES,
+        );
+        if (view === "full") await this.hydrateBody(detail, tool, signal);
+        return projectMessage(detail, view);
+      });
+      return {
+        messages,
+        ...(listed.nextPageToken ? { nextPageToken: listed.nextPageToken } : {}),
+        resultCountEstimate: listed.resultSizeEstimate ?? null,
+      };
+    }
+    if (tool === "get_draft") {
+      const draftId = requiredId(args.draftId, "draftId");
+      const view = messageView(args.messageFormat);
+      const url = urlFor(`drafts/${encodeURIComponent(draftId)}`);
+      url.searchParams.set("format", "raw");
+      const draft = await this.request<{ id?: string; message?: GmailMessage }>(
+        tool,
+        url,
+        { signal: signal ?? null },
+        true,
+        GMAIL_BINARY_RESPONSE_MAX_BYTES,
+      );
+      const raw = decodeBinary(
+        requiredString(draft.message?.raw, "provider draft raw", GMAIL_BINARY_RESPONSE_MAX_BYTES),
+      );
+      const parsed = await PostalMime.parse(raw, {
+        maxHeadersSize: 128 * 1024,
+        maxNestingDepth: 128,
+      });
+      const message: GmailMessage = {
+        ...draft.message,
+        payload: {
+          headers: parsed.headers.map((header) => ({
+            name: header.originalKey,
+            value: header.value,
+          })),
+        },
+      };
+      return {
+        ...projectMessage(message, view === "full" ? "minimal" : view),
+        ...(view === "full"
+          ? {
+              plaintextBody: parsed.text?.slice(0, MAX_BODY_CHARS) ?? null,
+              htmlBody: parsed.html?.slice(0, MAX_BODY_CHARS) ?? null,
+              contentTruncated:
+                (parsed.text?.length ?? 0) > MAX_BODY_CHARS ||
+                (parsed.html?.length ?? 0) > MAX_BODY_CHARS,
+              attachments: parsed.attachments.map((attachment) => ({
+                filename: attachment.filename,
+                mimeType: attachment.mimeType,
+                contentId: attachment.contentId ?? null,
+                size:
+                  typeof attachment.content === "string"
+                    ? Buffer.byteLength(attachment.content)
+                    : attachment.content.byteLength,
+              })),
+            }
+          : {}),
+        id: draft.id ?? draftId,
+        draftId: draft.id ?? draftId,
+        messageId: draft.message?.id ?? null,
+        contentSha256: sha256(raw),
+      };
+    }
+    if (tool === "delete_draft") {
+      const id = requiredId(args.draftId, "draftId");
+      await this.request(
+        tool,
+        urlFor(`drafts/${encodeURIComponent(id)}`),
+        { method: "DELETE", signal: signal ?? null },
+        false,
+      );
+      return { draftId: id, deleted: true };
+    }
+    if (tool === "update_draft") {
+      const id = requiredId(args.draftId, "draftId");
+      if (args.expectedContentSha256 !== undefined)
+        assertContentHash(await this.readDraftRaw(id, tool, signal), args.expectedContentSha256);
+      const reply = await this.readReply(args, tool, signal);
+      const mime = await this.composeMime(args, reply, tool);
+      const draft = await this.request<{ id?: string; message?: GmailMessage }>(
+        tool,
+        urlFor(`drafts/${encodeURIComponent(id)}`),
+        json(
+          {
+            message: {
+              raw: mime.toString("base64url"),
+              ...(reply?.threadId ? { threadId: reply.threadId } : {}),
+            },
+          },
+          "PUT",
+        ),
+        false,
+      );
+      return {
+        draftId: draft.id ?? id,
+        id: draft.id ?? id,
+        messageId: draft.message?.id ?? null,
+        contentSha256: sha256(mime),
+      };
+    }
+    if (["get_label", "create_label", "update_label", "delete_label"].includes(tool)) {
+      const id = tool === "create_label" ? undefined : requiredId(args.labelId, "labelId");
+      if (id && tool !== "get_label" && !id.startsWith("Label_"))
+        throw new GmailRestInputError("Only user-defined Label_ labels can be changed or deleted");
+      const url = urlFor(`labels${id ? `/${encodeURIComponent(id)}` : ""}`);
+      if (tool === "get_label")
+        return await this.request(tool, url, { signal: signal ?? null }, true);
+      if (tool === "delete_label") {
+        await this.request(tool, url, { method: "DELETE", signal: signal ?? null }, false);
+        return { labelId: id, deleted: true };
+      }
+      const body = labelDefinition(
+        args,
+        tool === "create_label" || booleanArg(args.replace, "replace"),
+      );
+      return await this.request(
+        tool,
+        url,
+        json(body, tool === "create_label" ? "POST" : args.replace === true ? "PUT" : "PATCH"),
+        false,
+      );
+    }
+    if (["modify_message", "modify_thread", "batch_modify_messages"].includes(tool)) {
+      const body: Record<string, unknown> = labelChanges(args);
+      let path: string;
+      if (tool === "batch_modify_messages") {
+        body.ids = [...new Set(requiredStringArray(args.messageIds, "messageIds", 1000, 256))];
+        path = "messages/batchModify";
+      } else {
+        const thread = tool === "modify_thread";
+        const id = requiredId(
+          args[thread ? "threadId" : "messageId"],
+          thread ? "threadId" : "messageId",
+        );
+        path = `${thread ? "threads" : "messages"}/${encodeURIComponent(id)}/modify`;
+      }
+      const result = await this.request(tool, urlFor(path), json(body), false);
+      return tool === "batch_modify_messages"
+        ? {
+            status: "acknowledged",
+            submittedCount: (body.ids as string[]).length,
+            reconciliation: "not_checked",
+            message:
+              "Gmail accepted changes for this batch. Individual message state has not been checked.",
+          }
+        : result;
+    }
+    if (/^(?:trash|restore)_(?:message|thread)$/u.test(tool)) {
+      const thread = tool.endsWith("_thread");
+      const id = requiredId(
+        args[thread ? "threadId" : "messageId"],
+        thread ? "threadId" : "messageId",
+      );
+      return await this.request(
+        tool,
+        urlFor(
+          `${thread ? "threads" : "messages"}/${encodeURIComponent(id)}/${tool.startsWith("trash_") ? "trash" : "untrash"}`,
+        ),
+        { method: "POST", signal: signal ?? null },
+        false,
+      );
+    }
+    if (tool === "get_history") {
+      const url = urlFor("history");
+      addPagination(url, args);
+      const start = requiredString(args.startHistoryId, "startHistoryId", 256);
+      if (!/^[0-9]+$/u.test(start))
+        throw new GmailRestInputError("startHistoryId must be the opaque numeric Gmail cursor");
+      url.searchParams.set("startHistoryId", start);
+      const labelId = optionalString(args.labelId, "labelId", 256);
+      if (labelId) url.searchParams.set("labelId", labelId);
+      for (const type of optionalStrings(args.historyTypes, "historyTypes")) {
+        enumArg(type, "historyTypes", [
+          "messageAdded",
+          "messageDeleted",
+          "labelAdded",
+          "labelRemoved",
+        ]);
+        url.searchParams.append("historyTypes", type);
+      }
+      try {
+        return await this.request(tool, url, { signal: signal ?? null }, true);
+      } catch (error) {
+        if (error instanceof GmailRestProviderError && error.status === 404)
+          return { resyncRequired: true, reason: "history_cursor_expired" };
+        throw error;
+      }
+    }
+    if (tool === "watch_mailbox") {
+      const topic = this.options.watchTopicName;
+      if (!topic || !gmailToolAvailableOnDeployment(tool, this.options))
+        throw new GmailRestInputError("Gmail watch requires a deployment-configured Pub/Sub topic");
+      const labelIds = optionalStrings(args.labelIds, "labelIds");
+      const behavior = enumArg(args.labelFilterBehavior, "labelFilterBehavior", [
+        "include",
+        "exclude",
+      ]);
+      const result = await this.request<Record<string, unknown>>(
+        tool,
+        urlFor("watch"),
+        json({
+          topicName: topic,
+          ...(labelIds.length ? { labelIds } : {}),
+          ...(behavior ? { labelFilterBehavior: behavior } : {}),
+        }),
+        false,
+      );
+      return {
+        ...result,
+        requiresRenewal: true,
+        notificationDelivery: "operator_managed",
+        reconciliation: "get_history",
+      };
+    }
+    if (tool === "stop_watch") {
+      await this.request(tool, urlFor("stop"), { method: "POST", signal: signal ?? null }, false);
+      return { stopped: true };
+    }
+    if (tool === "get_settings" || tool === "list_settings") {
+      const resource = requiredString(args.resource, "resource", 64);
+      const roots: Record<string, string> = {
+        autoForwarding: "settings/autoForwarding",
+        imap: "settings/imap",
+        language: "settings/language",
+        pop: "settings/pop",
+        vacation: "settings/vacation",
+        sendAs: "settings/sendAs",
+        filters: "settings/filters",
+        forwardingAddresses: "settings/forwardingAddresses",
+        cseIdentities: "settings/cse/identities",
+        cseKeypairs: "settings/cse/keypairs",
+      };
+      const singleton = ["autoForwarding", "imap", "language", "pop", "vacation"].includes(
+        resource,
+      );
+      let path = roots[resource];
+      if (resource === "smimeInfo")
+        path = `settings/sendAs/${encodeURIComponent(requiredId(args.sendAsEmail, "sendAsEmail"))}/smimeInfo`;
+      if (!path || (singleton && tool === "list_settings"))
+        throw new GmailRestInputError("Unsupported Gmail settings resource");
+      if (tool === "get_settings" && !singleton)
+        path += `/${encodeURIComponent(requiredId(args.id, "id"))}`;
+      const url = urlFor(path);
+      if (tool === "list_settings" && ["cseIdentities", "cseKeypairs"].includes(resource))
+        addPagination(url, args, "pageSize");
+      return await this.request(tool, url, { signal: signal ?? null }, true);
+    }
+    if (tool === "import_message" || tool === "insert_message") {
+      const raw = await this.rawInput(args);
+      if (!raw) throw new GmailRestInputError("raw or rawFile is required");
+      const url = urlFor(tool === "import_message" ? "messages/import" : "messages");
+      const date = enumArg(args.internalDateSource, "internalDateSource", [
+        "receivedTime",
+        "dateHeader",
+      ]);
+      if (date) url.searchParams.set("internalDateSource", date);
+      if (tool === "import_message") {
+        url.searchParams.set(
+          "processForCalendar",
+          String(booleanArg(args.processForCalendar, "processForCalendar")),
+        );
+        if (booleanArg(args.neverMarkSpam, "neverMarkSpam"))
+          url.searchParams.set("neverMarkSpam", "true");
+      }
+      return await this.request(
+        tool,
+        url,
+        json({
+          raw: raw.toString("base64url"),
+          labelIds: optionalStrings(args.labelIds, "labelIds"),
+        }),
+        false,
+      );
+    }
+    if (tool === "download_message" || tool === "download_attachment") {
+      if (!this.options.materializeGmailFile)
+        throw new GmailRestInputError("Gmail file delivery requires an available agent filesystem");
+      const operationId = requiredString(meta?.opengeniOperationId, "trusted operation ID", 36);
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+          operationId,
+        )
+      )
+        throw new GmailRestInputError("Gmail file delivery requires trusted operation context");
+      const id = requiredId(args.messageId, "messageId");
+      const url = urlFor(`messages/${encodeURIComponent(id)}`);
+      url.searchParams.set("format", tool === "download_message" ? "raw" : "full");
+      let destinationUrl = url.toString();
+      let bytes: Buffer, filename: string, mediaType: string, identity: string;
+      if (tool === "download_message") {
+        const message = await this.request<GmailMessage>(
+          tool,
+          url,
+          { signal: signal ?? null },
+          true,
+          GMAIL_BINARY_RESPONSE_MAX_BYTES,
+        );
+        bytes = decodeBinary(
+          requiredString(message.raw, "provider raw message", GMAIL_BINARY_RESPONSE_MAX_BYTES),
+        );
+        filename = `message-${safeIdentity(id)}.eml`;
+        mediaType = "message/rfc822";
+        identity = `message:${id}:raw`;
+      } else {
+        const partId = args.partId === "" ? "" : optionalString(args.partId, "partId", 256);
+        // Attachment IDs are opaque and can be longer than message or part IDs.
+        const attachmentId = optionalString(args.attachmentId, "attachmentId", 4096);
+        if (partId === undefined && !attachmentId)
+          throw new GmailRestInputError("partId or attachmentId is required");
+        if (partId === undefined) {
+          // Provider attachment tokens can change between metadata reads. Use
+          // the original token on its message-scoped endpoint, without trying
+          // to match it against a new snapshot. A stable part ID preserves MIME
+          // metadata; callers with only a token may supply the known filename.
+          bytes = await this.partBytes(id, { body: { attachmentId: attachmentId! } }, tool, signal);
+          destinationUrl = `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId!)}`;
+          filename = safeFileName(
+            optionalString(args.fileName, "fileName", 1024) ??
+              `attachment-${sha256(Buffer.from(attachmentId!)).slice(0, 24)}.bin`,
+          );
+          mediaType = "application/octet-stream";
+          identity = `message:${id}:attachment:${sha256(Buffer.from(attachmentId!))}`;
+        } else {
+          const message = await this.request<GmailMessage>(
+            tool,
+            url,
+            { signal: signal ?? null },
+            true,
+            GMAIL_BINARY_RESPONSE_MAX_BYTES,
+          );
+          const part = walkParts(message.payload).find((item) => (item.partId ?? "") === partId);
+          if (!part || part.parts?.length)
+            throw new GmailRestInputError("Requested MIME leaf part was not found in this message");
+          bytes = await this.partBytes(id, part, tool, signal);
+          filename = safeFileName(part.filename || `part-${safeIdentity(part.partId || "0")}.bin`);
+          mediaType = part.mimeType ?? "application/octet-stream";
+          identity = `message:${id}:part:${part.partId ?? ""}`;
+        }
+      }
+      if (bytes.byteLength > GMAIL_DOWNLOAD_MAX_BYTES)
+        throw new GmailRestInputError("Gmail download exceeds 50 MiB");
+      const connectionId = this.pinnedConnectionId!;
+      return await this.options.materializeGmailFile({
+        serverId: this.options.serverId,
+        connectionId,
+        operationId,
+        providerAttachmentId: { provider: "google-gmail", kind: "attachment", value: identity },
+        fileName: filename,
+        mediaType,
+        bytes,
+        authorizeProviderRequest: async () => {
+          if (signal?.aborted) return false;
+          const current = await this.options.resolveCredential({
+            workspaceId: this.options.workspaceId,
+            ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
+            serverId: this.options.serverId,
+            toolName: tool,
+            connectionRef: this.options.connectionRef,
+            destinationUrl,
+          });
+          return (
+            current.status === "ok" &&
+            current.connectionId === connectionId &&
+            (!current.authorizeProviderRequest || (await current.authorizeProviderRequest()))
+          );
+        },
+      });
+    }
+    throw new GmailRestInputError(`Unsupported Gmail tool: ${tool}`);
+  }
+
+  private async partBytes(
+    messageId: string,
+    part: GmailPart,
+    tool: string,
+    signal?: AbortSignal,
+  ): Promise<Buffer> {
+    if ((part.body?.size ?? 0) > GMAIL_DOWNLOAD_MAX_BYTES)
+      throw new GmailRestInputError("Gmail MIME part exceeds 50 MiB");
+    let data = part.body?.data;
+    let expectedSize = part.body?.size;
+    if (data === undefined && part.body?.attachmentId) {
+      const body = await this.request<{ data?: string; size?: number }>(
+        tool,
+        `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(part.body.attachmentId)}`,
+        { signal: signal ?? null },
+        true,
+        GMAIL_BINARY_RESPONSE_MAX_BYTES,
+      );
+      data = body.data;
+      expectedSize ??= body.size;
+    }
+    if (data === undefined && expectedSize === 0) return Buffer.alloc(0);
+    if (data === undefined)
+      throw new GmailRestProviderError("Gmail did not provide the requested MIME part bytes");
+    const bytes = decodeBinary(data);
+    if (
+      bytes.byteLength > GMAIL_DOWNLOAD_MAX_BYTES ||
+      (expectedSize !== undefined && bytes.byteLength !== expectedSize)
+    )
+      throw new GmailRestProviderError("Gmail MIME part size verification failed");
+    return bytes;
+  }
+
+  private async hydrateBody(
+    message: GmailMessage,
+    tool: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!message.id) return;
+    for (const part of walkParts(message.payload)) {
+      if (isTextBody(part) && part.body?.attachmentId && part.body.data === undefined) {
+        part.body.data = (await this.partBytes(message.id, part, tool, signal)).toString(
+          "base64url",
+        );
+      }
+    }
+  }
+
+  private async readDraftRaw(id: string, tool: string, signal?: AbortSignal): Promise<Buffer> {
+    const url = new URL(`${GMAIL_REST_API_BASE}/drafts/${encodeURIComponent(id)}`);
+    url.searchParams.set("format", "raw");
+    const draft = await this.request<{ message?: GmailMessage }>(
+      tool,
+      url,
+      { signal: signal ?? null },
+      true,
+      GMAIL_BINARY_RESPONSE_MAX_BYTES,
+    );
+    return decodeBinary(
+      requiredString(draft.message?.raw, "provider draft raw", GMAIL_BINARY_RESPONSE_MAX_BYTES),
+    );
+  }
+
+  private async readReply(
+    args: Record<string, unknown>,
+    tool: string,
+    signal?: AbortSignal,
+  ): Promise<GmailMessage | null> {
+    const id = optionalString(args.replyToMessageId, "replyToMessageId", 256);
+    if (!id) return null;
+    const url = new URL(`${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(id)}`);
+    url.searchParams.set("format", "metadata");
+    return await this.request(tool, url, { signal: signal ?? null }, true);
+  }
+
+  private async rawInput(args: Record<string, unknown>): Promise<Buffer | null> {
+    if (args.raw !== undefined && args.rawFile !== undefined)
+      throw new GmailRestInputError("Choose raw or rawFile, not both");
+    const raw = args.rawFile
+      ? Buffer.from(await this.readFileInput(args.rawFile, 35 * 1024 * 1024))
+      : args.raw !== undefined
+        ? decodeBinary(requiredString(args.raw, "raw", GMAIL_BINARY_RESPONSE_MAX_BYTES))
+        : null;
+    if (raw && (raw.length === 0 || raw.length > 35 * 1024 * 1024))
+      throw new GmailRestInputError("RFC 5322 message must contain 1 byte to 35 MiB");
+    return raw;
+  }
+
+  private fileInputReference(value: unknown): { path: string; sha256: string } {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new GmailRestInputError("file must contain path and sha256");
+    const file = value as Record<string, unknown>;
+    const path = requiredString(file.path, "file.path", 4096),
+      hash = requiredString(file.sha256, "file.sha256", 64);
+    if (!/^[0-9a-f]{64}$/iu.test(hash))
+      throw new GmailRestInputError("file.sha256 must be an exact SHA-256");
+    if (!this.options.readGmailFile)
+      throw new GmailRestInputError("Gmail file input requires an available agent filesystem");
+    return { path, sha256: hash.toLowerCase() };
+  }
+
+  private async readFileInput(
+    value: unknown,
+    maxBytes = MAX_ATTACHMENT_BYTES,
+  ): Promise<Uint8Array> {
+    const reference = this.fileInputReference(value);
+    const bytes = await this.options.readGmailFile!({ ...reference, maxBytes });
+    if (bytes.byteLength > maxBytes || sha256(bytes) !== reference.sha256)
+      throw new GmailRestInputError("Gmail file bytes changed or exceed the input size limit");
+    return bytes;
+  }
+
+  private async composeMime(
+    args: Record<string, unknown>,
+    reply: GmailMessage | null,
+    tool: string,
+  ): Promise<Buffer> {
+    const raw = await this.rawInput(args);
+    if (raw) {
+      if (
+        ["to", "cc", "bcc", "subject", "body", "htmlBody", "attachments", "from", "replyTo"].some(
+          (key) => args[key] !== undefined,
+        )
+      )
+        throw new GmailRestInputError("raw/rawFile cannot be combined with composing fields");
+      await this.validateRawSender(raw, tool);
+      return raw;
+    }
+    if (
+      args.attachments !== undefined &&
+      (!Array.isArray(args.attachments) || args.attachments.length > 100)
+    )
+      throw new GmailRestInputError("attachments must be an array of at most 100 items");
+    // Validate the complete descriptor list before any filesystem work. A
+    // request-local cache shares exact reads, never attachment occurrences or
+    // authorization across operations. Distinct files retain parallel I/O.
+    const descriptors = (args.attachments as unknown[] | undefined)?.map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new GmailRestInputError("Invalid attachment");
+      const item = value as Record<string, unknown>;
+      if (item.file !== undefined && item.content !== undefined)
+        throw new GmailRestInputError("Choose attachment file or content, not both");
+      const reference = item.file === undefined ? undefined : this.fileInputReference(item.file);
+      return { item, reference };
+    });
+    for (const [index, { item }] of (descriptors ?? []).entries()) attachmentMetadata(item, index);
+    const reads = new Map<string, Promise<string>>();
+    const settled =
+      descriptors &&
+      (await Promise.allSettled(
+        descriptors.map(async ({ item, reference }) => {
+          if (!reference) return item;
+          const key = JSON.stringify([reference.path, reference.sha256]);
+          let read = reads.get(key);
+          if (!read) {
+            read = this.readFileInput(reference).then((bytes) =>
+              Buffer.from(bytes).toString("base64"),
+            );
+            reads.set(key, read);
+          }
+          return { ...item, content: await read };
+        }),
+      ));
+    const failed = settled?.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failed) throw failed.reason;
+    const attachments = settled?.map(
+      (result) => (result as PromiseFulfilledResult<Record<string, unknown>>).value,
+    );
+    const mime = Buffer.from(
+      buildDraftMime({ ...args, ...(attachments ? { attachments } : {}) }, reply),
+    );
+    if (mime.length > 35 * 1024 * 1024)
+      throw new GmailRestInputError("Encoded Gmail message exceeds 35 MiB");
+    await this.validateRawSender(mime, tool);
+    return mime;
+  }
+
+  private async validateRawSender(raw: Buffer, tool: string): Promise<void> {
+    const headerEnd = raw.indexOf("\r\n\r\n") >= 0 ? raw.indexOf("\r\n\r\n") : raw.indexOf("\n\n");
+    if (headerEnd < 0 || headerEnd > 128 * 1024)
+      throw new GmailRestInputError("Invalid RFC 5322 message headers");
+    const headers = raw
+      .subarray(0, headerEnd)
+      .toString("latin1")
+      .replace(/\r?\n[ \t]+/gu, " ");
+    const froms = headers.match(/^From:.*$/gimu) ?? [];
+    if (froms.length > 1)
+      throw new GmailRestInputError("A message must have at most one From header");
+    if (froms.length === 0) return;
+    const from = mailboxAddress(froms[0]!.slice(5).trim());
+    const aliases = await this.request<{
+      sendAs?: Array<{ sendAsEmail?: string; isPrimary?: boolean; verificationStatus?: string }>;
+    }>(tool, `${GMAIL_REST_API_BASE}/settings/sendAs`, {}, true);
+    if (
+      !aliases.sendAs?.some(
+        (alias) =>
+          alias.sendAsEmail?.toLowerCase() === from.toLowerCase() &&
+          (alias.isPrimary || alias.verificationStatus === "accepted"),
+      )
+    )
+      throw new GmailRestInputError(
+        "From must match the connected account or a verified send-as alias",
+      );
   }
 
   private async reportAuthNeeded(
@@ -705,11 +1734,60 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     });
   }
 
+  /** Resolve the pinned account's credential for one tool and check its grant. */
+  private async resolveForTool(
+    toolName: string,
+    destinationUrl: string,
+    forceRefresh: boolean,
+  ): Promise<Extract<ResolveCredentialResult, { status: "ok" }>> {
+    const result = await this.options.resolveCredential({
+      workspaceId: this.options.workspaceId,
+      serverId: this.options.serverId,
+      connectionRef: this.options.connectionRef,
+      destinationUrl,
+      toolName,
+      forceRefresh,
+      ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
+    });
+    if (result.status === "auth_needed") {
+      await this.reportAuthNeeded(result, toolName);
+      throw new GmailRestAuthError("Authentication required for Gmail");
+    }
+    this.options.onResolvedConnectionId?.(result.connectionId);
+    if (this.pinnedConnectionId && this.pinnedConnectionId !== result.connectionId) {
+      throw new GmailRestAuthError("Gmail account changed during this tool session");
+    }
+    this.pinnedConnectionId = result.connectionId;
+    // A host-supplied credential may not report grants; Google then decides.
+    if (result.grantedScopes && !gmailToolSupportsScopes(toolName, result.grantedScopes)) {
+      await this.reportAuthNeeded(
+        {
+          status: "auth_needed",
+          reason: "insufficient_scope",
+          providerDomain: this.options.connectionRef.providerDomain,
+          ...(this.options.connectionRef.provider
+            ? { provider: this.options.connectionRef.provider }
+            : {}),
+          connectionId: result.connectionId,
+          ...(result.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
+          scopes: [gmailToolRequiredScope(toolName)],
+          ...(this.options.connectionRef.resource
+            ? { resource: this.options.connectionRef.resource }
+            : {}),
+        },
+        toolName,
+      );
+      throw new GmailRestAuthError(GMAIL_MORE_ACCESS_NEEDED);
+    }
+    return result;
+  }
+
   private async request<T>(
     toolName: string,
     urlInput: string | URL,
     init: RequestInit,
     replaySafe: boolean,
+    maxBytes = GOOGLE_RESPONSE_MAX_BYTES,
   ): Promise<T> {
     const url = new URL(urlInput);
     if (
@@ -719,41 +1797,36 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     ) {
       throw new Error("Gmail REST destination binding mismatch");
     }
-    const resolve = async (forceRefresh: boolean) => {
-      const result = await this.options.resolveCredential({
-        workspaceId: this.options.workspaceId,
-        serverId: this.options.serverId,
-        connectionRef: this.options.connectionRef,
-        destinationUrl: url.toString(),
-        toolName,
-        forceRefresh,
-        ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
-      });
-      if (result.status === "auth_needed") {
-        await this.reportAuthNeeded(result, toolName);
-        throw new GmailRestAuthError("Authentication required for Gmail");
-      }
-      this.options.onResolvedConnectionId?.(result.connectionId);
-      return result;
-    };
-    const send = async (headers: Record<string, string>) =>
-      await this.fetchImpl(url, {
+    const resolve = async (forceRefresh: boolean) =>
+      await this.resolveForTool(toolName, url.toString(), forceRefresh);
+    const send = async (headers: Record<string, string>) => {
+      const context = this.requestContext.getStore();
+      const request: RequestInit = {
         ...init,
         headers: { ...headers, ...headersRecord(init.headers) },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+        redirect: "error",
+        signal: AbortSignal.any([
+          ...(init.signal || context?.signal ? [init.signal || context!.signal!] : []),
+          AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        ]),
+      };
+      if (!replaySafe && context) context.mutationSubmitted = true;
+      return await this.fetchImpl(url, request);
+    };
     const sendBounded = async (credential: Extract<ResolveCredentialResult, { status: "ok" }>) => {
+      if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
+        throw new GmailRestAuthError("Authentication required for Gmail");
+      }
       try {
-        if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
-          throw new GmailRestAuthError("Authentication required for Gmail");
-        }
         return await send(credential.headers);
       } catch (error) {
         if (error instanceof GmailRestAuthError) throw error;
+        if (!replaySafe)
+          throw new GmailRestOutcomeUnknownError(
+            "Gmail mutation request failed after submission; outcome is uncertain",
+          );
         throw new GmailRestProviderError(
-          replaySafe
-            ? `Gmail request failed: ${safeProviderTransportMessage(error)}`
-            : "Gmail mutation request failed after submission; outcome is uncertain",
+          `Gmail request failed: ${safeProviderTransportMessage(error)}`,
         );
       }
     };
@@ -762,24 +1835,52 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
       if (!replaySafe) {
-        throw new GmailRestProviderError(
+        throw new GmailRestOutcomeUnknownError(
           "Gmail authentication expired after the mutation was submitted; outcome is uncertain",
         );
       }
       const refreshed = await resolve(true);
       response = await sendBounded(refreshed);
     }
+    if (
+      response.ok &&
+      (response.status === 204 ||
+        response.headers.get("content-length") === "0" ||
+        (!replaySafe &&
+          ["delete_draft", "delete_label", "batch_modify_messages", "stop_watch"].includes(
+            toolName,
+          )))
+    ) {
+      await response.body?.cancel().catch(() => undefined);
+      return {} as T;
+    }
     const payload = await readResponseJsonBounded<unknown>(
       response,
-      GOOGLE_RESPONSE_MAX_BYTES,
+      maxBytes,
       "Gmail REST response",
     ).catch((error) => {
+      if (!replaySafe)
+        throw new GmailRestOutcomeUnknownError(
+          `Gmail mutation returned an unreadable response (${response.status}); outcome is uncertain`,
+        );
       throw new GmailRestProviderError(
         `Gmail returned an unreadable response (${response.status}): ${safeErrorMessage(error)}`,
+        // Keep a refusal's status even when its body is not JSON, so 401/403
+        // are still recognized as authentication and access refusals.
+        response.ok ? undefined : response.status,
       );
     });
     if (!response.ok) {
-      throw new GmailRestProviderError(gmailProviderError(response.status, payload));
+      if (!replaySafe && response.status >= 500)
+        throw new GmailRestOutcomeUnknownError(
+          `Gmail mutation returned ${response.status}; outcome is uncertain`,
+        );
+      throw new GmailRestProviderError(
+        gmailProviderError(response.status, payload),
+        response.status,
+        gmailProviderReason(payload),
+        gmailRetryAfter(response.headers.get("retry-after")),
+      );
     }
     return payload as T;
   }
@@ -818,9 +1919,19 @@ function projectMessage(message: GmailMessage, view: "metadata" | "minimal" | "f
     labelIds: message.labelIds ?? [],
     internalDate: message.internalDate ?? null,
     sizeEstimate: message.sizeEstimate ?? null,
+    historyId: message.historyId ?? null,
+    headers: message.payload?.headers ?? [],
+    dateTime:
+      headers.date && !Number.isNaN(Date.parse(headers.date))
+        ? new Date(headers.date).toISOString()
+        : null,
   };
   if (view === "metadata") return base;
-  const minimal = { ...base, subject: headers.subject ?? null, snippet: message.snippet ?? null };
+  const minimal = {
+    ...base,
+    subject: headers.subject ? decodeWords(headers.subject) : null,
+    snippet: message.snippet ?? null,
+  };
   if (view === "minimal") return minimal;
   const content = extractContent(message.payload);
   return {
@@ -831,39 +1942,82 @@ function projectMessage(message: GmailMessage, view: "metadata" | "minimal" | "f
       attachment.id ? [attachment.id] : [],
     ),
     attachments: content.attachments,
+    contentTruncated: content.truncated,
+    decodingErrors: content.decodingErrors,
+    mimeParts: walkParts(message.payload).map((part) => ({
+      partId: part.partId ?? "",
+      mimeType: part.mimeType ?? null,
+      filename: part.filename ?? "",
+      headers: part.headers ?? [],
+      attachmentId: part.body?.attachmentId ?? null,
+      size: part.body?.size ?? null,
+    })),
   };
 }
 
 function extractContent(root: GmailPart | undefined): {
   plaintextBody: string | null;
   htmlBody: string | null;
-  attachments: Array<{ id: string | null; filename: string; mimeType: string; size: number }>;
+  attachments: Array<{
+    id: string | null;
+    partId: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+    contentId: string | null;
+    disposition: string | null;
+  }>;
+  truncated: boolean;
+  decodingErrors: string[];
 } {
   let plain = "";
   let html = "";
   const attachments: Array<{
     id: string | null;
+    partId: string;
     filename: string;
     mimeType: string;
     size: number;
+    contentId: string | null;
+    disposition: string | null;
   }> = [];
+  let truncated = false;
+  const decodingErrors: string[] = [];
   const pending = root ? [root] : [];
   let visited = 0;
   while (pending.length > 0 && visited < 2_048) {
     const part = pending.pop()!;
     visited += 1;
     const filename = part.filename?.trim() ?? "";
-    if (filename || part.body?.attachmentId) {
+    const headers = headerMap(part.headers);
+    if (!part.parts?.length && !isTextBody(part)) {
       attachments.push({
         id: part.body?.attachmentId ?? null,
         filename,
         mimeType: part.mimeType ?? "application/octet-stream",
         size: part.body?.size ?? 0,
+        partId: part.partId ?? "",
+        contentId: headers["content-id"] ?? null,
+        disposition: headers["content-disposition"] ?? null,
       });
     } else if (part.body?.data) {
-      const decoded = decodeBase64Url(part.body.data);
-      if (part.mimeType === "text/plain") plain = appendBounded(plain, decoded, MAX_BODY_CHARS);
-      if (part.mimeType === "text/html") html = appendBounded(html, decoded, MAX_BODY_CHARS);
+      try {
+        const charset =
+          /charset\s*=\s*["']?([^;\s"']+)/iu.exec(headers["content-type"] ?? "")?.[1] ?? "utf-8";
+        const decoded = new TextDecoder(charset, { fatal: true }).decode(
+          decodeBinary(part.body.data),
+        );
+        if (part.mimeType === "text/plain") {
+          truncated ||= plain.length + decoded.length + (plain ? 1 : 0) > MAX_BODY_CHARS;
+          plain = appendBounded(plain, decoded, MAX_BODY_CHARS);
+        }
+        if (part.mimeType === "text/html") {
+          truncated ||= html.length + decoded.length + (html ? 1 : 0) > MAX_BODY_CHARS;
+          html = appendBounded(html, decoded, MAX_BODY_CHARS);
+        }
+      } catch {
+        decodingErrors.push(part.partId ?? "");
+      }
     }
     for (let index = (part.parts?.length ?? 0) - 1; index >= 0; index -= 1) {
       pending.push(part.parts![index]!);
@@ -873,6 +2027,8 @@ function extractContent(root: GmailPart | undefined): {
     plaintextBody: plain || null,
     htmlBody: html || null,
     attachments,
+    truncated: truncated || pending.length > 0,
+    decodingErrors,
   };
 }
 
@@ -887,11 +2043,17 @@ function buildDraftMime(args: Record<string, unknown>, reply: GmailMessage | nul
   const htmlBody = optionalString(args.htmlBody, "htmlBody", 2 * 1024 * 1024);
   const attachments = parseAttachments(args.attachments);
   const headers = [
+    ...(args.from ? [`From: ${formatMailbox(requiredString(args.from, "from", 998))}`] : []),
+    ...(args.replyTo
+      ? [`Reply-To: ${formatMailbox(requiredString(args.replyTo, "replyTo", 998))}`]
+      : []),
     ...(to.length ? [`To: ${to.join(", ")}`] : []),
     ...(cc.length ? [`Cc: ${cc.join(", ")}`] : []),
     ...(bcc.length ? [`Bcc: ${bcc.join(", ")}`] : []),
     `Subject: ${encodeHeader(subject)}`,
     "MIME-Version: 1.0",
+    `Message-ID: <${crypto.randomUUID()}@opengeni.invalid>`,
+    `Date: ${new Date().toUTCString()}`,
   ];
   const replyMessageId = replyHeaders["message-id"];
   if (replyMessageId) {
@@ -909,9 +2071,11 @@ function buildDraftMime(args: Record<string, unknown>, reply: GmailMessage | nul
   const parts = [`--${boundary}\r\n${bodyEntity}`];
   for (const attachment of attachments) {
     const disposition = attachment.inline ? "inline" : "attachment";
-    const filename = attachment.filename ? `; filename="${escapeQuoted(attachment.filename)}"` : "";
+    const filename = attachment.filename
+      ? `; filename="${escapeQuoted(attachment.filename.replace(/[^\x20-\x7e]/gu, "_"))}"; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`
+      : "";
     parts.push(
-      `--${boundary}\r\nContent-Type: ${attachment.mimeType}${filename}\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: ${disposition}${filename}\r\n\r\n${wrapBase64(attachment.content.toString("base64"))}`,
+      `--${boundary}\r\nContent-Type: ${attachment.mimeType}\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: ${disposition}${filename}\r\n${attachment.contentId ? `Content-ID: <${attachment.contentId}>\r\n` : ""}\r\n${wrapBase64(attachment.content.toString("base64"))}`,
     );
   }
   parts.push(`--${boundary}--`);
@@ -945,6 +2109,7 @@ function parseAttachments(value: unknown): Array<{
   filename: string;
   mimeType: string;
   inline: boolean;
+  contentId: string | undefined;
 }> {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 100) {
@@ -956,7 +2121,10 @@ function parseAttachments(value: unknown): Array<{
       throw new GmailRestInputError(`attachments[${index}] must be an object`);
     }
     const record = entry as Record<string, unknown>;
-    const encoded = requiredString(record.content, `attachments[${index}].content`, 40_000_000);
+    const encoded =
+      record.content === ""
+        ? ""
+        : requiredString(record.content, `attachments[${index}].content`, 40_000_000);
     const content = decodeAttachmentContent(encoded, index);
     total += content.byteLength;
     if (total > MAX_ATTACHMENT_BYTES) {
@@ -964,11 +2132,20 @@ function parseAttachments(value: unknown): Array<{
     }
     return {
       content,
-      filename: optionalString(record.filename, `attachments[${index}].filename`, 255) ?? "",
-      mimeType: attachmentMimeType(record.mimeType, index),
-      inline: record.inline === true,
+      ...attachmentMetadata(record, index),
     };
   });
+}
+
+/** Metadata validation must not decode inline payloads during file preflight.
+ * Their bytes are decoded once, under the aggregate limit in parseAttachments. */
+function attachmentMetadata(record: Record<string, unknown>, index: number) {
+  return {
+    filename: optionalString(record.filename, `attachments[${index}].filename`, 255) ?? "",
+    mimeType: attachmentMimeType(record.mimeType, index),
+    inline: record.inline === true,
+    contentId: optionalContentId(record.contentId),
+  };
 }
 
 function decodeAttachmentContent(value: string, index: number): Buffer {
@@ -1048,13 +2225,9 @@ function requiredStringArray(value: unknown, name: string, maxItems: number, max
 
 function optionalEmailArray(value: unknown, name: string): string[] {
   if (value === undefined) return [];
+  if (Array.isArray(value) && value.length === 0) return [];
   const entries = requiredStringArray(value, name, 100, 320);
-  for (const entry of entries) {
-    if (!/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/u.test(entry)) {
-      throw new GmailRestInputError(`${name} contains an invalid plain email address`);
-    }
-  }
-  return entries;
+  return entries.map(formatMailbox);
 }
 
 function headerMap(headers: GmailHeader[] | undefined): Record<string, string> {
@@ -1067,22 +2240,22 @@ function headerMap(headers: GmailHeader[] | undefined): Record<string, string> {
 }
 
 function splitHeader(value: string | undefined): string[] {
-  return value
-    ? value
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter(Boolean)
-    : [];
+  if (!value) return [];
+  return addressParser(value, { flatten: true }).flatMap((entry) =>
+    entry.address
+      ? [
+          entry.name
+            ? `"${entry.name.replace(/["\\]/gu, "\\$&")}" <${entry.address}>`
+            : entry.address,
+        ]
+      : [],
+  );
 }
 
 function normalizedMessageDate(value: string | undefined): string | null {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value.slice(0, 998) : date.toISOString().slice(0, 10);
-}
-
-function decodeBase64Url(value: string): string {
-  return Buffer.from(value, "base64url").toString("utf8");
 }
 
 function appendBounded(current: string, next: string, limit: number): string {
@@ -1101,9 +2274,19 @@ function replySubject(value: string | undefined): string {
 }
 
 function encodeHeader(value: string): string {
-  return /[^\x20-\x7e]/u.test(value)
-    ? `=?UTF-8?B?${Buffer.from(value).toString("base64")}?=`
-    : value.replace(/[\r\n]+/gu, " ");
+  const normalized = value.replace(/[\r\n]+/gu, " ");
+  if (normalized.length <= 70 && !/[^\x20-\x7e]/u.test(normalized)) return normalized;
+  const chunks: string[] = [];
+  let chunk = "";
+  for (const character of normalized) {
+    if (Buffer.byteLength(chunk + character) > 42) {
+      chunks.push(chunk);
+      chunk = "";
+    }
+    chunk += character;
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks.map((part) => `=?UTF-8?B?${Buffer.from(part).toString("base64")}?=`).join("\r\n ");
 }
 
 function safeHeaderValue(value: string): string {
@@ -1127,6 +2310,136 @@ function wrapBase64(value: string): string {
   return value.match(/.{1,76}/gu)?.join("\r\n") ?? "";
 }
 
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+function assertContentHash(bytes: Uint8Array, value: unknown): void {
+  if (
+    typeof value !== "string" ||
+    !/^[a-f0-9]{64}$/iu.test(value) ||
+    sha256(bytes) !== value.toLowerCase()
+  )
+    throw new GmailRestInputError(
+      "Draft content changed or no exact reviewed contentSha256 was supplied; read the draft again before sending",
+    );
+}
+function optionalStrings(value: unknown, name: string): string[] {
+  if (value === undefined || (Array.isArray(value) && value.length === 0)) return [];
+  return [...new Set(requiredStringArray(value, name, 100, 256))];
+}
+function booleanArg(value: unknown, name: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") throw new GmailRestInputError(`${name} must be boolean`);
+  return value;
+}
+function enumArg(value: unknown, name: string, values: readonly string[]): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !values.includes(value))
+    throw new GmailRestInputError(`${name} is invalid`);
+  return value;
+}
+function addPagination(url: URL, args: Record<string, unknown>, sizeName = "maxResults"): void {
+  url.searchParams.set(sizeName, String(boundedPageSize(args.pageSize)));
+  const token = optionalString(args.pageToken, "pageToken", 4096);
+  if (token) url.searchParams.set("pageToken", token);
+}
+function labelDefinition(
+  args: Record<string, unknown>,
+  requireName: boolean,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (requireName) body.name = requiredString(args.name, "name", 225);
+  else if (args.name !== undefined) body.name = requiredString(args.name, "name", 225);
+  for (const [key, values] of Object.entries({
+    messageListVisibility: ["show", "hide"],
+    labelListVisibility: ["labelShow", "labelShowIfUnread", "labelHide"],
+  })) {
+    const value = enumArg(args[key], key, values);
+    if (value) body[key] = value;
+  }
+  if (args.color !== undefined) {
+    if (!args.color || typeof args.color !== "object" || Array.isArray(args.color))
+      throw new GmailRestInputError("color must be an object");
+    const color = args.color as Record<string, unknown>,
+      output: Record<string, string> = {};
+    for (const key of ["textColor", "backgroundColor"]) {
+      const value = optionalString(color[key], key, 7);
+      if (value && !/^#[a-f0-9]{6}$/iu.test(value))
+        throw new GmailRestInputError(
+          "Label colors must be #RRGGBB values from Gmail's supported palette",
+        );
+      if (value) output[key] = value;
+    }
+    body.color = output;
+  }
+  if (!Object.keys(body).length)
+    throw new GmailRestInputError("Supply at least one label field to change");
+  return body;
+}
+function labelChanges(args: Record<string, unknown>): {
+  addLabelIds: string[];
+  removeLabelIds: string[];
+} {
+  const addLabelIds = optionalStrings(args.addLabelIds, "addLabelIds"),
+    removeLabelIds = optionalStrings(args.removeLabelIds, "removeLabelIds");
+  if (!addLabelIds.length && !removeLabelIds.length)
+    throw new GmailRestInputError("Supply addLabelIds or removeLabelIds");
+  // Google permits manually applying TRASH and SPAM. Approval is resolved by
+  // the shared policy, never a second provider-adapter permission layer.
+  if (addLabelIds.some((id) => removeLabelIds.includes(id)))
+    throw new GmailRestInputError("A label cannot be both added and removed");
+  return { addLabelIds, removeLabelIds };
+}
+function decodeBinary(value: string): Buffer {
+  if (!/^[A-Za-z0-9_-]*={0,2}$/u.test(value) || value.replace(/=+$/u, "").length % 4 === 1)
+    throw new GmailRestProviderError("Invalid base64url Gmail bytes");
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.toString("base64url") !== value.replace(/=+$/u, ""))
+    throw new GmailRestProviderError("Invalid base64url Gmail bytes");
+  return bytes;
+}
+function walkParts(root: GmailPart | undefined): GmailPart[] {
+  const pending = root ? [root] : [],
+    result: GmailPart[] = [];
+  while (pending.length && result.length < 2048) {
+    const part = pending.pop()!;
+    result.push(part);
+    for (let i = (part.parts?.length ?? 0) - 1; i >= 0; i--) pending.push(part.parts![i]!);
+  }
+  return result;
+}
+function isTextBody(part: GmailPart): boolean {
+  const disposition = headerMap(part.headers)["content-disposition"] ?? "";
+  return (
+    !part.filename &&
+    !/^attachment\b/iu.test(disposition) &&
+    ["text/plain", "text/html"].includes(part.mimeType ?? "")
+  );
+}
+const safeFileName = (value: string): string => connectorAttachmentFileName(value);
+function mailboxAddress(value: string): string {
+  if (/[\r\n\u0000]/u.test(value))
+    throw new GmailRestInputError("Email address contains an invalid header character");
+  const addresses = addressParser(value, { flatten: true });
+  const address = addresses[0]?.address;
+  if (addresses.length !== 1 || !address || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/u.test(address))
+    throw new GmailRestInputError("Supply exactly one valid mailbox address per recipient");
+  return address;
+}
+function formatMailbox(value: string): string {
+  const address = mailboxAddress(value),
+    parsed = addressParser(value, { flatten: true })[0]!;
+  return parsed.name
+    ? `${/[^\x20-\x7e]/u.test(parsed.name) ? encodeHeader(parsed.name) : `"${escapeQuoted(parsed.name)}"`} <${address}>`
+    : address;
+}
+function optionalContentId(value: unknown): string | undefined {
+  const id = optionalString(value, "contentId", 255);
+  if (id && !/^[^<>\s\u0000-\u001f\u007f]+$/u.test(id))
+    throw new GmailRestInputError("contentId is invalid");
+  return id;
+}
+
 function headersRecord(value: HeadersInit | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   new Headers(value).forEach((headerValue, name) => {
@@ -1135,18 +2448,58 @@ function headersRecord(value: HeadersInit | undefined): Record<string, string> {
   return out;
 }
 
+const GMAIL_PROVIDER_REASONS = new Set([
+  "rateLimitExceeded",
+  "userRateLimitExceeded",
+  "quotaExceeded",
+  "dailyLimitExceeded",
+  "backendError",
+  "internalError",
+  "insufficientPermissions",
+  "domainPolicy",
+  "authError",
+  "notFound",
+  "invalidArgument",
+  "failedPrecondition",
+]);
+function gmailProviderReason(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const errors = (payload as { error?: { errors?: Array<{ reason?: unknown }> } }).error?.errors;
+  const reason = Array.isArray(errors)
+    ? errors.find(
+        (item) => typeof item?.reason === "string" && GMAIL_PROVIDER_REASONS.has(item.reason),
+      )?.reason
+    : undefined;
+  return typeof reason === "string" ? reason : undefined;
+}
+function gmailRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const milliseconds = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(milliseconds) && milliseconds >= 0
+    ? Math.min(milliseconds, 86_400_000)
+    : undefined;
+}
 function gmailProviderError(status: number, payload: unknown): string {
-  const message =
-    payload && typeof payload === "object" && !Array.isArray(payload)
-      ? (payload as { error?: { message?: unknown; status?: unknown } }).error
-      : undefined;
-  const safe =
-    typeof message?.status === "string"
-      ? message.status
-      : typeof message?.message === "string"
-        ? message.message.slice(0, 240)
-        : "provider request failed";
-  return `Gmail REST request failed (${status}): ${safe}`;
+  const reason = gmailProviderReason(payload);
+  const explanation =
+    reason === "insufficientPermissions"
+      ? "The current grant does not permit this operation."
+      : reason === "domainPolicy"
+        ? "The account's Google policy prevents this operation."
+        : (reason && /LimitExceeded|quotaExceeded/.test(reason)) || status === 429
+          ? "Gmail rate or quota limit reached. Retry after the indicated delay."
+          : status === 401
+            ? "Gmail authentication must be renewed."
+            : status === 403
+              ? "Gmail refused access. The response does not establish a missing scope."
+              : status === 404
+                ? "The selected resource is unavailable."
+                : status === 400
+                  ? "Gmail rejected the request. Check the supplied values."
+                  : status >= 500
+                    ? "Gmail is temporarily unavailable."
+                    : "Gmail rejected the operation.";
+  return `Gmail REST request failed (${status}): ${explanation}${reason ? ` (${reason})` : ""}`;
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -1194,9 +2547,54 @@ async function boundedMap<T, R>(values: T[], concurrency: number, map: (value: T
 }
 
 class GmailRestInputError extends Error {}
-class GmailRestProviderError extends Error {}
+/** Shared MCP uncertainty code preserves the gateway/connector journal outcome. */
+class GmailRestOutcomeUnknownError extends Error {
+  readonly code = 40_102;
+  readonly connectorActionOutcome = "uncertain";
+  readonly retryable = false;
+}
+class GmailRestProviderError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  constructor(
+    message: string,
+    readonly status?: number,
+    reason?: string,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.code =
+      status === 401
+        ? "authentication_required"
+        : status === 429 || (reason && /LimitExceeded|quotaExceeded/.test(reason))
+          ? "rate_limited"
+          : status === 403
+            ? "access_denied"
+            : status === 404
+              ? "not_found"
+              : status === 400
+                ? "invalid_input"
+                : "provider_unavailable";
+    this.retryable = this.code === "rate_limited" || status === undefined || status >= 500;
+  }
+}
 class GmailRestAuthError extends Error {}
 
 export function gmailRestToolIsMutation(toolName: string): boolean {
   return MUTATION_TOOLS.has(toolName);
+}
+
+/** Only used for the trusted local Gmail bridge's durable connector settlement. */
+export function gmailRestResultOutcome(output: unknown): "not_executed" | "uncertain" | null {
+  const result = output as {
+    isError?: boolean;
+    structuredContent?: { error?: { connectorActionOutcome?: string; outcomeUnknown?: boolean } };
+  } | null;
+  if (result?.isError !== true) return null;
+  const error = result.structuredContent?.error;
+  return error?.outcomeUnknown === true
+    ? "uncertain"
+    : error?.connectorActionOutcome === "not_executed"
+      ? "not_executed"
+      : null;
 }

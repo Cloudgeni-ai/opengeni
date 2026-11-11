@@ -23,15 +23,13 @@ import { createHash } from "node:crypto";
 import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
-  hasGitHubRepositorySelection,
   resolveStreamTokenSecret,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
-import { githubAppBotIdentity } from "@opengeni/github";
-import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
+import { type AccessGrant, type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
   getLiveEnrollmentConnection,
@@ -74,6 +72,7 @@ import {
   TERMINAL_STREAM_PORT,
   DisplayStackUnsupportedError,
   TerminalServerUnsupportedError,
+  usesAgentTransport,
   verifySandboxExecReadiness,
   StreamPortUnavailableError,
   renewSandboxProviderExpiration,
@@ -90,7 +89,7 @@ import {
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
-import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -155,11 +154,9 @@ export async function sessionAttachEnvironment(
    *  the materialization audit fact. Null records the legacy service sentinel. */
   attachSubjectId: string | null,
 ): Promise<Record<string, string>> {
-  const workspaceEnvironmentValues = await loadSessionAttachVariableSetValues(
-    services.db,
-    services.settings,
-    { accountId: session.accountId, workspaceId, session, subjectId: attachSubjectId },
-  );
+  // The manifest carries deployment constants only (W1): user secrets are
+  // resolved per command from `{{secret:…}}` references, never seeded here.
+  void attachSubjectId;
   // Build the env with the SESSION's backend, not the deployment default: the
   // stable base is backend-aware (HOME = the descriptor workspaceRoot, and the
   // git token-file/askpass pointers derive from HOME), the box is established
@@ -172,18 +169,9 @@ export async function sessionAttachEnvironment(
     session.sandboxBackend !== services.settings.sandboxBackend
       ? { ...services.settings, sandboxBackend: session.sandboxBackend }
       : services.settings;
-  const environment = stableSandboxEnvironmentForRun(
-    settingsForSession,
-    workspaceEnvironmentValues,
-    { workspaceId },
-  );
+  const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
-    applyGitAuthPointerEnvironment(
-      environment,
-      hasGitHubRepositorySelection(session.resources)
-        ? githubAppBotIdentity(services.settings)
-        : null,
-    );
+    applyGitAuthPointerEnvironment(environment);
   }
   return environment;
 }
@@ -206,6 +194,10 @@ export async function attachViewer(
     /** The authenticated subject attaching this viewer (0281): recorded on
      *  the holder row together with the live session authority epoch. */
     viewerSubjectId?: string;
+    /** The authenticated route grant, when one drives the attach. It resolves
+     *  the session's Sandbox Environment for an agent attempt as its
+     *  initiating human. */
+    grant?: AccessGrant;
     /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
     waitSignal?: AbortSignal;
   },
@@ -236,7 +228,12 @@ export async function attachViewer(
     : null;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
   const sandboxGroupId = session.sandboxGroupId;
-  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(
+    db,
+    settings,
+    session,
+    input.grant ? { grant: input.grant } : { subjectId: attachSubjectId },
+  );
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
@@ -282,7 +279,7 @@ export async function attachViewer(
       throw new HTTPException(error.reason === "balance" ? 402 : 429, {
         message:
           error.reason === "balance"
-            ? "insufficient OpenGeni credits for an idle sandbox viewer"
+            ? "insufficient workspace credits for an idle sandbox viewer"
             : "workspace sandbox warm allowance exhausted",
         cause: error,
       });
@@ -969,6 +966,21 @@ export async function mintDesktopStream(
       return null;
     }
 
+    // A compute sandbox's agent owns its display and serves the framebuffer
+    // over the relay, fenced by the lease epoch. Nothing runs over exec.
+    if (usesAgentTransport(established.backendId)) {
+      const relayed = await mintSelfhostedStream(services, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId: input.viewerId,
+        activeEpoch: lease.leaseEpoch,
+        viewerAuthority,
+        port: DESKTOP_STREAM_PORT,
+        session: established.session as RelayResolvableSession,
+      });
+      return relayed ? { ...relayed, resolution: defaultResolution(settings) } : null;
+    }
+
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
     // that genuinely can't run the stack degrades to transport:null, not a throw.
     try {
@@ -1103,6 +1115,11 @@ export type MintTerminalStreamInput = {
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
+  /** True when the route verified `terminal:attach` for this viewer: the token
+   *  then claims `control`, so the relay forwards its keystrokes to the PTY.
+   *  Omitted or false mints a watch-only (`view`) token. Independent of the
+   *  desktop stream-control setting. */
+  terminalInput?: boolean;
   /** The live lease (must be holder-confirmed warm). A selfhosted-active
    *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
   lease?: LeaseSnapshot;
@@ -1134,6 +1151,7 @@ export async function mintTerminalStream(
   // (grant.subjectId = "configured:key" for an API key) to a deterministic UUID
   // so StreamTokenPayload.parse never throws an uncaught 500.
   const viewerId = viewerIdAsUuid(input.viewerId);
+  const mode = input.terminalInput === true ? "control" : "view";
 
   // GATE 1: the terminal pty-ws plane requires the toggle ON, a real-PTY backend
   // (desktop-capable images bake ttyd), and a resolvable stream-token secret.
@@ -1184,6 +1202,7 @@ export async function mintTerminalStream(
           workspaceId: active.workspaceId,
           ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: TERMINAL_STREAM_PORT,
+          mode,
           sandbox: active,
           viewerAuthority,
         },
@@ -1235,6 +1254,22 @@ export async function mintTerminalStream(
       return null;
     }
 
+    // A compute sandbox's agent serves its terminal as a relay PTY, fenced by
+    // the lease epoch. Nothing runs over exec.
+    if (usesAgentTransport(established.backendId)) {
+      const relayed = await mintSelfhostedStream(services, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId: input.viewerId,
+        activeEpoch: lease.leaseEpoch,
+        viewerAuthority,
+        port: TERMINAL_STREAM_PORT,
+        mode,
+        session: established.session as RelayResolvableSession,
+      });
+      return relayed ? { ...relayed, transport: "relay-pty" } : null;
+    }
+
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that
     // genuinely can't run it degrades to the sse-events firehose, not a throw.
     try {
@@ -1261,6 +1296,7 @@ export async function mintTerminalStream(
         leaseEpoch: lease.leaseEpoch,
         streamTokenSecret: secret,
         port: TERMINAL_STREAM_PORT,
+        mode,
         ...viewerAuthority,
       });
     } catch (error) {
@@ -1339,6 +1375,8 @@ async function tryMintActiveSelfhostedStream(
     workspaceId: string;
     resourceSubjectId?: string;
     port: number;
+    /** Input authority the route granted; defaults to watch-only. */
+    mode?: "view" | "control";
     sandbox: SandboxRecord;
     /** 0281 viewer authority claims stamped into the relay stream token. */
     viewerAuthority?: { subjectId?: string; authorityEpoch: number };
@@ -1378,6 +1416,8 @@ async function tryMintActiveSelfhostedStream(
       if (!enrollment.workspaceRoot) return null;
       const client = new SelfhostedSandboxClient({
         workspaceId,
+        // Addressed where the machine is enrolled (it can serve other workspaces).
+        controlWorkspaceId: enrollment.workspaceId,
         workspaceRoot: enrollment.workspaceRoot,
         relay: relayConfigFromSettings(settings),
         controlRpcFactory: () => controlRpc(bus),
@@ -1393,7 +1433,7 @@ async function tryMintActiveSelfhostedStream(
     console.warn(
       `[tryMintActiveSelfhostedStream] resume failed for agent=${sandbox.enrollmentId} ` +
         `port=${input.port} epoch=${session.activeEpoch}: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
+        `${errorMessage(error)}`,
     );
     return null;
   }
@@ -1404,6 +1444,7 @@ async function tryMintActiveSelfhostedStream(
     activeEpoch: session.activeEpoch,
     ...(input.viewerAuthority ? { viewerAuthority: input.viewerAuthority } : {}),
     port,
+    ...(input.mode ? { mode: input.mode } : {}),
     session: shSession,
   });
 }
@@ -1426,6 +1467,9 @@ export type MintSelfhostedStreamInput = {
   viewerAuthority?: { subjectId?: string; authorityEpoch: number };
   /** The exposed stream port (6080 desktop / 7681 terminal). */
   port: number;
+  /** Input authority the route granted (the relay forwards viewer input only
+   *  for `control`). Defaults to watch-only `view`. */
+  mode?: "view" | "control";
   /** The resolvable selfhosted session (the routing proxy resolves the active
    *  selfhosted backend; its `resolveExposedPort` returns the relay endpoint). */
   session: RelayResolvableSession;
@@ -1467,6 +1511,7 @@ export async function mintSelfhostedStream(
       leaseEpoch: input.activeEpoch,
       streamTokenSecret: secret,
       port: input.port,
+      mode: input.mode ?? "view",
       ...(input.viewerAuthority ?? {}),
     });
     return {
@@ -1483,7 +1528,7 @@ export async function mintSelfhostedStream(
     console.warn(
       `[mintSelfhostedStream] relay stream mint degraded to transport:null ` +
         `(session=${input.sessionId} port=${input.port} epoch=${input.activeEpoch}): ` +
-        `${error instanceof Error ? error.message : String(error)}`,
+        `${errorMessage(error)}`,
     );
     if (error instanceof StreamPortUnavailableError) {
       return null;

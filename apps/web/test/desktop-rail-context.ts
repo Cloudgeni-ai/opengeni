@@ -1,0 +1,68 @@
+// Only data and navigation state are fixtures; the entire RailBody is production UI.
+import { useSyncExternalStore } from "react";
+import { client, useAppContext as baseContext, workspaceId } from "./session-sidebar-context";
+export { client, workspaceId };
+export const RAIL_DEFAULT_WIDTH = 288;
+export const RAIL_MIN_WIDTH = 220;
+export const RAIL_MAX_WIDTH = 480;
+const workspace = {
+  id: workspaceId,
+  accountId: "preview-org",
+  name: "cloudgeni",
+  status: "active",
+};
+const context = {
+  ...baseContext(),
+  clientConfig: { auth: { mode: "deploymentKey" }, connectedMachines: false },
+  workspaces: [workspace],
+  workspace,
+  managedSelfContext: null,
+  authSession: null,
+  accessContext: {
+    subjectId: "preview-user",
+    subjectLabel: "Alex Morgan",
+    workspaceGrants: [],
+    accountGrants: [
+      { accountId: "preview-org", permissions: [], metadata: { accountName: "Cloudgeni" } },
+    ],
+  },
+};
+export const useAppContext = () => context;
+// The session header reads the context optionally (#5711); the rail preview
+// always provides it.
+export const useOptionalAppContext = () => context;
+let collapsed = false;
+const listeners = new Set<() => void>();
+const subscribe = (listener: () => void) => {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+};
+const setCollapsed = (value: boolean) => {
+  collapsed = value;
+  listeners.forEach((listener) => listener());
+};
+// `?railwidth=<px>`: the width the person dragged the main rail to.
+const railWidth = Number(new URLSearchParams(location.search).get("railwidth")) || 288;
+export function useRail() {
+  return {
+    workspaceId,
+    collapsed: useSyncExternalStore(subscribe, () => collapsed),
+    isMobile: false,
+    drawerOpen: false,
+    width: railWidth,
+    setCollapsed,
+    toggleCollapsed: () => setCollapsed(!collapsed),
+    setDrawerOpen: () => {},
+    openWorkspace: () => {},
+    openOrg: () => {},
+    startNewSession: () => {},
+  };
+}
+// The settings shell reads the rail where it may be absent; here it is present.
+// `?apprail=none`: a page with no app rail around it, as personal settings.
+export function useOptionalRail() {
+  const rail = useRail();
+  return new URLSearchParams(location.search).get("apprail") === "none" ? null : rail;
+}

@@ -1,33 +1,59 @@
+import { modelDisplayName } from "@opengeni/sdk/model-display";
+import type { ChatClient } from "@opengeni/sdk";
+import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
+import { COMPATIBLE_ENDPOINT_CHOICE } from "@/components/models/organization-compatible-endpoints";
 import { pollDeviceAuthorization } from "@opengeni/connect";
-import { labelReasoningEffort } from "@opengeni/react";
-import type { CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
+import type {
+  BillingCheckoutStatus,
+  CodexConnectPoll,
+  CodexConnectStart,
+  OwnSubscriptionPlan,
+} from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { ArrowUpRightIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowUpRightIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { showCodexConnected } from "@/lib/codex-connect-result";
 
-import { CreditAmountPicker } from "@/components/credit-amount-picker";
+import { CreditAmountPicker } from "@opengeni/react/app/components/credit-amount-picker";
+import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
+import { ownSubscriptionPlanSentence } from "@opengeni/react/app/components/credits/own-subscription-plan-notice";
+import {
+  OpenGeniCreditsTile,
+  type ModelProviderId,
+} from "@opengeni/react/app/components/models/provider-mark";
+import {
+  ProviderConnectList,
+  providerPaymentSummary,
+  type ProviderConnectChoice,
+} from "@/components/models/provider-connect-list";
+import { CelebrationBurst } from "@opengeni/react/app/components/onboarding/celebration-burst";
+import { CreditsPrize } from "@opengeni/react/app/components/onboarding/credits-prize";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Notice } from "@/components/ui/notice";
-import { formatMoneyMicros, validTopupAmount } from "@/lib/format";
-import { userErrorText } from "@/lib/api-error";
-import { analyticsAction } from "@/lib/analytics-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { validTopupAmount } from "@opengeni/react/app/lib/format";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
+import { onboardingJourney } from "@/lib/onboarding-analytics";
 import {
   applyConnectedModelToNewSessionDraft,
   creditCheckoutSuccessUrl,
   creditsModelForCheckout,
   type ConnectedModelFamily,
-} from "@/lib/model-access-onboarding";
+} from "@opengeni/react/app/lib/model-access-onboarding";
 import type { StartingCreditsOnboarding } from "@/lib/onboarding-starting-credits";
+import { formatCreditAmount } from "@opengeni/react/app/lib/onboarding-use-case";
 import {
   isRetryableDevicePollError,
   pollSuperGrokDeviceLogin,
 } from "@/components/supergrok-device-poll";
 
-type ProviderKey = "gateway" | "openrouter";
+type ProviderKey = "vercel" | "openrouter" | "opper";
 
 const PROVIDER_KEYS: Record<
   ProviderKey,
@@ -36,22 +62,37 @@ const PROVIDER_KEYS: Record<
     role: string;
     label: string;
     placeholder: string;
+    help: string;
     family: ConnectedModelFamily;
+    analytics: "connect_ai_gateway" | "connect_openrouter" | "connect_opper";
   }
 > = {
-  gateway: {
+  vercel: {
     domain: "ai-gateway.vercel.sh",
     role: "vercel_ai_gateway",
     label: "Vercel AI Gateway",
     placeholder: "Vercel AI Gateway key",
+    help: "Create one in Vercel under AI Gateway, then API keys.",
     family: "vercel_gateway",
+    analytics: "connect_ai_gateway",
   },
   openrouter: {
     domain: "openrouter.ai",
     role: "openrouter",
     label: "OpenRouter",
     placeholder: "OpenRouter API key",
+    help: "Create one on openrouter.ai under Keys.",
     family: "openrouter",
+    analytics: "connect_openrouter",
+  },
+  opper: {
+    domain: "api.opper.ai",
+    role: "opper",
+    label: "Opper",
+    placeholder: "Opper API key",
+    help: "Create one at platform.opper.ai under API keys.",
+    family: "opper",
+    analytics: "connect_opper",
   },
 };
 
@@ -61,15 +102,15 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   supergrok: "SuperGrok",
   vercel_gateway: "Vercel AI Gateway",
   openrouter: "OpenRouter",
+  opper: "Opper",
   credits: "Opengeni credits",
+  openai: "OpenAI",
+  azure_openai: "Azure OpenAI",
+  openai_compatible: "Your endpoint",
 };
 
-/** ChatGPT keeps device code login behind a per-account (or workspace-admin) setting. */
-export const CHATGPT_SECURITY_SETTINGS_URL = "https://chatgpt.com/#settings/Security";
 /** Codex does not report its device-code lifetime; OpenAI documents 15 minutes. */
 const CODEX_DEVICE_CODE_TTL_MS = 15 * 60 * 1_000;
-/** Show troubleshooting once a device login has waited this long. */
-export const DEVICE_LOGIN_HINT_DELAY_MS = 60 * 1_000;
 
 type DevicePending = {
   kind: "codex" | "supergrok";
@@ -77,21 +118,18 @@ type DevicePending = {
   verificationUri: string;
 };
 
-export type IncludedOnboardingModel = { id: string; label: string; free: boolean };
-
-/** "GPT-6 Luna with extra high reasoning", or just the label when there is no effort to name. */
-function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string {
-  if (model.reasoningEffort === "none") return model.label;
-  return `${model.label} with ${labelReasoningEffort(model.reasoningEffort).toLowerCase()} reasoning`;
-}
+export type IncludedOnboardingModel = {
+  id: string;
+  label: string;
+  free: boolean;
+};
 
 /**
  * First-sign-in product step after the durable organization-name lifecycle.
- * When the organization already holds OpenGeni credits (for example the
+ * When the organization already holds Opengeni credits (for example the
  * verified-signup trial grant) and new chats default to a credits model,
  * starting to chat on those credits is the primary path: the step shows the
- * balance and the resolved default, and names the free model as what applies
- * once the credits run out. Otherwise, when the deployment includes a default
+ * balance without promising a particular model. Otherwise, when the deployment includes a default
  * model, starting to chat with it is the primary path. Every connection or
  * purchase is an optional upgrade. Connecting a model updates the
  * actor-private new-chat draft so the next chat preselects that model. Leaving
@@ -99,9 +137,8 @@ function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string
  *
  * The person here just created the organization, so a subscription (Codex,
  * SuperGrok) connects for everyone in it, and reaches their Personal
- * workspace through the organization. API keys stay in the Personal
- * workspace: the organization's keys serve shared workspaces only, so an
- * organization key would not pay for the next chat.
+ * workspace through the organization. An API key entered here connects to
+ * the Personal workspace, so it pays for the next chat right away.
  */
 export function ModelAccessOnboardingPanel({
   client,
@@ -113,9 +150,11 @@ export function ModelAccessOnboardingPanel({
   supergrokEnabled = false,
   includedModel = null,
   startingCredits = null,
+  continueToNextStep = false,
+  footer,
   onComplete,
 }: {
-  client?: OpenGeniBrowserClient;
+  client?: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   /** The new organization's name, for "Shared with everyone in Acme". */
   organizationName?: string | undefined;
@@ -125,15 +164,36 @@ export function ModelAccessOnboardingPanel({
   supergrokEnabled?: boolean;
   includedModel?: IncludedOnboardingModel | null;
   startingCredits?: StartingCreditsOnboarding | null;
+  /**
+   * Another onboarding step follows (the developer setup for "Add AI agents to
+   * my product"), so the primary action reads Continue instead of naming chat.
+   */
+  continueToNextStep?: boolean;
+  /** Shown at the end of the step, such as the organization's name and a way back. */
+  footer?: ReactNode;
   onComplete: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<DevicePending | null>(null);
-  const [pendingSlow, setPendingSlow] = useState(false);
-  const [keyProvider, setKeyProvider] = useState<ProviderKey | null>(null);
+  // The row whose connect step is open: a provider, or buying credits.
+  const [open, setOpen] = useState<ModelProviderId | "credits" | null>(
+    !startingCredits && !includedModel && billingMode === "stripe" ? "credits" : null,
+  );
+  // The "Use your own provider account" group, open to its provider rows.
+  const [providerAccountsOpen, setProviderAccountsOpen] = useState(false);
+  const keyProvider: ProviderKey | null =
+    open === "vercel" || open === "openrouter" || open === "opper" ? open : null;
+  const connectedModelId = useRef<string | undefined>(undefined);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [selectionRetry, setSelectionRetry] = useState<ConnectedModelFamily | null>(null);
+  // Credits a coupon (or a purchase) just added, celebrated in place.
+  const [won, setWon] = useState<{
+    amountMicros: number;
+    balanceMicros: number | null;
+    free: boolean;
+    celebration: number;
+  } | null>(null);
   const cancelled = useRef(false);
   // Set while a connected model is being saved as the next-chat selection.
   const finishing = useRef(false);
@@ -144,6 +204,18 @@ export function ModelAccessOnboardingPanel({
     operationId: string;
   } | null>(null);
 
+  // A new organization starts on Free, which doesn't include using a
+  // connected subscription: its sign-in says which plan does, from the catalog.
+  const ownSubscriptionPlan = useOwnSubscriptionPlan(
+    codexEnabled || supergrokEnabled ? client : undefined,
+    workspaceId,
+  );
+
+  const variant = startingCredits ? "credits" : includedModel ? "included" : "choose";
+  useEffect(() => {
+    onboardingJourney().viewed("model_access", variant);
+  }, [variant]);
+
   useEffect(() => {
     cancelled.current = false;
     return () => {
@@ -151,13 +223,6 @@ export function ModelAccessOnboardingPanel({
       pollAbort.current?.abort();
     };
   }, []);
-
-  useEffect(() => {
-    setPendingSlow(false);
-    if (!pending) return;
-    const timer = setTimeout(() => setPendingSlow(true), DEVICE_LOGIN_HINT_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [pending]);
 
   function stopDeviceLogin(): void {
     pollAbort.current?.abort();
@@ -167,34 +232,64 @@ export function ModelAccessOnboardingPanel({
 
   function leaveOnboarding(): void {
     // Leaving mid-save would complete twice or drop the connected selection.
-    if (finishing.current) return;
+    if (finishing.current || selectionRetry === "credits") return;
     stopDeviceLogin();
+    onboardingJourney().completed(
+      "model_access",
+      variant === "choose" && !won ? "skipped" : "start_chatting",
+    );
     onComplete();
   }
 
-  async function finishWithConnectedModel(family: ConnectedModelFamily): Promise<boolean> {
+  async function finishWithConnectedModel(
+    family: ConnectedModelFamily,
+    preferredModelId?: string,
+    complete = true,
+  ): Promise<boolean> {
+    connectedModelId.current = preferredModelId;
     if (client) {
       finishing.current = true;
       try {
-        const model = await applyConnectedModelToNewSessionDraft(client, workspaceId, family);
+        const model = await applyConnectedModelToNewSessionDraft(
+          client,
+          workspaceId,
+          family,
+          preferredModelId,
+        );
+        if (cancelled.current) return false;
         if (model) {
           setSelectionRetry(null);
-          toast.success(`${model.label} (${FAMILY_LABELS[family]}) is selected for your next chat`);
+          if (complete)
+            toast.success(
+              `${modelDisplayName(model)} (${FAMILY_LABELS[family]}) is selected for your next chat`,
+            );
         } else {
           setSelectionRetry(family);
-          toast.error("The connection is ready, but its model is not selectable yet");
+          toast.error(
+            family === "credits"
+              ? "Credits added. A covered model isn't available yet."
+              : "The connection is ready, but its model is not selectable yet",
+          );
           return false;
         }
       } catch (error) {
+        if (cancelled.current) return false;
         setSelectionRetry(family);
-        toast.error("Model connected, but your new-chat selection could not be saved", {
-          description: userErrorText(error),
-        });
+        toast.error(
+          family === "credits"
+            ? "Credits added. Couldn't prepare your next chat."
+            : "Model connected, but your new-chat selection could not be saved",
+          {
+            description: userErrorText(error),
+          },
+        );
         return false;
       } finally {
         finishing.current = false;
       }
     }
+    if (!complete) return true;
+    onboardingJourney().completed("model_access", "connected_model");
     onComplete();
     return true;
   }
@@ -203,7 +298,7 @@ export function ModelAccessOnboardingPanel({
     if (!client || busy || !selectionRetry) return;
     setBusy(true);
     try {
-      await finishWithConnectedModel(selectionRetry);
+      await finishWithConnectedModel(selectionRetry, connectedModelId.current);
     } finally {
       setBusy(false);
     }
@@ -212,6 +307,7 @@ export function ModelAccessOnboardingPanel({
   async function startDeviceLogin(kind: DevicePending["kind"]): Promise<void> {
     if (!client || busy || pending) return;
     const label = kind === "codex" ? "Codex" : "xAI";
+    const recordOutcome = beginModelConnectJourney(kind, "device_code");
     setBusy(true);
     let begin: () => Promise<{ status: string; plan?: string | null } | null>;
     let verificationUri: string;
@@ -254,8 +350,11 @@ export function ModelAccessOnboardingPanel({
           });
       }
     } catch (error) {
+      recordOutcome("outcome_unknown");
       setPending(null);
-      toast.error(`Couldn't start the ${label} sign-in`, { description: userErrorText(error) });
+      toast.error(`Couldn't start the ${label} sign-in`, {
+        description: userErrorText(error),
+      });
       return;
     } finally {
       setBusy(false);
@@ -270,11 +369,13 @@ export function ModelAccessOnboardingPanel({
       pollAbort.current = null;
       setPending(null);
       if (result.status === "connected") {
-        toast.success(
-          kind === "codex"
-            ? `Codex connected for ${organizationName || "your organization"}${result.plan ? ` (${result.plan} plan)` : ""}`
-            : `SuperGrok connected for ${organizationName || "your organization"}`,
-        );
+        recordOutcome("connected");
+        if (kind === "codex")
+          showCodexConnected(
+            `Codex connected for ${organizationName || "your organization"}`,
+            result,
+          );
+        else toast.success(`SuperGrok connected for ${organizationName || "your organization"}`);
         // Hold the leave buttons until the connected model is the next-chat selection.
         setBusy(true);
         try {
@@ -284,16 +385,20 @@ export function ModelAccessOnboardingPanel({
         }
         return;
       }
+      recordOutcome(result.status === "denied" ? "denied" : "expired");
       toast.error(
         result.status === "denied"
           ? `${label} login was denied`
           : "The code expired before it was authorized. Try again.",
       );
     } catch (error) {
+      recordOutcome(controller.signal.aborted ? "expired" : "outcome_unknown");
       if (controller.signal.aborted || cancelled.current) return;
       pollAbort.current = null;
       setPending(null);
-      toast.error(`Couldn't confirm the ${label} sign-in`, { description: userErrorText(error) });
+      toast.error(`Couldn't confirm the ${label} sign-in`, {
+        description: userErrorText(error),
+      });
     }
   }
 
@@ -310,7 +415,12 @@ export function ModelAccessOnboardingPanel({
       priorOperation?.provider === keyProvider && priorOperation.credential === value
         ? priorOperation.operationId
         : crypto.randomUUID();
-    providerKeyOperation.current = { provider: keyProvider, credential: value, operationId };
+    providerKeyOperation.current = {
+      provider: keyProvider,
+      credential: value,
+      operationId,
+    };
+    const recordOutcome = beginModelConnectJourney(config.family, "api_key");
     setBusy(true);
     try {
       await client.createConnection(workspaceId, {
@@ -325,10 +435,14 @@ export function ModelAccessOnboardingPanel({
         },
         operationId,
       });
+      recordOutcome("connected");
       toast.success(`${config.label} connected`);
       if (await finishWithConnectedModel(config.family)) providerKeyOperation.current = null;
     } catch (error) {
-      toast.error(`Couldn't connect ${config.label}`, { description: userErrorText(error) });
+      recordOutcome("outcome_unknown");
+      toast.error(`Couldn't connect ${config.label}`, {
+        description: userErrorText(error),
+      });
     } finally {
       setBusy(false);
     }
@@ -347,9 +461,15 @@ export function ModelAccessOnboardingPanel({
       const session = await client.createBillingCheckout({
         amountUsd,
         accountId: organizationId,
-        successUrl: creditCheckoutSuccessUrl(window.location.origin, workspaceId, creditsModel),
+        successUrl: creditCheckoutSuccessUrl(
+          window.location.origin,
+          workspaceId,
+          creditsModel,
+          organizationId,
+        ),
         cancelUrl: window.location.href,
       });
+      onboardingJourney().completed("model_access", "checkout");
       window.location.assign(session.url);
     } catch (error) {
       toast.error("Checkout failed", { description: userErrorText(error) });
@@ -357,148 +477,274 @@ export function ModelAccessOnboardingPanel({
     }
   }
 
-  function toggleKeyProvider(provider: ProviderKey): void {
-    const next = keyProvider === provider ? null : provider;
-    if (next !== keyProvider) {
-      setApiKey("");
-      providerKeyOperation.current = null;
-    }
-    setKeyProvider(next);
+  function toggleRow(row: ModelProviderId | "credits"): void {
+    // Opening another provider leaves a device login or key half-entered behind.
+    if (busy) return;
+    stopDeviceLogin();
+    setApiKey("");
+    providerKeyOperation.current = null;
+    setOpen((current) => (current === row ? null : row));
   }
 
-  const validAmount = validTopupAmount(topupAmount);
-  const everyone = `everyone in ${organizationName || "your organization"}`;
-  const providers = [
-    {
-      name: "Codex",
-      description: `Use your ChatGPT plan, for ${everyone}`,
-      action: () => void startDeviceLogin("codex"),
-      analytics: "connect_codex" as const,
-      disabled: !client,
-    },
-    {
-      name: "SuperGrok",
-      description: `Use your xAI subscription, for ${everyone}`,
-      action: () => void startDeviceLogin("supergrok"),
-      analytics: "connect_supergrok" as const,
-      disabled: !client,
-    },
-    {
-      name: "Vercel AI Gateway",
-      description: "Use your own API key, in your Personal workspace",
-      action: () => toggleKeyProvider("gateway"),
-      analytics: "connect_ai_gateway" as const,
-      key: "gateway",
-    },
-    {
-      name: "OpenRouter",
-      description: "Use your own API key, in your Personal workspace",
-      action: () => toggleKeyProvider("openrouter"),
-      analytics: "connect_openrouter" as const,
-      key: "openrouter",
-    },
-  ].filter(
-    (provider) =>
-      (codexEnabled || provider.name !== "Codex") &&
-      (supergrokEnabled || provider.name !== "SuperGrok"),
-  );
+  async function celebrateCheckout(status: BillingCheckoutStatus): Promise<void> {
+    setBusy(true);
+    setWon((previous) => ({
+      amountMicros: status.credit.amountMicros,
+      balanceMicros: status.balance?.balanceMicros ?? null,
+      free: status.credit.free,
+      celebration: (previous?.celebration ?? 0) + 1,
+    }));
+    try {
+      await finishWithConnectedModel("credits", undefined, false);
+    } finally {
+      if (!cancelled.current) setBusy(false);
+    }
+  }
 
-  const connectOptions = pending ? (
-    <div className="grid gap-4 py-3">
-      <h3 className="m-0 text-sm font-medium text-fg">
-        Connect {pending.kind === "codex" ? "Codex" : "SuperGrok"}
-      </h3>
-      <SubscriptionDeviceCodePanel
-        provider={pending.kind}
-        userCode={pending.userCode}
-        verificationUri={pending.verificationUri}
-        onCopyResult={(copied) =>
-          copied
-            ? toast.success("Code copied")
-            : toast.error("Couldn't copy the code", { description: "Copy it manually instead." })
-        }
+  const coupon =
+    billingMode === "stripe" ? (
+      <CouponRedeem
+        client={client}
+        accountId={organizationId}
+        workspaceId={workspaceId}
+        disabled={busy || !!pending}
+        onGranted={celebrateCheckout}
       />
-      {pendingSlow ? (
-        <Notice tone="waiting" title="Still waiting?">
-          {pending.kind === "codex" ? (
-            <>
-              Check that you entered the code exactly as shown. If ChatGPT says device code login is
-              off, turn it on in ChatGPT under Settings, Security (on Business and Enterprise plans
-              a ChatGPT admin allows it), then cancel and try again.{" "}
-              <a
-                className="font-medium text-fg underline underline-offset-2"
-                href={CHATGPT_SECURITY_SETTINGS_URL}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open ChatGPT security settings
-              </a>
-            </>
-          ) : (
-            "Check that you entered the code exactly as shown and approved access on the xAI page. If the code expired, cancel and try again."
-          )}
-        </Notice>
-      ) : null}
-      <Button type="button" variant="ghost" onClick={stopDeviceLogin}>
-        Cancel
-      </Button>
-    </div>
-  ) : (
-    <div className="divide-y divide-border">
-      {providers.map((provider) => (
-        <div key={provider.name}>
+    ) : null;
+
+  const validAmount = validTopupAmount(topupAmount);
+  const everyone = `For everyone in ${organizationName || "your organization"}`;
+  // Credits and plans people already pay for come first; pay-per-token
+  // provider accounts (API keys) sit behind one row, all still one click away.
+  const subscriptionChoices: ProviderConnectChoice[] = [
+    ...(codexEnabled
+      ? [
+          {
+            id: "codex" as const,
+            title: "Codex",
+            summary: providerPaymentSummary("codex", "Codex"),
+            note: everyone,
+          },
+        ]
+      : []),
+    ...(supergrokEnabled
+      ? [
+          {
+            id: "supergrok" as const,
+            title: "SuperGrok",
+            summary: providerPaymentSummary("supergrok", "SuperGrok"),
+            note: everyone,
+          },
+        ]
+      : []),
+  ];
+  const providerAccountChoices: ProviderConnectChoice[] = [
+    ...(
+      [
+        ["openai", "OpenAI"],
+        ["azure_openai", "Azure OpenAI"],
+        ["openrouter", "OpenRouter"],
+        ["opper", "Opper"],
+        ["vercel", "Vercel AI Gateway"],
+      ] as const
+    ).map(([id, title]) => ({
+      id,
+      title,
+      summary: providerPaymentSummary(id, title),
+    })),
+    // Connected for the organization, so every workspace in it can use it.
+    { id: "openai_compatible", ...COMPATIBLE_ENDPOINT_CHOICE },
+  ];
+  const openProviderAccount = providerAccountChoices.some((choice) => choice.id === open);
+  const providerAccountsExpanded = providerAccountsOpen || openProviderAccount;
+  /** Opens or closes the provider accounts group; closing it closes the provider open inside. */
+  const toggleProviderAccounts = () => {
+    if (busy) return;
+    if (providerAccountsExpanded && openProviderAccount) toggleRow(open as ModelProviderId);
+    setProviderAccountsOpen(!providerAccountsExpanded);
+  };
+
+  function devicePanel(kind: DevicePending["kind"]): ReactNode {
+    const name = kind === "codex" ? "ChatGPT" : "xAI";
+    if (!pending || pending.kind !== kind) {
+      return (
+        <div className="grid gap-3">
+          <p className="m-0 text-xs leading-relaxed text-fg-muted">
+            {kind === "codex"
+              ? "Sign in with the ChatGPT account whose plan should pay for new chats."
+              : "Sign in with the xAI account whose SuperGrok plan should pay for Grok models."}
+          </p>
+          {ownSubscriptionPlan ? (
+            <p
+              className="m-0 text-xs leading-relaxed text-fg"
+              data-testid="own-subscription-plan-note"
+            >
+              {ownSubscriptionPlanSentence(ownSubscriptionPlan)}
+            </p>
+          ) : null}
           <Button
             type="button"
-            variant="ghost"
-            className="h-auto min-h-16 w-full justify-between gap-4 rounded-md px-2 py-3 text-left"
-            aria-label={`Connect ${provider.name}`}
-            aria-expanded={provider.key ? keyProvider === provider.key : undefined}
-            disabled={busy || provider.disabled}
-            onClick={provider.action}
-            {...analyticsAction(provider.analytics)}
+            className="w-full sm:w-fit"
+            disabled={!client || busy}
+            onClick={() => void startDeviceLogin(kind)}
+            {...analyticsAction(kind === "codex" ? "connect_codex" : "connect_supergrok")}
           >
-            <span className="grid gap-1 whitespace-normal">
-              <span className="text-sm font-medium">{provider.name}</span>
-              <span className="text-xs font-normal text-fg-muted">{provider.description}</span>
-            </span>
-            <ChevronRightIcon
-              className={`size-4 text-fg-subtle transition-transform ${provider.key && keyProvider === provider.key ? "rotate-90" : ""}`}
-            />
+            {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+            Sign in with {name}
           </Button>
-          {provider.key && keyProvider === provider.key ? (
-            <div className="grid gap-2 px-2 pb-4 pt-1">
-              <Label htmlFor="onboarding-provider-key">
-                {PROVIDER_KEYS[keyProvider].label} API key
-              </Label>
-              <Input
-                id="onboarding-provider-key"
-                type="password"
-                autoComplete="off"
-                value={apiKey}
-                placeholder={PROVIDER_KEYS[keyProvider].placeholder}
-                onChange={(event) => setApiKey(event.target.value)}
-              />
-              <Button
-                type="button"
-                disabled={!client || busy || !apiKey.trim()}
-                onClick={() => void saveProviderKey()}
-              >
-                {busy ? <Loader2Icon className="size-4 animate-spin" /> : null} Connect{" "}
-                {provider.name}
-              </Button>
-            </div>
-          ) : null}
         </div>
-      ))}
-    </div>
+      );
+    }
+    return (
+      <div className="grid gap-4">
+        <SubscriptionDeviceCodePanel
+          provider={pending.kind}
+          userCode={pending.userCode}
+          verificationUri={pending.verificationUri}
+          onCopyResult={(copied) =>
+            copied
+              ? toast.success("Code copied")
+              : toast.error("Couldn't copy the code", {
+                  description: "Copy it manually instead.",
+                })
+          }
+        />
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full sm:w-fit"
+          onClick={stopDeviceLogin}
+        >
+          Cancel
+        </Button>
+      </div>
+    );
+  }
+
+  function keyPanel(provider: ProviderKey): ReactNode {
+    const config = PROVIDER_KEYS[provider];
+    return (
+      <div className="grid gap-2">
+        <Label htmlFor="onboarding-provider-key">{config.label} API key</Label>
+        <Input
+          id="onboarding-provider-key"
+          type="password"
+          autoComplete="off"
+          value={apiKey}
+          placeholder={config.placeholder}
+          onChange={(event) => setApiKey(event.target.value)}
+        />
+        <p className="m-0 text-xs text-fg-muted">{config.help}</p>
+        <Button
+          type="button"
+          className="mt-1 w-full sm:w-fit"
+          disabled={!client || busy || !apiKey.trim()}
+          onClick={() => void saveProviderKey()}
+          {...analyticsAction(config.analytics)}
+        >
+          {busy ? <Loader2Icon className="size-4 animate-spin" /> : null} Connect {config.label}
+        </Button>
+      </div>
+    );
+  }
+
+  function providerPanel(choice: ProviderConnectChoice): ReactNode {
+    if (choice.id === "codex" || choice.id === "supergrok") return devicePanel(choice.id);
+    if (
+      choice.id === "openai" ||
+      choice.id === "azure_openai" ||
+      choice.id === "openai_compatible"
+    ) {
+      const provider = choice.id;
+      return (
+        <DirectModelProviderForm
+          client={client}
+          workspaceId={workspaceId}
+          organizationId={organizationId}
+          provider={provider}
+          onBusyChange={setBusy}
+          onConnected={async (modelId) => {
+            await finishWithConnectedModel(provider, modelId);
+          }}
+        />
+      );
+    }
+    return choice.id === "vercel" || choice.id === "openrouter" || choice.id === "opper"
+      ? keyPanel(choice.id)
+      : null;
+  }
+
+  const creditsPanel =
+    billingMode === "stripe" ? (
+      <div className="grid gap-3">
+        <CreditAmountPicker
+          value={topupAmount}
+          onChange={setTopupAmount}
+          disabled={busy || !!pending}
+        />
+        <Button
+          type="button"
+          className="w-full"
+          disabled={!client || busy || !!pending || !validAmount}
+          onClick={() => void buyCredits()}
+          {...analyticsAction("buy_credits")}
+        >
+          {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+          {validAmount
+            ? `Add $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
+            : "Add credits"}
+          <ArrowUpRightIcon className="size-4" />
+        </Button>
+        <p className="m-0 text-xs text-fg-subtle">You’ll review your payment in Stripe Checkout.</p>
+      </div>
+    ) : null;
+
+  const creditsRow = creditsPanel ? (
+    <ListRow
+      leading={<OpenGeniCreditsTile size="lg" />}
+      title={startingCredits || won ? "Buy more Opengeni credits" : "Opengeni credits"}
+      // Short enough for one line at phone width; the row under it names
+      // provider accounts, so "nothing to set up" says the difference.
+      meta={["Pay as you go", "Nothing to set up"]}
+      indicator="expand"
+      expanded={open === "credits"}
+      panel={open === "credits" ? creditsPanel : null}
+      onOpen={() => toggleRow("credits")}
+    />
+  ) : null;
+
+  const connectOptions = (
+    <ProviderConnectList
+      label="Ways to pay"
+      choices={subscriptionChoices}
+      expanded={open === "credits" ? null : open}
+      panel={providerPanel}
+      onOpen={(choice) => toggleRow(choice.id)}
+      leadingRows={creditsRow}
+      groupRow={
+        <ListRow
+          leading={<LogoTile size="lg" icon={<KeyRoundIcon className="text-fg" />} />}
+          title="Use your own provider account"
+          meta={["OpenAI, Azure, OpenRouter and more"]}
+          indicator="expand"
+          expanded={providerAccountsExpanded}
+          onOpen={toggleProviderAccounts}
+        />
+      }
+      groupChoices={providerAccountsExpanded ? providerAccountChoices : []}
+    />
   );
 
   const selectionRetryNotice = selectionRetry ? (
     <div className="mt-6 grid gap-3 rounded-lg border border-border bg-bg p-4" role="alert">
       <div>
-        <p className="text-sm font-medium">Your service is connected</p>
+        <p className="text-sm font-medium">
+          {selectionRetry === "credits" ? "Your credits are ready" : "Your service is connected"}
+        </p>
         <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-          Its model is not selectable yet. Try again to use it for your next chat.
+          {selectionRetry === "credits"
+            ? "Try again to select a covered model for your next chat."
+            : "Its model is not selectable yet. Try again to use it for your next chat."}
         </p>
       </div>
       <Button
@@ -513,88 +759,84 @@ export function ModelAccessOnboardingPanel({
     </div>
   ) : null;
 
-  const secondaryCredits = Boolean(includedModel || startingCredits);
-  const CreditsHeading = secondaryCredits ? "h3" : "h2";
-  const credits =
-    billingMode === "stripe" ? (
-      <div className="mt-6 grid gap-4 border-t border-border pt-6">
-        <div>
-          <CreditsHeading className="text-sm font-medium">
-            {startingCredits ? "Buy more Opengeni credits" : "Use Opengeni credits"}
-          </CreditsHeading>
-          <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-            {startingCredits
-              ? "Top up anytime to keep chatting on Opengeni credits."
-              : includedModel
-                ? "Pay as you go for more capable hosted models."
-                : "Pay for hosted models as you go."}{" "}
-            No provider account needed.
-          </p>
-        </div>
-        <CreditAmountPicker
-          value={topupAmount}
-          onChange={setTopupAmount}
-          disabled={busy || !!pending}
-        />
-        <Button
-          type="button"
-          variant={secondaryCredits ? "outline" : "default"}
-          className="h-10 w-full"
-          disabled={!client || busy || !!pending || !validAmount}
-          onClick={() => void buyCredits()}
-          {...analyticsAction("buy_credits")}
-        >
-          {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
-          {validAmount
-            ? `Buy $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
-            : "Buy credits"}
-          <ArrowUpRightIcon className="size-4" />
-        </Button>
-        <p className="-mt-2 text-center text-xs text-fg-subtle">
-          You’ll review your payment in Stripe Checkout.
-        </p>
-      </div>
-    ) : null;
-
-  if (startingCredits) {
-    const freeAfterCredits = includedModel?.free ? includedModel : null;
+  if (startingCredits || won) {
+    const currency = startingCredits?.balance?.currency ?? "usd";
+    const startingAmount = startingCredits?.balance
+      ? formatCreditAmount(startingCredits.balance.balanceMicros, currency)
+      : null;
+    const monthlyPlan =
+      !won &&
+      startingCredits?.balance?.plan?.key === "free" &&
+      startingCredits.balance.plan.creditScoped
+        ? startingCredits.balance.plan
+        : null;
+    const monthlyAmount = monthlyPlan
+      ? formatCreditAmount(monthlyPlan.creditGrantedMicros, currency)
+      : null;
+    const wonAmount = won ? formatCreditAmount(won.amountMicros, "usd") : null;
+    const heading = won
+      ? won.free
+        ? `You got ${wonAmount} in free credits`
+        : `You added ${wonAmount} in credits`
+      : monthlyAmount
+        ? `${monthlyAmount} in free credits every month`
+        : startingAmount
+          ? `You got ${startingAmount} in free credits`
+          : "You got free Opengeni credits";
+    const prizeMicros = won
+      ? won.amountMicros
+      : (monthlyPlan?.creditRemainingMicros ?? startingCredits?.balance?.balanceMicros ?? null);
     return (
-      <section className="flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
+      <section className="og-page-glow flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
+        <CelebrationBurst key={won?.celebration ?? 0} />
         <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
-          <h1 className="text-xl font-semibold tracking-tight">
-            Start chatting with Opengeni credits
+          {prizeMicros !== null ? (
+            <CreditsPrize
+              key={won?.celebration ?? 0}
+              amountMicros={prizeMicros}
+              currency={won ? "usd" : currency}
+              label={
+                won
+                  ? won.free
+                    ? "Coupon redeemed"
+                    : "Credits added"
+                  : monthlyPlan
+                    ? "Monthly Free credit"
+                    : "Free credits"
+              }
+              caption={
+                won && won.balanceMicros !== null
+                  ? `Your balance is now ${formatCreditAmount(won.balanceMicros, "usd")}`
+                  : monthlyPlan
+                    ? "Resets monthly · Unused credit doesn't roll over"
+                    : `Added to ${organizationName || "your organization"}`
+              }
+            />
+          ) : null}
+          <h1
+            className={`text-xl font-semibold tracking-tight ${prizeMicros !== null ? "mt-6" : ""}`}
+          >
+            {heading}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-            {startingCredits.balance
-              ? `${formatMoneyMicros(startingCredits.balance.balanceMicros, startingCredits.balance.currency)} of Opengeni credits included.`
-              : "Opengeni credits are included with your account."}{" "}
-            New chats use {describeCreditsModel(startingCredits.model)}. No card or API key needed.
+            {monthlyPlan
+              ? "For the free-credit models. No card or API key needed."
+              : "Start chatting. No card or API key needed."}
           </p>
-          {freeAfterCredits ? (
-            <p className="mt-2 text-xs leading-relaxed text-fg-muted">
-              When your credits run out, new chats use {freeAfterCredits.label}, which is free.
-            </p>
-          ) : null}
           <Button
             type="button"
-            className="mt-6 h-10 w-full"
-            disabled={busy}
+            size="lg"
+            className="mt-6 w-full"
+            disabled={busy || selectionRetry === "credits"}
             onClick={leaveOnboarding}
           >
-            Start chatting
+            {continueToNextStep ? "Continue" : "Start chatting"}
           </Button>
-
-          <div className="mt-8 border-t border-border pt-6">
-            <h2 className="text-sm font-medium">Prefer your own subscription or key? (optional)</h2>
-            <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-              Connect a subscription or API key you already have
-              {billingMode === "stripe" ? ", or buy more Opengeni credits" : ""}. You can also do
-              this later.
-            </p>
-            <div className="mt-3">{connectOptions}</div>
-            {selectionRetryNotice}
-            {credits}
-          </div>
+          {coupon ? <div className="mt-3 text-center">{coupon}</div> : null}
+          {/* With credits there's no model to connect here; Models in
+              Organization settings connects one later. */}
+          {selectionRetryNotice}
+          {footer}
         </div>
       </section>
     );
@@ -609,8 +851,8 @@ export function ModelAccessOnboardingPanel({
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
             {includedModel.free
-              ? `${includedModel.label} is set up and free to use. No card or API key needed.`
-              : `${includedModel.label} is set up and included with this deployment.`}
+              ? `${modelDisplayName(includedModel)} is set up and free to use. No card or API key needed.`
+              : `${modelDisplayName(includedModel)} is set up and included with this deployment.`}
           </p>
           <Button
             type="button"
@@ -618,7 +860,11 @@ export function ModelAccessOnboardingPanel({
             disabled={busy}
             onClick={leaveOnboarding}
           >
-            {includedModel.free ? "Start chatting for free" : "Start chatting"}
+            {continueToNextStep
+              ? "Continue"
+              : includedModel.free
+                ? "Start chatting for free"
+                : "Start chatting"}
           </Button>
 
           <div className="mt-8 border-t border-border pt-6">
@@ -630,8 +876,9 @@ export function ModelAccessOnboardingPanel({
             </p>
             <div className="mt-3">{connectOptions}</div>
             {selectionRetryNotice}
-            {credits}
+            {coupon ? <div className="mt-4 text-center">{coupon}</div> : null}
           </div>
+          {footer}
         </div>
       </section>
     );
@@ -642,13 +889,14 @@ export function ModelAccessOnboardingPanel({
       <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
         <h1 className="text-xl font-semibold tracking-tight">Choose how to power your chats</h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-          Connect a service you already use
-          {billingMode === "stripe" ? ", or get started with Opengeni credits" : ""}.
+          {billingMode === "stripe"
+            ? "Opengeni credits are the simplest way to start. You can also use a plan or provider account you already have."
+            : "Connect a plan or provider account you already have."}
         </p>
 
-        <div className="mt-7">{connectOptions}</div>
+        <div className="mt-6">{connectOptions}</div>
         {selectionRetryNotice}
-        {credits}
+        {coupon ? <div className="mt-4 text-center">{coupon}</div> : null}
         <Button
           type="button"
           variant="ghost"
@@ -658,7 +906,30 @@ export function ModelAccessOnboardingPanel({
         >
           Skip for now
         </Button>
+        {footer}
       </div>
     </section>
   );
+}
+
+/** The plan the organization needs before a connected subscription runs, or null. */
+function useOwnSubscriptionPlan(
+  client: Pick<OpenGeniBrowserClient, "getWorkspaceModelCatalog"> | undefined,
+  workspaceId: string,
+): OwnSubscriptionPlan | null {
+  const [plan, setPlan] = useState<OwnSubscriptionPlan | null>(null);
+  useEffect(() => {
+    if (!client) return;
+    const abort = new AbortController();
+    // Any failure, even a client without the read, only leaves the hint out.
+    Promise.resolve()
+      .then(() => client.getWorkspaceModelCatalog(workspaceId, { signal: abort.signal }))
+      .then((catalog) => {
+        if (!abort.signal.aborted) setPlan(catalog.ownSubscriptionPlan ?? null);
+      })
+      // Unknown says nothing; Send still names the plan if it's needed.
+      .catch(() => undefined);
+    return () => abort.abort();
+  }, [client, workspaceId]);
+  return plan;
 }

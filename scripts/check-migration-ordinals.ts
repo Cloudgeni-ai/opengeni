@@ -2,7 +2,9 @@
 /**
  * Fail closed when a migration on this head reuses an ordinal that a protected
  * base already assigned to a different migration, or when the local ledger
- * itself carries duplicate ordinals. Prints the exact renumber command.
+ * adds unpublished duplicate ordinals. Published groups that already coexist
+ * on one protected base retain their immutable filename identities.
+ * Prints the exact renumber command for new collisions only.
  *
  *   bun scripts/check-migration-ordinals.ts [--base <ref>]
  *
@@ -16,14 +18,16 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { BASELINE_MIGRATIONS, SQUASHED_MIGRATIONS } from "../packages/db/src/migration-baseline";
 import {
   MIGRATIONS_DIR,
-  findOrdinalCollisions,
+  findProtectedOrdinalCollisions,
   listMigrationFiles,
   nextFreeOrdinal,
   parseLsTree,
   type MigrationName,
 } from "./migration-ordinals";
+import { errorMessage } from "@opengeni/contracts/values";
 
 async function git(root: string, ...command: string[]) {
   const child = Bun.spawn(["git", ...command], { cwd: root, stdout: "pipe", stderr: "pipe" });
@@ -80,16 +84,10 @@ async function main(): Promise<void> {
   }
 
   const headLedger = listMigrationFiles(root);
-  const collisions: Array<{ ref: string; ordinal: string; headFile: string; baseFile: string }> =
-    [];
-  const duplicates: string[][] = [];
-  for (const ledger of ledgers) {
-    const found = findOrdinalCollisions(headLedger, ledger.files);
-    for (const collision of found.collisions) {
-      collisions.push({ ref: ledger.ref, ...collision });
-    }
-    if (duplicates.length === 0) duplicates.push(...found.duplicates);
-  }
+  const { collisions, duplicates } = findProtectedOrdinalCollisions(headLedger, ledgers, {
+    parts: BASELINE_MIGRATIONS,
+    replaces: SQUASHED_MIGRATIONS,
+  });
   if (collisions.length === 0 && duplicates.length === 0) {
     const highest = nextFreeOrdinal(headLedger, ...ledgers.map((ledger) => ledger.files));
     console.log(
@@ -115,6 +113,6 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 });

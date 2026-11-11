@@ -71,7 +71,7 @@ variable "gke" {
 }
 
 variable "artifact_registry_writer_members" {
-  description = "IAM members allowed to push OpenGeni workload images to the Artifact Registry repository."
+  description = "IAM members allowed to push Opengeni workload images to the Artifact Registry repository."
   type        = list(string)
   default     = []
 }
@@ -80,6 +80,22 @@ variable "gke_admin_members" {
   description = "IAM members allowed to administer the GKE cluster through Kubernetes API."
   type        = list(string)
   default     = []
+}
+
+variable "runtime_readable_secret_ids" {
+  description = "Additional Secret Manager secret IDs in this project that the runtime service account may read, for example separate database or Temporal credential secrets synced through External Secrets. The created runtime secret is always readable; access is never granted project-wide."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for id in var.runtime_readable_secret_ids : can(regex("^[A-Za-z0-9_-]{1,255}$", id))])
+    error_message = "runtime_readable_secret_ids entries must be bare Secret Manager secret IDs (letters, digits, - and _), not resource names or wildcards."
+  }
+
+  validation {
+    condition     = !contains(var.runtime_readable_secret_ids, "${var.name_prefix}-runtime")
+    error_message = "runtime_readable_secret_ids must not list the runtime secret itself; it is always readable, and a second binding would remove access when the entry is later dropped."
+  }
 }
 
 variable "kubernetes_workload_identity" {

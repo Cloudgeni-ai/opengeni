@@ -11,7 +11,6 @@ import type {
   ProposeRigChangeRequest,
   Rig,
   RigChange,
-  ResourceAuthorityScope,
   RigVersion,
   UpdateRigRequest,
 } from "@opengeni/contracts";
@@ -26,7 +25,6 @@ import {
   getRigByName,
   getRigChange,
   getRigVersion,
-  getVariableSet,
   listRigChanges,
   listRigVersions,
   recordAuditEvent,
@@ -37,8 +35,6 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { boundedParallelMap } from "@opengeni/runtime/mcp-network";
-import { requirePermission } from "../access";
 import { rigProviderImagesFromVerification } from "./provider-images";
 
 export * from "./provider-images";
@@ -46,35 +42,6 @@ export * from "./provider-images";
 export const MAX_RIGS_PER_WORKSPACE = 50;
 export const MAX_CHECKS_PER_RIG = 100;
 export const MAX_CREDENTIAL_HOOKS_PER_RIG = 50;
-export const MAX_DEFAULT_VARIABLE_SETS_PER_RIG = 25;
-export const RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY = 4;
-
-type VariableSetEnvironment = { values: Record<string, string> } | null;
-
-/** Load complete rig defaults concurrently while preserving listed precedence. */
-export async function loadRigDefaultVariableSetEnvironment(
-  variableSetIds: readonly string[],
-  load: (variableSetId: string) => Promise<VariableSetEnvironment>,
-): Promise<Record<string, string>> {
-  const variableSets = await boundedParallelMap(
-    variableSetIds,
-    RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY,
-    load,
-  );
-  const values: Record<string, string> = {};
-  for (const variableSet of variableSets) {
-    Object.assign(values, variableSet?.values ?? {});
-  }
-  return values;
-}
-
-/** Rig defaults layer below the session's explicitly selected variable set. */
-export function mergeRigDefaultVariableSetEnvironment(
-  rigDefaultValues: Record<string, string>,
-  sessionValues: Record<string, string>,
-): Record<string, string> {
-  return { ...rigDefaultValues, ...sessionValues };
-}
 
 export type RigServices = {
   db: Database;
@@ -115,10 +82,12 @@ export async function recordRigAuditEvent(
   });
 }
 
-// Version attribution string for an API (user-authenticated) mutation. The MCP
-// session path (M4) will use `session:<id>` instead.
+// Version attribution string for an API (user-authenticated) mutation: the
+// caller's subject as is (`user:<id>`). It already names its kind, so it is not
+// prefixed again; versions written before this say `user:user:<id>`, which the
+// console still reads as that person. The MCP session path uses `session:<id>`.
 export function rigActorForGrant(grant: AccessGrant): string {
-  return `user:${grant.subjectId}`;
+  return grant.subjectId;
 }
 
 export async function requireRigForApi(
@@ -172,51 +141,6 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
   }
 }
 
-// Every referenced default variable set must exist in the workspace. RLS makes a
-// cross-workspace id indistinguishable from a missing one, so both map to 422.
-async function assertVariableSetsExist(
-  db: Database,
-  access: AccessGrant,
-  rigScope: ResourceAuthorityScope,
-  ids: ReadonlyArray<string> | undefined,
-): Promise<void> {
-  if (ids === undefined) {
-    return;
-  }
-  requirePermission(access, "variable-sets:attach");
-  if (ids.length === 0) {
-    return;
-  }
-  requirePermission(access, "variable-sets:use");
-  const unique = [...new Set(ids)];
-  for (const id of unique) {
-    const variableSet = await getVariableSet(db, access, id);
-    if (!variableSet) {
-      throw new HTTPException(422, {
-        message: `unknown defaultVariableSetId: ${id}`,
-      });
-    }
-    if (!variableSetScopeAllowedForRig(rigScope, variableSet.scope)) {
-      throw new HTTPException(422, {
-        message: `${rigScope}-scoped sandbox environments cannot use ${variableSet.scope}-scoped variable sets`,
-      });
-    }
-  }
-}
-
-/** A resource may depend only on Variable Sets whose audience is no narrower
- * than its own. User-owned rigs may use anything visible to their owner. */
-export function variableSetScopeAllowedForRig(
-  rigScope: ResourceAuthorityScope,
-  variableSetScope: ResourceAuthorityScope,
-): boolean {
-  return (
-    rigScope === "user" ||
-    variableSetScope === "organization" ||
-    (rigScope === "workspace" && variableSetScope === "workspace")
-  );
-}
-
 export async function createRigForApi(
   deps: RigServices,
   grant: AccessGrant,
@@ -225,12 +149,6 @@ export async function createRigForApi(
 ): Promise<Rig> {
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(
-    deps.db,
-    grant,
-    payload.scope,
-    payload.defaultVariableSetIds.length > 0 ? payload.defaultVariableSetIds : undefined,
-  );
   if ((await countRigs(deps.db, grant, payload.scope)) >= MAX_RIGS_PER_WORKSPACE) {
     throw new HTTPException(422, {
       message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} sandbox environments`,
@@ -256,7 +174,6 @@ export async function createRigForApi(
       setupScript: payload.setupScript ?? null,
       checks: payload.checks,
       credentialHooks: payload.credentialHooks,
-      defaultVariableSetIds: payload.defaultVariableSetIds,
       changelog: "Initial version",
       createdBy,
     },
@@ -344,12 +261,6 @@ export async function proposeRigChangeForApi(
   }
   if (request.kind === "definition_edit") {
     assertUniqueCheckNames(request.payload.checks);
-    await assertVariableSetsExist(
-      deps.db,
-      grant,
-      rig.scope,
-      request.payload.defaultVariableSetIds ?? undefined,
-    );
   }
   const change = await createRigChange(deps.db, {
     accountId: grant.accountId,
@@ -456,7 +367,6 @@ export async function promoteSetupAppendChange(
     setupScript: appendRigSetupCommand(base.setupScript, payload.command),
     checks: base.checks,
     credentialHooks: base.credentialHooks,
-    defaultVariableSetIds: base.defaultVariableSetIds,
   };
   const { version, change: updated } = await promoteChangeWithActiveCas(
     deps,
@@ -529,7 +439,6 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     setupScript?: unknown;
     checks?: unknown;
     credentialHooks?: unknown;
-    defaultVariableSetIds?: unknown;
     changelog?: unknown;
   };
   const nextDefinition = {
@@ -540,9 +449,6 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     credentialHooks: Array.isArray(payload.credentialHooks)
       ? (payload.credentialHooks as string[])
       : base.credentialHooks,
-    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
-      ? (payload.defaultVariableSetIds as string[])
-      : base.defaultVariableSetIds,
   };
   const { version, change: updated } = await promoteChangeWithActiveCas(
     deps,
@@ -593,12 +499,6 @@ export async function createRigVersionForApi(
     throw new HTTPException(422, { message: "sandbox environment has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(
-    deps.db,
-    grant,
-    rig.scope,
-    payload.defaultVariableSetIds ?? undefined,
-  );
   const base = rig.activeVersion;
   const version = await createRigVersion(
     deps.db,
@@ -609,7 +509,6 @@ export async function createRigVersionForApi(
       setupScript: payload.setupScript === undefined ? base.setupScript : payload.setupScript,
       checks: payload.checks ?? base.checks,
       credentialHooks: payload.credentialHooks ?? base.credentialHooks,
-      defaultVariableSetIds: payload.defaultVariableSetIds ?? base.defaultVariableSetIds,
       changelog: payload.changelog ?? "Manager-created version",
       createdBy: rigActorForGrant(grant),
     },

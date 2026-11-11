@@ -1,7 +1,7 @@
 /**
  * Public API surface inventory and compatibility diff.
  *
- * `docs/design/api-compatibility-policy.md` defines OpenGeni's public surface:
+ * `docs/design/api-compatibility-policy.md` defines Opengeni's public surface:
  * the `/v1` routes reachable through public `@opengeni/sdk` methods, the
  * documented session event envelope and event types, the exported names of
  * `@opengeni/sdk` and `@opengeni/react`, and the automation webhook ingress.
@@ -21,6 +21,7 @@
  *   parsed and its exported names (value or type-only) collected transitively.
  *
  * A method whose JSDoc carries `@internal` is excluded (web-app-only surface).
+ * Export subpaths listed in `INTERNAL_PACKAGE_SUBPATHS` are excluded too.
  */
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -32,12 +33,28 @@ export const ALLOWLIST_PATH = "scripts/public-api/breaking-changes.json";
 const HTTP_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
 /**
- * Public ingress formats that no SDK method calls (third parties post to them).
- * Provider callbacks whose format the provider owns (Stripe, GitHub, Slack) are
- * not OpenGeni's surface and stay out.
+ * Package export subpaths that are first-party implementation, not public
+ * surface. `@opengeni/react/app/*` is the Opengeni web app's session UI layer:
+ * the web app, the desktop app and the package's own embeds import it, but it
+ * carries no compatibility promise; embedders use the curated entry points.
+ * `@opengeni/sdk/desktop-bridge` is the contract between the desktop shell and
+ * the web app it hosts.
+ */
+const INTERNAL_PACKAGE_SUBPATHS: Record<string, readonly string[]> = {
+  "@opengeni/react": ["./app/*"],
+  "@opengeni/sdk": ["./desktop-bridge"],
+};
+
+/**
+ * Public routes that no SDK method calls: ingress formats third parties post
+ * to, and the OpenAI-compatible single-call routes a stock OpenAI client calls
+ * with base URL `/v1/workspaces/{workspaceId}`. Provider callbacks whose format
+ * the provider owns (Stripe, GitHub, Slack) are not Opengeni's surface and stay
+ * out.
  */
 export const PUBLIC_INGRESS_ROUTES: readonly string[] = [
-  "POST /v1/webhooks/automations/:endpointId",
+  "GET /v1/workspaces/:workspaceId/models",
+  "POST /v1/workspaces/:workspaceId/chat/completions",
 ];
 
 /** Documented event contracts, by `@opengeni/contracts` export name. */
@@ -76,6 +93,8 @@ export type Snapshot = {
   schemas: Record<string, { io: SchemaIo[]; shape: Record<string, string> }>;
   exports: Record<string, Record<string, ExportKind>>;
   sdkMembers: Record<string, string[]>;
+  /** Entry point + exported class, not a source class-name union. Optional for older baselines. */
+  sdkSignatures?: Record<string, Record<string, string[]>>;
 };
 
 // ---------------------------------------------------------------------------
@@ -126,6 +145,9 @@ function parse(path: string): { program: Node; comments: { value: string; end: n
 }
 
 function literalString(node: Node, bindings?: ReadonlyMap<string, string>): string | null {
+  if (bindings && node.type === "CallExpression" && (node.callee as Node).type === "Identifier") {
+    return bindings.get(String((node.callee as Node).name)) ?? null;
+  }
   if (node.type === "Literal" && typeof node.value === "string") return node.value;
   if (node.type === "StringLiteral" && typeof node.value === "string") return node.value;
   if (node.type === "TemplateLiteral") {
@@ -229,7 +251,11 @@ function jsdocBefore(
     : "";
 }
 
-function collectFunctionInfo(fn: Node, method: SdkMethod): void {
+function collectFunctionInfo(
+  fn: Node,
+  method: SdkMethod,
+  fileBindings: ReadonlyMap<string, string>,
+): void {
   for (const param of (fn.params as Node[] | undefined) ?? []) {
     const annotation =
       (param.typeAnnotation as Node | undefined) ??
@@ -241,7 +267,10 @@ function collectFunctionInfo(fn: Node, method: SdkMethod): void {
   for (const name of returnNames) if (name !== "Promise") method.responseTypes.add(name);
   const body = fn.body as Node | undefined;
   if (!body) return;
-  const bindings = new Map<string, string>();
+  const bindings = new Map(fileBindings);
+  for (const param of (fn.params as Node[] | undefined) ?? []) {
+    if (param.type === "Identifier") bindings.delete(String(param.name));
+  }
   walk(body, (child) => {
     if (child.type !== "VariableDeclarator" || (child.id as Node).type !== "Identifier") return;
     let init = child.init as Node | null;
@@ -249,7 +278,9 @@ function collectFunctionInfo(fn: Node, method: SdkMethod): void {
       init = init.body as Node;
     }
     const text = init ? literalString(init) : null;
-    if (text?.startsWith("/v1/")) bindings.set(String((child.id as Node).name), text);
+    const name = String((child.id as Node).name);
+    if (text?.startsWith("/v1/")) bindings.set(name, text);
+    else bindings.delete(name);
   });
   walk(body, (child) => {
     const text = literalString(child, bindings);
@@ -275,6 +306,17 @@ export function extractSdkMethods(files: readonly string[]): SdkMethod[] {
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     const { program, comments } = parse(file);
+    // Only a single literal return qualifies as a file-level path helper.
+    // Unknown or computed helpers must not invent an SDK-reachable route.
+    const fileBindings = new Map<string, string>();
+    for (const node of program.body as Node[]) {
+      if (node.type !== "FunctionDeclaration" || !node.id) continue;
+      const statements = (node.body as Node).body as Node[];
+      if (statements.length !== 1 || statements[0]!.type !== "ReturnStatement") continue;
+      const argument = statements[0]!.argument as Node | null;
+      const text = argument ? literalString(argument) : null;
+      if (text?.startsWith("/v1/")) fileBindings.set(String((node.id as Node).name), text);
+    }
     const add = (name: string, fn: Node, docStart: number) => {
       const method: SdkMethod = {
         name,
@@ -284,7 +326,7 @@ export function extractSdkMethods(files: readonly string[]): SdkMethod[] {
         requestTypes: new Set(),
         responseTypes: new Set(),
       };
-      collectFunctionInfo(fn, method);
+      collectFunctionInfo(fn, method, fileBindings);
       if (method.paths.size > 0) methods.push(method);
     };
     walk(program, (node) => {
@@ -341,7 +383,7 @@ function routeSegmentIsParam(segment: string): boolean {
 }
 
 /** 2 = SDK dynamic on route param, 1 = SDK dynamic on route literal, 0 = no match. */
-function matchQuality(sdkPath: string, routePath: string): 0 | 1 | 2 {
+export function matchQuality(sdkPath: string, routePath: string): 0 | 1 | 2 {
   const sdk = sdkPath.split("/");
   const route = routePath.split("/");
   if (route.at(-1) === "*") {
@@ -735,15 +777,11 @@ function declaredNames(declaration: Node): [string, ExportKind][] {
   }
 }
 
-function packageEntryExports(
-  packageDir: string,
-  packageName: string,
-): Record<string, Record<string, ExportKind>> {
+function packageEntryFiles(packageDir: string, packageName: string): Record<string, string> {
   const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as {
     exports: Record<string, string | { types?: string; default?: string; import?: string }>;
   };
-  const cache = new Map<string, ModuleExports>();
-  const out: Record<string, Record<string, ExportKind>> = {};
+  const out: Record<string, string> = {};
   for (const [subpath, target] of Object.entries(manifest.exports).sort(([a], [b]) =>
     a.localeCompare(b),
   )) {
@@ -751,12 +789,55 @@ function packageEntryExports(
       typeof target === "string" ? target : (target.types ?? target.default ?? target.import);
     const entryName =
       subpath === "." ? packageName : `${packageName}/${subpath.replace(/^\.\//, "")}`;
-    if (!file || !/\.(ts|tsx)$/.test(file)) {
+    if (!file) continue;
+    if (INTERNAL_PACKAGE_SUBPATHS[packageName]?.includes(subpath)) continue;
+    if (subpath.includes("*")) {
+      // A subpath pattern ("./ui/*" -> "./src/ui/*.tsx") exposes every matching
+      // module, so each one is its own entry point.
+      for (const [match, path] of expandSubpathPattern(packageDir, file)) {
+        out[entryName.replace("*", match)] = path;
+      }
+      continue;
+    }
+    out[entryName] = resolve(packageDir, file);
+  }
+  return out;
+}
+
+function expandSubpathPattern(packageDir: string, target: string): [string, string][] {
+  const [prefix, suffix = ""] = resolve(packageDir, target).split("*") as [string, string?];
+  const root = dirname(`${prefix}x`);
+  const matches: [string, string][] = [];
+  const visit = (dir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) {
+        visit(path);
+        continue;
+      }
+      if (!path.startsWith(prefix) || !path.endsWith(suffix)) continue;
+      const match = path.slice(prefix.length, path.length - suffix.length);
+      if (/\.(test|browser|dom-fixture)$|\.test\./.test(match)) continue;
+      matches.push([match.split("\\").join("/"), path]);
+    }
+  };
+  if (existsSync(root)) visit(root);
+  return matches.sort(([a], [b]) => a.localeCompare(b));
+}
+
+function packageEntryExports(
+  packageDir: string,
+  packageName: string,
+): Record<string, Record<string, ExportKind>> {
+  const cache = new Map<string, ModuleExports>();
+  const out: Record<string, Record<string, ExportKind>> = {};
+  for (const [entryName, file] of Object.entries(packageEntryFiles(packageDir, packageName))) {
+    if (!/\.(ts|tsx)$/.test(file)) {
       // CSS and other asset entry points: the entry itself is the surface.
       out[entryName] = {};
       continue;
     }
-    const exports = moduleExports(resolve(packageDir, file), cache);
+    const exports = moduleExports(file, cache);
     out[entryName] = Object.fromEntries(
       [...exports.entries()].sort(([a], [b]) => a.localeCompare(b)),
     );
@@ -764,41 +845,350 @@ function packageEntryExports(
   return out;
 }
 
-function sdkClassMembers(files: readonly string[]): Record<string, string[]> {
-  const out: Record<string, Set<string>> = {};
+/** Strip parser locations and source spelling, retaining only the declared type structure. */
+function signatureType(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(signatureType);
+  if (!value || typeof value !== "object") return value;
+  const node = value as Record<string, unknown>;
+  if (node.type === "TSTypeAnnotation") return signatureType(node.typeAnnotation);
+  const out = Object.fromEntries(
+    Object.entries(node)
+      .filter(
+        ([key, field]) =>
+          !["start", "end", "raw", "decorators"].includes(key) &&
+          (field !== null || key === "value"),
+      )
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, field]) => [key, signatureType(field)]),
+  );
+  // Union/intersection spelling order is not a type change.
+  if (["TSUnionType", "TSIntersectionType"].includes(String(node.type))) {
+    out.types = (out.types as unknown[]).sort((a, b) =>
+      JSON.stringify(a).localeCompare(JSON.stringify(b)),
+    );
+  }
+  return out;
+}
+
+type MemberSignature = {
+  kind: string;
+  static: boolean;
+  optional: boolean;
+  readonly: boolean;
+  generics: unknown;
+  parameters: { type: unknown; optional: boolean; rest: boolean }[];
+  result: unknown;
+};
+
+function memberSignature(member: Node): string {
+  const fn = member.value as Node | undefined;
+  const parameters = ((fn?.params as Node[] | undefined) ?? []).map((parameter) => {
+    const binding = (parameter.left ?? parameter.argument ?? parameter) as Node;
+    return {
+      type: signatureType(binding.typeAnnotation ?? parameter.typeAnnotation ?? null),
+      optional: parameter.type === "AssignmentPattern" || binding.optional === true,
+      rest: parameter.type === "RestElement",
+    };
+  });
+  return JSON.stringify({
+    kind: String(member.kind ?? "property"),
+    static: member.static === true,
+    optional: member.optional === true,
+    readonly: member.readonly === true,
+    generics: signatureType(fn?.typeParameters ?? null),
+    parameters,
+    result: signatureType(fn?.returnType ?? member.typeAnnotation ?? null),
+  } satisfies MemberSignature);
+}
+
+type ClassDefinition = { file: string; name: string; declaration: Node };
+type SymbolReference = { file: string; name: string };
+
+/** Resolve by module + local symbol; different modules can both declare OpenGeniClient. */
+export function sdkClassSurface(
+  files: readonly string[],
+  entries: Readonly<Record<string, string>>,
+): Pick<Snapshot, "sdkMembers" | "sdkSignatures"> {
+  const modules = new Map<string, ReturnType<typeof parse>>();
+  const definitions: ClassDefinition[] = [];
+  const module = (file: string) => {
+    const cached = modules.get(file);
+    if (cached) return cached;
+    const parsed = parse(file);
+    modules.set(file, parsed);
+    return parsed;
+  };
   for (const file of files) {
-    const source = readFileSync(file, "utf8");
-    const { program, comments } = parse(file);
-    for (const statement of program.body as Node[]) {
-      const declaration =
-        statement.type === "ExportNamedDeclaration" ? (statement.declaration as Node | null) : null;
-      if (!declaration || declaration.type !== "ClassDeclaration" || !declaration.id) continue;
-      const className = String((declaration.id as Node).name);
-      const members = (out[className] ??= new Set());
-      for (const member of ((declaration.body as Node).body as Node[]) ?? []) {
-        const key = member.key as Node | undefined;
-        if (!key || key.type !== "Identifier") continue;
-        if (member.accessibility === "private" || member.accessibility === "protected") continue;
-        if (member.type !== "MethodDefinition" && member.type !== "PropertyDefinition") continue;
-        if (member.kind === "constructor") continue;
-        if (/@internal\b/.test(jsdocBefore(comments, member.start, source))) continue;
-        members.add(String(key.name));
+    for (const statement of module(file).program.body as Node[]) {
+      const declaration = (statement.declaration ?? statement) as Node;
+      if (
+        statement.type === "ExportNamedDeclaration" &&
+        declaration.type === "ClassDeclaration" &&
+        declaration.id
+      ) {
+        definitions.push({ file, name: String((declaration.id as Node).name), declaration });
       }
     }
   }
-  return Object.fromEntries(
-    Object.entries(out)
-      .filter(([, members]) => members.size > 0)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, members]) => [name, [...members].sort()]),
+  const resolveClass = (
+    reference: SymbolReference,
+    exported = false,
+    seen = new Set<string>(),
+  ): ClassDefinition | null => {
+    const key = `${reference.file}:${exported}:${reference.name}`;
+    if (seen.has(key)) return null;
+    const nextSeen = new Set(seen).add(key);
+    for (const statement of module(reference.file).program.body as Node[]) {
+      const declaration = (statement.declaration ?? statement) as Node;
+      if (
+        declaration.type === "ClassDeclaration" &&
+        declaration.id &&
+        String((declaration.id as Node).name) === reference.name &&
+        (!exported || statement.type === "ExportNamedDeclaration")
+      )
+        return { file: reference.file, name: reference.name, declaration };
+      if (statement.type === "ImportDeclaration" && !exported && statement.importKind !== "type") {
+        const source = resolveModule(reference.file, String((statement.source as Node).value));
+        if (!source) continue;
+        for (const specifier of (statement.specifiers as Node[]) ?? []) {
+          if (
+            String((specifier.local as Node).name) !== reference.name ||
+            specifier.importKind === "type"
+          )
+            continue;
+          const imported =
+            specifier.type === "ImportDefaultSpecifier"
+              ? "default"
+              : String((specifier.imported as Node | undefined)?.name);
+          return resolveClass({ file: source, name: imported }, true, nextSeen);
+        }
+      }
+      if (
+        statement.type === "ExportNamedDeclaration" &&
+        exported &&
+        statement.exportKind !== "type"
+      ) {
+        for (const specifier of (statement.specifiers as Node[]) ?? []) {
+          const target = specifier.exported as Node;
+          if (
+            String(target.name ?? target.value) !== reference.name ||
+            specifier.exportKind === "type"
+          )
+            continue;
+          const local = specifier.local as Node;
+          const source = statement.source as Node | null;
+          const file = source
+            ? resolveModule(reference.file, String(source.value))
+            : reference.file;
+          if (file)
+            return resolveClass(
+              { file, name: String(local.name ?? local.value) },
+              !!source,
+              nextSeen,
+            );
+        }
+      }
+      if (
+        statement.type === "ExportAllDeclaration" &&
+        exported &&
+        statement.exportKind !== "type"
+      ) {
+        const file = resolveModule(reference.file, String((statement.source as Node).value));
+        const found = file ? resolveClass({ file, name: reference.name }, true, nextSeen) : null;
+        if (found) return found;
+      }
+      if (
+        statement.type === "ExportDefaultDeclaration" &&
+        exported &&
+        reference.name === "default"
+      ) {
+        if (declaration.type === "ClassDeclaration")
+          return { file: reference.file, name: "default", declaration };
+        if (declaration.type === "Identifier")
+          return resolveClass(
+            { file: reference.file, name: String(declaration.name) },
+            false,
+            nextSeen,
+          );
+      }
+    }
+    return null;
+  };
+  const effectiveMembers = (
+    definition: ClassDefinition,
+    seen = new Set<Node>(),
+  ): Map<string, string[]> => {
+    if (seen.has(definition.declaration))
+      throw new Error(`cyclic SDK class inheritance: ${definition.name}`);
+    const nextSeen = new Set(seen).add(definition.declaration);
+    const base = definition.declaration.superClass as Node | null;
+    const ancestor =
+      base?.type === "Identifier"
+        ? resolveClass({ file: definition.file, name: String(base.name) })
+        : null;
+    const members = ancestor ? effectiveMembers(ancestor, nextSeen) : new Map<string, string[]>();
+    const { comments } = module(definition.file);
+    const source = readFileSync(definition.file, "utf8");
+    const own = new Map<string, { signature: string; overload: boolean }[]>();
+    for (const member of (definition.declaration.body as Node).body as Node[]) {
+      const key = member.key as Node | undefined;
+      if (!key || key.type !== "Identifier" || member.kind === "constructor") continue;
+      if (member.type !== "MethodDefinition" && member.type !== "PropertyDefinition") continue;
+      const name = String(key.name);
+      if (
+        member.accessibility === "private" ||
+        member.accessibility === "protected" ||
+        /@internal\b/.test(jsdocBefore(comments, member.start, source))
+      ) {
+        members.delete(name);
+        continue;
+      }
+      const list = own.get(name) ?? own.set(name, []).get(name)!;
+      list.push({
+        signature: memberSignature(member),
+        overload: member.type === "MethodDefinition" && !(member.value as Node).body,
+      });
+    }
+    for (const [name, signatures] of own) {
+      const overloads = signatures.filter((signature) => signature.overload);
+      members.set(
+        name,
+        [
+          ...new Set(
+            (overloads.length ? overloads : signatures).map((signature) => signature.signature),
+          ),
+        ].sort(),
+      );
+    }
+    return members;
+  };
+  // Keep the existing class-name inventory for historical baselines, but include inheritance.
+  const legacy = new Map<string, Set<string>>();
+  for (const definition of definitions) {
+    const names =
+      legacy.get(definition.name) ?? legacy.set(definition.name, new Set()).get(definition.name)!;
+    for (const name of effectiveMembers(definition).keys()) names.add(name);
+  }
+  const sdkSignatures: NonNullable<Snapshot["sdkSignatures"]> = {};
+  for (const [entry, file] of Object.entries(entries)) {
+    if (!/\.(ts|tsx)$/.test(file)) continue;
+    for (const [name, kind] of moduleExports(file)) {
+      if (kind !== "value") continue;
+      const definition = resolveClass({ file, name }, true);
+      if (definition)
+        sdkSignatures[`${entry}:${name}`] = Object.fromEntries(
+          [...effectiveMembers(definition)].sort(([a], [b]) => a.localeCompare(b)),
+        );
+    }
+  }
+  return {
+    sdkMembers: Object.fromEntries(
+      [...legacy]
+        .filter(([, members]) => members.size)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, members]) => [name, [...members].sort()]),
+    ),
+    sdkSignatures: Object.fromEntries(
+      Object.entries(sdkSignatures).sort(([a], [b]) => a.localeCompare(b)),
+    ),
+  };
+}
+
+function signatureCompatible(previous: string, candidate: string): boolean {
+  const before = JSON.parse(previous) as MemberSignature;
+  const after = JSON.parse(candidate) as MemberSignature;
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const contains = (container: unknown, contained: unknown): boolean => {
+    const node = container as { type?: string; types?: unknown[] } | null;
+    if (node?.type === "TSAnyKeyword" || node?.type === "TSUnknownKeyword") return true;
+    const variants = node?.type === "TSUnionType" ? node.types! : [container];
+    const subset = contained as { type?: string; types?: unknown[] } | null;
+    return (subset?.type === "TSUnionType" ? subset.types! : [contained]).every((type) =>
+      variants.some((variant) => same(variant, type)),
+    );
+  };
+  // A parameter's inline object type may gain optional members: every object
+  // a caller passed before still fits. Kept members must be unchanged.
+  type Literal = {
+    type?: string;
+    members?: Array<{ key?: { name?: string }; optional?: boolean }>;
+  };
+  const accepts = (widenedType: unknown, originalType: unknown): boolean => {
+    if (contains(widenedType, originalType)) return true;
+    const widened = widenedType as Literal | null;
+    const original = originalType as Literal | null;
+    if (widened?.type !== "TSTypeLiteral" || original?.type !== "TSTypeLiteral") return false;
+    const kept = original.members ?? [];
+    const extra = (widened.members ?? []).filter(
+      (member) => !kept.some((other) => same(other, member)),
+    );
+    return (
+      kept.every((member) => (widened.members ?? []).some((other) => same(other, member))) &&
+      extra.every(
+        (member) =>
+          member.optional === true &&
+          member.key?.name !== undefined &&
+          !kept.some((other) => other.key?.name === member.key?.name),
+      )
+    );
+  };
+  if (
+    before.kind !== after.kind ||
+    before.static !== after.static ||
+    (!before.optional && after.optional) ||
+    (!before.readonly && after.readonly) ||
+    !same(before.generics, after.generics)
+  )
+    return false;
+  if (!contains(before.result, after.result) || after.parameters.length < before.parameters.length)
+    return false;
+  return (
+    before.parameters.every((parameter, index) => {
+      const next = after.parameters[index]!;
+      return (
+        parameter.rest === next.rest &&
+        (!parameter.optional || next.optional) &&
+        accepts(next.type, parameter.type)
+      );
+    }) &&
+    after.parameters
+      .slice(before.parameters.length)
+      .every((parameter) => parameter.optional || parameter.rest)
   );
+}
+
+/*
+ * The alias-specific signatures supplement (never replace) legacy member removals.
+ * Contract-schema diffs still own the shapes behind named request/response types.
+ */
+function signatureFindings(before: Snapshot, after: Snapshot): Finding[] {
+  const findings: Finding[] = [];
+  for (const [client, members] of Object.entries(before.sdkSignatures ?? {})) {
+    for (const [name, signatures] of Object.entries(members)) {
+      const next = after.sdkSignatures?.[client]?.[name];
+      if (
+        !next ||
+        signatures.some(
+          (signature) => !next.some((candidate) => signatureCompatible(signature, candidate)),
+        )
+      ) {
+        findings.push({
+          id: `signature:${client}.${name}`,
+          breaking: true,
+          message: `${client}.${name} ${next ? "has an incompatible signature" : "removed"}`,
+        });
+      }
+    }
+  }
+  return findings;
 }
 
 // ---------------------------------------------------------------------------
 // Generation
 // ---------------------------------------------------------------------------
 
-function sdkSourceFiles(root: string): string[] {
+/** SDK source files under `root` (a package `src` directory), excluding tests and declarations. */
+export function sdkSourceFiles(root: string): string[] {
   const files: string[] = [];
   const visit = (directory: string) => {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
@@ -974,7 +1364,7 @@ export function generateSnapshot(sources: SurfaceSources): Snapshot {
       ...packageEntryExports(sdkDir, "@opengeni/sdk"),
       ...packageEntryExports(join(root, "packages/react"), "@opengeni/react"),
     },
-    sdkMembers: sdkClassMembers(files),
+    ...sdkClassSurface(files, packageEntryFiles(sdkDir, "@opengeni/sdk")),
   };
 }
 
@@ -989,26 +1379,56 @@ export type Finding = {
   message: string;
 };
 
-/** Decides whether a field's move from one named schema to another keeps callers working. */
-type RefCompatibility = (
-  oldRef: string,
-  newRef: string,
-  ios: readonly SchemaIo[],
-  seen?: Set<string>,
-) => boolean;
+/** One node of a flattened shape, located by its path. */
+type ShapeAt = { shape: Shape; path: string };
+
+/**
+ * Decides whether the value at `old` (before) and the value at `next` (after)
+ * accept and produce the same wire data, so a change in how the node is
+ * written down (inline vs named schema, renamed schema) keeps callers working.
+ */
+type NodeCompatibility = (old: ShapeAt, next: ShapeAt, ios: readonly SchemaIo[]) => boolean;
 
 const REF_TYPE = /^ref\((.+)\)$/;
+
+/** True when `path` lies strictly below `prefix` in a flattened shape. */
+function isDescendant(path: string, prefix: string): boolean {
+  return path.startsWith(prefix) && /^[.[{|]/.test(path.slice(prefix.length));
+}
+
+/**
+ * The inline subtree at `path`, re-rooted at `$`. Requiredness and
+ * nullability belong to the field holding the value, which the caller
+ * compares, not to the value itself.
+ */
+function subtreeShape(shape: Shape, path: string): Shape {
+  const rooted: Shape = {};
+  for (const [candidate, node] of Object.entries(shape)) {
+    if (candidate === path) {
+      const { req: _req, nullable: _nullable, ...value } = node;
+      rooted.$ = value;
+    } else if (isDescendant(candidate, path)) {
+      rooted[`$${candidate.slice(path.length)}`] = node;
+    }
+  }
+  return rooted;
+}
 
 function shapeFindings(
   name: string,
   ios: readonly SchemaIo[],
   before: Shape,
   after: Shape,
-  refCompatible: RefCompatibility = () => false,
+  compatible: NodeCompatibility = () => false,
 ): Finding[] {
   const findings: Finding[] = [];
   const input = ios.includes("input");
   const output = ios.includes("output");
+  // Nodes whose value was compared as a whole; their children are not
+  // diffed path by path because they moved (into a named schema, or under a
+  // union variant).
+  const comparedBefore: string[] = [];
+  const comparedAfter: string[] = [];
   const push = (path: string, breaking: boolean, message: string) =>
     findings.push({
       id: `schema:${name}:${path}`,
@@ -1016,6 +1436,7 @@ function shapeFindings(
       message: `${name} ${path}: ${message}`,
     });
   for (const [path, old] of Object.entries(before)) {
+    if (comparedBefore.some((prefix) => isDescendant(path, prefix))) continue;
     const next = after[path];
     if (!next) {
       // A removed union variant is reported by its union node's value diff.
@@ -1026,20 +1447,63 @@ function shapeFindings(
       push(path, true, "field removed");
       continue;
     }
-    if (old.t !== next.t) {
+    // A one-value enum is emitted as a const by JSON Schema. Expanding it
+    // into same-scalar enum values follows the ordinary enum policy below.
+    const literalPair = [old, next].every(
+      (field) => (field.t === "const" || field.t === "enum") && field.enum?.length,
+    );
+    const literalTypes = new Set(
+      literalPair
+        ? [...(old.enum ?? []), ...(next.enum ?? [])].map((value) => typeof JSON.parse(value))
+        : [],
+    );
+    const sameScalarEnum =
+      literalPair &&
+      literalTypes.size === 1 &&
+      [...literalTypes].every(
+        (type) => type === "string" || type === "number" || type === "boolean",
+      );
+    let compareEnum = true;
+    if (old.t !== next.t && !sameScalarEnum) {
       const widenedInput = input && !output && next.t === "unknown";
       const narrowedOutput = output && !input && old.t === "unknown";
-      const oldRef = REF_TYPE.exec(old.t)?.[1];
-      const newRef = REF_TYPE.exec(next.t)?.[1];
-      // A field that now points at a differently named schema is only a break
-      // when that schema's shape breaks callers (e.g. a request union widened
+      const oldAt = { shape: before, path };
+      // A field that became a union still accepts and produces its previous
+      // value when one variant has that value's shape. The other variants are
+      // additions, which the union's own label diff reports.
+      const becameUnion = next.t === "union" && old.t !== "union";
+      const keptVariant = becameUnion
+        ? (next.enum ?? [])
+            .map((label) => `${path}|${label}`)
+            .find(
+              (variant) =>
+                after[variant] !== undefined &&
+                compatible(oldAt, { shape: after, path: variant }, ios),
+            )
+        : undefined;
+      // A field that now points at a differently named schema, or whose
+      // inline value moved into (or out of) a named schema, is only a break
+      // when the value's shape breaks callers (e.g. a request union widened
       // into a new named superset is additive).
-      if (oldRef && newRef && refCompatible(oldRef, newRef, ios)) {
+      const moved =
+        !becameUnion &&
+        (REF_TYPE.test(old.t) || REF_TYPE.test(next.t)) &&
+        compatible(oldAt, { shape: after, path }, ios);
+      if (moved) {
+        comparedBefore.push(path);
+        comparedAfter.push(path);
+        compareEnum = false;
         push(path, false, `type changed ${old.t} -> ${next.t} (compatible shape)`);
-      } else if (!widenedInput && !narrowedOutput) {
-        push(path, true, `type changed ${old.t} -> ${next.t}`);
+      } else if (keptVariant) {
+        comparedBefore.push(path);
+        comparedAfter.push(keptVariant);
+        push(path, false, `type changed ${old.t} -> ${next.t} (still accepts ${old.t})`);
+      } else {
+        if (!widenedInput && !narrowedOutput) {
+          push(path, true, `type changed ${old.t} -> ${next.t}`);
+        }
+        continue;
       }
-      continue;
     }
     if (old.req !== undefined && next.req !== undefined && old.req !== next.req) {
       if (input && !old.req && next.req) push(path, true, "became required in a request");
@@ -1052,7 +1516,7 @@ function shapeFindings(
         push(path, true, "may now be null in a response");
       else push(path, false, `nullable ${Boolean(old.nullable)} -> ${Boolean(next.nullable)}`);
     }
-    if (old.enum || next.enum) {
+    if (compareEnum && (old.enum || next.enum)) {
       const removed = (old.enum ?? []).filter((value) => !(next.enum ?? []).includes(value));
       const added = (next.enum ?? []).filter((value) => !(old.enum ?? []).includes(value));
       // Union variants behave like enum values: a removed request variant
@@ -1063,6 +1527,7 @@ function shapeFindings(
   }
   for (const [path, next] of Object.entries(after)) {
     if (before[path]) continue;
+    if (comparedAfter.some((prefix) => path === prefix || isDescendant(path, prefix))) continue;
     const parent = path.replace(/(\.[^.|[\]{}]+|\[\]|\{\}|\|[^.|[\]{}]+)$/, "");
     const parentExisted = parent === path || Boolean(before[parent]);
     if (input && next.req && parentExisted) push(path, true, "new required request field");
@@ -1139,19 +1604,35 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
         });
     }
   }
-  const refCompatible: RefCompatibility = (oldRef, newRef, ios, seen = new Set<string>()) => {
-    const key = `${oldRef}->${newRef}`;
-    const oldSchema = before.schemas[oldRef];
-    const newSchema = after.schemas[newRef];
-    if (!oldSchema || !newSchema || seen.has(key)) return false;
-    seen.add(key);
-    return !shapeFindings(
-      newRef,
-      ios,
-      decodeShape(oldSchema.shape),
-      decodeShape(newSchema.shape),
-      (a, b, nested) => refCompatible(a, b, nested, seen),
-    ).some((finding) => finding.breaking);
+  // The value at a node: the named schema it points at, or its inline subtree.
+  const valueShape = (side: Snapshot, at: ShapeAt): Shape | undefined => {
+    const node = at.shape[at.path];
+    if (!node) return undefined;
+    const ref = REF_TYPE.exec(node.t)?.[1];
+    if (!ref) return subtreeShape(at.shape, at.path);
+    const schema = side.schemas[ref];
+    return schema ? decodeShape(schema.shape) : undefined;
+  };
+  // Named-schema pairs already under comparison. Meeting one again means a
+  // recursive schema reached itself; any real difference is reported at a
+  // non-recursive position, so the repeat is assumed compatible.
+  const inProgress = new Set<string>();
+  const compatible: NodeCompatibility = (old, next, ios) => {
+    const oldRef = REF_TYPE.exec(old.shape[old.path]?.t ?? "")?.[1];
+    const newRef = REF_TYPE.exec(next.shape[next.path]?.t ?? "")?.[1];
+    const key = oldRef && newRef ? `${oldRef}->${newRef}` : null;
+    if (key && inProgress.has(key)) return true;
+    const oldShape = valueShape(before, old);
+    const newShape = valueShape(after, next);
+    if (!oldShape || !newShape) return false;
+    if (key) inProgress.add(key);
+    try {
+      return !shapeFindings(newRef ?? "value", ios, oldShape, newShape, compatible).some(
+        (finding) => finding.breaking,
+      );
+    } finally {
+      if (key) inProgress.delete(key);
+    }
   };
   for (const [name, schema] of Object.entries(before.schemas)) {
     const next = after.schemas[name];
@@ -1169,13 +1650,7 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
     }
     const ios = [...new Set([...schema.io, ...next.io])] as SchemaIo[];
     findings.push(
-      ...shapeFindings(
-        name,
-        ios,
-        decodeShape(schema.shape),
-        decodeShape(next.shape),
-        refCompatible,
-      ),
+      ...shapeFindings(name, ios, decodeShape(schema.shape), decodeShape(next.shape), compatible),
     );
   }
   for (const [entry, names] of Object.entries(before.exports)) {
@@ -1231,26 +1706,41 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
         });
     }
   }
-  return findings;
+  return [...findings, ...signatureFindings(before, after)];
 }
 
 // ---------------------------------------------------------------------------
 // Allowlist (the breaking-change log)
 // ---------------------------------------------------------------------------
 
+/**
+ * One entry of `scripts/public-api/breaking-changes.json`.
+ *
+ * Since the November 3, 2026 policy revision, a major release, a changeset or an
+ * elapsed deprecation period never authorizes a breaking change. An entry
+ * admits a breaking finding only when it records an emergency security
+ * exception (`securityException: true`) or an explicit owner-approved
+ * exception (`approval`: the link to that recorded decision). Entries written
+ * under the earlier major-based policy carry `removedInMajor`; they are kept as
+ * history and admit nothing new.
+ */
 export type AllowlistEntry = {
   /** Finding id(s) this entry covers; a trailing `*` matches a prefix. */
   ids: string[];
-  /** Where the deprecation was announced: changeset, docs URL, or ADR log anchor. */
-  deprecation: string;
-  /** SDK/API major that removes the old behaviour; must exceed the base major. */
-  removedInMajor: number;
-  /** Earliest removal date on the managed service (Sunset), ISO date. */
-  sunset: string;
   reason: string;
-  /** Optional emergency security exception (ADR (d)); still logged here. */
+  /** Emergency security exception (policy (d)); also logged in the policy's exception log. */
   securityException?: boolean;
+  /** Link (URL or docs path) to the recorded owner approval of this exception. */
+  approval?: string;
+  /** Historical (pre-November 2026) entries: where the deprecation was announced. */
+  deprecation?: string;
+  /** Historical (pre-November 2026) entries: the major that removed the old behaviour. */
+  removedInMajor?: number;
+  /** Historical (pre-November 2026) entries: the earliest removal date, ISO date. */
+  sunset?: string;
 };
+
+const REFERENCE = /(\.changeset\/|https?:\/\/|docs\/)/;
 
 export function validateAllowlist(entries: unknown): AllowlistEntry[] {
   if (!Array.isArray(entries)) throw new Error(`${ALLOWLIST_PATH} must be a JSON array`);
@@ -1263,34 +1753,58 @@ export function validateAllowlist(entries: unknown): AllowlistEntry[] {
       !entry.ids.every((id) => typeof id === "string" && id)
     )
       throw new Error(`${where}.ids must be a non-empty string array`);
+    if (typeof entry.reason !== "string" || entry.reason.trim().length < 10)
+      throw new Error(`${where}.reason must explain the change`);
+    if (entry.securityException !== undefined && typeof entry.securityException !== "boolean")
+      throw new Error(`${where}.securityException must be a boolean`);
     if (
-      typeof entry.deprecation !== "string" ||
-      !/(\.changeset\/|https?:\/\/|docs\/)/.test(entry.deprecation)
+      entry.approval !== undefined &&
+      (typeof entry.approval !== "string" || !REFERENCE.test(entry.approval))
+    )
+      throw new Error(
+        `${where}.approval must link (URL or docs path) to the recorded owner approval`,
+      );
+    if (
+      entry.deprecation !== undefined &&
+      (typeof entry.deprecation !== "string" || !REFERENCE.test(entry.deprecation))
     )
       throw new Error(
         `${where}.deprecation must reference a changeset, docs path, or URL announcing the deprecation`,
       );
-    if (!Number.isInteger(entry.removedInMajor))
+    if (entry.removedInMajor !== undefined && !Number.isInteger(entry.removedInMajor))
       throw new Error(`${where}.removedInMajor must be an integer major`);
-    if (typeof entry.sunset !== "string" || Number.isNaN(Date.parse(entry.sunset)))
+    if (
+      entry.sunset !== undefined &&
+      (typeof entry.sunset !== "string" || Number.isNaN(Date.parse(entry.sunset)))
+    )
       throw new Error(`${where}.sunset must be an ISO date`);
-    if (typeof entry.reason !== "string" || entry.reason.trim().length < 10)
-      throw new Error(`${where}.reason must explain the change`);
+    if (
+      entry.securityException !== true &&
+      entry.approval === undefined &&
+      entry.removedInMajor === undefined
+    )
+      throw new Error(
+        `${where} must record a security exception (securityException: true) or an owner approval (approval: link). A major release or deprecation period does not authorize a breaking change.`,
+      );
     return entry as AllowlistEntry;
   });
 }
 
+/**
+ * The entry that admits a breaking finding, or null. Only a security exception
+ * or an owner-approved exception admits one; historical major-based entries
+ * never admit a new finding.
+ */
 export function allowlisted(
   finding: Finding,
   entries: readonly AllowlistEntry[],
-  baseMajor: number,
 ): AllowlistEntry | null {
   for (const entry of entries) {
     const matches = entry.ids.some((id) =>
       id.endsWith("*") ? finding.id.startsWith(id.slice(0, -1)) : finding.id === id,
     );
     if (!matches) continue;
-    if (entry.securityException || entry.removedInMajor > baseMajor) return entry;
+    if (entry.securityException === true || entry.approval !== undefined) return entry;
   }
   return null;
 }

@@ -14,12 +14,12 @@ import {
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
 import { humanizeName } from "@/components/capabilities/skill-copy";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 /* ----------------------------------------------------------------------------
    A plugin's page: a bundle of skills and the connections they need. What it
@@ -62,6 +62,12 @@ export type PluginManageActions = {
   busy: boolean;
   /** Why an update can't be reviewed (no retained source URL). */
   updateUnavailableReason?: string;
+  /**
+   * Whether the viewer may remove this plugin: the server's flag (admins
+   * remove any plugin, a member only one they added). Omitted, `canManage`
+   * stands in.
+   */
+  canRemove?: boolean;
 };
 
 export function PluginPage({
@@ -134,7 +140,9 @@ export function PluginPage({
         {busy ? "Installing…" : "Install plugin"}
       </Button>
     ) : null;
-  const managed = installed && installation && manage && canManage;
+  const canRemove = manage ? (manage.canRemove ?? canManage) : false;
+  const managed = installed && installation && manage && (canManage || canRemove);
+  const askAdmin = installed ? !(manage ? canRemove : canManage) : !canManage;
 
   return (
     <CapabilityPage
@@ -166,16 +174,18 @@ export function PluginPage({
                   )}
                   Check for update
                 </RowButton>
-                <MoreMenu label={`More actions for ${title}`}>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    disabled={manage.busy}
-                    onSelect={manage.onRemove}
-                  >
-                    <TrashIcon />
-                    Remove plugin
-                  </DropdownMenuItem>
-                </MoreMenu>
+                {canRemove ? (
+                  <MoreMenu label={`More actions for ${title}`}>
+                    <DropdownMenuItem
+                      variant="destructive"
+                      disabled={manage.busy}
+                      onSelect={manage.onRemove}
+                    >
+                      <TrashIcon />
+                      Remove plugin
+                    </DropdownMenuItem>
+                  </MoreMenu>
+                ) : null}
               </>
             ) : null}
           </>
@@ -228,7 +238,7 @@ export function PluginPage({
             type="button"
             aria-expanded={expanded}
             onClick={() => setExpanded((value) => !value)}
-            className="mt-2 rounded-sm text-xs font-medium text-brand hover:underline"
+            className="mt-2 rounded-sm text-xs font-medium og-link"
           >
             {expanded ? "Show less" : "Read more"}
           </button>
@@ -239,9 +249,11 @@ export function PluginPage({
             {`Includes ${joinList(others)}, which Opengeni doesn't run yet.`}
           </p>
         ) : null}
-        {!canManage ? (
+        {askAdmin ? (
           <p className="mt-2 mb-0 text-xs leading-4.5 text-fg-muted">
-            Only workspace admins can install, update and remove plugins.
+            {installed
+              ? "Ask a workspace admin to update or remove this plugin."
+              : "Ask a workspace admin to install this plugin."}
           </p>
         ) : null}
       </DetailSection>
@@ -321,7 +333,7 @@ export function PluginPage({
                 href={item.sourceUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-medium text-brand hover:underline"
+                className="font-medium og-link"
               >
                 {item.sourceUrl.replace(/^https?:\/\//, "")}
               </a>

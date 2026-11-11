@@ -6,6 +6,9 @@ import {
   archivedTranscriptEvents,
   ARCHIVED_FILE_ID,
 } from "./fixtures/archived-transcript";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 test("a realistic imported transcript uses the unchanged canonical timeline projection", () => {
   const wireTranscript = JSON.parse(JSON.stringify(archivedImportTranscript));
@@ -13,7 +16,7 @@ test("a realistic imported transcript uses the unchanged canonical timeline proj
   expect(accepted).toEqual(archivedImportTranscript);
   const events = archivedTranscriptEvents();
   const before = structuredClone(events);
-  const items = buildTimeline(events);
+  const items = buildTimeline(englishText, events);
   expect(events).toEqual(before);
   expect(items.filter((item) => item.kind === "user-message").map((item) => item.text)).toEqual([
     "Summarize the attached migration plan.",
@@ -47,6 +50,8 @@ test("a realistic imported transcript uses the unchanged canonical timeline proj
   expect(items.filter((item) => item.kind === "goal").map((item) => item.action)).toEqual(["set"]);
   // Replayed/streamed normal envelopes and imported envelopes group identically.
   expect(
-    groupTimeline(buildTimeline(JSON.parse(JSON.stringify(events))), { readableTurns: true }),
-  ).toEqual(groupTimeline(items, { readableTurns: true }));
+    groupTimeline(englishText, buildTimeline(englishText, JSON.parse(JSON.stringify(events))), {
+      readableTurns: true,
+    }),
+  ).toEqual(groupTimeline(englishText, items, { readableTurns: true }));
 });

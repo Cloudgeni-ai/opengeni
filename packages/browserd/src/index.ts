@@ -1,4 +1,3 @@
-export * from "./binary";
 export * from "./attached-bridge";
 export * from "./attached-cdp";
 export * from "./cdp";
@@ -18,8 +17,8 @@ export * from "./journal";
 export * from "./lightpanda-binary";
 export * from "./lightpanda-runner";
 export * from "./media";
+export * from "./passkeys";
 export * from "./protocol";
-export * from "./protected-auth-journal";
 export * from "./runner";
 export * from "./server";
 export * from "./state-artifact";
@@ -30,3 +29,4 @@ export * from "./supervisor";
 export * from "./workspace-files";
 
 export * from "./chromium-context-pool";
+export * from "./computer-backend";

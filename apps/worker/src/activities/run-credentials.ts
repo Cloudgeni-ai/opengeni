@@ -25,7 +25,6 @@ export type RunCredentialResolutionContext = {
   turn: SessionTurn & { initiatingHumanSubjectId?: string | null };
   attemptId: string;
   effectiveSandboxBackend: SandboxBackend;
-  variableSet: { id: string; name: string } | null;
   /** Enables the workspace's configured HTTP credential provider. */
   settings?: Settings;
   initiatingHumanSubjectId?: string | null;
@@ -68,7 +67,6 @@ export function buildRunCredentialsRequest(
     sandboxOs: input.turn.sandboxOs ?? input.session.sandboxOs,
     purpose: input.purpose,
     forceRefresh: input.forceRefresh,
-    variableSet: input.variableSet,
   };
 }
 
@@ -92,7 +90,7 @@ export function runCredentialModelNote(
 ): string | undefined {
   if (material.authNeeded.length === 0) return undefined;
   return [
-    "[OpenGeni connected-service status]",
+    "[Opengeni connected-service status]",
     "One or more host-managed credentials need user attention. Continue with available capabilities, but do not claim the affected service is usable until it is reconnected.",
     JSON.stringify({
       credentials: material.authNeeded.map((notice) => ({
@@ -108,7 +106,7 @@ export function runCredentialModelNote(
 /**
  * Freeze the provider-neutral host credential request to this exact admitted
  * turn. The host selects connections and material; the worker never infers a
- * provider from repositories, environment names, or an OpenGeni variable set.
+ * provider from repositories, environment names, or an Opengeni variable set.
  * A workspace that configured its own HTTP credential provider uses it in
  * place of the deployment's injected port.
  */
@@ -159,7 +157,6 @@ export async function bindRunCredentialResolver(
       turn: input.turn,
       attemptId: input.attemptId,
       effectiveSandboxBackend: input.effectiveSandboxBackend,
-      variableSet: input.variableSet,
       rootSessionId,
       purpose: "provision",
       forceRefresh: false,

@@ -1,4 +1,4 @@
-import type { ApiKey } from "@/types";
+import type { ApiKey } from "@opengeni/react/app/types";
 
 export type ApiKeyStatus = "active" | "expired" | "revoked";
 

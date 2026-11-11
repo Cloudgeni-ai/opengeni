@@ -1,0 +1,714 @@
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  type CallToolResult,
+  type Icon,
+} from "@modelcontextprotocol/sdk/types.js";
+import {
+  ErrorEnvelope,
+  isReadOnlyPermissionSet,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  type OrganizationAccessPolicy,
+} from "@opengeni/contracts";
+import {
+  stampDelegatedHumanAuthorization,
+  stampWorkspacePersonAuthorization,
+} from "@opengeni/core";
+import { z } from "zod";
+
+import {
+  ACTION_CATALOG,
+  appActionChangesState,
+  findAppAction,
+  type ActionCatalogEntry,
+} from "@opengeni/contracts/app-actions";
+import { ACTION_REQUEST_SCHEMAS } from "./mcp/action-schema-imports.gen";
+import { actionDescription } from "./mcp/action-descriptions";
+import {
+  stampActionAuditProvenance,
+  type ActionAuditProvenance,
+} from "./http/disconnect-audit-actor";
+
+/* ----------------------------------------------------------------------------
+   The organization MCP server (`/v1/mcp`).
+
+   Every public API action is reachable through three tools: find an action,
+   describe it, run it. A call runs the real route in this process as the
+   caller, so the route's own permission checks decide, exactly as for the
+   app:
+
+   - a person who signed in (MCP OAuth): the request carries the verified
+     person proof, re-resolving their live access and capping it by the
+     connection's access setting on every call;
+   - an organization API key: the request carries that key.
+
+   The proof lives on the exact Request object in process memory; nothing a
+   client sends can create it.
+   -------------------------------------------------------------------------- */
+
+export type OrganizationMcpCaller =
+  | {
+      kind: "person";
+      accountId: string;
+      subjectId: string;
+      access: OrganizationAccessPolicy;
+    }
+  | { kind: "key"; authorization: string; accessKey: string | null };
+
+const MAX_RESPONSE_BYTES = 256 * 1024;
+/** Room left for the status, truncation note and hint around a trimmed body. */
+const RESULT_ENVELOPE_BYTES = 2 * 1024;
+const STREAM_READ_MS = 2_000;
+
+/**
+ * Someone who uses Opengeni through another product (an external user of the
+ * organization, for example a person in an embedded chat) acts in exactly one
+ * workspace, with no organization-level authority. Their one workspace, or
+ * null for anyone else.
+ */
+export function externalPersonWorkspace(caller: OrganizationMcpCaller): string | null {
+  if (caller.kind !== "person" || !caller.subjectId.startsWith("external_user:")) return null;
+  const scope = caller.access.workspaceScope;
+  return scope.kind === "selected" && scope.workspaceIds.length === 1
+    ? scope.workspaceIds[0]!
+    : null;
+}
+
+/** Whether an action works inside one named workspace, all an external person can reach. */
+export function actionInOneWorkspace(entry: ActionCatalogEntry): boolean {
+  return (
+    entry.path === "/v1/workspaces/:workspaceId" ||
+    entry.path.startsWith("/v1/workspaces/:workspaceId/")
+  );
+}
+
+/** Whether a 403 body is the billing routes' refusal for a missing billing:manage. */
+async function refusedForBillingManage(response: Response): Promise<boolean> {
+  try {
+    const envelope = ErrorEnvelope.safeParse(await response.clone().json());
+    return envelope.success && envelope.data.error.details?.permission === "billing:manage";
+  } catch {
+    return false;
+  }
+}
+
+/** Shown when a 401 or 403 answers an external person: this app doesn't offer it. */
+const EXTERNAL_PERSON_REFUSED_HINT =
+  "This isn't available to this person here. Tell them plainly, without pointing them to a page.";
+
+export const OrganizationActionSearchInput = z
+  .object({
+    query: z.string().max(200).default(""),
+    limit: z.number().int().min(1).max(50).default(20),
+    offset: z.number().int().min(0).default(0),
+  })
+  .strict();
+export const OrganizationActionDescribeInput = z
+  .object({ id: z.string().min(1).max(300) })
+  .strict();
+export const OrganizationActionCallInput = z
+  .object({
+    id: z.string().min(1).max(300),
+    pathParameters: z.record(z.string(), z.string().min(1).max(1024)).default({}),
+    query: z
+      .record(
+        z.string(),
+        z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))]),
+      )
+      .default({}),
+    body: z.unknown().optional(),
+  })
+  .strict();
+const SearchInput = OrganizationActionSearchInput;
+const DescribeInput = OrganizationActionDescribeInput;
+const CallInput = OrganizationActionCallInput;
+
+const TOOLS = [
+  {
+    name: "opengeni_actions_search",
+    title: "Find Opengeni actions",
+    description:
+      "Search every action available in Opengeni: sessions and chats, workspaces, people, knowledge, files, schedules, connections, models, keys, billing and settings. Returns action ids to describe and call. An empty query lists everything, page by page.",
+    inputSchema: z.toJSONSchema(SearchInput, { io: "input" }),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "opengeni_action_describe",
+    title: "Describe an Opengeni action",
+    description:
+      "Show an action's method, path, path parameters and the JSON schema of its input, so it can be called correctly.",
+    inputSchema: z.toJSONSchema(DescribeInput, { io: "input" }),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "opengeni_action_call",
+    title: "Run an Opengeni action",
+    description:
+      "Run one Opengeni action as this connection, with exactly the access it was given. Pass path parameters (for example workspaceId), query parameters and a JSON body. Returns the HTTP status and response.",
+    inputSchema: z.toJSONSchema(CallInput, { io: "input" }),
+    annotations: { readOnlyHint: false, openWorldHint: false },
+  },
+] as const;
+
+/** The brand mark from `apps/web/public/favicon.svg`. */
+const BRAND_MARK_PATH =
+  "M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z";
+
+function brandMarkSvgDataUri(fill: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="71 17 184 184" width="184" height="184"><path fill="${fill}" d="${BRAND_MARK_PATH}"/></svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
+/**
+ * MCP `serverInfo.icons` (spec 2025-11-25). Self-contained data URIs work for
+ * every deployment; the web app's PNG is added when its public origin is known.
+ */
+export function organizationMcpIcons(publicOrigin: string | null): Icon[] {
+  const icons: Icon[] = [
+    {
+      src: brandMarkSvgDataUri("#111111"),
+      mimeType: "image/svg+xml",
+      sizes: ["any"],
+      theme: "light",
+    },
+    {
+      src: brandMarkSvgDataUri("#FFFFFF"),
+      mimeType: "image/svg+xml",
+      sizes: ["any"],
+      theme: "dark",
+    },
+  ];
+  if (publicOrigin) {
+    icons.push({
+      src: new URL("/icon-512.png", publicOrigin).href,
+      mimeType: "image/png",
+      sizes: ["512x512"],
+      theme: "light",
+    });
+  }
+  return icons;
+}
+
+export type OrganizationActionContext = {
+  caller: OrganizationMcpCaller;
+  /**
+   * Who acts for the person (an agent session with admin access, a connected
+   * agent, a personal key), for audit records. Trusted server state only.
+   */
+  auditProvenance?: ActionAuditProvenance;
+  /** This API's own origin; the call never leaves the process. */
+  origin: string;
+  /** The web app's public origin, when configured; serves the PNG icon. */
+  publicOrigin?: string | null;
+  dispatch: (request: Request) => Promise<Response>;
+  signal?: AbortSignal;
+};
+
+export function buildOrganizationMcpServer(input: OrganizationActionContext): Server {
+  const server = new Server(
+    {
+      name: "opengeni",
+      title: "Opengeni",
+      version: "1.0.0",
+      websiteUrl: "https://opengeni.ai",
+      icons: organizationMcpIcons(input.publicOrigin ?? null),
+    },
+    {
+      capabilities: { tools: {} },
+      instructions:
+        "Opengeni actions: use opengeni_actions_search to find what you need, opengeni_action_describe for its inputs, then opengeni_action_call. Most actions take a workspaceId path parameter; list workspaces first (search 'workspaces').",
+    },
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: TOOLS.map((tool) => ({ ...tool, inputSchema: tool.inputSchema as never })),
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+    const args = request.params.arguments ?? {};
+    switch (request.params.name) {
+      case "opengeni_actions_search": {
+        const parsed = SearchInput.safeParse(args);
+        if (!parsed.success) return invalid(parsed.error);
+        return json(searchActions(parsed.data));
+      }
+      case "opengeni_action_describe": {
+        const parsed = DescribeInput.safeParse(args);
+        if (!parsed.success) return invalid(parsed.error);
+        return describeActionResult(parsed.data.id);
+      }
+      case "opengeni_action_call": {
+        const parsed = CallInput.safeParse(args);
+        if (!parsed.success) return invalid(parsed.error);
+        return await callOrganizationAction(input, parsed.data);
+      }
+      default:
+        return failure(`Unknown tool ${request.params.name}.`);
+    }
+  });
+  return server;
+}
+
+function words(value: string): string[] {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter(Boolean);
+}
+
+/** Actions an MCP caller can complete: browser-only ones are left out. */
+const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
+const DESCRIPTIONS = new Map(
+  CALLABLE_ACTIONS.map((entry) => [entry.id, actionDescription(entry)] as const),
+);
+
+export function searchActions(input: {
+  query: string;
+  limit: number;
+  offset: number;
+  /** Only actions the caller can reach at all, when they can reach fewer than all. */
+  reachable?: (entry: ActionCatalogEntry) => boolean;
+}) {
+  // Singular and plural match ("workspace" finds listWorkspaces), and so do a
+  // verb and its noun ("invite" finds createOrganizationInvitation). Only
+  // longer words lose a final "e", so short words such as "note", "line" or
+  // "theme" don't turn into other words' prefixes ("not", "lin", "them").
+  const stem = (word: string) => {
+    const singular = word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
+    const verb = singular.replace(/(?<=\w{3})ation$/u, "");
+    return verb.length > 5 ? verb.replace(/e$/u, "") : verb;
+  };
+  const wanted = words(input.query).map(stem);
+  // "workspaces" asks for a list; prefer list actions on a plural query.
+  const plural = words(input.query).some((word) => /[^s]s$/u.test(word));
+  const scored = CALLABLE_ACTIONS.map((entry) => {
+    // A word in the action's name matters far more than one in its path:
+    // nearly every path contains "workspaces".
+    const name = words(entry.id).map(stem);
+    const path = [...words(entry.path.replace(/:\w+/g, "")), entry.method.toLowerCase()].map(stem);
+    // A described action also matches the words people use for it
+    // ("pause", "primary", "reset"), below a name match.
+    const described = words(DESCRIPTIONS.get(entry.id) ?? "").map(stem);
+    const score = wanted.reduce(
+      (total, word) =>
+        total +
+        (name.includes(word)
+          ? 4
+          : name.some((token) => token.startsWith(word))
+            ? 3
+            : path.includes(word)
+              ? 1
+              : path.some((token) => token.startsWith(word))
+                ? 0.5
+                : described.includes(word)
+                  ? 0.5
+                  : 0),
+      0,
+    );
+    return {
+      entry,
+      score: score + (plural && score > 0 && name[0] === "list" ? 0.5 : 0),
+      size: name.length,
+    };
+  }).filter(
+    (candidate) =>
+      (input.reachable?.(candidate.entry) ?? true) && (wanted.length === 0 || candidate.score > 0),
+  );
+  scored.sort(
+    (left, right) =>
+      right.score - left.score ||
+      left.size - right.size ||
+      // On a tie, reads come before writes.
+      Number(left.entry.method !== "GET") - Number(right.entry.method !== "GET") ||
+      left.entry.id.localeCompare(right.entry.id),
+  );
+  return {
+    total: scored.length,
+    offset: input.offset,
+    actions: scored.slice(input.offset, input.offset + input.limit).map(({ entry }) => {
+      const description = DESCRIPTIONS.get(entry.id);
+      return {
+        id: entry.id,
+        method: entry.method,
+        path: entry.path,
+        ...(description ? { description } : {}),
+      };
+    }),
+  };
+}
+
+function pathParameters(path: string): string[] {
+  return [...path.matchAll(/:(\w+)/g)].map((match) => match[1]!);
+}
+
+function schemaFor(name: string): unknown {
+  const candidate = ACTION_REQUEST_SCHEMAS[name];
+  if (!(candidate instanceof z.ZodType)) return null;
+  try {
+    return z.toJSONSchema(candidate, { io: "input", unrepresentable: "any" });
+  } catch {
+    return null;
+  }
+}
+
+/** The describe tool's answer for an action id, or why it can't be used. */
+export function describeActionResult(id: string): CallToolResult {
+  const entry = findAppAction(id);
+  if (!entry) return failure(`No action "${id}". Search for it first.`);
+  if (entry.browserOnly) return browserOnly(entry);
+  return json(describeAction(entry));
+}
+
+export function describeAction(entry: ActionCatalogEntry) {
+  const reads = entry.method === "GET" || entry.method === "HEAD";
+  const description = actionDescription(entry);
+  return {
+    id: entry.id,
+    method: entry.method,
+    path: entry.path,
+    ...(description ? { description } : {}),
+    pathParameters: pathParameters(entry.path),
+    ...(entry.query ? { queryParameters: entry.query } : {}),
+    input: entry.request.map((name) => ({
+      name,
+      in: reads ? "query" : "body",
+      schema: schemaFor(name),
+    })),
+    response: entry.response,
+  };
+}
+
+/** Run one public action in process as the caller; the route's own checks decide. */
+export async function callOrganizationAction(
+  context: OrganizationActionContext,
+  input: z.infer<typeof OrganizationActionCallInput>,
+  options: {
+    /** A fixed note added to a successful result, for the caller's surface. */
+    note?: string | undefined;
+    /**
+     * A fixed refusal shown instead of the route's own 403 when that 403 is a
+     * missing billing:manage permission, for the caller's surface. Other 403s
+     * keep the route's answer.
+     */
+    billingForbidden?: string | undefined;
+  } = {},
+): Promise<CallToolResult> {
+  const outcome = await runOrganizationAction(context, input);
+  // Refusals decided before any request, including everything someone who
+  // uses Opengeni through another product can't reach, come first and are
+  // never reworded here.
+  if ("refused" in outcome) return outcome.refused;
+  if (
+    options.billingForbidden &&
+    outcome.externalPerson !== true &&
+    outcome.response.status === 403 &&
+    (await refusedForBillingManage(outcome.response))
+  ) {
+    await outcome.response.body?.cancel();
+    return failure(options.billingForbidden);
+  }
+  return await toolResult(outcome.response, outcome.entry, input.query, {
+    externalPerson: outcome.externalPerson === true,
+    note: options.note,
+  });
+}
+
+/**
+ * Run one action as the caller and return the route's raw response, or the
+ * refusal shown to the agent when the call can't be made at all. The same
+ * request, proof and route checks as {@link callOrganizationAction}.
+ */
+export async function runOrganizationAction(
+  context: OrganizationActionContext,
+  input: z.infer<typeof OrganizationActionCallInput>,
+): Promise<
+  | { response: Response; entry: ActionCatalogEntry; externalPerson?: true }
+  | { refused: CallToolResult }
+> {
+  const entry = findAppAction(input.id);
+  if (!entry) return { refused: failure(`No action "${input.id}". Search for it first.`) };
+  if (entry.browserOnly) return { refused: browserOnly(entry) };
+  const reads = entry.method === "GET" || entry.method === "HEAD";
+  const externalWorkspace = externalPersonWorkspace(context.caller);
+  if (context.caller.kind === "person" && context.caller.subjectId.startsWith("external_user:")) {
+    // Decided before any request, in one step: anything outside this person's
+    // one workspace can never succeed for them.
+    if (
+      !externalWorkspace ||
+      !actionInOneWorkspace(entry) ||
+      input.pathParameters.workspaceId !== externalWorkspace
+    ) {
+      return {
+        refused: failure(
+          `Nothing was run: this person uses this chat through another product, so app actions reach only this chat's workspace (workspaceId ${externalWorkspace ?? "unavailable"}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`,
+        ),
+      };
+    }
+  }
+  if (
+    context.caller.kind === "person" &&
+    appActionChangesState(entry) &&
+    isReadOnlyPermissionSet(context.caller.access.permissions)
+  ) {
+    return { refused: failure("This connection is read only, so it can't change anything.") };
+  }
+  let path = entry.path;
+  for (const name of pathParameters(entry.path)) {
+    const value = input.pathParameters[name];
+    if (!value) return { refused: failure(`Missing path parameter ${name}.`) };
+    // Encoding leaves "." alone, so a dot segment would reach another route.
+    if (value === "." || value === "..")
+      return { refused: failure(`Invalid path parameter ${name}.`) };
+    path = path.replace(`:${name}`, encodeURIComponent(value));
+  }
+  const url = new URL(path, context.origin);
+  if (url.pathname !== path) return { refused: failure("Invalid path parameters.") };
+  for (const [key, value] of Object.entries(input.query)) {
+    for (const each of Array.isArray(value) ? value : [value])
+      url.searchParams.append(key, String(each));
+  }
+  const headers = new Headers({
+    accept: "application/json",
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+  });
+  if (context.caller.kind === "key") {
+    headers.set("authorization", context.caller.authorization);
+    if (context.caller.accessKey) headers.set("x-opengeni-access-key", context.caller.accessKey);
+  }
+  const body = reads ? undefined : JSON.stringify(input.body ?? {});
+  if (body !== undefined) {
+    headers.set("content-type", "application/json");
+    // Exact length: the body-limit middleware otherwise rebuilds the Request,
+    // and the person proof lives on this exact object.
+    headers.set("content-length", String(Buffer.byteLength(body)));
+  }
+  const request = new Request(url, {
+    method: entry.method,
+    headers,
+    ...(body !== undefined ? { body } : {}),
+    ...(context.signal ? { signal: context.signal } : {}),
+    redirect: "manual",
+  });
+  if (context.caller.kind === "person") {
+    if (externalWorkspace) {
+      stampWorkspacePersonAuthorization(request, {
+        organizationId: context.caller.accountId,
+        workspaceId: externalWorkspace,
+        subjectId: context.caller.subjectId,
+        permissions: context.caller.access.permissions,
+      });
+    } else {
+      stampDelegatedHumanAuthorization(request, {
+        organizationId: context.caller.accountId,
+        subjectId: context.caller.subjectId,
+        permissions: context.caller.access.permissions,
+        workspaceScope: context.caller.access.workspaceScope,
+      });
+    }
+    if (context.auditProvenance) stampActionAuditProvenance(request, context.auditProvenance);
+  }
+  return {
+    response: await context.dispatch(request),
+    entry,
+    ...(externalWorkspace ? { externalPerson: true } : {}),
+  };
+}
+
+async function toolResult(
+  response: Response,
+  entry: ActionCatalogEntry,
+  query: z.infer<typeof OrganizationActionCallInput>["query"],
+  options: {
+    /** The caller uses Opengeni through another product: no app page to send them to. */
+    externalPerson: boolean;
+    /** A fixed note added to a successful result, for the caller's surface. */
+    note?: string | undefined;
+  },
+): Promise<CallToolResult> {
+  const status = response.status;
+  const location = response.headers.get("location");
+  if (status >= 300 && status < 400 && location) {
+    await response.body?.cancel();
+    return json({
+      status,
+      openInBrowser: location,
+      hint: "Open this link in a browser to finish.",
+    });
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  const result: Record<string, unknown> = { status };
+  if (/text\/event-stream/i.test(contentType)) {
+    result.events = await readStream(response);
+  } else {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const truncated = bytes.byteLength > MAX_RESPONSE_BYTES;
+    const kept = truncated ? bytes.slice(0, MAX_RESPONSE_BYTES) : bytes;
+    const trimmed =
+      truncated && /json/i.test(contentType) ? wholeItemsThatFit(bytes, entry, query) : null;
+    if (trimmed) {
+      result.body = trimmed.body;
+      result.truncated = trimmed.truncated;
+      result.hint = trimmed.hint;
+    } else if (/json/i.test(contentType) && !truncated) {
+      result.body = JSON.parse(new TextDecoder().decode(kept) || "null");
+    } else if (/^text\/|json|xml|yaml|javascript/i.test(contentType) || contentType === "") {
+      result.body = new TextDecoder().decode(kept);
+    } else {
+      result.contentType = contentType;
+      result.base64 = Buffer.from(kept).toString("base64");
+    }
+    if (truncated && !trimmed)
+      result.truncated = { returnedBytes: MAX_RESPONSE_BYTES, totalBytes: bytes.byteLength };
+  }
+  if ((status === 401 || status === 403) && options.externalPerson) {
+    result.hint = EXTERNAL_PERSON_REFUSED_HINT;
+  } else if (
+    (status === 401 || status === 403) &&
+    /human|browser|cookie|same-origin/i.test(JSON.stringify(result.body ?? ""))
+  ) {
+    result.hint = "This action has to be done by the person in the web app in a browser.";
+  }
+  if (options.note && status < 400) result.note = options.note;
+  return {
+    content: [{ type: "text", text: JSON.stringify(result) }],
+    ...(status >= 400 ? { isError: true } : {}),
+  };
+}
+
+type TrimmedResult = {
+  body: unknown;
+  truncated: Record<string, unknown>;
+  hint: string;
+};
+
+/**
+ * A JSON list too large for one result keeps as many whole items as fit, so
+ * the body stays valid JSON, with how to fetch the rest: a top-level array,
+ * or the largest array in a top-level object (`items`, `sessions`, ...).
+ * Anything else, or an item larger than the whole result, gets the plain byte
+ * cut instead (null).
+ */
+function wholeItemsThatFit(
+  bytes: Uint8Array,
+  entry: ActionCatalogEntry,
+  query: Record<string, unknown>,
+): TrimmedResult | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+  const budget = MAX_RESPONSE_BYTES - RESULT_ENVELOPE_BYTES;
+  let field: string | undefined;
+  let items: unknown[];
+  let fixedBytes = 2;
+  if (Array.isArray(value)) {
+    items = value;
+  } else if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const arrays = Object.entries(record).filter(
+      (pair): pair is [string, unknown[]] => Array.isArray(pair[1]) && pair[1].length > 0,
+    );
+    const largest = arrays
+      .map(([name, list]) => [name, list, jsonBytes(list)] as const)
+      .sort((left, right) => right[2] - left[2])[0];
+    if (!largest) return null;
+    [field, items] = [largest[0], largest[1]];
+    fixedBytes = jsonBytes({ ...record, [field]: [] });
+  } else {
+    return null;
+  }
+  let used = fixedBytes;
+  let count = 0;
+  for (const item of items) {
+    const size = jsonBytes(item) + (count > 0 ? 1 : 0);
+    if (used + size > budget) break;
+    used += size;
+    count += 1;
+  }
+  if (count === 0 || count === items.length) return null;
+  const kept = items.slice(0, count);
+  return {
+    body: field ? { ...(value as Record<string, unknown>), [field]: kept } : kept,
+    truncated: {
+      returnedItems: count,
+      totalItems: items.length,
+      ...(field ? { field } : {}),
+      returnedBytes: used,
+      totalBytes: bytes.byteLength,
+    },
+    hint: pagingHint(entry, query, count, items.length),
+  };
+}
+
+function pagingHint(
+  entry: ActionCatalogEntry,
+  query: Record<string, unknown>,
+  count: number,
+  total: number,
+): string {
+  const lead = `Only the first ${count} of the ${total} items in this response fit in one result.`;
+  const parameters = new Set(entry.query ?? []);
+  if (parameters.has("offset")) {
+    const offset = Number(query.offset ?? 0);
+    const next = (Number.isSafeInteger(offset) && offset > 0 ? offset : 0) + count;
+    return `${lead} Call again with query offset=${next} and limit=${count} for the next items.`;
+  }
+  if (parameters.has("limit")) {
+    const cursor =
+      parameters.has("cursor") && query.cursor !== undefined ? " and the same cursor" : "";
+    return `${lead} Call again with query limit=${count}${cursor} to get pages that fit, then page on from there; a cursor in this response skips the omitted items.`;
+  }
+  return `${lead} This action has no paging parameters; narrow the request if it takes filters.`;
+}
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value) ?? "null");
+}
+
+async function readStream(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  const deadline = Date.now() + STREAM_READ_MS;
+  try {
+    while (Date.now() < deadline && text.length < MAX_RESPONSE_BYTES) {
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<{ done: true; value: undefined }>((resolve) =>
+          setTimeout(
+            () => resolve({ done: true, value: undefined }),
+            Math.max(0, deadline - Date.now()),
+          ),
+        ),
+      ]);
+      if (next.done) break;
+      text += decoder.decode(next.value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return text;
+}
+
+function json(value: unknown): CallToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value) }] };
+}
+
+/** A browser-only action: say why, and that the person has to do it. */
+function browserOnly(entry: ActionCatalogEntry): CallToolResult {
+  return failure(
+    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the web app in a browser.`,
+  );
+}
+
+function failure(message: string): CallToolResult {
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+
+function invalid(error: z.ZodError): CallToolResult {
+  return failure(`Invalid input: ${z.prettifyError(error)}`);
+}

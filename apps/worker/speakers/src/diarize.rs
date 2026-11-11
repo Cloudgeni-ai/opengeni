@@ -1,0 +1,923 @@
+//! Who spoke when, following the pyannote 3 recipe:
+//!
+//! 1. Slide a 10 s window over the audio and let the segmentation model say,
+//!    per ~17 ms frame, which of up to three local speakers talk.
+//! 2. Embed each local speaker's speech in each window.
+//! 3. Cluster the embeddings with enough clean speech into global speakers,
+//!    and dissolve clusters too small to be a real participant.
+//! 4. Map each window's local speakers to distinct global speakers.
+//! 5. Average the windows' activity per frame, keep as many speakers per
+//!    frame as the windows counted, and turn frames into speaker turns.
+
+use crate::cluster;
+use crate::models::{Embedder, MIN_EMBEDDING_SAMPLES, Result, Segmentation, cosine, normalized};
+use serde::Serialize;
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+pub const SAMPLE_RATE: usize = 16_000;
+
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// Seconds between window starts.
+    pub step_seconds: f32,
+    /// Cosine distance below which voices are one speaker.
+    pub threshold: f32,
+    /// Cosine distance between speaker centres, measured from the mean
+    /// embedding of the recording, below which the clusters are one voice
+    /// that the noisy single-window embeddings split apart.
+    pub merge_threshold: f32,
+    pub min_speakers: usize,
+    pub max_speakers: usize,
+    /// Clusters with fewer clean embeddings than this are not speakers of
+    /// their own; their windows join the closest real speaker.
+    pub min_cluster_size: usize,
+    /// Seconds of speech, alone, a window needs for its embedding to help
+    /// form the clusters.
+    pub min_clean_seconds: f32,
+    /// Shortest turn kept, and longest same-speaker gap bridged, in seconds.
+    pub min_turn_seconds: f32,
+    pub min_gap_seconds: f32,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            step_seconds: 2.0,
+            threshold: 0.55,
+            merge_threshold: 0.8,
+            min_speakers: 1,
+            max_speakers: usize::MAX,
+            min_cluster_size: 12,
+            min_clean_seconds: 2.0,
+            min_turn_seconds: 0.0,
+            min_gap_seconds: 0.0,
+        }
+    }
+}
+
+/// Most embeddings clustered directly. The distance matrix grows with the
+/// square, so longer recordings cluster an even sample and assign the rest
+/// to the resulting speakers like every other window.
+const MAX_CLUSTERED: usize = 4_000;
+
+#[derive(Serialize, Debug, Clone)]
+pub struct Turn {
+    #[serde(rename = "startMs")]
+    pub start_ms: u64,
+    #[serde(rename = "endMs")]
+    pub end_ms: u64,
+    pub speaker: usize,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct Speaker {
+    pub speaker: usize,
+    #[serde(rename = "speechMs")]
+    pub speech_ms: u64,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct Diarization {
+    pub turns: Vec<Turn>,
+    pub speakers: Vec<Speaker>,
+}
+
+struct Window {
+    start: usize,
+    /// Per frame, a bitmask of the active local speakers.
+    masks: Vec<u8>,
+}
+
+/// One local speaker in one window, with the audio it spoke.
+struct Local {
+    window: usize,
+    speaker: usize,
+    clean: bool,
+    embedding: Option<Vec<f32>>,
+}
+
+/// Where each window starts: every `step` samples until one reaches the end.
+fn window_starts(window: usize, audio_len: usize, step: usize) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    while starts.last().unwrap() + window < audio_len {
+        starts.push(starts.last().unwrap() + step);
+    }
+    starts
+}
+
+fn segment(
+    model: &mut Segmentation,
+    audio: &[f32],
+    starts: &[usize],
+) -> Result<(Vec<Window>, usize)> {
+    // Windows per segmentation run. The arena keeps the largest run's
+    // activations for the whole process, about 25 MB per window, and more
+    // windows per run save no measurable CPU.
+    const BATCH: usize = 4;
+    let mut windows = Vec::with_capacity(starts.len());
+    let mut frames = 0;
+    for batch in starts.chunks(BATCH) {
+        let mut samples = vec![0f32; batch.len() * model.window];
+        for (index, &start) in batch.iter().enumerate() {
+            let end = (start + model.window).min(audio.len());
+            samples[index * model.window..index * model.window + (end - start)]
+                .copy_from_slice(&audio[start..end]);
+        }
+        let (masks, count) = model.activity(samples, batch.len())?;
+        frames = count;
+        for (index, &start) in batch.iter().enumerate() {
+            windows.push(Window {
+                start,
+                masks: masks[index * count..(index + 1) * count].to_vec(),
+            });
+        }
+    }
+    Ok((windows, frames))
+}
+
+/// Where a local speaker spoke in a window, as stretches of the audio:
+/// frames where only they talk when there is enough of it, otherwise every
+/// frame they talk in. Stretches, not copies, so every window's speech is
+/// never held at once; the second value says whether it is clean speech.
+fn local_runs(
+    audio_len: usize,
+    window: &Window,
+    window_samples: usize,
+    speaker: usize,
+    min_clean: usize,
+) -> (Vec<Range<usize>>, bool) {
+    let frames = window.masks.len();
+    let gather = |only: bool| -> Vec<Range<usize>> {
+        let mut out = Vec::new();
+        let mut run: Option<usize> = None;
+        for frame in 0..=frames {
+            let on = frame < frames && {
+                let mask = window.masks[frame];
+                if only {
+                    mask == 1 << speaker
+                } else {
+                    mask & (1 << speaker) != 0
+                }
+            };
+            match (on, run) {
+                (true, None) => run = Some(frame),
+                (false, Some(first)) => {
+                    let from = window.start + first * window_samples / frames;
+                    let to = (window.start + frame * window_samples / frames).min(audio_len);
+                    if from < to {
+                        out.push(from..to);
+                    }
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        out
+    };
+    let clean = gather(true);
+    if run_samples(&clean) >= min_clean {
+        (clean, true)
+    } else {
+        (gather(false), false)
+    }
+}
+
+fn run_samples(runs: &[Range<usize>]) -> usize {
+    runs.iter().map(|run| run.len()).sum()
+}
+
+/// The samples of the stretches, joined.
+fn gather(audio: &[f32], runs: &[Range<usize>]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(run_samples(runs));
+    for run in runs {
+        out.extend_from_slice(&audio[run.clone()]);
+    }
+    out
+}
+
+/// Embed `count` pieces of audio over the embedders (one per thread). Each
+/// thread takes the next piece when it is free and asks `samples` for it
+/// only then, so only one piece per thread is in memory at a time.
+pub fn embed_all<F, S>(
+    embedders: &mut [Embedder],
+    count: usize,
+    samples: F,
+) -> Result<Vec<Vec<f32>>>
+where
+    F: Fn(usize) -> S + Sync,
+    S: AsRef<[f32]>,
+{
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    // Each thread returns the (index, embedding) pairs it computed.
+    type Done = Vec<(usize, Vec<f32>)>;
+    let results: Vec<Result<Done>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = embedders
+            .iter_mut()
+            .take(count.max(1))
+            .map(|embedder| {
+                let (next, failed, samples) = (&next, &failed, &samples);
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= count || failed.load(Ordering::Relaxed) {
+                            return Ok(done);
+                        }
+                        match embedder.embed(samples(index).as_ref()) {
+                            Ok(vector) => done.push((index, vector)),
+                            Err(error) => {
+                                failed.store(true, Ordering::Relaxed);
+                                return Err(error);
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("embedding thread"))
+            .collect()
+    });
+    let mut out = vec![Vec::new(); count];
+    for result in results {
+        for (index, vector) in result? {
+            out[index] = vector;
+        }
+    }
+    Ok(out)
+}
+
+/// Give each window's local speakers distinct global speakers, maximizing
+/// the total similarity. Windows hold at most three local speakers, so
+/// trying every assignment is cheap.
+fn assign(similarities: &[Vec<f32>], speakers: usize) -> Vec<Option<usize>> {
+    let locals = similarities.len();
+    let mut best = vec![None; locals];
+    let mut best_score = f32::NEG_INFINITY;
+    let mut current = vec![None; locals];
+    fn search(
+        index: usize,
+        similarities: &[Vec<f32>],
+        speakers: usize,
+        used: &mut Vec<bool>,
+        current: &mut Vec<Option<usize>>,
+        score: f32,
+        best: &mut Vec<Option<usize>>,
+        best_score: &mut f32,
+    ) {
+        if index == similarities.len() {
+            if score > *best_score {
+                *best_score = score;
+                best.clone_from(current);
+            }
+            return;
+        }
+        let mut placed = false;
+        for speaker in 0..speakers {
+            if used[speaker] {
+                continue;
+            }
+            placed = true;
+            used[speaker] = true;
+            current[index] = Some(speaker);
+            let gain = similarities[index][speaker];
+            search(
+                index + 1,
+                similarities,
+                speakers,
+                used,
+                current,
+                score + gain,
+                best,
+                best_score,
+            );
+            used[speaker] = false;
+        }
+        if !placed {
+            // More local speakers than global ones: reuse the closest.
+            let closest = (0..speakers)
+                .max_by(|&a, &b| similarities[index][a].total_cmp(&similarities[index][b]));
+            current[index] = closest;
+            let gain = closest.map_or(0.0, |speaker| similarities[index][speaker]);
+            search(
+                index + 1,
+                similarities,
+                speakers,
+                used,
+                current,
+                score + gain,
+                best,
+                best_score,
+            );
+        }
+        current[index] = None;
+    }
+    let mut used = vec![false; speakers];
+    search(
+        0,
+        similarities,
+        speakers,
+        &mut used,
+        &mut current,
+        0.0,
+        &mut best,
+        &mut best_score,
+    );
+    best
+}
+
+/// The windows of a recording, segmented and with their local speakers
+/// embedded: the costly part of speaker detection, done once per window.
+pub struct Scanned {
+    windows: Vec<Window>,
+    locals: Vec<Local>,
+    frames: usize,
+    /// Windows taken from the cache rather than computed.
+    pub reused: usize,
+}
+
+impl Scanned {
+    pub fn windows(&self) -> usize {
+        self.windows.len()
+    }
+}
+
+/// Segment and embed every window, reusing those a cache already holds.
+pub fn scan(
+    segmentation: &mut Segmentation,
+    embedders: &mut [Embedder],
+    audio: &[f32],
+    options: &Options,
+    cache: Option<&WindowCache>,
+) -> Result<Scanned> {
+    if audio.len() < SAMPLE_RATE / 2 {
+        return Ok(Scanned {
+            windows: Vec::new(),
+            locals: Vec::new(),
+            frames: 0,
+            reused: 0,
+        });
+    }
+    let window_samples = segmentation.window;
+    let step = ((options.step_seconds * SAMPLE_RATE as f32) as usize)
+        .clamp(segmentation.frame_shift, window_samples);
+    let starts = window_starts(window_samples, audio.len(), step);
+    // A cached window is reused only where it saw the same whole stretch.
+    let cached: HashMap<usize, &CachedWindow> = cache
+        .map(|cache| {
+            cache
+                .windows
+                .iter()
+                .filter(|window| window.start + window_samples <= audio.len())
+                .map(|window| (window.start, window))
+                .collect()
+        })
+        .unwrap_or_default();
+    let fresh: Vec<usize> = starts
+        .iter()
+        .copied()
+        .filter(|start| !cached.contains_key(start))
+        .collect();
+    let (computed, mut frames) = if fresh.is_empty() {
+        (Vec::new(), 0)
+    } else {
+        segment(segmentation, audio, &fresh)?
+    };
+    if frames == 0 {
+        frames = cached
+            .values()
+            .next()
+            .map_or(0, |window| window.masks.len());
+    }
+    let mut computed = computed.into_iter();
+
+    // Embed each local speaker that said enough in a window.
+    let min_clean = (options.min_clean_seconds * SAMPLE_RATE as f32) as usize;
+    let mut windows = Vec::with_capacity(starts.len());
+    let mut locals = Vec::new();
+    let mut jobs = Vec::new();
+    let mut reused = 0;
+    for start in starts {
+        let index = windows.len();
+        if let Some(window) = cached.get(&start) {
+            windows.push(Window {
+                start,
+                masks: window.masks.clone(),
+            });
+            for local in &window.locals {
+                locals.push(Local {
+                    window: index,
+                    speaker: local.speaker,
+                    clean: local.clean,
+                    embedding: local.embedding.clone(),
+                });
+            }
+            reused += 1;
+            continue;
+        }
+        let window = computed
+            .next()
+            .ok_or("segmentation returned too few windows")?;
+        for speaker in 0..segmentation.speakers {
+            if !window.masks.iter().any(|mask| mask & (1 << speaker) != 0) {
+                continue;
+            }
+            let (runs, clean) =
+                local_runs(audio.len(), &window, window_samples, speaker, min_clean);
+            let embeddable = run_samples(&runs) >= MIN_EMBEDDING_SAMPLES;
+            locals.push(Local {
+                window: index,
+                speaker,
+                clean,
+                embedding: None,
+            });
+            if embeddable {
+                jobs.push((locals.len() - 1, runs));
+            }
+        }
+        windows.push(window);
+    }
+    let embeddings = embed_all(embedders, jobs.len(), |index| gather(audio, &jobs[index].1))?;
+    for ((target, _), embedding) in jobs.iter().zip(embeddings) {
+        let target = *target;
+        locals[target].embedding = Some(embedding);
+    }
+    Ok(Scanned {
+        windows,
+        locals,
+        frames,
+        reused,
+    })
+}
+
+/// Who spoke when, from scanned windows: clustering, assignment and turns.
+pub fn diarize_scanned(
+    segmentation: &Segmentation,
+    audio: &[f32],
+    options: &Options,
+    scanned: Scanned,
+) -> Result<Diarization> {
+    let Scanned {
+        windows,
+        locals,
+        frames,
+        ..
+    } = scanned;
+    if windows.is_empty() {
+        return Ok(Diarization::default());
+    }
+    let frame_shift = segmentation.frame_shift;
+    let offset = |window: &Window| (window.start as f32 / frame_shift as f32 + 0.5) as usize;
+    let total_frames = offset(windows.last().unwrap()) + frames;
+    let audio_frames = (audio.len() / frame_shift).min(total_frames);
+
+    // How many speakers talk in each frame, averaged over the windows.
+    let mut count_sum = vec![0f32; total_frames];
+    let mut coverage = vec![0f32; total_frames];
+    for window in &windows {
+        let first = offset(window);
+        for (frame, mask) in window.masks.iter().enumerate() {
+            count_sum[first + frame] += mask.count_ones() as f32;
+            coverage[first + frame] += 1.0;
+        }
+    }
+    let counts: Vec<usize> = count_sum
+        .iter()
+        .zip(&coverage)
+        .map(|(sum, covered)| {
+            if *covered > 0.0 {
+                (sum / covered + 0.5) as usize
+            } else {
+                0
+            }
+        })
+        .collect();
+    if counts.iter().all(|&count| count == 0) {
+        return Ok(Diarization::default());
+    }
+
+    // Cluster the clean embeddings into speakers.
+    let mut training: Vec<usize> = (0..locals.len())
+        .filter(|&i| locals[i].clean && locals[i].embedding.is_some())
+        .collect();
+    if training.len() < 2 {
+        training = (0..locals.len())
+            .filter(|&i| locals[i].embedding.is_some())
+            .collect();
+    }
+    if training.len() > MAX_CLUSTERED {
+        let stride = training.len().div_ceil(MAX_CLUSTERED);
+        training = training.into_iter().step_by(stride).collect();
+    }
+    let vectors: Vec<Vec<f32>> = training
+        .iter()
+        .map(|&i| locals[i].embedding.clone().unwrap())
+        .collect();
+    let merges = cluster::dendrogram(&vectors);
+    let labels = cluster::cut(
+        vectors.len(),
+        &merges,
+        options.threshold,
+        options.min_speakers,
+        options.max_speakers,
+    );
+    let clusters = labels.iter().copied().max().map_or(0, |max| max + 1);
+    let mut sizes = vec![0usize; clusters];
+    for &label in &labels {
+        sizes[label] += 1;
+    }
+    // A short recording has few windows; a fixed minimum would merge everyone.
+    let min_size = options
+        .min_cluster_size
+        .min(((vectors.len() as f32 * 0.1).round() as usize).max(1));
+    let mut keep: Vec<usize> = (0..clusters).filter(|&c| sizes[c] >= min_size).collect();
+    if keep.len() < options.min_speakers.min(clusters) || keep.is_empty() {
+        // Too few large clusters: keep the largest ones instead.
+        let mut by_size: Vec<usize> = (0..clusters).collect();
+        by_size.sort_by_key(|&c| std::cmp::Reverse(sizes[c]));
+        keep = by_size
+            .into_iter()
+            .take(options.min_speakers.max(1).min(clusters))
+            .collect();
+        keep.sort();
+    }
+    let sums: Vec<Vec<f32>> = keep
+        .iter()
+        .map(|&cluster| {
+            let mut sum = vec![0f32; vectors.first().map_or(0, Vec::len)];
+            for (vector, _) in vectors
+                .iter()
+                .zip(&labels)
+                .filter(|(_, label)| **label == cluster)
+            {
+                for (total, value) in sum.iter_mut().zip(vector) {
+                    *total += value;
+                }
+            }
+            sum
+        })
+        .collect();
+    // Every embedding of one recording shares its microphone and room, which
+    // pulls all cluster centres toward their common mean: on a phone in the
+    // middle of the table, different people sit as close as fragments of one
+    // voice do on a laptop. Centres measured from that mean compare the voices
+    // themselves, so one join threshold holds for both.
+    let members: Vec<usize> = keep.iter().map(|&cluster| sizes[cluster]).collect();
+    let centred = cluster::centred_sums(&sums, &members, &cluster::mean(&vectors));
+    let groups = cluster::merge_centroids(
+        &centred,
+        options.merge_threshold,
+        options.min_speakers.min(sums.len()),
+    );
+    let mut joined = vec![
+        vec![0f32; vectors.first().map_or(0, Vec::len)];
+        groups.iter().copied().max().map_or(0, |max| max + 1)
+    ];
+    for (sum, &group) in sums.iter().zip(&groups) {
+        for (total, value) in joined[group].iter_mut().zip(sum) {
+            *total += value;
+        }
+    }
+    let centroids: Vec<Vec<f32>> = joined.into_iter().map(normalized).collect();
+    let speakers = centroids.len();
+    if speakers == 0 {
+        return Ok(Diarization::default());
+    }
+
+    // Map each window's local speakers to distinct global speakers.
+    let mut global: Vec<Option<usize>> = vec![None; locals.len()];
+    let mut by_window: Vec<Vec<usize>> = vec![Vec::new(); windows.len()];
+    for (index, local) in locals.iter().enumerate() {
+        if local.embedding.is_some() {
+            by_window[local.window].push(index);
+        }
+    }
+    for members in &by_window {
+        let similarities: Vec<Vec<f32>> = members
+            .iter()
+            .map(|&i| {
+                centroids
+                    .iter()
+                    .map(|c| cosine(locals[i].embedding.as_ref().unwrap(), c))
+                    .collect()
+            })
+            .collect();
+        for (&member, speaker) in members.iter().zip(assign(&similarities, speakers)) {
+            global[member] = speaker;
+        }
+    }
+
+    // Average each speaker's activity per frame over the windows.
+    let mut activity = vec![0f32; total_frames * speakers];
+    for (index, local) in locals.iter().enumerate() {
+        let Some(speaker) = global[index] else {
+            continue;
+        };
+        let window = &windows[local.window];
+        let first = offset(window);
+        for (frame, mask) in window.masks.iter().enumerate() {
+            if mask & (1 << local.speaker) != 0 {
+                activity[(first + frame) * speakers + speaker] += 1.0;
+            }
+        }
+    }
+    let mut active = vec![false; total_frames * speakers];
+    let mut order: Vec<usize> = (0..speakers).collect();
+    for frame in 0..audio_frames {
+        if counts[frame] == 0 || coverage[frame] == 0.0 {
+            continue;
+        }
+        let row = &activity[frame * speakers..(frame + 1) * speakers];
+        order.sort_by(|&a, &b| row[b].total_cmp(&row[a]));
+        for &speaker in order.iter().take(counts[frame]) {
+            if row[speaker] > 0.0 {
+                active[frame * speakers + speaker] = true;
+            }
+        }
+    }
+
+    // Frames to turns.
+    let half_frame = segmentation.frame_size / 2;
+    let center_ms = |frame: usize| ((frame * frame_shift + half_frame) * 1000 / SAMPLE_RATE) as u64;
+    let half_shift_ms = (frame_shift * 500 / SAMPLE_RATE) as u64;
+    let audio_ms = (audio.len() * 1000 / SAMPLE_RATE) as u64;
+    let mut turns: Vec<Turn> = Vec::new();
+    for speaker in 0..speakers {
+        let mut run: Option<usize> = None;
+        let mut own: Vec<Turn> = Vec::new();
+        for frame in 0..=audio_frames {
+            let on = frame < audio_frames && active[frame * speakers + speaker];
+            match (on, run) {
+                (true, None) => run = Some(frame),
+                (false, Some(first)) => {
+                    let start_ms = center_ms(first).saturating_sub(half_shift_ms);
+                    let end_ms = (center_ms(frame - 1) + half_shift_ms).min(audio_ms);
+                    let gap_ms = (options.min_gap_seconds * 1000.0) as u64;
+                    match own.last_mut() {
+                        Some(last) if start_ms <= last.end_ms + gap_ms => last.end_ms = end_ms,
+                        _ => own.push(Turn {
+                            start_ms,
+                            end_ms,
+                            speaker,
+                        }),
+                    }
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        let min_ms = (options.min_turn_seconds * 1000.0) as u64;
+        turns.extend(
+            own.into_iter()
+                .filter(|turn| turn.end_ms - turn.start_ms >= min_ms),
+        );
+    }
+    turns.sort_by_key(|turn| (turn.start_ms, turn.speaker));
+
+    // Number speakers in order of first appearance.
+    let mut renumber = vec![usize::MAX; speakers];
+    let mut next = 0;
+    for turn in &turns {
+        if renumber[turn.speaker] == usize::MAX {
+            renumber[turn.speaker] = next;
+            next += 1;
+        }
+    }
+    let mut summaries: Vec<Speaker> = (0..speakers)
+        .filter(|&s| renumber[s] != usize::MAX)
+        .map(|s| Speaker {
+            speaker: renumber[s],
+            speech_ms: turns
+                .iter()
+                .filter(|t| t.speaker == s)
+                .map(|t| t.end_ms - t.start_ms)
+                .sum(),
+            embedding: centroids[s].clone(),
+        })
+        .collect();
+    summaries.sort_by_key(|speaker| speaker.speaker);
+    for turn in turns.iter_mut() {
+        turn.speaker = renumber[turn.speaker];
+    }
+    Ok(Diarization {
+        turns,
+        speakers: summaries,
+    })
+}
+
+/// One local speaker of a cached window.
+struct CachedLocal {
+    speaker: usize,
+    clean: bool,
+    embedding: Option<Vec<f32>>,
+}
+
+struct CachedWindow {
+    start: usize,
+    masks: Vec<u8>,
+    locals: Vec<CachedLocal>,
+}
+
+/// The scanned windows of a recording still being made, kept between runs so
+/// each window is segmented and embedded once: run after run over a growing
+/// recording, and once more when it ends, only the new windows cost anything.
+pub struct WindowCache {
+    windows: Vec<CachedWindow>,
+}
+
+const CACHE_MAGIC: &[u8; 8] = b"OGSPKWC1";
+
+impl WindowCache {
+    /// Keep the windows that saw a whole stretch of `audio_len` samples, with
+    /// a second to spare: the end of a growing recording's audio may still
+    /// change slightly once more of it is decoded.
+    pub fn of(scanned: &Scanned, window_samples: usize, audio_len: usize) -> Self {
+        let mut by_window: Vec<Vec<&Local>> = vec![Vec::new(); scanned.windows.len()];
+        for local in &scanned.locals {
+            by_window[local.window].push(local);
+        }
+        let windows = scanned
+            .windows
+            .iter()
+            .zip(by_window)
+            .filter(|(window, _)| window.start + window_samples + SAMPLE_RATE <= audio_len)
+            .map(|(window, locals)| CachedWindow {
+                start: window.start,
+                masks: window.masks.clone(),
+                locals: locals
+                    .into_iter()
+                    .map(|local| CachedLocal {
+                        speaker: local.speaker,
+                        clean: local.clean,
+                        embedding: local.embedding.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        Self { windows }
+    }
+
+    /// The cache as bytes: a header naming what made it (`fingerprint`) and how
+    /// much audio it covers, then each window with its local speakers.
+    pub fn write(&self, fingerprint: u64, scanned_samples: u64) -> Vec<u8> {
+        let frames = self.windows.first().map_or(0, |window| window.masks.len());
+        let dim = self
+            .windows
+            .iter()
+            .flat_map(|window| &window.locals)
+            .find_map(|local| local.embedding.as_ref().map(Vec::len))
+            .unwrap_or(0);
+        let mut out = Vec::new();
+        out.extend_from_slice(CACHE_MAGIC);
+        out.extend_from_slice(&fingerprint.to_le_bytes());
+        out.extend_from_slice(&scanned_samples.to_le_bytes());
+        out.extend_from_slice(&(self.windows.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(frames as u32).to_le_bytes());
+        out.extend_from_slice(&(dim as u32).to_le_bytes());
+        for window in &self.windows {
+            out.extend_from_slice(&(window.start as u64).to_le_bytes());
+            out.extend_from_slice(&window.masks);
+            out.push(window.locals.len() as u8);
+            for local in &window.locals {
+                out.push(local.speaker as u8);
+                let embedded = local
+                    .embedding
+                    .as_ref()
+                    .filter(|vector| vector.len() == dim);
+                out.push(u8::from(local.clean) | (u8::from(embedded.is_some()) << 1));
+                for value in embedded.into_iter().flatten() {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    /// The cache in `bytes`, or None when it is damaged or was made by other
+    /// models or settings (another `fingerprint`): then every window is new.
+    pub fn read(bytes: &[u8], fingerprint: u64) -> Option<Self> {
+        let mut at = 0usize;
+        let mut take = |count: usize| -> Option<&[u8]> {
+            let slice = bytes.get(at..at.checked_add(count)?)?;
+            at += count;
+            Some(slice)
+        };
+        if take(8)? != CACHE_MAGIC {
+            return None;
+        }
+        let u64_at = |slice: &[u8]| u64::from_le_bytes(slice.try_into().unwrap());
+        let u32_at = |slice: &[u8]| u32::from_le_bytes(slice.try_into().unwrap()) as usize;
+        if u64_at(take(8)?) != fingerprint {
+            return None;
+        }
+        let _scanned_samples = u64_at(take(8)?);
+        let count = u32_at(take(4)?);
+        let frames = u32_at(take(4)?);
+        let dim = u32_at(take(4)?);
+        let mut windows = Vec::with_capacity(count.min(1 << 20));
+        for _ in 0..count {
+            let start = u64_at(take(8)?) as usize;
+            let masks = take(frames)?.to_vec();
+            let local_count = take(1)?[0] as usize;
+            let mut locals = Vec::with_capacity(local_count);
+            for _ in 0..local_count {
+                let speaker = take(1)?[0] as usize;
+                let flags = take(1)?[0];
+                let embedding = if flags & 2 != 0 {
+                    Some(
+                        take(dim * 4)?
+                            .chunks_exact(4)
+                            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+                locals.push(CachedLocal {
+                    speaker,
+                    clean: flags & 1 != 0,
+                    embedding,
+                });
+            }
+            windows.push(CachedWindow {
+                start,
+                masks,
+                locals,
+            });
+        }
+        (at == bytes.len()).then_some(Self { windows })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assignment_keeps_local_speakers_apart() {
+        // Both locals prefer speaker 0; the better total puts one on 1.
+        let similarities = vec![vec![0.9, 0.2], vec![0.8, 0.7]];
+        assert_eq!(assign(&similarities, 2), vec![Some(0), Some(1)]);
+        // More locals than speakers: the extra one reuses its closest.
+        let crowded = vec![vec![0.9], vec![0.5]];
+        assert_eq!(assign(&crowded, 1), vec![Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn a_cache_reads_back_what_it_wrote_and_refuses_another_fingerprint() {
+        let scanned = Scanned {
+            windows: vec![
+                Window {
+                    start: 0,
+                    masks: vec![1, 0, 3],
+                },
+                Window {
+                    start: 32_000,
+                    masks: vec![0, 2, 2],
+                },
+            ],
+            locals: vec![
+                Local {
+                    window: 0,
+                    speaker: 0,
+                    clean: true,
+                    embedding: Some(vec![0.5, -1.0]),
+                },
+                Local {
+                    window: 0,
+                    speaker: 1,
+                    clean: false,
+                    embedding: None,
+                },
+                Local {
+                    window: 1,
+                    speaker: 1,
+                    clean: false,
+                    embedding: Some(vec![0.25, 2.0]),
+                },
+            ],
+            frames: 3,
+            reused: 0,
+        };
+        // The second window ends too near the end of the audio to be kept.
+        let cache = WindowCache::of(&scanned, 160_000, 160_000 + 32_000 + SAMPLE_RATE - 1);
+        assert_eq!(cache.windows.len(), 1);
+        let whole = WindowCache::of(&scanned, 160_000, 400_000);
+        let bytes = whole.write(7, 400_000);
+        let read = WindowCache::read(&bytes, 7).expect("same fingerprint");
+        assert_eq!(read.windows.len(), 2);
+        assert_eq!(read.windows[1].start, 32_000);
+        assert_eq!(read.windows[1].masks, vec![0, 2, 2]);
+        assert_eq!(read.windows[0].locals.len(), 2);
+        assert_eq!(read.windows[0].locals[0].embedding, Some(vec![0.5, -1.0]));
+        assert!(read.windows[0].locals[0].clean);
+        assert_eq!(read.windows[0].locals[1].embedding, None);
+        assert!(WindowCache::read(&bytes, 8).is_none());
+        assert!(WindowCache::read(&bytes[..bytes.len() - 1], 7).is_none());
+    }
+}

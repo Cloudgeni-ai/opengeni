@@ -2,7 +2,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 
@@ -139,7 +140,7 @@ describe("personal resource attachments in Chromium", () => {
         release = resolve;
       });
       await loadingPage.route(
-        "**/src/components/personal-resource-attachment-control.tsx*",
+        "**/src/app/components/personal-resource-attachment-control.tsx*",
         async (route) => {
           await held;
           await route.continue();
@@ -170,7 +171,7 @@ describe("personal resource attachments in Chromium", () => {
       await loadingPage.close();
       const failedPage = await context.newPage();
       await failedPage.route(
-        "**/src/components/personal-resource-attachment-control.tsx*",
+        "**/src/app/components/personal-resource-attachment-control.tsx*",
         (route) => route.abort("failed"),
       );
       await failedPage.goto(`${baseUrl}/test/personal-resource-attachments.html`, {

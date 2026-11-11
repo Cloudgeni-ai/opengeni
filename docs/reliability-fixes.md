@@ -1,6 +1,6 @@
 # Reliability fixes: bounded history, no orphan brick, scheduled-task + billing integrity
 
-OpenGeni runs **long-lived agent sessions** on Temporal + Postgres. The longer a
+Opengeni runs **long-lived agent sessions** on Temporal + Postgres. The longer a
 session lives — a weeks-long "manager" goal is the headline workload — the more a
 slow, unbounded, or off-by-K failure has time to accumulate into a hard brick or
 a silent double-charge. This document records the original five confirmed
@@ -19,8 +19,6 @@ over this summary. Canonical sources:
   conversation-truth reconcile, `historyRowsToAppend`, `modelUsageSourceKey`.
 - `packages/db/src/index.ts` — `orphanedResultRowIndicesForRepair`,
   `claimNextSessionExecution`, the reusable-session locked update.
-- `packages/db/drizzle/0014_repair_orphaned_function_call_results.sql` — the
-  one-time orphan repair.
 - `packages/core/src/domain/scheduled-tasks.ts` — the manual-trigger idempotency
   helpers and `assertReusableSessionRevivable`.
 

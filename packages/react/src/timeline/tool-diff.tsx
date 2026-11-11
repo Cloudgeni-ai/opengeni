@@ -3,6 +3,7 @@ import { useState } from "react";
 import { cn } from "../lib/cn";
 import { useThemeType } from "../lib/use-theme-type";
 import { PierreDiff } from "../components/pierre-diff";
+import { useOpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Tool diff
@@ -60,6 +61,7 @@ function LayoutToggle({
 
 /** Raw-patch fallback for a V4A hunk string the parser could not structure. */
 export function RawPatch({ diff }: { diff: string }) {
+  const t = useOpenGeniText();
   const occurrences = new Map<string, number>();
   const lines = diff.split("\n").map((line) => {
     const occurrence = (occurrences.get(line) ?? 0) + 1;
@@ -69,7 +71,7 @@ export function RawPatch({ diff }: { diff: string }) {
   return (
     <div className="min-w-0">
       <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
-        raw patch (could not parse hunks)
+        {t("timeline.toolDiff.rawPatchCouldNotParse")}
       </p>
       <pre className="max-h-72 overflow-auto border-l-2 border-og-border pl-3 font-og-mono text-og-xs leading-5">
         {lines.map(({ key, line }) => (

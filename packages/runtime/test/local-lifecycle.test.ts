@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { access, rm } from "node:fs/promises";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   captureVerifiedWorkspaceArchive,
   establishSandboxSessionFromEnvelope,

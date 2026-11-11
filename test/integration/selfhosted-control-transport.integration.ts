@@ -29,10 +29,12 @@ import {
   subjectFor,
   type SelfhostedRelayConfig,
 } from "@opengeni/runtime/sandbox";
-import { startTestServices, waitFor, type TestServices } from "@opengeni/testing";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { waitFor } from "@opengeni/testing/process";
 
 const RELAY: SelfhostedRelayConfig = { host: "relay.test", port: 443, tls: true };
 const CONNECTION_INSTANCE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const RECOVERY_MS = 1_000;
 
 /** Bridge a `MockAgentResponder` (the agent's op semantics) onto NATS: decode the
  *  request bytes, run the mock, encode its `ControlResponse`. This is the "enrolled
@@ -54,7 +56,10 @@ function buildClient(bus: EventBus, workspaceId: string): SelfhostedSandboxClien
     connectionInstanceId: CONNECTION_INSTANCE_ID,
     relay: RELAY,
     // The control transport over the SAME connection the bus owns — no second dial.
-    controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
+    // A short transport recovery allowance keeps "no responder" tests within their
+    // budget; the production default (two minutes) rides out NATS rotations.
+    controlRpcFactory: () =>
+      new NatsControlRpc(async () => bus.getRequestConnection(), { recoveryMs: RECOVERY_MS }),
     timeoutMs: 2_000,
   });
 }
@@ -123,9 +128,14 @@ describe("selfhosted control transport over a REAL local NATS", () => {
   //     responder re-subscribes — the SAME minted session, same connection.
   test("(c) bouncing the responder mid-session: blip → recover on the SAME connection", async () => {
     const mock = new MockAgentResponder({ hostname: "reconnect-vm" });
-    const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
+    // Its own agent subject: delivery negotiation is cached per bus connection and
+    // exact subject, so sharing (a)'s subject made this test inherit (a)'s cache
+    // expiry. When that expiry fell inside the never-sent retries below, the
+    // offline read also waited a fresh recovery window and outran its wait.
+    const bounceAgent = `${AGENT}-bounce`;
+    const subject = subjectFor(WS_A, bounceAgent, CONNECTION_INSTANCE_ID);
     let unsub = bus.subscribeRequests(subject, responderFor(mock));
-    const session = await buildClient(bus, WS_A).resume({ agentId: AGENT });
+    const session = await buildClient(bus, WS_A).resume({ agentId: bounceAgent });
 
     // Healthy before the bounce.
     expect(await session.ping()).toBe(true);
@@ -222,10 +232,13 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
     const unsub = bus.subscribeRequests(subject, responderFor(mock));
     let attempts = 0;
-    const rpc = new NatsControlRpc(async () => {
-      attempts += 1;
-      return attempts === 1 ? null : bus.getRequestConnection();
-    });
+    const rpc = new NatsControlRpc(
+      async () => {
+        attempts += 1;
+        return attempts === 1 ? null : bus.getRequestConnection();
+      },
+      { recoveryMs: RECOVERY_MS },
+    );
     const client = new SelfhostedSandboxClient({
       workspaceId: WS_A,
       workspaceRoot: "/srv/project",

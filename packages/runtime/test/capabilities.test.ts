@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { Agent, Runner, tool as functionTool, type AgentOutputItem } from "@openai/agents";
+import { assistantMessage, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { status } from "@grpc/grpc-js";
+import { imageOutputFromBytes } from "@openai/agents-core/sandbox/internal";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import sharp from "sharp";
 import { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
 import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal";
 import {
@@ -25,6 +31,302 @@ describe("portable local compaction capability boundary", () => {
       expect(types).toContain("shell");
       expect(types).not.toContain("skills");
     }
+  });
+});
+
+// An iPhone photo (HEIC) in the sandbox: providers reject the format, so
+// view_image used to answer "not a supported image file" and the agent had to
+// convert it with the shell before it could look at it.
+describe("view_image of a HEIC photo", () => {
+  const heic = new Uint8Array(readFileSync(join(import.meta.dir, "fixtures/rotated-grid.heic")));
+  const sandboxFiles = new Map<string, Uint8Array>([
+    ["photo.heic", heic],
+    ["mislabelled.jpg", heic],
+    ["notes.bin", new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])],
+  ]);
+  const reads: string[] = [];
+  const session = {
+    createEditor: () => ({}),
+    // The SDK's own provider path: sniff the bytes, fall back to the name.
+    viewImage: async ({ path }: { path: string }) => {
+      const bytes = sandboxFiles.get(path);
+      if (!bytes) throw new Error(`Image file not found: ${path}`);
+      return imageOutputFromBytes(path, bytes);
+    },
+    readFile: async ({ path }: { path: string }) => {
+      reads.push(path);
+      return sandboxFiles.get(path)!;
+    },
+  };
+  const viewImage = async (structuredToolTransport: boolean | undefined, path: string) => {
+    const filesystem = buildAgentCapabilities(testSettings(), [], {
+      structuredToolTransport,
+    }).find((cap) => cap.type === "filesystem")!;
+    const tool = filesystem
+      .clone()
+      .bind(session as never)
+      .tools()
+      .find((candidate) => candidate.name === "view_image");
+    if (!tool || tool.type !== "function") throw new Error("No view_image function");
+    return await tool.invoke({} as never, JSON.stringify({ path }));
+  };
+  const jpegOf = (output: unknown): Buffer => {
+    const url =
+      typeof output === "string" ? output : (output as { image: { url: string } }).image.url;
+    expect(url.startsWith("data:image/jpeg;base64,")).toBe(true);
+    return Buffer.from(url.slice(url.indexOf(",") + 1), "base64");
+  };
+
+  for (const structuredToolTransport of [undefined, false]) {
+    test(`shows the photo as an upright JPEG (structured transport ${String(structuredToolTransport)})`, async () => {
+      const jpeg = jpegOf(await viewImage(structuredToolTransport, "photo.heic"));
+      const metadata = await sharp(jpeg).metadata();
+      expect([metadata.format, metadata.width, metadata.height]).toEqual(["jpeg", 64, 96]);
+      // The first test also loads the decoder; a cold start can take seconds.
+    }, 30_000);
+  }
+
+  test("a HEIC saved with an image extension is converted too", async () => {
+    const jpeg = jpegOf(await viewImage(false, "mislabelled.jpg"));
+    expect((await sharp(jpeg).metadata()).format).toBe("jpeg");
+  });
+
+  test("other unsupported files and missing paths keep the SDK's answers", async () => {
+    reads.length = 0;
+    expect(await viewImage(false, "notes.bin")).toBe(
+      "image path `notes.bin` is not a supported image file",
+    );
+    expect(await viewImage(false, "missing.heic")).toBe("image path `missing.heic` was not found");
+    expect(reads).toEqual(["notes.bin"]);
+  });
+});
+
+describe("filesystem function tool schemas", () => {
+  test("apply_patch presents one string patch field and preserves tuple invocation", async () => {
+    const operations: unknown[] = [];
+    const session = {
+      createEditor: () => ({
+        createFile: async (operation: unknown) => {
+          operations.push(operation);
+          return { status: "completed", output: "created" };
+        },
+      }),
+    };
+    for (const structuredToolTransport of [undefined, false]) {
+      const filesystem = buildAgentCapabilities(testSettings(), [], {
+        structuredToolTransport,
+      }).find((cap) => cap.type === "filesystem")!;
+      const patch = filesystem
+        .clone()
+        .bind(session as never)
+        .tools()
+        .find((tool) => tool.name === "apply_patch");
+      if (!patch || patch.type !== "function") throw new Error("No apply_patch function");
+      expect(Object.keys(patch.parameters.properties ?? {})).toEqual(["patch"]);
+      expect(patch.parameters.properties?.patch).toMatchObject({ type: "string" });
+      expect(patch.parameters.required).toEqual(["patch"]);
+      expect(patch.description).toContain("*** Begin Patch");
+      await patch.invoke(
+        {} as never,
+        JSON.stringify({
+          command: [
+            "apply_patch",
+            "*** Begin Patch\n*** Add File: example.txt\n+example\n*** End Patch",
+          ],
+        }),
+      );
+    }
+    // The trailing empty "+" line gives the created file Codex's final newline.
+    expect(operations).toEqual([
+      { type: "create_file", path: "example.txt", diff: "+example\n+\n" },
+      { type: "create_file", path: "example.txt", diff: "+example\n+\n" },
+    ]);
+  });
+});
+
+// Production: a model sent apply_patch and a dependent `git add` as two calls in
+// one response. They ran concurrently, so the command ran before the file
+// existed. A file edit must run in model order relative to its sibling calls.
+describe("apply_patch ordering within one model response", () => {
+  async function runBatch(order: Array<"patch" | "probe">): Promise<string[]> {
+    const events: string[] = [];
+    const session = {
+      createEditor: () => ({
+        createFile: async () => {
+          events.push("patch:start");
+          await Bun.sleep(30);
+          events.push("patch:end");
+          return { status: "completed", output: "created" };
+        },
+      }),
+    };
+    const filesystem = buildAgentCapabilities(testSettings(), [], {
+      structuredToolTransport: false,
+    }).find((cap) => cap.type === "filesystem")!;
+    const patchTool = filesystem
+      .clone()
+      .bind(session as never)
+      .tools()
+      .find((candidate) => candidate.name === "apply_patch")!;
+    let probes = 0;
+    const probe = functionTool({
+      name: "probe",
+      description: "Records when it runs.",
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+      strict: true,
+      execute: async () => {
+        const id = ++probes;
+        events.push(`probe${id}:start`);
+        await Bun.sleep(30);
+        events.push(`probe${id}:end`);
+        return "ok";
+      },
+    });
+    const calls = order.map(
+      (name, index) =>
+        ({
+          id: `call-${index}`,
+          type: "function_call",
+          callId: `call-${index}`,
+          name: name === "patch" ? "apply_patch" : "probe",
+          status: "completed",
+          arguments:
+            name === "patch"
+              ? JSON.stringify({ patch: "*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch" })
+              : "{}",
+        }) as AgentOutputItem,
+    );
+    const model = new ScriptedModel([{ output: calls }, { output: [assistantMessage("done")] }]);
+    const agent = new Agent({ name: "patcher", model, tools: [patchTool, probe] });
+    await new Runner({ tracingDisabled: true }).run(agent, "edit then check");
+    return events;
+  }
+
+  test("a call after the edit starts only once the edit has finished", async () => {
+    expect(await runBatch(["patch", "probe"])).toEqual([
+      "patch:start",
+      "patch:end",
+      "probe1:start",
+      "probe1:end",
+    ]);
+  });
+
+  test("the edit waits for earlier calls, which still run concurrently", async () => {
+    const events = await runBatch(["probe", "probe", "patch", "probe"]);
+    const at = (event: string) => events.indexOf(event);
+    expect(at("probe2:start")).toBeLessThan(at("probe1:end"));
+    expect(at("patch:start")).toBeGreaterThan(at("probe1:end"));
+    expect(at("patch:start")).toBeGreaterThan(at("probe2:end"));
+    expect(at("probe3:start")).toBeGreaterThan(at("patch:end"));
+  });
+});
+
+// Production soak: an OpenAI-compatible chat model sent apply_patch arguments
+// that were truncated JSON. The SDK forces a human approval for unparseable
+// arguments of any tool whose approval policy is dynamic, and the filesystem
+// fallback's never-approve closure counted as dynamic: the session stalled in
+// requires_action on a broken patch. Malformed arguments must be a tool error.
+describe("malformed apply_patch arguments", () => {
+  const malformedArguments = [
+    // Exact production arguments: unterminated JSON string.
+    '{"diff": "*** Begin Patch\\n*** Add File: notes/soak.txt\\n+alpha\\n+beta\\n+gamma\\n*** End Patch\\n',
+    // The same intent as valid JSON under an unrecognized key.
+    JSON.stringify({
+      diff: "*** Begin Patch\n*** Add File: notes/soak.txt\n+alpha\n+beta\n+gamma\n*** End Patch\n",
+    }),
+  ];
+
+  for (const [index, args] of malformedArguments.entries()) {
+    test(`returns a model-visible tool error, never an approval (${index})`, async () => {
+      const operations: unknown[] = [];
+      const session = {
+        createEditor: () => ({
+          createFile: async (operation: unknown) => {
+            operations.push(operation);
+            return { status: "completed", output: "created" };
+          },
+        }),
+      };
+      const filesystem = buildAgentCapabilities(testSettings(), [], {
+        structuredToolTransport: false,
+      }).find((cap) => cap.type === "filesystem")!;
+      const tools = filesystem
+        .clone()
+        .bind(session as never)
+        .tools()
+        .filter((tool) => tool.name === "apply_patch");
+      const model = new ScriptedModel([
+        {
+          output: [
+            {
+              id: "call-malformed",
+              type: "function_call",
+              callId: "call-malformed",
+              name: "apply_patch",
+              status: "completed",
+              arguments: args,
+            } as AgentOutputItem,
+          ],
+        },
+        { output: [assistantMessage("retrying")] },
+      ]);
+      const agent = new Agent({ name: "patcher", model, tools });
+      const result = await new Runner({ tracingDisabled: true }).run(agent, "create the file");
+
+      expect(result.interruptions).toHaveLength(0);
+      expect(operations).toEqual([]);
+      expect(model.calls).toBe(2);
+      const toolOutput = result.newItems.find((item) => item.type === "tool_call_output_item");
+      expect(toolOutput).toBeDefined();
+      const text = JSON.stringify(toolOutput!.rawItem);
+      expect(text).toMatch(
+        index === 0 ? /parsing tool arguments/ : /Invalid apply_patch arguments/,
+      );
+      if (index === 1) expect(text).toContain("got keys diff");
+    });
+  }
+
+  test("a well-formed patch still runs without approval", async () => {
+    const operations: unknown[] = [];
+    const session = {
+      createEditor: () => ({
+        createFile: async (operation: unknown) => {
+          operations.push(operation);
+          return { status: "completed", output: "created" };
+        },
+      }),
+    };
+    const filesystem = buildAgentCapabilities(testSettings(), [], {
+      structuredToolTransport: false,
+    }).find((cap) => cap.type === "filesystem")!;
+    const tools = filesystem
+      .clone()
+      .bind(session as never)
+      .tools()
+      .filter((tool) => tool.name === "apply_patch");
+    const model = new ScriptedModel([
+      {
+        output: [
+          {
+            id: "call-ok",
+            type: "function_call",
+            callId: "call-ok",
+            name: "apply_patch",
+            status: "completed",
+            arguments: JSON.stringify({
+              patch: "*** Begin Patch\n*** Add File: notes/soak.txt\n+alpha\n*** End Patch",
+            }),
+          } as AgentOutputItem,
+        ],
+      },
+      { output: [assistantMessage("done")] },
+    ]);
+    const agent = new Agent({ name: "patcher", model, tools });
+    const result = await new Runner({ tracingDisabled: true }).run(agent, "create the file");
+    expect(result.interruptions).toHaveLength(0);
+    expect(operations).toEqual([
+      { type: "create_file", path: "notes/soak.txt", diff: "+alpha\n+\n" },
+    ]);
   });
 });
 
@@ -135,6 +437,37 @@ function webSearchHostedTools(
 }
 
 describe("native web search hosted tool", () => {
+  for (const sandboxBackend of ["none", "docker"] as const) {
+    test(`route context size changes only the hosted-search budget (${sandboxBackend})`, () => {
+      const settings = testSettings({ sandboxBackend });
+      const baseline = webSearchHostedTools(buildOpenGeniAgent(settings, []));
+      expect(baseline[0]!.providerData).toMatchObject({ search_context_size: "medium" });
+      for (const size of ["low", "medium", "high"] as const) {
+        const actual = webSearchHostedTools(
+          buildOpenGeniAgent(settings, [], {
+            hostedWebSearchContextSize: size,
+          }),
+        );
+        expect(actual).toEqual([
+          {
+            ...baseline[0],
+            providerData: {
+              ...(baseline[0]!.providerData as object),
+              search_context_size: size,
+            },
+          },
+        ]);
+      }
+      expect(
+        webSearchHostedTools(
+          buildOpenGeniAgent(settings, [], {
+            hostedWebSearch: false,
+            hostedWebSearchContextSize: "low",
+          }),
+        ),
+      ).toEqual([]);
+    });
+  }
   test("default settings attach a web_search hosted tool on the non-sandbox Agent path", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     const tools = webSearchHostedTools(agent);

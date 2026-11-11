@@ -2,7 +2,6 @@
 // its deliveries and Send test event, and the Add / Edit webhook form page.
 import type {
   IntegrationEndpointTestResult,
-  IntegrationWorkspaceFilter,
   WorkspaceInheritedIntegrationsResponse,
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEventType,
@@ -22,35 +21,35 @@ import {
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { CheckboxField, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { CheckboxField, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
-import { Section } from "@/components/ui/section";
-import { SettingRow, SettingRowSkeleton } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
-import type { SemanticTone } from "@/components/ui/status-dot";
-import { userErrorText } from "@/lib/api-error";
+import { Section } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import type { SemanticTone } from "@opengeni/react/ui/status-dot";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import type { DeveloperIntegrationsApi, IntegrationWebhook } from "./integrations-api";
 import {
@@ -67,7 +66,7 @@ import {
   type Load,
 } from "./shared";
 import { CodeSample, EndpointTestResult, WEBHOOKS_GUIDE_URL } from "./test-result";
-import { WorkspaceFilterField } from "./workspace-filter-field";
+import { WorkspaceFilterField, type RegistrationReach } from "./workspace-filter-field";
 import {
   DEFAULT_WEBHOOK_EVENTS,
   WEBHOOK_EVENT_GROUPS,
@@ -180,7 +179,7 @@ function InheritedWebhooksLine({
             <button
               type="button"
               onClick={organizationSettingsHref}
-              className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+              className="rounded-sm font-medium og-link"
             >
               Organization settings
             </button>
@@ -272,7 +271,7 @@ export function WebhooksSection({
               status={<HealthBadge health={health} variant="dot" />}
               description={
                 organization
-                  ? `${workspaceFilterLabel(webhook.workspaceFilter)} · ${webhookEventsSummary(webhook.eventTypes, 1)}`
+                  ? `${workspaceFilterLabel(webhook)} · ${webhookEventsSummary(webhook.eventTypes, 1)}`
                   : webhookEventsSummary(webhook.eventTypes, 1)
               }
               cells={{
@@ -580,9 +579,7 @@ export function WebhookPage({
         }
         meta={[
           <span key="events">{webhookEventsSummary(webhook.eventTypes)}</span>,
-          organization ? (
-            <span key="filter">{workspaceFilterLabel(webhook.workspaceFilter)}</span>
-          ) : null,
+          organization ? <span key="filter">{workspaceFilterLabel(webhook)}</span> : null,
           <span key="added" className="whitespace-nowrap">
             added {dateLabel(webhook.createdAt)}
           </span>,
@@ -636,9 +633,7 @@ export function WebhookPage({
               </ul>
             </DetailAsideItem>
             {organization ? (
-              <DetailAsideItem label="Workspaces">
-                {workspaceFilterLabel(webhook.workspaceFilter)}
-              </DetailAsideItem>
+              <DetailAsideItem label="Workspaces">{workspaceFilterLabel(webhook)}</DetailAsideItem>
             ) : null}
             <DetailAsideItem label="Signing secret">
               <span className="text-fg-muted">Shown once, when it was made.</span>
@@ -827,9 +822,11 @@ export function WebhookFormPage({
   const [events, setEvents] = useState<Set<WorkspaceWebhookEventType>>(
     () => new Set(current?.eventTypes ?? DEFAULT_WEBHOOK_EVENTS),
   );
-  const [filter, setFilter] = useState<IntegrationWorkspaceFilter | null>(
-    current?.workspaceFilter ?? null,
-  );
+  const [reach, setReach] = useState<RegistrationReach>({
+    filter: current?.workspaceFilter ?? null,
+    workspaceIds: current?.allowedWorkspaceIds ?? null,
+  });
+  const filter = reach.filter;
   const [errors, setErrors] = useState<{ url?: string; events?: string; filter?: string }>({});
   const [created, setCreated] = useState<{ webhook: IntegrationWebhook; secret: string } | null>(
     null,
@@ -839,7 +836,10 @@ export function WebhookFormPage({
     if (!current) return;
     setUrl(current.url);
     setEvents(new Set(current.eventTypes));
-    setFilter(current.workspaceFilter ?? null);
+    setReach({
+      filter: current.workspaceFilter ?? null,
+      workspaceIds: current.allowedWorkspaceIds ?? null,
+    });
   }, [current]);
 
   const back = { label: backLabel, onClick: onClose };
@@ -892,6 +892,9 @@ export function WebhookFormPage({
     if (organization && filter && !filter.externalSource.trim()) {
       nextErrors.filter = "Enter the external source, or send for every shared workspace.";
     }
+    if (organization && reach.workspaceIds?.length === 0) {
+      nextErrors.filter = "Pick at least one workspace.";
+    }
     setErrors(nextErrors);
     if (nextErrors.url || nextErrors.events || nextErrors.filter) return false;
     const eventTypes = WEBHOOK_EVENT_GROUPS.flatMap((group) => group.events)
@@ -907,7 +910,7 @@ export function WebhookFormPage({
         const updated = await api.updateWebhook(current.id, {
           url: trimmed,
           eventTypes,
-          ...(organization ? { workspaceFilter } : {}),
+          ...(organization ? { workspaceFilter, allowedWorkspaceIds: reach.workspaceIds } : {}),
         });
         toast("Webhook saved");
         onFinished(updated);
@@ -917,7 +920,7 @@ export function WebhookFormPage({
         await api.createWebhook({
           url: trimmed,
           eventTypes,
-          ...(organization ? { workspaceFilter } : {}),
+          ...(organization ? { workspaceFilter, allowedWorkspaceIds: reach.workspaceIds } : {}),
         }),
       );
       return true;
@@ -964,12 +967,13 @@ export function WebhookFormPage({
         </Field>
         {organization ? (
           <WorkspaceFilterField
-            value={filter}
+            value={reach}
             error={errors.filter}
             onChange={(next) => {
-              setFilter(next);
+              setReach(next);
               setErrors((value) => ({ ...value, filter: undefined }));
             }}
+            listWorkspaces={api.listSharedWorkspaces}
           />
         ) : null}
         <Field label="Events" group error={errors.events}>

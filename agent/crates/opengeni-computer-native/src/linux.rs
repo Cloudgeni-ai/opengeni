@@ -2,10 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use atspi::proxy::accessible::AccessibleProxy;
@@ -31,28 +30,34 @@ use image::{
     ExtendedColorType, ImageEncoder as _, RgbaImage,
 };
 use opengeni_agent_platform::{
-    validate_linux_named_key_chord, DesktopBackend as _, LinuxDesktop, LinuxRgbaFrame, LinuxWindow,
-    LinuxWindowRect, PlatformError,
+    validate_linux_named_key_chord, CapturedFrame, DesktopBackend as _, LinuxDesktop,
+    LinuxPasteOutcome, LinuxPreviousClipboard, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    PlatformError,
 };
 use opengeni_agent_proto::v1;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use crate::captured_frames::CapturedFrames;
+use crate::captured_frames::{
+    dispatch_with_frame_invalidation, dispatch_with_mutation_invalidation, CapturedFrames,
+};
 use crate::clipboard::NativeClipboardController;
+use crate::linux_gnome::{self, GnomeScreen, WaylandScreen};
 use crate::tree::semantic_roots_equivalent;
+use crate::window_input_fences::{WindowInputFences, WindowInputIdentity};
 use crate::{
     ComputerAdapter, NativeAction, NativeActionCommand, NativeActionValue, NativeAdapterError,
     NativeAdapterErrorCode, NativeAdapterResult, NativeCapabilities, NativeCapturedFrame,
     NativeClipboard, NativeClipboardAction, NativeKeyboardAction, NativeLocator,
-    NativeNodeMetadata, NativeNodeValue, NativeObservation, NativePointerAction,
-    NativePointerButton, NativeRect, NativeRedactedValue, NativeRedactionReason,
-    NativeSemanticAction, NativeSemanticPlatform, NativeTarget, NativeTargetKind, RawSemanticNode,
-    SemanticSnapshotIndex,
+    NativeNodeMetadata, NativeNodeValue, NativeObservation, NativeRect, NativeRedactedValue,
+    NativeRedactionReason, NativeSemanticAction, NativeSemanticPlatform, NativeTarget,
+    NativeTargetKind, RawSemanticNode, SemanticSnapshotIndex,
 };
+#[cfg(test)]
+use crate::{NativePointerAction, NativePointerButton};
 
 const CACHE_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_CALL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -61,6 +66,19 @@ const MAX_CACHE_ITEMS: usize = 50_000;
 const MAX_ENRICH_CONCURRENCY: usize = 32;
 const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
 const MAX_APPLICATION_SNAPSHOTS: usize = 128;
+/// Chromium and Electron register an AT-SPI root with empty top-level frames
+/// and build the rest of their tree only after an assistive client queries a
+/// frame. These delays bound how long one observation waits for that build.
+const TREE_ACTIVATION_SETTLE_DELAYS: [Duration; 2] =
+    [Duration::from_millis(150), Duration::from_millis(350)];
+/// Environment that makes toolkits which otherwise wait for an assistive
+/// client (Chromium/Electron, Firefox and GTK2, Qt) expose their tree from
+/// startup when launched through computer use.
+const LINUX_APPLICATION_ACCESSIBILITY_ENVIRONMENT: [(&str, &str); 3] = [
+    ("ACCESSIBILITY_ENABLED", "1"),
+    ("GNOME_ACCESSIBILITY", "1"),
+    ("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1"),
+];
 const WINDOW_CAPTURE_RESIZE_ERROR: &str = "X11 window resized during capture";
 const WINDOW_CAPTURE_RETRY_DELAYS: [Duration; 4] = [
     Duration::ZERO,
@@ -141,9 +159,58 @@ struct ObjectRecord {
 }
 
 struct StoredObservation {
+    admission_sequence: u64,
     target_generation: String,
+    target_key: String,
+    target_kind: NativeTargetKind,
+    window_focus: Option<WindowFocusFence>,
     snapshot: SemanticSnapshotIndex,
     objects: BTreeMap<String, ObjectRecord>,
+}
+
+#[derive(Clone)]
+struct WindowFocusFence {
+    target: TargetRecord,
+    application_root: ObjectRefOwned,
+    root: ObjectRecord,
+}
+
+impl WindowFocusFence {
+    fn input_identity(&self) -> WindowInputIdentity {
+        WindowInputIdentity {
+            target_id: self.target.target.id.clone(),
+            generation: self.target.target.target_generation.clone(),
+            key: self.target.key.clone(),
+            // Focus and title may change during an ordinary read. The native
+            // object, its placement and owning process cannot be substituted.
+            client: format!(
+                "{:?}",
+                (
+                    self.application_root.name_as_str(),
+                    self.application_root.path_as_str(),
+                    self.root.object.name_as_str(),
+                    self.root.object.path_as_str(),
+                    self.root.parent.name_as_str(),
+                    self.root.parent.path_as_str(),
+                    self.root.index_in_parent,
+                    self.target.target.application_id.as_deref(),
+                    self.target.target.process_id,
+                    self.target.target.bounds.as_ref(),
+                    self.target.x11_window.as_ref().map(|window| (
+                        window.id,
+                        window.process_id,
+                        window.bounds
+                    )),
+                )
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ObservationAdmission {
+    sequence: u64,
+    started_at: Instant,
 }
 
 #[derive(Clone)]
@@ -195,6 +262,22 @@ enum FrameFence {
 }
 
 impl FrameFence {
+    fn same_geometry(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Window(left), Self::Window(right)) => {
+                left.target_generation == right.target_generation
+                    && same_window_placement(&left.window, &right.window)
+                    && left.width == right.width
+                    && left.height == right.height
+            }
+            (Self::Screen(left), Self::Screen(right)) => {
+                left.target_generation == right.target_generation
+                    && left.width == right.width
+                    && left.height == right.height
+            }
+            _ => false,
+        }
+    }
     fn window(&self) -> Option<&WindowFrameFence> {
         match self {
             Self::Window(frame) => Some(frame),
@@ -230,9 +313,10 @@ impl LinuxApplicationLauncher {
         let mut command = Command::new(&self.executable);
         command
             .arg(application_id)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .envs(LINUX_APPLICATION_ACCESSIBILITY_ENVIRONMENT)
+            .stdin(opengeni_agent_platform::discarded_stdio())
+            .stdout(opengeni_agent_platform::discarded_stdio())
+            .stderr(opengeni_agent_platform::discarded_stdio());
         let mut child = command.spawn().map_err(|error| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::DriverFailed,
@@ -271,43 +355,79 @@ impl LinuxApplicationLauncher {
 
 /// Linux semantic adapter over the modern AT-SPI cache and typed interfaces.
 /// All object handles remain private; observations contain only short refs.
+/// Without an AT-SPI bus (for example an Xvfb virtual desktop on a headless
+/// host) it still sees and drives the screen with pixel input.
 pub(crate) struct AtspiComputerAdapter {
-    connection: AccessibilityConnection,
+    /// `None` when the session has no reachable AT-SPI bus.
+    connection: Option<AccessibilityConnection>,
+    /// Why `connection` is `None`.
+    accessibility_unavailable: Option<String>,
     incarnation: Uuid,
     sequence: AtomicU64,
     frame_sequence: AtomicU64,
     latest: RwLock<BTreeMap<String, StoredObservation>>,
+    window_input_fences: RwLock<WindowInputFences<WindowFocusFence>>,
     target_locators: RwLock<BTreeMap<String, TargetLocator>>,
     desktop: Option<LinuxDesktop>,
+    /// GNOME Wayland whole-screen control; X11 window control is then absent.
+    gnome: Option<Arc<GnomeScreen>>,
+    /// Why no screen backend is available, when neither is.
+    screen_unavailable: Option<String>,
     application_launcher: Option<LinuxApplicationLauncher>,
     clipboard: Option<NativeClipboardController>,
     captured_frames: RwLock<CapturedFrames<FrameFence>>,
+    input_seat: Mutex<()>,
     semantic_generation: Arc<AtomicU64>,
     application_snapshots: RwLock<BTreeMap<String, CachedApplicationSnapshot>>,
     semantic_event_cache: Arc<AtomicBool>,
+    /// Applications whose dormant tree this adapter already tried to wake.
+    activated_applications: Mutex<BTreeSet<String>>,
 }
 
 impl AtspiComputerAdapter {
     pub(crate) async fn open() -> NativeAdapterResult<Self> {
-        let connection = tokio::time::timeout(CACHE_TIMEOUT, AccessibilityConnection::new())
+        // Toolkits only register with AT-SPI while the session reports
+        // accessibility as enabled. This is the IsEnabled flag alone; the
+        // screen-reader flag stays untouched so no screen reader starts.
+        let _ = tokio::time::timeout(
+            CACHE_TIMEOUT,
+            atspi::connection::set_session_accessibility(true),
+        )
+        .await;
+        let accessibility = tokio::time::timeout(CACHE_TIMEOUT, AccessibilityConnection::new())
             .await
-            .map_err(|_| {
-                NativeAdapterError::unavailable(
-                    "Linux AT-SPI accessibility bus connection timed out",
-                    true,
-                )
-            })?
-            .map_err(|error| {
-                NativeAdapterError::unavailable(
-                    format!("Linux AT-SPI accessibility bus is unavailable: {error}"),
-                    true,
-                )
-            })?;
+            .map_err(|_| "Linux AT-SPI accessibility bus connection timed out".to_string())
+            .and_then(|connection| {
+                connection.map_err(|error| {
+                    format!("Linux AT-SPI accessibility bus is unavailable: {error}")
+                })
+            });
+        let (desktop, gnome, screen_unavailable) = match linux_gnome::detect().await {
+            WaylandScreen::NotWayland => match LinuxDesktop::open_default() {
+                Ok(desktop) => (Some(desktop), None, None),
+                Err(reason) => (None, None, Some(reason)),
+            },
+            WaylandScreen::Gnome(screen) => (None, Some(screen), None),
+            WaylandScreen::Unsupported(reason) => (None, None, Some(reason)),
+        };
+        // The screen is an independent control plane: without AT-SPI the
+        // adapter still captures and drives it, and only fails when neither
+        // semantic nor screen control is reachable.
+        let (connection, accessibility_unavailable) = match accessibility {
+            Ok(connection) => (Some(connection), None),
+            Err(reason) if desktop.is_some() || gnome.is_some() => (None, Some(reason)),
+            Err(reason) => return Err(NativeAdapterError::unavailable(reason, true)),
+        };
         let semantic_generation = Arc::new(AtomicU64::new(0));
-        let semantic_event_cache =
-            Arc::new(AtomicBool::new(register_semantic_events(&connection).await));
-        if semantic_event_cache.load(Ordering::Acquire) {
-            let event_connection = connection.clone();
+        let semantic_event_cache = Arc::new(AtomicBool::new(match &connection {
+            Some(connection) => register_semantic_events(connection).await,
+            None => false,
+        }));
+        if let Some(event_connection) = connection
+            .as_ref()
+            .filter(|_| semantic_event_cache.load(Ordering::Acquire))
+            .cloned()
+        {
             let event_generation = Arc::clone(&semantic_generation);
             let event_cache_enabled = Arc::clone(&semantic_event_cache);
             tokio::spawn(async move {
@@ -322,23 +442,68 @@ impl AtspiComputerAdapter {
         }
         Ok(Self {
             connection,
+            accessibility_unavailable,
             incarnation: Uuid::new_v4(),
             sequence: AtomicU64::new(0),
             frame_sequence: AtomicU64::new(0),
             latest: RwLock::new(BTreeMap::new()),
+            window_input_fences: RwLock::new(WindowInputFences::new()),
             target_locators: RwLock::new(BTreeMap::new()),
-            desktop: LinuxDesktop::open_default().ok(),
+            desktop,
+            gnome,
+            screen_unavailable,
             application_launcher: LinuxApplicationLauncher::discover(),
             clipboard: NativeClipboardController::open().ok(),
             captured_frames: RwLock::new(CapturedFrames::new()),
+            input_seat: Mutex::new(()),
             semantic_generation,
             application_snapshots: RwLock::new(BTreeMap::new()),
             semantic_event_cache,
+            activated_applications: Mutex::new(BTreeSet::new()),
         })
     }
 
+    /// The AT-SPI connection, or why semantic access is unavailable.
+    fn accessibility(&self) -> NativeAdapterResult<&AccessibilityConnection> {
+        self.connection.as_ref().ok_or_else(|| {
+            NativeAdapterError::unavailable(
+                self.accessibility_unavailable
+                    .clone()
+                    .unwrap_or_else(|| "Linux AT-SPI accessibility is unavailable".to_string()),
+                true,
+            )
+        })
+    }
+
+    fn screen_device(&self) -> NativeAdapterResult<ScreenDevice<'_>> {
+        if let Some(screen) = &self.gnome {
+            return Ok(ScreenDevice::Gnome(screen));
+        }
+        self.desktop.as_ref().map(ScreenDevice::X11).ok_or_else(|| {
+            NativeAdapterError::unavailable(
+                format!(
+                    "this Linux desktop cannot be seen or controlled: {}",
+                    self.screen_unavailable
+                        .as_deref()
+                        .unwrap_or("no graphical display is reachable")
+                ),
+                true,
+            )
+        })
+    }
+
+    fn window_control_unavailable(&self, what: &str) -> NativeAdapterError {
+        if self.gnome.is_some() {
+            NativeAdapterError::unsupported(format!(
+                "Linux {what} is not available on GNOME Wayland; use the screen target for pointer, keyboard and screenshots, and semantic actions for windows"
+            ))
+        } else {
+            NativeAdapterError::unavailable(format!("Linux X11 {what} is unavailable"), true)
+        }
+    }
+
     fn screen_target(&self) -> Option<NativeTarget> {
-        let display = self.desktop.as_ref()?.probe()?;
+        let display = self.screen_device().ok()?.probe()?;
         let key = format!("{}\0{}\0{}", display.id, display.width, display.height);
         Some(NativeTarget {
             id: format!("screen:{}", stable_digest(&display.id)),
@@ -379,7 +544,7 @@ impl AtspiComputerAdapter {
 
     async fn cache_items(&self) -> NativeAdapterResult<Vec<CacheItem>> {
         let registry_root = self
-            .connection
+            .accessibility()?
             .root_accessible_on_registry()
             .await
             .map_err(|error| driver_error("construct AT-SPI registry root", error))?;
@@ -430,27 +595,19 @@ impl AtspiComputerAdapter {
                 return Ok(snapshot.items.clone());
             }
         }
-        let proxy = CacheProxy::builder(self.connection.connection())
-            .destination(root.name().ok_or_else(null_object)?.clone())
-            .map_err(|error| driver_error("construct application cache destination", error))?
-            .build()
-            .await
-            .map_err(|error| driver_error("construct application cache proxy", error));
-        let cached = match proxy {
-            Ok(proxy) => match cache_call(proxy.get_items()).await {
-                Ok(items) => Ok(items),
-                Err(error) if is_signature_mismatch(&error) => cache_call(proxy.get_legacy_items())
-                    .await
-                    .map_err(|error| driver_error("read legacy application AT-SPI cache", error))
-                    .and_then(convert_legacy_cache),
-                Err(error) => Err(driver_error("read application AT-SPI cache", error)),
-            },
-            Err(error) => Err(error),
-        };
-        let items = match cached {
-            Ok(items) if !items.is_empty() && cache_snapshot_complete(&items) => Ok(items),
-            Ok(_) | Err(_) => self.crawl_application(root).await,
-        }?;
+        let mut items = self.read_application_items(root).await?;
+        if dormant_application_tree(&items) && self.claim_tree_activation(&cache_key).await {
+            self.wake_application_tree(&items).await;
+            for delay in TREE_ACTIVATION_SETTLE_DELAYS {
+                tokio::time::sleep(delay).await;
+                if let Ok(woken) = self.read_application_items(root).await {
+                    items = woken;
+                    if !dormant_application_tree(&items) {
+                        break;
+                    }
+                }
+            }
+        }
         if self.semantic_event_cache.load(Ordering::Acquire)
             && self.semantic_generation.load(Ordering::Acquire) == start_generation
         {
@@ -468,6 +625,59 @@ impl AtspiComputerAdapter {
             );
         }
         Ok(items)
+    }
+
+    async fn read_application_items(
+        &self,
+        root: &ObjectRefOwned,
+    ) -> NativeAdapterResult<Vec<CacheItem>> {
+        let proxy = CacheProxy::builder(self.accessibility()?.connection())
+            .destination(root.name().ok_or_else(null_object)?.clone())
+            .map_err(|error| driver_error("construct application cache destination", error))?
+            .build()
+            .await
+            .map_err(|error| driver_error("construct application cache proxy", error));
+        let cached = match proxy {
+            Ok(proxy) => match cache_call(proxy.get_items()).await {
+                Ok(items) => Ok(items),
+                Err(error) if is_signature_mismatch(&error) => cache_call(proxy.get_legacy_items())
+                    .await
+                    .map_err(|error| driver_error("read legacy application AT-SPI cache", error))
+                    .and_then(convert_legacy_cache),
+                Err(error) => Err(driver_error("read application AT-SPI cache", error)),
+            },
+            Err(error) => Err(error),
+        };
+        match cached {
+            Ok(items) if !items.is_empty() && cache_snapshot_complete(&items) => Ok(items),
+            Ok(_) | Err(_) => self.crawl_application(root).await,
+        }
+    }
+
+    /// Records one wake attempt per application root, so a genuinely empty
+    /// window costs the settle delay once rather than on every observation.
+    async fn claim_tree_activation(&self, cache_key: &str) -> bool {
+        let mut activated = self.activated_applications.lock().await;
+        if activated.len() >= MAX_APPLICATION_SNAPSHOTS {
+            activated.clear();
+        }
+        activated.insert(cache_key.to_owned())
+    }
+
+    /// Querying a top-level frame's attributes is the assistive-client
+    /// signal that makes Chromium and Electron build their accessibility tree.
+    async fn wake_application_tree(&self, items: &[CacheItem]) {
+        let mut frames = Vec::new();
+        for item in items {
+            if is_top_level_window_role(item.role) {
+                frames.push(item.object.clone());
+            }
+        }
+        for frame in frames {
+            if let Ok(proxy) = self.accessible_proxy(&frame).await {
+                let _ = timed(proxy.get_attributes()).await;
+            }
+        }
     }
 
     fn invalidate_semantic_cache(&self) {
@@ -651,14 +861,29 @@ impl AtspiComputerAdapter {
         let target = records
             .into_iter()
             .find(|record| record.target.id == target_id)
-            .ok_or_else(|| {
-                NativeAdapterError::definite(
-                    NativeAdapterErrorCode::TargetNotFound,
-                    "AT-SPI target no longer exists",
-                    true,
-                )
-            })?;
+            .ok_or_else(|| self.missing_target())?;
         Ok((target, items))
+    }
+
+    /// A target that is gone. When the desktop's login session is no longer
+    /// the one on the screen, its screen and windows are gone for that
+    /// reason, which is the one worth saying.
+    fn missing_target(&self) -> NativeAdapterError {
+        if let Some(reason) = self
+            .desktop
+            .as_ref()
+            .and_then(LinuxDesktop::session_unavailable_reason)
+        {
+            return NativeAdapterError::unavailable(
+                format!("this Linux desktop cannot be seen or controlled: {reason}"),
+                true,
+            );
+        }
+        NativeAdapterError::definite(
+            NativeAdapterErrorCode::TargetNotFound,
+            "AT-SPI target no longer exists",
+            true,
+        )
     }
 
     /// Refresh one previously resolved target from its coherent application
@@ -679,6 +904,18 @@ impl AtspiComputerAdapter {
         record.target.focused =
             item.states.contains(State::Focused) || item.states.contains(State::Active);
         record.target.bounds = self.component_bounds(&item.object, item.ifaces).await;
+        record.target.process_id = self.process_id(&item.object).await;
+        record.target.application_id = self.accessible_identifier(&item.object).await;
+        let generation_source = format!(
+            "{}\0{}\0{}",
+            record.key,
+            record
+                .target
+                .process_id
+                .map_or_else(String::new, |pid| pid.to_string()),
+            record.target.application_id.as_deref().unwrap_or("")
+        );
+        record.target.target_generation = format!("g_{}", stable_digest(&generation_source));
         if record.target.kind == NativeTargetKind::Window {
             let windows = self.desktop.as_ref()?.windows().await.ok()?;
             record.x11_window = correlate_x11_window(&record.target, &windows);
@@ -729,11 +966,19 @@ impl AtspiComputerAdapter {
         Ok(())
     }
 
+    // Keep the admitted observation, immutable window fence and stored
+    // semantic snapshot in the same ordered publication sequence.
+    #[allow(clippy::too_many_lines)]
     async fn observe_target(
         &self,
         target: TargetRecord,
         items: Vec<CacheItem>,
+        admission: ObservationAdmission,
     ) -> NativeAdapterResult<NativeObservation> {
+        let application_root = items
+            .iter()
+            .find(|item| object_key(&item.object).is_ok_and(|key| key == target.key))
+            .map(|item| item.app.clone());
         let descendants = descendant_keys(&target.key, &items)?;
         let selected: Vec<CacheItem> = items
             .into_iter()
@@ -757,8 +1002,7 @@ impl AtspiComputerAdapter {
             objects.insert(raw.key.clone(), object);
             raw_nodes.push(raw);
         }
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let observation_id = format!("o_{}_{}", self.incarnation.simple(), sequence);
+        let observation_id = format!("o_{}_{}", self.incarnation.simple(), admission.sequence);
         let snapshot = SemanticSnapshotIndex::build(
             observation_id.clone(),
             std::slice::from_ref(&target.key),
@@ -788,10 +1032,48 @@ impl AtspiComputerAdapter {
             focused_ref,
             changed_regions: Vec::new(),
         };
-        self.latest.write().await.insert(
+        let window_focus = if target.target.kind == NativeTargetKind::Window {
+            application_root.zip(objects.get(&target.key).cloned()).map(
+                |(application_root, root)| WindowFocusFence {
+                    target: target.clone(),
+                    application_root,
+                    root,
+                },
+            )
+        } else {
+            None
+        };
+        let mut latest = self.latest.write().await;
+        if latest
+            .get(&target.target.id)
+            .is_some_and(|stored| stored.admission_sequence > admission.sequence)
+        {
+            return Err(NativeAdapterError::definite(
+                NativeAdapterErrorCode::ObservationStale,
+                "a newer observation of this target already completed",
+                true,
+            ));
+        }
+        let mut fences = self.window_input_fences.write().await;
+        if let Some(fence) = &window_focus {
+            fences.remember(
+                fence.input_identity(),
+                observation.observation_id.clone(),
+                fence.clone(),
+                admission.started_at,
+                Instant::now(),
+            );
+        } else {
+            fences.forget_target(&target.target.id);
+        }
+        latest.insert(
             target.target.id,
             StoredObservation {
+                admission_sequence: admission.sequence,
                 target_generation: target.target.target_generation,
+                target_key: target.key,
+                target_kind: target.target.kind,
+                window_focus,
                 snapshot,
                 objects,
             },
@@ -947,7 +1229,7 @@ impl AtspiComputerAdapter {
 
     async fn process_id(&self, object: &ObjectRefOwned) -> Option<u32> {
         let name = object.name()?.clone();
-        let proxy = atspi::zbus::fdo::DBusProxy::new(self.connection.connection())
+        let proxy = atspi::zbus::fdo::DBusProxy::new(self.accessibility().ok()?.connection())
             .await
             .ok()?;
         timed(proxy.get_connection_unix_process_id(name.into()))
@@ -959,7 +1241,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<AccessibleProxy<'a>> {
-        AccessibleProxy::builder(self.connection.connection())
+        AccessibleProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct accessible destination", error))?
             .path(object.path().clone())
@@ -973,7 +1255,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ComponentProxy<'a>> {
-        ComponentProxy::builder(self.connection.connection())
+        ComponentProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct component destination", error))?
             .path(object.path().clone())
@@ -987,7 +1269,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ActionProxy<'a>> {
-        ActionProxy::builder(self.connection.connection())
+        ActionProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct action destination", error))?
             .path(object.path().clone())
@@ -1001,7 +1283,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<EditableTextProxy<'a>> {
-        EditableTextProxy::builder(self.connection.connection())
+        EditableTextProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct editable-text destination", error))?
             .path(object.path().clone())
@@ -1015,7 +1297,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<SelectionProxy<'a>> {
-        SelectionProxy::builder(self.connection.connection())
+        SelectionProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct selection destination", error))?
             .path(object.path().clone())
@@ -1029,7 +1311,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<TextProxy<'a>> {
-        TextProxy::builder(self.connection.connection())
+        TextProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct text destination", error))?
             .path(object.path().clone())
@@ -1043,7 +1325,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ValueProxy<'a>> {
-        ValueProxy::builder(self.connection.connection())
+        ValueProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct value destination", error))?
             .path(object.path().clone())
@@ -1097,6 +1379,149 @@ impl AtspiComputerAdapter {
         }
     }
 
+    async fn revalidate_window_focus(&self, fence: &WindowFocusFence) -> NativeAdapterResult<()> {
+        let window = fence.target.x11_window.as_ref().ok_or_else(|| {
+            NativeAdapterError::unsupported("observed window has no exact X11 client identity")
+        })?;
+        if fence.target.target.process_id.is_none()
+            || fence.target.target.process_id != window.process_id
+        {
+            return Err(NativeAdapterError::unsupported(
+                "window activation requires matching accessibility and X11 process identity",
+            ));
+        }
+        if object_key(&fence.root.object)? != fence.target.key || fence.application_root.is_null() {
+            return Err(NativeAdapterError::definite(
+                NativeAdapterErrorCode::TargetStale,
+                "observed window accessibility identity changed",
+                false,
+            ));
+        }
+        // Re-read this same semantic object on the original accessibility bus.
+        // Never rediscover another frame/window to stand in for the observation.
+        let proxy = self.accessible_proxy(&fence.root.object).await?;
+        let (role, parent, index, states) = futures::join!(
+            timed(proxy.get_role()),
+            timed(proxy.parent()),
+            timed(proxy.get_index_in_parent()),
+            timed(proxy.get_state())
+        );
+        let role = role.map_err(|error| driver_error("read exact focus window role", error))?;
+        let parent =
+            parent.map_err(|error| driver_error("read exact focus window parent", error))?;
+        let index = index.map_err(|error| driver_error("read exact focus window index", error))?;
+        let states =
+            states.map_err(|error| driver_error("read exact focus window state", error))?;
+        let process_id = self.process_id(&fence.root.object).await;
+        let bounds = self
+            .component_bounds(&fence.root.object, fence.root.interfaces)
+            .await;
+        let identifier = self.accessible_identifier(&fence.root.object).await;
+        if !matches!(role, Role::Frame | Role::Window | Role::Dialog)
+            || parent != fence.root.parent
+            || index != fence.root.index_in_parent
+            || states.contains(State::Defunct)
+            || !same_focus_target_identity(
+                &fence.target.target,
+                process_id,
+                bounds.as_ref(),
+                identifier.as_deref(),
+            )
+        {
+            return Err(NativeAdapterError::definite(
+                NativeAdapterErrorCode::TargetStale,
+                "exact observed accessibility window identity or geometry changed",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn activate_observed_window(
+        &self,
+        command: &NativeActionCommand,
+        fence: WindowFocusFence,
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
+        if fence.target.target.target_generation != command.expected_target_generation {
+            return Err(NativeAdapterError::definite(
+                NativeAdapterErrorCode::TargetStale,
+                "observed window generation changed",
+                false,
+            ));
+        }
+        self.revalidate_window_focus(&fence).await?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window activation"))?;
+        let window = fence.target.x11_window.clone().ok_or_else(|| {
+            NativeAdapterError::unsupported("observed window has no exact X11 client identity")
+        })?;
+        let activation = desktop.activate_window(window).await.map_err(|failure| {
+            if failure.dispatched {
+                NativeAdapterError::outcome_unknown(format!(
+                    "exact Linux window activation could not be confirmed: {}",
+                    failure.error
+                ))
+            } else {
+                match failure.error {
+                    PlatformError::NotFound(message) => NativeAdapterError::definite(
+                        NativeAdapterErrorCode::TargetStale,
+                        message,
+                        false,
+                    ),
+                    PlatformError::Unsupported(message) => NativeAdapterError::unsupported(message),
+                    error => NativeAdapterError::definite(
+                        NativeAdapterErrorCode::DriverFailed,
+                        format!("prepare exact Linux window activation: {error}"),
+                        true,
+                    ),
+                }
+            }
+        })?;
+        self.invalidate_semantic_cache();
+        self.revalidate_window_focus(&fence)
+            .await
+            .map_err(|error| {
+                NativeAdapterError::outcome_unknown(format!(
+                    "exact accessibility window changed after activation: {error}"
+                ))
+            })?;
+        let admission = ObservationAdmission {
+            sequence: self.sequence.fetch_add(1, Ordering::Relaxed) + 1,
+            started_at: Instant::now(),
+        };
+        let items = self
+            .application_cache(&fence.application_root)
+            .await
+            .map_err(|error| {
+                NativeAdapterError::outcome_unknown(format!(
+                    "observe exact activated application: {error}"
+                ))
+            })?;
+        let mut target = fence.target;
+        // Window activation is proved by X11 active/input-focus ownership. A
+        // non-focusable AT-SPI frame is not an element keyboard-focus target.
+        target.target.focused = true;
+        let observation = self
+            .observe_target(target, items, admission)
+            .await
+            .map_err(|error| {
+                NativeAdapterError::outcome_unknown(format!(
+                    "observe exact activated window: {error}"
+                ))
+            })?;
+        desktop
+            .verify_window_activation(activation)
+            .await
+            .map_err(|error| {
+                NativeAdapterError::outcome_unknown(format!(
+                    "exact window activation did not remain settled: {error}"
+                ))
+            })?;
+        Ok(Some(observation))
+    }
+
     async fn perform_named_action(
         &self,
         record: &ObjectRecord,
@@ -1104,10 +1529,17 @@ impl AtspiComputerAdapter {
     ) -> NativeAdapterResult<()> {
         require_interface(record, Interface::Action, "invoke")?;
         let proxy = self.action_proxy(&record.object).await?;
+        Self::perform_named_action_with_proxy(&proxy, names).await
+    }
+
+    async fn perform_named_action_with_proxy(
+        proxy: &ActionProxy<'_>,
+        names: Option<&[&str]>,
+    ) -> NativeAdapterResult<()> {
         let actions = timed(proxy.get_actions())
             .await
-            .map_err(|error| ambiguous("read AT-SPI actions", error))?;
-        let index = names.map_or(Some(0), |names| {
+            .map_err(|error| driver_error("read AT-SPI actions", error))?;
+        let index = names.map_or(actions.first().map(|_| 0), |names| {
             actions.iter().position(|candidate| {
                 names
                     .iter()
@@ -1307,7 +1739,12 @@ impl AtspiComputerAdapter {
             } => {
                 let frames = self.captured_frames.read().await;
                 let frame = frames
-                    .get(&command.target_id, frame_id)
+                    .get_for_action(
+                        &command.target_id,
+                        frame_id,
+                        &command.action,
+                        FrameFence::same_geometry,
+                    )
                     .and_then(FrameFence::screen)
                     .ok_or_else(|| {
                         NativeAdapterError::definite(
@@ -1378,16 +1815,13 @@ impl AtspiComputerAdapter {
         target: &NativeTarget,
         frame: Option<&ScreenFrameFence>,
     ) -> NativeAdapterResult<()> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 input is unavailable", true)
-        })?;
+        let desktop = self.screen_device()?;
         let inputs = screen_inputs(&command.action, target, frame)?;
-        for input in inputs {
-            desktop.inject(&input).await.map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "Linux XTEST delivery could not be confirmed: {error}"
-                ))
-            })?;
+        for (index, input) in inputs.into_iter().enumerate() {
+            desktop
+                .inject(&input)
+                .await
+                .map_err(|error| screen_input_error(error, index == 0))?;
         }
         Ok(())
     }
@@ -1396,9 +1830,10 @@ impl AtspiComputerAdapter {
         &self,
         record: TargetRecord,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let window = record.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetNotFound,
@@ -1436,9 +1871,10 @@ impl AtspiComputerAdapter {
         record: TargetRecord,
         options: crate::NativeCaptureOptions,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let window = record.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetNotFound,
@@ -1484,9 +1920,10 @@ impl AtspiComputerAdapter {
         mime_type: &str,
         bytes: Vec<u8>,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let current = desktop
             .windows()
             .await
@@ -1579,9 +2016,11 @@ impl AtspiComputerAdapter {
             .captured_frames
             .read()
             .await
-            .get(
+            .get_for_action(
                 &command.target_id,
                 command.expected_frame_id.as_deref().unwrap_or(""),
+                &command.action,
+                FrameFence::same_geometry,
             )
             .and_then(FrameFence::window)
             .cloned()
@@ -1637,9 +2076,22 @@ impl AtspiComputerAdapter {
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<Option<NativeObservation>> {
         let (record, frame) = self.validate_window_pointer(command).await?;
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window input is unavailable", true)
-        })?;
+        if record.target.process_id.is_none() || record.target.process_id != frame.window.process_id
+        {
+            return Err(NativeAdapterError::unsupported(
+                "window input requires matching accessibility and X11 process identity",
+            ));
+        }
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window input"))?;
+        // Raw input never substitutes screen authority or implicitly focuses
+        // another client. Explicit window focus must precede input.
+        let activation = desktop
+            .current_window_activation(frame.window.clone())
+            .await
+            .map_err(|error| window_input_error(error, false))?;
         let inputs = pixel_inputs(
             &command.action,
             f64::from(frame.window.bounds.x),
@@ -1647,38 +2099,170 @@ impl AtspiComputerAdapter {
             f64::from(frame.window.bounds.width) / f64::from(frame.width),
             f64::from(frame.window.bounds.height) / f64::from(frame.height),
         )?;
-        self.captured_frames.write().await.clear();
-        desktop
-            .inject_window(frame.window.id, frame.window.bounds, inputs)
-            .await
-            .map_err(|error| match error {
-                PlatformError::NotFound(message) => NativeAdapterError::definite(
-                    NativeAdapterErrorCode::FrameStale,
-                    format!("X11 window changed immediately before input: {message}"),
-                    true,
-                ),
-                error => NativeAdapterError::outcome_unknown(format!(
-                    "Linux X11 window input could not be confirmed: {error}"
-                )),
-            })?;
-        Ok(async {
-            let items = self.cache_items().await?;
-            let current = self
-                .target_records(&items)
-                .await?
-                .into_iter()
-                .find(|candidate| candidate.target.id == record.target.id)
-                .ok_or_else(|| {
-                    NativeAdapterError::definite(
-                        NativeAdapterErrorCode::TargetNotFound,
-                        "AT-SPI window disappeared after pointer input",
-                        true,
-                    )
-                })?;
-            self.observe_target(current, items).await
+        dispatch_with_frame_invalidation(
+            &self.captured_frames,
+            Some(command),
+            FrameFence::same_geometry,
+            async {
+                desktop
+                    .inject_activated_window(activation, inputs)
+                    .await
+                    .map_err(|failure| window_input_error(failure.error, failure.dispatched))
+            },
+        )
+        .await?;
+        // Optional AT-SPI enrichment must not delay a real second human click.
+        // Delivery is already confirmed; observation remains a separate read.
+        Ok(None)
+    }
+
+    async fn window_keyboard_fence(
+        &self,
+        command: &NativeActionCommand,
+    ) -> NativeAdapterResult<WindowFocusFence> {
+        let latest = self.latest.read().await;
+        let stored = latest.get(&command.target_id).ok_or_else(|| {
+            NativeAdapterError::definite(
+                NativeAdapterErrorCode::ObservationStale,
+                "window input requires an observation of the original client",
+                true,
+            )
+        })?;
+        if stored.target_kind != NativeTargetKind::Window
+            || stored.target_generation != command.expected_target_generation
+        {
+            return Err(NativeAdapterError::definite(
+                NativeAdapterErrorCode::TargetStale,
+                "window input target or generation changed",
+                true,
+            ));
         }
-        .await
-        .ok())
+        if let Some(expected) = command.expected_observation_id.as_deref() {
+            if expected != stored.snapshot.observation_id() {
+                let identity = stored
+                    .window_focus
+                    .as_ref()
+                    .ok_or_else(|| {
+                        NativeAdapterError::unsupported("window input has no observed client fence")
+                    })?
+                    .input_identity();
+                return self
+                    .window_input_fences
+                    .read()
+                    .await
+                    .get(&identity, expected, Instant::now())
+                    .cloned()
+                    .ok_or_else(|| {
+                        NativeAdapterError::definite(
+                            NativeAdapterErrorCode::ObservationStale,
+                            "window input has no recent observation of the original client",
+                            true,
+                        )
+                    });
+            }
+        }
+        stored.window_focus.clone().ok_or_else(|| {
+            NativeAdapterError::unsupported("window input has no observed client fence")
+        })
+    }
+
+    async fn dispatch_window_keyboard(
+        &self,
+        command: &NativeActionCommand,
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
+        self.validate(command).await?;
+        let fence = self.window_keyboard_fence(command).await?;
+        self.revalidate_window_focus(&fence).await?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window input"))?;
+        let window = fence.target.x11_window.clone().ok_or_else(|| {
+            NativeAdapterError::unsupported("window input has no exact X11 client identity")
+        })?;
+        let activation = desktop
+            .current_window_activation(window)
+            .await
+            .map_err(|error| window_input_error(error, false))?;
+        let inputs = pixel_inputs(&command.action, 0.0, 0.0, 1.0, 1.0)?;
+        desktop
+            .inject_activated_window(activation, inputs)
+            .await
+            .map_err(|failure| window_input_error(failure.error, failure.dispatched))?;
+        // Post-input accessibility enrichment is a separate bounded read.
+        Ok(None)
+    }
+
+    async fn validate_restoring_paste(
+        &self,
+        command: &NativeActionCommand,
+        text: &str,
+    ) -> NativeAdapterResult<()> {
+        if self.desktop.is_none() {
+            return Err(NativeAdapterError::unsupported(
+                "pasting with a clipboard restore needs an X11 desktop",
+            ));
+        }
+        if text.len() > 1024 * 1024 {
+            return Err(invalid_action(
+                "native clipboard text exceeds its UTF-8 byte envelope",
+            ));
+        }
+        Box::pin(self.validate(&plain_paste(command))).await
+    }
+
+    /// Pastes `text` and then puts the previous clipboard text back, once the
+    /// focused client has read the pasted text. The previous clipboard stays
+    /// replaced when it held no text (an image or files), was too large to
+    /// read whole, the target did not read the paste in time, or the person
+    /// copied something new meanwhile (their copy is kept).
+    async fn dispatch_restoring_paste(
+        &self,
+        command: &NativeActionCommand,
+        text: &str,
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
+        let plain = plain_paste(command);
+        self.validate(command).await?;
+        let (desktop, clipboard) = match (self.desktop.as_ref(), self.clipboard.as_ref()) {
+            (Some(desktop), Some(clipboard)) => (desktop.clone(), clipboard.clone()),
+            _ => {
+                return Err(NativeAdapterError::unsupported(
+                    "pasting with a clipboard restore needs an X11 desktop",
+                ))
+            }
+        };
+        let previous = clipboard.read().await.ok();
+        let offer = {
+            let text = text.to_owned();
+            tokio::task::spawn_blocking(move || desktop.offer_paste_text(text)).await
+        };
+        let Ok(Ok(offer)) = offer else {
+            // Without an offer of our own (text too large for one transfer,
+            // or the display refused it) the text is pasted from the shared
+            // clipboard and stays there.
+            clipboard
+                .mutate(NativeClipboardAction::Write, Some(text.to_owned()))
+                .await?;
+            return Box::pin(self.dispatch_on_seat(&plain)).await;
+        };
+        let pasted = Box::pin(self.dispatch_on_seat(&plain)).await;
+        let (offer, outcome) = if matches!(&pasted, Err(error) if !error.dispatched) {
+            (offer, None)
+        } else {
+            let (offer, outcome) = tokio::task::spawn_blocking(move || {
+                let outcome = offer.wait(PASTE_READ_WAIT);
+                (offer, outcome)
+            })
+            .await
+            .map_err(|error| {
+                NativeAdapterError::outcome_unknown(format!(
+                    "X11 paste offer task failed after dispatch: {error}"
+                ))
+            })?;
+            (offer, Some(outcome))
+        };
+        finish_restoring_paste(&clipboard, offer, outcome, previous, text).await;
+        pasted
     }
 
     async fn dispatch_clipboard_storage(
@@ -1716,22 +2300,27 @@ impl AtspiComputerAdapter {
 #[async_trait]
 impl ComputerAdapter for AtspiComputerAdapter {
     fn capabilities(&self) -> NativeCapabilities {
-        let desktop = self.desktop.is_some();
+        let desktop = self.desktop.is_some() || self.gnome.is_some();
+        // App and window targets come from AT-SPI; without it only the
+        // whole screen is a target.
+        let semantic = self.connection.is_some();
         NativeCapabilities {
-            semantic_observation: true,
-            app_discovery: true,
+            semantic_observation: semantic,
+            app_discovery: semantic,
             app_launch: desktop && self.application_launcher.is_some(),
-            window_capture: self
-                .desktop
-                .as_ref()
-                .is_some_and(LinuxDesktop::supports_window_capture),
+            window_capture: semantic
+                && self
+                    .desktop
+                    .as_ref()
+                    .is_some_and(LinuxDesktop::supports_window_capture),
             screen_capture: desktop,
-            semantic_actions: true,
+            semantic_actions: semantic,
             pointer_input: desktop,
+            pointer_click_continuation: desktop,
             keyboard_input: desktop,
             clipboard: self.clipboard.is_some(),
-            background_actions: true,
-            parallel_apps: true,
+            background_actions: semantic,
+            parallel_apps: semantic,
         }
     }
 
@@ -1753,25 +2342,27 @@ impl ComputerAdapter for AtspiComputerAdapter {
     }
 
     async fn observe(&self, target_id: &str) -> NativeAdapterResult<NativeObservation> {
+        let admission = ObservationAdmission {
+            sequence: self.sequence.fetch_add(1, Ordering::Relaxed) + 1,
+            started_at: Instant::now(),
+        };
         if let Some(screen) = self.screen_target() {
             if screen.id == target_id {
                 return Ok(self.screen_observation(screen).await);
             }
         }
         let (target, items) = self.load_target(target_id).await?;
-        self.observe_target(target, items).await
+        self.observe_target(target, items, admission).await
     }
 
     async fn capture(&self, target_id: &str) -> NativeAdapterResult<NativeCapturedFrame> {
         if let Some(target) = self.screen_target() {
             if target.id == target_id {
-                let desktop = self.desktop.as_ref().ok_or_else(|| {
-                    NativeAdapterError::unavailable("Linux X11 screen capture is unavailable", true)
-                })?;
+                let desktop = self.screen_device()?;
                 let captured = desktop.capture().await.map_err(|error| {
                     NativeAdapterError::definite(
                         NativeAdapterErrorCode::DriverFailed,
-                        format!("capture Linux X11 screen: {error}"),
+                        format!("capture Linux screen: {error}"),
                         true,
                     )
                 })?;
@@ -1819,13 +2410,11 @@ impl ComputerAdapter for AtspiComputerAdapter {
     ) -> NativeAdapterResult<NativeCapturedFrame> {
         if let Some(target) = self.screen_target() {
             if target.id == target_id {
-                let desktop = self.desktop.as_ref().ok_or_else(|| {
-                    NativeAdapterError::unavailable("Linux X11 screen capture is unavailable", true)
-                })?;
+                let desktop = self.screen_device()?;
                 let captured = desktop.capture_rgba().await.map_err(|error| {
                     NativeAdapterError::definite(
                         NativeAdapterErrorCode::DriverFailed,
-                        format!("capture Linux X11 live screen: {error}"),
+                        format!("capture Linux live screen: {error}"),
                         true,
                     )
                 })?;
@@ -1870,7 +2459,12 @@ impl ComputerAdapter for AtspiComputerAdapter {
             .await
     }
 
+    #[allow(clippy::too_many_lines)] // one route per action kind, checked in dispatch order
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()> {
+        command.validate_click_identity().map_err(invalid_action)?;
+        if let Some(text) = restoring_paste_text(&command.action) {
+            return self.validate_restoring_paste(command, text).await;
+        }
         if let Some(screen) = self.screen_target() {
             if screen.id == command.target_id {
                 return self.validate_screen(command, &screen).await;
@@ -1879,6 +2473,29 @@ impl ComputerAdapter for AtspiComputerAdapter {
         if matches!(command.action, NativeAction::Pointer { .. }) {
             self.validate_window_pointer(command).await?;
             return Ok(());
+        }
+        if let NativeAction::Keyboard { action, value } = &command.action {
+            if *action == NativeKeyboardAction::Press {
+                validate_linux_named_key_chord(value)
+                    .map_err(|error| invalid_action(error.to_string()))?;
+            }
+            self.window_keyboard_fence(command).await?;
+            return Ok(());
+        }
+        if let NativeAction::Clipboard { operation, text } = &command.action {
+            validate_clipboard_payload(*operation, text.as_deref())?;
+            if matches!(
+                operation,
+                NativeClipboardAction::Copy | NativeClipboardAction::Paste
+            ) {
+                if self.clipboard.is_none() {
+                    return Err(NativeAdapterError::unsupported(
+                        "native text clipboard is unavailable on this Linux graphical seat",
+                    ));
+                }
+                self.window_keyboard_fence(command).await?;
+                return Ok(());
+            }
         }
         let latest = self.latest.read().await;
         let stored = latest.get(&command.target_id).ok_or_else(|| {
@@ -1909,21 +2526,10 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 }
                 let _ = stored.snapshot.resolve(locator)?;
             }
-            NativeAction::Pointer { .. } | NativeAction::Keyboard { .. } => {
-                return Err(NativeAdapterError::unsupported(
-                    "Linux pixel input must target the exact X11 screen",
-                ));
-            }
+            NativeAction::Pointer { .. } => unreachable!("window pointer validation runs first"),
+            NativeAction::Keyboard { .. } => unreachable!("window keyboard validation runs first"),
             NativeAction::Clipboard { operation, text } => {
                 validate_clipboard_payload(*operation, text.as_deref())?;
-                if matches!(
-                    operation,
-                    NativeClipboardAction::Copy | NativeClipboardAction::Paste
-                ) {
-                    return Err(NativeAdapterError::unsupported(
-                        "Linux clipboard copy/paste must target the exact X11 screen",
-                    ));
-                }
                 if self.clipboard.is_none() {
                     return Err(NativeAdapterError::unsupported(
                         "native text clipboard is unavailable on this Linux graphical seat",
@@ -1936,6 +2542,18 @@ impl ComputerAdapter for AtspiComputerAdapter {
                         NativeAdapterErrorCode::InvalidAction,
                         "focus action target must equal the command target",
                         false,
+                    ));
+                }
+                if stored.target_kind == NativeTargetKind::Window
+                    && command
+                        .expected_observation_id
+                        .as_deref()
+                        .is_some_and(|id| id != stored.snapshot.observation_id())
+                {
+                    return Err(NativeAdapterError::definite(
+                        NativeAdapterErrorCode::ObservationStale,
+                        "window focus belongs to a stale AT-SPI observation",
+                        true,
                     ));
                 }
             }
@@ -1953,10 +2571,46 @@ impl ComputerAdapter for AtspiComputerAdapter {
         &self,
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<Option<NativeObservation>> {
+        // Only input and explicit activation contend for the physical seat.
+        // Background AT-SPI mutations stay independent while revoking causal
+        // click authority below. Each dispatch path revalidates its live target.
+        let _seat = if physical_seat_mutation(&command.action) {
+            Some(self.input_seat.lock().await)
+        } else {
+            None
+        };
+        let is_pointer = matches!(command.action, NativeAction::Pointer { .. });
+        let result = if is_pointer {
+            self.dispatch_on_seat(command).await
+        } else {
+            Box::pin(dispatch_with_mutation_invalidation(
+                &self.captured_frames,
+                command.operation_id.as_deref(),
+                self.dispatch_on_seat(command),
+            ))
+            .await
+        };
+        if is_pointer && result.is_err() {
+            self.captured_frames.write().await.clear();
+        }
+        result
+    }
+}
+
+impl AtspiComputerAdapter {
+    #[allow(clippy::too_many_lines)]
+    async fn dispatch_on_seat(
+        &self,
+        command: &NativeActionCommand,
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
+        command.validate_click_identity().map_err(invalid_action)?;
         // Do not wait for the accessibility bus to deliver our own mutation
         // event before the settlement observation. External mutations are
         // invalidated by the registered AT-SPI event stream above.
         self.invalidate_semantic_cache();
+        if let Some(text) = restoring_paste_text(&command.action) {
+            return self.dispatch_restoring_paste(command, text).await;
+        }
         if let Some(result) = self.dispatch_clipboard_storage(command).await {
             return result;
         }
@@ -1967,35 +2621,55 @@ impl ComputerAdapter for AtspiComputerAdapter {
                     .captured_frames
                     .read()
                     .await
-                    .get(
+                    .get_for_action(
                         &command.target_id,
                         command.expected_frame_id.as_deref().unwrap_or(""),
+                        &command.action,
+                        FrameFence::same_geometry,
                     )
                     .and_then(FrameFence::screen)
                     .cloned();
-                self.captured_frames.write().await.clear();
-                if let NativeAction::Launch { application_id } = &command.action {
-                    self.application_launcher
-                        .as_ref()
-                        .ok_or_else(|| {
-                            NativeAdapterError::unsupported(
-                                "Linux application launcher is unavailable on this graphical seat",
-                            )
-                        })?
-                        .launch(application_id)
-                        .await?;
-                } else {
-                    self.dispatch_screen_action(command, &screen, frame.as_ref())
-                        .await?;
-                }
+                dispatch_with_frame_invalidation(
+                    &self.captured_frames,
+                    Some(command),
+                    FrameFence::same_geometry,
+                    async {
+                        if let NativeAction::Launch { application_id } = &command.action {
+                            self.application_launcher
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    NativeAdapterError::unsupported(
+                            "Linux application launcher is unavailable on this graphical seat",
+                        )
+                                })?
+                                .launch(application_id)
+                                .await?;
+                        } else {
+                            self.dispatch_screen_action(command, &screen, frame.as_ref())
+                                .await?;
+                        }
+                        Ok::<(), NativeAdapterError>(())
+                    },
+                )
+                .await?;
                 return Ok(Some(self.screen_observation(screen).await));
             }
         }
         if matches!(command.action, NativeAction::Pointer { .. }) {
             return self.dispatch_window_pointer(command).await;
         }
+        if matches!(
+            command.action,
+            NativeAction::Keyboard { .. }
+                | NativeAction::Clipboard {
+                    operation: NativeClipboardAction::Copy | NativeClipboardAction::Paste,
+                    ..
+                }
+        ) {
+            return self.dispatch_window_keyboard(command).await;
+        }
         self.validate(command).await?;
-        let (record, semantic, before_roots, expected_focus_key) = {
+        let (record, semantic, before_roots, expected_focus_key, window_focus) = {
             let latest = self.latest.read().await;
             let stored = latest.get(&command.target_id).ok_or_else(|| {
                 NativeAdapterError::definite(
@@ -2023,6 +2697,15 @@ impl ComputerAdapter for AtspiComputerAdapter {
                         Some((*action, value.clone())),
                         stored.snapshot.roots().to_vec(),
                         (*action == NativeSemanticAction::Focus).then(|| key.to_string()),
+                        if *action == NativeSemanticAction::Focus {
+                            observed_window_focus(
+                                stored,
+                                key,
+                                command.expected_observation_id.as_deref(),
+                            )?
+                        } else {
+                            None
+                        },
                     )
                 }
                 NativeAction::Focus { .. } => {
@@ -2048,6 +2731,11 @@ impl ComputerAdapter for AtspiComputerAdapter {
                         Some((NativeSemanticAction::Focus, None)),
                         stored.snapshot.roots().to_vec(),
                         Some(key.to_string()),
+                        observed_window_focus(
+                            stored,
+                            key,
+                            command.expected_observation_id.as_deref(),
+                        )?,
                     )
                 }
                 NativeAction::Pointer { .. }
@@ -2060,6 +2748,9 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 }
             }
         };
+        if let Some(window_focus) = window_focus {
+            return self.activate_observed_window(command, window_focus).await;
+        }
         if let Some((action, value)) = semantic {
             if action == NativeSemanticAction::Focus {
                 let locator = self
@@ -2069,12 +2760,10 @@ impl ComputerAdapter for AtspiComputerAdapter {
                     .get(&command.target_id)
                     .cloned();
                 if let Some(window) = locator.and_then(|locator| locator.record.x11_window) {
-                    let desktop = self.desktop.as_ref().ok_or_else(|| {
-                        NativeAdapterError::unavailable(
-                            "Linux X11 window focus is unavailable",
-                            true,
-                        )
-                    })?;
+                    let desktop = self
+                        .desktop
+                        .as_ref()
+                        .ok_or_else(|| self.window_control_unavailable("window focus"))?;
                     desktop
                         .focus_window(window.id, window.bounds)
                         .await
@@ -2107,6 +2796,95 @@ impl ComputerAdapter for AtspiComputerAdapter {
             .await
             .ok())
     }
+}
+
+/// `LinuxDesktop::inject` resolves one whole input before its first XTEST
+/// event, so an unsupported refusal (such as a glyph no keycode can carry)
+/// of the first input emitted nothing and is a definite failure. Any other
+/// failure, or one after an earlier input, may follow delivered events.
+fn screen_input_error(error: PlatformError, first_input: bool) -> NativeAdapterError {
+    match error {
+        PlatformError::Unsupported(message) if first_input => {
+            NativeAdapterError::unsupported(message)
+        }
+        error => NativeAdapterError::outcome_unknown(format!(
+            "Linux input delivery could not be confirmed: {error}"
+        )),
+    }
+}
+
+/// The whole-screen backend: X11 (a real display, Xvfb or another X server) or
+/// GNOME on Wayland through Mutter.
+enum ScreenDevice<'a> {
+    X11(&'a LinuxDesktop),
+    Gnome(&'a GnomeScreen),
+}
+
+impl ScreenDevice<'_> {
+    fn probe(&self) -> Option<v1::Display> {
+        match self {
+            Self::X11(desktop) => desktop.probe(),
+            Self::Gnome(screen) => screen.probe(),
+        }
+    }
+
+    async fn capture(&self) -> Result<CapturedFrame, PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.capture().await,
+            Self::Gnome(screen) => screen.capture().await,
+        }
+    }
+
+    async fn capture_rgba(&self) -> Result<LinuxRgbaFrame, PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.capture_rgba().await,
+            Self::Gnome(screen) => screen.capture_rgba().await,
+        }
+    }
+
+    async fn inject(&self, input: &v1::DesktopInput) -> Result<(), PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.inject(input).await,
+            Self::Gnome(screen) => screen.inject(input).await,
+        }
+    }
+}
+
+fn window_input_error(error: PlatformError, dispatched: bool) -> NativeAdapterError {
+    if dispatched {
+        return NativeAdapterError::outcome_unknown(format!(
+            "exact Linux window input could not be confirmed: {error}"
+        ));
+    }
+    match error {
+        PlatformError::NotFound(message) => {
+            NativeAdapterError::definite(NativeAdapterErrorCode::TargetStale, message, true)
+        }
+        PlatformError::Unsupported(message) => NativeAdapterError::unsupported(message),
+        error => NativeAdapterError::definite(
+            NativeAdapterErrorCode::DriverFailed,
+            format!("prepare exact Linux window input: {error}"),
+            true,
+        ),
+    }
+}
+
+fn physical_seat_mutation(action: &NativeAction) -> bool {
+    matches!(
+        action,
+        NativeAction::Pointer { .. }
+            | NativeAction::Keyboard { .. }
+            | NativeAction::Focus { .. }
+            | NativeAction::Launch { .. }
+            | NativeAction::Semantic {
+                action: NativeSemanticAction::Focus,
+                ..
+            }
+            | NativeAction::Clipboard {
+                operation: NativeClipboardAction::Copy | NativeClipboardAction::Paste,
+                ..
+            }
+    )
 }
 
 fn encode_live_frame(
@@ -2336,6 +3114,28 @@ fn is_target_role(role: Role) -> bool {
     )
 }
 
+fn is_top_level_window_role(role: Role) -> bool {
+    matches!(role, Role::Frame | Role::Window | Role::Dialog)
+}
+
+fn dormant_application_tree(items: &[CacheItem]) -> bool {
+    dormant_tree_shape(items.iter().map(|item| (item.role, item.children)))
+}
+
+/// An application whose snapshot is only its root plus top-level windows
+/// without any children has registered with AT-SPI but not built its tree.
+fn dormant_tree_shape(nodes: impl IntoIterator<Item = (Role, i32)>) -> bool {
+    let mut windows = 0_usize;
+    for (role, children) in nodes {
+        if is_top_level_window_role(role) && children == 0 {
+            windows += 1;
+        } else if role != Role::Application {
+            return false;
+        }
+    }
+    windows > 0
+}
+
 const fn target_kind_rank(kind: NativeTargetKind) -> u8 {
     match kind {
         NativeTargetKind::App => 0,
@@ -2428,6 +3228,40 @@ fn same_window_placement(left: &LinuxWindow, right: &LinuxWindow) -> bool {
     left.id == right.id && left.process_id == right.process_id && left.bounds == right.bounds
 }
 
+fn same_focus_target_identity(
+    target: &NativeTarget,
+    process_id: Option<u32>,
+    bounds: Option<&NativeRect>,
+    identifier: Option<&str>,
+) -> bool {
+    target.kind == NativeTargetKind::Window
+        && target.process_id.is_some()
+        && target.process_id == process_id
+        && target.bounds.is_some()
+        && target.bounds.as_ref() == bounds
+        && target.application_id.as_deref() == identifier
+}
+
+fn observed_window_focus(
+    stored: &StoredObservation,
+    key: &str,
+    expected_observation: Option<&str>,
+) -> NativeAdapterResult<Option<WindowFocusFence>> {
+    if stored.target_kind != NativeTargetKind::Window || key != stored.target_key {
+        return Ok(None);
+    }
+    if expected_observation.is_some_and(|id| id != stored.snapshot.observation_id()) {
+        return Err(NativeAdapterError::definite(
+            NativeAdapterErrorCode::ObservationStale,
+            "window activation belongs to a stale observation",
+            false,
+        ));
+    }
+    stored.window_focus.clone().map(Some).ok_or_else(|| {
+        NativeAdapterError::unsupported("window activation has no immutable observed client fence")
+    })
+}
+
 fn validate_local_point(x: f64, y: f64, width: u32, height: u32) -> NativeAdapterResult<()> {
     if !x.is_finite()
         || !y.is_finite()
@@ -2503,68 +3337,8 @@ fn pixel_inputs(
     scale_y: f64,
 ) -> NativeAdapterResult<Vec<v1::DesktopInput>> {
     match action {
-        NativeAction::Pointer {
-            action,
-            x,
-            y,
-            end_x,
-            end_y,
-            delta_x,
-            delta_y,
-            button,
-            ..
-        } => {
-            let x = checked_i32(*x * scale_x + offset_x, "pointer x")?;
-            let y = checked_i32(*y * scale_y + offset_y, "pointer y")?;
-            let button = match button.unwrap_or(NativePointerButton::Left) {
-                NativePointerButton::Left => v1::PointerButton::Left,
-                NativePointerButton::Right => v1::PointerButton::Right,
-                NativePointerButton::Middle => v1::PointerButton::Middle,
-            };
-            match action {
-                NativePointerAction::Scroll => Ok(vec![desktop_input(
-                    v1::desktop_input::Event::Scroll(v1::ScrollEvent {
-                        x,
-                        y,
-                        delta_x: checked_i32(
-                            delta_x.unwrap_or(0.0) * scale_x,
-                            "horizontal scroll delta",
-                        )?,
-                        delta_y: checked_i32(
-                            delta_y.unwrap_or(0.0) * scale_y,
-                            "vertical scroll delta",
-                        )?,
-                    }),
-                )]),
-                NativePointerAction::Drag => {
-                    let end_x = checked_i32(
-                        end_x.ok_or_else(|| invalid_action("drag requires endX"))? * scale_x
-                            + offset_x,
-                        "drag end x",
-                    )?;
-                    let end_y = checked_i32(
-                        end_y.ok_or_else(|| invalid_action("drag requires endY"))? * scale_y
-                            + offset_y,
-                        "drag end y",
-                    )?;
-                    Ok(vec![
-                        pointer_input(x, y, v1::PointerAction::Down, button),
-                        pointer_input(end_x, end_y, v1::PointerAction::Move, button),
-                        pointer_input(end_x, end_y, v1::PointerAction::Up, button),
-                    ])
-                }
-                NativePointerAction::Click
-                | NativePointerAction::DoubleClick
-                | NativePointerAction::Move => {
-                    let action = match action {
-                        NativePointerAction::Click => v1::PointerAction::Click,
-                        NativePointerAction::DoubleClick => v1::PointerAction::DoubleClick,
-                        NativePointerAction::Move => v1::PointerAction::Move,
-                        NativePointerAction::Scroll | NativePointerAction::Drag => unreachable!(),
-                    };
-                    Ok(vec![pointer_input(x, y, action, button)])
-                }
-            }
+        NativeAction::Pointer { .. } => {
+            crate::linux_pointer::project_pointer(action, offset_x, offset_y, scale_x, scale_y)
         }
         NativeAction::Keyboard { action, value } => Ok(vec![desktop_input(
             v1::desktop_input::Event::Key(v1::KeyEvent {
@@ -2600,6 +3374,74 @@ fn pixel_inputs(
     }
 }
 
+/// Puts the clipboard in its final state after a restoring paste. `outcome`
+/// is `None` when nothing was pasted.
+async fn finish_restoring_paste(
+    clipboard: &NativeClipboardController,
+    offer: opengeni_agent_platform::LinuxPasteOffer,
+    outcome: Option<LinuxPasteOutcome>,
+    previous: Option<NativeClipboard>,
+    text: &str,
+) {
+    let keep = match outcome {
+        // The person copied something new: theirs stays.
+        Some(LinuxPasteOutcome::Superseded) => None,
+        // A late reader still gets the pasted text.
+        Some(LinuxPasteOutcome::Pending) => Some(Some(text.to_owned())),
+        None | Some(LinuxPasteOutcome::Consumed) => match previous {
+            Some(NativeClipboard {
+                text: Some(previous),
+                truncated: false,
+            }) => Some(Some(previous)),
+            Some(NativeClipboard { text: None, .. })
+                if offer.previous() == LinuxPreviousClipboard::Empty =>
+            {
+                Some(None)
+            }
+            // Contents that are not text, or too large to read whole, cannot
+            // be put back; the pasted text stays instead.
+            _ => Some(Some(text.to_owned())),
+        },
+    };
+    if let Some(Some(contents)) = keep {
+        // Written while the offer still owns the clipboard, so it is never
+        // briefly empty. The paste itself already happened; if this write
+        // fails, the pasted text simply stays.
+        let _ = clipboard
+            .mutate(NativeClipboardAction::Write, Some(contents))
+            .await;
+    }
+    // Dropping the offer gives up its ownership; with nothing written above
+    // an empty previous clipboard is empty again.
+    drop(offer);
+}
+
+/// How long a paste waits for the focused client to read its text before the
+/// text is left on the clipboard instead of restoring the previous one.
+const PASTE_READ_WAIT: Duration = Duration::from_secs(3);
+
+/// The text of a paste that restores the clipboard afterwards. Only the
+/// computer driver sends one; the public paste action carries no text.
+fn restoring_paste_text(action: &NativeAction) -> Option<&str> {
+    match action {
+        NativeAction::Clipboard {
+            operation: NativeClipboardAction::Paste,
+            text: Some(text),
+        } => Some(text),
+        _ => None,
+    }
+}
+
+fn plain_paste(command: &NativeActionCommand) -> NativeActionCommand {
+    NativeActionCommand {
+        action: NativeAction::Clipboard {
+            operation: NativeClipboardAction::Paste,
+            text: None,
+        },
+        ..command.clone()
+    }
+}
+
 fn validate_clipboard_payload(
     operation: NativeClipboardAction,
     text: Option<&str>,
@@ -2617,35 +3459,11 @@ fn validate_clipboard_payload(
     Ok(())
 }
 
-fn pointer_input(
-    x: i32,
-    y: i32,
-    action: v1::PointerAction,
-    button: v1::PointerButton,
-) -> v1::DesktopInput {
-    desktop_input(v1::desktop_input::Event::Pointer(v1::PointerEvent {
-        x,
-        y,
-        action: action as i32,
-        button: button as i32,
-    }))
-}
-
 fn desktop_input(event: v1::desktop_input::Event) -> v1::DesktopInput {
     v1::DesktopInput {
         channel_id: String::new(),
         event: Some(event),
     }
-}
-
-fn checked_i32(value: f64, label: &str) -> NativeAdapterResult<i32> {
-    if !value.is_finite() || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
-        return Err(invalid_action(format!(
-            "{label} is outside the native input range"
-        )));
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    Ok(value.round() as i32)
 }
 
 fn invalid_action(message: impl Into<String>) -> NativeAdapterError {
@@ -2751,6 +3569,126 @@ fn ambiguous(context: &str, error: impl std::fmt::Display) -> NativeAdapterError
 }
 
 #[cfg(test)]
+mod action_tests {
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, Mutex};
+
+    use atspi::Action;
+    use zbus::{connection::Builder, fdo, proxy::CacheProperties, Guid};
+
+    use super::{ActionProxy, AtspiComputerAdapter};
+    use crate::{NativeAdapterErrorCode, NativeAdapterResult};
+
+    #[derive(Clone, Copy)]
+    enum FixtureReply {
+        Empty,
+        ReadFailure,
+        Success,
+        MutationFailure,
+    }
+
+    struct FixtureAction {
+        reply: FixtureReply,
+        mutations: Arc<Mutex<Vec<i32>>>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl FixtureAction {
+        fn get_actions(&self) -> fdo::Result<Vec<Action>> {
+            match self.reply {
+                FixtureReply::Empty => Ok(Vec::new()),
+                FixtureReply::ReadFailure => Err(fdo::Error::Failed(
+                    "synthetic action-list failure".to_string(),
+                )),
+                FixtureReply::Success | FixtureReply::MutationFailure => Ok(vec![Action {
+                    name: "activate".to_string(),
+                    description: "Activate fixture".to_string(),
+                    keybinding: String::new(),
+                }]),
+            }
+        }
+
+        fn do_action(&self, index: i32) -> fdo::Result<bool> {
+            self.mutations
+                .lock()
+                .expect("fixture mutation lock")
+                .push(index);
+            if matches!(self.reply, FixtureReply::MutationFailure) {
+                Err(fdo::Error::Failed("synthetic mutation failure".to_string()))
+            } else {
+                Ok(true)
+            }
+        }
+    }
+
+    async fn invoke_fixture(reply: FixtureReply) -> (NativeAdapterResult<()>, Vec<i32>) {
+        let mutations = Arc::new(Mutex::new(Vec::new()));
+        let (server_socket, client_socket) = UnixStream::pair().expect("fixture socket pair");
+        let server = Builder::unix_stream(server_socket)
+            .server(Guid::generate())
+            .expect("fixture server GUID")
+            .p2p()
+            .serve_at(
+                "/org/example/action",
+                FixtureAction {
+                    reply,
+                    mutations: Arc::clone(&mutations),
+                },
+            )
+            .expect("fixture action service")
+            .build();
+        let client = Builder::unix_stream(client_socket).p2p().build();
+        let (_server, client) = futures::try_join!(server, client).expect("fixture connections");
+        let proxy = ActionProxy::builder(&client)
+            .destination("org.example.ActionFixture")
+            .expect("fixture action destination")
+            .path("/org/example/action")
+            .expect("fixture action path")
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .expect("fixture action proxy");
+        let result = AtspiComputerAdapter::perform_named_action_with_proxy(&proxy, None).await;
+        let dispatched = mutations.lock().expect("fixture mutation lock").clone();
+        (result, dispatched)
+    }
+
+    #[tokio::test]
+    async fn empty_action_list_rejects_invoke_without_mutation() {
+        let (result, mutations) = invoke_fixture(FixtureReply::Empty).await;
+        let error = result.expect_err("empty action list cannot invoke");
+        assert_eq!(error.code, NativeAdapterErrorCode::Unsupported);
+        assert!(!error.dispatched);
+        assert_eq!(mutations, [] as [i32; 0]);
+    }
+
+    #[tokio::test]
+    async fn action_list_read_failure_rejects_invoke_without_mutation() {
+        let (result, mutations) = invoke_fixture(FixtureReply::ReadFailure).await;
+        let error = result.expect_err("action-list read must fail before mutation");
+        assert_eq!(error.code, NativeAdapterErrorCode::DriverFailed);
+        assert!(!error.dispatched);
+        assert_eq!(mutations, [] as [i32; 0]);
+    }
+
+    #[tokio::test]
+    async fn nonempty_action_list_invokes_default_action_once() {
+        let (result, mutations) = invoke_fixture(FixtureReply::Success).await;
+        result.expect("default action invokes successfully");
+        assert_eq!(mutations, [0]);
+    }
+
+    #[tokio::test]
+    async fn mutation_failure_preserves_unknown_outcome() {
+        let (result, mutations) = invoke_fixture(FixtureReply::MutationFailure).await;
+        let error = result.expect_err("mutation outcome cannot be confirmed");
+        assert_eq!(error.code, NativeAdapterErrorCode::OutcomeUnknown);
+        assert!(error.dispatched);
+        assert_eq!(mutations, [0]);
+    }
+}
+
+#[cfg(test)]
 mod live_tests {
     use std::fs;
     use std::time::{Duration, Instant};
@@ -2759,6 +3697,73 @@ mod live_tests {
     use tokio::process::Command;
 
     use super::*;
+
+    /// Create an executable script fixture without this test process ever
+    /// holding it open for writing. Tests in this binary run concurrently and
+    /// spawn processes: a fork on another thread while this process has the
+    /// script open for writing hands that child the descriptor until it execs,
+    /// and executing the script in that window fails with ETXTBSY ("Text file
+    /// busy"). A short-lived `sh` writes the file instead, so the only
+    /// writable descriptor belongs to a process that has exited before the
+    /// test runs the script.
+    fn write_executable_script(path: &std::path::Path, script: &str) {
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"")
+            .arg("sh")
+            .arg(path)
+            .arg(script)
+            .status()
+            .expect("start fixture writer");
+        assert!(status.success(), "write executable fixture: {status}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DISPLAY on an X11 server and a session bus without AT-SPI (e.g. DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent)"]
+    async fn drives_the_screen_without_an_accessibility_bus() {
+        let adapter = AtspiComputerAdapter::open()
+            .await
+            .expect("a reachable screen is enough to open the adapter");
+        assert!(
+            adapter.connection.is_none(),
+            "this test needs a session without AT-SPI"
+        );
+        let capabilities = adapter.capabilities();
+        assert!(capabilities.screen_capture && capabilities.pointer_input);
+        assert!(!capabilities.semantic_observation && !capabilities.app_discovery);
+        let targets = adapter.targets().await.expect("targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].kind, NativeTargetKind::Screen);
+        let observation = adapter
+            .observe(&targets[0].id)
+            .await
+            .expect("observe screen");
+        assert_eq!(observation.target.id, targets[0].id);
+        adapter
+            .capture(&targets[0].id)
+            .await
+            .expect("capture the screen without AT-SPI");
+    }
+
+    #[test]
+    fn only_a_refused_first_screen_input_is_a_definite_failure() {
+        let glyph = || {
+            PlatformError::Unsupported(
+                "X11 keymap cannot type Unicode scalar U+00C6; use clipboard paste".into(),
+            )
+        };
+        let refused = screen_input_error(glyph(), true);
+        assert_eq!(refused.code, NativeAdapterErrorCode::Unsupported);
+        assert!(!refused.dispatched);
+        assert!(refused.message.contains("use clipboard paste"));
+        for error in [
+            screen_input_error(glyph(), false),
+            screen_input_error(PlatformError::os("XTEST key press result: broken"), true),
+        ] {
+            assert_eq!(error.code, NativeAdapterErrorCode::OutcomeUnknown);
+            assert!(error.dispatched);
+        }
+    }
 
     #[tokio::test]
     async fn window_capture_retries_only_a_resize_before_recording_a_frame() {
@@ -2837,9 +3842,7 @@ mod live_tests {
     async fn application_launch_returns_after_a_long_running_launcher_starts() {
         let directory = tempfile::tempdir().expect("tempdir");
         let executable = directory.path().join("gtk-launch");
-        fs::write(&executable, "#!/bin/sh\nsleep 2\n").expect("write launcher");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("make launcher executable");
+        write_executable_script(&executable, "#!/bin/sh\nsleep 2\n");
         let launcher = LinuxApplicationLauncher { executable };
 
         tokio::time::timeout(
@@ -2852,12 +3855,57 @@ mod live_tests {
     }
 
     #[tokio::test]
+    async fn application_launch_requests_toolkit_accessibility() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let executable = directory.path().join("gtk-launch");
+        let environment = directory.path().join("environment");
+        write_executable_script(
+            &executable,
+            &format!(
+                "#!/bin/sh\nprintf '%s %s %s' \"$ACCESSIBILITY_ENABLED\" \"$GNOME_ACCESSIBILITY\" \"$QT_LINUX_ACCESSIBILITY_ALWAYS_ON\" > '{}'\n",
+                environment.display()
+            ),
+        );
+        let launcher = LinuxApplicationLauncher { executable };
+
+        launcher
+            .launch("opengeni-browser.desktop")
+            .await
+            .expect("launcher accepted");
+        assert_eq!(
+            fs::read_to_string(&environment).expect("launcher environment"),
+            "1 1 1"
+        );
+    }
+
+    #[test]
+    fn only_empty_top_level_windows_mark_a_dormant_tree() {
+        assert!(dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 0)
+        ]));
+        assert!(dormant_tree_shape([
+            (Role::Application, 2),
+            (Role::Frame, 0),
+            (Role::Dialog, 0),
+        ]));
+        assert!(!dormant_tree_shape([(Role::Application, 0)]));
+        assert!(!dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 1)
+        ]));
+        assert!(!dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 1),
+            (Role::Button, 0),
+        ]));
+    }
+
+    #[tokio::test]
     async fn application_launch_reports_immediate_launcher_failure() {
         let directory = tempfile::tempdir().expect("tempdir");
         let executable = directory.path().join("gtk-launch");
-        fs::write(&executable, "#!/bin/sh\nexit 9\n").expect("write launcher");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("make launcher executable");
+        write_executable_script(&executable, "#!/bin/sh\nexit 9\n");
         let launcher = LinuxApplicationLauncher { executable };
 
         let error = launcher
@@ -2879,6 +3927,105 @@ mod live_tests {
             bounds: Some(bounds),
             focused: false,
         }
+    }
+
+    #[test]
+    fn window_focus_revalidates_process_bounds_and_semantic_identifier() {
+        let bounds = NativeRect {
+            x: 10.0,
+            y: 20.0,
+            width: 420.0,
+            height: 180.0,
+        };
+        let mut target = native_window(Some(42), "Example editor", bounds);
+        target.application_id = Some("example-window".into());
+        assert!(same_focus_target_identity(
+            &target,
+            Some(42),
+            Some(&bounds),
+            Some("example-window")
+        ));
+        assert!(!same_focus_target_identity(
+            &target,
+            Some(43),
+            Some(&bounds),
+            Some("example-window")
+        ));
+        assert!(!same_focus_target_identity(
+            &target,
+            None,
+            Some(&bounds),
+            Some("example-window")
+        ));
+        assert!(!same_focus_target_identity(
+            &target,
+            Some(42),
+            None,
+            Some("example-window")
+        ));
+        assert!(!same_focus_target_identity(
+            &target,
+            Some(42),
+            Some(&bounds),
+            Some("replacement-window")
+        ));
+        let moved = NativeRect { x: 11.0, ..bounds };
+        assert!(!same_focus_target_identity(
+            &target,
+            Some(42),
+            Some(&moved),
+            Some("example-window")
+        ));
+        target.kind = NativeTargetKind::App;
+        assert!(!same_focus_target_identity(
+            &target,
+            Some(42),
+            Some(&bounds),
+            Some("example-window")
+        ));
+    }
+
+    fn focus_observation(kind: NativeTargetKind) -> StoredObservation {
+        StoredObservation {
+            admission_sequence: 1,
+            target_generation: "g_example".into(),
+            target_key: "window-root".into(),
+            target_kind: kind,
+            window_focus: None,
+            snapshot: SemanticSnapshotIndex::build("o_example", &[], Vec::new()).unwrap(),
+            objects: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn window_root_without_observed_fence_cannot_fall_back_to_element_focus() {
+        let stored = focus_observation(NativeTargetKind::Window);
+        let Err(error) = observed_window_focus(&stored, "window-root", Some("o_example")) else {
+            panic!("window root needs its immutable observed client fence");
+        };
+        assert_eq!(error.code, NativeAdapterErrorCode::Unsupported);
+        assert!(!error.dispatched);
+        assert!(
+            observed_window_focus(&stored, "child-entry", Some("o_example"))
+                .unwrap()
+                .is_none()
+        );
+        let app = focus_observation(NativeTargetKind::App);
+        assert!(
+            observed_window_focus(&app, "window-root", Some("o_example"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn window_focus_refuses_stale_observation_before_activation() {
+        let stored = focus_observation(NativeTargetKind::Window);
+        let Err(error) = observed_window_focus(&stored, "window-root", Some("o_old")) else {
+            panic!("stale observed window cannot activate");
+        };
+        assert_eq!(error.code, NativeAdapterErrorCode::ObservationStale);
+        assert!(!error.dispatched);
     }
 
     fn x11_window(id: u32, process_id: Option<u32>, title: &str, x: i32) -> LinuxWindow {
@@ -2957,6 +4104,39 @@ mod live_tests {
     }
 
     #[test]
+    fn continuation_retention_requires_exact_capture_geometry_and_identity() {
+        let frame = WindowFrameFence {
+            frame_id: "painted-a".into(),
+            target_generation: "window-generation".into(),
+            window: x11_window(77, Some(42), "Fixture", 10),
+            width: 210,
+            height: 90,
+        };
+        let left = FrameFence::Window(frame.clone());
+        let mut right = frame.clone();
+        right.frame_id = "painted-b".into();
+        right.window.title = "Updated title".into();
+        assert!(left.same_geometry(&FrameFence::Window(right.clone())));
+        right.window.bounds.x += 1;
+        assert!(!left.same_geometry(&FrameFence::Window(right)));
+        let mut resized = frame.clone();
+        resized.width = 420;
+        assert!(!left.same_geometry(&FrameFence::Window(resized)));
+        let mut replaced = frame.clone();
+        replaced.window.id = 88;
+        assert!(!left.same_geometry(&FrameFence::Window(replaced)));
+        let mut generation = frame;
+        generation.target_generation = "another-generation".into();
+        assert!(!left.same_geometry(&FrameFence::Window(generation)));
+        assert!(!left.same_geometry(&FrameFence::Screen(ScreenFrameFence {
+            frame_id: "screen-frame".into(),
+            target_generation: "screen-generation".into(),
+            width: 210,
+            height: 90,
+        })));
+    }
+
+    #[test]
     fn live_frame_encoding_downscales_jpeg_without_changing_aspect_ratio() {
         let frame = LinuxRgbaFrame {
             rgba: vec![255_u8; 1_280 * 800 * 4],
@@ -2983,6 +4163,8 @@ mod live_tests {
     fn scaled_window_frame_coordinates_map_to_the_native_window() {
         let click = NativeAction::Pointer {
             frame_id: "frame:test".to_string(),
+            click_count: None,
+            continuation_of_operation_id: None,
             action: NativePointerAction::Click,
             x: 105.0,
             y: 45.0,
@@ -3003,6 +4185,8 @@ mod live_tests {
     fn scaled_screen_frame_coordinates_map_to_the_native_desktop() {
         let click = NativeAction::Pointer {
             frame_id: "frame:screen".to_string(),
+            click_count: None,
+            continuation_of_operation_id: None,
             action: NativePointerAction::Click,
             x: 202.0,
             y: 272.0,
@@ -3139,7 +4323,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 
-window = Gtk.Window(title='OpenGeni AT-SPI Fixture')
+window = Gtk.Window(title='Opengeni AT-SPI Fixture')
 window.set_default_size(420, 180)
 box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 window.add(box)
@@ -3163,7 +4347,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk
 
-window = Gtk.Window(title='OpenGeni X11 Occluder')
+window = Gtk.Window(title='Opengeni X11 Occluder')
 window.set_default_size(420, 180)
 window.set_decorated(False)
 window.move(0, 0)
@@ -3208,7 +4392,7 @@ Gtk.main()
                 .iter()
                 .find(|target| {
                     target.kind == NativeTargetKind::Window
-                        && target.title == "OpenGeni AT-SPI Fixture"
+                        && target.title == "Opengeni AT-SPI Fixture"
                 })
                 .cloned();
             let screen = targets
@@ -3444,6 +4628,7 @@ Gtk.main()
         value: Option<NativeActionValue>,
     ) -> NativeActionCommand {
         NativeActionCommand {
+            operation_id: None,
             target_id: observation.target.id.clone(),
             expected_target_generation: observation.target.target_generation.clone(),
             expected_observation_id: Some(observation.observation_id.clone()),
@@ -3463,12 +4648,15 @@ Gtk.main()
         y: f64,
     ) -> NativeActionCommand {
         NativeActionCommand {
+            operation_id: None,
             target_id: screen.id.clone(),
             expected_target_generation: frame.target_generation.clone(),
             expected_observation_id: None,
             expected_frame_id: Some(frame.frame_id.clone()),
             action: NativeAction::Pointer {
                 frame_id: frame.frame_id.clone(),
+                click_count: None,
+                continuation_of_operation_id: None,
                 action: NativePointerAction::Click,
                 x,
                 y,

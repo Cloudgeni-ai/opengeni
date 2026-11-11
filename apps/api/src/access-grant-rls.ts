@@ -1,15 +1,264 @@
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, BillingOrigin } from "@opengeni/contracts";
 import {
+  agentPrivateFileOwnerSubjectId,
+  billingOriginForGrant,
+  fundedBillingOrigin,
   requireLiveAgentAttemptAuthorization,
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  ambientBillingOrigin,
+  billingOriginOverride,
   freezeAgentLearningPolicy,
+  getSlackPrivateSessionOwnerSubjectId,
+  readTurnBillingOrigin,
+  withBillingOriginOverride,
   withSessionRlsActorContext,
   withCreditDebitAttribution,
+  type CreditDebitAttribution,
+  currentCreditDebitAttribution,
 } from "@opengeni/db";
-import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "./http/api-error";
+
+const AGENT_ATTEMPT_AUTHORITY_INVALID = "agent attempt authority is invalid";
+const AGENT_ATTEMPT_CALLER_STALE =
+  "This process's tool access belongs to a turn attempt that is no longer active. Stop retrying this process; start a fresh command from the current live turn. If a tool call may already have run, check its existing receipt or actual state before submitting it again.";
+
+/**
+ * A refused agent-attempt credential. The detail code names why, so request
+ * telemetry can tell a process that outlived its turn (`caller_stale`) from a
+ * malformed or revoked credential instead of reporting it as unclassified.
+ */
+function agentAttemptAuthorityError(
+  reason: "malformed" | SessionAuthorizationDeniedError["reason"],
+  cause?: unknown,
+): ApiHttpError {
+  const error = new ApiHttpError(403, {
+    code: "forbidden",
+    message:
+      reason === "caller_stale" ? AGENT_ATTEMPT_CALLER_STALE : AGENT_ATTEMPT_AUTHORITY_INVALID,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: `agent_attempt_${reason}` },
+  });
+  if (cause !== undefined) error.cause = cause;
+  return error;
+}
+
+/**
+ * Trusted payer for a non-agent grant: an authenticated human session pays as
+ * that human; keys and services are service work. An agent attempt must be
+ * resolved through the validated middleware context installed below.
+ */
+export function creditDebitAttributionForGrant(grant: AccessGrant): CreditDebitAttribution {
+  if (grant.principalKind === "agent_attempt") return currentCreditDebitAttribution();
+  // Who pays: a trusted dispatcher's origin, else the credential's.
+  const billingOrigin = fundedBillingOrigin(
+    grant.accountId,
+    ambientBillingOrigin() ?? billingOriginForGrant(grant),
+  );
+  return grant.principalKind === "human_session"
+    ? { kind: "human", initiatingHumanSubjectId: grant.subjectId, billingOrigin }
+    : ["service", "api_key", "configured_key", "mcp_gateway"].includes(grant.principalKind ?? "")
+      ? { kind: "service", billingOrigin }
+      : { kind: "unknown" };
+}
+
+/**
+ * A turn's funding origin never changes once accepted, so remember it per
+ * exact turn instead of reading it on every agent request.
+ */
+const TURN_ORIGIN_LIMIT = 4_096;
+const turnOriginsByDatabase = new WeakMap<object, Map<string, BillingOrigin>>();
+
+async function agentTurnBillingOrigin(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+  turnId: string,
+): Promise<BillingOrigin> {
+  let cache = turnOriginsByDatabase.get(deps.db);
+  if (!cache) {
+    cache = new Map();
+    turnOriginsByDatabase.set(deps.db, cache);
+  }
+  const key = `${grant.accountId}:${grant.workspaceId}:${turnId}`;
+  const remembered = cache.get(key);
+  if (remembered) return remembered;
+  const stored = await readTurnBillingOrigin(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    turnId,
+  });
+  // Plan credit never pays for work whose chat cannot be found. Only a
+  // decided origin is remembered: a turn not yet visible is read again.
+  if (!stored) return "api";
+  const origin = stored;
+  if (cache.size >= TURN_ORIGIN_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, origin);
+  return origin;
+}
+
+/**
+ * Who pays for work this grant starts outside a turn (a single model call,
+ * a tool): an agent attempt's chat, else a trusted dispatcher's origin, else
+ * the credential's (see `billingOriginForGrant`).
+ */
+export async function billingOriginForAccessGrant(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+): Promise<BillingOrigin> {
+  const turnId = grant.metadata?.turnId;
+  if (grant.principalKind === "agent_attempt") {
+    return fundedBillingOrigin(
+      grant.accountId,
+      typeof turnId === "string" ? await agentTurnBillingOrigin(deps, grant, turnId) : "api",
+    );
+  }
+  return fundedBillingOrigin(
+    grant.accountId,
+    ambientBillingOrigin() ?? billingOriginForGrant(grant),
+  );
+}
+
+/**
+ * Run a direct model API call (the OpenAI-compatible endpoint) as API use,
+ * whatever credential signed it: a person's own sign-in (browser session or
+ * native app credential) pays from credits only, like an API key. Two callers
+ * keep the origin they already have: an agent attempt (its chat's origin)
+ * and a trusted in-process dispatcher's stamp (an agent's app action keeps
+ * its chat's origin). Internal (legacy) accounts stay app
+ * (`fundedBillingOrigin`).
+ */
+export function asDirectModelApiUse<T>(grant: AccessGrant, work: () => Promise<T>): Promise<T> {
+  if (grant.principalKind === "agent_attempt" || billingOriginOverride()) return work();
+  return withBillingOriginOverride("api", work);
+}
+
+/**
+ * Start `work` alongside an authorization `gate` instead of after it, so a
+ * request pays one database wait for both. The gate still decides: when it
+ * refuses, its error is the answer and `work`'s result or failure is dropped
+ * unread. Only use this for reads whose result is disclosed after the gate.
+ */
+export async function alongsideAuthorization<G, W>(
+  gate: Promise<G>,
+  work: () => Promise<W>,
+): Promise<[G, W]> {
+  const pending = work();
+  // Observed here so a refused gate never leaves an unhandled rejection.
+  pending.catch(() => undefined);
+  const decided = await gate;
+  return [decided, await pending];
+}
+
+type AgentLearningActor = {
+  kind: "agent";
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
+/** The attempt a well-formed agent-attempt grant claims to be; null otherwise. */
+function claimedLearningActor(grant: AccessGrant, sessionId: string): AgentLearningActor | null {
+  const turnId = grant.metadata?.turnId;
+  const attemptId = grant.metadata?.attemptId;
+  const executionGeneration = grant.metadata?.executionGeneration;
+  if (
+    typeof turnId !== "string" ||
+    typeof attemptId !== "string" ||
+    typeof executionGeneration !== "number"
+  ) {
+    return null;
+  }
+  return { kind: "agent", sessionId, turnId, attemptId, executionGeneration };
+}
+
+function sameLearningActor(left: AgentLearningActor, right: AgentLearningActor): boolean {
+  return (
+    left.sessionId === right.sessionId &&
+    left.turnId === right.turnId &&
+    left.attemptId === right.attemptId &&
+    left.executionGeneration === right.executionGeneration
+  );
+}
+
+/**
+ * What decides an attempt's personal file owner: its frozen learning policy and
+ * the private Slack interaction, if any, that owns its session's root. Both are
+ * fixed for the attempt's lifetime.
+ */
+type FrozenLearningPolicy = {
+  learning: Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
+  slackPrivateOwnerSubjectId: string | null;
+};
+
+/**
+ * An agent's learning policy is frozen once per accepted turn (a durable
+ * snapshot that never changes afterwards), and this request path only uses it
+ * after the live-attempt check above has refused stale and interrupted
+ * attempts. Re-reading it on every agent request took row locks on the
+ * session, turn and attempt for an answer that cannot change, so remember the
+ * verified answer per exact attempt. Liveness is still checked on every
+ * request; only the immutable policy read (and the session's equally
+ * immutable Slack ownership) is reused.
+ */
+const FROZEN_LEARNING_LIMIT = 4_096;
+const FROZEN_LEARNING_TTL_MS = 15 * 60_000;
+const frozenLearningByDatabase = new WeakMap<
+  object,
+  Map<string, { expiresAt: number; policy: FrozenLearningPolicy }>
+>();
+
+function frozenLearningKey(grant: AccessGrant, actor: AgentLearningActor): string {
+  return [
+    grant.accountId,
+    grant.workspaceId,
+    actor.sessionId,
+    actor.turnId,
+    actor.attemptId,
+    actor.executionGeneration,
+  ].join(":");
+}
+
+function frozenLearningCache(database: object) {
+  let cache = frozenLearningByDatabase.get(database);
+  if (!cache) {
+    cache = new Map();
+    frozenLearningByDatabase.set(database, cache);
+  }
+  return cache;
+}
+
+function rememberedLearning(
+  database: object,
+  key: string,
+  now = Date.now(),
+): FrozenLearningPolicy | null {
+  const cache = frozenLearningCache(database);
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= now) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.policy;
+}
+
+function rememberLearning(database: object, key: string, policy: FrozenLearningPolicy): void {
+  const cache = frozenLearningCache(database);
+  cache.delete(key);
+  if (cache.size >= FROZEN_LEARNING_LIMIT) {
+    // Map iteration is insertion order: evict the oldest remembered attempt.
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, { expiresAt: Date.now() + FROZEN_LEARNING_TTL_MS, policy });
+}
 
 export async function withAccessGrantSessionRlsContext<T>(
   deps: Pick<ApiRouteDeps, "db">,
@@ -17,58 +266,108 @@ export async function withAccessGrantSessionRlsContext<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   if (grant.principalKind !== "agent_attempt") {
-    return await withCreditDebitAttribution(
-      grant.principalKind === "human_session"
-        ? { kind: "human", initiatingHumanSubjectId: grant.subjectId }
-        : grant.principalKind === "service" ||
-            grant.principalKind === "api_key" ||
-            grant.principalKind === "configured_key" ||
-            grant.principalKind === "mcp_gateway"
-          ? { kind: "service" }
-          : { kind: "unknown" },
-      () => withSessionRlsActorContext({ subjectId: grant.subjectId }, fn),
+    return await withCreditDebitAttribution(creditDebitAttributionForGrant(grant), () =>
+      withSessionRlsActorContext({ subjectId: grant.subjectId }, fn),
     );
   }
   const callerSessionId = grant.metadata?.sessionId;
   if (typeof callerSessionId !== "string") {
-    throw new HTTPException(403, { message: "agent attempt authority is invalid" });
+    throw agentAttemptAuthorityError("malformed");
   }
+  const freezeLearning = (actor: AgentLearningActor) =>
+    Promise.all([
+      freezeAgentLearningPolicy(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        actor,
+      }),
+      getSlackPrivateSessionOwnerSubjectId(deps.db, grant.workspaceId, actor.sessionId),
+    ]).then(
+      ([learning, slackPrivateOwnerSubjectId]): FrozenLearningPolicy => ({
+        learning,
+        slackPrivateOwnerSubjectId,
+      }),
+    );
   try {
-    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
-    const learning = await freezeAgentLearningPolicy(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      actor: {
-        kind: "agent",
-        sessionId: actor.callerSessionId,
-        turnId: actor.turnId,
-        attemptId: actor.attemptId,
-        executionGeneration: actor.executionGeneration,
-      },
-    });
+    // The learning policy is keyed by the exact attempt, which a live actor
+    // takes verbatim from the grant's claims. Read it for the claimed attempt
+    // while the liveness check runs; it is used only once that check passes
+    // and names the same attempt, and is otherwise read again for the actor.
+    // A policy already verified for the claimed attempt needs no read at all.
+    const claimed = claimedLearningActor(grant, callerSessionId);
+    const claimedKey = claimed ? frozenLearningKey(grant, claimed) : null;
+    const remembered = claimedKey ? rememberedLearning(deps.db, claimedKey) : null;
+    const [actor, speculative] = await alongsideAuthorization(
+      requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId),
+      async () => remembered ?? (claimed ? await freezeLearning(claimed) : null),
+    );
+    const verified: AgentLearningActor = {
+      kind: "agent",
+      sessionId: actor.callerSessionId,
+      turnId: actor.turnId,
+      attemptId: actor.attemptId,
+      executionGeneration: actor.executionGeneration,
+    };
+    const verifiedKey = frozenLearningKey(grant, verified);
+    const learning =
+      claimed && speculative && sameLearningActor(claimed, verified)
+        ? speculative
+        : (rememberedLearning(deps.db, verifiedKey) ?? (await freezeLearning(verified)));
+    rememberLearning(deps.db, verifiedKey, learning);
+    // Tools and sub-agents of a chat are billed like the chat.
+    const billingOrigin = fundedBillingOrigin(
+      grant.accountId,
+      await agentTurnBillingOrigin(deps, grant, actor.turnId),
+    );
     return await withCreditDebitAttribution(
       {
         kind: "turn",
         turnId: actor.turnId,
         initiatingHumanSubjectId: actor.initiatingHumanSubjectId ?? null,
+        billingOrigin,
       },
       () =>
         withSessionRlsActorContext(
           {
             subjectId: actor.subjectId,
             initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-            privateFileOwnerSubjectId:
-              learning.defaultScope === "personal" ? learning.subjectId : null,
+            agentRootSessionId: actor.callerRootSessionId,
+            privateFileOwnerSubjectId: agentPrivateFileOwnerSubjectId(
+              learning.learning,
+              learning.slackPrivateOwnerSubjectId,
+            ),
           },
           fn,
         ),
     );
   } catch (error) {
     if (error instanceof SessionAuthorizationDeniedError) {
-      throw new HTTPException(403, {
-        message: "agent attempt authority is invalid",
-        cause: error,
-      });
+      throw agentAttemptAuthorityError(error.reason, error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Prove that an agent-attempt grant is the exact live attempt of its bound
+ * session, with the same refusal as {@link withAccessGrantSessionRlsContext},
+ * without installing that request's RLS actor context. For requests that read
+ * and disclose nothing scoped (MCP protocol handshakes), so they need the
+ * liveness fence but none of the actor's data scope.
+ */
+export async function requireLiveAgentAttemptGrant(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+): Promise<void> {
+  const callerSessionId = grant.metadata?.sessionId;
+  if (grant.principalKind !== "agent_attempt" || typeof callerSessionId !== "string") {
+    throw agentAttemptAuthorityError("malformed");
+  }
+  try {
+    await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) {
+      throw agentAttemptAuthorityError(error.reason, error);
     }
     throw error;
   }

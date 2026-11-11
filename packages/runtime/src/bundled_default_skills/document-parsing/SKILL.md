@@ -11,7 +11,7 @@ metadata:
 
 Use the preinstalled `anydoc` CLI when a task needs the contents of a local
 office document, ebook, CSV, or text-based PDF. This is read-only extraction;
-it does not edit the source or replace OpenGeni's durable artifact tools.
+it does not edit the source or replace Opengeni's durable artifact tools.
 
 ```bash
 anydoc report.docx
@@ -34,3 +34,6 @@ Rules:
    or resource-limit failures must be reported rather than guessed around.
 6. Never install or download AnyDoc at runtime. If `anydoc` is unavailable,
    report that the selected compute image lacks the parsing runtime.
+7. AnyDoc's Markdown does not mark PDF pages. When page numbers matter, get
+   the count with `pdfinfo file.pdf` and one page's text with
+   `pdftotext -layout -f N -l N file.pdf -`.

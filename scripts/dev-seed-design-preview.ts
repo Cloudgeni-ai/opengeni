@@ -47,16 +47,17 @@ import {
   CAPABILITIES,
   DISPLAY_ACTIVE_SCHEDULES,
   EXTRA_SCHEDULES,
-  EXTRA_VARIABLE_SETS,
+  EXTRA_VAULTS,
   INTEGRATIONS,
   PENDING_KNOWLEDGE,
   PERSONAL_KNOWLEDGE,
   RIGS,
   SCHEDULE_RUNS,
-  SESSION_VARIABLE_SETS,
+  SESSION_VAULT_POLICIES,
   USAGE_MODELS,
   scheduledRunSessions,
   type ScheduleSeed,
+  type VaultSeed,
 } from "./dev-seed-design-preview/surfaces";
 import { LIVE_CONTENT, applyLiveBatch } from "./dev-seed-design-preview/live-edit";
 import { seedMachines } from "./dev-seed-design-preview/machines";
@@ -137,7 +138,7 @@ if (!credentials.OWNER_PASSWORD || !credentials.PEOPLE_PASSWORD) {
   writeFileSync(
     credentialsPath,
     [
-      "# OpenGeni design-preview stack (local fake data only).",
+      "# Opengeni design-preview stack (local fake data only).",
       `# Sign in at ${ORIGIN}`,
       `URL=${ORIGIN}`,
       `OWNER_EMAIL=${credentials.OWNER_EMAIL}`,
@@ -177,7 +178,8 @@ class Client {
     const setCookie = response.headers.getSetCookie?.() ?? [];
     for (const value of setCookie) {
       const pair = value.split(";")[0]!;
-      if (pair.startsWith("better-auth.session_token=")) this.cookie = pair;
+      // An https public origin makes Better Auth use the __Secure- cookie prefix.
+      if (/^(?:__Secure-)?better-auth\.session_token=/.test(pair)) this.cookie = pair;
     }
     const text = await response.text();
     let parsed: any = text;
@@ -310,18 +312,15 @@ type Grant = "viewer" | "member" | "admin";
 type WorkspaceSeed = {
   name: string;
   grants: Record<string, Grant>;
-  variableSets: {
-    name: string;
-    description: string;
-    vars: Record<string, string>;
-    updates?: Record<string, string[]>;
-  }[];
+  /** Workspace vaults, shaped like migrated Variable Sets (see VaultSeed). */
+  vaults: Omit<VaultSeed, "scope">[];
   schedules: {
     name: string;
     prompt: string;
     schedule: Record<string, unknown>;
     overlapPolicy?: string;
-    variableSet?: string;
+    /** Narrows every run to this vault. */
+    vault?: string;
   }[];
   apiKeys: {
     name: string;
@@ -420,8 +419,8 @@ const CONVERSATIONS: Record<string, SessionSeed[]> = {
       hoursAgo: 50,
       exchanges: [
         [
-          "Rotate the staging database password and update the variable set.",
-          "The password was rotated and the Staging database variable set now holds the new value. The old password stops working in 24 hours.",
+          "Rotate the staging database password and update the saved login.",
+          "The password was rotated and the Staging database login in the Shared vault now holds the new value. The old password stops working in 24 hours.",
         ],
       ],
     },
@@ -580,8 +579,8 @@ const CONVERSATIONS: Record<string, SessionSeed[]> = {
       hoursAgo: 28,
       exchanges: [
         [
-          "Write empty state copy for Schedules, Variable sets and API keys.",
-          "**Schedules:** Nothing scheduled yet. Schedules run agent work on a timer.\n\n**Variable sets:** No variable sets. Store credentials once and use them in any session.\n\n**API keys:** No API keys. Create one to start work from your own tools.",
+          "Write empty state copy for Schedules, Secrets and API keys.",
+          "**Schedules:** Nothing scheduled yet. Schedules run agent work on a timer.\n\n**Secrets:** No secrets yet. Save a login or key once and agents can use it in any session.\n\n**API keys:** No API keys. Create one to start work from your own tools.",
         ],
       ],
     },
@@ -634,7 +633,7 @@ const WORKSPACES: WorkspaceSeed[] = [
   {
     name: "Platform engineering",
     grants: { maria: "admin", jonas: "member", aiko: "viewer", tom: "member" },
-    variableSets: [
+    vaults: [
       {
         name: "AWS production",
         description: "Read-only role for cost and inventory checks.",
@@ -695,7 +694,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           hour: 8,
           minute: 0,
         },
-        variableSet: "AWS production",
+        vault: "AWS production",
       },
       {
         name: "Weekly dependency update PR",
@@ -708,13 +707,13 @@ const WORKSPACES: WorkspaceSeed[] = [
           daysOfWeek: ["MONDAY"],
         },
         overlapPolicy: "buffer_one",
-        variableSet: "GitHub automation",
+        vault: "GitHub automation",
       },
       {
         name: "Monthly access review",
         prompt: "List users and API keys with production access and highlight inactive ones.",
         schedule: { type: "interval", everySeconds: 2_592_000 },
-        variableSet: "Datadog",
+        vault: "Datadog",
       },
     ],
     apiKeys: [
@@ -725,8 +724,8 @@ const WORKSPACES: WorkspaceSeed[] = [
       },
       {
         name: "Terraform runner",
-        description: "Reads variable sets during plan.",
-        permissions: ["workspace:read", "variable-sets:list", "variable-sets:read"],
+        description: "Lists secrets and uses them by reference during plan.",
+        permissions: ["workspace:read", "secrets:list", "secrets:use"],
         expires: "future",
       },
       {
@@ -877,7 +876,7 @@ const WORKSPACES: WorkspaceSeed[] = [
   {
     name: "Customer success",
     grants: { maria: "member", aiko: "admin", jonas: "viewer" },
-    variableSets: [
+    vaults: [
       {
         name: "Zendesk",
         description: "Ticket export access.",
@@ -916,7 +915,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           minute: 45,
           daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
         },
-        variableSet: "Zendesk",
+        vault: "Zendesk",
       },
       {
         name: "Churn risk report",
@@ -928,7 +927,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           minute: 0,
           daysOfWeek: ["FRIDAY"],
         },
-        variableSet: "HubSpot",
+        vault: "HubSpot",
       },
       {
         name: "Hourly SLA watch",
@@ -985,7 +984,7 @@ const WORKSPACES: WorkspaceSeed[] = [
   {
     name: "Finance ops",
     grants: { maria: "viewer", tom: "viewer" },
-    variableSets: [
+    vaults: [
       {
         name: "Accounting system",
         description: "Bookkeeping API access.",
@@ -1021,7 +1020,7 @@ const WORKSPACES: WorkspaceSeed[] = [
         name: "Month-end close checklist",
         prompt: "Prepare the month-end close checklist and list missing receipts.",
         schedule: { type: "interval", everySeconds: 2_592_000 },
-        variableSet: "Accounting system",
+        vault: "Accounting system",
       },
       {
         name: "Weekly cash position",
@@ -1033,7 +1032,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           minute: 30,
           daysOfWeek: ["MONDAY"],
         },
-        variableSet: "Bank feed",
+        vault: "Bank feed",
       },
       {
         name: "Invoice reminders",
@@ -1088,7 +1087,7 @@ const WORKSPACES: WorkspaceSeed[] = [
   {
     name: "Design preview",
     grants: { maria: "admin", jonas: "member", aiko: "member", tom: "viewer" },
-    variableSets: [
+    vaults: [
       {
         name: "Figma",
         description: "Read design files for handoff notes.",
@@ -1139,14 +1138,14 @@ const WORKSPACES: WorkspaceSeed[] = [
           minute: 15,
           daysOfWeek: ["WEDNESDAY"],
         },
-        variableSet: "Preview deploys",
+        vault: "Preview deploys",
       },
       {
         name: "Design token drift check",
         prompt: "Compare design tokens in code with the Figma library.",
         schedule: { type: "interval", everySeconds: 21_600 },
         overlapPolicy: "skip",
-        variableSet: "Figma",
+        vault: "Figma",
       },
       {
         name: "Launch day check",
@@ -1484,44 +1483,151 @@ const conversationPlan: ConversationPlan[] = [];
 /** Scheduled task ids by workspace name ("Personal" for the owner's workspace). */
 const taskIdsByWorkspace: Record<string, Record<string, string>> = {};
 
-/** Variable sets by name, created through the API with their edit history. */
-async function seedVariableSets(
+/** Organization vaults whose availability names workspaces seeded later. */
+const pendingVaultAvailability: {
+  base: string;
+  vaultId: string;
+  names: string[];
+  allowPersonal: boolean;
+}[] = [];
+
+function itemFieldInputs(fields: NonNullable<VaultSeed["items"]>[number]["fields"]) {
+  return fields.map((field) =>
+    field.kind === "file"
+      ? {
+          name: field.name,
+          kind: "file" as const,
+          fileBase64: Buffer.from(field.value, "utf8").toString("base64"),
+          fileName: `${field.name}.json`,
+        }
+      : { name: field.name, ...(field.kind ? { kind: field.kind } : {}), value: field.value },
+  );
+}
+
+/**
+ * Vaults by name, created through the API with their items and edit history.
+ * `vars` become `api_key` items with a `value` field, exactly as the Variable
+ * Set migration copies them. Existing vaults and items are left alone.
+ */
+async function seedVaults(
   base: string,
-  sets: (WorkspaceSeed["variableSets"][number] & {
-    scope?: "workspace" | "user" | "organization";
-  })[],
+  vaults: (Omit<VaultSeed, "scope"> & { scope?: VaultSeed["scope"] })[],
 ): Promise<Record<string, string>> {
-  const existingSets = await owner.get<any>(`${base}/variable-sets`);
-  const setList: any[] = Array.isArray(existingSets)
-    ? existingSets
-    : (existingSets.variableSets ?? []);
-  const setIds: Record<string, string> = {};
-  for (const set of setList) setIds[set.name] = set.id;
-  for (const set of sets) {
-    const scope = set.scope ?? "workspace";
-    let found = setList.find((s) => s.name === set.name && s.scope === scope);
+  const existing = (await owner.get<{ vaults: any[] }>(`${base}/vaults`)).vaults;
+  const ids: Record<string, string> = {};
+  for (const vault of existing) ids[vault.name] ??= vault.id;
+  const sharedWorkspaces = (await owner.get<any[]>("/v1/workspaces")).filter(
+    (w) => w.kind === "shared",
+  );
+  for (const seed of vaults) {
+    const ownerKind = seed.scope ?? "workspace";
+    let found = existing.find((v) => v.name === seed.name && v.ownerKind === ownerKind);
+    const names =
+      seed.availableIn === undefined || seed.availableIn === "all" ? null : seed.availableIn;
     if (!found) {
-      found = await owner.post(`${base}/variable-sets`, {
-        scope,
-        name: set.name,
-        description: set.description,
-        variables: Object.entries(set.vars).map(([name, value]) => ({
-          name,
-          value,
-        })),
+      const resolved = names?.map((name) => sharedWorkspaces.find((w) => w.name === name)?.id);
+      const complete = resolved?.every((id): id is string => Boolean(id)) ?? true;
+      found = await owner.post(`${base}/vaults`, {
+        name: seed.name,
+        description: seed.description,
+        ownerKind,
+        ...(ownerKind === "organization"
+          ? {
+              availability: {
+                allowedWorkspaceIds:
+                  names === null ? null : complete ? resolved : [base.split("/").at(-1)],
+                allowPersonalWorkspaces: seed.allowPersonalWorkspaces ?? true,
+              },
+            }
+          : {}),
       });
-      for (const [name, values] of Object.entries(set.updates ?? {})) {
+    }
+    // Settle every narrowed organization vault after all workspaces exist, so a
+    // rerun repairs a vault that an earlier, interrupted run created narrowed to
+    // the only workspace that existed then.
+    if (ownerKind === "organization" && names !== null) {
+      pendingVaultAvailability.push({
+        base,
+        vaultId: found.id,
+        names,
+        allowPersonal: seed.allowPersonalWorkspaces ?? true,
+      });
+    }
+    ids[seed.name] = found.id;
+    const items = [
+      ...Object.entries(seed.vars ?? {}).map(([name, value]) => ({
+        type: "api_key" as const,
+        name,
+        fields: [{ name: "value", value }],
+        updates: seed.updates?.[name] ? { value: seed.updates[name] } : undefined,
+      })),
+      ...(seed.items ?? []),
+    ];
+    if (!items.length) continue;
+    const present = new Set<string>();
+    for (let cursor: string | null = null; ;) {
+      const page: any = await owner.get(
+        `${base}/vaults/${found.id}/items?limit=200&includeArchived=true${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      );
+      for (const item of page.items) present.add(item.name);
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+    for (const item of items) {
+      const finalName = ("renameTo" in item && item.renameTo) || item.name;
+      if (present.has(finalName) || present.has(item.name)) continue;
+      const expiresInDays = "expiresInDays" in item ? item.expiresInDays : undefined;
+      let created: any = await owner.post(`${base}/vaults/${found.id}/items`, {
+        type: item.type,
+        name: item.name,
+        ...("websites" in item && item.websites?.length ? { websites: item.websites } : {}),
+        ...(expiresInDays !== undefined
+          ? { expiresAt: new Date(Date.now() + expiresInDays * 86_400_000).toISOString() }
+          : {}),
+        fields: itemFieldInputs(item.fields),
+      });
+      for (const [fieldName, values] of Object.entries(item.updates ?? {})) {
         for (const value of values) {
-          await owner.put(`${base}/variable-sets/${found.id}/variables/${name}`, { value });
+          const field = created.fields.find((f: any) => f.name === fieldName);
+          created = await owner.patch(`${base}/vaults/${found.id}/items/${created.id}`, {
+            expectedGeneration: created.generation,
+            fields: [{ fieldId: field?.id, name: fieldName, value }],
+          });
         }
       }
+      if ("renameTo" in item && item.renameTo) {
+        await owner.patch(`${base}/vaults/${found.id}/items/${created.id}`, {
+          expectedGeneration: created.generation,
+          name: item.renameTo,
+        });
+      }
     }
-    setIds[set.name] = found.id;
   }
-  return setIds;
+  return ids;
 }
-/** Variable set ids by workspace name, then set name. */
-const variableSetIdsByWorkspace: Record<string, Record<string, string>> = {};
+
+/** Point organization vaults at workspaces that did not exist when they were created. */
+async function settleVaultAvailability() {
+  const shared = (await owner.get<any[]>("/v1/workspaces")).filter((w) => w.kind === "shared");
+  for (const pending of pendingVaultAvailability) {
+    const ids = pending.names
+      .map((name) => shared.find((w) => w.name === name)?.id)
+      .filter((id): id is string => Boolean(id));
+    const vault = await owner.get<any>(`${pending.base}/vaults/${pending.vaultId}`);
+    const current = vault.availability ?? {};
+    const same =
+      current.allowPersonalWorkspaces === pending.allowPersonal &&
+      Array.isArray(current.allowedWorkspaceIds) &&
+      [...current.allowedWorkspaceIds].sort().join() === [...ids].sort().join();
+    if (same) continue;
+    await owner.patch(`${pending.base}/vaults/${pending.vaultId}`, {
+      expectedGeneration: vault.generation,
+      availability: { allowedWorkspaceIds: ids, allowPersonalWorkspaces: pending.allowPersonal },
+    });
+  }
+}
+/** Vault ids by workspace name, then vault name. */
+const vaultIdsByWorkspace: Record<string, Record<string, string>> = {};
 
 // Schedules. Every task is created paused through the API except `manual`
 // ones (no Temporal schedule exists; only Run now fires them). "Display
@@ -1531,7 +1637,7 @@ async function seedSchedules(
   base: string,
   workspaceName: string,
   schedules: (WorkspaceSeed["schedules"][number] & Pick<ScheduleSeed, "active">)[],
-  setIds: Record<string, string>,
+  vaultIds: Record<string, string>,
 ): Promise<Record<string, string>> {
   const tasks = await owner.get<any[]>(`${base}/scheduled-tasks`);
   const displayActive = new Set(DISPLAY_ACTIVE_SCHEDULES[workspaceName] ?? []);
@@ -1553,7 +1659,9 @@ async function seedSchedules(
       schedule: task.schedule,
       runMode: "new_session_per_run",
       ...(task.overlapPolicy ? { overlapPolicy: task.overlapPolicy } : {}),
-      ...(task.variableSet ? { variableSetId: setIds[task.variableSet] } : {}),
+      ...(task.vault && vaultIds[task.vault]
+        ? { vaultPolicy: { mode: "selected", vaultIds: [vaultIds[task.vault]] } }
+        : {}),
       agentConfig: { prompt: task.prompt },
     });
     ids[task.name] = created.id;
@@ -1677,19 +1785,16 @@ for (const seed of WORKSPACES) {
     });
   }
 
-  // Variable sets
-  const setIds = await seedVariableSets(base, [
-    ...seed.variableSets,
-    ...(EXTRA_VARIABLE_SETS[seed.name] ?? []),
-  ]);
-  variableSetIdsByWorkspace[seed.name] = setIds;
+  // Vaults
+  const vaultIds = await seedVaults(base, [...seed.vaults, ...(EXTRA_VAULTS[seed.name] ?? [])]);
+  vaultIdsByWorkspace[seed.name] = vaultIds;
 
   // Schedules
   taskIdsByWorkspace[seed.name] = await seedSchedules(
     base,
     seed.name,
     [...seed.schedules, ...(EXTRA_SCHEDULES[seed.name] ?? [])],
-    setIds,
+    vaultIds,
   );
 
   // Workspace API keys
@@ -1777,15 +1882,12 @@ for (const seed of WORKSPACES) {
 const personalWs = ownerMembership.personalWorkspaceId;
 {
   const base = `/v1/workspaces/${personalWs}`;
-  variableSetIdsByWorkspace.Personal = await seedVariableSets(
-    base,
-    EXTRA_VARIABLE_SETS.Personal ?? [],
-  );
+  vaultIdsByWorkspace.Personal = await seedVaults(base, EXTRA_VAULTS.Personal ?? []);
   taskIdsByWorkspace.Personal = await seedSchedules(
     base,
     "Personal",
     EXTRA_SCHEDULES.Personal ?? [],
-    variableSetIdsByWorkspace.Personal,
+    vaultIdsByWorkspace.Personal,
   );
   await seedKnowledgeGroups(base, "Bendik's notes", PERSONAL_KNOWLEDGE, "personal");
   conversationPlan.push({
@@ -1799,6 +1901,26 @@ const personalWs = ownerMembership.personalWorkspaceId;
     ]),
   });
   log("Seeded Personal workspace");
+}
+
+// Organization vaults available in workspaces seeded after them; Design
+// preview's agents start with secrets off (the "Secrets are off" states).
+await settleVaultAvailability();
+{
+  const designPreview = (await owner.get<any[]>("/v1/workspaces")).find(
+    (w) => w.kind === "shared" && w.name === "Design preview",
+  );
+  if (
+    designPreview &&
+    designPreview.settings?.sessionAgentDefaults?.capabilities?.secrets !== false
+  ) {
+    await owner.patch(`/v1/workspaces/${designPreview.id}/settings`, {
+      sessionAgentDefaults: {
+        ...(designPreview.settings?.sessionAgentDefaults ?? {}),
+        capabilities: { from: "all", secrets: false },
+      },
+    });
+  }
 }
 const workspaceIdByName: Record<string, string> = Object.fromEntries(
   conversationPlan.map((plan) => [plan.name, plan.workspaceId]),
@@ -1853,7 +1975,13 @@ const artifactsByWorkspace: Record<string, Record<string, ArtifactRef>> = {};
 
 await linkArtifactsToSessions(sql);
 await seedScheduleRuns(sql);
-await seedPendingKnowledge(sql);
+try {
+  await seedPendingKnowledge(sql);
+} catch (error) {
+  // Knowledge review rows depend on agent-turn provenance the seed can't
+  // always fake; the rest of the preview doesn't need them.
+  console.warn(`Skipped Knowledge proposals: ${error instanceof Error ? error.message : error}`);
+}
 await seedUsage(sql);
 await sql.close();
 
@@ -2112,18 +2240,19 @@ async function seedConversations(
       await writeSession(id, seed, new Date(Date.now() - seed.hoursAgo * 3_600_000));
     }
 
-    // Variable sets the conversation used, as the session composer shows them.
+    // Sessions narrowed to the vaults their conversation used (vault policy).
     for (const { id, seed } of all) {
-      const attach = (SESSION_VARIABLE_SETS[plan.name]?.[seed.title] ?? [])
-        .map((name) => variableSetIdsByWorkspace[plan.name]?.[name])
-        .filter((setId): setId is string => Boolean(setId));
-      if (!attach.length) continue;
-      await tx`update sessions set variable_set_ids = ${JSON.stringify(attach)}::text::jsonb,
-          variable_set_id = ${attach.at(-1)!}
-        where workspace_id = ${ws} and id = ${id} and variable_set_ids = '[]'::jsonb`;
+      const vaultIds = (SESSION_VAULT_POLICIES[plan.name]?.[seed.title] ?? [])
+        .map((name) => vaultIdsByWorkspace[plan.name]?.[name])
+        .filter((vaultId): vaultId is string => Boolean(vaultId));
+      if (!vaultIds.length) continue;
+      const policy = JSON.stringify({ mode: "selected", vaultIds });
+      await tx`update sessions set vault_policy = ${policy}::text::jsonb
+        where workspace_id = ${ws} and id = ${id} and vault_policy = '{"mode":"all"}'::jsonb`;
     }
 
-    // Finalize the session-activity gate exactly as the API does.
+    // This seed script retains the legacy writer protocol during the expand
+    // release. The stamp trigger also assigns activity_xid to these rows.
     await tx`select set_config('opengeni.session_activity_gate_state', 'preparing', true)`;
     await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
     await tx.unsafe(
@@ -2480,45 +2609,71 @@ async function seedUsage(db: SQL) {
     const sessions = await db`select id, created_by_subject_id from sessions
       where workspace_id = ${plan.workspaceId} order by updated_at desc limit 40`;
     if (!sessions.length) continue;
+    const schedules = await db`select id from scheduled_tasks
+      where workspace_id = ${plan.workspaceId} limit 5`;
+    // Chats deleted since they ran: their usage stays, their rows are gone.
+    const deleted = Array.from({ length: 3 }, () => ({
+      id: randomUUID(),
+      created_by_subject_id: sessions[0]!.created_by_subject_id,
+    }));
     const weight = weights[plan.name] ?? 0.3;
     let seed = plan.workspaceId.charCodeAt(0);
     const random = () => {
       seed = (seed * 9301 + 49297) % 233280;
       return seed / 233280;
     };
+    const between = ([low, high]: readonly [number, number]) => low + random() * (high - low);
     await db.begin(async (tx) => {
-      for (let day = 29; day >= 0; day--) {
+      for (let day = 89; day >= 0; day--) {
         const weekday = new Date(Date.now() - day * 86_400_000).getUTCDay();
-        const busy = weekday === 0 || weekday === 6 ? 0.25 : 1;
+        const busy =
+          (weekday === 0 || weekday === 6 ? 0.25 : 1) * (0.55 + (0.45 * (89 - day)) / 89);
         const calls = Math.round((6 + random() * 14) * weight * busy);
         for (let call = 0; call < calls; call++) {
-          const session = sessions[Math.floor(random() * sessions.length)]!;
+          const session =
+            random() < 0.04
+              ? deleted[Math.floor(random() * deleted.length)]!
+              : sessions[Math.floor(random() * sessions.length)]!;
           const pick = random();
           let cumulative = 0;
           const model =
             USAGE_MODELS.find((candidate) => (cumulative += candidate.share) >= pick) ??
             USAGE_MODELS[0];
-          const input = Math.round(8_000 + random() * 60_000);
-          const cached = Math.round(input * (0.3 + random() * 0.5));
-          const output = Math.round(300 + random() * 3_500);
+          const input = Math.round(12_000 + random() * 110_000);
+          const cached = Math.round(input * between(model.cacheRatio));
+          const cacheWrite = model.writes ? Math.round((input - cached) * between([0.4, 0.9])) : 0;
+          const uncached = input - cached - cacheWrite;
+          const output = Math.round(250 + random() * 3_800);
           const reasoning = Math.round(output * random() * 0.6);
-          const cost = Math.round(
-            ((input - cached + output * 4) / 1000) * model.costPerKToken * 1000,
+          const listMicros = Math.round(
+            uncached * model.price.input +
+              cached * model.price.cacheRead +
+              cacheWrite * model.price.cacheWrite +
+              output * model.price.output,
           );
+          // Credits carry a small margin over list price.
+          const chargedMicros = model.billing === "external" ? 0 : Math.round(listMicros * 1.05);
           const occurredAt = new Date(
             Date.now() - day * 86_400_000 - Math.floor(random() * 10 * 3_600_000),
           );
           const turnId = randomUUID();
           const subject = String(session.created_by_subject_id);
+          const scheduled =
+            schedules.length > 0 && random() < 0.12
+              ? schedules[Math.floor(random() * schedules.length)]!.id
+              : null;
           await tx`insert into model_call_facts (account_id, workspace_id, session_id, turn_id, source_key,
               provider, provider_api, model, billing_path, turn_source, initiator_kind, initiator_subject_id,
-              input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens,
-              priced_cost_micros, occurred_at, recorded_at)
+              scheduled_task_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens,
+              reasoning_tokens, total_tokens, priced_cost_micros, estimated_provider_cost_micros,
+              equivalent_credit_cost_micros, pricing_source, occurred_at, recorded_at)
             values (${plan.accountId}, ${plan.workspaceId}, ${session.id}, ${turnId},
               ${`design-preview:${turnId}`}, ${model.provider}, 'responses', ${model.model},
-              ${model.billing}, 'user', 'subject', ${subject}, ${input}, ${output}, ${cached},
-              ${reasoning}, ${input + output}, ${model.billing === "external" ? 0 : cost},
-              ${occurredAt}, ${occurredAt})`;
+              ${model.billing}, ${scheduled ? "scheduled" : "user"}, ${scheduled ? "service" : "subject"},
+              ${scheduled ? "service:scheduler" : subject}, ${scheduled},
+              ${input}, ${output}, ${cached}, ${cacheWrite}, ${reasoning}, ${input + output},
+              ${chargedMicros}, ${listMicros}, ${Math.round(listMicros * 1.05)},
+              'configured_list_price', ${occurredAt}, ${occurredAt})`;
           await tx`insert into usage_events (account_id, workspace_id, subject_id, event_type, quantity,
               unit, source_resource_type, source_resource_id, idempotency_key, occurred_at, recorded_at,
               initiator_kind, initiator_subject_id, origin)
@@ -2529,7 +2684,7 @@ async function seedUsage(db: SQL) {
             await tx`insert into usage_events (account_id, workspace_id, subject_id, event_type, quantity,
                 unit, source_resource_type, source_resource_id, idempotency_key, occurred_at, recorded_at,
                 initiator_kind, initiator_subject_id, origin)
-              values (${plan.accountId}, ${plan.workspaceId}, ${subject}, 'model.cost', ${cost},
+              values (${plan.accountId}, ${plan.workspaceId}, ${subject}, 'model.cost', ${chargedMicros},
                 'usd_micros', 'model', ${model.model}, ${`design-preview:cost:${turnId}`}, ${occurredAt},
                 ${occurredAt}, 'subject', ${subject}, 'user')`;
           }
@@ -2756,9 +2911,6 @@ async function seedRigs() {
       : (existing.rigs ?? existing.items ?? []);
     for (const rig of rigs) {
       if (list.some((candidate) => candidate.name === rig.name)) continue;
-      const setIds = (rig.variableSets ?? [])
-        .map((set) => variableSetIdsByWorkspace[name]?.[set])
-        .filter((id): id is string => Boolean(id));
       try {
         const createdRig = await owner.post<any>(`${base}/rigs`, {
           ...(rig.scope ? { scope: rig.scope } : {}),
@@ -2767,7 +2919,6 @@ async function seedRigs() {
           setupScript: rig.setupScript,
           checks: rig.checks,
           credentialHooks: rig.credentialHooks ?? [],
-          defaultVariableSetIds: setIds,
         });
         if (rig.nextVersion) {
           await owner.post(`${base}/rigs/${createdRig.id}/versions`, {

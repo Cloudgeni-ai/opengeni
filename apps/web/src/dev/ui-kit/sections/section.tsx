@@ -1,15 +1,15 @@
 import { useState, type ReactNode } from "react";
 import { PauseIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
-import { DisabledReason } from "@/components/ui/disabled-reason";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack, type SectionVariant } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowLink, SettingRowSkeleton } from "@/components/ui/setting-row";
-import { StatusDot } from "@/components/ui/status-dot";
-import { Switch } from "@/components/ui/switch";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { DisabledReason } from "@opengeni/react/ui/disabled-reason";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack, type SectionVariant } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowLink, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
+import { Switch } from "@opengeni/react/ui/switch";
 
 import {
   currentWorkspace,

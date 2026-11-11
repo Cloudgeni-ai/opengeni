@@ -1,8 +1,9 @@
 import type { Settings } from "@opengeni/config";
 import {
-  assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   dbSql,
   type Database,
+  type RuntimeDatabaseDegradedListener,
   type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability, type EventBus } from "@opengeni/events";
@@ -120,6 +121,8 @@ export async function runReadinessChecks(
 export function dbReadyCheck(
   db: Database,
   posture?: RuntimeDatabasePostureOptions,
+  afterDatabaseReady?: () => Promise<void>,
+  onDegraded?: RuntimeDatabaseDegradedListener,
 ): () => Promise<void> {
   let inFlight: Promise<void> | undefined;
   return () => {
@@ -129,10 +132,11 @@ export function dbReadyCheck(
     if (inFlight) return inFlight;
     inFlight = (async () => {
       if (posture) {
-        await assertRuntimeDatabasePosture(db, posture);
-        return;
+        await assertRuntimeDatabaseReadiness(db, posture, onDegraded);
+      } else {
+        await db.execute(dbSql`select 1`);
       }
-      await db.execute(dbSql`select 1`);
+      await afterDatabaseReady?.();
     })().finally(() => {
       inFlight = undefined;
     });

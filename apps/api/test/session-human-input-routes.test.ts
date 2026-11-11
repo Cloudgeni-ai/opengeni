@@ -7,6 +7,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getSession,
   submitHumanPromptInTransaction,
   updateWorkspaceSettings,
   withWorkspaceSubjectSessionActivityRls,
@@ -17,12 +18,9 @@ import {
   signDelegatedAccessToken,
   skillReviewHumanInput,
 } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
@@ -218,6 +216,27 @@ async function frozenFixture(
 }
 
 describe("structured human-input HTTP surface (real PostgreSQL)", () => {
+  test("conversation projections name the session sequence they reflect", async () => {
+    const fixture = await frozenFixture();
+    const base = `/v1/workspaces/${fixture.workspaceId}/sessions/${fixture.sessionId}`;
+    const headers = { authorization: fixture.authorization };
+    const session = await getSession(client.db, fixture.workspaceId, fixture.sessionId);
+    expect(session!.lastSequence).toBeGreaterThan(0);
+    for (const path of ["human-input-requests?status=pending", "queue", "goal?absent=null"]) {
+      const response = await app.request(`http://x${base}/${path}`, { headers });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-OpenGeni-Session-Sequence")).toBe(
+        String(session!.lastSequence),
+      );
+    }
+    const missing = await app.request(
+      `http://x/v1/workspaces/${fixture.workspaceId}/sessions/${crypto.randomUUID()}/queue`,
+      { headers },
+    );
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get("X-OpenGeni-Session-Sequence")).toBeNull();
+  });
+
   test("accepts annotation-only messages and returns server-numbered structured payloads", async () => {
     const suffix = crypto.randomUUID();
     const subjectId = `user:${suffix}`;

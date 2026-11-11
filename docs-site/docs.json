@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
   "name": "Opengeni",
-  "description": "Opengeni is open-source infrastructure for adding AI agents to your product: durable streaming sessions, sandboxes, tools and MCP, per-user credentials, memory, multi-tenant workspaces, and React components you restyle. Use the managed cloud or self-host.",
+  "description": "Add agents that finish real work to your product. Opengeni is the open, self-hostable runtime for long-running AI agents.",
   "colors": {
     "primary": "#1f8a74",
     "light": "#9fe3d3",
@@ -50,12 +50,12 @@
           "integrate/configure-the-agent",
           "integrate/your-data",
           "integrate/background-agents",
+          "integrate/meetings",
           "integrate/users-and-tenants",
           "integrate/approvals-and-questions",
           "integrate/existing-chat-ui",
           "integrate/proxy-from-any-backend",
           "integrate/production",
-          "integrate/session-history-import",
           "integrate/host-managed-integrations"
         ]
       },
@@ -72,11 +72,21 @@
       {
         "group": "Guides",
         "pages": [
+          "guides/excel-add-in",
+          "guides/microsoft-teams",
+          "guides/developer-plugin",
           "guides/self-host",
           "run-locally",
           "guides/connect-a-machine",
           "guides/webhooks-and-credentials",
-          "guides/usage-allowances"
+          "guides/connected-vaults",
+          "guides/auto-connect",
+          "guides/usage-allowances",
+          "guides/task-usage-limits",
+          "guides/insights",
+          "guides/site-data",
+          "guides/site-sql",
+          "guides/published-sites"
         ]
       },
       {
@@ -133,12 +143,40 @@
   "footer": {
     "socials": {
       "github": "https://github.com/Cloudgeni-ai/opengeni"
-    }
+    },
+    "links": [
+      {
+        "header": "Support",
+        "items": [
+          {
+            "label": "support@opengeni.ai",
+            "href": "mailto:support@opengeni.ai"
+          }
+        ]
+      },
+      {
+        "header": "Legal",
+        "items": [
+          {
+            "label": "Privacy Policy",
+            "href": "https://opengeni.ai/privacy"
+          },
+          {
+            "label": "Terms of Service",
+            "href": "https://opengeni.ai/terms"
+          }
+        ]
+      }
+    ]
   },
   "redirects": [
     {
       "source": "/guides/integrate-your-product",
       "destination": "/embed-manually"
+    },
+    {
+      "source": "/guides/coding-agents",
+      "destination": "/guides/developer-plugin"
     }
   ]
 }

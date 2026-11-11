@@ -24,17 +24,17 @@ function incidentConfig(): ScheduledTaskAgentConfig {
       requiredFirstPartyMcpTools: ["github_repositories_list"],
       requiredFirstPartyMcpPermissions: ["github:use"],
       requiredRig: null,
-      requiredVariableSetNames: ["incident-production"],
-      requiredVariableNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
+      requiredVaultNames: ["incident-production"],
+      requiredSecretNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
       dataSource: {
         kind: "prometheus",
         queryPath: "/api/v1/query_range",
         workspaceLabel: "workspace_id",
         alertSelectorLabels: ["alertname"],
         route: {
-          kind: "variable_set",
-          variableSetName: "incident-production",
-          variableNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
+          kind: "vault",
+          vaultName: "incident-production",
+          secretNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
         },
         requiredSeries: [
           {

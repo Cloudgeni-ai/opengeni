@@ -7,16 +7,11 @@ import {
   grantWorkspaceAccess,
   type DbClient,
 } from "@opengeni/db";
-import {
-  MemoryEventBus,
-  acquireSharedTestDatabase,
-  freePort,
-  runCommand,
-  startProcess,
-  testSettings,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { testSettings } from "@opengeni/testing/settings";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import postgres from "postgres";
 
@@ -216,14 +211,14 @@ describe("connected machine removal browser e2e", () => {
         subjectId,
         permissions: ["enrollments:read", "enrollments:manage"],
       });
-      const machine = await seedMachine(workspaceId, "Jrgens-MacBook-Pro-2.local", "desktop");
+      const machine = await seedMachine(workspaceId, "fixture-laptop.example.invalid", "desktop");
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/machines`);
       const card = page.locator(`[data-machine-card="${machine.sandboxId}"]`);
       await waitForMachineCard(page, machine.sandboxId);
       await card.focus();
       await page.keyboard.press("Enter");
       const remove = page.getByRole("button", {
-        name: "Remove machine Jrgens-MacBook-Pro-2.local",
+        name: "Remove machine fixture-laptop.example.invalid",
       });
       await remove.waitFor();
       await remove.focus();
@@ -236,7 +231,7 @@ describe("connected machine removal browser e2e", () => {
 
       const dialog = page.getByRole("dialog");
       await dialog.waitFor();
-      expect(await dialog.textContent()).toContain("Jrgens-MacBook-Pro-2.local");
+      expect(await dialog.textContent()).toContain("fixture-laptop.example.invalid");
       expect(await dialog.textContent()).toContain("Last seen");
       expect(await dialog.textContent()).toContain(
         "Access will be revoked immediately while the machine is offline",
@@ -272,13 +267,13 @@ describe("connected machine removal browser e2e", () => {
         subjectId,
         permissions: ["enrollments:read", "enrollments:manage"],
       });
-      const machine = await seedMachine(workspaceId, "Jrgens-MacBook-Pro-2.local", "mobile");
+      const machine = await seedMachine(workspaceId, "fixture-laptop.example.invalid", "mobile");
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/machines`);
       const card = page.locator(`[data-machine-card="${machine.sandboxId}"]`);
       await waitForMachineCard(page, machine.sandboxId);
       await card.tap();
       const remove = page.getByRole("button", {
-        name: "Remove machine Jrgens-MacBook-Pro-2.local",
+        name: "Remove machine fixture-laptop.example.invalid",
       });
       await remove.waitFor();
       expect(await remove.getAttribute("data-remove-machine")).toBe("true");
@@ -288,7 +283,7 @@ describe("connected machine removal browser e2e", () => {
       await remove.tap();
       const dialog = page.getByRole("dialog");
       await dialog.waitFor();
-      expect(await dialog.textContent()).toContain("Jrgens-MacBook-Pro-2.local");
+      expect(await dialog.textContent()).toContain("fixture-laptop.example.invalid");
       await page.screenshot({
         path: "artifacts/connected-machine-removal/mobile-confirm.png",
         fullPage: true,

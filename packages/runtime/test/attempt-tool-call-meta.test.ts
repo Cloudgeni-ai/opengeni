@@ -3,7 +3,7 @@ import { RunContext } from "@openai/agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { FIRST_PARTY_MCP_CALLER_META_KEY } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { attemptToolCallMeta, buildOpenGeniAgent, prepareAgentTools } from "../src/index";
 
 const operationId = "8d4c7c1e-0b7f-4a55-9d0f-3f2a1c9b6e10";

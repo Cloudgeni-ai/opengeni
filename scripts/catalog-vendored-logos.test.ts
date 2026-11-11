@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CURATED_CATALOG, curatedCatalogEntriesByMcpUrl } from "./catalog-curation";
+import {
+  CURATED_CATALOG,
+  catalogIdentityEntriesByMcpUrl,
+  curatedCatalogEntriesByMcpUrl,
+} from "./catalog-curation";
 import {
   VENDORED_LOGO_DIRECTORY,
   VENDORED_LOGO_MANIFEST,
@@ -487,7 +491,7 @@ describe("vendored logo manifest document", () => {
     }
   });
 
-  test("the committed manifest covers exactly the curated rows that permit a logo, byte for byte", async () => {
+  test("the committed manifest covers exactly the curated and identity rows that permit a logo, byte for byte", async () => {
     const normalized = normalizeCatalogSnapshot(await readSnapshotFile(snapshotPath));
     const { fetchable, suppressed } = curatedLogoCandidates(normalized.rows);
     const committed = vendoredLogosByCapabilityId(VENDORED_LOGO_MANIFEST);
@@ -502,18 +506,23 @@ describe("vendored logo manifest document", () => {
       const asset = await readVendoredLogoAsset(entry!, VENDORED_LOGO_DIRECTORY);
       expect(asset.ok, `${entry!.file}: ${asset.ok ? "" : asset.reason}`).toBe(true);
     }
-    // Gmail and Mobbin publish no reusable logo licence; the overlay keeps the
-    // monogram and no asset may be vendored for them.
+    // Google publishes no reusable Gmail, Drive or Calendar MCP logo asset, so
+    // nothing is vendored for them; @opengeni/react bundles their product marks.
     for (const { capabilityId } of suppressed) {
       expect(committed.has(capabilityId)).toBe(false);
     }
     expect(suppressed.map((entry) => entry.domain).sort()).toEqual([
+      "calendarmcp.googleapis.com",
+      "drivemcp.googleapis.com",
       "gmailmcp.googleapis.com",
-      "mobbin.com",
     ]);
-    // Every vendored row is curated: the long tail is never vendored.
+    // Every vendored row is curated or a reviewed identity: the long tail is never vendored.
     for (const entry of VENDORED_LOGO_MANIFEST.entries) {
-      expect(curatedCatalogEntriesByMcpUrl.has(entry.mcpUrl), entry.capabilityId).toBe(true);
+      expect(
+        curatedCatalogEntriesByMcpUrl.has(entry.mcpUrl) ||
+          catalogIdentityEntriesByMcpUrl.has(entry.mcpUrl),
+        entry.capabilityId,
+      ).toBe(true);
     }
     // No orphaned files next to the manifest.
     const files = (await readdir(VENDORED_LOGO_DIRECTORY)).filter(
@@ -563,14 +572,16 @@ describe("vendor-catalog-logos script", () => {
 
     const normalized = normalizeCatalogSnapshot(await snapshot());
     const { fetchable } = curatedLogoCandidates(normalized.rows);
+    const sourceById = new Map(fetchable.map((c) => [c.capabilityId, c.sourceUrl]));
     expect(fetched.sort()).toEqual(fetchable.map((c) => c.sourceUrl).sort());
     expect(result.failed.map((f) => [f.domain, f.reason]).sort()).toEqual([
       ["linear.app", "image_too_large"],
       ["slack.com", "invalid_content_type:text/html"],
     ]);
     expect(result.suppressed.map((s) => s.domain).sort()).toEqual([
+      "calendarmcp.googleapis.com",
+      "drivemcp.googleapis.com",
       "gmailmcp.googleapis.com",
-      "mobbin.com",
     ]);
     expect(result.manifest.entries).toHaveLength(fetchable.length - 2);
     expect(result.totalBytes).toBe(good.byteLength * (fetchable.length - 2));
@@ -584,7 +595,7 @@ describe("vendor-catalog-logos script", () => {
       expect(entry.sha256).toBe(sha256(good));
       expect(entry.contentType).toBe("image/png");
       expect(entry.fetchedAt).toBe("2026-08-17T10:00:00.000Z");
-      expect(entry.sourceUrl).toBe(`https://integrations.sh/logo/${entry.domain}`);
+      expect(entry.sourceUrl).toBe(sourceById.get(entry.capabilityId)!);
       expect(entry.file.endsWith(".png")).toBe(true);
       const asset = await readVendoredLogoAsset(entry, directory);
       expect(asset.ok).toBe(true);

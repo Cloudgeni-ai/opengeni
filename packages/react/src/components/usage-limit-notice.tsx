@@ -11,6 +11,7 @@ import {
   type AllowanceLabels,
 } from "../usage/allowance-copy";
 import { summarizeUsage, usagePercentLabel, type UsageSummary } from "../usage/summary";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type UsageLimitNoticeLabels = AllowanceLabels & {
   /** "You've used 85% of your usage limit." */
@@ -22,13 +23,15 @@ export type UsageLimitNoticeLabels = AllowanceLabels & {
   dismiss: string;
 };
 
-export const DEFAULT_USAGE_LIMIT_NOTICE_LABELS: UsageLimitNoticeLabels = {
-  ...allowanceLabels(),
-  memberWarning: (percent) => `You've used ${percent}% of your usage limit.`,
-  workspaceWarning: (percent) => `This workspace has used ${percent}% of its usage budget.`,
-  memberExhausted: "You've reached your usage limit.",
-  workspaceExhausted: "This workspace has reached its usage limit.",
-  dismiss: "Dismiss",
+export const DEFAULT_USAGE_LIMIT_NOTICE_LABELS = (t: OpenGeniText): UsageLimitNoticeLabels => {
+  return {
+    ...allowanceLabels(t),
+    memberWarning: (percent) => t("usageLimitNotice.youVeUsedPercentOf", { percent }),
+    workspaceWarning: (percent) => t("usageLimitNotice.thisWorkspaceHasUsedPercent", { percent }),
+    memberExhausted: t("usageLimitNotice.youVeReachedYourUsage"),
+    workspaceExhausted: t("usageLimitNotice.thisWorkspaceHasReachedIts"),
+    dismiss: t("usageLimitNotice.dismiss"),
+  };
 };
 
 type NoticeBaseProps = {
@@ -112,7 +115,8 @@ export function UsageLimitNoticeView({
   dismissStorageKey,
   className,
 }: NoticeBaseProps & { summary: UsageSummary | null }) {
-  const labels = { ...DEFAULT_USAGE_LIMIT_NOTICE_LABELS, ...overrides };
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_USAGE_LIMIT_NOTICE_LABELS(t), ...overrides };
   const binding = summary?.binding ?? null;
   const state = summary?.state;
   const key =
@@ -158,7 +162,7 @@ export function UsageLimitNoticeView({
         {exhausted ? <>{workspace ? labels.workspaceRemedy : labels.memberRemedy} </> : null}
         <span
           className="whitespace-nowrap"
-          title={binding.resetsAt ? formatAllowanceInstant(binding.resetsAt) : undefined}
+          title={binding.resetsAt ? formatAllowanceInstant(t, binding.resetsAt) : undefined}
         >
           {reset}
         </span>

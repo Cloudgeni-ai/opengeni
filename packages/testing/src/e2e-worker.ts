@@ -1,15 +1,16 @@
-import { getSettings } from "@opengeni/config";
-import { createDb } from "@opengeni/db";
+import { dbSearchPath, getSettings } from "@opengeni/config";
+import { createDb, databasePasswordFileOptions, databasePoolOptions } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import {
   createOpenGeniWorker,
   createWorkerWorkflowSignaler,
-  registerSessionWorkflowWakeDispatcherSchedule,
+  startInternalMaintenanceCadences,
 } from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import {
+  assistantMessage,
   functionCall,
   latestExecCommandState,
   ScriptedModel,
@@ -21,7 +22,15 @@ const role = process.env.OPENGENI_WORKER_ROLE;
 if (role !== "control" && role !== "turn") {
   throw new Error("OPENGENI_WORKER_ROLE must be 'control' or 'turn' for the E2E worker");
 }
-const dbClient = createDb(settings.databaseUrl);
+// Same database scoping as the production worker entry point: a deployment
+// with a dedicated schema (OPENGENI_DB_SCHEMA) is reached through it.
+const searchPath = dbSearchPath(settings);
+const dbClient = createDb(settings.databaseUrl, {
+  ...(searchPath ? { searchPath } : {}),
+  rlsStrategy: settings.rlsStrategy,
+  ...databasePoolOptions(settings),
+  ...databasePasswordFileOptions(settings),
+});
 const bus = await createNatsEventBus(settings.natsUrl);
 const model = scriptedModelForScenario(process.env.OPENGENI_TEST_SCENARIO ?? "default");
 const runtime = createProductionAgentRuntime({ model });
@@ -29,11 +38,21 @@ const observability = createObservability(settings, { component: `e2e-worker-${r
 const workflowSignaler = await createWorkerWorkflowSignaler(settings, dbClient.db);
 // The browser acceptance must include the same durable wake-repair owner as a
 // production control worker. Starting only the raw Temporal pollers makes a
-// committed Pause/Resume look successful while its outbox trigger targets a
-// schedule that does not exist, stranding the resumed queue forever.
+// committed Pause/Resume look successful while a lost immediate trigger is
+// never repaired, stranding the resumed queue forever.
+// OPENGENI_TEST_SANDBOX_REAPER=1 adds the sandbox reaper, the owner that
+// settles a background command still running when its turn ended.
 const wakeSchedule =
   role === "control"
-    ? await registerSessionWorkflowWakeDispatcherSchedule(settings, observability)
+    ? await startInternalMaintenanceCadences({
+        settings,
+        observability,
+        db: dbClient.db,
+        jobs:
+          process.env.OPENGENI_TEST_SANDBOX_REAPER === "1"
+            ? ["session-workflow-wake-dispatcher", "sandbox-lease-reaper"]
+            : ["session-workflow-wake-dispatcher"],
+      })
     : null;
 const { worker, connection } = await createOpenGeniWorker({
   role,
@@ -50,11 +69,12 @@ const { worker, connection } = await createOpenGeniWorker({
     signalCodexCapacityWorkflow: workflowSignaler.signalCodexCapacityWorkflow,
     startSandboxReaperWorkflow: workflowSignaler.startSandboxReaperWorkflow,
     startVideoGenerationWorkflow: workflowSignaler.startVideoGenerationWorkflow,
+    startRecordingWorkflow: workflowSignaler.startRecordingWorkflow,
   },
 });
 
 console.log(
-  `OpenGeni ${role} test worker listening on ${settings.temporalTaskQueue} ` +
+  `Opengeni ${role} test worker listening on ${settings.temporalTaskQueue} ` +
     `(ownership=${settings.sandboxOwnershipEnabled} capture=${settings.workspaceCaptureEnabled} storage=${Boolean(settings.objectStorageEndpoint)})`,
 );
 try {
@@ -71,6 +91,7 @@ try {
 
 function scriptedModelForScenario(scenario: string): Model {
   if (scenario === "child-wait-boundary") return new ChildWaitBoundaryModel();
+  if (scenario === "background-command-wait") return new BackgroundCommandWaitModel();
   if (scenario === "held-wait-person-turn") return new HeldWaitPersonTurnModel();
   if (scenario === "held-wait-consumed-by-person-turn") {
     return new HeldWaitConsumedByPersonTurnModel();
@@ -78,8 +99,14 @@ function scriptedModelForScenario(scenario: string): Model {
   if (scenario === "sandbox") {
     return new SandboxScriptedModel();
   }
+  if (scenario === "directive") {
+    return new DirectiveScriptedModel();
+  }
   if (scenario === "browser-command-control") {
     return new BrowserCommandControlModel();
+  }
+  if (scenario === "session-usage-limit-restart") {
+    return new SessionUsageLimitRestartModel(process.env.OPENGENI_TEST_USAGE_LIMIT_PHASE);
   }
   if (scenario === "slow") {
     return new ScriptedModel([
@@ -106,6 +133,39 @@ function scriptedModelForScenario(scenario: string): Model {
       outputText: "hello from e2e",
     },
   ]);
+}
+
+/**
+ * Task usage-limit crash/wake fixture. Each worker generation is a separate
+ * process, so the phase comes from its environment: `hold` streams the main
+ * turn until the test kills the worker (no usage is ever reported for it), and
+ * `answer` replies with a priced 200-token response. Non-streamed auxiliary
+ * calls (such as titles) cost one token so they never hold or dominate.
+ */
+class SessionUsageLimitRestartModel implements Model {
+  constructor(private readonly phase: string | undefined) {}
+
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return await new ScriptedModel([
+      { inputTokens: 1, outputText: "Usage limit fixture" },
+    ]).getResponse(request);
+  }
+
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    const step: ScriptedModelStep =
+      this.phase === "hold"
+        ? {
+            chunks: Array.from({ length: 6_000 }, () => "working "),
+            outputText: "never finished",
+            delayMs: 100,
+          }
+        : {
+            inputTokens: 200,
+            chunks: ["usage ", "limit ", "answer"],
+            outputText: "usage limit answer",
+          };
+    yield* new ScriptedModel([step]).getStreamedResponse(request);
+  }
 }
 
 class BrowserCommandControlModel implements Model {
@@ -244,7 +304,7 @@ function workspaceCaptureShellStep(): ScriptedModelStep {
             "mkdir -p api web",
             "git -C api init -q",
             "git -C api config user.email e2e@opengeni.dev",
-            "git -C api config user.name 'OpenGeni E2E'",
+            "git -C api config user.name 'Opengeni E2E'",
             "printf 'base api\\n' > api/app.txt",
             "git -C api add app.txt",
             "git -C api commit -qm base",
@@ -252,7 +312,7 @@ function workspaceCaptureShellStep(): ScriptedModelStep {
             "printf 'untracked api\\n' > api/notes.txt",
             "git -C web init -q",
             "git -C web config user.email e2e@opengeni.dev",
-            "git -C web config user.name 'OpenGeni E2E'",
+            "git -C web config user.name 'Opengeni E2E'",
             "printf 'rename me\\n' > web/old.txt",
             "printf 'delete me\\n' > web/deleted.txt",
             "git -C web add -A",
@@ -366,6 +426,67 @@ class ChildWaitBoundaryModel implements Model {
 }
 
 /**
+ * Wake-latency fixture. The first message names the case:
+ * `BGWAIT mode=command sleep=<s> timeout=<s>` starts `sleep` as a background
+ * command, then waits; `BGWAIT mode=deadline timeout=<s>` only waits. The turn
+ * after the wait reports what woke it, so the test can time the wake.
+ */
+class BackgroundCommandWaitModel implements Model {
+  private step(request: ModelRequest): ScriptedModelStep {
+    const body = JSON.stringify(request.input ?? request);
+    const spec = /BGWAIT mode=(command|deadline)(?: sleep=(\d+))? timeout=(\d+)/u.exec(body);
+    if (!spec) return { outputText: "BGWAIT title" };
+    const [, mode, sleepSeconds, timeoutSeconds] = spec;
+    const waitName = request.tools.find((tool) => tool.name?.endsWith("wait_for_input"))?.name;
+    // Auxiliary calls such as the session title carry no agent tools.
+    if (!waitName) return { outputText: "Background wait fixture" };
+    const items = Array.isArray(request.input) ? (request.input as unknown[]) : [];
+    const called = (name: string) =>
+      items.some(
+        (item) =>
+          typeof item === "object" &&
+          item !== null &&
+          (item as { type?: unknown }).type === "function_call" &&
+          (item as { name?: unknown }).name === name,
+      );
+    if (called(waitName)) {
+      const woke = body.includes("session_wait_timeout") ? "timeout" : "input";
+      return { outputText: `BGWAIT DONE ${woke}` };
+    }
+    if (mode === "command" && !called("exec_command")) {
+      return {
+        output: [
+          functionCall("exec_command", {
+            cmd: `sleep ${sleepSeconds ?? "5"}; echo bgwait-finished`,
+            yield_time_ms: 250,
+            // Deliberately backgrounded: without it, a command this short
+            // finishes inside the exec_command call's finish floor.
+            background: true,
+            max_output_tokens: 200,
+          }),
+        ],
+      };
+    }
+    return {
+      output: [
+        // A turn that answers a person must reply visibly before it waits.
+        assistantMessage("Waiting for the fixture."),
+        functionCall(waitName, {
+          reason: "Waiting for the background command fixture.",
+          timeoutSeconds: Number(timeoutSeconds),
+        }),
+      ],
+    };
+  }
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return new ScriptedModel([this.step(request)]).getResponse(request);
+  }
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([this.step(request)]).getStreamedResponse(request);
+  }
+}
+
+/**
  * A goalless root spawns a child and waits for it. A person's question was
  * queued before the spawn, so it runs right after the wait and is answered
  * without waiting again. The child finishes only after its own 30 s wait
@@ -393,6 +514,8 @@ class HeldWaitPersonTurnModel implements Model {
       if (!body.includes("opengeni__wait_for_input"))
         return {
           output: [
+            // A person's turn must say something visible before it waits.
+            assistantMessage("HELD_WAIT_STARTED: a child is counting; I'll wait for it."),
             functionCall(name("wait_for_input"), {
               reason: "Waiting for the child's count",
               timeoutSeconds: 600,
@@ -455,6 +578,8 @@ class HeldWaitConsumedByPersonTurnModel implements Model {
         }
         return {
           output: [
+            // A person's turn must say something visible before it waits.
+            assistantMessage("CONSUMED_WAIT_STARTED: a child is counting; I'll wait for it."),
             functionCall(name("wait_for_input"), {
               reason: "Waiting for the child's count",
               timeoutSeconds: 45,
@@ -476,4 +601,84 @@ class HeldWaitConsumedByPersonTurnModel implements Model {
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     yield* new ScriptedModel([await this.step(request)]).getStreamedResponse(request);
   }
+}
+
+/**
+ * Generic scripted driver for the secrets e2e harness (scripts/verify/secrets-e2e).
+ * The latest user message carries `E2E-DIRECTIVE {"steps":[{"tool":"exec_command",
+ * "args":{...}}]} E2E-END`. The model calls each tool in order and then answers
+ * `E2E-REPORT {"tools":[...],"outputs":[...]}` with the tool names it was offered
+ * and every step's output, so the harness can assert on both without a real model.
+ */
+class DirectiveScriptedModel implements Model {
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return await new ScriptedModel([directiveStepForRequest(request)]).getResponse(request);
+  }
+
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([directiveStepForRequest(request)]).getStreamedResponse(request);
+  }
+}
+
+type DirectiveStep = { tool: string; args: unknown };
+
+function directiveItemText(item: unknown): string {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+  const content = (item as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        part && typeof part === "object" ? String((part as { text?: unknown }).text ?? "") : "",
+      )
+      .join("\n");
+  }
+  return "";
+}
+
+function directiveOutputText(output: unknown): string {
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) return output.map(directiveOutputText).join("\n");
+  if (output && typeof output === "object") {
+    const text = (output as { text?: unknown }).text;
+    if (typeof text === "string") return text;
+  }
+  return JSON.stringify(output ?? null);
+}
+
+function directiveStepForRequest(request: ModelRequest): ScriptedModelStep {
+  const items: unknown[] = Array.isArray(request.input) ? request.input : [request.input];
+  let start = -1;
+  let steps: DirectiveStep[] = [];
+  for (let index = items.length - 1; index >= 0 && start < 0; index -= 1) {
+    const item = items[index] as { role?: unknown };
+    if (item && typeof item === "object" && item.role !== "user") continue;
+    const match = /E2E-DIRECTIVE\s*([\s\S]*?)\s*E2E-END/u.exec(directiveItemText(item));
+    if (!match) continue;
+    start = index;
+    steps = (JSON.parse(match[1]!) as { steps: DirectiveStep[] }).steps;
+  }
+  if (start < 0)
+    return { outputText: 'E2E-REPORT {"error":"no E2E-DIRECTIVE in the latest user message"}' };
+  const after = items.slice(start + 1) as { type?: string; callId?: string; output?: unknown }[];
+  const issued = after.filter(
+    (item) => item.type === "function_call" && item.callId?.startsWith("e2e-step-"),
+  );
+  if (issued.length < steps.length) {
+    const step = steps[issued.length]!;
+    return {
+      output: [
+        functionCall(step.tool, step.args, `e2e-step-${issued.length}-${crypto.randomUUID()}`),
+      ],
+    };
+  }
+  const outputs = after
+    .filter((item) => item.type === "function_call_result" && item.callId?.startsWith("e2e-step-"))
+    .map((item) => directiveOutputText(item.output).slice(0, 8_000));
+  const tools = (request.tools ?? []).map(
+    (tool) => (tool as { name?: string; type?: string }).name ?? tool.type,
+  );
+  const report = `E2E-REPORT ${JSON.stringify({ tools, outputs })}`;
+  return { outputText: report };
 }

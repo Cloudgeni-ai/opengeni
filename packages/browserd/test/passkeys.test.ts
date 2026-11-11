@@ -1,0 +1,497 @@
+import { expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import type { BrowserPasskeyCredential, BrowserPasskeySyncRequest } from "@opengeni/contracts";
+import {
+  BrowserPasskeyManager,
+  PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT,
+  VIRTUAL_AUTHENTICATOR_OPTIONS,
+} from "../src/passkeys";
+
+type Call = { method: string; params: Record<string, unknown>; sessionId: string | undefined };
+type StoredCredential = { credentialId: string; signCount: number; privateKey: string };
+
+/** Minimal CDP peer: one virtual authenticator per session, credentials keyed by id. */
+class FakeCdp {
+  readonly calls: Call[] = [];
+  readonly authenticators = new Map<string, Map<string, StoredCredential>>();
+  private readonly listeners = new Map<
+    string,
+    Set<(event: { params: Record<string, unknown> }) => void>
+  >();
+  url = "https://login.example.test/account/passkeys";
+
+  async send<T>(
+    method: string,
+    params: Readonly<Record<string, unknown>> = {},
+    options: { sessionId?: string } = {},
+  ): Promise<T> {
+    const sessionId = options.sessionId;
+    this.calls.push({ method, params: { ...params }, sessionId });
+    const store = sessionId ? this.authenticators.get(sessionId) : undefined;
+    switch (method) {
+      case "Page.enable":
+        return {} as T;
+      case "Page.addScriptToEvaluateOnNewDocument":
+        if (sessionId === "no-page") throw new Error("Page domain unavailable");
+        return { identifier: "1" } as T;
+      case "WebAuthn.enable":
+        return {} as T;
+      case "WebAuthn.addVirtualAuthenticator":
+        if (sessionId === "broken") throw new Error("WebAuthn domain unavailable");
+        this.authenticators.set(sessionId!, new Map());
+        return { authenticatorId: `authenticator-${sessionId}` } as T;
+      case "WebAuthn.addCredential": {
+        const credential = params.credential as StoredCredential;
+        store!.set(credential.credentialId, { ...credential });
+        return {} as T;
+      }
+      case "WebAuthn.removeCredential":
+        store!.delete(params.credentialId as string);
+        return {} as T;
+      case "Target.getTargetInfo":
+        return { targetInfo: { url: this.url } } as T;
+      default:
+        throw new Error(`unexpected ${method}`);
+    }
+  }
+
+  on(
+    method: string,
+    listener: (event: { params: Record<string, unknown> }) => void,
+    sessionId?: string,
+  ): () => void {
+    const key = `${sessionId ?? ""}\0${method}`;
+    const set = this.listeners.get(key) ?? new Set();
+    set.add(listener);
+    this.listeners.set(key, set);
+    return () => set.delete(listener);
+  }
+
+  emit(sessionId: string, method: string, params: Record<string, unknown>): void {
+    for (const listener of this.listeners.get(`${sessionId}\0${method}`) ?? []) {
+      listener({ params });
+    }
+  }
+
+  installed(sessionId: string): Record<string, number> {
+    return Object.fromEntries(
+      [...(this.authenticators.get(sessionId) ?? new Map<string, StoredCredential>())].map(
+        ([id, credential]) => [id, credential.signCount],
+      ),
+    );
+  }
+}
+
+const binding = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+
+function setup() {
+  const cdp = new FakeCdp();
+  const manager = new BrowserPasskeyManager({
+    ...binding,
+    now: () => new Date("2026-10-12T12:00:00.000Z"),
+  });
+  const sync = (
+    credentials: BrowserPasskeyCredential[] | null,
+    acknowledgeEventIds: string[] = [],
+  ) =>
+    manager.sync({
+      protocolVersion: 1,
+      ...binding,
+      credentials,
+      acknowledgeEventIds,
+    } satisfies BrowserPasskeySyncRequest);
+  return { cdp, manager, sync };
+}
+
+// "credential-1" bytes in standard (CDP) and url-safe (vault) base64 spellings.
+const STANDARD_ID = "Y3JlZC0x+/8=";
+const URL_ID = "Y3JlZC0x-_8";
+
+function vaultCredential(
+  overrides: Partial<BrowserPasskeyCredential> = {},
+): BrowserPasskeyCredential {
+  return {
+    itemId: randomUUID(),
+    rpId: "login.example.test",
+    credentialId: URL_ID,
+    userHandle: "dXNlci0x",
+    userName: "alice",
+    userDisplayName: "Alice",
+    privateKey: "cHJpdmF0ZS1rZXktMQ",
+    signCount: 4,
+    ...overrides,
+  };
+}
+
+test("installs one ctap2.1 internal authenticator per tab holding the desired set", async () => {
+  const { cdp, manager, sync } = setup();
+  expect(await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" })).toBe(true);
+  expect(await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a2" })).toBe(false);
+  expect(await manager.attachTarget(cdp, { targetId: "tab-x", sessionId: "broken" })).toBe(false);
+  const added = cdp.calls.find((call) => call.method === "WebAuthn.addVirtualAuthenticator");
+  expect(added?.params).toEqual({ options: VIRTUAL_AUTHENTICATOR_OPTIONS });
+  const credential = vaultCredential();
+  expect(await sync([credential])).toEqual({ ...binding, authenticators: 1, events: [] });
+  // Vault base64url becomes CDP's standard padded base64.
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 4 });
+  const install = cdp.calls.find((call) => call.method === "WebAuthn.addCredential");
+  expect(install?.params.credential).toEqual({
+    credentialId: STANDARD_ID,
+    isResidentCredential: true,
+    rpId: "login.example.test",
+    privateKey: "cHJpdmF0ZS1rZXktMQ==",
+    userHandle: "dXNlci0x",
+    signCount: 4,
+    userName: "alice",
+    userDisplayName: "Alice",
+  });
+  // A tab opened later (popup, new tab) receives every desired credential.
+  await manager.attachTarget(cdp, { targetId: "tab-b", sessionId: "b" });
+  expect(cdp.installed("b")).toEqual({ [STANDARD_ID]: 4 });
+  expect((await sync(null)).authenticators).toBe(2);
+  manager.detachSession("b");
+  expect((await sync(null)).authenticators).toBe(1);
+  manager.detachConnection(cdp);
+  expect((await sync(null)).authenticators).toBe(0);
+});
+
+test.each([
+  { backupEligibility: false, backupState: false },
+  { backupEligibility: true, backupState: false },
+  { backupEligibility: true, backupState: true },
+])("preserves per-credential backup flags on import and counter propagation: %j", async (flags) => {
+  const { cdp, manager, sync } = setup();
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  const credential = vaultCredential(flags);
+  await sync([credential]);
+  await manager.attachTarget(cdp, { targetId: "tab-b", sessionId: "b" });
+  cdp.emit("a", "WebAuthn.credentialAsserted", {
+    authenticatorId: "authenticator-a",
+    credential: { credentialId: STANDARD_ID, rpId: credential.rpId, signCount: 5 },
+  });
+  await sync(null);
+  const installs = cdp.calls.filter((call) => call.method === "WebAuthn.addCredential");
+  expect(installs).toHaveLength(3);
+  for (const install of installs) expect(install.params.credential).toMatchObject(flags);
+});
+
+test("refreshes backup state even when the signature counter has not changed", async () => {
+  const { cdp, manager, sync } = setup();
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  const credential = vaultCredential({ backupEligibility: true, backupState: false });
+  await sync([credential]);
+  cdp.calls.length = 0;
+  await sync([{ ...credential, backupState: true }]);
+  expect(cdp.calls.map((call) => call.method)).toEqual([
+    "WebAuthn.removeCredential",
+    "WebAuthn.addCredential",
+  ]);
+  expect(cdp.calls[1]!.params.credential).toMatchObject({
+    backupEligibility: true,
+    backupState: true,
+    signCount: 4,
+  });
+});
+
+test("withdraws passkey autofill in a tab before its authenticator exists, or gives it none", async () => {
+  const { cdp, manager, sync } = setup();
+  expect(await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" })).toBe(true);
+  // Page script must never see autofill the authenticator would answer unasked,
+  // so the withdrawal is in place before the authenticator is added.
+  expect(cdp.calls.map((call) => call.method)).toEqual([
+    "Page.enable",
+    "Page.addScriptToEvaluateOnNewDocument",
+    "WebAuthn.enable",
+    "WebAuthn.addVirtualAuthenticator",
+  ]);
+  expect(cdp.calls[1]!.params).toEqual({
+    source: PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT,
+    runImmediately: true,
+  });
+  // A tab that cannot take the withdrawal gets no authenticator at all.
+  expect(await manager.attachTarget(cdp, { targetId: "tab-x", sessionId: "no-page" })).toBe(false);
+  expect(cdp.authenticators.has("no-page")).toBe(false);
+  expect((await sync([vaultCredential()])).authenticators).toBe(1);
+  // A cross-origin frame shares its tab's authenticator and gets the same
+  // withdrawal on its own session; one that closed meanwhile is no failure.
+  await manager.withdrawAutofill(cdp, "frame-1");
+  expect(
+    cdp.calls.filter((call) => call.sessionId === "frame-1").map((call) => call.method),
+  ).toEqual(["Page.enable", "Page.addScriptToEvaluateOnNewDocument"]);
+  await manager.withdrawAutofill(cdp, "no-page");
+});
+
+test("the withdrawal reports no passkey autofill and leaves conditional requests unanswered until aborted", async () => {
+  const answered: string[] = [];
+  class Container {
+    get(options: unknown) {
+      answered.push(`get:${(options as { mediation?: string }).mediation ?? "optional"}`);
+      return Promise.resolve("credential");
+    }
+    create(options: unknown) {
+      answered.push(`create:${(options as { mediation?: string }).mediation ?? "optional"}`);
+      return Promise.resolve("credential");
+    }
+  }
+  const Credential = {
+    isConditionalMediationAvailable: async () => true,
+    getClientCapabilities: async () => ({
+      conditionalGet: true,
+      conditionalCreate: true,
+      hybridTransport: true,
+    }),
+  };
+  const scope = { CredentialsContainer: Container, PublicKeyCredential: Credential };
+  new Function("globalThis", PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT)(scope);
+  const credentials = new Container();
+  expect(await Credential.isConditionalMediationAvailable()).toBe(false);
+  expect(await Credential.getClientCapabilities()).toEqual({
+    conditionalGet: false,
+    conditionalCreate: false,
+    hybridTransport: true,
+  });
+  // Requests made in the open still reach the authenticator.
+  expect(await credentials.get({ publicKey: {} })).toBe("credential");
+  expect(await credentials.create({ mediation: "required", publicKey: {} })).toBe("credential");
+  // Conditional ones never do; they settle only when the page aborts them.
+  const controller = new AbortController();
+  let settled = "pending";
+  const pending = credentials.get({
+    mediation: "conditional",
+    publicKey: {},
+    signal: controller.signal,
+  });
+  pending.then(
+    () => (settled = "resolved"),
+    (error: Error) => (settled = `rejected:${error.name}`),
+  );
+  void credentials.create({ mediation: "conditional", publicKey: {} });
+  await Bun.sleep(20);
+  expect(settled).toBe("pending");
+  controller.abort();
+  await Bun.sleep(0);
+  expect(settled).toBe("rejected:AbortError");
+  expect(answered).toEqual(["get:optional", "create:required"]);
+});
+
+test("reports a page registration, shares it with every tab and keeps it until acknowledged", async () => {
+  const { cdp, manager, sync } = setup();
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  await manager.attachTarget(cdp, { targetId: "tab-b", sessionId: "b" });
+  cdp.authenticators.get("a")!.set("bmV3LWNyZWQ=", {
+    credentialId: "bmV3LWNyZWQ=",
+    signCount: 0,
+    privateKey: "bmV3LWtleQ==",
+  });
+  cdp.emit("a", "WebAuthn.credentialAdded", {
+    authenticatorId: "authenticator-a",
+    credential: {
+      credentialId: "bmV3LWNyZWQ=",
+      isResidentCredential: true,
+      rpId: "login.example.test",
+      privateKey: "bmV3LWtleQ==",
+      userHandle: "dXNlci0y",
+      userName: "bob",
+      signCount: 0,
+    },
+  });
+  const first = await sync(null);
+  expect(first.events).toEqual([
+    {
+      type: "registered",
+      eventId: expect.any(String),
+      occurredAt: "2026-10-12T12:00:00.000Z",
+      targetId: "tab-a",
+      origin: "https://login.example.test",
+      credential: {
+        rpId: "login.example.test",
+        credentialId: "bmV3LWNyZWQ=",
+        userHandle: "dXNlci0y",
+        userName: "bob",
+        userDisplayName: null,
+        privateKey: "bmV3LWtleQ==",
+        signCount: 0,
+      },
+    },
+  ]);
+  expect(cdp.installed("b")).toEqual({ "bmV3LWNyZWQ=": 0 });
+  // Our own installs echo as additions; they are never new registrations.
+  cdp.emit("b", "WebAuthn.credentialAdded", {
+    authenticatorId: "authenticator-b",
+    credential: {
+      credentialId: "bmV3LWNyZWQ=",
+      rpId: "login.example.test",
+      privateKey: "x",
+      signCount: 0,
+    },
+  });
+  // A replacement that does not (yet) include it keeps an unacknowledged registration.
+  const other = vaultCredential();
+  expect((await sync([other])).events).toHaveLength(1);
+  expect(cdp.installed("b")).toEqual({ "bmV3LWNyZWQ=": 0, [STANDARD_ID]: 4 });
+  // Acknowledged and saved: the vault now supplies it with its item id.
+  const saved = vaultCredential({
+    credentialId: "bmV3LWNyZWQ",
+    userHandle: "dXNlci0y",
+    privateKey: "bmV3LWtleQ",
+    signCount: 0,
+  });
+  expect((await sync([other, saved], [first.events[0]!.eventId])).events).toEqual([]);
+  expect(cdp.installed("a")).toEqual({ "bmV3LWNyZWQ=": 0, [STANDARD_ID]: 4 });
+  // Acknowledged, then no longer desired: removed from every tab.
+  await sync([other]);
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 4 });
+  expect(cdp.installed("b")).toEqual({ [STANDARD_ID]: 4 });
+});
+
+test("propagates the newest sign count to every tab and coalesces assertion events", async () => {
+  const { cdp, manager, sync } = setup();
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  await manager.attachTarget(cdp, { targetId: "tab-b", sessionId: "b" });
+  const credential = vaultCredential({ signCount: 4 });
+  await sync([credential]);
+  const assert = (sessionId: string, signCount: number) => {
+    // The authenticator bumps its own counter, then reports it.
+    cdp.authenticators.get(sessionId)!.get(STANDARD_ID)!.signCount = signCount;
+    cdp.emit(sessionId, "WebAuthn.credentialAsserted", {
+      authenticatorId: `authenticator-${sessionId}`,
+      credential: { credentialId: STANDARD_ID, rpId: "login.example.test", signCount },
+    });
+  };
+  cdp.calls.length = 0;
+  assert("a", 5);
+  let pending = (await sync(null)).events;
+  expect(pending).toEqual([
+    {
+      type: "asserted",
+      eventId: expect.any(String),
+      occurredAt: "2026-10-12T12:00:00.000Z",
+      targetId: "tab-a",
+      rpId: "login.example.test",
+      credentialId: URL_ID,
+      itemId: credential.itemId,
+      signCount: 5,
+    },
+  ]);
+  // The other tab's copy is replaced with the higher counter.
+  expect(cdp.calls.map((call) => `${call.sessionId}:${call.method}`)).toEqual([
+    "b:WebAuthn.removeCredential",
+    "b:WebAuthn.addCredential",
+  ]);
+  expect(cdp.installed("b")).toEqual({ [STANDARD_ID]: 5 });
+  assert("b", 6);
+  pending = (await sync(null)).events;
+  expect(pending).toHaveLength(1);
+  expect(pending[0]).toMatchObject({ type: "asserted", targetId: "tab-b", signCount: 6 });
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 6 });
+  // A stale vault counter never lowers what the tabs hold.
+  expect((await sync([{ ...credential, signCount: 2 }], [pending[0]!.eventId])).events).toEqual([]);
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 6 });
+  expect(cdp.installed("b")).toEqual({ [STANDARD_ID]: 6 });
+  // A higher counter from another session is installed everywhere.
+  await sync([{ ...credential, signCount: 9 }]);
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 9 });
+  expect(cdp.installed("b")).toEqual({ [STANDARD_ID]: 9 });
+});
+
+test("rejects a sync for another controller binding", async () => {
+  const { manager } = setup();
+  await expect(
+    manager.sync({
+      protocolVersion: 1,
+      browserSessionId: binding.browserSessionId,
+      controllerGeneration: "controller-2",
+      credentials: null,
+      acknowledgeEventIds: [],
+    }),
+  ).rejects.toThrow("passkey sync targets another browser controller binding");
+});
+
+test("a set loaded for another owner never carries the previous owner's passkeys or registrations", async () => {
+  const { cdp, manager } = setup();
+  const alice = randomUUID();
+  const bob = randomUUID();
+  const sync = (
+    credentials: BrowserPasskeyCredential[] | null,
+    owner?: string | null,
+    acknowledgeEventIds: string[] = [],
+  ) =>
+    manager.sync({
+      protocolVersion: 1,
+      ...binding,
+      credentials,
+      acknowledgeEventIds,
+      ...(owner === undefined ? {} : { owner }),
+    } satisfies BrowserPasskeySyncRequest);
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  const credential = vaultCredential({ signCount: 4 });
+  expect(await sync([credential], alice)).toEqual({
+    ...binding,
+    authenticators: 1,
+    events: [],
+    supportsOwners: true,
+  });
+  // Alice's set asserts and registers a passkey before anyone syncs again.
+  cdp.authenticators.get("a")!.get(STANDARD_ID)!.signCount = 7;
+  cdp.emit("a", "WebAuthn.credentialAsserted", {
+    authenticatorId: "authenticator-a",
+    credential: { credentialId: STANDARD_ID, rpId: "login.example.test", signCount: 7 },
+  });
+  cdp.authenticators.get("a")!.set("bmV3LWNyZWQ=", {
+    credentialId: "bmV3LWNyZWQ=",
+    signCount: 0,
+    privateKey: "bmV3LWtleQ==",
+  });
+  cdp.emit("a", "WebAuthn.credentialAdded", {
+    authenticatorId: "authenticator-a",
+    credential: {
+      credentialId: "bmV3LWNyZWQ=",
+      rpId: "login.example.test",
+      privateKey: "bmV3LWtleQ==",
+      userHandle: "dXNlci0y",
+      signCount: 0,
+    },
+  });
+  // Alice's own next replacement keeps her unsaved registration.
+  const kept = await sync([credential], alice);
+  expect(kept.events.find((event) => event.type === "registered")).toMatchObject({
+    owner: alice,
+  });
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 7, "bmV3LWNyZWQ=": 0 });
+
+  // A caller acting for nobody empties the authenticators, a new tab included.
+  const cleared = await sync([]);
+  expect(cleared).not.toHaveProperty("supportsOwners");
+  expect(cleared.events.find((event) => event.type === "registered")).not.toHaveProperty("owner");
+  expect(cdp.installed("a")).toEqual({});
+  await manager.attachTarget(cdp, { targetId: "tab-b", sessionId: "b" });
+  expect(cdp.installed("b")).toEqual({});
+  // A registration made meanwhile belongs to nobody.
+  cdp.authenticators.get("b")!.set("aHVtYW4=", {
+    credentialId: "aHVtYW4=",
+    signCount: 0,
+    privateKey: "aHVtYW4ta2V5",
+  });
+  cdp.emit("b", "WebAuthn.credentialAdded", {
+    authenticatorId: "authenticator-b",
+    credential: {
+      credentialId: "aHVtYW4=",
+      rpId: "login.example.test",
+      privateKey: "aHVtYW4ta2V5",
+      signCount: 0,
+    },
+  });
+
+  // Bob's set: none of Alice's passkeys, and every pending registration
+  // still names the set it was made under.
+  const bobs = await sync([], bob);
+  expect(cdp.installed("a")).toEqual({});
+  expect(cdp.installed("b")).toEqual({});
+  expect(
+    bobs.events.flatMap((event) => (event.type === "registered" ? [event.owner] : [])),
+  ).toEqual([alice, null]);
+
+  // Alice's set loaded again never presents a lower counter than a page saw.
+  await sync([credential], alice);
+  expect(cdp.installed("a")).toEqual({ [STANDARD_ID]: 7 });
+});

@@ -1,0 +1,60 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'dev.opengeni'
+version = '1.0.0'
+
+// The app's expo-notifications package, when it has one: built from source as
+// a Gradle project, or prebuilt in its own local Maven repository. Ringing
+// agents' calls from a push extends its Firebase messaging service.
+def expoNotifications = null
+if (rootProject.findProject(':expo-notifications') != null) {
+  expoNotifications = project(':expo-notifications')
+} else {
+  try {
+    def resolved = providers.exec {
+      workingDir(rootDir)
+      commandLine('node', '--print', "require.resolve('expo-notifications/package.json')")
+      ignoreExitValue = true
+    }.standardOutput.asText.get().trim()
+    def config = resolved ? new File(new File(resolved).parentFile, 'expo-module.config.json') : null
+    def publication = config?.isFile() ? new groovy.json.JsonSlurper().parse(config).android?.publication : null
+    if (publication != null) {
+      repositories {
+        maven { url = uri(new File(config.parentFile, publication.repository ?: 'local-maven-repo')) }
+      }
+      expoNotifications = "${publication.groupId}:${publication.artifactId}:${publication.version}"
+    }
+  } catch (Exception ignored) {
+    expoNotifications = null
+  }
+}
+
+android {
+  namespace "dev.opengeni.textselection"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+  // Without expo-notifications calls are still system calls; only agents'
+  // calls cannot ring.
+  if (expoNotifications != null) {
+    sourceSets {
+      main.java.srcDirs += 'src/push/java'
+    }
+  }
+}
+
+dependencies {
+  // Self-managed system calls (Telecom). 1.0.x builds with compileSdk 36.
+  implementation 'androidx.core:core-telecom:1.0.1'
+  implementation 'androidx.core:core:1.13.1'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+  // The app already has both; this links the same ones.
+  if (expoNotifications != null) {
+    implementation expoNotifications
+    implementation 'com.google.firebase:firebase-messaging:25.0.1'
+  }
+}

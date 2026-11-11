@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { MEANINGFUL_SESSION_EVENT_TYPES } from "../src/session-meaningful-events";
 import { toPostgresLosslessJson } from "../src/lossless-json";
@@ -18,12 +17,13 @@ import {
   settleConnectedMachineSessionBackgroundCommand,
   waitForSessionInputWithEvent,
   settleSessionInputWait,
+  childFailedTurnDedupeKey,
   claimPendingSessionSystemUpdateOutbox,
   claimSessionWorkForAttempt,
   configureChildLifecycleNotices,
   createDb,
+  createRig,
   createSession,
-  createVariableSet,
   enqueueSessionTurn,
   ensureManagedAccessForUserWithOrganizationMemberships,
   failSessionWorkBeforeAttemptClaim,
@@ -64,9 +64,9 @@ afterAll(async () => {
 
 type Grant = { accountId: string; workspaceId: string; subjectId: string };
 
-async function managedWorkspaceWithPersonalVariableSet(): Promise<{
+async function managedWorkspaceWithPersonalRig(): Promise<{
   grant: Grant;
-  variableSetId: string;
+  rigId: string;
 }> {
   const userId = `child-read-personal-${crypto.randomUUID()}`;
   const subjectId = `user:${userId}`;
@@ -94,13 +94,13 @@ async function managedWorkspaceWithPersonalVariableSet(): Promise<{
       ${membership.organizationId}, 1, ${"e".repeat(64)}, ${"f".repeat(64)},
       'child-read-acknowledgment'
     ) on conflict (account_id) do nothing`;
-  const variableSet = await createVariableSet(client.db, {
+  const rig = await createRig(client.db, {
     accountId: membership.organizationId,
     workspaceId: membership.personalWorkspaceId,
     scope: "user",
     subjectId,
     name: `child-read-personal-${crypto.randomUUID()}`,
-    variables: [{ name: "PERSONAL_TOKEN", valueEncrypted: "ciphertext:test" }],
+    initialVersion: { setupScript: "echo personal-resource-test" },
   });
   return {
     grant: {
@@ -108,7 +108,7 @@ async function managedWorkspaceWithPersonalVariableSet(): Promise<{
       workspaceId: sharedGrant.workspaceId,
       subjectId,
     },
-    variableSetId: variableSet.id,
+    rigId: rig.id,
   };
 }
 
@@ -149,10 +149,17 @@ async function startSession(
     parent?: Started;
     goal?: boolean;
     message: string;
-    personalVariableSetId?: string;
+    personalRigId?: string;
     personalMode?: "once" | "session" | "always";
   },
 ) {
+  const [personalRigVersion] = input.personalRigId
+    ? await shared.admin<Array<{ id: string }>>`
+        select id from rig_versions where account_id = ${grant.accountId}
+          and rig_id = ${input.personalRigId} and active`
+    : [];
+  if (input.personalRigId && !personalRigVersion)
+    throw new Error("personal Rig has no active version");
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -177,11 +184,11 @@ async function startSession(
     reasoningEffort: "medium" as const,
     latencyMode: "standard" as const,
     sandboxBackend: "none",
-    ...(input.personalVariableSetId
+    ...(input.personalRigId
       ? {
           subjectId: grant.subjectId,
-          variableSetIds: [input.personalVariableSetId],
-          variableSetId: input.personalVariableSetId,
+          rigId: input.personalRigId,
+          rigVersionId: personalRigVersion!.id,
           initialPersonalResourceAttachmentIntent: {
             mode: input.personalMode ?? ("session" as const),
             workspaceSharedAcknowledged: true,
@@ -651,6 +658,10 @@ describe("child read acknowledgment on parent consumption", () => {
       account_id, activation_version, inventory_digest, parity_digest, activated_by
     ) values (${grant.accountId}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'historical-read-test')
       on conflict (account_id) do nothing`;
+    // An owner whose Personal workspace predates its row (the 1232 backfill has
+    // not reached it yet) is still accepted through the pointer.
+    await shared.admin`delete from workspace_memberships
+      where workspace_id=${grant.workspaceId} and subject_id=${grant.subjectId}`;
     const [row] = await shared.admin`select count(*)::int as count from workspace_memberships
       where workspace_id=${grant.workspaceId} and subject_id=${grant.subjectId}`;
     expect(row!.count).toBe(0);
@@ -997,10 +1008,10 @@ describe("child read acknowledgment on parent consumption", () => {
   });
 
   test("a child result inherits its exact parent-turn human and admits session personal resources", async () => {
-    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const { grant, rigId } = await managedWorkspaceWithPersonalRig();
     const parent = await startSession(grant, {
       message: "orchestrate",
-      personalVariableSetId: variableSetId,
+      personalRigId: rigId,
     });
     const child = await startSession(grant, { parent, message: "work" });
     await settleIdle(grant, child);
@@ -1279,6 +1290,232 @@ describe("child read acknowledgment on parent consumption", () => {
     });
   });
 
+  /** What the rail shows `subjectId` about one parent's failed child. */
+  async function failureAttention(
+    grant: Grant,
+    subjectId: string,
+    parentId: string,
+    childId: string,
+  ) {
+    const listed = await listSessionsForSubject(client.db, grant.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      includeTotals: true,
+    });
+    const child = await getSessionForSubject(client.db, grant.workspaceId, childId, subjectId);
+    const stats = listed.sessions.find((session) => session.id === parentId)?.treeStats;
+    return {
+      unreadFailedDescendants: stats?.unreadFailedDescendants,
+      unreadDescendants: stats?.unreadDescendants,
+      projectFailed: listed.totals?.groups.reduce((sum, group) => sum + group.failed, 0),
+      childUnread: child?.unread,
+      childFailureHandled: child?.failureHandled ?? false,
+    };
+  }
+
+  test("a failure its parent agent consumed stays the agent's after later events and for every member", async () => {
+    const grant = await workspace();
+    const other = await member(grant);
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    // Until the parent agent takes the failure, every member is asked to look.
+    for (const subjectId of [grant.subjectId, other]) {
+      expect(await failureAttention(grant, subjectId, parent.session.id, child.session.id)).toEqual(
+        {
+          unreadFailedDescendants: 1,
+          unreadDescendants: 1,
+          projectFailed: 1,
+          childUnread: true,
+          childFailureHandled: false,
+        },
+      );
+    }
+
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+    // Staging incident shape: the failed child's workspace capture lands as a
+    // meaningful `workspace.revision.degraded` seconds after the parent's claim
+    // acknowledged the failure, so the child reads unread again.
+    await appendSessionEvents(client.db, grant.workspaceId, child.session.id, [
+      {
+        type: "workspace.revision.degraded",
+        payload: { reason: "repository_discovery_command_failed" },
+      },
+    ]);
+    // The child's own read state is unchanged (the new event is unread, and the
+    // other member never read anything), but neither the failure nor that late
+    // event reaches anyone through the parent.
+    for (const subjectId of [grant.subjectId, other]) {
+      expect(await failureAttention(grant, subjectId, parent.session.id, child.session.id)).toEqual(
+        {
+          unreadFailedDescendants: 0,
+          unreadDescendants: 0,
+          projectFailed: 0,
+          childUnread: true,
+          childFailureHandled: true,
+        },
+      );
+    }
+    const listed = await listSessionsForSubject(client.db, grant.workspaceId, {
+      subjectId: other,
+      parentSessionId: null,
+    });
+    expect(
+      listed.sessions.find((session) => session.id === parent.session.id)?.treeStats,
+    ).toMatchObject({ failedDescendants: 1, unreadFailedDescendants: 0 });
+  });
+
+  test("a new failure the parent has not taken yet asks again", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+    const parentTurn = await claim(grant, parent.session.id);
+    expect(parentTurn.action).toBe("claimed");
+    expect(
+      (await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id))
+        .childFailureHandled,
+    ).toBe(true);
+
+    // The child is prompted again and fails again; its new notice is pending
+    // on the parent, so this failure is nobody's yet.
+    await enqueueHumanTurn(grant, child.session.id);
+    const retried = await claim(grant, child.session.id);
+    if (retried.action !== "claimed") throw new Error("child retry was not claimed");
+    await settleFailed(grant, {
+      session: child.session,
+      turn: retried.turn,
+      attemptId: retried.attemptId,
+    });
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    expect(
+      await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+    ).toEqual({
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+      projectFailed: 1,
+      childUnread: true,
+      childFailureHandled: false,
+    });
+  });
+
+  /** A parent that consumed its child's first failure; the child is retried. */
+  async function consumedFailureThenRetry(grant: Grant) {
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+    expect(
+      (await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id))
+        .childFailureHandled,
+    ).toBe(true);
+    await enqueueHumanTurn(grant, child.session.id);
+    const retried = await claim(grant, child.session.id);
+    if (retried.action !== "claimed") throw new Error("child retry was not claimed");
+    return { parent, child, retried };
+  }
+
+  test("a new failure not yet delivered to the parent never inherits the old verdict", async () => {
+    const grant = await workspace();
+    const { parent, child, retried } = await consumedFailureThenRetry(grant);
+    await settleFailed(grant, {
+      session: child.session,
+      turn: retried.turn,
+      attemptId: retried.attemptId,
+    });
+    // The new failure's notice is still in the outbox (delivery not yet run or
+    // erroring); the earlier delivered failure must not decide this one.
+    expect(
+      await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+    ).toMatchObject({ unreadFailedDescendants: 1, projectFailed: 1, childFailureHandled: false });
+  });
+
+  test("a failure notice settled without the parent seeing it stays the person's", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    for (const state of ["superseded", "cancelled", "failed"]) {
+      await shared.admin`
+        update session_system_updates set state = ${state}
+        where session_id = ${parent.session.id} and source_id = ${child.session.id}
+          and kind = 'child_terminal_result'`;
+      expect(
+        await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+      ).toMatchObject({ unreadFailedDescendants: 1, childFailureHandled: false });
+    }
+  });
+
+  test("a later turn the parent never heard about reopens the failure", async () => {
+    const grant = await workspace();
+    const { parent, child, retried } = await consumedFailureThenRetry(grant);
+    // Operator retirement shape: the retried turn ends failed without writing
+    // a new notice for the parent.
+    await shared.admin`
+      update session_turns set status = 'failed', active_attempt_id = null,
+        finished_at = clock_timestamp(), updated_at = clock_timestamp()
+      where id = ${retried.turn.id}`;
+    await shared.admin`update sessions set status = 'failed' where id = ${child.session.id}`;
+    expect(
+      (await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id))
+        .childFailureHandled,
+    ).toBe(false);
+  });
+
+  test("a failure before the retry was claimed is handled once its parent takes it", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    const [episode] = await shared.admin<Array<{ dedupe_key: string }>>`
+      select dedupe_key from session_system_update_outbox
+      where source_session_id = ${child.session.id} and kind = 'child_terminal_result'`;
+    // Pins the key the handled-failure SQL rebuilds to recognize the failed turn.
+    expect(episode?.dedupe_key).toBe(childFailedTurnDedupeKey(child.session.id, child.turn.id));
+    await enqueueHumanTurn(grant, parent.session.id);
+    const parentTurn = await claim(grant, parent.session.id);
+    if (parentTurn.action !== "claimed") throw new Error("parent turn was not claimed");
+
+    // The retry fails before any attempt claims it.
+    await enqueueHumanTurn(grant, child.session.id);
+    const failed = await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId, {
+      accountId: grant.accountId,
+      sessionId: child.session.id,
+      workflowId: `session-${child.session.id}`,
+      trigger: { kind: "next" },
+      error: "Agent turn admission failed before attempt claim.",
+      admissionFailure: { disposition: "permanent", code: "claim_invariant" },
+    });
+    expect(failed.action).toBe("failed");
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    expect(
+      await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+    ).toMatchObject({ unreadFailedDescendants: 1, childFailureHandled: false });
+
+    await settleIdle(grant, {
+      session: parent.session,
+      turn: parentTurn.turn,
+      attemptId: parentTurn.attemptId,
+    });
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+    expect(
+      await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+    ).toMatchObject({ unreadFailedDescendants: 0, childFailureHandled: true });
+  });
+
   test("an acknowledgment already ahead of the consumed child is never regressed", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { message: "orchestrate" });
@@ -1554,10 +1791,10 @@ describe("child read acknowledgment on parent consumption", () => {
 test.each(["legacy", "current", "legacy-replay"] as const)(
   "a %s retained command result preserves exact causal human for personal resources",
   async (version) => {
-    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const { grant, rigId } = await managedWorkspaceWithPersonalRig();
     const parent = await startSession(grant, {
       message: "run background work",
-      personalVariableSetId: variableSetId,
+      personalRigId: rigId,
     });
     const { accountId, workspaceId } = grant;
     const sessionId = parent.session.id,
@@ -1651,10 +1888,10 @@ test.each(["legacy", "current", "legacy-replay"] as const)(
 );
 
 test("an input wait timeout preserves exact waiting human for personal resources", async () => {
-  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const { grant, rigId } = await managedWorkspaceWithPersonalRig();
   const parent = await startSession(grant, {
     message: "wait for work",
-    personalVariableSetId: variableSetId,
+    personalRigId: rigId,
   });
   await waitForSessionInputWithEvent(client.db, grant.workspaceId, parent.session.id, {
     reason: "waiting for CI",
@@ -1721,10 +1958,10 @@ async function connectedCommand(grant: Grant, parent: Started) {
 test.each(["session", "always"] as const)(
   "a Connected Machine result inherits only its %s personal grant",
   async (mode) => {
-    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const { grant, rigId } = await managedWorkspaceWithPersonalRig();
     const parent = await startSession(grant, {
       message: "start command",
-      personalVariableSetId: variableSetId,
+      personalRigId: rigId,
       personalMode: mode,
     });
     const command = await connectedCommand(grant, parent);
@@ -1765,10 +2002,10 @@ test.each(["session", "always"] as const)(
 );
 
 test("a command successor cannot extend a once personal grant", async () => {
-  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const { grant, rigId } = await managedWorkspaceWithPersonalRig();
   const parent = await startSession(grant, {
     message: "start command",
-    personalVariableSetId: variableSetId,
+    personalRigId: rigId,
     personalMode: "once",
   });
   const command = await connectedCommand(grant, parent);
@@ -1786,6 +2023,11 @@ test("commands from separate turns of the same human coalesce during an explicit
   await enqueueHumanTurn(owner, first.session.id);
   const secondClaim = await claim(owner, first.session.id);
   if (secondClaim.action !== "claimed") throw new Error("second turn was not claimed");
+  const frozen = await shared.admin`select subscription_authority from session_turns
+    where id in (${first.turn.id}, ${secondClaim.turn.id}) order by created_at`;
+  expect(frozen).toHaveLength(2);
+  expect(frozen[0]!.subscription_authority).not.toBeNull();
+  expect(frozen[1]!.subscription_authority).toEqual(frozen[0]!.subscription_authority);
   const second = {
     session: first.session,
     turn: secondClaim.turn,
@@ -1925,10 +2167,10 @@ async function recoverLegacyCausalUpdate(grant: Grant, parent: Started, sourceId
 }
 
 test("a command successor cannot revive a revoked personal grant", async () => {
-  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const { grant, rigId } = await managedWorkspaceWithPersonalRig();
   const parent = await startSession(grant, {
     message: "start command",
-    personalVariableSetId: variableSetId,
+    personalRigId: rigId,
   });
   const command = await connectedCommand(grant, parent);
   await waitForCommands(grant, parent);
@@ -2019,37 +2261,4 @@ test("migration rejects a mismatched launch receipt and a partial identity", asy
       })}`,
     ),
   ).rejects.toThrow("launch_identity_check");
-});
-
-test("0419 launch validation resolves its dedicated data schema", async () => {
-  const schemaName = `command_launch_${crypto.randomUUID().replaceAll("-", "")}`;
-  const migration = await readFile(
-    new URL("../drizzle/0419_background_command_launch_authority.sql", import.meta.url),
-    "utf8",
-  );
-  await shared.admin.begin(async (tx) => {
-    await tx.unsafe(`create schema "${schemaName}"`);
-    await tx`select set_config('search_path', ${schemaName}, true)`;
-    await tx.unsafe(`
-      create table session_turns (id uuid, workspace_id uuid, session_id uuid, account_id uuid);
-      create table session_turn_attempts (id uuid, turn_id uuid, workspace_id uuid, session_id uuid, account_id uuid, execution_generation int);
-      create table session_background_commands (
-        id uuid, account_id uuid, workspace_id uuid, session_id uuid, provider text,
-        retained_process_id uuid, control_workspace_id uuid, enrollment_id uuid,
-        connection_instance_id text, op_id text
-      );`);
-    await tx.unsafe(migration);
-    const account = crypto.randomUUID(),
-      dataWorkspaceId = crypto.randomUUID(),
-      session = crypto.randomUUID(),
-      turn = crypto.randomUUID(),
-      attempt = crypto.randomUUID();
-    await tx`insert into session_turns values (${turn},${dataWorkspaceId},${session},${account})`;
-    await tx`insert into session_turn_attempts values (${attempt},${turn},${dataWorkspaceId},${session},${account},1)`;
-    await tx`insert into session_background_commands (id,account_id,workspace_id,session_id,provider,launch_turn_id,launch_attempt_id,launch_execution_generation)
-      values (${crypto.randomUUID()},${account},${dataWorkspaceId},${session},'connected_machine',${turn},${attempt},1)`;
-    const [count] = await tx`select count(*)::int as count from session_background_commands`;
-    expect(count?.count).toBe(1);
-    await tx.unsafe(`drop schema "${schemaName}" cascade`);
-  });
 });

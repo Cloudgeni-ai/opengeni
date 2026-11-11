@@ -1,0 +1,639 @@
+//! What a live VM's saved state depends on: the memory its next snapshot
+//! is relative to, and the host's watch on its disk.
+
+use std::fs;
+use std::io;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde::{Deserialize, Serialize};
+
+use super::{Job, blocking};
+use crate::image::{Generation, Images, Meta, Verified};
+use crate::layout::Paths;
+use crate::store::Store;
+use compute_engine::{Engine, EngineError, ErrorKind};
+
+#[cfg(target_os = "linux")]
+use crate::paging::Paging;
+
+/// What the VM's memory equals, page for page, apart from what it changed
+/// since: what a diff snapshot is relative to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Base {
+    /// All zeros: a VM booted fresh.
+    Zero,
+    /// A published image generation.
+    Image(Generation),
+    /// Unknown, for example after a failed snapshot or merge: the next
+    /// snapshot must hold every page.
+    Unknown,
+}
+
+/// The record of a live VM's [`Base`], kept so an agent that restarts
+/// while the VM runs can go on saving only what changed, rather than
+/// every page. It sits in the host-only sandbox directory.
+///
+/// Which pages a VM changed lives only in its VMM process, and each
+/// snapshot resets it. So the record names the process
+/// ([`compute_engine::Engine::process_identity`]) and, for an image, the
+/// hashes that tell that image's content apart from any other's. It is
+/// written only once what it says is true: after a VM starts, and after
+/// an image is published. It is withdrawn before anything makes it false:
+/// before every snapshot, which resets the VMM's record of changed pages,
+/// and before the images are deleted. A record that is missing,
+/// unreadable, about another process, or about an image that is gone,
+/// changed, or not wholly on local disk leaves the base unknown.
+///
+/// It never needs to be durable: it is only ever used beside the live
+/// process it names, which no host crash leaves running, and the name
+/// includes the boot, so a record a crash left behind names no process.
+/// It is replaced by rename, so an agent that stops part-way never leaves
+/// half of one.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+// Strict: a damaged field name must not pass as a missing optional one.
+#[serde(deny_unknown_fields)]
+struct BaseRecord {
+    /// The VMM process the record is about.
+    process: String,
+    /// The image the VM's memory is based on; `None` for a VM booted
+    /// fresh, whose memory was all zeros. Required, `null` included: a
+    /// record that lost the field must not read as zeros, or a save would
+    /// drop every page the VM did not change since its image.
+    #[serde(deserialize_with = "Option::deserialize")]
+    image: Option<RecordedImage>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedImage {
+    generation: Generation,
+    state_hash: String,
+    chunks_hash: String,
+}
+
+/// Where a live VM's [`BaseRecord`] is kept.
+pub(crate) fn base_record(paths: &Paths) -> PathBuf {
+    paths.dir.join("memory-base.json")
+}
+
+/// Records that the memory of the VM whose process is `process` is
+/// based on `image`, or on zeros if `None`; see [`BaseRecord`]. Blocking.
+pub(crate) fn record_base(paths: &Paths, process: &str, image: Option<&Meta>) -> io::Result<()> {
+    let record = BaseRecord {
+        process: process.to_owned(),
+        image: image.map(|meta| RecordedImage {
+            generation: meta.generation,
+            state_hash: meta.state_hash.clone(),
+            chunks_hash: meta.chunks_hash.clone(),
+        }),
+    };
+    let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
+    let path = base_record(paths);
+    let staging = path.with_extension("staging");
+    fs::write(&staging, bytes)?;
+    fs::rename(&staging, &path)
+}
+
+/// Withdraws the record of the VM's base before anything makes it false.
+/// Blocking.
+pub(crate) fn withdraw_base(paths: &Paths) -> io::Result<()> {
+    crate::layout::remove_if_present(&base_record(paths))
+}
+
+/// Forgets what a live VM's memory is based on, so its next save holds
+/// every page, and withdraws the record of it, so an agent that restarts
+/// does not go by it either.
+pub(super) async fn lose_base(paths: &Paths, base: &mut Base) {
+    *base = Base::Unknown;
+    let paths = paths.clone();
+    let dir = paths.dir.clone();
+    if let Err(error) = blocking(move || withdraw_base(&paths))
+        .await
+        .and_then(|withdrawn| withdrawn)
+    {
+        tracing::warn!(dir = %dir.display(), %error, "memory base record not withdrawn");
+    }
+}
+
+impl<E: Engine, S: Store> Job<E, S> {
+    /// Records what the memory of `vm`, just started from `image` or booted
+    /// fresh if `None`, is based on, for an agent that restarts while it
+    /// runs (see [`record_base`]). Without it, that agent's first save of
+    /// the VM holds every page. Marks it its sandbox's only copy if it is
+    /// ([`Self::mark_only_copy`]).
+    pub(super) async fn record_started(&self, vm: &E::Vm, image: Option<&Verified>) {
+        self.mark_only_copy(vm);
+        let process = match self.engine.process_identity(vm) {
+            Ok(process) => process,
+            Err(error) => {
+                tracing::debug!(id = %self.id, %error, "the VM's process is not named");
+                return;
+            }
+        };
+        let (paths, meta) = (self.paths.clone(), image.map(|image| image.meta().clone()));
+        if let Err(error) = blocking(move || record_base(&paths, &process, meta.as_ref()))
+            .await
+            .and_then(|recorded| recorded)
+        {
+            tracing::warn!(id = %self.id, %error, "memory base not recorded");
+        }
+    }
+}
+
+/// What the memory of a VM found running after an agent restart is based
+/// on, as its record says, if the record is about `process`, the VM's
+/// own, and its image is still the same and wholly in `images` on local
+/// disk; otherwise unknown. Reads the image's description, state and
+/// chunk map. Blocking.
+pub(crate) fn recorded_base(paths: &Paths, process: Option<&str>, images: &Images) -> Base {
+    let path = base_record(paths);
+    let record = match fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<BaseRecord>(&bytes) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "unreadable memory base record");
+                return Base::Unknown;
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Base::Unknown,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "memory base record not read");
+            return Base::Unknown;
+        }
+    };
+    if process != Some(record.process.as_str()) {
+        return Base::Unknown;
+    }
+    let Some(recorded) = record.image else {
+        return Base::Zero;
+    };
+    match images.verify(recorded.generation, crate::image::Depth::Light) {
+        // An image still filled from object storage may miss pages a diff
+        // would be merged over.
+        Ok(image)
+            if !image.meta().remote
+                && image.meta().state_hash == recorded.state_hash
+                && image.meta().chunks_hash == recorded.chunks_hash =>
+        {
+            Base::Image(recorded.generation)
+        }
+        Ok(_) => Base::Unknown,
+        Err(suspect) => {
+            tracing::debug!(generation = %recorded.generation, %suspect, "the recorded memory base is not usable");
+            Base::Unknown
+        }
+    }
+}
+
+/// What a live VM's saved state depends on: what backs its memory, and the
+/// host's watch on its disk.
+#[derive(Debug)]
+pub(crate) struct LiveMemory {
+    pub base: Base,
+    /// The agent's side of the pager process serving its memory, if one
+    /// does.
+    #[cfg(target_os = "linux")]
+    pub paging: Option<Paging>,
+    /// Sees every write to the disk that was lost while the VM ran.
+    pub disk: Arc<DiskWatch>,
+}
+
+impl LiveMemory {
+    pub fn booted(disk: DiskWatch) -> Self {
+        Self {
+            base: Base::Zero,
+            #[cfg(target_os = "linux")]
+            paging: None,
+            disk: Arc::new(disk),
+        }
+    }
+
+    /// A VM found running after an agent restart, whose memory is based on
+    /// `base` as far as its record shows ([`recorded_base`]).
+    pub fn adopted(disk: DiskWatch, base: Base) -> Self {
+        Self {
+            base,
+            #[cfg(target_os = "linux")]
+            paging: None,
+            disk: Arc::new(disk),
+        }
+    }
+
+    /// A VM found running after an agent restart whose pager the agent
+    /// reconnected to, whose memory is based on `base` as far as its record
+    /// shows ([`recorded_base`]).
+    pub fn reconnected(disk: DiskWatch, pager: Reconnected, base: Base) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        let Reconnected {} = pager;
+        Self {
+            base,
+            #[cfg(target_os = "linux")]
+            paging: Some(pager.paging),
+            disk: Arc::new(disk),
+        }
+    }
+
+    /// Resolves if the VM's memory can no longer be served, so the VM must
+    /// be stopped.
+    pub fn failed(&self) -> impl Future<Output = ()> + Send + 'static {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            return futures::future::Either::Left(paging.failed());
+        }
+        futures::future::Either::Right(std::future::pending())
+    }
+
+    /// Says the agent is about to end the VM, so its pager going away is
+    /// expected rather than lost memory. Call it before stopping the VM.
+    pub fn ending(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            paging.ending();
+        }
+    }
+
+    /// Whether the image this VM's memory comes from may still be written
+    /// to local disk: while it is filled from object storage, and after a
+    /// failed fill until every write it started has landed.
+    pub fn hydrating(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(hydration) = self
+            .paging
+            .as_ref()
+            .and_then(|paging| paging.hydration.as_ref())
+        {
+            return hydration.is_writing();
+        }
+        false
+    }
+
+    /// Waits until the image this VM's memory comes from is whole and its
+    /// pager, if it has one, holds every byte: until then the image must
+    /// stay the current one, unsealed and in place, so an agent that
+    /// restarts can still fill it by name. Saves and forgetting the image
+    /// wait for this.
+    pub async fn settled(&self, operation: &'static str) -> Result<(), EngineError> {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            if let Some(hydration) = paging.hydration.clone() {
+                hydration.finished().await.map_err(|why| {
+                    let kind = if why.permanent {
+                        ErrorKind::MemoryLost
+                    } else {
+                        ErrorKind::Transient
+                    };
+                    EngineError::caused_by(kind, operation, why)
+                })?;
+            }
+            paging.complete().await.map_err(|why| {
+                let kind = match why {
+                    crate::paging::Incomplete::Failed => ErrorKind::MemoryLost,
+                    crate::paging::Incomplete::Stopped => ErrorKind::Transient,
+                };
+                EngineError::new(kind, operation, "the pager does not hold the whole image")
+            })?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = operation;
+        Ok(())
+    }
+
+    /// For a VM that has ended and whose files are about to be deleted:
+    /// stops serving and fetching its memory and returns once nothing more
+    /// will be written for it.
+    pub async fn close(self) {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            paging.close().await;
+        }
+    }
+
+    /// For a VM that would not end and so may still run: goes on serving
+    /// and fetching its memory in the background, as
+    /// [`Reconnected::serve_detached`] does, so its guest never waits
+    /// forever on a page. Dropping the memory instead stops serving it.
+    /// Returns the task serving it, if its memory is paged.
+    pub fn serve_detached(self) -> Option<tokio::task::JoinHandle<()>> {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = self.paging {
+            return Some(Reconnected { paging }.serve_detached());
+        }
+        None
+    }
+}
+
+/// The pager of a VM found running after an agent restart, reconnected
+/// before the VM itself is taken back.
+#[derive(Debug)]
+pub(crate) struct Reconnected {
+    #[cfg(target_os = "linux")]
+    pub paging: Paging,
+}
+
+impl Reconnected {
+    /// For a VM that was not taken back after all: stops serving and
+    /// fetching its memory.
+    pub async fn close(self) {
+        #[cfg(target_os = "linux")]
+        self.paging.close().await;
+    }
+
+    /// Says the VM is about to be ended on purpose, as
+    /// [`LiveMemory::ending`] does, so its pager going away with it is not
+    /// taken for lost memory.
+    pub fn ending(&self) {
+        #[cfg(target_os = "linux")]
+        self.paging.ending();
+    }
+
+    /// For a VM that may still run but was not taken back: goes on serving
+    /// and fetching its memory in the background until the pager holds all
+    /// of it, or ends with the VM, so its guest never waits forever on a
+    /// page. The pager needs no agent after that. Returns the task serving
+    /// it: until it ends, nothing else may connect to the pager, which
+    /// serves one connection at a time and drops the one before.
+    pub fn serve_detached(self) -> tokio::task::JoinHandle<()> {
+        #[cfg(target_os = "linux")]
+        return tokio::spawn(async move {
+            let _ = self.paging.complete().await;
+        });
+        #[cfg(not(target_os = "linux"))]
+        tokio::spawn(async {})
+    }
+}
+
+/// The host's watch on a VM's disk, which decides whether a snapshot of
+/// the VM can be trusted to match a disk that is durable.
+///
+/// Firecracker logs and ignores a failed flush of a disk, so the guest's
+/// writes can be lost without the VMM reporting it. Linux keeps a
+/// writeback error for each open file description: `fsync` through one
+/// reports every error since that description was opened, or since it
+/// last reported one, whatever other descriptions reported meanwhile. A
+/// description opened later only sees errors no `fsync` has reported yet,
+/// and the VMM syncs its own on a snapshot or whenever the guest asks
+/// (which it may, offered or not).
+///
+/// So the watch holds a description opened before the VM's VMM starts,
+/// which only the watch ever syncs, after each snapshot: that sees every
+/// write lost since the VM started. The VM's engine keeps the same
+/// description for as long as the VM lives ([`Engine::hold`]), so an agent
+/// that restarts beside the VM gets it back ([`Engine::held`]) and sees
+/// all the same. Only the watch's own sync can take an error from that
+/// description, so only it runs under a check marker, made durable in the
+/// host-only sandbox directory just before it and removed once it comes
+/// back clean: a sync that reported an error to an agent that stopped
+/// before it could act ran under the marker, which the next agent finds.
+/// An agent that stops anywhere else, such as while the VMM takes a
+/// snapshot and syncs its own description, leaves every error for the next
+/// sync through the kept one, and a snapshot no sync vouched for is never
+/// used. So stopping the agent to upgrade it costs a VM its trust only if
+/// that one sync was under way. A failure is final for the VM: no snapshot
+/// of it is trusted again.
+///
+/// [`Engine::hold`]: compute_engine::Engine::hold
+/// [`Engine::held`]: compute_engine::Engine::held
+#[derive(Debug)]
+pub(crate) struct DiskWatch {
+    disk: PathBuf,
+    marker: PathBuf,
+    /// `None` when an adopted VM's disk could not be opened.
+    file: Option<fs::File>,
+    failed: AtomicBool,
+}
+
+impl DiskWatch {
+    /// The watch for a VM about to start from `paths`: no earlier VM's
+    /// check concerns it.
+    pub fn fresh(paths: &Paths) -> io::Result<Self> {
+        let file = crate::layout::open_jailed(&paths.disk)?;
+        let marker = check_marker(paths);
+        crate::layout::remove_durably(&marker)?;
+        Ok(Self {
+            disk: paths.disk.clone(),
+            marker,
+            file: Some(file),
+            failed: AtomicBool::new(false),
+        })
+    }
+
+    /// The watch for a VM found running after an agent restart, through
+    /// `held`, the description the VM's engine kept for it. It has failed
+    /// if a check was under way, since a sync may have reported a lost
+    /// write to no one, or if nothing was kept or what was is not the
+    /// VM's disk: either way lost writes could go unseen, so no snapshot is
+    /// trusted.
+    pub fn adopt(paths: &Paths, held: Option<OwnedFd>) -> Self {
+        let file = held
+            .ok_or_else(|| io::Error::other("no description of the disk was kept"))
+            .and_then(|held| {
+                let held = fs::File::from(held);
+                let disk = crate::layout::open_jailed(&paths.disk)?.metadata()?;
+                let kept = held.metadata()?;
+                if (kept.dev(), kept.ino()) == (disk.dev(), disk.ino()) {
+                    Ok(held)
+                } else {
+                    Err(io::Error::other("the kept description is of another file"))
+                }
+            })
+            .inspect_err(|error| tracing::warn!(disk = %paths.disk.display(), %error, "no watch on an adopted VM's disk"))
+            .ok();
+        let marker = check_marker(paths);
+        let checking = !matches!(
+            fs::symlink_metadata(&marker),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        );
+        if checking {
+            tracing::warn!(disk = %paths.disk.display(), "the agent stopped while checking the disk; no snapshot of its VM is trusted");
+        }
+        Self {
+            disk: paths.disk.clone(),
+            marker,
+            failed: AtomicBool::new(file.is_none() || checking),
+            file,
+        }
+    }
+
+    /// A new descriptor for the watch's open file description, for the
+    /// engine to keep; `None` if the watch has none. Nothing may sync
+    /// through it or any other copy of the description but
+    /// [`DiskWatch::sync`]: the check marker covers that sync alone, so
+    /// any other would take errors from the watch unseen.
+    pub(super) fn description(&self) -> io::Result<Option<OwnedFd>> {
+        self.file
+            .as_ref()
+            .map(|file| file.try_clone().map(OwnedFd::from))
+            .transpose()
+    }
+
+    /// Starts a check, before a snapshot the check is to vouch for: fails
+    /// once the watch has failed, so no snapshot of the VM is taken. It
+    /// writes nothing, since nothing before [`DiskWatch::sync`] can take an
+    /// error from the watch's description.
+    pub(crate) fn begin(&self) -> io::Result<()> {
+        if self.failed() {
+            return Err(self.lost());
+        }
+        Ok(())
+    }
+
+    /// Flushes the disk, failing if any write to it was lost since the
+    /// watch was opened, under the check marker, which it removes if none
+    /// was. If the marker cannot be made durable it does not sync, and the
+    /// watch has not failed.
+    pub(crate) fn sync(&self) -> io::Result<()> {
+        let Some(file) = self.file.as_ref().filter(|_| !self.failed()) else {
+            return Err(self.lost());
+        };
+        crate::layout::write_atomic(&self.marker, b"")?;
+        if let Err(error) =
+            crate::layout::failpoint(&self.disk, "sync").and_then(|()| file.sync_all())
+        {
+            tracing::error!(disk = %self.disk.display(), %error, "the disk lost writes");
+            self.failed.store(true, Ordering::Release);
+            return Err(self.lost());
+        }
+        // A marker left behind only costs trust after a restart.
+        if let Err(error) = crate::layout::remove_durably(&self.marker) {
+            tracing::warn!(marker = %self.marker.display(), %error, "disk check not cleared");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    fn lost(&self) -> io::Error {
+        io::Error::other(format!(
+            "{} may have lost writes since its VM started",
+            self.disk.display()
+        ))
+    }
+}
+
+/// Present while the host checks a VM's disk, or after a check failed.
+pub(super) fn check_marker(paths: &Paths) -> PathBuf {
+    paths.dir.join("disk-check")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::{ChunkMap, Parts, Verified};
+
+    const LEN: u64 = 1 << 20;
+
+    struct Sandbox {
+        _root: tempfile::TempDir,
+        paths: Paths,
+        images: Images,
+    }
+
+    fn sandbox() -> Sandbox {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::at(root.path().join("sandbox"));
+        fs::create_dir_all(&paths.dir).unwrap();
+        let images = Images::new(paths.dir.join("images"));
+        Sandbox {
+            _root: root,
+            paths,
+            images,
+        }
+    }
+
+    impl Sandbox {
+        /// Publishes a whole image whose state is `state`.
+        fn publish(&self, state: &[u8]) -> Verified {
+            let (state_file, memory) =
+                (self.paths.dir.join("state"), self.paths.dir.join("memory"));
+            fs::write(&state_file, state).unwrap();
+            fs::File::create(&memory).unwrap().set_len(LEN).unwrap();
+            self.images
+                .publish(Parts::Whole {
+                    state: &state_file,
+                    memory: &memory,
+                    len: LEN,
+                })
+                .unwrap()
+        }
+
+        fn base(&self, process: Option<&str>) -> Base {
+            recorded_base(&self.paths, process, &self.images)
+        }
+    }
+
+    #[test]
+    fn a_base_is_trusted_only_beside_the_process_it_names() {
+        let sandbox = sandbox();
+        let image = sandbox.publish(b"one");
+        record_base(&sandbox.paths, "vmm-1", Some(image.meta())).unwrap();
+        assert_eq!(sandbox.base(Some("vmm-1")), Base::Image(image.generation()));
+        assert_eq!(sandbox.base(Some("vmm-2")), Base::Unknown);
+        assert_eq!(sandbox.base(None), Base::Unknown, "an unnamed process");
+        record_base(&sandbox.paths, "vmm-2", None).unwrap();
+        assert_eq!(sandbox.base(Some("vmm-2")), Base::Zero);
+        assert_eq!(sandbox.base(Some("vmm-1")), Base::Unknown);
+    }
+
+    #[test]
+    fn a_base_is_not_trusted_once_its_image_is_gone_or_another_has_its_number() {
+        let sandbox = sandbox();
+        let image = sandbox.publish(b"one");
+        record_base(&sandbox.paths, "vmm", Some(image.meta())).unwrap();
+        sandbox.images.clear().unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "a missing image");
+        // With every image gone, numbers start again.
+        let other = sandbox.publish(b"two");
+        assert_eq!(other.generation(), image.generation());
+        assert_eq!(
+            sandbox.base(Some("vmm")),
+            Base::Unknown,
+            "another image under the same number"
+        );
+    }
+
+    #[test]
+    fn a_base_still_filled_from_the_store_is_not_trusted() {
+        let sandbox = sandbox();
+        let state = sandbox.paths.dir.join("state");
+        fs::write(&state, b"remote").unwrap();
+        let image = sandbox
+            .images
+            .publish(Parts::Remote {
+                state: &state,
+                memory_len: LEN,
+                chunks: ChunkMap::zeros(LEN),
+                manifest: b"{}",
+                prefilled: None,
+            })
+            .unwrap();
+        record_base(&sandbox.paths, "vmm", Some(image.meta())).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown);
+    }
+
+    #[test]
+    fn a_withdrawn_or_unreadable_record_leaves_the_base_unknown() {
+        let sandbox = sandbox();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "no record");
+        record_base(&sandbox.paths, "vmm", None).unwrap();
+        withdraw_base(&sandbox.paths).unwrap();
+        withdraw_base(&sandbox.paths).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "withdrawn");
+        let path = base_record(&sandbox.paths);
+        fs::write(&path, b"{\"process\":\"vmm\",").unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "cut short");
+        fs::write(&path, br#"{"process":"vmm","image":null,"imagee":null}"#).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "a damaged field");
+        // Read as zeros, a record without its image would have a save drop
+        // every page the VM kept from that image.
+        fs::write(&path, br#"{"process":"vmm"}"#).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "no image field");
+        fs::write(&path, br#"{"process":"vmm","image":null}"#).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Zero);
+    }
+}

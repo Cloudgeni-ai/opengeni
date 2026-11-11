@@ -1,0 +1,1030 @@
+import { t } from "../../lib/console-text";
+import type { AuthNeededItem } from "../../../timeline";
+import { MACHINES_SESSION_POLL_MS, type MachineView } from "../../../machines";
+import { machineDisplayName, machineScopeLabel } from "../../../sandbox-label-model";
+import { OPENGENI_BROWSER_EXTENSION_URL } from "@opengeni/contracts";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import {
+  ArrowUpRightIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  LaptopIcon,
+  Loader2Icon,
+  MonitorIcon,
+  PlusIcon,
+  PuzzleIcon,
+  ServerIcon,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+
+import { useAppApi } from "../../lib/app-api";
+import {
+  ConnectMachineDialog,
+  connectScopeFor,
+  type ConnectMachineScope,
+} from "../machines/connect-machine-dialog";
+import { Button } from "../../../ui/button";
+import { ListRow, RowList } from "../../../ui/list-row";
+import { LogoTile } from "../../../ui/logo-tile";
+import { Notice } from "../../../ui/notice";
+import { RowButton } from "../../../ui/page-actions";
+import { useAppContext } from "../../app-context";
+import { useClientConfigFlags } from "../../../hooks/use-client-config-flags";
+import { userErrorText } from "../../../ui/api-error";
+import { isMachineComputeSelectable } from "../../lib/machine-selectability";
+import { useDesktopThisComputer } from "../desktop/this-computer";
+import { isPersonalMachine, moveChatToMachine } from "../../lib/move-chat-to-machine";
+import { hasWorkspacePermission } from "../../lib/permissions";
+import { useWorkspaceMachines } from "../../lib/use-workspace-machines";
+import { thisComputerReady, thisComputerNeedsPermissions } from "../../../this-computer";
+import { SessionCapabilityFrame } from "../../../components/session-capability-frame";
+import type { ChatSendContext } from "./session-github-repositories";
+
+/** While the connect dialog is open, look for the new machine every few seconds. */
+const WATCH_POLL_MS = 3_000;
+/** After "Add to Chrome", how often to check whether the extension linked up. */
+const CHROME_POLL_MS = 5_000;
+/** Stop checking for the extension after this long without a link. */
+const CHROME_POLL_LIMIT_MS = 10 * 60_000;
+/**
+ * After a computer comes online, keep checking quietly for a short while: its
+ * Chrome profile usually links up a few seconds after the machine does.
+ */
+const CHROME_REFRESH_POLL_LIMIT_MS = 60_000;
+
+export { machineUseMessage } from "../../lib/move-chat-to-machine";
+
+/** A neutral laptop mark for the card (the frame renders logos as images). */
+export const CONNECTED_MACHINE_LOGO =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2 -2 28 28" fill="none" stroke="#71717a" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"/><path d="M20.054 15.987H3.946"/></svg>',
+  );
+
+export type SessionMachineCapabilityCardProps = {
+  item: AuthNeededItem;
+  workspaceId: string;
+  sessionId: string;
+  /** What a composer Send would carry now, so this Send follows the same rules. */
+  sendContext?: (() => ChatSendContext) | undefined;
+  /** Re-read the session after the chat moves to a machine. */
+  onConfigured?: (() => Promise<void>) | undefined;
+};
+
+function stateLabel(machine: MachineView): string {
+  switch (machine.state) {
+    case "online":
+    case "consent_required":
+      return "Online";
+    case "display_unavailable":
+      return "Online · no display";
+    case "reconnecting":
+      return "Reconnecting";
+    case "enrolling":
+      return "Connecting";
+    default:
+      return "Offline";
+  }
+}
+
+/** Focus moves only when the person is not working somewhere else. */
+function focusIfIdle(card: HTMLElement | null, target: HTMLElement | null = card) {
+  requestAnimationFrame(() => {
+    const active = document.activeElement;
+    const idle = !active || active === document.body || (card?.contains(active) ?? false);
+    if (idle && target?.isConnected) target.focus();
+    else if (idle && card?.isConnected) card.focus();
+  });
+}
+
+/**
+ * The Connected Machine card in a conversation. The agent can post it, but only
+ * the person can connect a machine or move this chat onto one. Once a machine with a
+ * screen is reachable, the card offers the Opengeni Browser extension for it.
+ */
+export function SessionMachineCapabilityCard({
+  item,
+  workspaceId,
+  sessionId,
+  sendContext,
+  onConfigured,
+}: SessionMachineCapabilityCardProps) {
+  const context = useAppContext();
+  const { apiBaseUrl } = useAppApi();
+  const recommendation = item.capability!;
+  const accessKnown = context.accessContext !== null && context.accessContext !== undefined;
+  const canMessage =
+    !accessKnown || hasWorkspacePermission(context.accessContext, workspaceId, "sessions:control");
+
+  const [setupOpen, setSetupOpen] = useState(false);
+  // Reconnecting to turn screen control on starts with it already chosen, and
+  // with the machine's own access so the same machine reconnects as it was.
+  const [setupScreenControl, setSetupScreenControl] = useState(false);
+  const [setupScope, setSetupScope] = useState<ConnectMachineScope>("user");
+  const [justConnected, setJustConnected] = useState<string | null>(null);
+  const [using, setUsing] = useState<string | null>(null);
+  const [useError, setUseError] = useState<{ name: string; reason: string | null } | null>(null);
+  const [outcome, setOutcome] = useState<{ sandboxId: string; text: string } | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const [othersOpen, setOthersOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsOpener = useRef<HTMLButtonElement>(null);
+  const cardRef = useRef<HTMLElement>(null);
+  const opener = useRef<HTMLButtonElement>(null);
+  const setupOpener = useRef<HTMLElement | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  const fleet = useWorkspaceMachines({
+    workspaceId,
+    sessionId,
+    pollIntervalMs: setupOpen ? WATCH_POLL_MS : MACHINES_SESSION_POLL_MS,
+  });
+  const unavailableOnDeployment =
+    fleet.error instanceof OpenGeniApiError && fleet.error.status === 404;
+  const machines = useMemo(
+    () => fleet.machines.filter((machine) => !machine.isSessionGroup && machine.enrollmentId),
+    [fleet.machines],
+  );
+  const activeMachine = machines.find((machine) => machine.active) ?? null;
+  const reachable = machines.filter((machine) => isMachineComputeSelectable(machine.state));
+  // The machine the agent asked for, while this chat doesn't run on it yet.
+  const requested =
+    (item.requestedSandboxId
+      ? machines.find((machine) => machine.sandboxId === item.requestedSandboxId)
+      : undefined) ?? null;
+  const asking = requested !== null && !requested.active;
+  const requestedName = requested ? machineDisplayName(t, requested) : "";
+  // The person can allow it right here: lead with that, other machines fold away.
+  const allowHere =
+    asking && fleet.canAttach && isMachineComputeSelectable(requested.state) ? requested : null;
+  // Allowing your own machine turns it on for your work in this workspace.
+  const allowOwnMachine = allowHere !== null && isPersonalMachine(allowHere);
+  // In a shared chat, people in the workspace see what the agent does on it.
+  const sharedChat = sendContext?.().personalMachineIntent?.workspaceSharedAcknowledged === true;
+  const personalWorkspace =
+    context.workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
+
+  const openSetup = (reconnect?: MachineView) => {
+    const active = document.activeElement;
+    setupOpener.current = active instanceof HTMLElement ? active : null;
+    setJustConnected(null);
+    setSetupScreenControl(reconnect !== undefined);
+    setSetupScope(reconnect ? connectScopeFor(reconnect) : "user");
+    setSetupOpen(true);
+  };
+  const closeSetup = () => {
+    // Fast polling ends with the dialog; focus returns to what opened it.
+    setSetupOpen(false);
+    const back = setupOpener.current?.isConnected ? setupOpener.current : opener.current;
+    focusIfIdle(cardRef.current, back);
+  };
+
+  const ordered = useMemo(() => {
+    const rank = (machine: MachineView) =>
+      machine.sandboxId === justConnected
+        ? 0
+        : machine.active
+          ? 1
+          : isMachineComputeSelectable(machine.state)
+            ? 2
+            : 3;
+    return [...machines]
+      .filter((machine) => machine.sandboxId !== allowHere?.sandboxId)
+      .sort(
+        (left, right) =>
+          rank(left) - rank(right) ||
+          machineDisplayName(t, left).localeCompare(machineDisplayName(t, right)),
+      );
+  }, [allowHere?.sandboxId, justConnected, machines]);
+
+  const use = useCallback(
+    async (machine: MachineView) => {
+      if (using !== null) return;
+      const name = machineDisplayName(t, machine);
+      setUseError(null);
+      setOutcome(null);
+      const chat = sendContext?.() ?? { blocked: null, awaitingHuman: false, extras: {} };
+      if (chat.blocked) {
+        setUseError({ name, reason: chat.blocked });
+        return;
+      }
+      setUsing(machine.sandboxId);
+      const result = await moveChatToMachine({
+        machine,
+        chat,
+        canMessage,
+        previousSandboxId: fleet.machines.find((candidate) => candidate.active)?.sandboxId ?? null,
+        attach: fleet.attach,
+        sendMessage: (message) => context.client.sendMessage(workspaceId, sessionId, message),
+      });
+      if (!alive.current) return;
+      if (!result.moved) {
+        setUsing(null);
+        setUseError({ name, reason: result.reason });
+        return;
+      }
+      const text = result.text;
+      setUsing(null);
+      setOutcome({ sandboxId: machine.sandboxId, text });
+      setAnnouncement(text);
+      setSettingsOpen(false);
+      requestAnimationFrame(() => focusIfIdle(cardRef.current, settingsOpener.current));
+      await onConfigured?.().catch(() => {});
+    },
+    [canMessage, context.client, fleet, onConfigured, sendContext, sessionId, using, workspaceId],
+  );
+
+  // Screen control and Chrome belong to the machine this chat runs on. Before
+  // the person picks one, rows about some other machine would compete with
+  // choosing or connecting the right one.
+  const chromeMachine =
+    activeMachine?.hasDisplay && isMachineComputeSelectable(activeMachine.state)
+      ? activeMachine
+      : null;
+  const chrome = useAttachedChrome(
+    workspaceId,
+    fleet.canRead && chromeMachine?.enrollmentId
+      ? { enrollmentId: chromeMachine.enrollmentId }
+      : null,
+  );
+  const fresh = justConnected
+    ? (machines.find((machine) => machine.sandboxId === justConnected) ?? null)
+    : null;
+  const origin = apiBaseUrl || (typeof window !== "undefined" ? window.location.origin : "");
+
+  // One clear action per state. With a reachable machine, using one of them
+  // and connecting another computer are peers in the list below: the card
+  // doesn't guess which machine the person means.
+  const connectAnother = fleet.canConnect && (reachable.length > 0 || activeMachine !== null);
+  const actionUnavailable = unavailableOnDeployment
+    ? "Connected Machines aren't available on this deployment."
+    : asking && !isMachineComputeSelectable(requested.state)
+      ? `Turn on ${requestedName} to allow it here.`
+      : !fleet.canRead
+        ? "You don't have access to this workspace's machines."
+        : fresh && fleet.canAttach && !fresh.active
+          ? `${machineDisplayName(t, fresh)} connected. Choose it below to use it here.`
+          : reachable.length > 0 && fleet.canAttach
+            ? connectAnother
+              ? "Choose where this chat runs, or connect another computer."
+              : "Choose where this chat runs."
+            : reachable.length > 0
+              ? "You can't change where this chat runs."
+              : fleet.canConnect
+                ? null
+                : machines.length > 0
+                  ? "Turn on one of the machines below to use it here."
+                  : "Ask a workspace admin to connect a machine.";
+  // Inside the desktop app, the computer it runs on is one click away.
+  const desktop = useDesktopThisComputer();
+  const desktopReady =
+    thisComputerReady(desktop?.computer.status ?? null) && !desktop?.computer.status?.reconnecting;
+  const offerThisComputer =
+    desktop !== null &&
+    desktop.computer.status !== null &&
+    desktop.computer.status.state !== "unavailable" &&
+    !thisComputerReady(desktop.computer.status) &&
+    !unavailableOnDeployment &&
+    fleet.canRead;
+  const visibleDetails =
+    useError !== null || ordered.length > 0 || chromeMachine !== null || connectAnother;
+  // While the agent's request can be allowed here, everything else is one
+  // click away instead of competing with it.
+  const folded = allowHere !== null && !othersOpen;
+  const foldable =
+    allowHere !== null && (ordered.length > 0 || chromeMachine !== null || connectAnother);
+  const complete = !asking && (activeMachine !== null || desktopReady);
+  const completeLabel = activeMachine
+    ? outcome?.sandboxId === activeMachine.sandboxId
+      ? outcome.text
+      : `This chat runs on ${machineDisplayName(t, activeMachine)}`
+    : desktopReady
+      ? `Your agents can use ${desktop?.computer.status?.machineName || "this computer"}.`
+      : undefined;
+  // Keep the successful choice in the conversation, not the whole setup panel.
+  // Errors and an in-flight move still need their original controls and feedback.
+  const compact = complete && !settingsOpen && using === null && useError === null;
+  const confirmationLabel =
+    activeMachine &&
+    (outcome?.sandboxId !== activeMachine.sandboxId ||
+      outcome.text === `This chat now runs on ${machineDisplayName(t, activeMachine)}.`)
+      ? `Using ${machineDisplayName(t, activeMachine)}`
+      : completeLabel;
+
+  return (
+    <>
+      <span className="sr-only" role="status" aria-live="polite">
+        {announcement}
+      </span>
+      {complete ? (
+        <div
+          data-machine-confirmation=""
+          className="flex max-w-[540px] items-start gap-2 text-sm text-fg-muted"
+        >
+          <CheckIcon aria-hidden className="mt-3.5 size-4 shrink-0" />
+          <p className="min-w-0 flex-1 py-3 [overflow-wrap:anywhere]">{confirmationLabel}</p>
+          <Button
+            ref={settingsOpener}
+            variant="ghost"
+            size="sm"
+            className="min-h-11 shrink-0"
+            aria-label="Machine settings"
+            aria-expanded={!compact}
+            onClick={() => setSettingsOpen((open) => !open)}
+          >
+            Settings
+            <ChevronRightIcon aria-hidden className={compact ? "" : "rotate-90"} />
+          </Button>
+        </div>
+      ) : null}
+      <div hidden={compact} data-machine-setup="">
+        <SessionCapabilityFrame
+          name={asking ? requestedName : recommendation.name || "Connected Machine"}
+          subtitle={
+            asking
+              ? `${stateLabel(requested)} · ${machineScopeLabel(t, requested.scope)}`
+              : "Your computer or server"
+          }
+          logo={CONNECTED_MACHINE_LOGO}
+          typeLabel="Machine"
+          description={
+            allowOwnMachine
+              ? "The agent asked to use this machine. Allowing it lets your agents use it in this workspace from now on, and moves this chat here."
+              : allowHere
+                ? "The agent asked to use this machine. Allowing it moves this chat here, and the agent continues on it."
+                : asking
+                  ? `The agent asked to use ${requestedName}.`
+                  : recommendation.rationale
+          }
+          skill={false}
+          expanded={false}
+          // Running on some other machine doesn't answer the agent's request for
+          // this one: the card stays open with Allow until the chat is on it.
+          complete={complete}
+          completeLabel={completeLabel}
+          actionLabel={
+            allowHere
+              ? using === allowHere.sandboxId
+                ? "Allowing…"
+                : "Allow"
+              : offerThisComputer
+                ? desktop.computer.acting
+                  ? "Turning on…"
+                  : "Use this computer"
+                : "Connect a computer"
+          }
+          busy={allowHere ? using !== null : offerThisComputer && desktop.computer.acting}
+          actionUnavailable={allowHere || offerThisComputer ? null : actionUnavailable}
+          opensDialog={false}
+          note={
+            allowHere
+              ? allowOwnMachine && sharedChat
+                ? "Only your own messages run on it. This chat is shared, so people in this workspace see what the agent does there."
+                : allowOwnMachine
+                  ? "Only your own messages run on it."
+                  : ""
+              : offerThisComputer
+                ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
+                : fleet.canConnect
+                  ? "You can remove a connected machine anytime from Machines."
+                  : ""
+          }
+          onOpen={() => {
+            if (allowHere) return void use(allowHere);
+            if (!offerThisComputer) return openSetup();
+            if (desktop.computer.acting) return;
+            if (thisComputerNeedsPermissions(desktop.computer.status))
+              return desktop.allowPermissions();
+            // Resumes, registers afresh or starts the agent, whichever it needs,
+            // then asks for any missing permission itself.
+            void desktop.computer.turnOn().then(() => void fleet.refresh());
+          }}
+          onClose={closeSetup}
+          opener={opener}
+          cardRef={cardRef}
+          details={
+            unavailableOnDeployment || !fleet.canRead ? null : (
+              <>
+                {desktop?.computer.actionError !== null &&
+                desktop?.computer.actionError !== undefined ? (
+                  <Notice tone="failed" live="assertive" className="mx-4 mb-3 text-xs">
+                    Computer use couldn't turn on. {desktop.computer.actionError || "Try again."}
+                  </Notice>
+                ) : null}
+                {visibleDetails ? (
+                  <div
+                    data-slot="connected-machines"
+                    className="space-y-3 border-t border-border px-[19px] pt-3 pb-4 max-[480px]:px-3.5"
+                  >
+                    {useError ? (
+                      <Notice tone="failed" live="assertive" className="text-xs">
+                        {`Couldn't move this chat to ${useError.name}. ${
+                          useError.reason ??
+                          (fleet.mutationError
+                            ? userErrorText(fleet.mutationError, "Try again.")
+                            : "Try again.")
+                        }`}
+                      </Notice>
+                    ) : null}
+                    {foldable ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="-ml-2 text-fg-muted"
+                        aria-expanded={othersOpen}
+                        onClick={() => setOthersOpen((open) => !open)}
+                      >
+                        <ChevronRightIcon
+                          aria-hidden
+                          className={
+                            othersOpen ? "rotate-90 transition-transform" : "transition-transform"
+                          }
+                        />
+                        Use a different machine
+                      </Button>
+                    ) : null}
+                    {!folded && ordered.length > 0 ? (
+                      <RowList label="Connected machines" flush>
+                        {ordered.map((machine) => (
+                          <MachineRow
+                            key={machine.sandboxId}
+                            machine={machine}
+                            primary={machine.sandboxId === justConnected}
+                            canUse={fleet.canAttach}
+                            busy={using === machine.sandboxId}
+                            locked={using !== null || fleet.attaching}
+                            onUse={() => void use(machine)}
+                          />
+                        ))}
+                      </RowList>
+                    ) : null}
+                    {!folded && chromeMachine ? (
+                      <ScreenControlStep
+                        key={chromeMachine.sandboxId}
+                        machine={chromeMachine}
+                        workspaceId={workspaceId}
+                        canManage={fleet.canManageMachine(chromeMachine)}
+                        refresh={fleet.refresh}
+                        onReconnect={() => openSetup(chromeMachine)}
+                      />
+                    ) : null}
+                    {!folded && chromeMachine ? (
+                      <ChromeStep
+                        chrome={chrome}
+                        machineName={machineDisplayName(t, chromeMachine)}
+                      />
+                    ) : null}
+                    {!folded && connectAnother ? (
+                      // Its own list after the machines and their steps: it is
+                      // not a connected machine, and it shouldn't split the chat
+                      // machine from its screen control and Chrome rows.
+                      <RowList label="Connect another computer" flush>
+                        <ListRow
+                          leading={<LogoTile icon={<PlusIcon />} />}
+                          title="Another computer"
+                          description="Not connected yet"
+                          control={
+                            <RowButton
+                              aria-label="Connect another computer"
+                              aria-haspopup="dialog"
+                              onClick={() => openSetup()}
+                            >
+                              Connect
+                            </RowButton>
+                          }
+                        />
+                      </RowList>
+                    ) : null}
+                  </div>
+                ) : null}
+              </>
+            )
+          }
+        />
+      </div>
+      {fleet.canConnect && !unavailableOnDeployment ? (
+        <ConnectMachineDialog
+          open={setupOpen}
+          onOpenChange={(open) => {
+            if (!open) closeSetup();
+          }}
+          workspaceId={workspaceId}
+          sessionId={sessionId}
+          origin={origin}
+          machines={fleet.machines}
+          machinesLoading={fleet.loading}
+          machinesError={fleet.error}
+          personalWorkspace={personalWorkspace}
+          canShareWithWorkspace={fleet.canManage}
+          canConnectOwnMachine={fleet.canConnectOwnMachine}
+          defaultScope={setupScope}
+          defaultAllowScreenControl={setupScreenControl}
+          onConnected={(machine) => {
+            setJustConnected(machine.sandboxId);
+            setAnnouncement(`${machineDisplayName(t, machine)} connected.`);
+          }}
+          useInChat={{ canUse: fleet.canAttach, onUse: (machine) => void use(machine) }}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * An earlier Connected Machine card whose request the agent made again further
+ * down. The newer card is the live one, so this stays a single quiet line.
+ */
+export function RepeatedMachineRequestNote({ chrome = false }: { chrome?: boolean }) {
+  return (
+    <p className="flex items-center gap-2 text-xs text-fg-muted">
+      <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
+      {chrome
+        ? "The agent asked to connect Chrome. It asked again below."
+        : "The agent asked to use a machine. It asked again below."}
+    </p>
+  );
+}
+
+function MachineRow({
+  machine,
+  primary,
+  canUse,
+  busy,
+  locked,
+  onUse,
+}: {
+  machine: MachineView;
+  primary: boolean;
+  canUse: boolean;
+  busy: boolean;
+  locked: boolean;
+  onUse: () => void;
+}) {
+  const name = machineDisplayName(t, machine);
+  const selectable = isMachineComputeSelectable(machine.state);
+  const Icon = machine.os === "linux" && !machine.hasDisplay ? ServerIcon : LaptopIcon;
+  const common = {
+    leading: <LogoTile icon={<Icon />} />,
+    title: name,
+    meta: [stateLabel(machine), machineScopeLabel(t, machine.scope)],
+  };
+  if (machine.active) {
+    return (
+      <ListRow
+        {...common}
+        control={
+          <span className="inline-flex items-center gap-1 text-xs font-medium text-status-idle">
+            <CheckIcon aria-hidden className="size-3.5" />
+            In this chat
+          </span>
+        }
+      />
+    );
+  }
+  // The meta line already says why ("Offline", "Reconnecting").
+  if (!selectable) return <ListRow {...common} disabled />;
+  if (!canUse) return <ListRow {...common} />;
+  const label = busy ? `Moving this chat to ${name}` : `Use ${name} in this chat`;
+  return (
+    <ListRow
+      {...common}
+      control={
+        primary ? (
+          <Button
+            type="button"
+            size="sm"
+            aria-label={label}
+            aria-disabled={locked || undefined}
+            className="rounded-[10px] pointer-coarse:h-11"
+            onClick={() => {
+              if (!locked) onUse();
+            }}
+          >
+            {busy ? <Loader2Icon aria-hidden className="animate-spin" /> : null}
+            {busy ? "Moving…" : "Use in this chat"}
+          </Button>
+        ) : (
+          <RowButton
+            aria-label={label}
+            aria-disabled={locked || undefined}
+            onClick={() => {
+              if (!locked) onUse();
+            }}
+          >
+            {busy ? <Loader2Icon aria-hidden className="animate-spin" /> : null}
+            {busy ? "Moving…" : "Use"}
+          </RowButton>
+        )
+      }
+    />
+  );
+}
+
+export type ChromeState = {
+  connected: { name: string } | null;
+  /** A read completed, so a null `connected` means Chrome is not linked yet. */
+  checked: boolean;
+  /** Start checking for the extension (after the person opens the store). */
+  watch: () => void;
+  /** Checking for the extension after the person opened the store. */
+  watching: boolean;
+};
+
+/** Which Chrome to look for: one on an exact machine, or any the person connected. */
+export type AttachedChromeScope = { enrollmentId: string } | "any" | null;
+
+/**
+ * Whether the Opengeni Browser extension linked a Chrome profile the agent can
+ * use (the same check browser_open applies) on this exact machine, or, with
+ * "any", on any machine. Reads once, and again whenever `refreshKey` changes
+ * (for example when a computer comes online); polls only after the person opens
+ * the store, stops once linked, after a bounded time, or when the inventory is
+ * not available to them.
+ */
+export function useAttachedChrome(
+  workspaceId: string,
+  scope: AttachedChromeScope,
+  refreshKey: string | null = null,
+): ChromeState {
+  const { client } = useAppContext();
+  // Poll on its own timer; a new client identity on re-render must not refetch.
+  const clientRef = useRef(client);
+  clientRef.current = client;
+  const [connected, setConnected] = useState<{ name: string } | null>(null);
+  const [checked, setChecked] = useState(false);
+  const [watchSince, setWatchSince] = useState<number | null>(null);
+  const [refreshSince, setRefreshSince] = useState<number | null>(null);
+  const [expired, setExpired] = useState(false);
+  const [denied, setDenied] = useState(false);
+  const linked = connected !== null;
+  const enrollmentId = scope === null ? null : scope === "any" ? "*" : scope.enrollmentId;
+
+  useEffect(() => {
+    setConnected(null);
+    setChecked(false);
+    setDenied(false);
+  }, [enrollmentId]);
+
+  useEffect(() => {
+    setRefreshSince(refreshKey === null ? null : Date.now());
+  }, [refreshKey]);
+
+  useEffect(() => {
+    if (!enrollmentId || denied) return;
+    let cancelled = false;
+    const read = async () => {
+      try {
+        const result = await clientRef.current.listAttachedBrowsers(workspaceId);
+        if (cancelled) return;
+        const device = result.devices.find(
+          (candidate) =>
+            candidate.state === "connected" &&
+            candidate.capabilities.debuggerAttachment &&
+            (enrollmentId === "*" || candidate.enrollmentId === enrollmentId),
+        );
+        setConnected(device ? { name: device.profileLabel ?? device.browserName } : null);
+        setChecked(true);
+      } catch (failure) {
+        // Without inventory access the step still offers the install link.
+        if (
+          !cancelled &&
+          failure instanceof OpenGeniApiError &&
+          failure.status >= 400 &&
+          failure.status < 500
+        ) {
+          setDenied(true);
+        }
+      }
+    };
+    void read();
+    if (linked || (watchSince === null && refreshSince === null)) {
+      return () => void (cancelled = true);
+    }
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const watching = watchSince !== null && now - watchSince <= CHROME_POLL_LIMIT_MS;
+      const refreshing =
+        refreshSince !== null && now - refreshSince <= CHROME_REFRESH_POLL_LIMIT_MS;
+      if (!watching && !refreshing) {
+        window.clearInterval(timer);
+        if (watchSince !== null) setExpired(true);
+        return;
+      }
+      if (document.visibilityState !== "hidden") void read();
+    }, CHROME_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [denied, enrollmentId, linked, refreshSince, watchSince, workspaceId]);
+
+  const watch = useCallback(() => {
+    setExpired(false);
+    setWatchSince(Date.now());
+  }, []);
+  return {
+    connected,
+    checked,
+    watch,
+    watching: watchSince !== null && !linked && !expired && !denied,
+  };
+}
+
+/** How long to keep checking for the new consent, or a granted Mac permission. */
+const SCREEN_CONTROL_WATCH_MS = 90_000;
+const MAC_PERMISSION_WATCH_MS = 3 * 60_000;
+const SCREEN_CONTROL_POLL_MS = 3_000;
+
+type MacPermissionPane = "screen_recording" | "accessibility" | "input_monitoring";
+type MacPermissions = NonNullable<NonNullable<MachineView["runtime"]>["macPermissions"]>;
+
+/** The order the agent needs them in: seeing the screen first, then input. */
+const MAC_PERMISSIONS: ReadonlyArray<{
+  pane: MacPermissionPane;
+  key: keyof MacPermissions;
+  label: string;
+}> = [
+  { pane: "screen_recording", key: "screenRecording", label: "Screen Recording" },
+  { pane: "accessibility", key: "accessibility", label: "Accessibility" },
+  { pane: "input_monitoring", key: "inputMonitoring", label: "Input Monitoring" },
+];
+
+function isOnline(machine: MachineView): boolean {
+  return (
+    machine.state === "online" ||
+    machine.state === "consent_required" ||
+    machine.state === "display_unavailable"
+  );
+}
+
+/**
+ * Screen control for the machine with a screen. Turning it on changes this
+ * machine in place (agents can do the same themselves); the step then follows
+ * what the machine reports: the agent's own consent, then on a Mac each of the
+ * three OS permissions, one System Settings pane at a time.
+ */
+function ScreenControlStep({
+  machine,
+  workspaceId,
+  canManage,
+  refresh,
+  onReconnect,
+}: {
+  machine: MachineView;
+  workspaceId: string;
+  canManage: boolean;
+  refresh: () => Promise<void>;
+  /** Open the connect command, for a connection too old to change in place. */
+  onReconnect: () => void;
+}) {
+  const { client } = useAppContext();
+  const stepRef = useRef<HTMLDivElement>(null);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [opened, setOpened] = useState<MacPermissionPane | null>(null);
+  const [watchUntil, setWatchUntil] = useState(0);
+  const [stalled, setStalled] = useState(false);
+  const [reconnect, setReconnect] = useState(false);
+
+  const online = isOnline(machine);
+  const runtime = machine.runtime;
+  const allowed = machine.allowScreenControl;
+  // Older reports cannot say whether the agent holds the consent; trust the row.
+  const applied = allowed && (runtime?.capabilities.screenControl ?? true);
+  const renewable = runtime?.capabilities.credentialRenew === true;
+  const mac = machine.os === "macos";
+  const permissions = mac ? (runtime?.macPermissions ?? null) : null;
+  const reason = machine.desktopUnavailableReason?.trim() || null;
+  const missing = permissions
+    ? (MAC_PERMISSIONS.find((step) => !permissions[step.key]) ?? null)
+    : mac && reason !== null && /screen recording/i.test(reason)
+      ? MAC_PERMISSIONS[0]!
+      : null;
+  const updating = runtime?.versionState === "updating";
+  const waiting =
+    (allowed && !applied && online && (renewable || updating) && !reconnect) || opened !== null;
+
+  // Also when the card opens on a change already underway (a reload, or an
+  // agent turned it on): watch for a while, then offer Try again.
+  useEffect(() => {
+    if (waiting && watchUntil === 0) setWatchUntil(Date.now() + SCREEN_CONTROL_WATCH_MS);
+  }, [waiting, watchUntil]);
+
+  // Re-read the machine while a change is on its way, for a bounded time.
+  useEffect(() => {
+    if (!waiting || watchUntil === 0) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() > watchUntil) {
+        window.clearInterval(timer);
+        setStalled(true);
+        return;
+      }
+      void refreshRef.current().catch(() => {});
+    }, SCREEN_CONTROL_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [waiting, watchUntil]);
+
+  async function turnOn() {
+    if (busy || !machine.enrollmentId) return;
+    setBusy(true);
+    setNote(null);
+    setStalled(false);
+    try {
+      const result = await client.enableMachineScreenControl(workspaceId, machine.enrollmentId);
+      if (result.reason === "renewal_failed") setNote(result.message);
+      setReconnect(result.reason === "reconnect_required");
+      setWatchUntil(Date.now() + SCREEN_CONTROL_WATCH_MS);
+      await refreshRef.current().catch(() => {});
+    } catch (failure) {
+      setNote(
+        failure instanceof OpenGeniApiError && failure.status === 403
+          ? "Only an organization admin can turn this on."
+          : userErrorText(failure, "Try again."),
+      );
+    } finally {
+      setBusy(false);
+      focusIfIdle(stepRef.current);
+    }
+  }
+
+  async function updateAgent() {
+    if (busy || !machine.enrollmentId) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      await client.updateMachineAgent(workspaceId, machine.enrollmentId);
+      setStalled(false);
+      setWatchUntil(Date.now() + MAC_PERMISSION_WATCH_MS);
+      await refreshRef.current().catch(() => {});
+    } catch (failure) {
+      setNote(userErrorText(failure, "Try again."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openPane(pane: MacPermissionPane) {
+    if (busy || !machine.enrollmentId) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const result = await client.openMachinePrivacySettings(workspaceId, machine.enrollmentId, {
+        pane,
+      });
+      if (result.opened) {
+        setOpened(pane);
+        setStalled(false);
+        setWatchUntil(Date.now() + MAC_PERMISSION_WATCH_MS);
+      } else {
+        setNote(result.message);
+      }
+    } catch (failure) {
+      setNote(userErrorText(failure, "Try again."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const button = (label: string, onClick: () => void) => (
+    <RowButton aria-disabled={busy || undefined} aria-busy={busy || undefined} onClick={onClick}>
+      {busy ? <Loader2Icon aria-hidden className="animate-spin" /> : null}
+      {label}
+    </RowButton>
+  );
+  const done = (
+    <span className="inline-flex items-center gap-1 text-xs font-medium text-status-idle">
+      <CheckIcon aria-hidden className="size-3.5" />
+      On
+    </span>
+  );
+
+  // The row stays one short line like its neighbours; anything the person has
+  // to do on the machine goes in the wrapping line under it.
+  let description: string;
+  let hint: string | null = null;
+  let control: ReactNode = null;
+  if (!allowed) {
+    description = canManage
+      ? "Let agents see and use this screen"
+      : "Ask a workspace admin to turn it on";
+    if (canManage) control = button(busy ? "Turning on…" : "Turn on", () => void turnOn());
+  } else if (!applied) {
+    // The step only shows for a reachable machine.
+    if (reconnect) {
+      description = "Needs a fresh connection";
+      hint = "Run the connect command on this machine again, with screen control on.";
+      if (canManage) control = button("Connect again", onReconnect);
+    } else if (updating) {
+      description = "Updating the agent…";
+    } else if (!renewable) {
+      description = "Waiting for an agent update";
+      hint = "It turns on by itself once this machine's agent is updated.";
+      if (canManage && !runtime?.updateBlockedReason) {
+        control = button(busy ? "Updating…" : "Update agent", () => void updateAgent());
+      }
+    } else if (stalled || note) {
+      description = "Not on yet";
+      if (canManage) control = button(busy ? "Trying…" : "Try again", () => void turnOn());
+    } else {
+      description = "Turning on…";
+    }
+  } else if (missing) {
+    const shown = opened === missing.pane;
+    // The row stays short at any width; the hint names the permission.
+    description = "Mac permission needed";
+    hint = shown
+      ? `On the Mac, switch on Opengeni under ${missing.label}.${
+          missing.pane === "screen_recording" ? " Choose Quit & Reopen if macOS asks." : ""
+        }`
+      : `Allow ${missing.label} for Opengeni on this Mac.`;
+    if (canManage && online) {
+      control = button(shown ? "Open again" : "Open settings", () => void openPane(missing.pane));
+    }
+  } else if (reason) {
+    description = reason;
+  } else {
+    description = "Agents can see and use this screen";
+    control = done;
+  }
+  const notice = note ?? hint;
+
+  return (
+    <div
+      data-slot="screen-control"
+      ref={stepRef}
+      tabIndex={-1}
+      className="space-y-2 outline-hidden"
+    >
+      <RowList label="Screen control" flush>
+        <ListRow
+          leading={<LogoTile icon={<MonitorIcon />} />}
+          title="Screen control"
+          description={description}
+          control={control}
+        />
+      </RowList>
+      <span className="sr-only" aria-live="polite">
+        {notice ? `${description}. ${notice}` : description}
+      </span>
+      {notice ? (
+        <Notice tone="waiting" className="text-xs">
+          {notice}
+        </Notice>
+      ) : null}
+    </div>
+  );
+}
+
+function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName: string }) {
+  const { client } = useAppContext();
+  // The deployment's own extension when it ships one, else Opengeni Browser.
+  const extension = useClientConfigFlags(client).browserExtension ?? {
+    name: "Opengeni Browser",
+    installUrl: OPENGENI_BROWSER_EXTENSION_URL,
+  };
+  return (
+    <div data-slot="chrome-extension">
+      <RowList label="Chrome" flush>
+        <ListRow
+          leading={<LogoTile icon={<PuzzleIcon />} />}
+          title="Chrome"
+          description={
+            chrome.connected
+              ? `${chrome.connected.name} on ${machineName}`
+              : `Add ${extension.name} on ${machineName}`
+          }
+          control={
+            chrome.connected ? (
+              <span className="inline-flex items-center gap-1 text-xs font-medium text-status-idle">
+                <CheckIcon aria-hidden className="size-3.5" />
+                Connected
+              </span>
+            ) : (
+              <Button asChild size="sm" variant="outline" className="rounded-[10px]">
+                <a
+                  href={extension.installUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={chrome.watch}
+                >
+                  Add to Chrome
+                  <ArrowUpRightIcon aria-hidden />
+                  <span className="sr-only"> (opens the Chrome Web Store in a new tab)</span>
+                </a>
+              </Button>
+            )
+          }
+        />
+      </RowList>
+    </div>
+  );
+}

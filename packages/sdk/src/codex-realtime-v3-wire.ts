@@ -3,7 +3,8 @@
  *
  * These shapes are pinned to openai/codex@fa1d4c40. V3 delegates work with
  * `delegation.created`; it does not expose the ordinary Realtime V2
- * `function_call` protocol.
+ * `function_call` protocol. `transcript.segment` is an application adapter
+ * extension for providers that emit fragments without semantic turn boundaries.
  */
 
 export const CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT = 128;
@@ -40,7 +41,7 @@ export type CodexRealtimeV3Event =
       endMs: number | null;
     })
   | (ProviderEventIdentity & {
-      type: "turn.done";
+      type: "turn.done" | "transcript.segment";
       turnId: string;
       role: "user" | "assistant";
       transcript: string;
@@ -173,7 +174,7 @@ export function parseCodexRealtimeV3Event(payload: string): CodexRealtimeV3Parse
     };
   }
 
-  if (type === "turn.done") {
+  if (type === "turn.done" || type === "transcript.segment") {
     const turn = record(event.turn);
     const turnIdField = boundedStringField(turn, "id", CODEX_REALTIME_V3_MAX_IDENTIFIER_BYTES);
     const transcriptField = boundedStringField(

@@ -1,3 +1,9 @@
+import {
+  isSitePermission,
+  type SitePermission,
+  type SitePermissionSetting,
+} from "./site-permissions";
+
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const NATIVE_HOST_NAME = "ai.opengeni.browser" as const;
 
@@ -29,6 +35,8 @@ export type ExtensionDevice = {
   platform: ExtensionPlatform;
   architecture: ExtensionArchitecture;
   connectionGeneration: string;
+  /** Stable for this extension worker's lifetime, across native reconnects. */
+  stateGeneration: string;
   inventoryRevision: number;
   capabilities: {
     tabInventory: true;
@@ -40,6 +48,8 @@ export type ExtensionDevice = {
     diagnostics: true;
     rawCdp: false;
     linkedComputer: true;
+    /** Read-only DOMSnapshot privacy discovery, including closed roots. */
+    paymentFieldPrivacy: true;
   };
 };
 
@@ -55,6 +65,7 @@ export type ExtensionInventory = {
   deviceId: string;
   connectionGeneration: string;
   inventoryRevision: number;
+  profile?: { profileLabel: string | null };
   tabs: AttachedTab[];
 };
 
@@ -86,10 +97,36 @@ export type BridgeCommand =
       type: "debugger.command";
       tabId: string;
       sessionId?: string;
+      /** The attachment `debugger.attach` reported. A command naming an
+       * attachment that has since ended is refused, so a late command can
+       * never run under a newer attachment of the same tab. */
+      attachment?: number;
       method: string;
       params: Record<string, unknown>;
     }
-  | { type: "debugger.poll"; afterSequence: number; limit: number };
+  | { type: "debugger.poll"; afterSequence: number; limit: number }
+  /** Where Chrome saved completed downloads of `url` (before or after
+   * redirects) that started at or after `startedAfter`, oldest first. A
+   * controlled tab's download events name the download but not its file. */
+  | { type: "downloads.find"; url: string; startedAfter: string }
+  /** Sets one permission for one exact site (`https://example.com`), which
+   * the tab `tabId` must show under the attachment `debugger.attach`
+   * reported. Extensions that answer `ping` with `sitePermissions: true`
+   * know it. */
+  | {
+      type: "permissions.set";
+      tabId: string;
+      attachment: number;
+      origin: string;
+      permission: SitePermission;
+      setting: SitePermissionSetting;
+    };
+
+export type FoundDownload = {
+  id: number;
+  filePath: string;
+  sizeBytes: number;
+};
 
 export type BridgeDebuggerEvent = {
   sequence: number;
@@ -112,6 +149,36 @@ export type ExtensionCommandResult = {
     retryable: boolean;
   };
 };
+
+const DEBUGGER_DOMAINS = new Set([
+  "Accessibility",
+  "DOM",
+  "Input",
+  "Log",
+  "Network",
+  "Page",
+  "Runtime",
+]);
+
+// Single methods admitted outside the driver's domains. Focus emulation keeps
+// a background tab rendering and acknowledging input without activating it or
+// raising Chrome; without it Chrome holds every mouse event sent to a hidden
+// tab for about five seconds. Chrome clears it when the debugger detaches.
+// Inspector.enable only reports a crashed tab, so the agent stops waiting on it.
+// Emulation.clearDeviceMetricsOverride only removes an emulated size: a
+// screenshot of a tab Chrome had to be asked again to draw can leave its
+// temporary emulation behind, and clearing it lets the tab follow its window.
+// DOMSnapshot is read-only privacy discovery, including closed shadow roots.
+const DEBUGGER_METHODS = new Set([
+  "Emulation.setFocusEmulationEnabled",
+  "Emulation.clearDeviceMetricsOverride",
+  "Inspector.enable",
+  "DOMSnapshot.captureSnapshot",
+]);
+
+export function isAllowedDebuggerMethod(method: string): boolean {
+  return DEBUGGER_METHODS.has(method) || DEBUGGER_DOMAINS.has(method.slice(0, method.indexOf(".")));
+}
 
 export function parseExtensionCommand(value: unknown): ExtensionCommandEnvelope {
   const envelope = requireRecord(value, "bridge command envelope");
@@ -160,6 +227,57 @@ export function parseExtensionReady(value: unknown): ExtensionReady {
   };
 }
 
+export type AgentUnavailableReason =
+  | "agent_not_running"
+  | "agent_outdated"
+  | "extension_outdated"
+  | "agent_error";
+
+/**
+ * The agent side's explanation, sent once before it closes a connection it
+ * cannot take. Agents that predate it close without one.
+ */
+export type AgentUnavailable = {
+  type: "unavailable";
+  reason: AgentUnavailableReason;
+  agentVersion: string | null;
+  detail: string | null;
+};
+
+const AGENT_UNAVAILABLE_REASONS: readonly string[] = [
+  "agent_not_running",
+  "agent_outdated",
+  "extension_outdated",
+  "agent_error",
+];
+
+export function isAgentUnavailable(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as { type?: unknown }).type === "unavailable"
+  );
+}
+
+/**
+ * Deliberately tolerant: this message explains a version difference, so it
+ * must read from an agent of any version. Unknown reasons are agent errors.
+ */
+export function parseAgentUnavailable(value: unknown): AgentUnavailable {
+  const envelope = requireRecord(value, "agent unavailable message");
+  if (envelope.type !== "unavailable") throw new Error("agent unavailable message is invalid");
+  const optionalText = (field: unknown, maxLength: number): string | null =>
+    typeof field === "string" && field.trim() ? field.trim().slice(0, maxLength) : null;
+  return {
+    type: "unavailable",
+    reason: AGENT_UNAVAILABLE_REASONS.includes(envelope.reason as string)
+      ? (envelope.reason as AgentUnavailableReason)
+      : "agent_error",
+    agentVersion: optionalText(envelope.agentVersion, 64),
+    detail: optionalText(envelope.detail, 512),
+  };
+}
+
 function parseBridgeCommand(value: unknown): BridgeCommand {
   const command = requireRecord(value, "bridge command");
   switch (command.type) {
@@ -179,16 +297,21 @@ function parseBridgeCommand(value: unknown): BridgeCommand {
       exactKeys(command, ["type", "tabId"]);
       return { type: command.type, tabId: requireTabId(command.tabId) };
     case "debugger.command": {
-      exactKeys(command, ["type", "tabId", "sessionId", "method", "params"]);
+      exactKeys(command, ["type", "tabId", "sessionId", "attachment", "method", "params"]);
       const params = requireRecord(command.params, "debugger command parameters");
       const sessionId =
         command.sessionId === undefined
           ? undefined
           : boundedString(command.sessionId, 1, 512, "debugger session id");
+      const attachment =
+        command.attachment === undefined
+          ? undefined
+          : boundedInteger(command.attachment, 1, Number.MAX_SAFE_INTEGER);
       return {
         type: command.type,
         tabId: requireTabId(command.tabId),
         ...(sessionId ? { sessionId } : {}),
+        ...(attachment === undefined ? {} : { attachment }),
         method: debuggerMethod(command.method),
         params,
       };
@@ -200,6 +323,38 @@ function parseBridgeCommand(value: unknown): BridgeCommand {
         afterSequence: boundedInteger(command.afterSequence, 0, Number.MAX_SAFE_INTEGER),
         limit: boundedInteger(command.limit, 1, 1_000),
       };
+    case "downloads.find": {
+      exactKeys(command, ["type", "url", "startedAfter"]);
+      const startedAfter = boundedString(command.startedAfter, 20, 40, "download start time");
+      if (!Number.isFinite(Date.parse(startedAfter))) {
+        throw new Error("download start time is invalid");
+      }
+      return { type: command.type, url: boundedUrl(command.url), startedAfter };
+    }
+    case "permissions.set": {
+      exactKeys(command, ["type", "tabId", "attachment", "origin", "permission", "setting"]);
+      // Whether the origin is one Chrome can be given is the extension's
+      // answer (`unsupported_site`), not a malformed request.
+      const origin = boundedString(command.origin, 1, 2_048, "site permission origin");
+      if (!isSitePermission(command.permission)) {
+        throw new Error("site permission is unsupported");
+      }
+      if (
+        command.setting !== "granted" &&
+        command.setting !== "denied" &&
+        command.setting !== "prompt"
+      ) {
+        throw new Error("site permission setting is invalid");
+      }
+      return {
+        type: command.type,
+        tabId: requireTabId(command.tabId),
+        attachment: boundedInteger(command.attachment, 1, Number.MAX_SAFE_INTEGER),
+        origin,
+        permission: command.permission,
+        setting: command.setting,
+      };
+    }
     default:
       throw new Error("bridge command type is unsupported");
   }

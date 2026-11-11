@@ -1,4 +1,5 @@
 import { ApiError } from "@/api";
+import { SIGN_IN_METHOD_ORIGIN_MESSAGE } from "./sign-in-method-origin";
 
 export function signInMethodFailure(error: unknown): {
   kind: "identity_changed" | "reauth" | "rejected" | "unknown";
@@ -10,6 +11,12 @@ export function signInMethodFailure(error: unknown): {
       message:
         "The result of this change is unknown. Cancel any open dialog, then retry the same request or refresh to check your methods. Don't submit a new change yet.",
     };
+  }
+  if (error.details?.code === "SIGN_IN_METHOD_SAME_ORIGIN_REQUIRED") {
+    return { kind: "rejected", message: SIGN_IN_METHOD_ORIGIN_MESSAGE };
+  }
+  if (error.code?.startsWith("PASSKEY_")) {
+    return { kind: "rejected", message: error.message };
   }
   const code = error.code?.toUpperCase().replace(/^SIGN_IN_METHOD_/, "");
   if (code === "IDENTITY_CHANGED")
@@ -44,6 +51,9 @@ export function signInMethodFailure(error: unknown): {
       "This sign-in provider is no longer connected. Refresh to see your current methods.",
     EXPLICIT_RECONNECT_REQUIRED:
       "This method was explicitly disconnected. Refresh, then choose Reconnect here to authorize it again.",
+    PASSKEY_LIMIT:
+      "Your account has the most passkeys it can hold. Remove one before adding another.",
+    RATE_LIMITED: "Too many sign-in method attempts. Wait a minute, then try again.",
   };
   return {
     kind: code === "PASSWORD_CHANGED" ? "reauth" : "rejected",

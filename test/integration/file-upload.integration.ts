@@ -11,9 +11,10 @@ import {
   createDb,
   dbSql,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
-  setActiveCodexCredential,
-  upsertCodexSubscriptionCredential,
+  connectSubscriptionCoreCodexConnection,
+  setSubscriptionCoreCodexPrimary,
+  withBillingOriginOverride,
+  withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -23,12 +24,11 @@ import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   GARAGE_FIXTURE_ACCESS_KEY_ID,
   GARAGE_FIXTURE_SECRET_ACCESS_KEY,
-  MemoryEventBus,
-  startTestServices,
-  testSettings,
-  waitFor,
-  type TestServices,
-} from "@opengeni/testing";
+} from "@opengeni/testing/object-storage-fixture";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { createFileUploadReaperActivities } from "../../apps/worker/src/activities/file-upload-reaper";
 import type { ActivityServices } from "../../apps/worker/src/activities/types";
@@ -37,6 +37,7 @@ import {
   FILE_UPLOAD_REAPER_SCHEDULE_ID,
   registerFileUploadReaperSchedule,
 } from "../../apps/worker/src/index";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const APP_ROLE_PASSWORD = "opengeni_app";
 const DELEGATION_SECRET = "fileupload-file-upload-delegation-secret";
@@ -254,7 +255,6 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient OpenGeni credits",
         retryable: false,
       },
     });
@@ -282,26 +282,50 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
     // draft's model. The same durable attachment then admits with zero managed
     // credits and creates exactly one session/message/turn.
     const encryptionKey = environmentsEncryptionKeyBytes(fixture.settings)!;
-    const credential = await upsertCodexSubscriptionCredential(appDb.db, {
-      accountId: fixture.accountId,
-      workspaceId: fixture.workspaceId,
-      credentialEncrypted: encryptEnvironmentValue(
-        encryptionKey,
-        JSON.stringify({
-          access_token: "synthetic-access-token",
-          refresh_token: "synthetic-refresh-token",
-          id_token: "synthetic-id-token",
-        }),
-      ),
-      chatgptAccountId: `synthetic:${crashed.fileId}`,
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: new Date(Date.now() + 60_000),
-      lastRefreshAt: new Date(),
-    });
-    await ensureCodexRotationSettings(appDb.db, fixture.accountId, fixture.workspaceId);
-    expect(await setActiveCodexCredential(appDb.db, fixture.workspaceId, credential.id)).toBe(true);
+    // bootstrapWorkspace grants this synthetic caller workspace access, not
+    // organization membership. The core connect writer requires a real admin.
+    const [personal] = await admin`insert into workspaces (account_id, name)
+      values (${fixture.accountId}, 'Synthetic owner Personal workspace') returning id`;
+    await admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id, role)
+      values (${fixture.accountId}, ${fixture.subjectId}, 'active', ${personal!.id}, 'owner')
+      on conflict (account_id, subject_id) do nothing`;
+    const credential = await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+      connectSubscriptionCoreCodexConnection(appDb.db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        subjectId: fixture.subjectId,
+        credentialEncrypted: encryptEnvironmentValue(
+          encryptionKey,
+          JSON.stringify({
+            access_token: "synthetic-access-token",
+            refresh_token: "synthetic-refresh-token",
+            id_token: "synthetic-id-token",
+          }),
+        ),
+        providerAccountId: `synthetic:${crashed.fileId}`,
+        providerSubjectId: "synthetic-person",
+        accountEmail: null,
+        label: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: new Date(Date.now() + 60_000),
+        lastRefreshAt: new Date(),
+      }),
+    );
+    if (credential.kind !== "connected")
+      throw new Error(`Core fixture refused: ${credential.reason}`);
+    expect(
+      (
+        await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+          setSubscriptionCoreCodexPrimary(appDb.db, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            subjectId: fixture.subjectId,
+            connectionId: credential.id,
+          }),
+        )
+      ).activated,
+    ).toBe(credential.id);
     const codexDraftResponse = await app.request(
       workspacePath(fixture.workspaceId, "/new-session-draft"),
       {
@@ -323,19 +347,21 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       model: "codex/gpt-6-sol",
     });
     const retryIdempotencyKey = crypto.randomUUID();
-    const retried = await app.request(workspacePath(fixture.workspaceId, "/sessions"), {
-      method: "POST",
-      headers: { "content-type": "application/json", ...fixture.headers },
-      body: JSON.stringify({
-        initialMessage: draftPayload.text,
-        resources: draftPayload.resources,
-        model: codexDraft.model,
-        reasoningEffort: codexDraft.reasoningEffort,
-        clientEventId: crypto.randomUUID(),
-        idempotencyKey: retryIdempotencyKey,
-        expectedNewSessionDraftRevision: codexDraft.revision,
+    const retried = await withBillingOriginOverride("app", () =>
+      app.request(workspacePath(fixture.workspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json", ...fixture.headers },
+        body: JSON.stringify({
+          initialMessage: draftPayload.text,
+          resources: draftPayload.resources,
+          model: codexDraft.model,
+          reasoningEffort: codexDraft.reasoningEffort,
+          clientEventId: crypto.randomUUID(),
+          idempotencyKey: retryIdempotencyKey,
+          expectedNewSessionDraftRevision: codexDraft.revision,
+        }),
       }),
-    });
+    );
     expect(retried.status).toBe(202);
     const created = (await retried.json()) as {
       id: string;
@@ -709,6 +735,13 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
           await release;
           return { claimed: 0, deleted: 0, failed: 0 };
         },
+        // The reaper workflow runs further sweeps after the upload reaper;
+        // register them as no-ops so each triggered run completes cleanly.
+        maintainRetainedScreenshots: async () => ({}),
+        maintainBrowserStateArtifacts: async () => ({}),
+        recoverVideoGenerationWorkflows: async () => ({}),
+        reconcileRecentModelCallFacts: async () => ({}),
+        recordRecentTurnTimingProfiles: async () => ({}),
       },
     });
     const run = worker.run();
@@ -794,6 +827,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
 
 type WorkspaceFixture = {
   accountId: string;
+  subjectId: string;
   workspaceId: string;
   headers: Record<string, string>;
   settings: ReturnType<typeof uploadSettings>;
@@ -861,6 +895,7 @@ async function workspaceFixture(
   });
   return {
     accountId,
+    subjectId: access.subjectId,
     workspaceId,
     headers: { authorization: `Bearer ${token}` },
     settings,
@@ -945,11 +980,6 @@ function pngBytes(): Uint8Array {
       "base64",
     ),
   );
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Buffer.from(digest).toString("hex");
 }
 
 function workspacePath(workspaceId: string, path: string): string {

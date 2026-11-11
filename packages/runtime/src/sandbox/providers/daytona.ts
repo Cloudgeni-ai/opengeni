@@ -2,6 +2,7 @@ import { DaytonaSandboxClient } from "@openai/agents-extensions/sandbox/daytona"
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
 import { REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
+import { withDaytonaCommandBinding } from "./daytona-command-binding";
 
 export const daytonaProvider: ProviderRegistration = {
   backend: "daytona",
@@ -9,6 +10,7 @@ export const daytonaProvider: ProviderRegistration = {
   instanceIdFields: ["sandboxId"],
   workspaceCapturePolicy: () => REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.daytona,
+  sessionSupportsPty: true,
   validateCredentials(settings) {
     if (!settings.daytonaApiKey) {
       throw new SandboxConfigError("daytona", "OPENGENI_DAYTONA_API_KEY is required");
@@ -32,6 +34,6 @@ export const daytonaProvider: ProviderRegistration = {
     if (settings.daytonaExposedPortUrlTtlSeconds) {
       options.exposedPortUrlTtlS = settings.daytonaExposedPortUrlTtlSeconds;
     }
-    return new DaytonaSandboxClient(options);
+    return withDaytonaCommandBinding(new DaytonaSandboxClient(options), options);
   },
 };

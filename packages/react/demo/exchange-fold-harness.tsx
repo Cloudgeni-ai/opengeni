@@ -203,7 +203,8 @@ function tailScenario(): Draft[] {
   tool(
     "after-final",
     "exec_command",
-    { cmd: "record-analysis-metadata" },
+    // A script, so its plain-words title keeps the name the tail preview shows.
+    { cmd: "./record-analysis-metadata.sh" },
     "Analysis metadata saved.",
     "turn-tail",
   );
@@ -459,6 +460,37 @@ function machineFollowUpScenario(): Draft[] {
 }
 
 const SCENARIOS: Record<string, () => Draft[]> = {
+  // A long live turn from a model that writes a whitespace-only message
+  // ("\n\n") around every tool call, as some models do. Those messages have
+  // nothing to read and must not open a blank band above the work row. It
+  // ends with a long streamed answer, so the turn settles under a reader.
+  "blank-notes": () => {
+    const { drafts, add, tool, stream, settle } = script();
+    add("user.message", { text: "Build the estimate part by part." }, null);
+    add("turn.started", {}, "turn-blank", 2);
+    stream(
+      "blank-intro",
+      "I'll build it part by part, starting with the outer walls.",
+      "turn-blank",
+    );
+    for (let step = 0; step < 40; step += 1) {
+      add(
+        "agent.message.completed",
+        { text: "\n\n", messageId: `blank-${step}`, phase: "commentary" },
+        "turn-blank",
+      );
+      tool(`item-${step}`, "create_item", { name: `Item ${step + 1}` }, "ok", "turn-blank");
+      if (step === 19) stream("blank-middle", "The walls are done. Now the roof.", "turn-blank");
+    }
+    const answer = Array.from(
+      { length: 24 },
+      (_, index) =>
+        `**Part ${index + 1}.** ${index + 4} items, ${(index + 2) * 3} hours. The quantities follow the drawings; prices are estimates until a supplier list is connected.`,
+    ).join("\n\n");
+    stream("blank-answer", answer, "turn-blank", 90);
+    settle(answer, "turn-blank");
+    return drafts;
+  },
   overlap: () => {
     const { drafts, add } = script();
     add("user.message", { text: "Earlier work is still pending." }, null);

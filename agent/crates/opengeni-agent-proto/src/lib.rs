@@ -1,4 +1,4 @@
-//! Generated wire-protocol types for the OpenGeni self-hosted agent.
+//! Generated wire-protocol types for the Opengeni self-hosted agent.
 //!
 //! This crate is the **Rust side** of the single-source-of-truth wire protocol
 //! defined once in [`agent/proto/opengeni_agent.proto`]. The build script
@@ -17,7 +17,7 @@
 //! ```no_run
 //! use opengeni_agent_proto::{v1, Message};
 //!
-//! let ping = v1::PingRequest { nonce: 42 };
+//! let ping = v1::PingRequest { nonce: 42, ..Default::default() };
 //! let bytes = ping.encode_to_vec();
 //! let decoded = v1::PingRequest::decode(bytes.as_slice()).unwrap();
 //! assert_eq!(ping.nonce, decoded.nonce);

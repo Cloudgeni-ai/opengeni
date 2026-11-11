@@ -23,6 +23,8 @@ export function availableSessionStorage(owner: SessionStorageOwner): Storage | n
  * Recover a page that still references hashed assets removed by a newer
  * deployment. Vite emits this event before a rejected lazy import reaches
  * React, so one guarded reload can fetch the current HTML and asset manifest.
+ * This is the last resort: deployed web servers keep serving previous builds'
+ * assets (docs/deployment.md, "Web assets across rollouts").
  */
 export function installVitePreloadRecovery({
   target,

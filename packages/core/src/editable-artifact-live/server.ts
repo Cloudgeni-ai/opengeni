@@ -27,7 +27,7 @@ import {
   type EditableArtifactScope,
   type EditableArtifactStateHash,
 } from "../domain/editable-artifacts/types";
-import { EditableArtifactLiveError } from "./errors";
+import { EditableArtifactLiveError } from "@opengeni/contracts/editable-artifact-live";
 import type {
   EditableArtifactLiveAuthorizationInvalidationPort,
   EditableArtifactLiveClockPort,

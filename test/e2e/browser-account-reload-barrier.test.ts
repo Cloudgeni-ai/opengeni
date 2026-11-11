@@ -148,3 +148,23 @@ test("excess console, wrong status, failed terminal, unmatched response and phas
     f.observer.dispose();
   }
 });
+
+test("missing-dispatch diagnostics retain the exact failing count without granting an allowance", async () => {
+  const f = fixture();
+  f.finish(f.request());
+  f.console();
+  await expect(f.observer.wait()).rejects.toThrow("missing dispatches at seal");
+  await expect(f.observer.wait()).rejects.toThrow('"requests":1');
+  f.observer.dispose();
+});
+
+test("late dispatch is observed diagnostically but never repairs the sealed failure", async () => {
+  const f = fixture();
+  f.finish(f.request());
+  f.console();
+  const waiting = f.observer.wait();
+  f.finish(f.request());
+  f.console();
+  await expect(waiting).rejects.toThrow("missing dispatches at seal");
+  f.observer.dispose();
+});

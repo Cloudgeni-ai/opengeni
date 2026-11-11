@@ -42,4 +42,13 @@ describe("chat table available width", () => {
       [1100, 1900, 400].map((preferredWidth) => markdownTableWidth({ ...desktop, preferredWidth })),
     ).toEqual([1100, 1392, 768]);
   });
+
+  test("caps wide tables at a readable width so their cells wrap", () => {
+    expect(markdownTableWidth({ ...desktop, maxWidth: 1024, preferredWidth: 1900 })).toBe(1024);
+    expect(markdownTableWidth({ ...desktop, maxWidth: 1024, preferredWidth: 900 })).toBe(900);
+  });
+
+  test("never narrows a table below the prose column", () => {
+    expect(markdownTableWidth({ ...desktop, maxWidth: 600, preferredWidth: 1900 })).toBe(768);
+  });
 });

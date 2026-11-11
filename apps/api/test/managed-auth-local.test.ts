@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   managedAuthRequiresEmailVerification,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthSignupEmailNotAllowed,
+  managedAuthSocialSignupOptions,
   managedAuthUserCreateAdmission,
   managedAuthUserCreateOverride,
   resolveManagedAuthOAuthAttempt,
@@ -41,6 +43,51 @@ describe("managed auth email verification posture", () => {
         { id: "user-1", emailVerified: false },
       ),
     ).toBeUndefined();
+  });
+
+  test("explicit overrides preserve admission boundaries", () => {
+    const disabled = { environment: "production", managedAuthRequireEmailVerification: false };
+    const user = { id: "user-1", email: "member@example.test", emailVerified: false };
+    expect(managedAuthRequiresEmailVerification(disabled)).toBe(false);
+    expect(
+      managedAuthRequiresEmailVerification({
+        environment: "local",
+        managedAuthRequireEmailVerification: true,
+      }),
+    ).toBe(true);
+    expect(managedAuthUserCreateAdmission(disabled, user, "credential")).toEqual({
+      data: { ...user, emailVerified: true },
+    });
+    expect(managedAuthUserCreateAdmission(disabled, user, "google")).toBe(false);
+    expect(
+      managedAuthUserCreateAdmission(
+        { ...disabled, managedAuthNewSignupsEnabled: false },
+        user,
+        "credential",
+      ),
+    ).toBe(false);
+    expect(
+      managedAuthUserCreateAdmission(
+        { ...disabled, allowedUserEmails: ["other@example.test"] },
+        user,
+        "credential",
+      ),
+    ).toBe(false);
+  });
+
+  test("only passkey sign-up may create an account with a reserved .invalid address", () => {
+    const settings = { environment: "production", managedAuthRequireEmailVerification: false };
+    const placeholder = { id: "user-1", email: "user-1@passkey.invalid", emailVerified: true };
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "credential")).toBe(false);
+    expect(
+      managedAuthUserCreateAdmission(
+        settings,
+        { ...placeholder, email: "someone@Example.INVALID" },
+        "credential",
+      ),
+    ).toBe(false);
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "google")).toBe(false);
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "passkey")).not.toBe(false);
   });
 
   test("rejects an unverified social identity before creating its managed user", () => {
@@ -240,4 +287,48 @@ describe("managed user allowlist", () => {
       ).toBeUndefined();
     });
   }
+
+  test("names an unlisted address as the reason, but not while sign-ups are paused", () => {
+    const settings = { allowedUserEmails: ["staff@example.com"] };
+    expect(managedAuthSignupEmailNotAllowed(settings, "outsider@example.com")).toBe(true);
+    expect(managedAuthSignupEmailNotAllowed(settings, " STAFF@example.com")).toBe(false);
+    expect(
+      managedAuthSignupEmailNotAllowed({ allowedUserEmails: undefined }, "anyone@x.test"),
+    ).toBe(false);
+    expect(
+      managedAuthSignupEmailNotAllowed(
+        { ...settings, managedAuthNewSignupsEnabled: false },
+        "outsider@example.com",
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("paused new account sign-ups", () => {
+  for (const provider of ["credential", "google", "github"]) {
+    test(`refuses every new ${provider} user while sign-ups are paused`, () => {
+      expect(
+        managedAuthUserCreateAdmission(
+          { environment: "production", managedAuthNewSignupsEnabled: false },
+          { email: "new@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBe(false);
+      expect(
+        managedAuthUserCreateAdmission(
+          { environment: "production", managedAuthNewSignupsEnabled: true },
+          { email: "new@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBeUndefined();
+    });
+  }
+
+  test("uses the hard provider switch, not only the client-overridable implicit one", () => {
+    expect(managedAuthSocialSignupOptions({ managedAuthNewSignupsEnabled: true })).toEqual({});
+    expect(managedAuthSocialSignupOptions({ managedAuthNewSignupsEnabled: false })).toEqual({
+      disableImplicitSignUp: true,
+      disableSignUp: true,
+    });
+  });
 });

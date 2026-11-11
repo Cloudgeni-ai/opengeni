@@ -15,6 +15,7 @@
 // hero, and any future fleet-summary count.
 // ----------------------------------------------------------------------------
 import type { MachineState, MetricSample } from "../../types/machines";
+import { type OpenGeniText } from "../../messages/runtime";
 
 export type HealthLevel = "healthy" | "degraded" | "critical" | "offline" | "unknown";
 
@@ -50,29 +51,55 @@ function pct(used: number, total: number): number {
 
 /** Fold a machine's reachability + latest sample + wall-clock into one verdict. */
 export function deriveHealth(
+  msg: OpenGeniText,
   state: MachineState,
   metrics: MetricSample | null,
   now: number = Date.now(),
 ): HealthVerdict {
   // Reachability dominates: an offline machine has no meaningful resource story.
   if (state === "offline") {
-    return { level: "offline", label: "Offline", reason: "Not reachable", stale: true };
+    return {
+      level: "offline",
+      label: msg("machines.health.offline"),
+      reason: msg("machines.health.notReachable"),
+      stale: true,
+    };
   }
   if (state === "enrolling") {
-    return { level: "unknown", label: "Enrolling", reason: "Completing enrollment", stale: false };
+    return {
+      level: "unknown",
+      label: msg("machines.health.enrolling"),
+      reason: msg("machines.health.completingEnrollment"),
+      stale: false,
+    };
   }
 
   const stale = metrics ? now - new Date(metrics.sampledAt).getTime() > STALE_AFTER_MS : true;
 
   // Reconnecting, or online-but-quiet: reachable yet we can't trust the numbers.
   if (state === "reconnecting") {
-    return { level: "degraded", label: "Reconnecting", reason: "Re-establishing link", stale };
+    return {
+      level: "degraded",
+      label: msg("machines.health.reconnecting"),
+      reason: msg("machines.health.reEstablishingLink"),
+      stale,
+    };
   }
   if (!metrics) {
-    return { level: "unknown", label: "Online", reason: "Awaiting first sample", stale };
+    return {
+      level: "unknown",
+      label: msg("machines.health.online"),
+      reason: msg("machines.health.awaitingFirstSample"),
+      stale,
+    };
   }
   if (stale) {
-    return { level: "degraded", label: "Telemetry stale", reason: "No recent sample", stale: true };
+    return {
+      level: "degraded",
+      label: msg("machines.health.telemetryStale"),
+      reason: msg("machines.health.noRecentSample"),
+      stale: true,
+    };
   }
 
   // Reachable + fresh: the verdict is now the worst resource pressure. Evaluate
@@ -82,16 +109,32 @@ export function deriveHealth(
   const cpu = metrics.cpuPct;
 
   const pressures: Array<{ level: HealthLevel; reason: string; sev: number }> = [
-    resolve("Disk", diskPct, PRESSURE.disk),
-    resolve("Memory", memPct, PRESSURE.mem),
+    resolve(msg("machines.health.disk"), diskPct, PRESSURE.disk),
+    resolve(msg("machines.health.memory"), memPct, PRESSURE.mem),
     resolve("CPU", cpu, PRESSURE.cpu),
   ];
   const worst = pressures.reduce((a, b) => (b.sev > a.sev ? b : a));
 
-  if (worst.sev === 2) return { level: "critical", label: "Critical", reason: worst.reason, stale };
+  if (worst.sev === 2)
+    return {
+      level: "critical",
+      label: msg("machines.health.critical"),
+      reason: worst.reason,
+      stale,
+    };
   if (worst.sev === 1)
-    return { level: "degraded", label: "Under load", reason: worst.reason, stale };
-  return { level: "healthy", label: "Healthy", reason: "All systems nominal", stale };
+    return {
+      level: "degraded",
+      label: msg("machines.health.underLoad"),
+      reason: worst.reason,
+      stale,
+    };
+  return {
+    level: "healthy",
+    label: msg("machines.health.healthy"),
+    reason: msg("machines.health.allSystemsNominal"),
+    stale,
+  };
 }
 
 function resolve(

@@ -13,49 +13,62 @@ import { Popover as PopoverPrimitive } from "radix-ui";
 import { useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ModelsFormPage } from "@/components/models/models-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmailChipsInput, type EmailChip } from "@/components/ui/email-chips-input";
-import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField, Field, FieldStack } from "@/components/ui/field";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { RoleSelect } from "@/components/ui/role-select";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Toolbar, ToolbarGroup, ToolbarSearch, ToolbarSummary } from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmailChipsInput, type EmailChip } from "@opengeni/react/ui/email-chips-input";
+import { EmptyState, EmptyStateLink } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { CheckboxField, Field, FieldStack } from "@opengeni/react/ui/field";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { RoleSelect } from "@opengeni/react/ui/role-select";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Toolbar, ToolbarGroup, ToolbarSearch, ToolbarSummary } from "@opengeni/react/ui/toolbar";
 import {
   canInviteOrganizationRole,
   canRevokeOrganizationInvitation,
   organizationMemberCapabilities,
-} from "@/lib/organization-admin";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/app/lib/organization-admin";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
+import { cn } from "@opengeni/react/app/lib/utils";
+import {
+  isSeatLimitError,
+  planSeatsFull,
+  seatUpgradeFor,
+  seatUpgradeFromError,
+  type SeatUpgrade,
+} from "@opengeni/react/app/lib/subscription-plans";
+import { PlanSeats, SeatLimitNotice } from "./plan-seats";
 import type {
   OrganizationInvitation,
   OrganizationMember,
+  OrganizationMemberName,
   OrganizationMembershipRole,
   OrganizationWorkspaceAccess,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import {
   useOrganizationDirectory,
@@ -66,12 +79,15 @@ import { useOrganizationNavigation, type OrganizationNavigation } from "./organi
 import {
   canResendInvitation,
   expiresLabel,
+  filterWorkspacesByName,
   firstName,
   initialsOf,
   invitationDeliveryOutcome,
   invitationState,
   invitationStatusLabel,
   joinNames,
+  memberEmail,
+  memberEmailDetail,
   memberName,
   memberStatusLabel,
   ORGANIZATION_ROLE_LABELS,
@@ -79,6 +95,7 @@ import {
   withArticle,
   workspaceRoleLabel,
   workspaceRoleOptions,
+  WORKSPACE_SEARCH_THRESHOLD,
 } from "./organization-people-model";
 
 /* ----------------------------------------------------------------------------
@@ -97,20 +114,28 @@ export function OrganizationPeoplePage({
   person,
   invitation,
   view,
+  canManageBilling,
 }: {
   workspaceId: string;
   person?: string;
   invitation?: string;
   view?: "invite";
+  /** Whether the signed-in person can change the plan; defaults to owners. */
+  canManageBilling?: boolean;
 }) {
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
-  const actions = usePeopleActions(directory, setConfirm);
+  const billing = canManageBilling ?? directory.actorRole === "owner";
+  const actions = usePeopleActions(directory, setConfirm, billing);
+
+  // Members who aren't owners or admins see who is here by name, nothing more.
+  if (!directory.canAdminister) return <MemberNamesList />;
 
   let page;
-  if (view === "invite") page = <InvitePage nav={nav} />;
-  else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
+  if (view === "invite") {
+    page = <InvitePage nav={nav} canManageBilling={billing} />;
+  } else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
   else if (invitation) {
     page = <InvitationPage key={invitation} id={invitation} nav={nav} actions={actions} />;
   } else page = <PeopleList nav={nav} actions={actions} />;
@@ -142,6 +167,7 @@ interface PeopleActions {
 function usePeopleActions(
   directory: OrganizationDirectory,
   setConfirm: (confirm: Confirm) => void,
+  canManageBilling: boolean,
 ): PeopleActions {
   return useMemo(
     () => ({
@@ -156,7 +182,7 @@ function usePeopleActions(
           });
         } catch (error) {
           toast.error(`Couldn't restore ${memberName(member)}`, {
-            description: userErrorText(error),
+            description: seatRefusalText(error, directory, canManageBilling),
           });
         }
       },
@@ -175,8 +201,25 @@ function usePeopleActions(
         }
       },
     }),
-    [directory, setConfirm],
+    [directory, setConfirm, canManageBilling],
   );
+}
+
+/** A seat refusal tells people who can't change the plan to ask an owner. */
+function seatRefusalText(
+  error: unknown,
+  directory: OrganizationDirectory,
+  canManageBilling: boolean,
+): string {
+  // Directory actions wrap the API error; the refusal is its cause.
+  const refusal = error instanceof Error && error.cause !== undefined ? error.cause : error;
+  if (canManageBilling || !isSeatLimitError(refusal, directory.plan)) return userErrorText(error);
+  const upgrade = seatUpgradeFor(directory.plan, directory.plans) ?? seatUpgradeFromError(refusal);
+  return upgrade?.key === "enterprise"
+    ? `Ask an organization owner about ${upgrade.label}.`
+    : upgrade
+      ? `Ask an organization owner to upgrade to ${upgrade.label}.`
+      : "Ask an organization owner to upgrade the plan.";
 }
 
 function activeOwnerCount(members: readonly OrganizationMember[]): number {
@@ -435,7 +478,7 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
     .filter((member) =>
       matches(
         memberName(member),
-        member.email,
+        memberEmail(member),
         ...member.sharedWorkspaceAccess.map((access) => access.workspaceName),
       ),
     )
@@ -465,6 +508,7 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
   const total = shownMembers.length + shownInvitations.length;
   return (
     <div className="flex min-w-0 flex-col gap-4">
+      <PlanSeats plan={directory.plan} />
       <Toolbar>
         <ToolbarSearch
           value={query}
@@ -539,7 +583,7 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
                     leading={<PersonAvatar name={name} />}
                     title={name}
                     titleAddon={you ? <MetaChip variant="outline">You</MetaChip> : undefined}
-                    description={member.email && member.email !== name ? member.email : undefined}
+                    description={memberEmailDetail(member, name)}
                     status={
                       status ? (
                         <StatusBadge
@@ -635,6 +679,96 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
   );
 }
 
+/* ------------------------------------------------- names, for members */
+
+/**
+ * Everyone in the organization by name, for a member who isn't an owner or
+ * admin: exactly what the server returns, with no email, role, status or
+ * workspace access.
+ */
+function MemberNamesList() {
+  const directory = useOrganizationDirectory();
+  const [query, setQuery] = useState("");
+  const { value, loading: reading, error } = directory.memberNames;
+  const loading = reading && value.members.length === 0 && !error;
+  const nameOf = (member: OrganizationMemberName) =>
+    member.name ?? (member.you && directory.youLabel ? directory.youLabel : "Unnamed person");
+
+  if (error) {
+    return (
+      <ErrorMessage
+        variant="inline"
+        title="Couldn't load the people in this organization."
+        action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(error)}
+      >
+        {userErrorTextWithoutReference(error)}
+      </ErrorMessage>
+    );
+  }
+  if (!loading && !value.available) {
+    return (
+      <EmptyState
+        variant="inline"
+        title="Only owners and admins can see who's in this organization."
+      />
+    );
+  }
+
+  const needle = query.trim().toLocaleLowerCase();
+  const shown = value.members
+    .filter((member) => !needle || nameOf(member).toLocaleLowerCase().includes(needle))
+    .sort((a, b) => (a.you === b.you ? 0 : a.you ? -1 : 1));
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <Toolbar>
+        <ToolbarSearch
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Search people"
+          aria-label="Search people"
+          disabled={loading}
+        />
+      </Toolbar>
+      {needle && !loading ? (
+        <ToolbarSummary>
+          {shown.length} of {value.members.length}{" "}
+          {value.members.length === 1 ? "person" : "people"}
+        </ToolbarSummary>
+      ) : null}
+      {loading ? (
+        <RowList label="People" busy flush>
+          <ListRowSkeleton count={4} />
+        </RowList>
+      ) : shown.length === 0 ? (
+        <EmptyState
+          variant="inline"
+          title={needle ? `No one matches "${query.trim()}".` : "No one here yet."}
+          action={
+            needle ? (
+              <EmptyStateLink onClick={() => setQuery("")}>Clear search</EmptyStateLink>
+            ) : undefined
+          }
+        />
+      ) : (
+        <RowList label="People" nameLabel="Person" flush>
+          {shown.map((member) => {
+            const name = nameOf(member);
+            return (
+              <ListRow
+                key={member.id}
+                leading={<PersonAvatar name={name} />}
+                title={name}
+                titleAddon={member.you ? <MetaChip variant="outline">You</MetaChip> : undefined}
+              />
+            );
+          })}
+        </RowList>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------ person page */
 
 function WorkspaceAccessRows({
@@ -646,6 +780,7 @@ function WorkspaceAccessRows({
 }) {
   const directory = useOrganizationDirectory();
   const [saving, setSaving] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const overview = directory.overview.value;
   const roles = workspaceRoleOptions(overview);
   const name = memberName(member);
@@ -653,12 +788,16 @@ function WorkspaceAccessRows({
   if (overview.workspaces.length === 0) {
     return <p className="text-sm text-fg-muted">There are no shared workspaces yet.</p>;
   }
-  return (
+  const searchable = overview.workspaces.length > WORKSPACE_SEARCH_THRESHOLD;
+  const shown = searchable
+    ? filterWorkspacesByName(overview.workspaces, query)
+    : overview.workspaces;
+  const rows = (
     <ul
       aria-label={`Workspace access for ${name}`}
       className="-mx-3 flex min-w-0 flex-col [&>li+li]:border-t [&>li+li]:border-border"
     >
-      {overview.workspaces.map((workspace) => {
+      {shown.map((workspace) => {
         const grant =
           workspace.members.find((each) => each.organizationMembershipId === member.id) ?? null;
         return (
@@ -718,6 +857,25 @@ function WorkspaceAccessRows({
         );
       })}
     </ul>
+  );
+  if (!searchable) return rows;
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      <Toolbar>
+        <ToolbarSearch
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Search workspaces"
+          aria-label={`Search workspaces for ${name}`}
+        />
+      </Toolbar>
+      {query.trim() ? (
+        <ToolbarSummary>
+          {shown.length} of {overview.workspaces.length} workspaces
+        </ToolbarSummary>
+      ) : null}
+      {shown.length === 0 ? <p className="text-sm text-fg-muted">No workspaces match.</p> : rows}
+    </div>
   );
 }
 
@@ -818,10 +976,7 @@ function PersonPage({
             ) : null}
           </>
         }
-        meta={[
-          member.email && member.email !== name ? member.email : null,
-          ORGANIZATION_ROLE_LABELS[member.role],
-        ]}
+        meta={[memberEmailDetail(member, name) ?? null, ORGANIZATION_ROLE_LABELS[member.role]]}
         actions={
           <>
             {capability.canReactivate ? (
@@ -1032,12 +1187,22 @@ function InvitationPage({
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function InvitePage({ nav }: { nav: OrganizationNavigation }) {
+function InvitePage({
+  nav,
+  canManageBilling,
+}: {
+  nav: OrganizationNavigation;
+  canManageBilling: boolean;
+}) {
   const directory = useOrganizationDirectory();
   const [emails, setEmails] = useState<string[]>([]);
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
   const [showErrors, setShowErrors] = useState(false);
+  const [seatLimitError, setSeatLimitError] = useState<{
+    message: string;
+    upgrade: SeatUpgrade | null;
+  } | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
 
@@ -1059,6 +1224,12 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
   });
   const problems = chips.filter((chip) => chip.problem);
   const count = Math.max(1, chips.length - problems.length);
+  // The catalog picks the plan with room for everyone in the form (the
+  // server names a plan for one more person); the server's plan is the
+  // fallback without a catalog. A full plan says so up front.
+  const seatUpgrade =
+    seatUpgradeFor(directory.plan, directory.plans, count) ?? seatLimitError?.upgrade ?? null;
+  const seatsFull = seatLimitError !== null || planSeatsFull(directory.plan);
   const emailError =
     emails.length === 0
       ? showErrors
@@ -1082,6 +1253,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
       pendingLabel="Sending…"
       footerStart="Invitations expire in 7 days."
       onSubmit={async () => {
+        setSeatLimitError(null);
         setShowErrors(true);
         if (emails.length === 0 || problems.length > 0) return false;
         if (!canInviteOrganizationRole(directory.actorRole, role)) {
@@ -1100,10 +1272,20 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
         }
         if (result.failed.length > 0) {
           setEmails(result.failed.map((each) => each.email));
+          const seatFailure = result.failed.find((each) => each.seatLimitReached);
+          if (seatFailure) {
+            setSeatLimitError({
+              message: seatFailure.message,
+              upgrade: seatFailure.upgrade ?? null,
+            });
+          }
+          // Other failures still say why, next to the seat notice.
+          const other = result.failed.filter((each) => !each.seatLimitReached);
+          if (other.length === 0) return false;
           throw new Error(
-            result.failed.length === 1
-              ? `Couldn't invite ${result.failed[0]!.email}. ${result.failed[0]!.message}`
-              : `Couldn't invite ${joinNames(result.failed.map((each) => each.email))}. ${result.failed[0]!.message}`,
+            other.length === 1
+              ? `Couldn't invite ${other[0]!.email}. ${other[0]!.message}`
+              : `Couldn't invite ${joinNames(other.map((each) => each.email))}. ${other[0]!.message}`,
           );
         }
         nav.openSection("people");
@@ -1111,6 +1293,18 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
       }}
     >
       <FieldStack>
+        <PlanSeats plan={directory.plan} />
+        {seatsFull && directory.plan ? (
+          <SeatLimitNotice
+            canManage={canManageBilling}
+            upgrade={seatUpgrade}
+            onUpgrade={() => nav.openSection("billing")}
+          />
+        ) : seatLimitError ? (
+          <Notice tone="waiting" title="Couldn't send the invitation" live="assertive">
+            {seatLimitError.message}
+          </Notice>
+        ) : null}
         <Field
           label="Email addresses"
           hint="Separate with commas, or press Enter after each one."
@@ -1201,6 +1395,7 @@ function PeopleConfirm({
             ? `Their access to ${joinNames(names)} is removed. Restoring doesn't bring it back.`
             : "They have no shared workspaces right now.",
           "Their unfinished work is stopped. Their Personal workspace is kept.",
+          "Schedules they own stop running and pause themselves. Each one says why on its Automations page.",
         ]}
         confirmLabel="Suspend"
         pendingLabel="Suspending…"
@@ -1231,6 +1426,7 @@ function PeopleConfirm({
             ? `${first} loses access to ${organizationName} and ${count} shared ${count === 1 ? "workspace" : "workspaces"} right away.`
             : `${first} loses access to ${organizationName} right away.`,
           "Their unfinished work is stopped. Their personal data is kept for as long as your retention policy says.",
+          "Schedules they own stop running for good. Each one says why on its Automations page, where people there can set it up again as theirs.",
           `${first} can never be invited to ${organizationName} again.`,
         ]}
         confirmLabel="Remove from organization"

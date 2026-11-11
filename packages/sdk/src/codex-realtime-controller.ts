@@ -9,12 +9,14 @@ import type {
   CodexRealtimeV3Bridge,
   CodexRealtimeV3BridgeFatal,
   CodexRealtimeV3BridgeSnapshot,
+  CodexRealtimeV3TranscriptEntry,
 } from "./codex-realtime-v3";
 import type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 import {
   acquireCodexRealtimeMicrophone,
   codexRealtimeMicrophoneHealthy,
   CodexRealtimeMicrophoneError,
+  defaultRealtimeRemoteAudio,
   startCodexRealtimeWebrtc,
 } from "./codex-realtime";
 import type {
@@ -24,6 +26,9 @@ import type {
   CodexRealtimeWebrtcSession,
 } from "./codex-realtime";
 import { OpenGeniApiError } from "./errors";
+import { prepareRealtimeWebrtc, type PreparedRealtimeWebrtc } from "./realtime-webrtc-preparation";
+import { watchRealtimeAudioFlow } from "./realtime-audio-flow";
+import type { RealtimeAudioFlowIssue, RealtimeAudioFlowWatch } from "./realtime-audio-flow";
 import type {
   ActivateCodexRealtimeConnectionRequest,
   BeginSessionRealtimeRequest,
@@ -31,6 +36,8 @@ import type {
   CodexRealtimeWebrtcResponse,
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   EndSessionRealtimeRequest,
   RenewSessionRealtimeRequest,
   SessionRealtimeInboundEntry,
@@ -39,6 +46,7 @@ import type {
   SessionRealtimeMutationResponse,
   SyncSessionRealtimeLedgerRequest,
   SyncSessionRealtimeLedgerResponse,
+  RealtimeVoiceSettings,
 } from "./types";
 
 export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
@@ -47,7 +55,7 @@ export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecy
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const OUTBOUND_SYNC_INTERVAL_MS = 1_000;
 export const CODEX_REALTIME_NEGOTIATION_TIMEOUT_MS = 20_000;
-// OpenGeni policy: rotate conservatively without asserting an upstream lifetime.
+// Opengeni policy: rotate conservatively without asserting an upstream lifetime.
 const DEFAULT_CONNECTION_ROTATION_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_RECONNECT_BACKOFF_MS = [250, 1_000, 2_000, 5_000] as const;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
@@ -97,7 +105,20 @@ export type CodexRealtimeDiagnosticKind =
   | "rotation"
   | "reconnect"
   | "lost_owner"
-  | "terminal_stop";
+  | "terminal_stop"
+  /**
+   * The call is live but the microphone delivers no sound at all, so the
+   * voice cannot hear the person. Clears once sound arrives.
+   */
+  | "no_input_audio"
+  /** A reply was produced but none of its audio played. Clears once audio plays. */
+  | "output_silent";
+
+const AUDIO_FLOW_MESSAGES: Record<RealtimeAudioFlowIssue, string> = {
+  no_input_audio:
+    "Your microphone isn't picking up any sound, so the voice can't hear you. Check that no other app is using the microphone, or end the call and try again.",
+  output_silent: "A reply arrived but couldn't be played. Check your volume and audio output.",
+};
 
 export type CodexRealtimeDiagnostic = {
   kind: CodexRealtimeDiagnosticKind;
@@ -120,7 +141,40 @@ export type CodexRealtimeControllerSnapshot = {
   reconnectAttempt: number;
   diagnostic: CodexRealtimeDiagnostic | null;
   error: string | null;
+  /**
+   * Set when Opengeni refused or ended deployment-funded voice for credits or
+   * availability. Codes match voice input: `insufficient_credits`,
+   * `allowance_exhausted`, `monthly_model_cost_limit`, plus
+   * `realtime_voice_unavailable` and `region_restricted` (EU-only workspace,
+   * voice model not EU). Cleared on the next start.
+   */
+  refusal?: CodexRealtimeRefusal | null;
 };
+
+export type CodexRealtimeRefusal = { code: string; message: string };
+
+const REALTIME_REFUSAL_CODES = new Set([
+  "insufficient_credits",
+  "allowance_exhausted",
+  "monthly_model_cost_limit",
+  "realtime_voice_unavailable",
+  "region_restricted",
+]);
+
+/** A definitive credit/availability refusal from Opengeni, with its plain message. */
+export function codexRealtimeRefusal(error: unknown): CodexRealtimeRefusal | null {
+  if (!(error instanceof OpenGeniApiError) || !error.code) return null;
+  if (!REALTIME_REFUSAL_CODES.has(error.code)) return null;
+  const message = apiErrorMessage(error);
+  return {
+    code: error.code,
+    message:
+      message ??
+      (error.code === "insufficient_credits"
+        ? "Live voice needs credits. Add credits to continue."
+        : "Live voice is unavailable right now."),
+  };
+}
 
 export type CodexRealtimeControllerClient = {
   beginSessionRealtime(
@@ -140,12 +194,20 @@ export type CodexRealtimeControllerClient = {
     request: CodexRealtimeWebrtcRequest,
     options?: { signal?: AbortSignal | undefined },
   ): Promise<CodexRealtimeWebrtcResponse>;
+  negotiateRealtimeWebsocket?(
+    workspaceId: string,
+    sessionId: string,
+    request: SessionRealtimeWebsocketRequest,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<SessionRealtimeWebsocketResponse>;
+  /** @deprecated Implement negotiateRealtimeWebsocket. */
   negotiateGatewayRealtime?(
     workspaceId: string,
     sessionId: string,
     request: GatewayRealtimeConnectRequest,
     options?: { signal?: AbortSignal | undefined },
   ): Promise<GatewayRealtimeConnectResponse>;
+  /** @deprecated Implement negotiateRealtimeWebsocket. */
   negotiateXaiSubscriptionRealtime?(
     workspaceId: string,
     sessionId: string,
@@ -178,6 +240,7 @@ export type CodexRealtimeOwnerStorage = Pick<Storage, "getItem" | "setItem" | "r
 
 /** Canonical browser-owner storage namespace for a public realtime model. */
 export function sessionRealtimeOwnerStorageNamespace(model: SessionRealtimeModel): string {
+  if (model === "opengeni-azure/gpt-live-1") return "azure-live-owner";
   if (model === "gpt-live-1-boulder-alpha") return "codex-realtime-owner";
   if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-realtime-owner";
   return "gateway-realtime-owner";
@@ -221,6 +284,10 @@ export type CreateCodexRealtimeControllerOptions = {
   workspaceId: string;
   sessionId: string;
   storage?: CodexRealtimeOwnerStorage | undefined;
+  /**
+   * Element that plays the voice's replies. Optional: without one the
+   * controller plays them through its own detached audio element.
+   */
   remoteAudio?: HTMLAudioElement | undefined;
   createPeerConnection?: (() => RTCPeerConnection) | undefined;
   getUserMedia?: ((constraints: MediaStreamConstraints) => Promise<MediaStream>) | undefined;
@@ -237,11 +304,28 @@ export type CreateCodexRealtimeControllerOptions = {
   model?: SessionRealtimeModel | undefined;
   ownerStorageNamespace?: string | undefined;
   startTransport?: RealtimeControllerTransportStarter | undefined;
+  /** Alternate WebRTC transports can share local offer preparation. */
+  prepareWebrtc?: boolean | undefined;
   /** Model-visible application context captured with each durable realtime message. */
   getModelContext?: (() => string | undefined) | undefined;
+  /**
+   * BCP 47 tag of the language the person speaks (for example `nb-NO`), read
+   * whenever a provider connection opens. Models that hold a conversation in
+   * one fixed language (catalog entries with `languages`) listen and reply in
+   * it; the others detect the spoken language themselves.
+   */
+  getLanguage?: (() => string | undefined) | undefined;
+  /**
+   * Voice settings for this session's voice (voice, language, turn eagerness),
+   * read whenever a provider connection opens. Each set field overrides the
+   * workspace's saved settings for the model; settings the model does not
+   * offer (see its catalog entry) are ignored.
+   */
+  getVoiceSettings?: (() => RealtimeVoiceSettings | undefined) | undefined;
 };
 
 export type RealtimeControllerTransportStarter = (input: {
+  prepared?: PreparedRealtimeWebrtc | undefined;
   client: CodexRealtimeControllerClient;
   workspaceId: string;
   sessionId: string;
@@ -252,6 +336,10 @@ export type RealtimeControllerTransportStarter = (input: {
   expectedVersion: number;
   expectedConnectionEpoch: number;
   rotate: boolean;
+  /** BCP 47 tag of the language the person speaks, when the host supplied one. */
+  language?: string | undefined;
+  /** Voice settings for this connection, when the host supplied them. */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   signal: AbortSignal;
   media: MediaStream;
   onEventsCreated(events: RTCDataChannel): void;
@@ -261,6 +349,10 @@ export type RealtimeControllerTransportStarter = (input: {
 }) => Promise<CodexRealtimeWebrtcSession>;
 
 export type CodexRealtimeController = {
+  /** Prepare local transport only. Does not capture audio or begin a server/provider call. */
+  prepare?(): Promise<void>;
+  /** Connect during ring only with an audio device that gates capture/playback until Answer; hold context delivery. */
+  prepareIncoming?(input: { callId: string; device: string }): Promise<void>;
   snapshot(): CodexRealtimeControllerSnapshot;
   subscribe(listener: (snapshot: CodexRealtimeControllerSnapshot) => void): () => void;
   start(): Promise<void>;
@@ -285,6 +377,8 @@ type OwnerRecord = {
   browserInstanceId: string;
   ownerKey: string;
   delegationReplay?: OwnerDelegationReplay | undefined;
+  /** What was said since the last delegation, so a reload keeps it for the next one. */
+  undelegatedTranscript?: CodexRealtimeV3TranscriptEntry[] | undefined;
 };
 
 type OwnerDelegationReplay = {
@@ -297,6 +391,8 @@ type ConnectionRuntime = {
   generation: number;
   transport: CodexRealtimeWebrtcSession;
   bridge: CodexRealtimeV3Bridge;
+  /** Watches the live call for silent audio; absent where stats are unavailable. */
+  audioFlow: RealtimeAudioFlowWatch | null;
 };
 
 type RecoveryCause = "rotation" | "reconnect" | "microphone" | "reload" | "manual";
@@ -317,6 +413,11 @@ export function createCodexRealtimeController(
     options.ownerStorageNamespace,
   );
   const model = options.model ?? "gpt-live-1-boulder-alpha";
+  // Every connection of this controller plays through one element, so a
+  // rotation hands playback over instead of opening a second output.
+  let ownRemoteAudio: HTMLAudioElement | undefined;
+  const remoteAudio = (): HTMLAudioElement | undefined =>
+    options.remoteAudio ?? (ownRemoteAudio ??= defaultRealtimeRemoteAudio());
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
   const now = options.now ?? (() => new Date());
   const scheduleInterval =
@@ -355,6 +456,7 @@ export function createCodexRealtimeController(
     reconnectAttempt: 0,
     diagnostic: null,
     error: null,
+    refusal: null,
   };
   let active: ConnectionRuntime | null = null;
   let pendingAbort: AbortController | null = null;
@@ -371,6 +473,9 @@ export function createCodexRealtimeController(
   let generation = 0;
   let reconnectAttempt = 0;
   let recoveryTerminal = false;
+  // Whether this mode ever reached a live provider connection. A definitive
+  // failure before that ends the mode instead of leaving an empty call open.
+  let connectedInMode = false;
   let mutationTail = Promise.resolve();
   let connectionTask: Promise<void> | null = null;
   const acceptedDelegationItemIds = new Set(
@@ -381,6 +486,24 @@ export function createCodexRealtimeController(
       entry.delegationItemId ? [[entry.delegationItemId, entry] as const] : [],
     ),
   );
+  // Shared by every provider connection of this call, like the delegation
+  // replay state: a reconnect must not drop what was said since the last
+  // delegation.
+  const undelegatedTranscript: CodexRealtimeV3TranscriptEntry[] = [
+    ...(owner?.undelegatedTranscript ?? []),
+  ];
+  const persistUndelegatedTranscript = (
+    entries: readonly CodexRealtimeV3TranscriptEntry[],
+  ): void => {
+    if (!owner || !storage) return;
+    const next: OwnerRecord = { ...owner, undelegatedTranscript: [...entries] };
+    try {
+      storage.setItem(storageKey, JSON.stringify(next));
+      owner = next;
+    } catch {
+      // Best effort: the live call keeps the transcript in memory.
+    }
+  };
 
   const invalidateStoredOwner = (): void => {
     try {
@@ -495,12 +618,48 @@ export function createCodexRealtimeController(
   const closeActive = (): void => {
     const current = active;
     active = null;
+    current?.audioFlow?.stop();
     current?.bridge.close();
     current?.transport.stop();
     publish({ bridge: null, audibleOutput: "inactive" });
   };
 
+  let preparation: { abort: AbortController; task: Promise<PreparedRealtimeWebrtc> } | null = null;
+  let incoming: {
+    callId: string;
+    device: string;
+    answered: boolean;
+    accepted: Promise<void>;
+    accept(): void;
+    task: Promise<void> | null;
+  } | null = null;
+  const prepare = async (): Promise<void> => {
+    if (closed || stopping || active) return;
+    if (preparation) {
+      await preparation.task;
+      return;
+    }
+    if (options.startTransport && !options.prepareWebrtc) return;
+    const abort = new AbortController();
+    const entry = {
+      abort,
+      task: prepareRealtimeWebrtc({
+        createPeerConnection: options.createPeerConnection ?? (() => new RTCPeerConnection()),
+        signal: abort.signal,
+      }),
+    };
+    preparation = entry;
+    try {
+      await entry.task;
+    } catch (error) {
+      if (preparation === entry) preparation = null;
+      throw error;
+    }
+  };
+
   const closeBrowserResources = (releaseMedia = true): void => {
+    preparation?.abort.abort(new DOMException("Realtime preparation retired", "AbortError"));
+    preparation = null;
     stopTimers();
     pendingAbort?.abort(new DOMException("Codex realtime browser owner closed", "AbortError"));
     pendingAbort = null;
@@ -514,9 +673,11 @@ export function createCodexRealtimeController(
     storage?.removeItem(storageKey);
     acceptedDelegationItemIds.clear();
     pendingDelegations.clear();
+    undelegatedTranscript.length = 0;
   };
 
   const transitionEnded = (message = "Realtime mode ended"): void => {
+    incoming = null;
     stopping = false;
     connectionTask = null;
     closeBrowserResources();
@@ -536,8 +697,32 @@ export function createCodexRealtimeController(
     });
   };
 
-  const ensureMicrophone = async (replace: boolean, signal: AbortSignal): Promise<MediaStream> => {
+  let microphoneAcquisition: Promise<MediaStream> | null = null;
+  const ensureMicrophone = async (
+    replace: boolean,
+    signal: AbortSignal,
+    warmup = false,
+  ): Promise<MediaStream> => {
     if (!replace && codexRealtimeMicrophoneHealthy(microphone)) return microphone!;
+    if (!replace && microphoneAcquisition) {
+      // Startup acquires the microphone alongside the begin request; the
+      // connection joins that acquisition instead of prompting twice.
+      try {
+        return await abortable(microphoneAcquisition, signal);
+      } catch (error) {
+        throw publishMicrophoneFailure(error, signal);
+      }
+    }
+    const acquisition = acquireMicrophone(signal, warmup);
+    microphoneAcquisition = acquisition;
+    try {
+      return await acquisition;
+    } finally {
+      if (microphoneAcquisition === acquisition) microphoneAcquisition = null;
+    }
+  };
+
+  const acquireMicrophone = async (signal: AbortSignal, warmup: boolean): Promise<MediaStream> => {
     releaseMicrophone();
     publish({ microphone: "acquiring" });
     try {
@@ -554,27 +739,36 @@ export function createCodexRealtimeController(
       publish({ microphone: "active" });
       return acquired;
     } catch (error) {
-      const microphoneError =
-        error instanceof CodexRealtimeMicrophoneError
-          ? error
-          : signal.aborted && state.microphone === "acquiring"
-            ? new CodexRealtimeMicrophoneError(
-                "acquisition_failed",
-                "Microphone did not become available before voice startup timed out",
-              )
-            : null;
-      if (microphoneError) {
-        const kind =
-          microphoneError.code === "permission_denied" ? "permission_failure" : "device_failure";
-        publish({
-          microphone: microphoneError.code,
-          status: state.mode?.state === "active" ? "recovering" : "error",
-          diagnostic: diagnostic(kind, microphoneError.message, true),
-          error: microphoneError.message,
-        });
+      // A cancelled warmup is not a microphone failure: startup either failed
+      // for its own reason or ended before it needed the microphone.
+      if (warmup && signal.aborted) {
+        if (state.microphone === "acquiring") publish({ microphone: "inactive" });
+        throw error;
       }
-      throw microphoneError ?? error;
+      throw publishMicrophoneFailure(error, signal);
     }
+  };
+
+  const publishMicrophoneFailure = (error: unknown, signal: AbortSignal): unknown => {
+    const microphoneError =
+      error instanceof CodexRealtimeMicrophoneError
+        ? error
+        : signal.aborted && state.microphone === "acquiring"
+          ? new CodexRealtimeMicrophoneError(
+              "acquisition_failed",
+              "Microphone did not become available before voice startup timed out",
+            )
+          : null;
+    if (!microphoneError) return error;
+    const kind =
+      microphoneError.code === "permission_denied" ? "permission_failure" : "device_failure";
+    publish({
+      microphone: microphoneError.code,
+      status: state.mode?.state === "active" ? "recovering" : "error",
+      diagnostic: diagnostic(kind, microphoneError.message, true),
+      error: microphoneError.message,
+    });
+    return microphoneError;
   };
 
   const syncForGeneration = async (
@@ -619,6 +813,42 @@ export function createCodexRealtimeController(
     publish({
       audibleOutput: next,
       ...(next === "audible" ? { error: null } : {}),
+    });
+  };
+
+  // Say so when a live call is silent on one side instead of leaving the
+  // person talking to nothing; clear it once audio flows again.
+  const onAudioFlowIssue = (
+    targetGeneration: number,
+    issue: RealtimeAudioFlowIssue | null,
+  ): void => {
+    if (closed || stopping || active?.generation !== targetGeneration) return;
+    const current = state.diagnostic?.kind;
+    const showing = current === "no_input_audio" || current === "output_silent";
+    if (issue === null) {
+      if (showing) publish({ diagnostic: null, error: null });
+      return;
+    }
+    if (state.status !== "active") return;
+    const message = AUDIO_FLOW_MESSAGES[issue];
+    publish({ diagnostic: diagnostic(issue, message, true, targetGeneration), error: message });
+  };
+
+  const startAudioFlow = (
+    targetGeneration: number,
+    transport: CodexRealtimeWebrtcSession,
+  ): RealtimeAudioFlowWatch | null => {
+    const peerConnection = transport.peerConnection as RTCPeerConnection | null | undefined;
+    if (!peerConnection || typeof peerConnection.getStats !== "function") return null;
+    return watchRealtimeAudioFlow({
+      peerConnection,
+      inputMuted: () => state.inputMuted,
+      // Blocked playback already has its own diagnostic and remedy.
+      outputMuted: () => state.outputMuted || state.audibleOutput === "blocked",
+      onIssue: (issue) => onAudioFlowIssue(targetGeneration, issue),
+      now: () => now().getTime(),
+      setInterval: scheduleInterval,
+      clearInterval: unscheduleInterval,
     });
   };
 
@@ -699,6 +929,12 @@ export function createCodexRealtimeController(
     if (closed || stopping || isAbortError(error)) return;
     const message = safeError(error);
     if (error instanceof CodexRealtimeMicrophoneError) {
+      if (error.code !== "track_ended" && !connectedInMode) {
+        // No conversation exists yet: end the call and say how to fix the
+        // microphone instead of holding an empty "reconnecting" call open.
+        await endAfterFailure(microphoneFailureMessage(error), null);
+        return;
+      }
       if (error.code === "track_ended" && state.mode?.state === "active") {
         reconnectAttempt += 1;
         publish({
@@ -720,6 +956,11 @@ export function createCodexRealtimeController(
       transitionEnded("Realtime owner no longer exists");
       return;
     }
+    const refusal = codexRealtimeRefusal(error);
+    if (refusal) {
+      await endForRefusal(refusal);
+      return;
+    }
     if (error instanceof OpenGeniApiError && error.status === 409 && error.retryable && owner) {
       try {
         const reconciled = await begin(owner, true, false);
@@ -737,6 +978,9 @@ export function createCodexRealtimeController(
           return;
         }
       }
+    } else if (error instanceof OpenGeniApiError && !error.retryable && !connectedInMode) {
+      await endAfterFailure(message, null);
+      return;
     } else if (error instanceof OpenGeniApiError && !error.retryable) {
       stopTimers();
       if (!active) releaseMicrophone();
@@ -766,6 +1010,7 @@ export function createCodexRealtimeController(
     const current = active;
     if (closed || stopping || !current || current.generation !== targetGeneration) return;
     active = null;
+    current.audioFlow?.stop();
     failedBridge.close();
     current.transport.stop();
     publish({
@@ -826,7 +1071,7 @@ export function createCodexRealtimeController(
     rotate: boolean,
     replaceMicrophone: boolean,
   ): Promise<void> => {
-    if (currentMode.state !== "active") {
+    if (currentMode.state !== "active" && currentMode.state !== "preparing") {
       transitionEnded();
       return;
     }
@@ -883,9 +1128,32 @@ export function createCodexRealtimeController(
     });
     let connected: CodexRealtimeWebrtcSession;
     try {
-      const media = await ensureMicrophone(replaceMicrophone, abort.signal);
+      // Persist a fragment provider's tail before the replacement broker reads
+      // its startup history, while the old connection still owns the ledger.
+      if (active?.transport.drain) {
+        await active.transport.drain();
+        await active.bridge.flush();
+      }
+      if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
+        throw abort.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+      const localPreparation = preparation;
+      const [media, prepared] = await Promise.all([
+        ensureMicrophone(replaceMicrophone, abort.signal),
+        localPreparation
+          ? abortable(localPreparation.task, abort.signal).catch((error) => {
+              localPreparation.abort.abort(error);
+              return undefined;
+            })
+          : undefined,
+      ]);
+      if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
+        throw abort.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+      if (preparation === localPreparation) preparation = null;
       const operationId = randomUUID();
       const commonTransportInput = {
+        prepared,
         client: options.client,
         workspaceId: options.workspaceId,
         sessionId: options.sessionId,
@@ -896,6 +1164,8 @@ export function createCodexRealtimeController(
         expectedVersion: currentMode.version,
         expectedConnectionEpoch: currentMode.connectionEpoch,
         rotate,
+        language: options.getLanguage?.(),
+        voiceSettings: options.getVoiceSettings?.(),
         signal: abort.signal,
         media,
         onEventsCreated: earlyEvents.attach,
@@ -909,8 +1179,9 @@ export function createCodexRealtimeController(
         ? await options.startTransport(commonTransportInput)
         : await startCodexRealtimeWebrtc({
             ...commonTransportInput,
-            remoteAudio: options.remoteAudio,
+            remoteAudio: remoteAudio(),
             activateRemoteAudio: false,
+            primeRemoteAudio: currentMode.state === "preparing",
             createPeerConnection: options.createPeerConnection,
             getUserMedia: options.getUserMedia,
             negotiate: async (request, requestOptions) =>
@@ -930,8 +1201,50 @@ export function createCodexRealtimeController(
       }
       throw error;
     }
+    let audioFlow: RealtimeAudioFlowWatch | null = null;
     try {
       await waitForDataChannelOpen(connected.events, abort.signal);
+      if (currentMode.state === "preparing") {
+        clearNegotiationTimer();
+        const ring = incoming;
+        if (!ring) throw new Error("Incoming call preparation was retired");
+        const expiry = Date.parse(currentMode.leaseExpiresAt) - Date.now();
+        negotiationTimer = scheduleTimeout(
+          () => abort.abort(new DOMException("Incoming call expired", "AbortError")),
+          Math.max(0, expiry),
+        );
+        // No bridge exists yet, so neither context nor delivery acknowledgments
+        // can reach the provider before this exact phone wins the answer.
+        await abortable(ring.accepted, abort.signal);
+        const accepted = await options.client.beginSessionRealtime(
+          options.workspaceId,
+          options.sessionId,
+          {
+            operationId: record.operationId,
+            browserInstanceId: record.browserInstanceId,
+            ownerKey: record.ownerKey,
+            model,
+            incomingCall: { callId: ring.callId, device: ring.device, answered: true },
+          },
+        );
+        if (accepted.mode.state !== "active") throw new Error("Incoming call was not accepted");
+        if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
+          await options.client
+            .endSessionRealtime(options.workspaceId, options.sessionId, accepted.mode.id, {
+              browserInstanceId: record.browserInstanceId,
+              ownerKey: record.ownerKey,
+              expectedVersion: accepted.mode.version,
+              reason: "browser_unload",
+            })
+            .catch(() => undefined);
+          throw abort.signal.reason ?? new DOMException("Incoming call was retired", "AbortError");
+        }
+        currentMode = accepted.mode;
+        publish({ mode: currentMode });
+        // The native audio device switches from generated silence to capture
+        // on system-call acceptance. The negotiated sender remains unchanged.
+        clearNegotiationTimer();
+      }
       if (
         closed ||
         stopping ||
@@ -1010,12 +1323,19 @@ export function createCodexRealtimeController(
         acceptedDelegationItemIds,
         pendingDelegations,
         onDelegationReplayStateChange: persistDelegationReplay,
+        undelegatedTranscript,
+        onUndelegatedTranscriptChange: persistUndelegatedTranscript,
         onSnapshot: (nextBridge) => {
           if (active?.generation === targetGeneration) publish({ bridge: nextBridge });
         },
         onFatal: (fatal) => onBridgeFatal(targetGeneration, bridge, fatal),
+        onFinalTranscript: (role) => {
+          if (role === "assistant") audioFlow?.assistantReplied();
+        },
       });
-      active = { generation: targetGeneration, transport: connected, bridge };
+      audioFlow = startAudioFlow(targetGeneration, connected);
+      active = { generation: targetGeneration, transport: connected, bridge, audioFlow };
+      connectedInMode = true;
       connected.setOutputMuted(state.outputMuted);
       recoveryTerminal = false;
       pendingAbort = null;
@@ -1044,6 +1364,7 @@ export function createCodexRealtimeController(
       });
       connected.activateRemoteAudio();
       previous?.bridge.close();
+      previous?.audioFlow?.stop();
       previous?.transport.stop();
       earlyEvents.handoff(bridge);
       if (active?.generation !== targetGeneration) {
@@ -1054,6 +1375,7 @@ export function createCodexRealtimeController(
       }
       startTimers();
     } catch (error) {
+      audioFlow?.stop();
       clearNegotiationTimer();
       earlyEvents.close();
       connected.stop();
@@ -1078,11 +1400,37 @@ export function createCodexRealtimeController(
         browserInstanceId: record.browserInstanceId,
         ownerKey: record.ownerKey,
         model,
+        ...(incoming ? { incomingCall: { callId: incoming.callId, device: incoming.device } } : {}),
       },
     );
-    if (response.mode.state !== "active") {
+    if (response.mode.state !== "active" && response.mode.state !== "preparing") {
       transitionEnded();
       return null;
+    }
+    if (closed || stopping || owner !== record) {
+      await options.client
+        .endSessionRealtime(options.workspaceId, options.sessionId, response.mode.id, {
+          browserInstanceId: record.browserInstanceId,
+          ownerKey: record.ownerKey,
+          expectedVersion: response.mode.version,
+          reason: "browser_unload",
+        })
+        .catch(() => undefined);
+      return null;
+    }
+    if (incoming && !incoming.answered && response.mode.state !== "preparing") {
+      await options.client.endSessionRealtime(
+        options.workspaceId,
+        options.sessionId,
+        response.mode.id,
+        {
+          browserInstanceId: record.browserInstanceId,
+          ownerKey: record.ownerKey,
+          expectedVersion: response.mode.version,
+          reason: "browser_unload",
+        },
+      );
+      throw new Error("Server did not prepare the incoming call");
     }
     publish({ mode: response.mode, realtimeId: response.mode.id });
     if (connectAfterBegin) {
@@ -1098,6 +1446,7 @@ export function createCodexRealtimeController(
   };
 
   const heartbeat = async (): Promise<void> => {
+    let stopInstruction: CodexRealtimeRefusal | null = null;
     await exclusive(async () => {
       const current = state.mode;
       if (!owner || !current || current.state !== "active") {
@@ -1121,6 +1470,43 @@ export function createCodexRealtimeController(
         return;
       }
       publish({ mode: result.mode, realtimeId: result.mode.id, error: null });
+      stopInstruction = result.stop ?? null;
+    });
+    // The server stopped extending the lease (for example, out of credits):
+    // drain and end gracefully inside the remaining lease.
+    const instruction = stopInstruction as CodexRealtimeRefusal | null;
+    stopInstruction = null;
+    if (instruction && !stopping && !closed) await endForRefusal(instruction);
+  };
+
+  /**
+   * End the call because Opengeni refused it, keep final speech, and leave a
+   * terminal, non-retrying state that explains why.
+   */
+  const endForRefusal = async (refusal: CodexRealtimeRefusal): Promise<void> =>
+    await endAfterFailure(refusal.message, refusal);
+
+  const endAfterFailure = async (
+    message: string,
+    refusal: CodexRealtimeRefusal | null,
+  ): Promise<void> => {
+    try {
+      await controller.stop();
+    } catch {
+      // The lease is no longer extended; a failed graceful end lapses on its own.
+      stopping = false;
+      closeBrowserResources();
+      clearOwner();
+    }
+    recoveryTerminal = false;
+    publish({
+      status: "error",
+      realtimeId: null,
+      mode: null,
+      bridge: null,
+      diagnostic: diagnostic("terminal_stop", message, false),
+      error: message,
+      refusal,
     });
   };
 
@@ -1161,7 +1547,91 @@ export function createCodexRealtimeController(
     publish({ outputMuted: muted });
   };
 
+  const startCall = async () => {
+    if (state.status === "lost_owner") {
+      throw new Error("Realtime mode belongs to another browser owner");
+    }
+    if (!["idle", "error"].includes(state.status) || state.mode?.state === "active") return;
+    closed = false;
+    stopping = false;
+    recoveryTerminal = false;
+    connectedInMode = false;
+    const record: OwnerRecord = {
+      version: OWNER_RECORD_VERSION,
+      workspaceId: options.workspaceId,
+      sessionId: options.sessionId,
+      browserInstanceId: randomUUID(),
+      ownerKey: `opengeni-realtime-owner:${randomUUID()}`,
+      operationId: randomUUID(),
+    };
+    owner = record;
+    undelegatedTranscript.length = 0;
+    storage?.setItem(storageKey, JSON.stringify(record));
+    publish({ status: "starting", error: null, diagnostic: null, refusal: null });
+    const microphoneWarmup = new AbortController();
+    // Offer creation overlaps admission and microphone permission/capture.
+    void prepare().catch(() => undefined);
+    if (!incoming)
+      void ensureMicrophone(false, microphoneWarmup.signal, true).catch(() => undefined);
+    try {
+      await begin(record, false);
+    } catch (error) {
+      microphoneWarmup.abort(new DOMException("Realtime startup failed", "AbortError"));
+      closeBrowserResources(false);
+      const refusal = codexRealtimeRefusal(error);
+      const failedMode = state.mode as SessionRealtimeMode | null;
+      if (failedMode?.state === "preparing") {
+        await controller.stop().catch(() => undefined);
+        incoming = null;
+      } else if (failedMode?.state === "active") {
+        await handleConnectionFailure(error, "reconnect", false);
+      } else {
+        // The microphone was only warmed for this start; do not keep it live.
+        releaseMicrophone();
+        incoming = null;
+        clearOwner();
+        publish({
+          status: "error",
+          realtimeId: null,
+          mode: null,
+          error: refusal?.message ?? safeError(error),
+          ...(refusal
+            ? { refusal, diagnostic: diagnostic("terminal_stop", refusal.message, false) }
+            : {}),
+        });
+      }
+      if (refusal) return;
+      throw error;
+    } finally {
+      // A start that ended without connecting must not finish acquiring later.
+      if (!active) microphoneWarmup.abort(new DOMException("Realtime startup ended", "AbortError"));
+    }
+  };
+
   const controller: CodexRealtimeController = {
+    prepare,
+    prepareIncoming: async (input) => {
+      if (incoming) {
+        await incoming.task;
+        return;
+      }
+      if (closed || stopping || active || !["idle", "error"].includes(state.status)) return;
+      if (options.startTransport && !options.prepareWebrtc) return;
+      let accept!: () => void;
+      const accepted = new Promise<void>((resolve) => {
+        accept = resolve;
+      });
+      const ring = {
+        ...input,
+        answered: false,
+        accepted,
+        accept,
+        task: null as Promise<void> | null,
+      };
+      incoming = ring;
+      ring.task = startCall();
+      await ring.task;
+    },
     snapshot: () => ({ ...state }),
     subscribe: (listener) => {
       listeners.add(listener);
@@ -1169,48 +1639,31 @@ export function createCodexRealtimeController(
       return () => listeners.delete(listener);
     },
     start: async () => {
-      if (state.status === "lost_owner") {
-        throw new Error("Realtime mode belongs to another browser owner");
-      }
-      if (!["idle", "error"].includes(state.status) || state.mode?.state === "active") return;
-      closed = false;
-      stopping = false;
-      recoveryTerminal = false;
-      const record: OwnerRecord = {
-        version: OWNER_RECORD_VERSION,
-        workspaceId: options.workspaceId,
-        sessionId: options.sessionId,
-        browserInstanceId: randomUUID(),
-        ownerKey: `opengeni-realtime-owner:${randomUUID()}`,
-        operationId: randomUUID(),
-      };
-      owner = record;
-      storage?.setItem(storageKey, JSON.stringify(record));
-      publish({ status: "starting", error: null, diagnostic: null });
-      try {
-        await begin(record, false);
-      } catch (error) {
-        closeBrowserResources(false);
-        const failedMode = state.mode as SessionRealtimeMode | null;
-        if (failedMode?.state === "active") {
-          await handleConnectionFailure(error, "reconnect", false);
-        } else {
-          clearOwner();
-          publish({
-            status: "error",
-            realtimeId: null,
-            mode: null,
-            error: safeError(error),
-          });
+      if (incoming) {
+        incoming.answered = true;
+        incoming.accept();
+        try {
+          await incoming.task;
+        } catch (error) {
+          // A failed speculative connection does not consume the accepted call.
+          // Starting normally claims it with the existing answer path.
+          if (incoming || closed || stopping) throw error;
+          await startCall();
         }
-        throw error;
+        return;
       }
+      await startCall();
     },
     observeLifecycle: async (lifecycle) => {
       if (!lifecycle) {
         if (recoveryTerminal && state.mode?.state === "active") return;
         const record = readOwnerRecord(storage, storageKey, options);
         if (!record) {
+          // A read-only ring preparation has no owner to end. Keep its local
+          // offer when the first lifecycle observation arrives at Answer.
+          if (state.status === "idle" && !state.mode) return;
+          // Keep a terminal failure readable after the server records the end.
+          if (state.status === "error" && !state.mode) return;
           transitionEnded();
           return;
         }
@@ -1233,8 +1686,12 @@ export function createCodexRealtimeController(
       }
       if (lifecycle.state === "ended") {
         const record = readOwnerRecord(storage, storageKey, options);
+        if (!record && state.status === "idle" && !state.mode) return;
         if (record && record.operationId !== lifecycle.operationId) {
-          if (connectionTask || state.status === "active") return;
+          // An earlier call's end is not news while this browser is starting
+          // its own call (for example, waiting on the microphone prompt):
+          // re-beginning would advance the lease and fail the pending start.
+          if (connectionTask || state.status === "active" || state.status === "starting") return;
           closed = false;
           stopping = false;
           owner = record;
@@ -1250,6 +1707,9 @@ export function createCodexRealtimeController(
           await connectionTask;
           return;
         }
+        // The server's end of a call that failed to start must not wipe the
+        // failure the user still needs to read.
+        if (state.status === "error" && !state.mode) return;
         if (state.realtimeId === null || lifecycle.realtimeId === state.realtimeId) {
           transitionEnded(`Realtime ended: ${lifecycle.reason}`);
         }
@@ -1259,11 +1719,22 @@ export function createCodexRealtimeController(
       if (state.status === "active" && state.realtimeId === lifecycle.realtimeId) return;
       const record = readOwnerRecord(storage, storageKey, options);
       if (!record || record.operationId !== lifecycle.operationId) {
-        closeBrowserResources();
-        owner = null;
         const leaseExpiresAt = Date.parse(lifecycle.leaseExpiresAt);
         const remainingLeaseMs = leaseExpiresAt - now().getTime();
-        if (Number.isFinite(remainingLeaseMs) && remainingLeaseMs <= 0) {
+        const leaseExpired = Number.isFinite(remainingLeaseMs) && remainingLeaseMs <= 0;
+        // An earlier call whose lease already ran out (its end not yet in the
+        // events) is not another owner: it must not fail the call this
+        // browser is starting.
+        if (
+          leaseExpired &&
+          lifecycle.realtimeId !== state.realtimeId &&
+          (connectionTask || state.status === "starting")
+        ) {
+          return;
+        }
+        closeBrowserResources();
+        owner = null;
+        if (leaseExpired) {
           transitionEnded("Realtime lease expired");
           return;
         }
@@ -1337,6 +1808,7 @@ export function createCodexRealtimeController(
       connectionTask = null;
       void retiredTask?.catch(() => undefined);
       try {
+        await active?.transport.drain?.();
         await active?.bridge.sealAndFlush();
         closeBrowserResources();
         let current = state.mode;
@@ -1391,7 +1863,18 @@ export function createCodexRealtimeController(
       }
     },
     close: () => {
+      if (state.mode?.state === "preparing" && owner) {
+        void options.client
+          .endSessionRealtime(options.workspaceId, options.sessionId, state.mode.id, {
+            browserInstanceId: owner.browserInstanceId,
+            ownerKey: owner.ownerKey,
+            expectedVersion: state.mode.version,
+            reason: "browser_unload",
+          })
+          .catch(() => undefined);
+      }
       closed = true;
+      incoming = null;
       stopping = false;
       closeBrowserResources();
       listeners.clear();
@@ -1520,14 +2003,39 @@ function readOwnerRecord(
       storage?.removeItem(key);
       return null;
     }
+    const undelegatedTranscript = readUndelegatedTranscript(parsed.undelegatedTranscript);
     return {
-      ...(parsed as Omit<OwnerRecord, "delegationReplay">),
+      ...(parsed as Omit<OwnerRecord, "delegationReplay" | "undelegatedTranscript">),
       ...(delegationReplay ? { delegationReplay } : {}),
+      ...(undelegatedTranscript ? { undelegatedTranscript } : {}),
     };
   } catch {
     storage?.removeItem(key);
     return null;
   }
+}
+
+/** A malformed transcript is dropped; it never invalidates the owner. */
+function readUndelegatedTranscript(value: unknown): CodexRealtimeV3TranscriptEntry[] | undefined {
+  if (!Array.isArray(value) || value.length > CODEX_REALTIME_V3_PENDING_MAX_ENTRIES)
+    return undefined;
+  const entries: CodexRealtimeV3TranscriptEntry[] = [];
+  for (const candidate of value) {
+    const record = recordValue(candidate);
+    if (
+      !record ||
+      (record.role !== "user" && record.role !== "assistant") ||
+      typeof record.text !== "string" ||
+      record.text.length > 65_536 ||
+      typeof record.turnId !== "string" ||
+      record.turnId.length < 1 ||
+      record.turnId.length > 1_024
+    ) {
+      return undefined;
+    }
+    entries.push({ role: record.role, text: record.text, turnId: record.turnId });
+  }
+  return entries;
 }
 
 function readOwnerDelegationReplay(value: unknown): OwnerDelegationReplay | undefined | null {
@@ -1704,10 +2212,56 @@ function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/** Reject when `signal` aborts without cancelling the shared `promise`. */
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function microphoneFailureMessage(error: CodexRealtimeMicrophoneError): string {
+  switch (error.code) {
+    case "permission_denied":
+      return "Microphone access is blocked. Allow it in site settings, then try again.";
+    case "device_not_found":
+      return "No microphone was found. Connect one, then try again.";
+    case "device_unavailable":
+      return "Your microphone is busy or unavailable. Close other apps using it, then try again.";
+    default:
+      return /timed out/i.test(error.message)
+        ? "Microphone access wasn't granted in time. Allow it when your browser asks, then try again."
+        : "The microphone could not start. Try again.";
+  }
+}
+
+/** The server's own message, without the transport prefix or reference id. */
+function apiErrorMessage(error: OpenGeniApiError): string | null {
+  try {
+    const body = JSON.parse(error.body) as Record<string, unknown>;
+    const nested =
+      body.error && typeof body.error === "object" ? (body.error as Record<string, unknown>) : body;
+    return typeof nested.message === "string" && nested.message ? nested.message : null;
+  } catch {
+    return null;
+  }
+}
+
 function safeError(error: unknown): string {
-  return error instanceof Error ? error.message : "Codex realtime browser controller failed";
+  if (error instanceof OpenGeniApiError) {
+    const message = apiErrorMessage(error);
+    if (message) return /[.!?]$/.test(message) ? message : `${message}.`;
+  }
+  return error instanceof Error ? error.message : "Live voice failed in this browser.";
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { workspaceAccessLevels } from "@/lib/permissions";
+import { workspaceAccessLevels } from "@opengeni/react/app/lib/permissions";
 
 import {
   initialsOf,

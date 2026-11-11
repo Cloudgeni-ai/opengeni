@@ -1,0 +1,97 @@
+# Published Sites gateway Worker. See README.md.
+#
+# The top level is the LOCAL DEVELOPMENT configuration (`wrangler dev`). The
+# staging and production environments below are placeholders: the ops
+# repository owns real deployment configuration (account, routes, KV
+# namespace and rate-limit ids, secrets). No domain is named in this file.
+name = "opengeni-site-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+workers_dev = false
+preview_urls = false
+
+[vars]
+ENVIRONMENT = "development"
+# Browsers resolve *.localhost to loopback: open http://<label>.sites.localhost:8787
+SITES_DOMAIN = "sites.localhost"
+API_ORIGIN = "http://127.0.0.1:8000"
+APP_ORIGIN = "http://127.0.0.1:3000"
+FORCE_NOINDEX = "true"
+LOGIN_ONLY = "false"
+# GATEWAY_SECRET (and optional TURNSTILE_SECRET) come from .dev.vars locally
+# and from `wrangler secret put` in deployed environments.
+
+[[kv_namespaces]]
+binding = "HOST_MAP"
+id = "local-host-map"
+
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 600, period = 60 }
+
+# Optional per-Site Cloudflare storage: one SQLite-backed Durable Object per
+# Site (`SITE_DB.idFromName(siteId)`), reached only through the API's signed
+# internal route `/_og/internal/site-db`. Remove the binding to turn the
+# route off (404). The migration tag is permanent once deployed.
+[[durable_objects.bindings]]
+name = "SITE_DB"
+class_name = "SiteDatabase"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SiteDatabase"]
+
+[env.staging]
+name = "opengeni-site-gateway-staging"
+# account_id = "<staging account id>"
+# routes = [{ pattern = "*.<staging sites domain>/*", zone_name = "<staging sites domain>" }]
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+SITES_DOMAIN = "<staging sites domain>"
+API_ORIGIN = "<staging API origin>"
+APP_ORIGIN = "<staging app origin>"
+FORCE_NOINDEX = "true"
+LOGIN_ONLY = "true"
+
+# [[env.staging.kv_namespaces]]
+# binding = "HOST_MAP"
+# id = "<staging KV namespace id>"
+
+# [[env.staging.ratelimits]]
+# name = "RATE_LIMITER"
+# namespace_id = "<staging rate-limit namespace id>"
+# simple = { limit = 600, period = 60 }
+
+# Durable Object bindings are not inherited by environments; the top-level
+# [[migrations]] apply to every environment.
+# [[env.staging.durable_objects.bindings]]
+# name = "SITE_DB"
+# class_name = "SiteDatabase"
+
+[env.production]
+name = "opengeni-site-gateway-production"
+# account_id = "<production account id>"
+# routes = [{ pattern = "*.<production sites domain>/*", zone_name = "<production sites domain>" }]
+
+[env.production.vars]
+ENVIRONMENT = "production"
+SITES_DOMAIN = "<production sites domain>"
+API_ORIGIN = "<production API origin>"
+APP_ORIGIN = "<production app origin>"
+FORCE_NOINDEX = "false"
+LOGIN_ONLY = "false"
+
+# [[env.production.kv_namespaces]]
+# binding = "HOST_MAP"
+# id = "<production KV namespace id>"
+
+# [[env.production.ratelimits]]
+# name = "RATE_LIMITER"
+# namespace_id = "<production rate-limit namespace id>"
+# simple = { limit = 600, period = 60 }
+
+# [[env.production.durable_objects.bindings]]
+# name = "SITE_DB"
+# class_name = "SiteDatabase"

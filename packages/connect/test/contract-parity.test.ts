@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import type { ConnectAttempt, ConnectProvider, ConnectAdvance } from "../src/types";
+import type {
+  ConnectAttempt,
+  ConnectProvider,
+  ConnectAdvance,
+  PreparedMcpSetup,
+} from "../src/types";
 import { ConnectAttempt as AttemptSchema } from "../../contracts/src/connect";
 import type * as Contract from "../../contracts/src/connect";
 
@@ -10,10 +15,12 @@ type Parity = [
   Assert<Compatible<ConnectAttempt, Contract.ConnectAttempt>>,
   Assert<Compatible<ConnectProvider, Contract.ConnectProvider>>,
   Assert<Compatible<ConnectAdvance, Contract.ConnectAdvance>>,
+  Assert<Compatible<PreparedMcpSetup, Contract.PreparedMcpSetup>>,
+  Assert<Compatible<Contract.PreparedMcpSetup, PreparedMcpSetup>>,
 ];
-const parity: Parity = [true, true, true];
+const parity: Parity = [true, true, true, true, true];
 test("Connect wire mirrors remain compatible and completion is not credential-only", () => {
-  expect(parity).toEqual([true, true, true]);
+  expect(parity).toEqual([true, true, true, true, true]);
   expect(
     AttemptSchema.safeParse({
       id: "attempt",

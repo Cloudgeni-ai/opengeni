@@ -1,28 +1,42 @@
-import type { SessionEvent, SessionLineageResponse } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef } from "react";
+import type { ChatClient } from "@opengeni/sdk";
+import type {
+  SessionEvent,
+  ChatSessionLineageResponse as SessionLineageResponse,
+  SessionLineageResponse as FullSessionLineageResponse,
+  OpenGeniClient,
+} from "@opengeni/sdk";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import {
   useEmbeddedSessionLineage,
   type EmbeddedSessionLineageClientOverride,
 } from "../session-context";
-import { useDebouncedCallback, usePolledValue, useSessionEventTrigger } from "./internal";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
+import {
+  projectionReadThrough,
+  useDebouncedCallback,
+  usePolledValue,
+  useSessionEventTrigger,
+} from "./internal";
 
-export type UseSessionLineageOptions = EmbeddedSessionLineageClientOverride & {
-  events?: SessionEvent[] | undefined;
-  /** Refresh interval (ms). Off by default. */
-  pollIntervalMs?: number | undefined;
-  enabled?: boolean | undefined;
-  /** Optional shared causal clock invoked when each network read starts. */
-  beginRead?: (() => number) | undefined;
-};
+export type UseSessionLineageOptions<Client extends ChatClient = OpenGeniClient> =
+  EmbeddedSessionLineageClientOverride<Client> & {
+    events?: SessionEvent[] | undefined;
+    /** Refresh interval (ms). Off by default. */
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+    /** Optional shared causal clock invoked when each network read starts. */
+    beginRead?: (() => number) | undefined;
+  };
 
-export type UseSessionLineageResult = {
-  lineage: SessionLineageResponse | null;
-  loading: boolean;
-  error: Error | null;
-  /** Causal generation captured when the accepted lineage read started. */
-  readGeneration: number;
-  refresh: () => Promise<void>;
-};
+export type UseSessionLineageResult<L extends SessionLineageResponse = FullSessionLineageResponse> =
+  {
+    lineage: L | null;
+    loading: boolean;
+    error: Error | null;
+    /** Causal generation captured when the accepted lineage read started. */
+    readGeneration: number;
+    refresh: () => Promise<void>;
+  };
 
 export function isLineageRefreshEvent(event: SessionEvent): boolean {
   if (event.type === "session.status.changed" || event.type === "session.created") {
@@ -62,8 +76,16 @@ function isSessionCreateToolCallCreated(event: SessionEvent): boolean {
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
 export function useSessionLineage(
   sessionId: string | null | undefined,
-  options: UseSessionLineageOptions = {},
-): UseSessionLineageResult {
+  options?: UseSessionLineageOptions,
+): UseSessionLineageResult;
+export function useSessionLineage(
+  sessionId: string | null | undefined,
+  options: UseSessionLineageOptions<ChatClient>,
+): UseSessionLineageResult<SessionLineageResponse>;
+export function useSessionLineage(
+  sessionId: string | null | undefined,
+  options: UseSessionLineageOptions<ChatClient> = {},
+): UseSessionLineageResult<SessionLineageResponse> {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionLineage(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
@@ -123,6 +145,9 @@ export function useSessionLineage(
       void refresh();
     }, 2500);
   }, [refresh]);
+  // Lineage reflects this session's events through the sequence its read
+  // observed; only a later spawn or status change can add or move children.
+  const readThrough = projectionReadThrough(state.data?.lineage, state.loading);
   useSessionEventTrigger(
     client,
     workspaceId,
@@ -133,19 +158,48 @@ export function useSessionLineage(
     // open its OWN streamEvents tail — a second live SSE connection next to the
     // session route's useSessionEvents. A caller with no feed opts into polling
     // (pollIntervalMs), never a duplicate stream.
-    { events: options.events, enabled: enabled && options.events !== undefined },
+    {
+      events: options.events,
+      enabled: enabled && options.events !== undefined,
+      readThrough,
+      refresh: refreshSoon,
+    },
   );
-  useSessionEventTrigger(
+  // A spawn's child row can commit after the lineage read even when the tool
+  // call started before it, so a spawn still in flight always refreshes (now
+  // and once more shortly after). A finished spawn is covered by its output
+  // event, which the watermark above settles.
+  const feedRef = useRef(options.events);
+  useLayoutEffect(() => {
+    feedRef.current = options.events;
+  }, [options.events]);
+  const isSpawnInFlight = useCallback((event: SessionEvent) => {
+    if (!isSessionCreateToolCallCreated(event)) return false;
+    const callId = (event.payload as { id?: unknown } | null | undefined)?.id;
+    if (typeof callId !== "string") return true;
+    return !(feedRef.current ?? []).some(
+      (item) =>
+        item.type === "agent.toolCall.output" &&
+        (item.payload as { id?: unknown } | null | undefined)?.id === callId,
+    );
+  }, []);
+  useSessionEventTrigger(client, workspaceId, sessionId, isSpawnInFlight, refreshAfterChildCreate, {
+    events: options.events,
+    enabled: enabled && options.events !== undefined,
+  });
+  // Until the first read lands, show the lineage as it was when this
+  // conversation was last left (only when the host retains reads).
+  const retainedLineage = useRetainedSessionView(
     client,
     workspaceId,
     sessionId,
-    isSessionCreateToolCallCreated,
-    refreshAfterChildCreate,
-    { events: options.events, enabled: enabled && options.events !== undefined },
+    "lineage",
+    state.data?.lineage ?? null,
+    { enabled, discard: deniesRetainedView(state.error) },
   );
   return {
-    lineage: state.data?.lineage ?? null,
-    loading: state.loading,
+    lineage: state.data?.lineage ?? retainedLineage,
+    loading: state.loading && retainedLineage === null,
     error: state.error,
     readGeneration: state.data?.readGeneration ?? 0,
     refresh,

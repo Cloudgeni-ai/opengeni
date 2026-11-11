@@ -44,6 +44,7 @@ export const opensandboxProvider: ProviderRegistration = {
   instanceIdFields: ["sandboxId"],
   workspaceCapturePolicy: () => REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.opensandbox,
+  sessionSupportsPty: false,
   validateCredentials(settings) {
     if (!settings.openSandboxBaseUrl) {
       throw new SandboxConfigError("opensandbox", "OPENGENI_OPENSANDBOX_BASE_URL is required");

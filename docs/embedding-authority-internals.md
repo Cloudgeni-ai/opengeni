@@ -56,10 +56,13 @@ to the saved host return URL but cannot recover credential-exchange authority.
 Core `application/connect-authority.ts` shares
 native, service-key and external callback checks; `prepareFikenTokenInstall`
 shares verified Fiken token persistence between native routes and Connect.
-First-party Atlassian and Google Drive knowledge/publication callbacks retain
+First-party Google Drive knowledge/publication callbacks retain
 their account/resource proofs while committing credentials and completion in
 one transaction. The native entry points use `NativeConnectSetup`; source-sync
-destination controls remain explicit. Public OpenAPI/GraphQL source setup stores
+destination controls remain explicit. Native Atlassian setup and sync are retired;
+in-flight callbacks preserve their authority checks and exact navigation but
+settle failed without exchanging a grant. Hosted Atlassian MCP is unchanged.
+Public OpenAPI/GraphQL source setup stores
 an immutable source after preview, then re-resolves revision/hash and explicit
 selected operations through the existing installation validator. No-auth API
 sources do not invent credentials. Custom-header MCP setup uses the runtime's
@@ -79,16 +82,57 @@ membership/Personal-workspace anchors, but no native login or shared-workspace
 grant. Reuse cannot reactivate suspended or revoked membership.
 External-mode admission is resolved separately in `packages/core/src/access/`:
 only organization-key authentication can assert an external actor, and its
-workspace permissions intersect the live key ceiling with explicit membership.
+workspace permissions intersect the live key ceiling with membership.
 `OpenGeniClient.asUser` returns an isolated server-side client; it never changes
-a shared client's actor or grants membership. Explicit host onboarding lives in
+a shared client's actor. Explicit host onboarding lives in
 `packages/core/src/application/external-workspace-members.ts` and reauthorizes
-under the organization membership fence. External lifecycle administration
+under the organization membership fence. Request authentication reads a known
+identity with `readExternalIdentity` (no row locks, no writes) and the
+revocation watermark while holding that fence **shared**, so it orders against
+every lifecycle writer and revoke (they hold it exclusively) without making an
+organization's concurrent requests authenticate one at a time. Only a first
+request for an unknown identity provisions it through `ensureExternalIdentity`
+under the exclusive fence. The read is a runtime definer that migration 1172
+creates withheld (the previous release rejects a runtime grant on a definer it
+does not know); until a later migration grants it, every request takes the
+exclusive path. First-use membership
+(`provisionExternalMemberOnFirstUse`, request entry only, never a fresh
+re-check) creates a missing shared-workspace row with the conversation defaults
+through `ensureExternalWorkspaceMemberOnFirstUse` in
+`packages/db/src/external-membership-operations.ts`: same fence and live key
+authority (`members:manage` or legacy `workspace:admin`, every default
+permission, workspace in scope), the keyed-grant prepare/record functions
+(identity re-validated active under the fence, Personal workspaces refused,
+receipt plus key-attributed lifecycle event), insert-on-conflict-do-nothing,
+plain external mode only, never for `opengeni-sdk:user-isolation:*`
+workspaces or a requested permission outside the defaults.
+First use also returns `superseded`, creating nothing, when a removal left a
+revocation marker above the watermark the request read when it authenticated.
+A stated membership (`membership` in the external-actor header) replaces
+first use at request entry: `applyStatedMembership` compares the grant the
+request already read, and only when it differs calls
+`applyStatedExternalWorkspaceMembership` (same fence, live key and keyed
+grant/update prepare/record, last-administrator check under row locks). It
+drops the statement when a removal (`removeWorkspaceMember`, which stamps every
+external-member removal under the fence) left a revocation marker above the
+sequence watermark read when the request authenticated. The ceiling check
+(`requireStatedMembershipCeiling`) mirrors the PATCH endpoint's refusals.
+External lifecycle administration
 reuses native settlement commands; core private/Personal admission uses a
 dedicated verified-owning-user proof. Explicit linked-native admission uses the
 separate link proof; no external request is stamped as a managed-cookie login.
 Workspace gateway admission distinguishes verified external-user and
 organization-service-key provenance from native-human and attempt claims.
+Published Site member dispatch reuses native delegated owning-human admission.
+Its backend-only `stampSiteViewerSessionAuthorization` binds an exact Request
+to the gateway-verified identity and one workspace; external-member proofs
+reload existing active membership and intersect the Site permission ceiling,
+without provisioning an identity or fabricating managed-cookie authentication.
+Native users retain their actual profile and subscription authority. The request
+also retains a live Site/viewer reauthorization callback for streamed delivery.
+Guest/outsider service execution carries a separate request-local Site principal
+context; immutable session columns bind that audience across all native surfaces.
+Neither an origin label nor hidden navigation is an ownership proof.
 These new request-time lanes recheck live authority before provider invocation
 and approval issuance; existing catalog filtering and approval rules remain
 authoritative. This does not supply durable scheduled/binding delegation.
@@ -130,11 +174,7 @@ causal continuations. Runtime execution and credential-use checks deny revoked
 links without tying durable work to the original API key. Linking does not
 transfer personal connection ownership. Native consent and account inventory reuse the shared
 React link surfaces; inventory is participant-scoped and cursor-bounded.
-The DB create boundary strips retired selection metadata from new input and no
-longer accepts host-selection arguments. `retired-session-create-metadata.ts`
-keeps only a historical replay rejection: nonempty or malformed stored host
-selection cannot be mistaken for a native create using the same idempotency key.
-Historical records are not rewritten. This compatibility check grants no access.
+The DB create boundary does not accept host-selection arguments.
 Curated API Integration OAuth carries encrypted external continuation data in
 signed state. `packages/core/src/application/external-continuation.ts` checks
 the live identity, explicit membership and organization-key ceiling; the
@@ -203,8 +243,8 @@ Inline visualizations receive the shared visualization stylesheet and helper scr
 with frame-scoped resize messages and theme updates; ordinary Sites are unchanged.
 The CSS/helpers under packages/react are canonical. generate-visualization-assets.ts
 generates both the renderer constants and the visualization skill’s preview/export
-assets from them. The default opengeni-visualize skill owns detailed inline design
-guidance; the main operational prompt only routes to it and to opengeni-sites.
+assets from them. The default visualize skill owns detailed inline design
+guidance; the main operational prompt only routes to it and to sites.
 Markdown image references use artifact:<uuid>. The native chat resolves metadata
 through the current workspace API and reuses the retained-artifact image loader
 (object URL cleanup, unavailable states, and current viewer authentication).

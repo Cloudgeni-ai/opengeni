@@ -1,0 +1,605 @@
+/**
+ * The action registry: everything a person can do from the keyboard, the ⌘K
+ * menu, menus and the desktop menu bar. Each action is defined once here, with
+ * its name, keys and availability, so every surface shows and runs it the same
+ * way. See docs/command-menu-and-shortcuts.md.
+ */
+import {
+  ArchiveIcon,
+  ArrowDownIcon,
+  ArrowUpIcon,
+  AudioLinesIcon,
+  ChevronsUpDownIcon,
+  CommandIcon,
+  GitForkIcon,
+  HistoryIcon,
+  InboxIcon,
+  KeyboardIcon,
+  LinkIcon,
+  MailIcon,
+  MailOpenIcon,
+  MessageCircleQuestionIcon,
+  MicIcon,
+  PanelLeftIcon,
+  PanelRightIcon,
+  PencilIcon,
+  PinIcon,
+  PinOffIcon,
+  PlusIcon,
+  SearchIcon,
+  SquareIcon,
+  TextSearchIcon,
+  type LucideIcon,
+} from "lucide-react";
+import type { SessionListRow } from "../../../session-list-model";
+import type { Recording } from "@opengeni/contracts";
+import type { RecorderState } from "@opengeni/sdk/recordings";
+import { canStartRecording } from "../../../meetings/recorder-state";
+import type { ActionSurface, Chord, ChordPlatform } from "./chords";
+import type { ChatOperations } from "./chat-operations";
+
+export type ActionGroup = "chat" | "meetings" | "navigate" | "view" | "help";
+
+/** Where the desktop menu bar shows an action. */
+export type DesktopMenuPlacement = "file" | "view" | "go" | "chat" | "help";
+
+/** A workspace someone can switch to, in the workspace picker's order. */
+export type WorkspaceChoice = {
+  id: string;
+  name: string;
+  /** The workspace's organization, by name. */
+  organization: string;
+  /** A Personal workspace, private to its owner. */
+  personal: boolean;
+};
+
+/** The meeting recorder, as the actions use it. */
+export type MeetingActions = {
+  /** The recorder's state; null until its capture code loads. */
+  state: RecorderState | null;
+  /** Start recording as the Meetings page's button does, and show Meetings. */
+  start(): void;
+  /** Show Meetings, where the recording going is. */
+  show(): void;
+  /** Stop the recording going and open it. */
+  stop(): void | Promise<void>;
+};
+
+/** What the ⌘K menu asks of the server for meetings; see `MeetingPages.list`. */
+export type MeetingListOptions = {
+  /** Words in titles and current transcripts. */
+  query?: string;
+  /** Someone who spoke, by part of their name. */
+  person?: string;
+  startedFrom?: string;
+  startedTo?: string;
+  limit: number;
+  signal?: AbortSignal;
+};
+
+/** The Meetings pages, where this surface has them (whether or not this browser records). */
+export type MeetingPages = {
+  /** Show Meetings. */
+  openList(): void;
+  /** Open one of this workspace's meetings, as its row on Meetings does. */
+  open(recordingId: string): void;
+  /** A meeting's address, for a new browser tab or to share. */
+  link(recordingId: string): string;
+  copyLink(recordingId: string): void | Promise<void>;
+  /** This workspace's meetings the person can see, newest first. */
+  list(options: MeetingListOptions): Promise<readonly Recording[]>;
+  /** The meeting on screen, if any. */
+  current: {
+    recordingId: string;
+    /** Ask about it, as its Ask field does; with no question, put the cursor there. Null when it takes none. */
+    ask: ((question: string | null) => void) | null;
+  } | null;
+};
+
+export type ActionEnv = {
+  workspaceId: string;
+  subjectId: string;
+  surface: ActionSurface;
+  platform: ChordPlatform;
+  /** The chat on screen, if any. */
+  currentChat: SessionListRow | null;
+  /** The Site on screen, if any. */
+  currentSiteId: string | null;
+  ops: ChatOperations;
+  /** Whether the sidebar's chat list is part of this surface. */
+  chatList: boolean;
+  /** Whether chats have the right-hand workspace panel on this surface. */
+  workspacePanel: boolean;
+  /** Every workspace open to the person, in the workspace picker's order. */
+  workspaces: readonly WorkspaceChoice[];
+  /** Whether the person may fork the chat on screen. */
+  canForkCurrentChat: boolean;
+  /** Meetings, when this surface records them and this browser can. */
+  meetings: MeetingActions | null;
+  /** The Meetings pages, when this surface has them. */
+  meetingPages: MeetingPages | null;
+  newChat(): void;
+  /** Opens a chat; one in another workspace switches to that workspace. */
+  openChat(chatId: string, workspaceId?: string): void;
+  /** Opens one of this workspace's Sites in the app, as its sidebar row does. */
+  openSite(siteId: string): void;
+  /** A Site's address, for opening it in a new browser tab. */
+  siteLink(siteId: string): string;
+  openWorkspace(workspaceId: string): void;
+  /** The ⌘K menu, listing workspaces to switch to. */
+  openWorkspacePicker(): void;
+  openInbox(): void;
+  toggleSidebar(): void;
+  toggleWorkspacePanel(): void;
+  findInChat(): void;
+  searchMessages(query?: string): void;
+  renameCurrentChat(): void;
+  /** Asks the chat on screen to fork from its latest message. */
+  forkCurrentChat(): void;
+  openCommandMenu(): void;
+  openShortcutSheet(): void;
+  /** Back to the most recently viewed other chat (a quick Control+Tab). */
+  switchToRecentChat(): void;
+  /** Chats in sidebar order, and the pinned ones in their order. */
+  sidebarOrder(): readonly string[];
+  pinnedOrder(): readonly string[];
+};
+
+export type AppAction = {
+  id: string;
+  /** Plain words; chat actions may read the chat (Pin or Unpin). */
+  title: string | ((env: ActionEnv, chat: SessionListRow | null) => string);
+  group: ActionGroup;
+  icon: LucideIcon;
+  /** A different icon for some chats (Unpin for a pinned chat). */
+  iconFor?: (chat: SessionListRow | null) => LucideIcon;
+  /** Extra words the ⌘K menu matches, e.g. "share" for Copy link. */
+  keywords?: readonly string[];
+  chords?: readonly Chord[];
+  /** The cheat sheet's own key text when one action has many chords (⌘1 to ⌘9). */
+  chordSummary?: (platform: ChordPlatform) => string;
+  /** Acts on a chat: the current one, or the one a menu or ⌘K row points at. */
+  forChat?: boolean;
+  /** Acts on the meeting on screen; ⌘K lists it under "This meeting". */
+  forMeeting?: boolean;
+  /** Listed in the ⌘K menu (some exist only as keys). Default true. */
+  inCommandMenu?: boolean;
+  /**
+   * Opens a dialog of its own. From ⌘K it runs once the menu has handed focus
+   * back, so the new dialog returns focus to the same place when it closes.
+   */
+  opensDialog?: boolean;
+  /** Offered in ⌘K before anything is typed. */
+  suggested?: boolean;
+  /** The desktop menu bar section, when it appears there. */
+  desktopMenu?: DesktopMenuPlacement;
+  available(env: ActionEnv, chat: SessionListRow | null): boolean;
+  run(env: ActionEnv, chat: SessionListRow | null, chord?: Chord): void | Promise<void>;
+};
+
+export function actionTitle(
+  action: AppAction,
+  env: ActionEnv,
+  chat: SessionListRow | null,
+): string {
+  return typeof action.title === "string" ? action.title : action.title(env, chat);
+}
+
+export function actionIcon(action: AppAction, chat: SessionListRow | null): LucideIcon {
+  return action.iconFor?.(chat) ?? action.icon;
+}
+
+const ALWAYS = () => true;
+
+function stepChat(env: ActionEnv, direction: 1 | -1): void {
+  const order = env.sidebarOrder();
+  if (order.length === 0) return;
+  const index = env.currentChat ? order.indexOf(env.currentChat.id) : -1;
+  const next = index < 0 ? (direction === 1 ? 0 : order.length - 1) : index + direction;
+  if (next < 0 || next >= order.length) return;
+  env.openChat(order[next]!);
+}
+
+/** The previous or next workspace in the picker's order, wrapping around. */
+export function stepWorkspace(
+  workspaces: readonly Pick<WorkspaceChoice, "id">[],
+  currentId: string,
+  direction: 1 | -1,
+): string | null {
+  if (workspaces.length < 2) return null;
+  const index = workspaces.findIndex((workspace) => workspace.id === currentId);
+  const next =
+    index < 0
+      ? direction === 1
+        ? 0
+        : workspaces.length - 1
+      : (index + direction + workspaces.length) % workspaces.length;
+  return workspaces[next]!.id;
+}
+
+function switchWorkspace(env: ActionEnv, direction: 1 | -1): void {
+  const id = stepWorkspace(env.workspaces, env.workspaceId, direction);
+  if (id && id !== env.workspaceId) env.openWorkspace(id);
+}
+
+const hasOtherWorkspaces = (env: ActionEnv) => env.workspaces.length > 1;
+
+/** A recording is being captured, so Start recording shows it instead. */
+function meetingBusy(env: ActionEnv): boolean {
+  return !canStartRecording(env.meetings?.state);
+}
+
+const PINNED_CHORDS: Chord[] = Array.from({ length: 9 }, (_, index) => ({
+  code: `Digit${index + 1}`,
+  mod: true,
+  only: "desktop" as const,
+}));
+
+let appActionList: readonly AppAction[] | undefined;
+
+/**
+ * Every action, built on first use. The icons come from chunks the router
+ * shares with other routes; reading them while this module loads can see them
+ * before they exist, depending on which route a visitor opens first.
+ */
+export function appActions(): readonly AppAction[] {
+  return (appActionList ??= [
+    {
+      id: "commandMenu.open",
+      title: "Command menu",
+      group: "help",
+      icon: CommandIcon,
+      chords: [{ code: "KeyK", mod: true }],
+      inCommandMenu: false,
+      desktopMenu: "go",
+      available: ALWAYS,
+      run: (env) => env.openCommandMenu(),
+    },
+    {
+      id: "chat.new",
+      title: "New chat",
+      group: "chat",
+      icon: PlusIcon,
+      keywords: ["start", "create", "session"],
+      // The desktop menu shows its first key, the familiar ⌘N; browsers keep ⌘N for windows.
+      chords: [
+        { code: "KeyN", mod: true, only: "desktop" },
+        { code: "KeyO", mod: true, shift: true },
+      ],
+      suggested: true,
+      desktopMenu: "file",
+      available: ALWAYS,
+      run: (env) => env.newChat(),
+    },
+    {
+      // The Meetings page's Start recording button, from anywhere. While one
+      // records, it shows that recording instead of starting a second one, as a
+      // desktop call notification's Record does. ⌃⌘N sits beside New chat's ⌘N
+      // and, like Archive, is Ctrl+Alt elsewhere; see the shortcuts doc.
+      id: "meetings.start",
+      title: (env) => (meetingBusy(env) ? "Go to recording" : "Start recording"),
+      group: "meetings",
+      icon: MicIcon,
+      keywords: ["meeting", "new meeting", "record", "notetaker", "transcript", "audio", "call"],
+      chords: [
+        { code: "KeyN", mod: true, control: true, platform: "mac" },
+        { code: "KeyN", mod: true, alt: true, platform: "other" },
+      ],
+      desktopMenu: "file",
+      available: (env) => env.meetings !== null,
+      run: (env) => (meetingBusy(env) ? env.meetings?.show() : env.meetings?.start()),
+    },
+    {
+      // No key, so a stray press never ends a meeting.
+      id: "meetings.stop",
+      title: "Stop recording",
+      group: "meetings",
+      icon: SquareIcon,
+      keywords: ["meeting", "end", "finish", "record"],
+      desktopMenu: "file",
+      available: (env) => env.meetings?.state === "recording" || env.meetings?.state === "paused",
+      run: (env) => env.meetings?.stop(),
+    },
+    {
+      // The meeting on screen's Ask field, from ⌘K. Typing a question first
+      // asks it straight away; see the menu's "Ask about this meeting: …" row.
+      id: "meeting.ask",
+      title: "Ask about this meeting",
+      group: "meetings",
+      icon: MessageCircleQuestionIcon,
+      keywords: ["question", "chat", "agent", "summary", "notes"],
+      forMeeting: true,
+      opensDialog: true,
+      available: (env) => Boolean(env.meetingPages?.current?.ask),
+      run: (env) => env.meetingPages?.current?.ask?.(null),
+    },
+    {
+      id: "meeting.copyLink",
+      title: "Copy meeting link",
+      group: "meetings",
+      icon: LinkIcon,
+      keywords: ["share", "url", "address"],
+      forMeeting: true,
+      available: (env) => Boolean(env.meetingPages?.current),
+      run: (env) => {
+        const current = env.meetingPages?.current;
+        if (current) return env.meetingPages?.copyLink(current.recordingId);
+      },
+    },
+    {
+      id: "chat.copyLink",
+      title: "Copy link",
+      group: "chat",
+      icon: LinkIcon,
+      keywords: ["share", "url", "address"],
+      chords: [{ code: "Comma", mod: true, shift: true }],
+      forChat: true,
+      suggested: true,
+      desktopMenu: "chat",
+      available: (_env, chat) => chat !== null,
+      run: (env, chat) => (chat ? env.ops.copyLink(chat) : undefined),
+    },
+    {
+      id: "chat.pin",
+      title: (_env, chat) => (chat?.pinned ? "Unpin" : "Pin"),
+      group: "chat",
+      icon: PinIcon,
+      iconFor: (chat) => (chat?.pinned ? PinOffIcon : PinIcon),
+      keywords: ["unpin", "favorite", "star"],
+      chords: [{ code: "KeyP", mod: true, alt: true }],
+      forChat: true,
+      suggested: true,
+      desktopMenu: "chat",
+      available: (_env, chat) => chat !== null && !chat.archived,
+      run: (env, chat) => (chat ? env.ops.setPinned(chat, !chat.pinned) : undefined),
+    },
+    {
+      id: "chat.rename",
+      title: "Rename",
+      group: "chat",
+      icon: PencilIcon,
+      keywords: ["title", "name"],
+      forChat: true,
+      desktopMenu: "chat",
+      // Renaming happens in the chat's own title, so only for the chat on screen.
+      available: (env, chat) => chat !== null && env.currentChat?.id === chat.id,
+      run: (env) => env.renameCurrentChat(),
+    },
+    {
+      id: "chat.fork",
+      title: "Fork chat",
+      group: "chat",
+      icon: GitForkIcon,
+      keywords: ["copy", "duplicate", "branch", "clone"],
+      forChat: true,
+      opensDialog: true,
+      desktopMenu: "chat",
+      // From the latest message, as the fork button under a message does; only
+      // for the chat on screen, whose messages are loaded.
+      available: (env, chat) =>
+        chat !== null && env.currentChat?.id === chat.id && env.canForkCurrentChat,
+      run: (env) => env.forkCurrentChat(),
+    },
+    {
+      id: "chat.unread",
+      title: (_env, chat) => (chat?.unread ? "Mark as read" : "Mark as unread"),
+      group: "chat",
+      icon: MailIcon,
+      iconFor: (chat) => (chat?.unread ? MailOpenIcon : MailIcon),
+      keywords: ["read", "unread"],
+      forChat: true,
+      desktopMenu: "chat",
+      available: (_env, chat) => chat !== null && !chat.archived,
+      run: (env, chat) => (chat ? env.ops.setUnread(chat, !chat.unread) : undefined),
+    },
+    {
+      id: "chat.archive",
+      title: "Archive",
+      group: "chat",
+      icon: ArchiveIcon,
+      keywords: ["archive", "done", "storage"],
+      // Apple Mail's Archive key; Ctrl+Alt elsewhere, as Pin, since browsers there
+      // keep Ctrl+Shift+A for tab search.
+      chords: [
+        { code: "KeyA", mod: true, control: true, platform: "mac" },
+        { code: "KeyA", mod: true, alt: true, platform: "other" },
+      ],
+      forChat: true,
+      desktopMenu: "chat",
+      // Archived chats stay archived; only people who can control a chat archive it.
+      available: (env, chat) =>
+        chat !== null &&
+        chat.parentSessionId === null &&
+        !chat.archived &&
+        (env.ops.archiveLabel ? env.ops.archiveLabel(chat) !== null : true),
+      run: (env, chat) => (chat ? env.ops.setArchived(chat, true) : undefined),
+    },
+    {
+      id: "chat.find",
+      title: "Find in chat",
+      group: "chat",
+      icon: TextSearchIcon,
+      keywords: ["search", "find"],
+      chords: [{ code: "KeyF", mod: true }],
+      desktopMenu: "chat",
+      // The conversation owns ⌘F itself; the registry lists it so it is discoverable.
+      available: (env) => env.currentChat !== null,
+      run: (env) => env.findInChat(),
+    },
+    {
+      id: "go.inbox",
+      title: "Inbox",
+      group: "navigate",
+      icon: InboxIcon,
+      keywords: ["notifications", "replies", "needs you"],
+      chords: [
+        { code: "KeyI", mod: true, shift: true, platform: "mac" },
+        // Browsers on Windows and Linux open developer tools with Ctrl+Shift+I.
+        { code: "KeyI", mod: true, shift: true, platform: "other", only: "desktop" },
+      ],
+      suggested: true,
+      desktopMenu: "go",
+      available: ALWAYS,
+      run: (env) => env.openInbox(),
+    },
+    {
+      id: "go.meetings",
+      title: "Meetings",
+      group: "navigate",
+      icon: AudioLinesIcon,
+      keywords: ["recordings", "transcripts", "calls", "notes"],
+      suggested: true,
+      desktopMenu: "go",
+      available: (env) => env.meetingPages !== null,
+      run: (env) => env.meetingPages?.openList(),
+    },
+    {
+      id: "go.previousChat",
+      title: "Previous chat",
+      group: "navigate",
+      icon: ArrowUpIcon,
+      chords: [{ code: "ArrowUp", alt: true }],
+      inCommandMenu: false,
+      available: (env) => env.chatList,
+      run: (env) => stepChat(env, -1),
+    },
+    {
+      id: "go.nextChat",
+      title: "Next chat",
+      group: "navigate",
+      icon: ArrowDownIcon,
+      chords: [{ code: "ArrowDown", alt: true }],
+      inCommandMenu: false,
+      available: (env) => env.chatList,
+      run: (env) => stepChat(env, 1),
+    },
+    {
+      // Hold Control to see recent chats and keep pressing Tab; release to open.
+      // The actions provider runs the switcher itself because it needs Control's
+      // release, so the desktop menu bar never owns this key.
+      id: "go.recentChat",
+      title: "Switch to recent chat",
+      group: "navigate",
+      icon: HistoryIcon,
+      chords: [
+        { code: "Tab", control: true, platform: "mac", only: "desktop" },
+        // Browsers keep Control+Tab for their own tabs.
+        { code: "Tab", mod: true, platform: "other", only: "desktop" },
+      ],
+      inCommandMenu: false,
+      available: ALWAYS,
+      run: (env) => env.switchToRecentChat(),
+    },
+    {
+      id: "go.pinnedChat",
+      title: "Pinned chat 1 to 9",
+      group: "navigate",
+      icon: PinIcon,
+      chords: PINNED_CHORDS,
+      chordSummary: (platform) => (platform === "mac" ? "⌘1 – ⌘9" : "Ctrl+1 – Ctrl+9"),
+      inCommandMenu: false,
+      available: (env) => env.chatList,
+      run: (env, _chat, chord) => {
+        const index = chord ? Number(chord.code.slice(5)) - 1 : 0;
+        const id = env.pinnedOrder()[index];
+        if (id) env.openChat(id);
+      },
+    },
+    {
+      id: "go.searchMessages",
+      title: "Search messages",
+      group: "navigate",
+      icon: SearchIcon,
+      keywords: ["find", "history", "full text"],
+      opensDialog: true,
+      desktopMenu: "go",
+      available: ALWAYS,
+      run: (env) => env.searchMessages(),
+    },
+    {
+      id: "go.switchWorkspace",
+      title: "Switch workspace…",
+      group: "navigate",
+      icon: ChevronsUpDownIcon,
+      keywords: ["workspace", "organization", "team", "change", "go to"],
+      desktopMenu: "go",
+      available: hasOtherWorkspaces,
+      run: (env) => env.openWorkspacePicker(),
+    },
+    {
+      // The workspace picker's order, wrapping around. ⌥⌘ and arrows sit in the
+      // same place on every keyboard layout, and browsers leave them alone.
+      id: "go.previousWorkspace",
+      title: "Previous workspace",
+      group: "navigate",
+      icon: ArrowUpIcon,
+      chords: [
+        { code: "ArrowUp", mod: true, alt: true },
+        // Some Linux desktops take Ctrl+Alt+arrows to switch their own workspaces.
+        { code: "PageUp", mod: true, shift: true, platform: "other", only: "desktop" },
+      ],
+      inCommandMenu: false,
+      desktopMenu: "go",
+      available: hasOtherWorkspaces,
+      run: (env) => switchWorkspace(env, -1),
+    },
+    {
+      id: "go.nextWorkspace",
+      title: "Next workspace",
+      group: "navigate",
+      icon: ArrowDownIcon,
+      chords: [
+        { code: "ArrowDown", mod: true, alt: true },
+        { code: "PageDown", mod: true, shift: true, platform: "other", only: "desktop" },
+      ],
+      inCommandMenu: false,
+      desktopMenu: "go",
+      available: hasOtherWorkspaces,
+      run: (env) => switchWorkspace(env, 1),
+    },
+    {
+      id: "view.sidebar",
+      title: "Toggle sidebar",
+      group: "view",
+      icon: PanelLeftIcon,
+      keywords: ["hide", "show", "collapse", "rail"],
+      // ⌘B as in most editors and chat apps. It is bold in rich text, so the menu
+      // bar shows the platform's standard sidebar key instead, which also works.
+      chords: [
+        { code: "KeyB", mod: true, formatting: true },
+        { code: "KeyS", mod: true, control: true, platform: "mac" },
+        { code: "KeyS", mod: true, shift: true, platform: "other" },
+      ],
+      desktopMenu: "view",
+      available: (env) => env.chatList,
+      run: (env) => env.toggleSidebar(),
+    },
+    {
+      id: "view.workspacePanel",
+      title: "Toggle workspace panel",
+      group: "view",
+      icon: PanelRightIcon,
+      keywords: ["right", "inspector", "files", "browser", "terminal", "hide", "show"],
+      // The second sidebar's key in VS Code and Cursor.
+      chords: [{ code: "KeyB", mod: true, alt: true }],
+      desktopMenu: "view",
+      available: (env) => env.workspacePanel && env.currentChat !== null,
+      run: (env) => env.toggleWorkspacePanel(),
+    },
+    {
+      id: "help.shortcuts",
+      title: "Keyboard shortcuts",
+      group: "help",
+      icon: KeyboardIcon,
+      keywords: ["keys", "hotkeys", "cheat sheet", "help"],
+      chords: [{ code: "Slash", mod: true }],
+      desktopMenu: "help",
+      available: ALWAYS,
+      run: (env) => env.openShortcutSheet(),
+    },
+  ]);
+}
+
+export function findAction(id: string): AppAction | undefined {
+  return appActions().find((action) => action.id === id);
+}

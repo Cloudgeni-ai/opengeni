@@ -1,23 +1,23 @@
 import { expect, test } from "bun:test";
 import { verifyModalMaterializedPath } from "../src/sandbox/providers/modal-materialization-verification";
 import {
-  ModalCommandControl,
+  type ModalCommandControl,
   type ModalProviderCommand,
   type ModalProviderOutputPage,
-} from "../src/sandbox/providers/modal-legacy-command-control";
+} from "../src/sandbox/providers/modal-command-control";
 import { materializationVerificationDiagnostic } from "../src/sandbox/materialization-verification-error";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
 import { withSandboxProviderCapture } from "../src/sandbox/provider-operation-gate";
 
 const marker = "__OPENGENI_MATERIALIZED_PATH_VISIBLE__";
 const command: ModalProviderCommand = {
-  provider: "modal",
+  kind: "modal-router-v1",
   sandboxId: "sb-test",
   taskId: "ta-test",
-  execId: "tp-test",
+  execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
   streams: {
-    stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-    stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+    stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
   },
 };
 
@@ -83,7 +83,11 @@ test("bounds empty observations without restarting or losing the exact execution
     diagnostic: {
       reason: "command_pending",
       providerSessionId: null,
-      providerExecution: { sandboxId: "sb-test", taskId: "ta-test", execId: "tp-test" },
+      providerExecution: {
+        sandboxId: "sb-test",
+        taskId: "ta-test",
+        execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
+      },
     },
   });
   expect(f.starts()).toBe(1);
@@ -126,7 +130,11 @@ test("provider errors keep identity and retained diagnostic evidence", async () 
   ).rejects.toBe(error);
   expect(materializationVerificationDiagnostic(error)).toMatchObject({
     reason: "command_error",
-    providerExecution: { sandboxId: "sb-test", taskId: "ta-test", execId: "tp-test" },
+    providerExecution: {
+      sandboxId: "sb-test",
+      taskId: "ta-test",
+      execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
+    },
   });
   expect(f.starts()).toBe(1);
 });
@@ -220,52 +228,4 @@ test("capture waits for the probe under the original gate without nested admissi
   finish();
   await Promise.all([materialization, capture]);
   expect(order).toEqual(["write", "probe", "verified", "capture"]);
-});
-
-test("a stream failure aborts and drains its sibling before releasing probe ownership", async () => {
-  const failure = new Error("stdout transport failed");
-  let siblingEntered!: () => void;
-  const entered = new Promise<void>((resolve) => {
-    siblingEntered = resolve;
-  });
-  let siblingSettled = false;
-  let siblingSignal: AbortSignal | undefined;
-  const pending = new Set<AbortController>();
-  const port = {
-    sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
-    containerExec: async () => ({ execId: "tp-test" }),
-    async *containerExecGetOutput(
-      request: { fileDescriptor: number },
-      options?: { signal?: AbortSignal },
-    ): AsyncGenerator<never> {
-      if (request.fileDescriptor === 1) {
-        await entered;
-        throw failure;
-      }
-      siblingSignal = options?.signal;
-      try {
-        siblingEntered();
-        yield await new Promise<never>((_, reject) => {
-          siblingSignal!.addEventListener("abort", () => reject(siblingSignal!.reason), {
-            once: true,
-          });
-        });
-      } finally {
-        // Model asynchronous transport cleanup, not merely receipt of abort.
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        siblingSettled = true;
-      }
-    },
-  };
-  const control = ModalCommandControl.forSandbox(
-    { cpClient: port, version: () => "0.9.0" } as never,
-    "sb-test",
-    "/workspace",
-  );
-  await expect(
-    verifyModalMaterializedPath(control, "repos/example", "/workspace", pending),
-  ).rejects.toBe(failure);
-  expect(siblingSignal?.aborted).toBe(true);
-  expect(siblingSettled).toBe(true);
-  expect(pending.size).toBe(0);
 });

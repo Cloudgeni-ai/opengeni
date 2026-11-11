@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
-  ANALYTICS_MODEL_PROVIDERS,
   SESSION_TURN_SURFACES,
   TOOL_FAMILY_INTEGRATION_DOMAINS,
   ToolFamily,
@@ -58,7 +57,7 @@ describe("product analytics dimensions", () => {
     }
   });
 
-  test("first-party families come from OpenGeni's own fixed names only", () => {
+  test("first-party families come from Opengeni's own fixed names only", () => {
     expect(firstPartyToolFamily("goal_set")).toBe("goal_set");
     expect(firstPartyToolFamily("exec_command")).toBe("exec_command");
     expect(firstPartyToolFamily("skill_checkout")).toBe("skill_checkout");
@@ -73,14 +72,5 @@ describe("product analytics dimensions", () => {
     expect(ToolFamily.safeParse("exec_command").success).toBe(true);
     expect(ToolFamily.safeParse("integration:Customer Host").success).toBe(false);
     expect(ToolFamily.safeParse("Exec Command").success).toBe(false);
-  });
-
-  test("migration 0533 mirrors the fixed lists", () => {
-    const sql = readFileSync(
-      `${repoRoot}packages/db/drizzle/0533_turn_surface_analytics.sql`,
-      "utf8",
-    );
-    for (const surface of SESSION_TURN_SURFACES) expect(sql).toContain(`'${surface}'`);
-    for (const provider of ANALYTICS_MODEL_PROVIDERS) expect(sql).toContain(`'${provider}'`);
   });
 });

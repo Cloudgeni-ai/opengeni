@@ -4,6 +4,7 @@ import type {
   ConfirmExternalIdentityLinkRequest,
   ExternalIdentityLinkPreview,
 } from "@opengeni/sdk";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type IdentityLinkClient = {
   previewIdentityLink(
@@ -42,6 +43,7 @@ export function IdentityLinkConsent({
   className,
   onComplete,
 }: IdentityLinkConsentProps) {
+  const t = useOpenGeniText();
   const [link, setLink] = useState<ExternalIdentityLink | null>(null);
   const [preview, setPreview] = useState<ExternalIdentityLinkPreview | null>(null);
   const [selected, setSelected] = useState<ExternalIdentityLink["permissions"]>([]);
@@ -103,49 +105,48 @@ export function IdentityLinkConsent({
   return (
     <section
       className={["og-connect og-identity-link", className].filter(Boolean).join(" ")}
-      aria-label="Link your account"
+      aria-label={t("identityLinkConsent.linkYourAccount")}
       aria-busy={busy}
     >
-      <h2>Link your Opengeni account</h2>
-      <p>
-        Only continue if you started this request in a product you trust. Linking lets that product
-        act as your account with the permissions you select. It does not merge accounts or move
-        existing work.
-      </p>
+      <h2>{t("identityLinkConsent.linkYourOpengeniAccount")}</h2>
+      <p>{t("identityLinkConsent.onlyContinueIfYouStarted")}</p>
       {preview && (
         <dl>
-          <dt>Organization</dt>
+          <dt>{t("identityLinkConsent.organization")}</dt>
           <dd>{preview.organizationId}</dd>
-          <dt>Product user</dt>
+          <dt>{t("identityLinkConsent.productUser")}</dt>
           <dd>
             {preview.externalIdentity.externalId} ({preview.externalIdentity.source})
           </dd>
-          <dt>Your Opengeni identity</dt>
+          <dt>{t("identityLinkConsent.yourOpengeniIdentity")}</dt>
           <dd>{preview.nativeSubjectId}</dd>
         </dl>
       )}
       {error && (
         <div role="alert">
-          This request could not be completed. It may have expired, changed, or require you to sign
-          in to the right organization.
+          {t("identityLinkConsent.thisRequestCouldNotBe")}
           {!link && (
             <button type="button" disabled={busy} onClick={() => setRetry((value) => value + 1)}>
-              Try again
+              {t("identityLinkConsent.tryAgain")}
             </button>
           )}
         </div>
       )}
-      {!link && busy && <p role="status">Loading the account-link request…</p>}
+      {!link && busy && (
+        <p role="status">{t("identityLinkConsent.loadingTheAccountLinkRequest")}</p>
+      )}
       {link?.status === "pending" && (
         <>
           <p>
             {link.expiresAt
-              ? `Access ends ${new Date(link.expiresAt).toLocaleString()}.`
-              : "Access lasts until you or the product revoke this link."}{" "}
-            Your current permissions still apply.
+              ? t("identityLinkConsent.accessEndsLocalestring", {
+                  localeString: new Date(link.expiresAt).toLocaleString(t.locale),
+                })
+              : t("identityLinkConsent.accessLastsUntilYouOr")}{" "}
+            {t("identityLinkConsent.yourCurrentPermissionsStillApply")}
           </p>
           <fieldset disabled={busy}>
-            <legend>Allow these permissions</legend>
+            <legend>{t("identityLinkConsent.allowThesePermissions")}</legend>
             {link.permissions.map((permission) => (
               <label key={permission}>
                 <input
@@ -168,24 +169,24 @@ export function IdentityLinkConsent({
             disabled={busy || selected.length === 0}
             onClick={() => void mutate(false)}
           >
-            {busy ? "Saving…" : "Allow selected access"}
+            {busy ? t("identityLinkConsent.saving") : t("identityLinkConsent.allowSelectedAccess")}
           </button>
-          <p>You can close this page without granting access.</p>
+          <p>{t("identityLinkConsent.youCanCloseThisPage")}</p>
         </>
       )}
       {link?.status === "active" && (
         <>
-          <p role="status">Account linked. Return to your product to continue.</p>
+          <p role="status">{t("identityLinkConsent.accountLinkedReturnToYour")}</p>
           <button type="button" disabled={busy} onClick={() => void mutate(true)}>
-            Revoke this link
+            {t("identityLinkConsent.revokeThisLink")}
           </button>
         </>
       )}
       {link?.status === "revoked" && (
-        <p role="status">Link revoked. Your Opengeni account and existing work are unchanged.</p>
+        <p role="status">{t("identityLinkConsent.linkRevokedYourOpengeniAccount")}</p>
       )}
       {link?.status === "expired" && (
-        <p role="status">This request has expired. Start a new request from your product.</p>
+        <p role="status">{t("identityLinkConsent.thisRequestHasExpiredStart")}</p>
       )}
     </section>
   );

@@ -29,6 +29,41 @@ type Row = {
   external_continuation: unknown;
 };
 
+/**
+ * Content-free state transition of one Connect attempt, reported only after
+ * its transaction committed. `providerId` is caller-chosen; observers must
+ * bound it against a reviewed catalog before using it as a label.
+ */
+export type ConnectAttemptTransition = {
+  providerId: string;
+  previousState: Attempt["state"] | null;
+  state: Attempt["state"];
+  errorCode: string | null;
+};
+type ConnectAttemptTransitionObserver = (transition: ConnectAttemptTransition) => void;
+let connectAttemptTransitionObserver: ConnectAttemptTransitionObserver | null = null;
+
+/** Install the process-wide observer (the API sets one at startup). */
+export function setConnectAttemptTransitionObserver(
+  observer: ConnectAttemptTransitionObserver | null,
+): void {
+  connectAttemptTransitionObserver = observer;
+}
+
+function reportConnectAttemptTransition(previous: Attempt | null, next: Attempt): void {
+  if (previous && previous.state === next.state) return;
+  try {
+    connectAttemptTransitionObserver?.({
+      providerId: next.providerId,
+      previousState: previous?.state ?? null,
+      state: next.state,
+      errorCode: next.error?.code ?? null,
+    });
+  } catch {
+    // Telemetry never changes the committed setup outcome.
+  }
+}
+
 export class ConnectAttemptConflictError extends Error {
   readonly code = "CONNECT_ATTEMPT_CONFLICT";
   constructor(message = "Connect attempt changed; reload its current state") {
@@ -157,7 +192,8 @@ export async function beginConnectAttempt(
   if (value.workspaceId !== scope.workspaceId || value.revision !== 1)
     throw new ConnectAttemptConflictError();
   const key = createHash("sha256").update(input.idempotencyKey).digest("hex");
-  return scoped(db, scope, async (tx) => {
+  let created = false;
+  const result = await scoped(db, scope, async (tx) => {
     // Serialize per-actor creation and quota, not the provider's remote request.
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(
       ${`connect:${scope.workspaceId}:${scope.subjectId}`}, 0))`);
@@ -189,8 +225,11 @@ export async function beginConnectAttempt(
       returning *`,
     );
     if (!row) throw new Error("Connect attempt insert returned no result");
+    created = true;
     return projection(row, scope);
   });
+  if (created) reportConnectAttemptTransition(null, result);
+  return result;
 }
 
 export async function getConnectAttempt(
@@ -202,7 +241,8 @@ export async function getConnectAttempt(
   returnUrl: string;
   operationInFlight: boolean;
 }> {
-  return scoped(db, scope, async (tx) => {
+  let transition: [Attempt, Attempt] | null = null;
+  const result = await scoped(db, scope, async (tx) => {
     const row = await lockAttempt(tx, scope, id);
     const current = projection(row, scope);
     if (row.expired && !["complete", "cancelled", "expired", "uncertain"].includes(current.state)) {
@@ -215,6 +255,7 @@ export async function getConnectAttempt(
       await tx.execute(sql`update connect_attempts set projection = ${JSON.stringify(expired)}::jsonb,
         updated_at = now() where id = ${row.id}::uuid`);
       row.projection = expired;
+      transition = [current, expired];
     }
     return {
       attempt: projection(row, scope),
@@ -222,6 +263,8 @@ export async function getConnectAttempt(
       operationInFlight: row.operation_id !== null,
     };
   });
+  if (transition) reportConnectAttemptTransition(...(transition as [Attempt, Attempt]));
+  return result;
 }
 
 export async function listPendingConnectAttempts(
@@ -239,6 +282,135 @@ export async function listPendingConnectAttempts(
     );
     return rows.map((row) => projection(row, scope));
   });
+}
+
+/** How long a saved account whose setup did not finish stays eligible to finish. */
+export const UNFINISHED_CONNECT_SETUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * The actor's setups that saved an account but never installed its
+ * integration (someone closed the app before the last step), newest first.
+ * Unlike the pending list this includes attempts past their short expiry
+ * (still open, or already marked expired): the saved account outlives the
+ * attempt, and finishing needs no provider round trip.
+ */
+/**
+ * A later setup by the same person of the same integration for the same saved
+ * account. It took over: whatever the person did with that account since
+ * (finished it, removed its tools) stands, so the older setup never finishes.
+ */
+function supersedingSetup(attempt: ReturnType<typeof sql>) {
+  return sql`select 1 from connect_attempts later
+    where later.workspace_id = ${attempt}.workspace_id and later.account_id = ${attempt}.account_id
+      and later.subject_id = ${attempt}.subject_id and later.id <> ${attempt}.id
+      and later.created_at > ${attempt}.created_at
+      and later.projection->>'providerId' = ${attempt}.projection->>'providerId'
+      and later.projection->'account'->>'id' = ${attempt}.projection->'account'->>'id'`;
+}
+
+export async function listUnfinishedConnectSetups(
+  db: Database,
+  scope: ConnectActorScope,
+  limit = 16,
+): Promise<Attempt[]> {
+  return scoped(db, scope, async (tx) => {
+    const rows = await rawRows<Row>(
+      tx,
+      sql`select * from connect_attempts attempt
+      where attempt.workspace_id = ${scope.workspaceId}::uuid
+        and attempt.account_id = ${scope.accountId}::uuid
+        and attempt.subject_id = ${scope.subjectId} and attempt.operation_id is null
+        and attempt.created_at > now() - make_interval(secs => ${UNFINISHED_CONNECT_SETUP_WINDOW_MS / 1000})
+        and attempt.projection->>'state' in ('connected_but_incomplete','preview','expired')
+        and attempt.projection->>'credentialsCommitted' = 'true'
+        and coalesce(attempt.projection->>'integrationInstalled', 'false') <> 'true'
+        and not exists (${supersedingSetup(sql`attempt`)})
+      order by attempt.created_at desc, attempt.id desc limit ${limit}`,
+    );
+    return rows.map((row) => projection(row, scope));
+  });
+}
+
+/**
+ * Finish one unfinished setup (see listUnfinishedConnectSetups) in a single
+ * transaction: `commit` installs under the attempt's row lock and returns the
+ * completed attempt, or null to leave it as it is. Nothing happens when the
+ * attempt moved on since `expectedRevision` or an operation is in flight
+ * (the app is advancing it itself). Pass the same transaction to
+ * installation persistence; do not perform network effects inside commit.
+ */
+export async function completeUnfinishedConnectSetup(
+  db: Database,
+  scope: ConnectActorScope,
+  input: {
+    attemptId: string;
+    expectedRevision: number;
+    commit: (
+      tx: Database,
+      current: Attempt,
+      origin: ExternalActorContinuation | null,
+    ) => Promise<Attempt | null>;
+  },
+): Promise<Attempt | null> {
+  let transition: [Attempt, Attempt] | null = null;
+  const result = await scoped(db, scope, async (tx) => {
+    const row = await lockAttempt(tx, scope, input.attemptId);
+    const current = projection(row, scope);
+    if (
+      row.operation_id !== null ||
+      current.revision !== input.expectedRevision ||
+      !["connected_but_incomplete", "preview", "expired"].includes(current.state) ||
+      !current.credentialsCommitted ||
+      current.integrationInstalled ||
+      !current.account
+    )
+      return null;
+    // One finish per saved account at a time (two tabs, a chat card and
+    // Capabilities, or a server retry): the second sees the first's tools.
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`connect-finish:${scope.workspaceId}:${scope.subjectId}:${current.account.id}`}, 0))`,
+    );
+    const superseded = await rawRows<{ found: number }>(
+      tx,
+      sql`select 1 as found from connect_attempts attempt
+        where attempt.id = ${row.id}::uuid and exists (${supersedingSetup(sql`attempt`)})`,
+    );
+    if (superseded.length > 0) return null;
+    const committed = await input.commit(
+      tx,
+      structuredClone(current),
+      row.external_continuation ? ExternalActorContinuation.parse(row.external_continuation) : null,
+    );
+    if (!committed) return null;
+    const next = ConnectAttempt.parse(committed);
+    if (
+      next.id !== current.id ||
+      next.workspaceId !== current.workspaceId ||
+      next.providerId !== current.providerId ||
+      next.ownership !== current.ownership ||
+      next.completionRequirement !== current.completionRequirement ||
+      stableJson(next.installationTarget ?? null) !==
+        stableJson(current.installationTarget ?? null) ||
+      next.expiresAt !== current.expiresAt ||
+      next.revision !== current.revision + 1 ||
+      next.state !== "complete" ||
+      !next.credentialsCommitted ||
+      !next.integrationInstalled
+    )
+      throw new ConnectAttemptConflictError();
+    const persisted = await rawRows<{ id: string }>(
+      tx,
+      sql`update connect_attempts set projection = ${JSON.stringify(next)}::jsonb,
+      updated_at = now() where id = ${row.id}::uuid returning id`,
+    );
+    if (persisted.length !== 1 || persisted[0]?.id !== row.id)
+      throw new ConnectAttemptConflictError("Connect completion was not persisted");
+    transition = [current, next];
+    return next;
+  });
+  if (transition) reportConnectAttemptTransition(...(transition as [Attempt, Attempt]));
+  return result;
 }
 
 /** A claim is committed before remote effects. Never expire/reclaim it merely
@@ -305,7 +477,8 @@ export async function finishConnectOperation(
   },
 ): Promise<Attempt> {
   validateOperation(input.operationId, input.inputDigest);
-  return scoped(db, scope, async (tx) => {
+  let transition: [Attempt, Attempt] | null = null;
+  const result = await scoped(db, scope, async (tx) => {
     const row = await lockAttempt(tx, scope, input.attemptId);
     const current = projection(row, scope);
     await input.authorize?.(
@@ -327,6 +500,7 @@ export async function finishConnectOperation(
       next.providerId !== current.providerId ||
       next.ownership !== current.ownership ||
       next.completionRequirement !== current.completionRequirement ||
+      stableJson(next.mcpSetup ?? null) !== stableJson(current.mcpSetup ?? null) ||
       stableJson(next.installationTarget ?? null) !==
         stableJson(current.installationTarget ?? null) ||
       (current.source !== undefined && stableJson(next.source) !== stableJson(current.source)) ||
@@ -340,9 +514,19 @@ export async function finishConnectOperation(
       ...row.receipts,
       [input.operationId]: { digest: input.inputDigest, result: next },
     };
-    await tx.execute(sql`update connect_attempts set projection = ${JSON.stringify(next)}::jsonb,
+    const persisted = await rawRows<{ id: string }>(
+      tx,
+      sql`update connect_attempts set projection = ${JSON.stringify(next)}::jsonb,
       receipts = ${JSON.stringify(receipts)}::jsonb, operation_id = null, operation_digest = null,
-      updated_at = now() where id = ${row.id}::uuid`);
+      updated_at = now() where id = ${row.id}::uuid returning id`,
+    );
+    // A callback that loses the actor scope must roll back its writes, not
+    // report success while RLS silently prevents the completion receipt.
+    if (persisted.length !== 1 || persisted[0]?.id !== row.id)
+      throw new ConnectAttemptConflictError("Connect completion receipt was not persisted");
+    transition = [current, next];
     return next;
   });
+  if (transition) reportConnectAttemptTransition(...(transition as [Attempt, Attempt]));
+  return result;
 }

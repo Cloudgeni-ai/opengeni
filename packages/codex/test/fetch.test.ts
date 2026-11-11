@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  CODEX_TRANSPORT_HEADER,
   CODEX_REQUEST_BODY_NORMALIZED_HEADER,
   CODEX_REQUEST_MODEL_HEADER,
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   type CodexModelRequestEvent,
+  type CodexReportedUsage,
   type CodexRequestContext,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
@@ -14,8 +16,10 @@ import {
   classifyCodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
+  warmCodexResponsesConnection,
   isCodexTransportError,
   opaqueProviderArtifactFingerprint,
+  parseCodexReportedUsage,
   parseCodexUsageHeaders,
   withCodexRequestOverrides,
 } from "../src";
@@ -51,6 +55,11 @@ function expectExactlyOneTerminalPerAttempt(
     })),
   );
   for (const [index, expectation] of expected.entries()) {
+    if (expectation.phase === "failed") {
+      expect(terminalEvents[index]?.failureCause).toBeDefined();
+    } else {
+      expect(terminalEvents[index]?.failureCause).toBeUndefined();
+    }
     if (expectation.requestId !== undefined) {
       expect(terminalEvents[index]?.requestId).toBe(expectation.requestId);
     }
@@ -99,6 +108,238 @@ function ctx(overrides: Partial<CodexRequestContext> = {}): CodexRequestContext 
     ...overrides,
   };
 }
+
+describe("Codex request failure causes", () => {
+  function capture() {
+    const events: CodexModelRequestEvent[] = [];
+    const diagnostics: CodexModelRequestEvent[] = [];
+    const failureObserved = Promise.withResolvers<void>();
+    return {
+      events,
+      diagnostics,
+      failureObserved: failureObserved.promise,
+      send: (base: FetchLike, signal?: AbortSignal, stream = true) =>
+        codexRequestStorage.run(
+          ctx({
+            onModelRequestEvent: (event) => {
+              events.push(event);
+              if (event.phase === "failed") failureObserved.resolve();
+            },
+            onModelRequestDiagnostic: (event) => diagnostics.push(event),
+          }),
+          () =>
+            codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+              method: "POST",
+              ...(signal ? { signal } : {}),
+              body: JSON.stringify({ stream }),
+            }),
+        ),
+      failure: () => {
+        expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "failed" }]);
+        expect(diagnostics).toEqual(events);
+        expect(JSON.stringify(events)).not.toContain("private");
+        expect(
+          events.filter((event) => event.phase !== "failed").every((event) => !event.failureCause),
+        ).toBe(true);
+        return events.find((event) => event.phase === "failed")?.failureCause;
+      },
+    };
+  }
+
+  test.each(["before dispatch", "before headers", "after headers"])(
+    "records caller abort %s with the abort reason name",
+    async (when) => {
+      const audit = capture();
+      const controller = new AbortController();
+      const reason = Object.assign(new Error("private abort message"), { name: "StopRequested" });
+      const transportError = Object.assign(new Error("private transport message"), {
+        name: "AbortError",
+        code: "ABORT_ERR",
+      });
+      if (when === "before dispatch") controller.abort(reason);
+      if (when === "after headers") {
+        const response = await audit.send(
+          async () => new Response(new ReadableStream<Uint8Array>({})),
+          controller.signal,
+        );
+        controller.abort(reason);
+        await expect(response.text()).rejects.toBe(reason);
+      } else {
+        await expect(
+          audit.send(async () => {
+            controller.abort(reason);
+            throw transportError;
+          }, controller.signal),
+        ).rejects.toBe(when === "before dispatch" ? reason : transportError);
+      }
+      expect(audit.failure()).toEqual({
+        kind: "caller_abort",
+        errorName: when === "before headers" ? "AbortError" : "StopRequested",
+        ...(when === "before headers" ? { errorCode: "ABORT_ERR" } : {}),
+        abortReasonName: "StopRequested",
+      });
+      expect(JSON.stringify(audit.events)).not.toContain("private");
+    },
+  );
+
+  test("records a pre-headers transport error, not an unproven caller abort", async () => {
+    const audit = capture();
+    const error = Object.assign(new Error("private connection details"), {
+      name: "AbortError",
+      code: "ECONNRESET",
+    });
+    await expect(
+      audit.send(async () => {
+        throw error;
+      }),
+    ).rejects.toBe(error);
+    expect(audit.failure()).toEqual({
+      kind: "transport_error",
+      errorName: "AbortError",
+      errorCode: "ECONNRESET",
+    });
+  });
+
+  test("records the original response-body reset before error translation", async () => {
+    const audit = capture();
+    const error = Object.assign(new Error("private stream details"), { code: "ECONNRESET" });
+    const response = await audit.send(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(error);
+            },
+          }),
+        ),
+    );
+    await expect(response.text()).rejects.toMatchObject({
+      code: "invalid_sse_terminal",
+      cause: error,
+    });
+    expect(audit.failure()).toEqual({
+      kind: "stream_reset",
+      errorName: "Error",
+      errorCode: "ECONNRESET",
+    });
+  });
+
+  test("records consumer cancellation without treating its reason as a caller abort", async () => {
+    const audit = capture();
+    const reason = Object.assign(new Error("private cancellation details"), {
+      name: "AbortError",
+      code: "CANCELLED",
+    });
+    const response = await audit.send(async () => new Response(new ReadableStream<Uint8Array>({})));
+    await response.body!.cancel(reason);
+    await audit.failureObserved;
+    expect(audit.failure()).toEqual({
+      kind: "consumer_cancel",
+      errorName: "AbortError",
+      errorCode: "CANCELLED",
+    });
+  });
+
+  test("bounds metadata and never serializes messages or other error content", async () => {
+    const audit = capture();
+    const secret = "sensitive-message-token-body-header-url-id";
+    const reason = Object.assign(new Error(secret), { name: "R".repeat(100) });
+    const error = Object.assign(new Error(secret), {
+      name: "N".repeat(100),
+      code: "C".repeat(100),
+      cause: new Error(secret),
+      body: secret,
+      headers: { authorization: secret },
+      url: secret,
+      token: secret,
+      id: secret,
+      toJSON() {
+        throw new Error("must not serialize the error");
+      },
+    });
+    const controller = new AbortController();
+    await expect(
+      audit.send(async () => {
+        controller.abort(reason);
+        throw error;
+      }, controller.signal),
+    ).rejects.toBe(error);
+    expect(audit.failure()).toEqual({
+      kind: "caller_abort",
+      errorName: "N".repeat(64),
+      errorCode: "C".repeat(64),
+      abortReasonName: "R".repeat(64),
+    });
+    expect(JSON.stringify(audit.events)).not.toContain(secret);
+    expect(JSON.stringify(audit.diagnostics)).not.toContain(secret);
+  });
+
+  test.each(["private primitive reason", null, { name: 123, code: {} }])(
+    "ignores non-string metadata: %#",
+    async (error) => {
+      const audit = capture();
+      await expect(
+        audit.send(async () => {
+          throw error;
+        }),
+      ).rejects.toBe(error);
+      expect(audit.failure()).toEqual({ kind: "transport_error" });
+    },
+  );
+
+  test("diagnostics tolerate throwing cancellation-reason getters", async () => {
+    const audit = capture();
+    const reason = {
+      get name() {
+        throw new Error("private getter failure");
+      },
+      get code() {
+        throw new Error("private getter failure");
+      },
+    };
+    const response = await audit.send(async () => new Response(new ReadableStream<Uint8Array>({})));
+    await response.body!.cancel(reason);
+    await audit.failureObserved;
+    expect(audit.failure()).toEqual({ kind: "consumer_cancel" });
+  });
+
+  test.each([true, false])(
+    "records missing SSE terminals as stream resets (stream=%s)",
+    async (stream) => {
+      const audit = capture();
+      const response = await audit.send(
+        async () => new Response(": keepalive\n\n"),
+        undefined,
+        stream,
+      );
+      if (stream)
+        await expect(response.text()).rejects.toMatchObject({ code: "invalid_sse_terminal" });
+      else await response.text();
+      expect(audit.failure()?.kind).toBe("stream_reset");
+    },
+  );
+
+  test.each([true, false])(
+    "records HTTP refusals without response body content (body=%s)",
+    async (body) => {
+      const audit = capture();
+      const response = await audit.send(
+        async () => new Response(body ? "private provider error" : null, { status: 403 }),
+      );
+      await response.text();
+      expect(audit.failure()).toEqual({ kind: "transport_error" });
+      expect(JSON.stringify(audit.events)).not.toContain("private provider error");
+    },
+  );
+
+  test("successful events have no failure cause", async () => {
+    const audit = capture();
+    const response = await audit.send(baseRecorder().base);
+    await response.text();
+    expectExactlyOneTerminalPerAttempt(audit.events, [{ transportAttempt: 1, phase: "completed" }]);
+    expect(audit.events.every((event) => !("failureCause" in event))).toBe(true);
+  });
+});
 
 describe("Codex streaming EOF audit", () => {
   test.each(["\n\n", "\n", "", "\r", "\r\n"])(
@@ -367,9 +608,7 @@ describe("codexSubscriptionFetch", () => {
   });
 
   test("sends the session_id affinity header when the context carries a sessionId", async () => {
-    // The backend's sticky cache-routing key: without it, byte-identical
-    // resends miss the prompt cache ~50% (measured shard lottery); with it
-    // they pin to the warm shard. Must ride EVERY request of the session.
+    // Existing library callers retain their per-session affinity fallback.
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
     await codexRequestStorage.run(ctx({ sessionId: "11111111-2222-4333-8444-555555555555" }), () =>
@@ -382,6 +621,33 @@ describe("codexSubscriptionFetch", () => {
     expect(headers.get("session_id")).toBe("11111111-2222-4333-8444-555555555555");
   });
 
+  test("shared affinity changes only the header, including the credential-refresh retry", async () => {
+    const { base, captures } = baseRecorder([401, 200, 200]);
+    const fetchImpl = codexSubscriptionFetch(base);
+    const input = [{ role: "user", content: "Keep this exact prefix." }];
+    for (const sessionId of ["session-a", "session-b"]) {
+      await codexRequestStorage.run(ctx({ sessionId, cacheAffinityKey: "shared-cohort" }), () =>
+        fetchImpl("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "m",
+            instructions: "Unchanged",
+            input,
+            prompt_cache_key: sessionId,
+          }),
+        }),
+      );
+    }
+    expect(captures).toHaveLength(3);
+    for (const [index, capture] of captures.entries()) {
+      expect(new Headers(capture.init?.headers).get("session_id")).toBe("shared-cohort");
+      const body = JSON.parse(String(capture.init?.body));
+      expect(body.prompt_cache_key).toBe(index < 2 ? "session-a" : "session-b");
+      expect(body.instructions).toBe("Unchanged");
+      expect(body.input).toEqual(input);
+    }
+  });
+
   test("omits the session_id header when the context has none (legacy behavior)", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
@@ -392,6 +658,28 @@ describe("codexSubscriptionFetch", () => {
       }),
     );
     expect(new Headers(captures[0]?.init?.headers).get("session_id")).toBeNull();
+  });
+
+  test("WebSocket pre-open uses the same shared affinity as dispatch", async () => {
+    const { base, captures } = baseRecorder();
+    const warmed: Headers[] = [];
+    const transport = Object.assign(base, {
+      warm: (_url: string, headers: HeadersInit) => warmed.push(new Headers(headers)),
+    });
+    await codexRequestStorage.run(
+      ctx({ sessionId: "session-a", cacheAffinityKey: "cohort" }),
+      async () => {
+        await warmCodexResponsesConnection(transport, "https://chatgpt.com/backend-api");
+        expect(captures).toHaveLength(0);
+        await codexSubscriptionFetch(transport)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: "{}",
+        });
+      },
+    );
+    expect(warmed).toHaveLength(1);
+    expect(warmed[0]!.get("session_id")).toBe("cohort");
+    expect(new Headers(captures[0]!.init?.headers).get("session_id")).toBe("cohort");
   });
 
   test("advertises remote compaction v2 beta features and turn metadata", async () => {
@@ -780,7 +1068,8 @@ describe("codexSubscriptionFetch", () => {
     } catch (error) {
       observed = error;
     }
-    expect(String(observed)).toContain("injected partial stream failure");
+    expect(observed).toMatchObject({ code: "invalid_sse_terminal" });
+    expect(String((observed as Error).cause)).toContain("injected partial stream failure");
     expect(calls).toBe(1);
   });
 
@@ -1047,6 +1336,57 @@ describe("codexSubscriptionFetch", () => {
       "first_byte",
       "completed",
     ]);
+  });
+
+  test("the headers event reports how the request was carried", async () => {
+    const carried = async (transportHeader: string | null) => {
+      const events: CodexModelRequestEvent[] = [];
+      const response = await codexRequestStorage.run(
+        ctx({
+          onModelRequestEvent: (event) => {
+            events.push(event);
+          },
+        }),
+        () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(
+                'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}\n\n',
+                {
+                  status: 200,
+                  headers: transportHeader ? { [CODEX_TRANSPORT_HEADER]: transportHeader } : {},
+                },
+              ),
+          )("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ stream: true }),
+          }),
+      );
+      await response.text();
+      return events.find((event) => event.phase === "headers")?.transport;
+    };
+    expect(await carried("websocket; connection=reused")).toEqual({
+      kind: "websocket",
+      connection: "reused",
+      input: "full",
+    });
+    expect(await carried("websocket; connection=reused; input=incremental")).toEqual({
+      kind: "websocket",
+      connection: "reused",
+      input: "incremental",
+    });
+    expect(await carried("websocket; connection=new; handshake_ms=180")).toEqual({
+      kind: "websocket",
+      connection: "new",
+      input: "full",
+      handshakeMs: 180,
+    });
+    expect(await carried("http; reason=connection_busy")).toEqual({
+      kind: "http",
+      reason: "connection_busy",
+    });
+    // A response the socket transport never labelled did not pass through it.
+    expect(await carried(null)).toEqual({ kind: "http", reason: "unavailable" });
   });
 
   test("whole-request deadline wins over a longer stream-idle deadline", async () => {
@@ -1878,6 +2218,51 @@ describe("codexSubscriptionFetch", () => {
     expect(calls).toBe(1);
   });
 
+  test("streaming caller: a connection lost mid-response fails as invalid_sse_terminal", async () => {
+    const lost = new Error("Codex response WebSocket closed before the response finished (1006)");
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        const encoder = new TextEncoder();
+        let sent = false;
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!sent) {
+              sent = true;
+              controller.enqueue(
+                encoder.encode('data: {"type":"response.created","response":{"id":"r1"}}\n\n'),
+              );
+              return;
+            }
+            controller.error(lost);
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+      }),
+    );
+
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({
+      status: 502,
+      code: "invalid_sse_terminal",
+    });
+    expect(isCodexTransportError(observed)).toBe(true);
+    expect((observed as Error).cause).toBe(lost);
+    expect(calls).toBe(1);
+  });
+
   test("streaming caller: a null accepted body fails as invalid_sse_terminal", async () => {
     let calls = 0;
     const response = await codexRequestStorage.run(ctx(), () =>
@@ -2275,6 +2660,43 @@ describe("parseCodexUsageHeaders", () => {
   });
 });
 
+describe("parseCodexReportedUsage", () => {
+  test("reports a weekly-only account's windows that the labeled snapshot cannot hold", () => {
+    const headers = new Headers({
+      "x-codex-primary-used-percent": "66",
+      "x-codex-primary-limit-window-seconds": "604800",
+      "x-codex-primary-reset-at": "1783200000",
+      "x-codex-secondary-used-percent": "0",
+    });
+    expect(parseCodexUsageHeaders(headers)).toBeNull();
+    const reported = parseCodexReportedUsage(headers);
+    expect(reported?.windows).toEqual([
+      { usedPercent: 66, resetAt: new Date(1783200000 * 1000) },
+      { usedPercent: 0, resetAt: null },
+    ]);
+  });
+
+  test("reports a single slot, resolving reset-after-seconds", () => {
+    const before = Date.now();
+    const reported = parseCodexReportedUsage(
+      new Headers({
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-reset-after-seconds": "3600",
+      }),
+    );
+    expect(reported?.windows).toHaveLength(1);
+    expect(reported!.windows[0]!.usedPercent).toBe(100);
+    expect(reported!.windows[0]!.resetAt!.getTime()).toBeGreaterThanOrEqual(before + 3600 * 1000);
+  });
+
+  test("absent or non-integer used-percent reports nothing", () => {
+    expect(parseCodexReportedUsage(new Headers({}))).toBeNull();
+    expect(
+      parseCodexReportedUsage(new Headers({ "x-codex-primary-used-percent": "n/a" })),
+    ).toBeNull();
+  });
+});
+
 describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
   function usageBase(status: number, headers: Record<string, string>): FetchLike {
     return async () =>
@@ -2283,6 +2705,50 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
         headers: { "content-type": "text/event-stream", ...headers },
       });
   }
+
+  test("joins each durable reading before returning a response, without replacing a provider response on telemetry failure", async () => {
+    const persisted: number[] = [];
+    const fetchImpl = codexSubscriptionFetch(
+      usageBase(200, {
+        "x-codex-primary-used-percent": "55",
+        "x-codex-primary-limit-window-seconds": "18000",
+        "x-codex-secondary-used-percent": "12",
+        "x-codex-secondary-limit-window-seconds": "604800",
+      }),
+    );
+    const request = () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: true }),
+      });
+    await codexRequestStorage.run(
+      ctx({
+        persistUsageHeaders: async (snapshot) => {
+          await Promise.resolve();
+          persisted.push(snapshot.primaryUsedPercent);
+        },
+      }),
+      async () => {
+        for (let index = 1; index <= 3; index++) {
+          const response = await request();
+          expect(response.status).toBe(200);
+          expect(persisted).toHaveLength(index);
+        }
+      },
+    );
+    for (const persistUsageHeaders of [
+      async () => {
+        throw new Error("fixture rejected persistence");
+      },
+      () => {
+        throw new Error("fixture synchronous persistence failure");
+      },
+    ]) {
+      await codexRequestStorage.run(ctx({ persistUsageHeaders }), async () => {
+        expect((await request()).status).toBe(200);
+      });
+    }
+  });
 
   test("fires onUsageHeaders on the OK path with the parsed snapshot", async () => {
     const seen: CodexUsageHeaderSnapshot[] = [];
@@ -2339,5 +2805,34 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
       }),
     );
     expect(seen).toHaveLength(0);
+  });
+
+  test("reports a weekly-only account's usage even though no labeled snapshot exists", async () => {
+    const labeled: CodexUsageHeaderSnapshot[] = [];
+    const reported: CodexReportedUsage[] = [];
+    for (const status of [200, 429]) {
+      const fetchImpl = codexSubscriptionFetch(
+        usageBase(status, {
+          "x-codex-primary-used-percent": "100",
+          "x-codex-primary-limit-window-seconds": "604800",
+        }),
+      );
+      await codexRequestStorage.run(
+        ctx({
+          onUsageHeaders: (s) => labeled.push(s),
+          onReportedUsage: (usage) => reported.push(usage),
+        }),
+        () =>
+          fetchImpl("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ stream: true }),
+          }),
+      );
+    }
+    expect(labeled).toHaveLength(0);
+    expect(reported.map((usage) => usage.windows.map((w) => w.usedPercent))).toEqual([
+      [100],
+      [100],
+    ]);
   });
 });

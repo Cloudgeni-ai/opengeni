@@ -13,6 +13,7 @@ import {
   EnrollmentConsent,
   EnrollmentDeviceFlow,
   MachineCard,
+  MachineDetail,
   MachineDockBar,
   MachineStatusPill,
   MachinesDashboard,
@@ -148,6 +149,24 @@ function SwapTransition() {
 type ViewDef = { id: string; node: ReactNode; padded?: boolean };
 
 const VIEWS: Record<string, ViewDef> = {
+  "authentication-expired": {
+    id: "authentication-expired",
+    node: (
+      <MachineDetail
+        machine={{
+          ...offlineMachine,
+          connectionAuthority: {
+            ...offlineMachine.connectionAuthority,
+            state: "expired",
+            authenticationError: "credentials_expired",
+          },
+        }}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+      />
+    ),
+  },
   // --- IA / flow (pass 1) ---
   "flow-device": {
     id: "flow-device",

@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 
 import { defaultToolRegistry, type ToolCallItem } from "../../../../packages/react/src/timeline";
 
-import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
+import { createSessionRetainedScreenshotLoader } from "@opengeni/react";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =

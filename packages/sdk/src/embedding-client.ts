@@ -8,10 +8,40 @@ import type {
   ConfirmExternalIdentityLinkRequest,
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
+  ExternalActorStatedMembership,
 } from "@opengeni/contracts/external-identities";
 
 /** Non-secret service attribution, serialized as a flat JSON object of at most 2 KiB. */
 export type ServiceContext = Record<string, string | number | boolean>;
+
+/** Options for {@link OpenGeniClient.asUser}. */
+export type AsUserOptions = {
+  /** Namespace of `externalId` in your app; defaults to `"default"`. */
+  source?: string;
+  /**
+   * The user's membership as your app knows it right now. On every
+   * workspace-scoped request the user's grant in that shared workspace becomes
+   * exactly these permissions before the request is authorized (created if
+   * missing, changed only when it differs). Omit it to use the stored grant.
+   * Removing a user stays an explicit revoke.
+   */
+  membership?: ExternalActorStatedMembership;
+};
+
+function statedMembership(
+  membership: ExternalActorStatedMembership | undefined,
+): ExternalActorStatedMembership | undefined {
+  if (membership === undefined) return undefined;
+  const permissions: unknown = membership?.permissions;
+  if (
+    !Array.isArray(permissions) ||
+    permissions.length === 0 ||
+    permissions.length > 256 ||
+    permissions.some((permission) => typeof permission !== "string" || permission.length === 0)
+  )
+    throw new Error("Invalid membership: permissions must be a non-empty list of permission names");
+  return { permissions: [...new Set(permissions as ExternalActorStatedMembership["permissions"])] };
+}
 
 function hasStaticHeader(options: OpenGeniClientOptions, names: string[]): boolean {
   return (
@@ -53,7 +83,7 @@ function serializeServiceContext(context: ServiceContext): string {
 
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
-  /** Read configuration (null means no configured ceiling). Requires admin or organization-key read authority. */
+  /** Read configuration (null means no configured ceiling). Requires a person who can start chats in the workspace, admin, or organization-key read authority. */
   async getWorkspaceAllowance(
     workspaceId: string,
   ): Promise<import("@opengeni/contracts/usage-allowances").WorkspaceAllowance | null> {
@@ -215,9 +245,15 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
   }
 
   /** Server-side organization-key client scoped to one host-authenticated user.
-   * Does not mutate this client, provision workspace membership, or link native
-   * identities. The API verifies key and membership authority on each request. */
-  asUser(externalId: string, options: { source?: string } = {}): this {
+   * Does not mutate this client or link native identities. With `membership`,
+   * each workspace-scoped request states the user's permissions there and the
+   * API applies them under the key's member-management authority; without it
+   * the stored membership applies. The API verifies key and membership
+   * authority on each request. */
+  asUser(
+    externalId: string,
+    options: { source?: string; membership?: ExternalActorStatedMembership } = {},
+  ): this {
     if (typeof window !== "undefined")
       throw new Error("asUser is a server-side API; keep organization keys on your backend");
     if (
@@ -238,10 +274,16 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     if (!validOpaqueText(externalId, 1024) || !validOpaqueText(source, 200)) {
       throw new Error("Invalid external identity reference");
     }
+    const membership = statedMembership(options.membership);
     const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
     const client = new Client({ ...this.options });
+    client.sessionResponse = this.sessionResponse;
     client.externalActorHeader = encodeURIComponent(
-      JSON.stringify({ mode: "external", identity: { externalId, source } }),
+      JSON.stringify({
+        mode: "external",
+        identity: { externalId, source },
+        ...(membership ? { membership } : {}),
+      }),
     );
     return client;
   }
@@ -269,6 +311,7 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     const serializedContext = context === undefined ? undefined : serializeServiceContext(context);
     const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
     const client = new Client({ ...this.options });
+    client.sessionResponse = this.sessionResponse;
     client.serviceInitiatorHeader = name;
     client.serviceContextHeader = serializedContext;
     return client;
@@ -458,6 +501,16 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/connect/attempts`);
   }
 
+  /**
+   * Finishes the caller's built-in integration setups that saved an account
+   * but never added its tools, and returns the ones it completed.
+   */
+  async finishUnfinishedConnectSetups(
+    workspaceId: string,
+  ): Promise<import("@opengeni/contracts/connect").ConnectAttempt[]> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/connect/attempts/finish`);
+  }
+
   async advanceConnectAttempt(
     workspaceId: string,
     attemptId: string,
@@ -490,7 +543,12 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     );
   }
 
-  /** Explicit organization-service-key onboarding; asUser never grants membership. */
+  /**
+   * Explicit organization-service-key onboarding with chosen permissions. Not
+   * needed for the default path: an `asUser` request through a key with
+   * `members:manage` adds a missing member with conversation permissions on
+   * first use. Change an existing member with `updateExternalWorkspaceMember`.
+   */
   async addExternalWorkspaceMember(
     workspaceId: string,
     request: {

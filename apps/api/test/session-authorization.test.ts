@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionAuthorizationOperation } from "@opengeni/contracts";
-import { SessionTenancyConflictError, SessionTenancyNotActivatedError } from "@opengeni/db";
+import {
+  canonicalSessionAuthorizationOperation,
+  SessionAuthorizationOperation,
+} from "@opengeni/contracts";
+import {
+  SessionTenancyConflictError,
+  SessionTenancyInvalidRequestError,
+  SessionTenancyNotActivatedError,
+  SessionVisibilityWorkConflictError,
+} from "@opengeni/db";
 import { SessionTenancyPersistenceOutcomeUnknownError } from "@opengeni/core";
 import { ApiHttpError } from "../src/http/api-error";
 import {
@@ -14,24 +22,36 @@ const root = `/v1/workspaces/22222222-2222-4222-8222-222222222222/sessions/${ses
 
 const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "", "session.read"],
+  ["GET", "/configuration", "session.tool_policy.write"],
   ["PATCH", "", "session.title.write"],
   ["DELETE", "", "session.delete"],
   ["PUT", "/pin", "session.pin.write"],
   ["PUT", "/attention", "session.attention.write"],
   ["PUT", "/archive", "session.archive.write"],
   ["PUT", "/visibility", "session.visibility.write"],
+  ["GET", "/visibility/preview", "session.visibility.write"],
   ["POST", "/forks", "session.fork.create"],
+  ["GET", "/share-link", "session.read"],
+  ["PUT", "/share-link", "session.share_link.write"],
+  ["DELETE", "/share-link", "session.share_link.write"],
   ["PUT", "/channel", "session.channel.write"],
   ["PUT", "/tool-policy", "session.tool_policy.write"],
+  ["POST", "/resources/remove", "session.resources.write"],
   ["POST", "/mcp-credentials/rotate", "session.mcp.credentials.rotate"],
   ["GET", "/lineage", "session.lineage.read"],
   ["GET", "/background-commands", "session.read"],
   ["GET", "/model-context", "session.read"],
+  ["GET", "/tool-reviews/synthetic-approval", "session.read"],
+  ["GET", "/tool-reviews/synthetic-approval/details", "session.read"],
   ["GET", "/codex-accounts", "session.read"],
   ["DELETE", "/background-commands/33333333-3333-4333-8333-333333333333", "session.control"],
-  ["POST", "/codex-account", "session.codex_account.write"],
+  ["POST", "/codex-account", "session.model_account.write"],
+  ["GET", "/model-account", "session.read"],
+  ["PUT", "/model-account", "session.model_account.write"],
   ["POST", "/realtime/webrtc", "session.realtime.start"],
+  ["POST", "/realtime/websocket", "session.realtime.start"],
   ["POST", "/realtime/gateway", "session.realtime.start"],
+  ["POST", "/realtime/supergrok", "session.realtime.start"],
   ["POST", "/realtime", "session.realtime.start"],
   ["PATCH", "/realtime/33333333-3333-4333-8333-333333333333/heartbeat", "session.realtime.control"],
   [
@@ -107,6 +127,27 @@ describe("session HTTP authorization classification", () => {
       retryable: false,
       details: { reason: "not_quiescent", blocker: "shared_sandbox_group" },
     });
+    const work = {
+      runningTurnCount: 1,
+      queuedTurnCount: 2,
+      activeGoal: true,
+      liveVoice: false,
+      otherPeoplePendingUpdateCount: 1,
+      otherPeopleAccountChoiceCount: 0,
+    };
+    expect(
+      sessionTenancyHttpError(new SessionVisibilityWorkConflictError("active_work", work, 1)),
+    ).toMatchObject({
+      status: 409,
+      code: "conflict",
+      retryable: false,
+      details: { reason: "active_work", ...work },
+    });
+    expect(
+      sessionTenancyHttpError(
+        new SessionVisibilityWorkConflictError("stopping_active_work", work, 1),
+      ),
+    ).toMatchObject({ status: 409, retryable: true, details: { reason: "stopping_active_work" } });
     expect(sessionTenancyHttpError(new SessionTenancyNotActivatedError())).toMatchObject({
       status: 409,
       code: "conflict",
@@ -120,6 +161,20 @@ describe("session HTTP authorization classification", () => {
       retryable: true,
       outcomeUnknown: true,
     });
+    expect(
+      sessionTenancyHttpError(
+        new SessionTenancyInvalidRequestError(undefined, "history_compacted"),
+      ),
+    ).toMatchObject({
+      status: 422,
+      code: "validation_failed",
+      retryable: false,
+      message: expect.stringContaining("compacted"),
+      details: { reason: "fork_point_history_compacted" },
+    });
+    const generic = sessionTenancyHttpError(new SessionTenancyInvalidRequestError());
+    expect(generic).toMatchObject({ status: 422, message: "Invalid session tenancy request." });
+    expect((generic as ApiHttpError).details).toBeUndefined();
   });
 
   test("an old proposal cannot be applied using the newer current revision as its fence", () => {
@@ -138,5 +193,25 @@ describe("session HTTP authorization classification", () => {
       null,
     );
     expect(sessionAuthorizationOperationForHttp("DELETE", `${root}/events`, sessionId)).toBe(null);
+  });
+
+  test("internal account-choice classification is neutral; the older host name stays a valid alias", () => {
+    // Hosts written against the older name still parse and can normalize it.
+    expect(SessionAuthorizationOperation.parse("session.codex_account.write")).toBe(
+      "session.codex_account.write",
+    );
+    expect(canonicalSessionAuthorizationOperation("session.codex_account.write")).toBe(
+      "session.model_account.write",
+    );
+    expect(canonicalSessionAuthorizationOperation("session.model_account.write")).toBe(
+      "session.model_account.write",
+    );
+    expect(canonicalSessionAuthorizationOperation("session.read")).toBe("session.read");
+    // Internal classification stays canonical, independent of host capabilities.
+    for (const [method, suffix] of cases) {
+      expect(sessionAuthorizationOperationForHttp(method, `${root}${suffix}`, sessionId)).not.toBe(
+        "session.codex_account.write",
+      );
+    }
   });
 });

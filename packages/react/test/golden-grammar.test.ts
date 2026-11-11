@@ -5,6 +5,10 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline";
 import { serializeTimeline } from "./golden/serialize";
 import type { SerializedTimeline } from "./golden/serialize";
+import { createOpenGeniText } from "../src/messages/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
+
+const englishText = createOpenGeniText();
 
 const CONTRACT_CHANGED =
   "the event-grammar contract changed; if intentional, regenerate snapshots (bun packages/react/test/golden/regenerate.ts) and include the diff in your PR for review";
@@ -17,8 +21,8 @@ function readJson<T>(path: string): T {
 }
 
 function project(events: SessionEvent[]) {
-  const items = buildTimeline(events);
-  return serializeTimeline(items, groupTimeline(items));
+  const items = buildTimeline(englishText, events);
+  return serializeTimeline(items, groupTimeline(englishText, items));
 }
 
 describe("golden event grammar", () => {
@@ -34,10 +38,9 @@ describe("golden event grammar", () => {
       try {
         expect(actual).toEqual(expected);
       } catch (error) {
-        throw new Error(
-          `${CONTRACT_CHANGED}\nFixture: ${file}\n${error instanceof Error ? error.message : String(error)}`,
-          { cause: error },
-        );
+        throw new Error(`${CONTRACT_CHANGED}\nFixture: ${file}\n${errorMessage(error)}`, {
+          cause: error,
+        });
       }
     });
   }
@@ -51,7 +54,7 @@ describe("golden event grammar", () => {
       expect(compact).toEqual(raw);
     } catch (error) {
       throw new Error(
-        `${CONTRACT_CHANGED}\nFixture: 05-coalesced-compact.json\n${error instanceof Error ? error.message : String(error)}`,
+        `${CONTRACT_CHANGED}\nFixture: 05-coalesced-compact.json\n${errorMessage(error)}`,
         { cause: error },
       );
     }

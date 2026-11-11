@@ -13,6 +13,24 @@ import {
 export type ManagedAuthClientRateLimitRule = { window: number; max: number };
 
 /**
+ * Better Auth endpoints that are never limited per client address. A limit is
+ * kept only where a request verifies a credential or sends mail; these only
+ * read or end the caller's own session, so a per-address limit adds no
+ * protection and, behind a shared address, makes ordinary page loads fail.
+ *
+ * `/get-session` resolves the session cookie; guessing a session token is not
+ * feasible, and every other authenticated API route serves the same lookup
+ * without a client-address limit. Without this exemption it falls under Better
+ * Auth's default (100 per 10 s), and that counter resets only after 10 s with
+ * no admitted request. Any steady traffic from one address (an office or
+ * carrier NAT, an edge that does not forward client addresses, a browser test
+ * runner) never pauses for 10 s, so after its 100th session read every page
+ * load from that address fails with 429 until the traffic stops. `/sign-out`
+ * ends the caller's own session and must succeed even after that.
+ */
+export const MANAGED_AUTH_UNLIMITED_PATHS = ["/get-session", "/sign-out"] as const;
+
+/**
  * Better Auth's per-client-address limits, keyed by endpoint path relative to
  * `/v1/auth`. The client address is the trusted source address stamped by the
  * API (see `TRUSTED_CLIENT_ADDRESS_HEADER`), never a caller-supplied header.
@@ -44,6 +62,16 @@ export const MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES = {
   "/reset-password/*": { window: 60, max: 20 },
 } as const satisfies Record<string, ManagedAuthClientRateLimitRule>;
 
+/** The rules handed to Better Auth: the limits above, plus `false` for each
+ * path in {@link MANAGED_AUTH_UNLIMITED_PATHS}, which skips its limiter. */
+export const MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES: Record<
+  string,
+  ManagedAuthClientRateLimitRule | false
+> = {
+  ...MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+  ...Object.fromEntries(MANAGED_AUTH_UNLIMITED_PATHS.map((path) => [path, false as const])),
+};
+
 export type ManagedAuthEmailThrottle = {
   purpose: "sign_in" | "sign_up" | "password_reset" | "verification_email";
   windowSeconds: number;
@@ -70,13 +98,19 @@ export type ManagedAuthEmailThrottle = {
  * distributed attacker may make up to `perEmailMax` attempts per window
  * against one email, and can deny that email's password sign-in for the rest
  * of the window once it spends them.
+ *
+ * Email sign-in uses one-hour windows: at most 100 password attempts per
+ * account in each window from all addresses together (OWASP ASVS / ADA CASA
+ * 1.1.1 allow no more than 100 failed attempts per hour on one account), and
+ * 20 in each window from one address. A window starts with the first attempt
+ * after the previous one ended, so these are per-hour budgets, never more.
  */
 export const MANAGED_AUTH_EMAIL_THROTTLES = {
   "/sign-in/email": {
     purpose: "sign_in",
-    windowSeconds: 15 * 60,
-    perSourceMax: 10,
-    perEmailMax: 50,
+    windowSeconds: 60 * 60,
+    perSourceMax: 20,
+    perEmailMax: 100,
   },
   "/sign-up/email": {
     purpose: "sign_up",
@@ -228,25 +262,33 @@ export async function consumeManagedAuthEmailThrottle(
  * `auth.api.*` calls, so the product session-set sign-in is covered too. The
  * per-(email, address) window is consumed first; only an attempt it admits
  * counts toward the email's shared window.
+ *
+ * `admit` runs after the throttle for every request the throttle lets through,
+ * so a refusal it makes is still rate limited like any other attempt.
  */
-export function createManagedAuthEmailThrottleHook(db: Pick<Database, "execute">, secret: string) {
+export function createManagedAuthEmailThrottleHook(
+  db: Pick<Database, "execute">,
+  secret: string,
+  admit?: (ctx: { path: string; body: unknown }) => Promise<void>,
+) {
   return createAuthMiddleware(async (ctx) => {
     const throttle = managedAuthEmailThrottleFor(ctx.path);
-    if (!throttle) return;
     const email = (ctx.body as { email?: unknown } | undefined)?.email;
-    if (typeof email !== "string" || !email.trim()) return;
-    const source = managedAuthThrottleSource(ctx.headers);
-    const perSource = await consumeManagedAuthEmailThrottle(db, {
-      key: managedAuthEmailSourceThrottleKey(secret, throttle.purpose, email, source),
-      windowSeconds: throttle.windowSeconds,
-      max: throttle.perSourceMax,
-    });
-    if (!perSource.allowed) throw new ManagedAuthEmailThrottleError(perSource.retryAfterSeconds);
-    const perEmail = await consumeManagedAuthEmailThrottle(db, {
-      key: managedAuthEmailThrottleKey(secret, throttle.purpose, email),
-      windowSeconds: throttle.windowSeconds,
-      max: throttle.perEmailMax,
-    });
-    if (!perEmail.allowed) throw new ManagedAuthEmailThrottleError(perEmail.retryAfterSeconds);
+    if (throttle && typeof email === "string" && email.trim()) {
+      const source = managedAuthThrottleSource(ctx.headers);
+      const perSource = await consumeManagedAuthEmailThrottle(db, {
+        key: managedAuthEmailSourceThrottleKey(secret, throttle.purpose, email, source),
+        windowSeconds: throttle.windowSeconds,
+        max: throttle.perSourceMax,
+      });
+      if (!perSource.allowed) throw new ManagedAuthEmailThrottleError(perSource.retryAfterSeconds);
+      const perEmail = await consumeManagedAuthEmailThrottle(db, {
+        key: managedAuthEmailThrottleKey(secret, throttle.purpose, email),
+        windowSeconds: throttle.windowSeconds,
+        max: throttle.perEmailMax,
+      });
+      if (!perEmail.allowed) throw new ManagedAuthEmailThrottleError(perEmail.retryAfterSeconds);
+    }
+    await admit?.({ path: ctx.path, body: ctx.body });
   });
 }

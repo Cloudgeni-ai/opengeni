@@ -1,6 +1,3 @@
-import { migrate } from "@opengeni/db/migrate";
-import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
-import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -16,14 +13,16 @@ import {
 } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
-  captureScheduledTaskRestoreState,
   defaultSessionMcpServerIds,
   mcpAccountRouteId,
   resolveSessionToolPolicy,
   settingsWithEnabledCapabilityMcpServers,
   syncUpdatedScheduledTask,
+  syncCreatedScheduledTask,
   createValidatedScheduledTask,
+  turnOnOwnLoginHere,
   validatedScheduledTaskUpdate,
+  type SessionWorkflowClient,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
@@ -36,34 +35,31 @@ import {
   createScheduledTaskRun,
   recordScheduledTaskAdmissionFailure,
   createSession,
-  createVariableSet,
-  createXaiSubscriptionCredential,
-  disconnectXaiSubscriptionCredential,
   getScheduledTaskRunAcceptedExecution,
-  getScheduledVariableSetExpectedGenerationForAttempt,
+  getScheduledTaskRunByProducerKey,
   getScheduledTask,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTaskRevisionAuthority,
+  issueSelfUserResourceGrant,
   listSessionSystemUpdatesForTurn,
   listScheduledTaskRuns,
   nestedPostgresSqlState,
   persistSlackBotInstallationWithSuccessAudit,
   requestSessionTurnRecovery,
   requireSession,
-  setVariableSetVariable,
+  revokeSelfUserResourceGrant,
   updateScheduledTask,
   type DbClient,
+  type Database,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  acquireBlankTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
+import { MockAgentResponder, subjectFor } from "@opengeni/runtime";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
-import { loadWorkspaceEnvironmentForRunWithCredentials } from "../src/activities/environment";
 import type { ActivityServices } from "../src/activities/types";
 
 let available = true;
@@ -90,7 +86,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function workspaceFixture() {
+async function workspaceFixture(subjectId = `subject-${crypto.randomUUID()}`) {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('scheduled personal authority') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
@@ -102,7 +98,7 @@ async function workspaceFixture() {
   const fixture = {
     accountId: account!.id,
     workspaceId: workspace!.id,
-    subjectId: `subject-${crypto.randomUUID()}`,
+    subjectId,
   };
   await admin`
     insert into organization_memberships (
@@ -139,6 +135,13 @@ async function commonConnectionDelegationFixture(
     `;
     return row!;
   });
+  // A login added in a shared workspace starts turned on there (D-54).
+  await turnOnOwnLoginHere(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: workspace.subjectId,
+    authorityId: connection.authorityId,
+  });
   return {
     connection,
     membershipId: membership!.id,
@@ -172,7 +175,7 @@ async function slackBotConnectionFixture(workspace: Awaited<ReturnType<typeof wo
       slackTeamName: "Scheduled claim test",
       botUserId: `U-${suffix}`,
       botId: `B-${suffix}`,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: "2026-08-16T20:00:00.000Z",
     },
   });
@@ -197,6 +200,7 @@ function delegation(
 function activities(
   overrides: Parameters<typeof testSettings>[0] = {},
   bus = new MemoryEventBus(),
+  db = client.db,
 ) {
   return createScheduledTaskActivities(
     async () =>
@@ -219,7 +223,7 @@ function activities(
           ],
           ...overrides,
         }),
-        db: client.db,
+        db,
         bus,
       }) as unknown as ActivityServices,
   );
@@ -279,45 +283,89 @@ async function scheduledRuntimeMcpIds(
   }).toolRefs.map((tool) => tool.id);
 }
 
-async function claimedCommonVariableSetRun(
-  workspace: Awaited<ReturnType<typeof workspaceFixture>>,
-  variableSetId: string,
-) {
-  const task = await createScheduledTask(client.db, {
-    ...workspace,
-    createdBy: { kind: "subject", subjectId: workspace.subjectId },
-    name: `materialize-exact-generation-${crypto.randomUUID()}`,
-    status: "active",
-    schedule: { type: "manual" },
-    temporalScheduleId: `scheduled-vs-${crypto.randomUUID()}`,
-    runMode: "new_session_per_run",
-    overlapPolicy: "allow_concurrent",
-    agentConfig: { prompt: "materialize exact generation", resources: [], tools: [], metadata: {} },
-    variableSetId,
-    metadata: {},
-  });
-  const dispatched = await activities().dispatchScheduledTaskRun({
-    workspaceId: workspace.workspaceId,
-    taskId: task.id,
-    triggerType: "scheduled",
-    producerKey: `scheduled-vs-${crypto.randomUUID()}`,
-  });
-  if (dispatched.action !== "start") throw new Error(`dispatch ${JSON.stringify(dispatched)}`);
-  const attemptId = crypto.randomUUID();
-  const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
-    sessionId: dispatched.sessionId,
-    workflowId: dispatched.workflowId,
-    workflowRunId: crypto.randomUUID(),
-    attemptId,
-    dispatchId: crypto.randomUUID(),
-    trigger: { kind: "next" },
-  });
-  if (claimed.action !== "claimed") throw new Error(`claim ${JSON.stringify(claimed)}`);
-  return { dispatched, claimed, attemptId };
-}
-
 describe("scheduled task personal MCP authority", () => {
-  test("validated create and material update freeze an empty set; explicit replacement stays exact through dispatch", async () => {
+  test.each(["organization", "personal"] as const)(
+    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude %s pool snapshot and SuperGrok's default v1 carrier into the generated turn",
+    async (scope) => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      // This task already accepted its legacy pool before migration. The
+      // dispatcher copies it verbatim even though fresh selection uses v2.
+      const claudeSnapshot =
+        scope === "personal"
+          ? { version: 1 as const, scope: "user" as const, authorityGeneration: 1 }
+          : { version: 1 as const, scope: "organization" as const };
+      // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
+      // workspace default, never computed from live pools, and copied verbatim.
+      const xaiSnapshot = { version: 1, scope: "workspace" } as const;
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        name: `subscription-authority-${crypto.randomUUID()}`,
+        status: "active",
+        schedule: { type: "manual" },
+        temporalScheduleId: `subscription-authority-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Use the accepted subscription pool",
+          model: "scripted-model",
+          resources: [],
+          tools: [],
+          metadata: {},
+        },
+        claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
+        metadata: {},
+      });
+
+      const dispatched = await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `subscription-authority:${crypto.randomUUID()}`,
+      });
+      expect(dispatched.action).toBe("start");
+      if (dispatched.action !== "start")
+        throw new Error(`Unexpected schedule result: ${dispatched.action}`);
+
+      const [run] = await admin<{ accepted_execution_snapshot: Record<string, unknown> }[]>`
+      select accepted_execution_snapshot from scheduled_task_runs
+      where workspace_id = ${workspace.workspaceId} and session_id = ${dispatched.sessionId}`;
+      expect(run?.accepted_execution_snapshot).toMatchObject({
+        claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
+      });
+      const [session] = await admin<
+        {
+          xai: unknown;
+          claude: unknown;
+        }[]
+      >`
+      select initial_xai_provider_account_authority_snapshot as xai,
+        initial_claude_provider_account_authority_snapshot as claude
+      from sessions where id = ${dispatched.sessionId}`;
+      expect(session).toEqual({ xai: xaiSnapshot, claude: claudeSnapshot });
+
+      const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+        sessionId: dispatched.sessionId,
+        workflowId: dispatched.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      expect(claimed.action).toBe("claimed");
+      if (claimed.action !== "claimed")
+        throw new Error(`Scheduled turn was not claimed: ${claimed.reason}`);
+      const [turn] = await admin<{ xai: unknown; claude: unknown }[]>`
+      select xai_provider_account_authority_snapshot as xai,
+        claude_provider_account_authority_snapshot as claude
+      from session_turns where id = ${claimed.turn.id}`;
+      expect(turn).toEqual({ xai: xaiSnapshot, claude: claudeSnapshot });
+    },
+    180_000,
+  );
+
+  test("validated create and edits store no accounts; Default resolves live; a person's pin stays exact through dispatch", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const mcpServers = [
@@ -353,10 +401,8 @@ describe("scheduled task personal MCP authority", () => {
         },
       }),
     });
-    expect(task.agentConfig).toMatchObject({
-      connectionAccounts: [],
-      connectionAccountsFrozen: true,
-    });
+    expect(task.agentConfig).not.toHaveProperty("pinnedAccounts");
+    expect(task.agentConfig).not.toHaveProperty("connectionAccounts");
     const first = await commonConnectionDelegationFixture(workspace);
     const second = await commonConnectionDelegationFixture(workspace);
     const update = await validatedScheduledTaskUpdate({
@@ -370,10 +416,8 @@ describe("scheduled task personal MCP authority", () => {
       }),
       toolsProvided: true,
     });
-    expect(update.agentConfig).toMatchObject({
-      connectionAccounts: [],
-      connectionAccountsFrozen: true,
-    });
+    expect(update.agentConfig).not.toHaveProperty("pinnedAccounts");
+    expect(update.agentConfig).not.toHaveProperty("connectionAccounts");
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, update);
     const scheduler = activities({ mcpServers });
     const dispatch = (producerKey = crypto.randomUUID()) =>
@@ -383,14 +427,16 @@ describe("scheduled task personal MCP authority", () => {
         triggerType: "scheduled",
         producerKey,
       });
-    const emptyRun = await dispatch();
-    expect(emptyRun.action).toBe("start");
+    const defaultRun = await dispatch();
+    expect(defaultRun.action).toBe("start");
     const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
-    const emptyAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+    const defaultAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
       workspaceId: workspace.workspaceId,
       runId: runs[0]!.id,
     });
-    expect(emptyAccepted?.mcpAccountBindings).toEqual([]);
+    expect(
+      defaultAccepted?.mcpAccountBindings?.map((binding) => binding.connectionId).sort(),
+    ).toEqual([first.connection.id, second.connection.id].sort());
     const existing = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
     await expect(
       validatedScheduledTaskUpdate({
@@ -415,10 +461,14 @@ describe("scheduled task personal MCP authority", () => {
       objectStorage: null,
       grant,
       existing,
-      payload: UpdateScheduledTaskRequest.parse({ connectionAccounts: selections }),
+      payload: UpdateScheduledTaskRequest.parse({
+        pinnedAccounts: selections,
+        pinnedAccountsRequired: true,
+      }),
     });
-    expect(selectedUpdate.agentConfig).toMatchObject({ connectionAccountsFrozen: true });
-    expect(selectedUpdate.agentConfig?.connectionAccounts).toHaveLength(2);
+    expect(selectedUpdate.agentConfig).toMatchObject({ pinnedAccountsRequired: true });
+    expect(selectedUpdate.agentConfig?.pinnedAccounts).toHaveLength(2);
+    expect(selectedUpdate.agentConfig).not.toHaveProperty("connectionAccountsFrozen");
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, selectedUpdate);
     await commonConnectionDelegationFixture(workspace);
     const acceptedProducer = crypto.randomUUID();
@@ -484,21 +534,30 @@ describe("scheduled task personal MCP authority", () => {
         resources: [],
         tools: [{ kind: "mcp", id: "mail" }],
         metadata: {},
-        connectionAccounts: [],
       },
       metadata: {},
     });
-    const connect = () =>
-      admin.begin(async (tx) => {
+    const connect = async () => {
+      const account = await admin.begin(async (tx) => {
         await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true),
         set_config('opengeni.workspace_id', ${workspace.workspaceId}, true),
         set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
-        const [row] = await tx<{ id: string }[]>`insert into connections
+        const [row] = await tx<{ id: string; authorityId: string }[]>`insert into connections
         (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
         values (${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
-          'mail.example.test', 'oauth2', 'fixture-ciphertext') returning id`;
-        return row!.id;
+          'mail.example.test', 'oauth2', 'fixture-ciphertext')
+        returning id, authority_id as "authorityId"`;
+        return row!;
       });
+      // A login added in a shared workspace starts turned on there (D-54).
+      await turnOnOwnLoginHere(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: workspace.subjectId,
+        authorityId: account.authorityId,
+      });
+      return account.id;
+    };
     const firstAccount = await connect();
     const scheduler = activities({
       mcpServers: [
@@ -572,7 +631,8 @@ describe("scheduled task personal MCP authority", () => {
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
       agentConfig: {
         ...task.agentConfig,
-        connectionAccounts: [{ serverId: "mail", connectionId: firstAccount }],
+        pinnedAccounts: [{ serverId: "mail", connectionId: firstAccount }],
+        pinnedAccountsRequired: true,
       },
     });
     expect(
@@ -583,61 +643,353 @@ describe("scheduled task personal MCP authority", () => {
     );
   });
 
-  test("generated sessions resolve workspace and organization Variable Sets without personal authority", async () => {
+  test("an Only me schedule's runs create Only me chats owned by its owner", async () => {
     if (!available) return;
-    const workspace = await workspaceFixture();
-    const workspaceSet = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "scheduled workspace variables",
-    });
-    const organizationSet = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "organization",
-      allowOrganization: true,
-      name: "scheduled organization variables",
-    });
-
-    for (const [scope, variableSet, runMode] of [
-      ["workspace", workspaceSet, "new_session_per_run"],
-      ["organization", organizationSet, "reusable_session"],
-    ] as const) {
+    const workspace = await workspaceFixture(`user:${crypto.randomUUID()}`);
+    await admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${workspace.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'scheduled-private-run-test')`;
+    for (const runMode of ["new_session_per_run", "reusable_session"] as const) {
       const task = await createScheduledTask(client.db, {
         ...workspace,
-        name: `${scope} generated Variable Set`,
+        name: `Only me ${runMode}`,
         status: "active",
+        visibility: "user_private",
         schedule: { type: "interval", everySeconds: 3_600 },
         temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
         runMode,
         overlapPolicy: "allow_concurrent",
-        agentConfig: {
-          prompt: `Use the ${scope} Variable Set`,
-          resources: [],
-          tools: [],
-          metadata: {},
-        },
+        agentConfig: { prompt: "Review my notes", resources: [], tools: [], metadata: {} },
         createdBy: { kind: "subject", subjectId: workspace.subjectId },
-        variableSetId: variableSet.id,
         metadata: {},
       });
+      expect(task.visibility, runMode).toBe("private");
       const dispatched = await activities().dispatchScheduledTaskRun({
         workspaceId: workspace.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
-        producerKey: `common-variable-set-${scope}-${crypto.randomUUID()}`,
+        producerKey: `private-schedule-${runMode}-${crypto.randomUUID()}`,
       });
-      expect(dispatched.action, scope).toBe("start");
-      const [session] = await admin<Array<{ variableSetId: string | null }>>`
-        select variable_set_id as "variableSetId"
-        from sessions where id = ${dispatched.sessionId}`;
-      expect(session?.variableSetId, scope).toBe(variableSet.id);
-      const [authority] = await admin<Array<{ count: number }>>`
-        select count(*)::int as count
-        from scheduled_task_personal_resource_authorities
-        where task_id = ${task.id}`;
-      expect(authority?.count, scope).toBe(0);
+      expect(dispatched).toMatchObject({ action: "start" });
+      if (dispatched.action !== "start") throw new Error(`Unexpected: ${dispatched.action}`);
+      const [session] = await admin<Array<{ visibility: string; owner: string | null }>>`
+        select visibility, owner_subject_id as owner from sessions where id = ${dispatched.sessionId}`;
+      expect(session, runMode).toEqual({ visibility: "user_private", owner: workspace.subjectId });
     }
   });
+
+  test.each(["workspace", "organization"] as const)(
+    "workspace machine defaults freeze %s machines and never grant personal-machine consent",
+    async (machineScope) => {
+      if (!available) return;
+      const workspace = await workspaceFixture(`user:${crypto.randomUUID()}`);
+      const machineBus = new MemoryEventBus();
+      const install = async (scope: "workspace" | "user" | "organization") => {
+        let originWorkspaceId = workspace.workspaceId;
+        if (scope === "organization") {
+          const [home] = await admin<
+            Array<{ id: string }>
+          >`insert into workspaces (account_id, name) values (${workspace.accountId}, 'Organization machine home') returning id`;
+          originWorkspaceId = home!.id;
+          await admin`insert into workspace_inference_controls(workspace_id, account_id) values (${originWorkspaceId}, ${workspace.accountId})`;
+        }
+        const machine = await admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${originWorkspaceId}, true)`;
+          await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
+          const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+          select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+          from finalize_scoped_enrollment(${workspace.accountId}::uuid, ${originWorkspaceId}::uuid, ${scope},
+            ${`pubkey-${crypto.randomUUID()}`}, false, false, 'linux', 'x86_64', 'Default machine', ${scope === "organization"})`;
+          return row!;
+        });
+        const connectionInstanceId = crypto.randomUUID();
+        const responder = new MockAgentResponder();
+        machineBus.subscribeRequests(
+          subjectFor(originWorkspaceId, machine.enrollmentId, connectionInstanceId),
+          async (payload, subject) =>
+            ControlResponse.encode(
+              await responder.request(subject, ControlRequest.decode(payload), { timeoutMs: 0 }),
+            ).finish(),
+        );
+        await admin.begin(async (tx) => {
+          await tx`alter table enrollments no force row level security`;
+          await tx`update enrollments set connection_instance_id = ${connectionInstanceId}, connection_generation = 1,
+          connection_lease_expires_at = clock_timestamp() + interval '1 hour', workspace_root = '/home/me/work'
+          where id = ${machine.enrollmentId}`;
+          await tx`alter table enrollments force row level security`;
+        });
+        return machine;
+      };
+      const machine = await install(machineScope);
+      await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "machine", targetSandboxId: machine.sandboxId } })} where id = ${workspace.workspaceId}`;
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "Uses the workspace machine",
+        status: "active",
+        schedule: { type: "interval", everySeconds: 3600 },
+        temporalScheduleId: `schedule-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Inspect the selected computer",
+          tools: [],
+          resources: [],
+          metadata: {},
+          executionTarget: "workspace_default",
+        },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      const dispatch = (producerKey: string, overrides = {}) =>
+        activities(
+          {
+            sandboxBackend: "local",
+            sandboxOwnershipEnabled: true,
+            sandboxSelfhostedEnabled: true,
+            ...overrides,
+          },
+          machineBus,
+        ).dispatchScheduledTaskRun({
+          workspaceId: workspace.workspaceId,
+          taskId: task.id,
+          triggerType: "scheduled",
+          producerKey,
+        });
+      const first = await dispatch(`default-machine:${crypto.randomUUID()}`);
+      expect(first.action).toBe("start");
+      if (first.action !== "start") throw new Error(`Unexpected: ${JSON.stringify(first)}`);
+      expect(await requireSession(client.db, workspace.workspaceId, first.sessionId)).toMatchObject(
+        {
+          activeSandboxId: machine.sandboxId,
+          sandboxBackend: "selfhosted",
+        },
+      );
+      const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+      const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+        workspaceId: workspace.workspaceId,
+        runId: run!.id,
+      });
+      expect(accepted?.resolvedMachineTarget).toEqual({ targetSandboxId: machine.sandboxId });
+      const recoveryRunId = crypto.randomUUID();
+      const recoveryKey = `default-recovery:${crypto.randomUUID()}`;
+      await createScheduledTaskRun(client.db, {
+        runId: recoveryRunId,
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: task.authorityRevision,
+        taskExecutionDigest: task.executionDigest,
+        triggerType: "scheduled",
+        producerKey: recoveryKey,
+        acceptedExecutionSnapshot: {
+          ...accepted!,
+          generatedSessionBinding: {
+            ...accepted!.generatedSessionBinding!,
+            createIdempotencyKey: `scheduled-task-run:${recoveryRunId}`,
+          },
+        },
+      });
+      await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "managed" } })} where id = ${workspace.workspaceId}`;
+      const recovered = await dispatch(recoveryKey);
+      expect(recovered.action).toBe("start");
+      if (recovered.action !== "start") throw new Error(`Unexpected: ${JSON.stringify(recovered)}`);
+      expect(
+        await requireSession(client.db, workspace.workspaceId, recovered.sessionId),
+      ).toMatchObject({ activeSandboxId: machine.sandboxId });
+      const next = await dispatch(`default-managed:${crypto.randomUUID()}`);
+      expect(next.action).toBe("start");
+      if (next.action !== "start") throw new Error(`Unexpected: ${JSON.stringify(next)}`);
+      expect(await requireSession(client.db, workspace.workspaceId, next.sessionId)).toMatchObject({
+        activeSandboxId: null,
+        sandboxBackend: "local",
+      });
+      const personal = await install("user");
+      await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "machine", targetSandboxId: personal.sandboxId } })} where id = ${workspace.workspaceId}`;
+      expect(await dispatch(`default-personal:${crypto.randomUUID()}`)).toMatchObject({
+        action: "blocked",
+        reason: "machine_target_unavailable",
+      });
+      await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "machine", targetSandboxId: machine.sandboxId } })} where id = ${workspace.workspaceId}`;
+      expect(
+        await dispatch(`default-disabled:${crypto.randomUUID()}`, {
+          sandboxSelfhostedEnabled: false,
+        }),
+      ).toMatchObject({ action: "blocked", reason: "machine_target_unavailable" });
+    },
+    180_000,
+  );
+
+  test("its owner's schedules run on their own machine, Only me or shared; nobody else's can", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture(`user:${crypto.randomUUID()}`);
+    await admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${workspace.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'scheduled-personal-machine-test')`;
+    const colleague = `user:${crypto.randomUUID()}`;
+    const [colleagueHome] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${workspace.accountId}, 'colleague home') returning id`;
+    await admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${workspace.accountId}, ${colleague}, 'active', ${colleagueHome!.id})`;
+    await admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${workspace.accountId}, ${workspace.workspaceId}, ${colleague})`;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+      await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+      await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
+      const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${workspace.accountId}::uuid, ${workspace.workspaceId}::uuid, 'user',
+          ${`pubkey-${crypto.randomUUID()}`}, false, false, 'linux', 'x86_64',
+          'My laptop', false
+        )`;
+      return row!;
+    });
+    // An in-memory stand-in for the machine's agent answers the liveness ping.
+    const connectionInstanceId = crypto.randomUUID();
+    const machineBus = new MemoryEventBus();
+    const responder = new MockAgentResponder();
+    machineBus.subscribeRequests(
+      subjectFor(workspace.workspaceId, machine.enrollmentId, connectionInstanceId),
+      async (payload, subject) =>
+        ControlResponse.encode(
+          await responder.request(subject, ControlRequest.decode(payload), { timeoutMs: 0 }),
+        ).finish(),
+    );
+    await admin.begin(async (tx) => {
+      await tx`alter table enrollments no force row level security`;
+      await tx`update enrollments set connection_instance_id = ${connectionInstanceId},
+          connection_generation = 1,
+          connection_lease_expires_at = clock_timestamp() + interval '1 hour',
+          workspace_root = '/home/me/work'
+        where id = ${machine.enrollmentId}`;
+      await tx`alter table enrollments force row level security`;
+    });
+    const scheduleOnMachine = async (input: {
+      owner: string;
+      visibility: "user_private" | "workspace_shared";
+    }) =>
+      await createScheduledTask(client.db, {
+        ...workspace,
+        name: `On my machine ${crypto.randomUUID()}`,
+        status: "active",
+        visibility: input.visibility,
+        schedule: { type: "interval", everySeconds: 3_600 },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Tidy my downloads folder",
+          resources: [],
+          tools: [],
+          metadata: {},
+          machineTarget: { targetSandboxId: machine.sandboxId },
+        },
+        createdBy: { kind: "subject", subjectId: input.owner },
+        metadata: {},
+      });
+    const dispatch = async (taskId: string) =>
+      await activities({}, machineBus).dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId,
+        triggerType: "scheduled",
+        producerKey: `personal-machine-${crypto.randomUUID()}`,
+      });
+
+    // A colleague's schedule never runs on it, Only me or shared.
+    for (const refused of [
+      await scheduleOnMachine({ owner: colleague, visibility: "user_private" }),
+      await scheduleOnMachine({ owner: colleague, visibility: "workspace_shared" }),
+    ]) {
+      const result = await dispatch(refused.id);
+      expect(result.action, refused.visibility).not.toBe("start");
+      const [runs] = await admin<Array<{ count: number }>>`
+        select count(*)::int as count from sessions
+        where workspace_id = ${workspace.workspaceId}
+          and metadata->>'scheduledTaskId' = ${refused.id}`;
+      expect(runs!.count).toBe(0);
+    }
+
+    // The owner's schedules run there, Only me or shared, each run in a chat
+    // with the schedule's audience and a grant for that chat alone, and the
+    // database admits the attempt on the machine.
+    let task: Awaited<ReturnType<typeof scheduleOnMachine>> | undefined;
+    for (const visibility of ["user_private", "workspace_shared"] as const) {
+      task = await scheduleOnMachine({ owner: workspace.subjectId, visibility });
+      const dispatched = await dispatch(task.id);
+      expect(dispatched, visibility).toMatchObject({ action: "start" });
+      if (dispatched.action !== "start") throw new Error(`Unexpected: ${dispatched.action}`);
+      const [session] = await admin<
+        Array<{ visibility: string; owner: string | null; sandboxId: string | null }>
+      >`select visibility, owner_subject_id as owner, active_sandbox_id as "sandboxId"
+        from sessions where id = ${dispatched.sessionId}`;
+      expect(session).toEqual({
+        visibility,
+        // A shared chat has no owner; its runs still run as the schedule's owner.
+        owner: visibility === "user_private" ? workspace.subjectId : null,
+        sandboxId: machine.sandboxId,
+      });
+      const grants = await admin<Array<{ mode: string; context: string }>>`
+        select mode, context from organization_user_resource_grants
+        where account_id = ${workspace.accountId} and action = 'connected_machine.use'
+          and status = 'active' and session_id = ${dispatched.sessionId}`;
+      expect(grants).toEqual([{ mode: "session", context: visibility }]);
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+        sessionId: dispatched.sessionId,
+        workflowId: dispatched.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error(`claim ${JSON.stringify(claimed)}`);
+      const [authorization] = await admin<Array<{ enrollmentId: string; grantMode: string }>>`
+        select enrollment_id as "enrollmentId", grant_mode as "grantMode"
+        from session_attempt_connected_machine_authorizations where attempt_id = ${attemptId}`;
+      expect(authorization).toEqual({ enrollmentId: machine.enrollmentId, grantMode: "session" });
+    }
+
+    // Without that grant, and once the owner turned the machine off in this
+    // workspace, the database refuses the run's next attempt.
+    const second = await dispatch(task!.id);
+    if (second.action !== "start") throw new Error(`Unexpected: ${second.action}`);
+    await admin`update organization_user_resource_grants set status = 'revoked',
+        revoked_at = clock_timestamp(), generation = generation + 1, updated_at = clock_timestamp()
+      where session_id = ${second.sessionId} and action = 'connected_machine.use'`;
+    const [machineAuthority] = await admin<Array<{ authorityId: string }>>`
+      select authority_id as "authorityId" from enrollments where id = ${machine.enrollmentId}`;
+    const owner = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+    };
+    const standing = await issueSelfUserResourceGrant(client.db, {
+      ...owner,
+      authorityId: machineAuthority!.authorityId,
+      resourceKind: "connected_machine",
+      mode: "always",
+      context: "user_private",
+      workspaceSharedAcknowledged: false,
+    });
+    await revokeSelfUserResourceGrant(client.db, { ...owner, grantId: standing.grantId });
+    const refused = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: second.sessionId,
+      workflowId: second.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(nestedPostgresSqlState(refused)).toBe("42501");
+    const reasons: string[] = [];
+    for (let error = refused; error instanceof Error; error = error.cause) {
+      reasons.push(error.message);
+    }
+    expect(reasons.join("\n")).toContain("personal machine use requires explicit grant");
+  }, 120_000);
 
   test("freezes workspace-default MCP tools across fresh and recovery claims", async () => {
     if (!available) return;
@@ -784,248 +1136,6 @@ describe("scheduled task personal MCP authority", () => {
     });
     expect(accepted?.targetSessionExecution?.mcpServerIds).toContain(latentServerId);
     expect(accepted?.targetSessionExecution?.effectiveMcpServerIds).not.toContain(latentServerId);
-  });
-
-  test("fences post-claim Variable Set drift before local or host secret reads", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    const variableSet = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: `scheduled-materialization-${crypto.randomUUID()}`,
-    });
-    const settings = testSettings({
-      databaseUrl: shared!.appUrl,
-      sandboxBackend: "none",
-      environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
-    });
-
-    // The worker resolves the exact accepted generation from the run snapshot
-    // before it asks a host credential provider for values.
-    const hostOptions = async (claimed: {
-      dispatched: { sessionId: string };
-      claimed: { turn: { id: string; executionGeneration: number } };
-      attemptId: string;
-    }) => ({
-      expectedGeneration: await getScheduledVariableSetExpectedGenerationForAttempt(client.db, {
-        accountId: workspace.accountId,
-        workspaceId: workspace.workspaceId,
-        subjectId: workspace.subjectId,
-        initiatingHumanSubjectId: workspace.subjectId,
-        sessionId: claimed.dispatched.sessionId,
-        turnId: claimed.claimed.turn.id,
-        attemptId: claimed.attemptId,
-        executionGeneration: claimed.claimed.turn.executionGeneration,
-        variableSetId: variableSet.id,
-      }),
-    });
-
-    const unchangedLocal = await claimedCommonVariableSetRun(workspace, variableSet.id);
-    const local = await loadWorkspaceEnvironmentForRunWithCredentials(
-      client.db,
-      settings,
-      workspace,
-      variableSet.id,
-      {
-        sessionId: unchangedLocal.dispatched.sessionId,
-        turnId: unchangedLocal.claimed.turn.id,
-        attemptId: unchangedLocal.attemptId,
-        executionGeneration: unchangedLocal.claimed.turn.executionGeneration,
-        initiatingHumanSubjectId: workspace.subjectId,
-      },
-    );
-    expect(local?.generation).toBe(variableSet.generation);
-
-    const unchangedHost = await claimedCommonVariableSetRun(workspace, variableSet.id);
-    let unchangedHostCalls = 0;
-    const hosted = await loadWorkspaceEnvironmentForRunWithCredentials(
-      client.db,
-      settings,
-      workspace,
-      variableSet.id,
-      {
-        sessionId: unchangedHost.dispatched.sessionId,
-        turnId: unchangedHost.claimed.turn.id,
-        attemptId: unchangedHost.attemptId,
-        executionGeneration: unchangedHost.claimed.turn.executionGeneration,
-        initiatingHumanSubjectId: workspace.subjectId,
-      },
-      async (request) => {
-        unchangedHostCalls += 1;
-        return {
-          ...request,
-          id: request.variableSetId,
-          name: "hosted",
-          description: null,
-          scope: "workspace",
-          generation: request.expectedGeneration!,
-          values: {},
-        };
-      },
-      await hostOptions(unchangedHost),
-    );
-    expect(unchangedHostCalls).toBe(1);
-    expect(hosted?.generation).toBe(variableSet.generation);
-
-    const changedLocal = await claimedCommonVariableSetRun(workspace, variableSet.id);
-    await setVariableSetVariable(client.db, {
-      ...workspace,
-      variableSetId: variableSet.id,
-      name: "CHANGED_LOCAL",
-      valueEncrypted: "not-read",
-    });
-    const errorChainIncludes = (error: unknown, expected: string) => {
-      let current: unknown = error;
-      for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
-        const candidate = current as { message?: string; cause?: unknown };
-        if (candidate.message?.includes(expected)) return true;
-        current = candidate.cause;
-      }
-      return false;
-    };
-    let localError: unknown;
-    try {
-      await loadWorkspaceEnvironmentForRunWithCredentials(
-        client.db,
-        settings,
-        workspace,
-        variableSet.id,
-        {
-          sessionId: changedLocal.dispatched.sessionId,
-          turnId: changedLocal.claimed.turn.id,
-          attemptId: changedLocal.attemptId,
-          executionGeneration: changedLocal.claimed.turn.executionGeneration,
-          initiatingHumanSubjectId: workspace.subjectId,
-        },
-      );
-    } catch (error) {
-      localError = error;
-    }
-    expect(
-      errorChainIncludes(localError, "scheduled Variable Set generation changed after claim"),
-    ).toBe(true);
-
-    const changedHost = await claimedCommonVariableSetRun(workspace, variableSet.id);
-    await setVariableSetVariable(client.db, {
-      ...workspace,
-      variableSetId: variableSet.id,
-      name: "CHANGED_HOST",
-      valueEncrypted: "not-read",
-    });
-    let changedHostCalls = 0;
-    let hostError: unknown;
-    try {
-      await loadWorkspaceEnvironmentForRunWithCredentials(
-        client.db,
-        settings,
-        workspace,
-        variableSet.id,
-        {
-          sessionId: changedHost.dispatched.sessionId,
-          turnId: changedHost.claimed.turn.id,
-          attemptId: changedHost.attemptId,
-          executionGeneration: changedHost.claimed.turn.executionGeneration,
-          initiatingHumanSubjectId: workspace.subjectId,
-        },
-        async (request) => {
-          changedHostCalls += 1;
-          return {
-            ...request,
-            id: request.variableSetId,
-            name: "must-not-run",
-            description: null,
-            scope: "workspace",
-            generation: request.expectedGeneration!,
-            values: {},
-          };
-        },
-        await hostOptions(changedHost),
-      );
-    } catch (error) {
-      hostError = error;
-    }
-    expect(
-      errorChainIncludes(hostError, "scheduled Variable Set generation changed after claim"),
-    ).toBe(true);
-    expect(changedHostCalls).toBe(0);
-  });
-
-  test("revoking accepted user-scoped xAI authority rejects before claim", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    await admin`insert into workspace_memberships (
-      account_id, workspace_id, subject_id, role, permissions
-    ) values (
-      ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
-      'owner', '[]'::jsonb
-    ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
-    const credential = await createXaiSubscriptionCredential(client.db, {
-      ...workspace,
-      scope: "user",
-      encryptionKey: Buffer.alloc(32, 23),
-      secret: { version: 1, accessToken: "scheduled-xai-claim" },
-      providerAccountId: `scheduled-xai-${crypto.randomUUID()}`,
-      label: "scheduled xAI claim",
-    });
-    const task = await createScheduledTask(client.db, {
-      ...workspace,
-      createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      name: "xAI claim authority",
-      status: "active",
-      schedule: { type: "manual" },
-      temporalScheduleId: `scheduled-xai-${crypto.randomUUID()}`,
-      runMode: "new_session_per_run",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: {
-        prompt: "must retain exact xAI authority",
-        resources: [],
-        tools: [],
-        metadata: {},
-        model: "supergrok/grok-4.7",
-      },
-      xaiProviderAccountAuthoritySnapshot: credential.authoritySnapshot,
-      metadata: {},
-    });
-    const dispatched = await activities({
-      supergrokSubscriptionEnabled: true,
-    }).dispatchScheduledTaskRun({
-      workspaceId: workspace.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: `scheduled-xai-${crypto.randomUUID()}`,
-    });
-    if (dispatched.action !== "start") throw new Error(`dispatch ${JSON.stringify(dispatched)}`);
-    await disconnectXaiSubscriptionCredential(client.db, {
-      ...workspace,
-      credentialId: credential.account.id,
-      authoritySnapshot: credential.authoritySnapshot,
-    });
-    const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
-      sessionId: dispatched.sessionId,
-      workflowId: dispatched.workflowId,
-      workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    expect(claimed).toEqual({ action: "unclaimed", reason: "no-work" });
-    const [evidence] = await admin<
-      Array<{ runStatus: string; runError: string | null; updateState: string; attempts: number }>
-    >`
-      select run.status as "runStatus", run.error as "runError",
-        update_value.state as "updateState",
-        (select count(*)::int from session_turn_attempts attempt
-          where attempt.session_id = run.session_id) as attempts
-      from scheduled_task_runs run
-      join session_system_updates update_value on update_value.scheduled_task_run_id = run.id
-      where run.task_id = ${task.id}
-    `;
-    expect(evidence).toEqual({
-      runStatus: "failed",
-      runError: "scheduled_xai_authority_changed",
-      updateState: "failed",
-      attempts: 0,
-    });
   });
 
   test("revoking an accepted Slack bot rejects before a fresh attempt", async () => {
@@ -1295,11 +1405,6 @@ describe("scheduled task personal MCP authority", () => {
   test("suspending the revision authorizer after dispatch rejects common resource work", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const variableSet = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "claim-time suspended authorizer",
-    });
     const task = await createScheduledTask(client.db, {
       ...workspace,
       name: "claim-time causal suspension",
@@ -1315,7 +1420,6 @@ describe("scheduled task personal MCP authority", () => {
         metadata: {},
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      variableSetId: variableSet.id,
       metadata: {},
     });
     const dispatched = await activities().dispatchScheduledTaskRun({
@@ -1496,57 +1600,115 @@ describe("scheduled task personal MCP authority", () => {
     expect(evidence).toEqual({ runs: 2, sessions: 1 });
   });
 
-  test("0414 rolling producer fence replay preserves identity and refuses definition drift", async () => {
-    if (!available) return;
-    const historical = await acquireBlankTestDatabase("scheduled-0414-replay");
-    if (!historical) throw new Error("Historical migration test requires PostgreSQL");
-    const historicalAdmin = postgres(historical.databaseUrl, { max: 1, onnotice: () => undefined });
-    try {
-      // 0461 deliberately extends this function for ordinary private source
-      // tasks. 0414 replay is a pre-cutover contract, never a downgrade path.
-      await historicalAdmin`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-      // These later migrations require the post-0461 Knowledge/file policies.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql')`;
-      // Allowance policy/attribution compiles against the same withheld
-      // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
-      for (const name of allowanceMigrationTail)
-        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
-      await migrate(historical.databaseUrl);
-      const migration = await readFile(
-        new URL(
-          "../../../packages/db/drizzle/0414_scheduled_generated_producer_materialization.sql",
-          import.meta.url,
-        ),
-        "utf8",
-      );
-      const [before] =
-        await historicalAdmin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-      await historicalAdmin.begin(async (tx) => {
-        await tx.unsafe(migration);
+  for (const change of ["materialized", "edited", "paused"] as const) {
+    test(`stale cold admission re-reads the ${change} task`, async () => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      await commonConnectionDelegationFixture(workspace);
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "stale cold producer admission",
+        status: "active",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "reusable_session",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Original message",
+          resources: [],
+          tools: [{ kind: "mcp", id: "scheduled-common" }],
+          metadata: {},
+        },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
       });
-      const [after] =
-        await historicalAdmin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-      expect(after).toEqual(before);
-      await expect(
-        historicalAdmin.begin(async (tx) => {
-          const drifted = String(before!.definition).replace(
-            "receipt.source_execution_digest = OLD.task_execution_digest",
-            "receipt.source_execution_digest <> OLD.task_execution_digest",
-          );
-          expect(drifted).not.toBe(before!.definition);
-          await tx.unsafe(drifted);
-          await tx.unsafe(migration);
-        }),
-      ).rejects.toMatchObject({ code: "55000" });
-      const [restored] =
-        await historicalAdmin`select pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-      expect(restored!.definition).toBe(before!.definition);
-    } finally {
-      await historicalAdmin.end();
-      await historical.release();
-    }
-  }, 180_000);
+      let interleaved = false;
+      let firstSessionId: string | undefined;
+      const dialect = new PgDialect();
+      // Hold only the second producer immediately before its real SQL admission.
+      // Its cold snapshot is already resolved; let the first dispatch commit the
+      // reusable binding before submitting that now-stale snapshot to PostgreSQL.
+      const intercept = (db: Database): Database =>
+        new Proxy(db, {
+          get(target, property) {
+            if (property === "transaction") {
+              return (callback: (tx: Database) => Promise<unknown>) =>
+                target.transaction((tx) => callback(intercept(tx)));
+            }
+            if (property === "execute") {
+              return async (query: Parameters<Database["execute"]>[0]) => {
+                const text =
+                  typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql;
+                if (!interleaved && text.includes("create_scheduled_agent_run_with_admission(")) {
+                  interleaved = true;
+                  const first = await activities().dispatchScheduledTaskRun({
+                    workspaceId: workspace.workspaceId,
+                    taskId: task.id,
+                    triggerType: "scheduled",
+                    producerKey: `stale-cold-first-${crypto.randomUUID()}`,
+                  });
+                  expect(first.action).toBe("start");
+                  firstSessionId = first.sessionId;
+                  const bound = await getScheduledTask(client.db, workspace.workspaceId, task.id);
+                  expect(bound!.authorityRevision).toBe(task.authorityRevision + 1);
+                  expect(bound!.executionDigest).not.toBe(task.executionDigest);
+                  expect(bound!.reusableSessionId).toBe(firstSessionId);
+                  if (change !== "materialized") {
+                    await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+                      ...(change === "paused"
+                        ? { status: "paused" }
+                        : { agentConfig: { ...task.agentConfig, prompt: "Updated message" } }),
+                    });
+                  }
+                }
+                return target.execute(query);
+              };
+            }
+            const value = Reflect.get(target, property);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      const input = {
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled" as const,
+        producerKey: `stale-cold-second-${crypto.randomUUID()}`,
+      };
+      const second = await activities(
+        {},
+        new MemoryEventBus(),
+        intercept(client.db),
+      ).dispatchScheduledTaskRun(input);
+      expect(interleaved).toBe(true);
+      const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+      if (change === "paused") {
+        expect(second).toEqual({ action: "blocked", reason: "scheduled_task_paused" });
+        expect(runs).toHaveLength(1);
+      } else {
+        expect(second).toMatchObject({ action: "signal", sessionId: firstSessionId });
+        expect(runs).toHaveLength(2);
+        expect(new Set(runs.map((run) => run.sessionId))).toEqual(new Set([firstSessionId]));
+        const secondRun = await getScheduledTaskRunByProducerKey(client.db, input);
+        expect(secondRun).not.toBeNull();
+        const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+          workspaceId: workspace.workspaceId,
+          runId: secondRun!.id,
+        });
+        expect(accepted!.task.reusableSessionId).toBe(firstSessionId);
+        expect(accepted!.task.agentConfig.prompt).toBe(
+          change === "edited" ? "Updated message" : "Original message",
+        );
+        expect(await activities().dispatchScheduledTaskRun(input)).toMatchObject({
+          action: "signal",
+          sessionId: firstSessionId,
+          triggerEventId: second.triggerEventId,
+        });
+        expect(
+          await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10),
+        ).toHaveLength(2);
+      }
+    }, 30_000);
+  }
 
   for (const authorityCase of [
     "valid",
@@ -2053,7 +2215,7 @@ describe("scheduled task personal MCP authority", () => {
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
       agentConfig: {
         ...task.agentConfig,
-        connectionAccounts: [{ serverId: "scheduled-common", connectionId: laterAccount }],
+        pinnedAccounts: [{ serverId: "scheduled-common", connectionId: laterAccount }],
         prompt: "Changed only after the earlier occurrence was accepted",
       },
     });
@@ -2103,18 +2265,98 @@ describe("scheduled task personal MCP authority", () => {
     });
     expect(
       (await getScheduledTask(client.db, workspace.workspaceId, task.id))?.agentConfig
-        .connectionAccounts,
+        .pinnedAccounts,
     ).toEqual([{ serverId: "scheduled-common", connectionId: laterAccount }]);
+  });
+
+  test.each(["prompt", "name", "status"] as const)(
+    "late Temporal sync failure preserves a newer %s edit",
+    async (field) => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      const original = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "Original schedule",
+        status: "paused",
+        schedule: { type: "manual" },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "skip",
+        agentConfig: { prompt: "Original message", resources: [], tools: [], metadata: {} },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      const changed = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
+        status: "active",
+        agentConfig: { ...original.agentConfig, prompt: "First edit" },
+      });
+      let newer = changed;
+      await expect(
+        syncUpdatedScheduledTask({
+          db: client.db,
+          previous: { task: original },
+          task: changed,
+          workflowClient: {
+            syncScheduledTask: async ({
+              onFailure,
+            }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+              newer = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
+                ...(field === "prompt"
+                  ? { agentConfig: { ...changed.agentConfig, prompt: "Newer edit" } }
+                  : field === "name"
+                    ? { name: "Newer name" }
+                    : { status: "paused" }),
+              });
+              const error = new Error("Synthetic synchronization failure");
+              throw await client.db.transaction((tx) => onFailure!(tx, error));
+            },
+          } as never,
+        }),
+      ).rejects.toMatchObject({ persistenceRestored: false });
+      expect(await getScheduledTask(client.db, workspace.workspaceId, original.id)).toEqual(newer);
+    },
+  );
+
+  test("late creation sync failure never deletes a schedule edited meanwhile", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const created = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "New schedule",
+      status: "paused",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Review activity", resources: [], tools: [], metadata: {} },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: {},
+    });
+    let newer = created;
+    await expect(
+      syncCreatedScheduledTask({
+        db: client.db,
+        task: created,
+        workflowClient: {
+          syncScheduledTask: async ({
+            onFailure,
+          }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+            newer = await updateScheduledTask(client.db, workspace.workspaceId, created.id, {
+              name: "Reviewed schedule",
+            });
+            const error = new Error("Synthetic synchronization failure");
+            throw await client.db.transaction((tx) => onFailure!(tx, error));
+          },
+        } as never,
+      }),
+    ).rejects.toMatchObject({ persistenceRestored: false });
+    expect(await getScheduledTask(client.db, workspace.workspaceId, created.id)).toEqual(newer);
   });
 
   test("Temporal sync failure restores every execution-affecting task field", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const originalDelegations = delegation(workspace.subjectId, "linear", "linear.app");
-    const variableSet = await createVariableSet(client.db, {
-      ...workspace,
-      name: "scheduled restore variables",
-    });
     const rig = await createRig(client.db, {
       ...workspace,
       name: "scheduled restore rig",
@@ -2139,7 +2381,7 @@ describe("scheduled task personal MCP authority", () => {
       runMode: "reusable_session",
       overlapPolicy: "buffer_one",
       agentConfig: {
-        connectionAccounts: originalDelegations.map(({ serverId, connectionId }) => ({
+        pinnedAccounts: originalDelegations.map(({ serverId, connectionId }) => ({
           serverId,
           connectionId,
         })),
@@ -2149,14 +2391,13 @@ describe("scheduled task personal MCP authority", () => {
         metadata: { version: "original" },
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      variableSetId: variableSet.id,
       rigId: rig.id,
       metadata: { version: "original" },
     });
     const original = await updateScheduledTask(client.db, workspace.workspaceId, created.id, {
       reusableSessionId: reusableSession.id,
     });
-    const restoreState = await captureScheduledTaskRestoreState(client.db, original);
+    const restoreState = { task: original };
     const changedDelegations = delegation(workspace.subjectId, "github", "github.com");
     const changed = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
       name: "changed name",
@@ -2165,7 +2406,7 @@ describe("scheduled task personal MCP authority", () => {
       runMode: "new_session_per_run",
       overlapPolicy: "skip",
       agentConfig: {
-        connectionAccounts: changedDelegations.map(({ serverId, connectionId }) => ({
+        pinnedAccounts: changedDelegations.map(({ serverId, connectionId }) => ({
           serverId,
           connectionId,
         })),
@@ -2176,7 +2417,6 @@ describe("scheduled task personal MCP authority", () => {
       },
       targetSessionId: null,
       reusableSessionId: null,
-      variableSetId: null,
       rigId: null,
       metadata: { version: "changed" },
     });
@@ -2187,8 +2427,11 @@ describe("scheduled task personal MCP authority", () => {
         previous: restoreState,
         task: changed,
         workflowClient: {
-          syncScheduledTask: async () => {
-            throw new Error("expected Temporal synchronization failure");
+          syncScheduledTask: async ({
+            onFailure,
+          }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+            const error = new Error("expected Temporal synchronization failure");
+            throw await client.db.transaction((tx) => onFailure!(tx, error));
           },
         } as never,
       }),
@@ -2203,91 +2446,13 @@ describe("scheduled task personal MCP authority", () => {
       overlapPolicy: original.overlapPolicy,
       agentConfig: original.agentConfig,
       reusableSessionId: reusableSession.id,
-      variableSetId: variableSet.id,
       rigId: rig.id,
       metadata: original.metadata,
     });
     expect(restored?.ownerSubjectId).toBe(original.ownerSubjectId);
   });
 
-  test("a materialized reusable workspace Variable Set task keeps its causal human on the next occurrence", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    const variableSet = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "reusable workspace variables",
-    });
-    const task = await createScheduledTask(client.db, {
-      ...workspace,
-      name: "reusable workspace Variable Set",
-      status: "active",
-      schedule: { type: "interval", everySeconds: 3_600 },
-      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-      runMode: "reusable_session",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: {
-        prompt: "Use the workspace Variable Set",
-        resources: [],
-        tools: [],
-        metadata: {},
-      },
-      createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      variableSetId: variableSet.id,
-      metadata: {},
-    });
-    const sourceAuthority = await getScheduledTaskRevisionAuthority(client.db, {
-      accountId: task.accountId,
-      workspaceId: task.workspaceId,
-      taskId: task.id,
-      taskAuthorityRevision: task.authorityRevision,
-    });
-    expect(sourceAuthority?.subjectId).toBe(workspace.subjectId);
-
-    const first = await activities().dispatchScheduledTaskRun({
-      workspaceId: workspace.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: `reusable-vs-1-${crypto.randomUUID()}`,
-    });
-    expect(first.action).toBe("start");
-    const materialized = await getScheduledTask(client.db, workspace.workspaceId, task.id);
-    expect(materialized?.reusableSessionId).toBe(first.sessionId!);
-    expect(materialized?.authorityRevision).toBeGreaterThan(task.authorityRevision);
-    const headAuthority = await getScheduledTaskRevisionAuthority(client.db, {
-      accountId: task.accountId,
-      workspaceId: task.workspaceId,
-      taskId: task.id,
-      taskAuthorityRevision: materialized!.authorityRevision,
-    });
-    expect(headAuthority).toEqual(sourceAuthority);
-
-    const second = await activities().dispatchScheduledTaskRun({
-      workspaceId: workspace.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: `reusable-vs-2-${crypto.randomUUID()}`,
-    });
-    expect(["start", "signal"]).toContain(second.action);
-    expect(second.sessionId).toBe(first.sessionId);
-    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
-    expect(runs).toHaveLength(2);
-    for (const run of runs) {
-      const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
-        workspaceId: workspace.workspaceId,
-        runId: run.id,
-      });
-      expect(accepted?.causalHumanSubjectId).toBe(workspace.subjectId);
-      expect(accepted?.causalHumanAuthority).toEqual(sourceAuthority);
-      // The cold occurrence resolves the Variable Set itself; the warm one
-      // inherits it from the materialized target session.
-      expect(
-        accepted?.resolvedVariableSet?.id ?? accepted?.targetSessionExecution?.variableSetId,
-      ).toBe(variableSet.id);
-    }
-  });
-
-  test("a non-human writer automates plain and workspace-secret tasks but cannot author a personal one", async () => {
+  test("a non-human writer automates plain tasks but cannot author a personal one", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const serviceSubjectId = `service-writer-${crypto.randomUUID()}`;
@@ -2330,46 +2495,6 @@ describe("scheduled task personal MCP authority", () => {
     });
     expect(accepted?.causalHumanSubjectId).toBeNull();
     expect(accepted?.causalHumanAuthority).toBeNull();
-
-    // A workspace Variable Set is ordinary workspace authority: a non-human
-    // writer may keep automating with it, exactly as before the cutover.
-    const variableSet = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "service writer workspace variables",
-    });
-    const secretsTask = await createScheduledTask(client.db, {
-      ...workspace,
-      name: "service-authored workspace secrets task",
-      status: "active",
-      schedule: { type: "interval", everySeconds: 3_600 },
-      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-      runMode: "new_session_per_run",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: { prompt: "service authored secrets", resources: [], tools: [], metadata: {} },
-      createdBy: { kind: "service", subjectId: serviceSubjectId },
-      variableSetId: variableSet.id,
-      metadata: {},
-    });
-    const secretsDispatched = await activities().dispatchScheduledTaskRun({
-      workspaceId: workspace.workspaceId,
-      taskId: secretsTask.id,
-      triggerType: "scheduled",
-      producerKey: `service-workspace-secrets-${crypto.randomUUID()}`,
-    });
-    expect(secretsDispatched.action).toBe("start");
-    const [secretsRun] = await listScheduledTaskRuns(
-      client.db,
-      workspace.workspaceId,
-      secretsTask.id,
-      10,
-    );
-    const secretsAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
-      workspaceId: workspace.workspaceId,
-      runId: secretsRun!.id,
-    });
-    expect(secretsAccepted?.resolvedVariableSet?.id).toBe(variableSet.id);
-    expect(secretsAccepted?.causalHumanSubjectId).toBeNull();
 
     // A personal (user-scoped) authority is different: it needs the exact human
     // who owns it, so a non-human writer fails closed at create.

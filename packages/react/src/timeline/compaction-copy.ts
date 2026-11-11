@@ -1,31 +1,184 @@
 import type { ContextCompactionItem } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
+
+/** Headline for a compaction that could not produce a checkpoint. */
+export const COMPACTION_FAILURE_TITLE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.couldnTCompactConversationHistory");
 
 /**
- * Subtitle for a settled compaction landmark. A definitive provider rejection
- * repeats deterministically for the same conversation, so it names the
- * rejected field and withholds the generic retry promise; every other skip
- * keeps its existing copy.
+ * Headline for a compaction cut short by its own attempt's cancellation (for
+ * example a worker restarting during a deploy). Not a failure: the recovered
+ * attempt checks again and compacts if the history still needs it.
+ */
+export const COMPACTION_INTERRUPTED_TITLE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.compactionInterrupted");
+
+/**
+ * Headline for an automatic idle checkpoint dropped because no subscription
+ * had capacity. Not a failure: the next turn compacts if still needed.
+ */
+export const COMPACTION_POSTPONED_TITLE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.compactionPostponed");
+
+/**
+ * Headline and subtitle for a checkpoint that trimmed older messages because
+ * the chat's model could not summarize them. Not a failure: the turn goes on.
+ */
+export const COMPACTION_TRIMMED_TITLE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.olderMessagesTrimmed");
+export const COMPACTION_TRIMMED_SUBTITLE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.theModelCouldnTSummarizeThem");
+
+/** Headline for a settled `skipped` compaction landmark. */
+export function compactionSkipTitle(t: OpenGeniText, reason: string | null): string {
+  if (reason === "interrupted") return COMPACTION_INTERRUPTED_TITLE(t);
+  if (reason === "capacity_unavailable") return COMPACTION_POSTPONED_TITLE(t);
+  return COMPACTION_FAILURE_TITLE(t);
+}
+
+/** Why a definitive provider rejection repeats; shown behind Details. */
+export const COMPACTION_REJECTION_NOTE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.theProviderRejectsThisRequest");
+
+/**
+ * Subtitle for a settled compaction landmark. Kept short: a definitive provider
+ * rejection withholds the generic retry promise, names the one recovery step,
+ * and moves its identifiers behind Details ({@link compactionFailureDetails}).
+ * An automatic compaction (labelled Auto) was not requested by anyone, so its
+ * failure does not ask the person to request it again.
  */
 export function compactionSkipSubtitle(
+  t: OpenGeniText,
   reason: string | null,
   providerRejection: ContextCompactionItem["providerRejection"] = null,
+  trigger: ContextCompactionItem["trigger"] = null,
 ): string {
   switch (reason) {
     case "no_history":
-      return "No active history to compact";
+      return t("timeline.compactionCopy.noActiveHistoryToCompact");
     case "replacement_not_smaller":
-      return "Checkpoint would not reduce memory size";
+      return t("timeline.compactionCopy.checkpointWouldNotReduceMemory");
     case "replacement_exceeds_model_budget":
-      return "Checkpoint exceeds this model's context budget. Chat history is unchanged.";
+      return t("timeline.compactionCopy.checkpointExceedsThisModelS");
     case "replacement_unchanged":
-      return "Checkpoint made no progress";
+      return t("timeline.compactionCopy.checkpointMadeNoProgress");
+    case "interrupted":
+      return t("timeline.compactionCopy.itWillRetryIfStill");
+    case "capacity_unavailable":
+      return t("timeline.compactionCopy.noSubscriptionCapacityRightNow");
     case "summarization_failed":
       return providerRejection
-        ? `The model provider rejected the compaction request (${describeCompactionProviderRejection(providerRejection)}). Chat history is unchanged. Repeating it fails the same way until the conversation changes; if a new message fails again, start a new session.`
-        : "Request it again to retry. Chat history is unchanged.";
+        ? t("timeline.compactionCopy.chatHistoryIsUnchangedIf")
+        : trigger === "auto" || trigger === "proactive"
+          ? t("timeline.compactionCopy.chatHistoryIsUnchanged")
+          : t("timeline.compactionCopy.requestItAgainToRetry");
     default:
-      return "Compaction was not needed. Chat history is unchanged.";
+      return t("timeline.compactionCopy.compactionWasNotNeededChat");
   }
+}
+
+export type CompactionFailureDetails = {
+  /** One plain sentence on why it failed, when known. */
+  note: string | null;
+  /** Provider identifiers or the recorded error text, in display order. */
+  facts: Array<{ label: string; value: string }>;
+};
+
+/**
+ * `implementation` of a checkpoint that trimmed older messages because the
+ * chat's model could not summarize them.
+ */
+export const TRIMMED_COMPACTION_IMPLEMENTATION = "deterministic_trim";
+
+/** Whether a landmark is a checkpoint that trimmed history instead of summarizing it. */
+export function isTrimmedCompaction(item: Pick<ContextCompactionItem, "phase" | "implementation">) {
+  return item.phase === "compacted" && item.implementation === TRIMMED_COMPACTION_IMPLEMENTATION;
+}
+
+/**
+ * Technical diagnostics for a failed compaction landmark, or for a checkpoint
+ * that trimmed history because its summary failed, or null when it has none:
+ * a definitive provider rejection lists its content-free identifiers, and the
+ * provider's own message follows when it sent one; any other failure shows the
+ * turn's recorded error text. Presentation only.
+ */
+export function compactionFailureDetails(
+  t: OpenGeniText,
+  item: Pick<
+    ContextCompactionItem,
+    "phase" | "skipReason" | "providerRejection" | "failureDetail" | "implementation"
+  > & { providerMessage?: string },
+): CompactionFailureDetails | null {
+  const trimmed = isTrimmedCompaction(item);
+  if (!trimmed && (item.phase !== "skipped" || item.skipReason !== "summarization_failed")) {
+    return null;
+  }
+  const rejection = item.providerRejection;
+  const providerMessage = item.providerMessage?.trim();
+  const messageFact = providerMessage
+    ? [{ label: t("timeline.compactionCopy.providerMessage"), value: providerMessage }]
+    : [];
+  if (!rejection) {
+    if (trimmed) return messageFact.length > 0 ? { note: null, facts: messageFact } : null;
+    const recorded = item.failureDetail?.trim();
+    return recorded
+      ? { note: null, facts: [{ label: t("timeline.compactionCopy.error"), value: recorded }] }
+      : null;
+  }
+  const facts = [
+    {
+      label: t("timeline.compactionCopy.response"),
+      // Some providers repeat the type as the code; name it once.
+      value: [
+        `HTTP ${rejection.httpStatus}`,
+        rejection.type,
+        rejection.code === rejection.type ? null : rejection.code,
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join(" · "),
+    },
+  ];
+  if (rejection.param)
+    facts.push({ label: t("timeline.compactionCopy.parameter"), value: rejection.param });
+  if (rejection.requestId)
+    facts.push({ label: t("timeline.compactionCopy.requestId"), value: rejection.requestId });
+  facts.push(...messageFact);
+  // A trimmed checkpoint already recovered; the repeat warning is for a failure.
+  return { note: trimmed ? null : COMPACTION_REJECTION_NOTE(t), facts };
+}
+
+const COMPACTION_TURN_FAILURE_PREFIX = "compaction summarization failed:";
+
+/** How a turn's failure reads on its chip and notice; see {@link presentTurnFailureText}. */
+export type TurnFailurePresentation = {
+  summary: string;
+  /** The recorded text the summary replaced, offered behind Details. */
+  detail?: string;
+  /** The summary names a compaction failure, whose own landmark owns the detail. */
+  compaction?: true;
+};
+
+/**
+ * Short copy for a turn's failure reason. A compaction failure records the raw
+ * provider text after a fixed prefix, and a diagnostic failure (an unclassified
+ * error or operator text; see `presentFailure`) records text not written for
+ * people. Both name the outcome instead (`diagnosticOutcome` for a diagnostic)
+ * and keep the recorded text as `detail`, behind Details. Copy the worker
+ * wrote for people passes through unchanged. Presentation only: the stored
+ * (and model-facing) event keeps its text.
+ */
+export function presentTurnFailureText(
+  t: OpenGeniText,
+  failureText: string | null | undefined,
+  diagnosticOutcome: string | null = null,
+): TurnFailurePresentation | null {
+  const text = failureText?.trim();
+  if (!text) return null;
+  if (text.toLowerCase().startsWith(COMPACTION_TURN_FAILURE_PREFIX)) {
+    return { summary: COMPACTION_FAILURE_TITLE(t), detail: text, compaction: true };
+  }
+  if (diagnosticOutcome) return { summary: diagnosticOutcome, detail: text };
+  return { summary: text };
 }
 
 /** `HTTP 400 invalid_request_error, param input[3].encrypted_content`; identifiers only. */

@@ -20,8 +20,6 @@ import {
   NetworkRouteMutationResponse,
   interactionPlacementsEqual,
   networkRoutePlacementCompatibilityIssue,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   ReportAuthRunRequest,
   RequestHumanInteractionToolInput,
   SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY,
@@ -53,8 +51,6 @@ import {
   type NetworkRouteConfiguration as NetworkRouteConfigurationValue,
   type NetworkRouteListResponse as NetworkRouteListResponseValue,
   type NetworkRouteMutationResponse as NetworkRouteMutationResponseValue,
-  type ProtectedAuthFillRequest as ProtectedAuthFillRequestValue,
-  type ProtectedAuthFillResponse as ProtectedAuthFillResponseValue,
   type ReportAuthRunRequest as ReportAuthRunRequestValue,
   type ResolveInteractionInterventionRequest as ResolveInteractionInterventionRequestValue,
   type RequestHumanInteractionToolInput as RequestHumanInteractionToolInputValue,
@@ -68,7 +64,7 @@ import {
   type UpdateSiteAuthConnectionRequest as UpdateSiteAuthConnectionRequestValue,
   type VerifyAuthRunRequest as VerifyAuthRunRequestValue,
 } from "@opengeni/contracts";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
@@ -1327,7 +1323,6 @@ function authRunFromRow(row: AuthRunRow): AuthRunValue {
     authorityId: row.authorityId,
     state: row.state,
     choices: row.choices,
-    pendingFields: row.pendingFields,
     externalAction: row.externalAction,
     interventionId: row.interventionId,
     verifiedUrl: row.verifiedUrl,
@@ -1487,7 +1482,6 @@ const AUTH_RUN_TRANSITIONS: Readonly<
 > = {
   discovering: new Set([
     "awaiting_choice",
-    "awaiting_secret",
     "awaiting_external_action",
     "working",
     "failed",
@@ -1495,30 +1489,15 @@ const AUTH_RUN_TRANSITIONS: Readonly<
   ]),
   awaiting_choice: new Set([
     "awaiting_choice",
-    "awaiting_secret",
     "awaiting_external_action",
     "working",
     "failed",
     "cancelled",
   ]),
-  awaiting_secret: new Set([
-    "awaiting_secret",
-    "awaiting_external_action",
-    "working",
-    "failed",
-    "cancelled",
-  ]),
-  awaiting_external_action: new Set([
-    "awaiting_external_action",
-    "awaiting_secret",
-    "working",
-    "failed",
-    "cancelled",
-  ]),
+  awaiting_external_action: new Set(["awaiting_external_action", "working", "failed", "cancelled"]),
   working: new Set([
     "working",
     "awaiting_choice",
-    "awaiting_secret",
     "awaiting_external_action",
     "failed",
     "cancelled",
@@ -1526,18 +1505,6 @@ const AUTH_RUN_TRANSITIONS: Readonly<
   verified: new Set(),
   failed: new Set(),
   cancelled: new Set(),
-};
-
-type ProtectedAuthOperationMetadata = {
-  schemaVersion: 1;
-  authRunVersion: number;
-  authority: SiteAuthAuthorityValue;
-  origins: string[];
-  fields: Array<{
-    id: string;
-    purpose: "identifier" | "password" | "secret" | "totp";
-  }>;
-  credentialVersion: number | null;
 };
 
 type ExternalAuthOperationMetadata = {
@@ -1553,30 +1520,6 @@ export type ExternalAuthPreparation = {
   response: ExternalAuthRunResponseValue | null;
   replayed: boolean;
 };
-
-export type ProtectedAuthFillPreparation = {
-  run: AuthRunValue;
-  authority: SiteAuthAuthorityValue;
-  origins: string[];
-  credentialVersion: number | null;
-  operationState: ResourceOperationRow["state"];
-  response: ProtectedAuthFillResponseValue | null;
-  replayed: boolean;
-};
-
-function protectedAuthFillDigest(
-  authRunId: string,
-  request: ProtectedAuthFillRequestValue,
-  actorSubjectId: string,
-): string {
-  const { operationId: _operationId, ...digestRequest } = request;
-  return operationDigest({
-    version: 1,
-    authRunId,
-    request: digestRequest,
-    actorSubjectId,
-  });
-}
 
 function parseExternalAuthRunRequest(
   input: ExternalAuthRunRequestValue,
@@ -1641,159 +1584,6 @@ function externalAuthPreparationFromOperation(
         : null,
     replayed: operation.state === "completed",
   };
-}
-
-function parseProtectedAuthFillRequest(
-  input: ProtectedAuthFillRequestValue,
-): ProtectedAuthFillRequestValue {
-  return ProtectedAuthFillRequest.parse({
-    operationId: input.operationId,
-    expectedVersion: input.expectedVersion,
-    expectedTargetGeneration: input.expectedTargetGeneration,
-    expectedDocumentGeneration: input.expectedDocumentGeneration,
-    expectedFrameId: input.expectedFrameId,
-    authorityId: input.authorityId,
-    fields: input.fields,
-    submit: input.submit,
-  });
-}
-
-function protectedAuthPreparationFromOperation(
-  operation: ResourceOperationRow,
-  run: AuthRunRow,
-): ProtectedAuthFillPreparation {
-  const metadata = protectedAuthOperationMetadata(operation.metadata);
-  return {
-    run: authRunFromRow(run),
-    authority: metadata.authority,
-    origins: metadata.origins,
-    credentialVersion: metadata.credentialVersion,
-    operationState: operation.state,
-    response:
-      operation.state === "completed" && operation.result
-        ? {
-            ...ProtectedAuthFillResponse.parse(operation.result),
-            replayed: true,
-          }
-        : null,
-    replayed: operation.state === "completed",
-  };
-}
-
-export async function getProtectedAuthFillPreparation(
-  db: Database,
-  input: InteractionMutationScope & {
-    authRunId: string;
-  } & ProtectedAuthFillRequestValue,
-): Promise<ProtectedAuthFillPreparation | null> {
-  const request = parseProtectedAuthFillRequest(input);
-  const digest = protectedAuthFillDigest(input.authRunId, request, input.actorSubjectId);
-  return await withRlsContext(
-    db,
-    input,
-    async (scopedDb) => {
-      const operation = await loadOperation(scopedDb, input.workspaceId, request.operationId);
-      if (!operation) return null;
-      assertOperationIdentity(operation, {
-        resourceKind: "auth_run",
-        resourceId: input.authRunId,
-        kind: "protected_fill",
-        requestDigest: digest,
-        actorSubjectId: input.actorSubjectId,
-      });
-      const run = await loadAuthRunRow(scopedDb, input.workspaceId, input.authRunId);
-      if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
-      return protectedAuthPreparationFromOperation(operation, run);
-    },
-    CONSISTENT_READ,
-  );
-}
-
-function protectedAuthOperationMetadata(value: unknown): ProtectedAuthOperationMetadata {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new InteractionResourceStateError("Protected-fill operation metadata is invalid");
-  }
-  const record = value as Record<string, unknown>;
-  const authority = SiteAuthAuthority.parse(record.authority);
-  if (
-    record.schemaVersion !== 1 ||
-    !Number.isSafeInteger(record.authRunVersion) ||
-    (record.authRunVersion as number) < 1 ||
-    !Array.isArray(record.origins) ||
-    record.origins.some(
-      (origin) =>
-        typeof origin !== "string" ||
-        (() => {
-          try {
-            return new URL(origin).origin !== origin;
-          } catch {
-            return true;
-          }
-        })(),
-    ) ||
-    !Array.isArray(record.fields) ||
-    record.fields.length < 1 ||
-    record.fields.length > 32 ||
-    !(
-      record.credentialVersion === null ||
-      (Number.isSafeInteger(record.credentialVersion) && (record.credentialVersion as number) > 0)
-    )
-  ) {
-    throw new InteractionResourceStateError("Protected-fill operation metadata is invalid");
-  }
-  const purposes = new Set(["identifier", "password", "secret", "totp"]);
-  const fields = record.fields.map((field) => {
-    if (!field || typeof field !== "object" || Array.isArray(field)) {
-      throw new InteractionResourceStateError("Protected-fill operation metadata is invalid");
-    }
-    const candidate = field as Record<string, unknown>;
-    if (
-      typeof candidate.id !== "string" ||
-      candidate.id.length < 1 ||
-      candidate.id.length > 512 ||
-      typeof candidate.purpose !== "string" ||
-      !purposes.has(candidate.purpose)
-    ) {
-      throw new InteractionResourceStateError("Protected-fill operation metadata is invalid");
-    }
-    return {
-      id: candidate.id,
-      purpose: candidate.purpose as ProtectedAuthOperationMetadata["fields"][number]["purpose"],
-    };
-  });
-  if (new Set(fields.map((field) => field.id)).size !== fields.length) {
-    throw new InteractionResourceStateError("Protected-fill operation metadata is invalid");
-  }
-  if ((authority.kind === "connection_fields") !== (record.credentialVersion !== null)) {
-    throw new InteractionResourceStateError("Protected-fill credential metadata is invalid");
-  }
-  return {
-    schemaVersion: 1,
-    authRunVersion: record.authRunVersion as number,
-    authority,
-    origins: [...(record.origins as string[])],
-    fields,
-    credentialVersion: record.credentialVersion as number | null,
-  };
-}
-
-function protectedAuthFields(
-  authority: SiteAuthAuthorityValue,
-  requested: readonly ProtectedAuthFillRequestValue["fields"][number][],
-): ProtectedAuthOperationMetadata["fields"] {
-  if (authority.kind === "external_provider") {
-    throw new InteractionResourceStateError(
-      "External auth providers cannot use protected field fill",
-    );
-  }
-  const configured = new Map(authority.fields.map((field) => [field.id, field]));
-  return requested.map((field) => {
-    const match = configured.get(field.fieldId);
-    if (!match) {
-      throw new InteractionResourceStateError("Protected-fill field is not configured");
-    }
-    return { id: match.id, purpose: match.purpose };
-  });
 }
 
 export async function listAuthRuns(
@@ -2146,7 +1936,6 @@ export async function settleSessionMaintenanceInTransaction(
     .set({
       state: "cancelled",
       choices: [],
-      pendingFields: [],
       externalAction: null,
       verifiedUrl: null,
       failureCode: null,
@@ -2238,7 +2027,6 @@ export async function reportAuthRun(
     ...(input.authorityId !== undefined ? { authorityId: input.authorityId } : {}),
     state: input.state,
     ...(input.choices !== undefined ? { choices: input.choices } : {}),
-    ...(input.pendingFields !== undefined ? { pendingFields: input.pendingFields } : {}),
     ...(input.externalAction !== undefined ? { externalAction: input.externalAction } : {}),
     ...(input.failureCode !== undefined ? { failureCode: input.failureCode } : {}),
   });
@@ -2305,7 +2093,6 @@ export async function reportAuthRun(
         authorityId: request.authorityId ?? current.authorityId,
         state: request.state,
         choices: request.choices ?? [],
-        pendingFields: request.pendingFields ?? [],
         externalAction: request.externalAction ?? null,
         failureCode: request.state === "failed" ? request.failureCode! : null,
         version: current.version + 1,
@@ -2603,7 +2390,6 @@ export async function completeExternalAuth(
           .set({
             state: "failed",
             choices: [],
-            pendingFields: [],
             externalAction: null,
             interventionId: null,
             verifiedUrl: null,
@@ -2765,7 +2551,6 @@ export async function completeExternalAuth(
           targetGeneration: input.target?.targetGeneration ?? run.targetGeneration,
           documentGeneration: input.target?.documentGeneration ?? run.documentGeneration,
           choices: [],
-          pendingFields: [],
           externalAction:
             providerResult.state === "needs_human" ? providerResult.externalAction : null,
           interventionId,
@@ -2858,508 +2643,6 @@ function assertExternalAuthOperationBinding(
   }
 }
 
-export async function prepareProtectedAuthFill(
-  db: Database,
-  input: InteractionMutationScope & {
-    authRunId: string;
-    credentialVersion: number | null;
-  } & ProtectedAuthFillRequestValue,
-): Promise<ProtectedAuthFillPreparation> {
-  const request = parseProtectedAuthFillRequest(input);
-  const digest = protectedAuthFillDigest(input.authRunId, request, input.actorSubjectId);
-  return await withRlsContext(db, input, async (scopedDb) => {
-    await assertWorkspaceAccount(scopedDb, input.accountId, input.workspaceId);
-    await setSubjectRlsContext(scopedDb, input.actorSubjectId);
-    await lockOperation(scopedDb, request.operationId);
-    const existing = await loadOperation(scopedDb, input.workspaceId, request.operationId);
-    if (existing) {
-      assertOperationIdentity(existing, {
-        resourceKind: "auth_run",
-        resourceId: input.authRunId,
-        kind: "protected_fill",
-        requestDigest: digest,
-        actorSubjectId: input.actorSubjectId,
-      });
-      const run = await loadAuthRunRow(scopedDb, input.workspaceId, input.authRunId);
-      if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
-      return protectedAuthPreparationFromOperation(existing, run);
-    }
-
-    const [run] = await scopedDb
-      .select()
-      .from(schema.authRuns)
-      .where(
-        and(
-          eq(schema.authRuns.workspaceId, input.workspaceId),
-          eq(schema.authRuns.id, input.authRunId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
-    if (run.settledAt) throw new InteractionResourceStateError("Auth run is already settled");
-    if (run.version !== request.expectedVersion) {
-      throw new InteractionResourceConflictError("Auth run changed before protected fill");
-    }
-    if (
-      run.targetGeneration !== request.expectedTargetGeneration ||
-      run.documentGeneration !== request.expectedDocumentGeneration ||
-      !request.expectedDocumentGeneration ||
-      !request.expectedFrameId
-    ) {
-      throw new InteractionResourceConflictError(
-        "Protected fill does not match the exact auth-run document",
-      );
-    }
-    const [browser] = await scopedDb
-      .select({
-        lifecycle: schema.browserSessions.lifecycle,
-        controllerGeneration: schema.browserSessions.controllerGeneration,
-      })
-      .from(schema.browserSessions)
-      .where(
-        and(
-          eq(schema.browserSessions.workspaceId, input.workspaceId),
-          eq(schema.browserSessions.id, run.browserSessionId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    if (
-      !browser ||
-      browser.lifecycle !== "active" ||
-      browser.controllerGeneration !== run.controllerGeneration
-    ) {
-      throw new InteractionResourceConflictError(
-        "Protected fill belongs to a stale browser controller",
-      );
-    }
-    const connectionRow = await getSiteAuthConnectionRow(
-      scopedDb,
-      input.workspaceId,
-      run.siteAuthConnectionId,
-    );
-    if (connectionRow.status !== "active") {
-      throw new InteractionResourceStateError("Site auth connection is archived");
-    }
-    const connection = siteAuthConnectionFromRow(connectionRow);
-    assertAuthSelection(connection, {
-      methodId: run.methodId,
-      authorityId: request.authorityId,
-    });
-    if (run.authorityId && run.authorityId !== request.authorityId) {
-      throw new InteractionResourceConflictError("Auth run selected another authority");
-    }
-    const authority = connection.authorities.find(
-      (candidate) => candidate.id === request.authorityId,
-    );
-    if (!authority) throw new InteractionResourceStateError("Auth authority is not configured");
-    const fields = protectedAuthFields(authority, request.fields);
-    if (
-      (authority.kind === "connection_fields" &&
-        (!Number.isSafeInteger(input.credentialVersion) || input.credentialVersion! < 1)) ||
-      (authority.kind !== "connection_fields" && input.credentialVersion !== null)
-    ) {
-      throw new InteractionResourceStateError("Protected-fill credential version is invalid");
-    }
-    const metadata: ProtectedAuthOperationMetadata = {
-      schemaVersion: 1,
-      authRunVersion: run.version,
-      authority,
-      origins: [...connection.origins],
-      fields,
-      credentialVersion: input.credentialVersion,
-    };
-    await scopedDb.insert(schema.interactionResourceOperations).values({
-      operationId: request.operationId,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      resourceKind: "auth_run",
-      resourceId: input.authRunId,
-      kind: "protected_fill",
-      requestDigest: digest,
-      metadata,
-      state: "prepared",
-      actorSubjectId: input.actorSubjectId,
-    });
-    return {
-      run: authRunFromRow(run),
-      authority,
-      origins: [...connection.origins],
-      credentialVersion: input.credentialVersion,
-      operationState: "prepared",
-      response: null,
-      replayed: false,
-    };
-  });
-}
-
-export async function dispatchProtectedAuthFill(
-  db: Database,
-  input: InteractionMutationScope & { authRunId: string; operationId: string },
-): Promise<ResourceOperationRow["state"]> {
-  return await withRlsContext(db, input, async (scopedDb) => {
-    await lockOperation(scopedDb, input.operationId);
-    const [operation] = await scopedDb
-      .select()
-      .from(schema.interactionResourceOperations)
-      .where(
-        and(
-          eq(schema.interactionResourceOperations.workspaceId, input.workspaceId),
-          eq(schema.interactionResourceOperations.operationId, input.operationId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    if (!operation)
-      throw new InteractionResourceNotFoundError("Protected-fill operation not found");
-    assertProtectedFillOperationBinding(operation, input);
-    if (operation.state === "prepared") {
-      const [dispatched] = await scopedDb
-        .update(schema.interactionResourceOperations)
-        .set({ state: "dispatched" })
-        .where(
-          and(
-            eq(schema.interactionResourceOperations.operationId, input.operationId),
-            eq(schema.interactionResourceOperations.state, "prepared"),
-          ),
-        )
-        .returning({ state: schema.interactionResourceOperations.state });
-      if (!dispatched) {
-        throw new InteractionResourceConflictError("Protected-fill dispatch lost its fence");
-      }
-      return dispatched.state;
-    }
-    return operation.state;
-  });
-}
-
-export async function completeProtectedAuthFill(
-  db: Database,
-  input: InteractionMutationScope & {
-    authRunId: string;
-    operationId: string;
-    status: ProtectedAuthFillResponseValue["status"];
-    targetGeneration?: string;
-    documentGeneration?: string | null;
-    failureCode?: string;
-    intervention?: {
-      originatingSessionId: string;
-      originatingTurnId?: string | null;
-      originatingAttemptId?: string | null;
-      originatingToolOperationId?: string | null;
-      kind: "manual_login" | "mfa" | "external_action" | "confirmation" | "other";
-      reason: string;
-      expiresInSeconds: number;
-    };
-  },
-): Promise<ProtectedAuthFillResponseValue> {
-  try {
-    return await withRlsContext(db, input, async (scopedDb) => {
-      await lockOperation(scopedDb, input.operationId);
-      const [operation] = await scopedDb
-        .select()
-        .from(schema.interactionResourceOperations)
-        .where(
-          and(
-            eq(schema.interactionResourceOperations.workspaceId, input.workspaceId),
-            eq(schema.interactionResourceOperations.operationId, input.operationId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!operation)
-        throw new InteractionResourceNotFoundError("Protected-fill operation not found");
-      assertProtectedFillOperationBinding(operation, input);
-      if (operation.state === "completed" && operation.result) {
-        return {
-          ...ProtectedAuthFillResponse.parse(operation.result),
-          replayed: true,
-        };
-      }
-      if (operation.state === "failed" || operation.state === "outcome_unknown") {
-        throw new InteractionResourceStateError(
-          `Protected-fill operation is ${operation.state.replace("_", " ")}`,
-        );
-      }
-      if (
-        (input.status === "submitted" || input.status === "working") &&
-        operation.state !== "dispatched"
-      ) {
-        throw new InteractionResourceStateError("Protected fill was not dispatched");
-      }
-      const metadata = protectedAuthOperationMetadata(operation.metadata);
-      const [run] = await scopedDb
-        .select()
-        .from(schema.authRuns)
-        .where(
-          and(
-            eq(schema.authRuns.workspaceId, input.workspaceId),
-            eq(schema.authRuns.id, input.authRunId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
-      if (run.version !== metadata.authRunVersion || run.settledAt) {
-        throw new InteractionResourceConflictError("Auth run changed after protected fill began");
-      }
-      if (input.targetGeneration && input.targetGeneration !== run.targetGeneration) {
-        throw new InteractionResourceConflictError("Protected-fill result targets another tab");
-      }
-      const submitted = input.status === "submitted" || input.status === "working";
-      const needsHuman = input.status === "needs_human";
-      if (needsHuman !== Boolean(input.intervention)) {
-        throw new InteractionResourceStateError(
-          "Human protected fill requires one durable intervention",
-        );
-      }
-      if (needsHuman && metadata.authority.kind !== "human") {
-        throw new InteractionResourceStateError(
-          "Only a human auth authority can request human intervention",
-        );
-      }
-      let interventionId: string | null = null;
-      if (needsHuman) {
-        const intervention = input.intervention!;
-        if (
-          (intervention.originatingAttemptId && !intervention.originatingTurnId) ||
-          (intervention.originatingToolOperationId && !intervention.originatingAttemptId)
-        ) {
-          throw new InteractionResourceStateError(
-            "Protected-fill intervention provenance is incomplete",
-          );
-        }
-        const request = CreateInteractionInterventionRequest.parse({
-          operationId: input.operationId,
-          resourceKind: "browser_session",
-          resourceId: run.browserSessionId,
-          targetId: run.targetId,
-          expectedControllerGeneration: run.controllerGeneration,
-          expectedTargetGeneration: run.targetGeneration,
-          expectedDocumentGeneration: run.documentGeneration,
-          kind: intervention.kind,
-          reason: intervention.reason,
-          authRunId: run.id,
-          expiresInSeconds: intervention.expiresInSeconds,
-        });
-        interventionId = randomUUID();
-        const [created] = await scopedDb
-          .insert(schema.interactionInterventions)
-          .values({
-            id: interventionId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            resourceKind: request.resourceKind,
-            resourceId: request.resourceId,
-            targetId: request.targetId,
-            controllerGeneration: request.expectedControllerGeneration,
-            targetGeneration: request.expectedTargetGeneration,
-            documentGeneration: request.expectedDocumentGeneration,
-            kind: request.kind,
-            reason: request.reason,
-            authRunId: run.id,
-            originatingSessionId: intervention.originatingSessionId,
-            originatingTurnId: intervention.originatingTurnId ?? null,
-            originatingAttemptId: intervention.originatingAttemptId ?? null,
-            originatingToolOperationId: intervention.originatingToolOperationId ?? null,
-            operationId: input.operationId,
-            expiresAt: sql`now() + (${request.expiresInSeconds} * interval '1 second')`,
-          })
-          .returning({ id: schema.interactionInterventions.id });
-        if (!created) {
-          throw new Error("Protected-fill intervention insert returned no row");
-        }
-      }
-      const failureCode =
-        submitted || needsHuman ? null : (input.failureCode ?? "protected_fill_failed");
-      const [updated] = await scopedDb
-        .update(schema.authRuns)
-        .set({
-          authorityId: metadata.authority.id,
-          state: submitted ? "working" : needsHuman ? "awaiting_secret" : "failed",
-          choices: [],
-          pendingFields: needsHuman
-            ? metadata.fields.map((field) => ({
-                id: field.id,
-                label: field.id,
-                purpose: field.purpose,
-              }))
-            : [],
-          externalAction: null,
-          interventionId,
-          verifiedUrl: null,
-          failureCode,
-          documentGeneration:
-            submitted && input.documentGeneration !== undefined
-              ? input.documentGeneration
-              : run.documentGeneration,
-          version: run.version + 1,
-          updatedAt: sql`now()`,
-          settledAt: failureCode ? sql`now()` : null,
-        })
-        .where(
-          and(
-            eq(schema.authRuns.workspaceId, input.workspaceId),
-            eq(schema.authRuns.id, input.authRunId),
-            eq(schema.authRuns.version, metadata.authRunVersion),
-            sql`${schema.authRuns.settledAt} is null`,
-          ),
-        )
-        .returning();
-      if (!updated) {
-        throw new InteractionResourceConflictError("Protected-fill settlement lost its auth fence");
-      }
-      await projectSettledAuthRunHealth(scopedDb, {
-        run: updated,
-        actorSubjectId: input.actorSubjectId,
-      });
-      const response = ProtectedAuthFillResponse.parse({
-        run: authRunFromRow(updated),
-        status: input.status,
-        operationId: input.operationId,
-        replayed: false,
-      });
-      const [completed] = await scopedDb
-        .update(schema.interactionResourceOperations)
-        .set({
-          state: "completed",
-          resultVersion: updated.version,
-          result: response,
-          settledAt: sql`now()`,
-        })
-        .where(
-          and(
-            eq(schema.interactionResourceOperations.operationId, input.operationId),
-            inArray(schema.interactionResourceOperations.state, ["prepared", "dispatched"]),
-          ),
-        )
-        .returning({
-          operationId: schema.interactionResourceOperations.operationId,
-        });
-      if (!completed) {
-        throw new InteractionResourceConflictError(
-          "Protected-fill settlement lost its operation fence",
-        );
-      }
-      await advanceWorkspaceInteractionRevision(scopedDb, input.accountId, input.workspaceId);
-      return response;
-    });
-  } catch (error) {
-    if (
-      postgresConstraint(error) === "interaction_interventions_workspace_operation_uq" ||
-      postgresConstraint(error) === "interaction_interventions_open_target_kind_uq" ||
-      postgresConstraint(error) === "interaction_interventions_open_auth_run_uq"
-    ) {
-      throw new InteractionResourceConflictError(
-        "A matching interaction intervention is already open",
-      );
-    }
-    throw error;
-  }
-}
-
-export async function markProtectedAuthFillOutcomeUnknown(
-  db: Database,
-  input: InteractionMutationScope & {
-    authRunId: string;
-    operationId: string;
-    errorCode: string;
-  },
-): Promise<void> {
-  await withRlsContext(db, input, async (scopedDb) => {
-    await lockOperation(scopedDb, input.operationId);
-    const [operation] = await scopedDb
-      .select()
-      .from(schema.interactionResourceOperations)
-      .where(
-        and(
-          eq(schema.interactionResourceOperations.workspaceId, input.workspaceId),
-          eq(schema.interactionResourceOperations.operationId, input.operationId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    if (!operation)
-      throw new InteractionResourceNotFoundError("Protected-fill operation not found");
-    assertProtectedFillOperationBinding(operation, input);
-    if (
-      operation.state === "completed" ||
-      operation.state === "failed" ||
-      operation.state === "outcome_unknown"
-    ) {
-      return;
-    }
-    const [marked] = await scopedDb
-      .update(schema.interactionResourceOperations)
-      .set({
-        state: "outcome_unknown",
-        errorCode: input.errorCode,
-        settledAt: sql`now()`,
-      })
-      .where(
-        and(
-          eq(schema.interactionResourceOperations.operationId, input.operationId),
-          inArray(schema.interactionResourceOperations.state, ["prepared", "dispatched"]),
-        ),
-      )
-      .returning({
-        operationId: schema.interactionResourceOperations.operationId,
-      });
-    if (!marked) {
-      throw new InteractionResourceConflictError(
-        "Protected-fill unknown outcome lost its operation fence",
-      );
-    }
-    const metadata = protectedAuthOperationMetadata(operation.metadata);
-    const [failedRun] = await scopedDb
-      .update(schema.authRuns)
-      .set({
-        state: "failed",
-        choices: [],
-        pendingFields: [],
-        externalAction: null,
-        verifiedUrl: null,
-        failureCode: input.errorCode,
-        version: sql`${schema.authRuns.version} + 1`,
-        updatedAt: sql`now()`,
-        settledAt: sql`now()`,
-      })
-      .where(
-        and(
-          eq(schema.authRuns.workspaceId, input.workspaceId),
-          eq(schema.authRuns.id, input.authRunId),
-          eq(schema.authRuns.version, metadata.authRunVersion),
-          sql`${schema.authRuns.settledAt} is null`,
-        ),
-      )
-      .returning();
-    if (failedRun) {
-      await projectSettledAuthRunHealth(scopedDb, {
-        run: failedRun,
-        actorSubjectId: input.actorSubjectId,
-      });
-    }
-    await advanceWorkspaceInteractionRevision(scopedDb, input.accountId, input.workspaceId);
-  });
-}
-
-function assertProtectedFillOperationBinding(
-  operation: ResourceOperationRow,
-  input: { authRunId: string; actorSubjectId: string },
-): void {
-  if (
-    operation.resourceKind !== "auth_run" ||
-    operation.resourceId !== input.authRunId ||
-    operation.kind !== "protected_fill" ||
-    operation.actorSubjectId !== input.actorSubjectId
-  ) {
-    throw new InteractionResourceConflictError(
-      "Operation id is bound to another protected-fill request",
-    );
-  }
-}
-
 export async function verifyAuthRun(
   db: Database,
   input: InteractionMutationScope & {
@@ -3444,7 +2727,6 @@ export async function verifyAuthRun(
           .set({
             state: "verified",
             choices: [],
-            pendingFields: [],
             externalAction: null,
             interventionId: null,
             documentGeneration: input.documentGeneration,
@@ -3649,7 +2931,6 @@ async function settleLinkedAuthRun(
     .set({
       state: resumed ? "working" : input.outcome === "cancelled" ? "cancelled" : "failed",
       choices: [],
-      pendingFields: [],
       externalAction: null,
       interventionId: null,
       failureCode:
@@ -3777,12 +3058,69 @@ export type AttemptInteractionInterventionRequest = {
   originatingAttemptId: string;
   toolCallId: string;
   input: RequestHumanInteractionToolInputValue;
+  /**
+   * The target as the worker read it when the turn paused. It supplies the
+   * generations a request left out; a string says why it could not be read.
+   */
+  currentTarget?: InteractionRequestCurrentTarget | string;
 };
+
+export type InteractionRequestCurrentTarget = {
+  controllerGeneration: string;
+  targetGeneration: string;
+  documentGeneration: string | null;
+};
+
+/**
+ * An interaction_request_human call the pause could not record. `refusal` is
+ * the call's tool result: what happened in plain words and what to do next.
+ * Nothing was written for the call.
+ */
+export class InteractionRequestRefusedError extends Error {
+  readonly name = "InteractionRequestRefusedError";
+  get refusal(): string {
+    return this.message;
+  }
+}
+
+const OBSERVE_AND_ASK_AGAIN =
+  "Observe the tab or window again, then call interaction_request_human again if a person still needs to act there.";
+const ASK_WITHOUT_GENERATIONS =
+  "Call interaction_request_human again and leave out expectedControllerGeneration, expectedTargetGeneration and expectedDocumentGeneration; they are read from the tab or window when the turn pauses.";
+const ASK_WITHOUT_AUTH_RUN =
+  "Call interaction_request_human again without authRunId and the expected generation fields, or wait with operation=wait and the interventionId browser_auth returned.";
+const WAIT_ONLY_FOR_RETURNED =
+  "Use operation=wait only with an interventionId browser_auth returned in this turn; otherwise ask with operation=request.";
+
+function plainReason(reason: string): string {
+  return reason.trim().replace(/[.\s]+$/u, "");
+}
+
+function refuseRequest(reason: string, next: string): InteractionRequestRefusedError {
+  return new InteractionRequestRefusedError(
+    `Nothing was requested: ${plainReason(reason)}. ${next}`,
+  );
+}
+
+function refuseWait(reason: string, next: string): InteractionRequestRefusedError {
+  return new InteractionRequestRefusedError(`Not waiting: ${plainReason(reason)}. ${next}`);
+}
+
+function isOpenInterventionUniqueViolation(error: unknown): boolean {
+  const constraint = postgresConstraint(error);
+  return (
+    constraint === "interaction_interventions_open_target_kind_uq" ||
+    constraint === "interaction_interventions_open_auth_run_uq"
+  );
+}
 
 /**
  * Persist one interaction interruption inside the same transaction as its
  * frozen Agent RunState. This is deliberately transaction-local: callers must
  * already hold the session/turn/attempt settlement locks and RLS context.
+ * A call that cannot be recorded throws InteractionRequestRefusedError, whose
+ * refusal becomes the call's result; callers run this in a savepoint so the
+ * refusal leaves nothing behind.
  */
 export async function persistAttemptInteractionInterventionInTransaction(
   db: Database,
@@ -3790,38 +3128,46 @@ export async function persistAttemptInteractionInterventionInTransaction(
 ): Promise<InteractionInterventionValue> {
   const input = RequestHumanInteractionToolInput.parse(raw.input);
   if (Buffer.byteLength(raw.toolCallId) < 1 || Buffer.byteLength(raw.toolCallId) > 1_024) {
-    throw new InteractionResourceStateError("Interaction tool call id is invalid");
+    throw new Error("Interaction tool call id is invalid");
   }
   if (input.operation === "wait") {
+    const interventionId = input.interventionId;
     const [current] = await db
       .select()
       .from(schema.interactionInterventions)
       .where(
         and(
           eq(schema.interactionInterventions.workspaceId, raw.workspaceId),
-          eq(schema.interactionInterventions.id, input.interventionId),
+          eq(schema.interactionInterventions.id, interventionId),
         ),
       )
       .for("update")
       .limit(1);
-    if (!current) throw new InteractionResourceNotFoundError("Interaction intervention not found");
+    if (!current) {
+      throw refuseWait(`intervention ${interventionId} was not found`, WAIT_ONLY_FOR_RETURNED);
+    }
     if (current.status !== "open" || current.expiresAt.getTime() <= Date.now()) {
-      throw new InteractionResourceStateError("Interaction intervention is no longer open");
+      throw refuseWait(
+        `intervention ${interventionId} is no longer open; it was finished, dismissed or expired`,
+        "Observe the tab or window again, then call interaction_request_human with operation=request if a person still needs to act there.",
+      );
     }
     if (
       current.originatingSessionId !== raw.originatingSessionId ||
       current.originatingTurnId !== raw.originatingTurnId
     ) {
-      throw new InteractionResourceConflictError(
-        "Interaction intervention belongs to another agent operation",
+      throw refuseWait(
+        `intervention ${interventionId} was opened by another agent turn`,
+        WAIT_ONLY_FOR_RETURNED,
       );
     }
     if (
       current.originatingToolCallId !== null &&
       current.originatingToolCallId !== raw.toolCallId
     ) {
-      throw new InteractionResourceConflictError(
-        "Interaction intervention already has another waiting tool call",
+      throw refuseWait(
+        `another interaction_request_human call already waits for intervention ${interventionId}`,
+        "That call's result says how the person finished; do not wait for it twice.",
       );
     }
     const row =
@@ -3845,36 +3191,18 @@ export async function persistAttemptInteractionInterventionInTransaction(
               )
               .returning()
           )[0];
-    if (!row) throw new InteractionResourceConflictError("Intervention wait lost its fence");
+    if (!row) {
+      throw refuseWait(
+        `intervention ${interventionId} changed while this call started waiting`,
+        "Call interaction_request_human with operation=wait again.",
+      );
+    }
     return interventionFromRow(row);
   }
 
-  await assertActiveInteractionResource(db, {
-    workspaceId: raw.workspaceId,
-    resourceKind: input.resourceKind,
-    resourceId: input.resourceId,
-    expectedControllerGeneration: input.expectedControllerGeneration,
-  });
-  let authRun: AuthRunRow | null = null;
-  if (input.authRunId) {
-    if (input.resourceKind !== "browser_session") {
-      throw new InteractionResourceStateError("Only browser interventions can belong to auth runs");
-    }
-    authRun = await loadAuthRunRow(db, raw.workspaceId, input.authRunId);
-    if (!authRun) throw new InteractionResourceNotFoundError("Auth run not found");
-    if (
-      authRun.browserSessionId !== input.resourceId ||
-      authRun.targetId !== input.targetId ||
-      authRun.controllerGeneration !== input.expectedControllerGeneration ||
-      authRun.targetGeneration !== input.expectedTargetGeneration ||
-      authRun.documentGeneration !== input.expectedDocumentGeneration ||
-      authRun.settledAt
-    ) {
-      throw new InteractionResourceConflictError(
-        "Interaction intervention does not match the active auth run",
-      );
-    }
-  }
+  // A re-freeze (another approval of the same pause was answered first)
+  // finds the intervention it recorded before; the person may already be
+  // acting on it, so it stands without checking the target again.
   const [existing] = await db
     .select()
     .from(schema.interactionInterventions)
@@ -3887,6 +3215,8 @@ export async function persistAttemptInteractionInterventionInTransaction(
     .for("update")
     .limit(1);
   if (existing) {
+    const matches = (requested: string | null | undefined, recorded: string | null) =>
+      requested === undefined || requested === recorded;
     if (
       existing.operationId !== raw.operationId ||
       existing.originatingSessionId !== raw.originatingSessionId ||
@@ -3895,9 +3225,9 @@ export async function persistAttemptInteractionInterventionInTransaction(
       existing.resourceKind !== input.resourceKind ||
       existing.resourceId !== input.resourceId ||
       existing.targetId !== input.targetId ||
-      existing.controllerGeneration !== input.expectedControllerGeneration ||
-      existing.targetGeneration !== input.expectedTargetGeneration ||
-      existing.documentGeneration !== input.expectedDocumentGeneration ||
+      !matches(input.expectedControllerGeneration, existing.controllerGeneration) ||
+      !matches(input.expectedTargetGeneration, existing.targetGeneration) ||
+      !matches(input.expectedDocumentGeneration, existing.documentGeneration) ||
       existing.kind !== input.kind ||
       existing.reason !== input.reason ||
       existing.authRunId !== (input.authRunId ?? null) ||
@@ -3907,30 +3237,188 @@ export async function persistAttemptInteractionInterventionInTransaction(
     }
     return interventionFromRow(existing);
   }
-  const [row] = await db
-    .insert(schema.interactionInterventions)
-    .values({
-      id: raw.id,
-      accountId: raw.accountId,
+  let authRun: AuthRunRow | null = null;
+  if (input.authRunId) {
+    if (input.resourceKind !== "browser_session") {
+      throw refuseRequest(
+        "authRunId applies only to browser tabs",
+        "Call interaction_request_human again without authRunId.",
+      );
+    }
+    authRun = await loadAuthRunRow(db, raw.workspaceId, input.authRunId);
+    if (!authRun) {
+      throw refuseRequest(`auth run ${input.authRunId} was not found`, ASK_WITHOUT_AUTH_RUN);
+    }
+  }
+  const suppliedGenerations =
+    input.expectedControllerGeneration !== undefined ||
+    input.expectedTargetGeneration !== undefined ||
+    input.expectedDocumentGeneration !== undefined;
+  // Generations the request left out come from its auth run, else from the
+  // target as the worker read it at this pause. Supplied ones must match that
+  // reading (an auth run is matched below). When the target could not be
+  // read, only a request that supplied all three is recorded, as given; its
+  // controller is still checked against the session below.
+  const current = authRun ? null : typeof raw.currentTarget === "object" ? raw.currentTarget : null;
+  if (
+    current &&
+    ((input.expectedControllerGeneration !== undefined &&
+      input.expectedControllerGeneration !== current.controllerGeneration) ||
+      (input.expectedTargetGeneration !== undefined &&
+        input.expectedTargetGeneration !== current.targetGeneration) ||
+      (input.expectedDocumentGeneration !== undefined &&
+        input.expectedDocumentGeneration !== current.documentGeneration))
+  ) {
+    throw refuseRequest(
+      "the expected generation values given do not match the tab or window as it is now",
+      ASK_WITHOUT_GENERATIONS,
+    );
+  }
+  const source = authRun ?? current;
+  const controllerGeneration =
+    input.expectedControllerGeneration ?? source?.controllerGeneration ?? null;
+  const targetGeneration = input.expectedTargetGeneration ?? source?.targetGeneration ?? null;
+  const documentGeneration =
+    input.expectedDocumentGeneration !== undefined
+      ? input.expectedDocumentGeneration
+      : source
+        ? source.documentGeneration
+        : undefined;
+  if (
+    controllerGeneration === null ||
+    targetGeneration === null ||
+    documentGeneration === undefined
+  ) {
+    throw refuseRequest(
+      typeof raw.currentTarget === "string"
+        ? raw.currentTarget
+        : "the tab or window could not be read when the turn paused",
+      OBSERVE_AND_ASK_AGAIN,
+    );
+  }
+  const sessionLabel = input.resourceKind === "browser_session" ? "browser" : "computer";
+  try {
+    await assertActiveInteractionResource(db, {
       workspaceId: raw.workspaceId,
       resourceKind: input.resourceKind,
       resourceId: input.resourceId,
-      targetId: input.targetId,
-      controllerGeneration: input.expectedControllerGeneration,
-      targetGeneration: input.expectedTargetGeneration,
-      documentGeneration: input.expectedDocumentGeneration,
-      kind: input.kind,
-      reason: input.reason,
-      authRunId: input.authRunId ?? null,
-      originatingSessionId: raw.originatingSessionId,
-      originatingTurnId: raw.originatingTurnId,
-      originatingAttemptId: raw.originatingAttemptId,
-      originatingToolOperationId: raw.operationId,
-      originatingToolCallId: raw.toolCallId,
-      operationId: raw.operationId,
-      expiresAt: sql`now() + (${input.expiresInSeconds} * interval '1 second')`,
-    })
-    .returning();
+      expectedControllerGeneration: controllerGeneration,
+    });
+  } catch (error) {
+    if (error instanceof InteractionResourceNotFoundError) {
+      throw refuseRequest(
+        `${sessionLabel} session ${input.resourceId} was not found`,
+        OBSERVE_AND_ASK_AGAIN,
+      );
+    }
+    if (error instanceof InteractionResourceStateError) {
+      throw refuseRequest(
+        `${sessionLabel} session ${input.resourceId} is not active`,
+        OBSERVE_AND_ASK_AGAIN,
+      );
+    }
+    if (error instanceof InteractionResourceConflictError) {
+      if (authRun) {
+        throw refuseRequest(
+          `the browser session restarted after auth run ${authRun.id} started`,
+          ASK_WITHOUT_AUTH_RUN,
+        );
+      }
+      throw input.expectedControllerGeneration !== undefined
+        ? refuseRequest(
+            "the expected generation values given do not match the tab or window as it is now",
+            ASK_WITHOUT_GENERATIONS,
+          )
+        : refuseRequest(
+            `the ${sessionLabel} session restarted while the request was being made`,
+            OBSERVE_AND_ASK_AGAIN,
+          );
+    }
+    throw error;
+  }
+  if (
+    authRun &&
+    (authRun.browserSessionId !== input.resourceId ||
+      authRun.targetId !== input.targetId ||
+      authRun.controllerGeneration !== controllerGeneration ||
+      authRun.targetGeneration !== targetGeneration ||
+      authRun.documentGeneration !== documentGeneration ||
+      authRun.settledAt)
+  ) {
+    throw refuseRequest(
+      authRun.settledAt
+        ? `auth run ${authRun.id} has already finished`
+        : `auth run ${authRun.id} is for another tab or page${suppliedGenerations ? ", or the expected generation values given do not match it" : ""}`,
+      ASK_WITHOUT_AUTH_RUN,
+    );
+  }
+  // One open request per target and kind (and per auth run); the resource
+  // row lock above serializes this with every other insert.
+  const [alreadyOpen] = await db
+    .select({ id: schema.interactionInterventions.id })
+    .from(schema.interactionInterventions)
+    .where(
+      and(
+        eq(schema.interactionInterventions.workspaceId, raw.workspaceId),
+        eq(schema.interactionInterventions.status, "open"),
+        or(
+          and(
+            eq(schema.interactionInterventions.resourceKind, input.resourceKind),
+            eq(schema.interactionInterventions.resourceId, input.resourceId),
+            eq(schema.interactionInterventions.targetId, input.targetId),
+            eq(schema.interactionInterventions.kind, input.kind),
+          ),
+          ...(input.authRunId
+            ? [eq(schema.interactionInterventions.authRunId, input.authRunId)]
+            : []),
+        ),
+      ),
+    )
+    .limit(1);
+  const alreadyOpenNext =
+    "If browser_auth returned that interventionId, wait for it with operation=wait; otherwise ask again only after that request is finished.";
+  if (alreadyOpen) {
+    throw refuseRequest(
+      `another open request (intervention ${alreadyOpen.id}) already asks a person to act on this tab or window`,
+      alreadyOpenNext,
+    );
+  }
+  let inserted: Array<typeof schema.interactionInterventions.$inferSelect>;
+  try {
+    inserted = await db
+      .insert(schema.interactionInterventions)
+      .values({
+        id: raw.id,
+        accountId: raw.accountId,
+        workspaceId: raw.workspaceId,
+        resourceKind: input.resourceKind,
+        resourceId: input.resourceId,
+        targetId: input.targetId,
+        controllerGeneration,
+        targetGeneration,
+        documentGeneration,
+        kind: input.kind,
+        reason: input.reason,
+        authRunId: input.authRunId ?? null,
+        originatingSessionId: raw.originatingSessionId,
+        originatingTurnId: raw.originatingTurnId,
+        originatingAttemptId: raw.originatingAttemptId,
+        originatingToolOperationId: raw.operationId,
+        originatingToolCallId: raw.toolCallId,
+        operationId: raw.operationId,
+        expiresAt: sql`now() + (${input.expiresInSeconds} * interval '1 second')`,
+      })
+      .returning();
+  } catch (error) {
+    // A request opened concurrently by a writer that does not take the
+    // resource lock (or committed after this snapshot) is the same refusal.
+    if (!isOpenInterventionUniqueViolation(error)) throw error;
+    throw refuseRequest(
+      "another open request already asks a person to act on this tab or window",
+      alreadyOpenNext,
+    );
+  }
+  const [row] = inserted;
   if (!row) throw new Error("Interaction interruption insert returned no row");
   if (authRun) {
     const linked = await db
@@ -3950,7 +3438,10 @@ export async function persistAttemptInteractionInterventionInTransaction(
       )
       .returning({ id: schema.authRuns.id });
     if (linked.length !== 1) {
-      throw new InteractionResourceConflictError("Auth run changed before intervention link");
+      throw refuseRequest(
+        `auth run ${authRun.id} changed while the request was being made`,
+        ASK_WITHOUT_AUTH_RUN,
+      );
     }
   }
   await advanceWorkspaceInteractionRevision(db, raw.accountId, raw.workspaceId);

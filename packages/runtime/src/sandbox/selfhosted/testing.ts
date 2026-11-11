@@ -129,7 +129,7 @@ export class MockAgentResponder implements ControlRpc {
       case "ping":
         return ok(req.requestId, {
           $case: "ping",
-          ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+          ping: { nonce: op.ping.nonce, agentMonotonicMs: "0", controlReplayTokens: [] },
         });
       case "fsRead": {
         const bytes = this.files.get(normalize(op.fsRead.path));
@@ -288,6 +288,7 @@ function defaultEcho(req: ExecRequest, hostname: string): ExecResponse {
     stderr: new Uint8Array(0),
     timedOut: false,
     durationMs: "1",
+    backgroundChildrenStopped: false,
   };
 }
 

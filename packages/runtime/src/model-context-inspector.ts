@@ -8,7 +8,7 @@ import type {
   ModelContextTool,
 } from "@opengeni/contracts";
 import { MODEL_CONTEXT_SNAPSHOT_VERSION } from "@opengeni/contracts";
-import { estimateSerializedValueTokens, estimateTextTokens } from "./context-compaction";
+import { estimateTextTokens } from "./context-compaction";
 import { lazyToolRuntimeForAgent } from "./lazy-tool-transport";
 import type { EffectiveSkillSelection } from "./runtime-skills";
 
@@ -25,7 +25,7 @@ export type PersistentAgentInstructionLayerDraft = {
   joinBefore?: string;
 };
 
-function contextTextEstimate(value: unknown): number | null {
+function contextTextEstimate(value: unknown, serialized?: string): number | null {
   const containsNonText = (part: unknown): boolean => {
     if (Array.isArray(part)) return part.some(containsNonText);
     if (!part || typeof part !== "object") return false;
@@ -39,7 +39,13 @@ function contextTextEstimate(value: unknown): number | null {
       return true;
     return Object.values(record).some(containsNonText);
   };
-  return containsNonText(value) ? null : estimateSerializedValueTokens(value);
+  if (containsNonText(value)) return null;
+  // Provider parts are parsed JSON. Reuse the representation already needed
+  // for byte accounting rather than traversing that tree again for its length
+  // and then again for its non-ASCII count. Strings retain the raw-text rule.
+  return estimateTextTokens(
+    typeof value === "string" ? value : (serialized ?? JSON.stringify(value)),
+  );
 }
 
 export function buildProviderRequestSnapshot(input: {
@@ -70,15 +76,27 @@ export function buildProviderRequestSnapshot(input: {
     body = null;
     unavailableReason = "The provider body is not a JSON object.";
   }
-  const parts = Object.entries(payload).map(([key, value]) => ({
-    key,
-    estimatedTokens: contextTextEstimate(value),
-    utf8Bytes: Buffer.byteLength(JSON.stringify(value), "utf8"),
-    ...(Array.isArray(value) ? { itemEstimatedTokens: value.map(contextTextEstimate) } : {}),
-  }));
-  const instructionsTokens =
-    parts.find((part) => part.key === "instructions")?.estimatedTokens ?? 0;
-  const wireInstructions = typeof payload.instructions === "string" ? payload.instructions : null;
+  const parts = Object.entries(payload).map(([key, value]) => {
+    const serialized = JSON.stringify(value);
+    return {
+      key,
+      estimatedTokens: contextTextEstimate(value, serialized),
+      utf8Bytes: Buffer.byteLength(serialized, "utf8"),
+      ...(Array.isArray(value)
+        ? { itemEstimatedTokens: value.map((item) => contextTextEstimate(item)) }
+        : {}),
+    };
+  });
+  // Native Anthropic Messages bodies carry the instructions as `system` text
+  // blocks and the tools with `input_schema`; Responses bodies use
+  // `instructions` and do not repeat their contents here (the body owns them).
+  const anthropic = anthropicInstructionsAndTools(payload, input.persistentLayers);
+  const instructionsTokens = anthropic
+    ? estimateTextTokens(anthropic.instructions)
+    : (parts.find((part) => part.key === "instructions")?.estimatedTokens ?? 0);
+  const wireInstructions =
+    anthropic?.instructions ??
+    (typeof payload.instructions === "string" ? payload.instructions : null);
   const sectionLayers =
     wireInstructions && input.persistentLayers?.length
       ? splitCapturedInstructions({
@@ -99,9 +117,9 @@ export function buildProviderRequestSnapshot(input: {
     requestIndex: input.requestIndex,
     // Wire body owns the contents. Legacy prefix fields are not reconstructed;
     // `layers` only names sections of the wire instructions.
-    instructions: "",
+    instructions: anthropic?.instructions ?? "",
     layers,
-    tools: [],
+    tools: anthropic?.tools ?? [],
     skills: [],
     tokens: {
       instructions: instructionsTokens,
@@ -115,6 +133,75 @@ export function buildProviderRequestSnapshot(input: {
       parts,
     },
   };
+}
+
+/**
+ * The instructions and tools of an Anthropic Messages body. `system` starts
+ * with the agent instructions (one text block, or the cache-split stable prefix
+ * and its tail, which concatenate back exactly); developer history items folded
+ * in after them are conversation context, as they are in a Responses `input`,
+ * so they are not instructions. Null for any other body shape.
+ */
+function anthropicInstructionsAndTools(
+  payload: Record<string, unknown>,
+  persistentLayers: readonly PersistentAgentInstructionLayerDraft[] | undefined,
+): { instructions: string; tools: ModelContextTool[] } | null {
+  if (typeof payload.instructions === "string" || payload.system === undefined) return null;
+  const textBlocks =
+    typeof payload.system === "string"
+      ? [{ text: payload.system, breakpoint: false }]
+      : Array.isArray(payload.system)
+        ? payload.system.flatMap((block) =>
+            block &&
+            typeof block === "object" &&
+            (block as { type?: unknown }).type === "text" &&
+            typeof (block as { text?: unknown }).text === "string"
+              ? [
+                  {
+                    text: (block as { text: string }).text,
+                    breakpoint: (block as { cache_control?: unknown }).cache_control !== undefined,
+                  },
+                ]
+              : [],
+          )
+        : [];
+  const blocks = textBlocks.map((block) => block.text);
+  const composed = persistentLayers?.length
+    ? joinPersistentAgentInstructionLayers(persistentLayers)
+    : "";
+  let instructions = blocks[0] ?? "";
+  // The cache split cuts the instructions into a stable prefix and a tail. With
+  // the layers the joined text must reproduce them; without, the split is the
+  // only way the first block carries a breakpoint while more blocks follow.
+  const split = composed
+    ? blocks.length > 1 &&
+      !instructions.startsWith(composed) &&
+      composed.startsWith(instructions) &&
+      `${instructions}${blocks[1]}`.startsWith(composed)
+    : blocks.length > 1 && textBlocks[0]!.breakpoint;
+  if (split) instructions = `${instructions}${blocks[1]}`;
+  const tools = (Array.isArray(payload.tools) ? payload.tools : []).flatMap((tool) => {
+    if (!tool || typeof tool !== "object") return [];
+    const record = tool as Record<string, unknown>;
+    const name = typeof record.name === "string" && record.name ? record.name : null;
+    if (!name) return [];
+    const { cache_control: _cache, name: _name, description, input_schema, type, ...rest } = record;
+    return [
+      countedTool({
+        name,
+        // Client tools have no type on the wire; server tools name theirs.
+        type: typeof type === "string" && type ? type : "function",
+        visibility: "eager",
+        ...(typeof description === "string" ? { description } : {}),
+        ...(input_schema !== undefined
+          ? { schema: input_schema }
+          : Object.keys(rest).length > 0
+            ? { schema: rest }
+            : {}),
+      }),
+    ];
+  });
+  return { instructions, tools };
 }
 
 export type PersistentAgentInstructionInspection = {
@@ -140,6 +227,7 @@ const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
   sandbox_filesystem: "Sandbox filesystem",
   sent_system_instructions: "Sent system instructions",
   identity: "Identity",
+  agent_instructions: "Agent instructions",
 };
 
 export function joinPersistentAgentInstructionLayers(
@@ -364,16 +452,14 @@ function countedTool(input: {
   schema?: unknown;
 }): ModelContextTool {
   const schema = input.schema;
-  const utf8Bytes = Buffer.byteLength(
-    JSON.stringify({
-      name: input.name,
-      type: input.type,
-      description: input.description,
-      namespace: input.namespace,
-      schema,
-    }),
-    "utf8",
-  );
+  const serialized = JSON.stringify({
+    name: input.name,
+    type: input.type,
+    description: input.description,
+    namespace: input.namespace,
+    schema,
+  });
+  const utf8Bytes = Buffer.byteLength(serialized, "utf8");
   return {
     name: input.name,
     type: input.type,
@@ -382,13 +468,7 @@ function countedTool(input: {
     ...(input.namespace ? { namespace: input.namespace } : {}),
     ...(schema !== undefined ? { schema } : {}),
     utf8Bytes,
-    estimatedTokens: estimateSerializedValueTokens({
-      name: input.name,
-      type: input.type,
-      description: input.description,
-      namespace: input.namespace,
-      schema,
-    }),
+    estimatedTokens: estimateTextTokens(serialized),
   };
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { getSettings } from "../src";
 
-// Managed deployment billing OpenGeni credits through Stripe; the default
+// Managed deployment billing Opengeni credits through Stripe; the default
 // OpenAI catalog prices gpt-6-astra, gpt-6-sol and gpt-6-luna as credits.
 const stripeEnv = {
   OPENGENI_ENVIRONMENT: "production",
@@ -19,10 +19,10 @@ const stripeEnv = {
 };
 
 describe("credits default model settings", () => {
-  test("default to GPT-6 Luna at extra high reasoning", () => {
+  test("default to GPT-6 Luna at medium reasoning", () => {
     const settings = getSettings({});
     expect(settings.creditsDefaultModel).toBe("gpt-6-luna");
-    expect(settings.creditsDefaultReasoningEffort).toBe("xhigh");
+    expect(settings.creditsDefaultReasoningEffort).toBe("medium");
   });
 
   test("are deployment-configurable", () => {

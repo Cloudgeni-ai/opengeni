@@ -16,11 +16,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { feedbackSubmissions } from "../../../packages/db/src/schema";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerFeedbackRoutes } from "../src/routes/feedback";
 
@@ -33,6 +30,7 @@ let sessionId: string;
 const subjectId = "user:feedback-author";
 const secret = "feedback-route-test-delegation-secret";
 const permissions = ["workspace:read", "sessions:read", "sessions:create"] as const;
+const storedObjects = new Map<string, { bytes: Uint8Array; contentType: string }>();
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("feedback-routes");
   if (!shared) throw new Error("Real PostgreSQL is required for feedback isolation verification");
@@ -63,7 +61,17 @@ beforeAll(async () => {
   registerFeedbackRoutes(app, {
     db: client.db,
     settings: testSettings({ delegationSecret: secret }),
-  } as ApiRouteDeps);
+    objectStorage: {
+      async putObjectIfAbsent(args: { key: string; contentType: string; body: Uint8Array }) {
+        if (storedObjects.has(args.key)) return false;
+        storedObjects.set(args.key, { bytes: args.body, contentType: args.contentType });
+        return true;
+      },
+      async getObjectBytes(key: string) {
+        return storedObjects.get(key) ?? null;
+      },
+    },
+  } as unknown as ApiRouteDeps);
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -76,6 +84,7 @@ async function request(
     actor?: string;
     kind?: "human_session" | "agent_attempt";
     readOnly?: boolean;
+    path?: string;
   } = {},
 ) {
   const bearer = await signDelegatedAccessToken(secret, {
@@ -94,11 +103,14 @@ async function request(
       : {}),
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
-  return app.request(`http://x/v1/workspaces/${workspaceId}/feedback${options.query ?? ""}`, {
-    method: payload === undefined ? "GET" : "POST",
-    headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
-  });
+  return app.request(
+    `http://x/v1/workspaces/${workspaceId}/feedback${options.path ?? ""}${options.query ?? ""}`,
+    {
+      method: payload === undefined ? "GET" : "POST",
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+    },
+  );
 }
 test("general feedback stores exact comments and replays without duplicates", async () => {
   const payload = { idempotencyKey: crypto.randomUUID(), comment: "  exact\nfeedback\u0000🙂  " };
@@ -361,6 +373,29 @@ test("private-session feedback requires the session owner even with workspace pe
     });
     expect(response.status).toBe(actor === owner ? 201 : 404);
   }
+  // Naming a chat its author cannot read in the report's context still sends
+  // the report, and records nothing about that chat.
+  const bearer = await signDelegatedAccessToken(secret, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: "user:other-workspace-reader",
+    principalKind: "human_session",
+    permissions: [...permissions],
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  const unreadable = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/feedback`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      idempotencyKey: crypto.randomUUID(),
+      comment: "Something is off here",
+      context: { source: "web", sessionId: target.id },
+    }),
+  });
+  expect(unreadable.status).toBe(201);
+  const [row] = await shared!.admin<{ diagnostics: Record<string, unknown> }[]>`
+    select diagnostics from feedback_submissions where id = ${(await unreadable.json()).feedback.id}`;
+  expect(row!.diagnostics).not.toHaveProperty("session");
 });
 
 test("read-only credentials can read own feedback but cannot submit it", async () => {
@@ -372,4 +407,150 @@ test("read-only credentials can read own feedback but cannot submit it", async (
     expect(response.status).toBe(403);
   }
   expect((await request(undefined, { readOnly: true })).status).toBe(200);
+});
+
+test("feedback keeps its screenshots and app context, and replays only the same images", async () => {
+  const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
+  const payload = {
+    idempotencyKey: crypto.randomUUID(),
+    comment: "The send button did nothing",
+    context: {
+      source: "mobile",
+      trigger: "shake",
+      platform: "ios",
+      appVersion: "1.4.0",
+      buildNumber: "202610251500",
+      screen: `/session/${sessionId}`,
+      recentErrors: [{ at: new Date().toISOString(), message: "Couldn't send" }],
+    },
+    screenshots: [{ contentType: "image/jpeg", base64: Buffer.from(jpeg).toString("base64") }],
+  };
+  const first = await request(payload);
+  expect(first.status).toBe(201);
+  const { feedback } = await first.json();
+  expect(feedback.context).toEqual(payload.context);
+  expect(feedback.screenshots).toEqual([
+    expect.objectContaining({ index: 0, contentType: "image/jpeg", sizeBytes: jpeg.byteLength }),
+  ]);
+  expect(JSON.stringify(feedback)).not.toContain("objectKey");
+  expect(storedObjects.size).toBe(1);
+  expect((await request(payload)).status).toBe(200);
+  expect(storedObjects.size).toBe(1);
+  const other = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 9]);
+  expect(
+    (
+      await request({
+        ...payload,
+        screenshots: [{ contentType: "image/jpeg", base64: Buffer.from(other).toString("base64") }],
+      })
+    ).status,
+  ).toBe(409);
+  const image = await request(undefined, { path: `/${feedback.id}/screenshots/0` });
+  expect(image.status).toBe(200);
+  expect(image.headers.get("content-type")).toBe("image/jpeg");
+  expect(new Uint8Array(await image.arrayBuffer())).toEqual(jpeg);
+  expect(
+    (
+      await request(undefined, {
+        path: `/${feedback.id}/screenshots/0`,
+        actor: "user:someone-else",
+      })
+    ).status,
+  ).toBe(404);
+  expect((await request(undefined, { path: `/${feedback.id}/screenshots/1` })).status).toBe(404);
+});
+
+test("a report records what went on in the app and the state of the chat in view", async () => {
+  const turn = await enqueueSessionTurn(client.db, {
+    accountId,
+    workspaceId,
+    sessionId,
+    triggerEventId: crypto.randomUUID(),
+    temporalWorkflowId: "feedback-diagnostics-test",
+    source: "user",
+    prompt: "Latest task",
+    resources: [],
+    tools: [],
+    model: "test-model",
+    reasoningEffort: "high",
+    sandboxBackend: "none",
+    metadata: {},
+    initiator: { kind: "subject", subjectId },
+  });
+  const at = new Date().toISOString();
+  const payload = {
+    idempotencyKey: crypto.randomUUID(),
+    comment: "The reply never arrived",
+    context: {
+      source: "web",
+      screen: `/workspaces/${workspaceId}/sessions/${sessionId}`,
+      sessionId,
+      recentRequests: [
+        {
+          at,
+          method: "POST",
+          path: `/v1/workspaces/${workspaceId}/sessions/${sessionId}/messages`,
+          status: 503,
+          durationMs: 30_012,
+          correlationId: "req-1",
+        },
+        { at, method: "GET", path: "/v1/me", status: 0, durationMs: 4 },
+      ],
+      recentExceptions: [
+        {
+          at,
+          kind: "error",
+          message: "TypeError: x is undefined",
+          stack: "at render (app.js:1:2)",
+        },
+        { at, kind: "resource", message: "An image failed to load", source: "/files/a.png" },
+      ],
+      breadcrumbs: [
+        { at, kind: "navigation", label: `/workspaces/${workspaceId}/sessions/${sessionId}` },
+        { at, kind: "network", label: "offline" },
+      ],
+    },
+  };
+  const response = await request(payload);
+  expect(response.status).toBe(201);
+  const { feedback } = await response.json();
+  expect(feedback.context).toEqual(payload.context);
+  // Diagnostics are for whoever investigates the report, not for the client.
+  expect(feedback).not.toHaveProperty("diagnostics");
+  const [row] = await shared!.admin<{ diagnostics: Record<string, unknown> }[]>`
+    select diagnostics from feedback_submissions where id = ${feedback.id}`;
+  expect(row!.diagnostics).toEqual({
+    server: expect.any(Object),
+    session: {
+      id: sessionId,
+      status: expect.any(String),
+      visibility: expect.any(String),
+      lastSequence: expect.any(Number),
+      latestTurn: expect.objectContaining({
+        id: turn.id,
+        model: "test-model",
+        reasoningEffort: "high",
+      }),
+    },
+  });
+  // A replay keeps the first record.
+  expect((await request(payload)).status).toBe(200);
+
+  const unknown = await request({
+    idempotencyKey: crypto.randomUUID(),
+    comment: "Elsewhere",
+    context: { source: "mobile", sessionId: crypto.randomUUID() },
+  });
+  expect(unknown.status).toBe(201);
+  const [other] = await shared!.admin<{ diagnostics: Record<string, unknown> }[]>`
+    select diagnostics from feedback_submissions where id = ${(await unknown.json()).feedback.id}`;
+  expect(other!.diagnostics).not.toHaveProperty("session");
+});
+test("screenshots must be real images of the declared type", async () => {
+  const response = await request({
+    idempotencyKey: crypto.randomUUID(),
+    comment: "Not an image",
+    screenshots: [{ contentType: "image/png", base64: Buffer.from("hello").toString("base64") }],
+  });
+  expect(response.status).toBe(400);
 });

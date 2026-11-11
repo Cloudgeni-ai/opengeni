@@ -32,12 +32,11 @@ describe("editable artifact outbox production composition", () => {
     ).toThrow();
   });
 
-  test("runtime posture rejects inherited relation or sequence access", async () => {
+  test("runtime posture names the inherited relation or sequence access it rejects", async () => {
     const row = {
       current_role: EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE,
       session_role: EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE,
-      can_access_any_relation: false,
-      can_access_any_sequence: false,
+      accessible_relations: [] as string[],
     };
     await expect(
       assertDedicatedOutboxDispatcherDatabaseRole({
@@ -46,13 +45,31 @@ describe("editable artifact outbox production composition", () => {
     ).resolves.toBeUndefined();
     await expect(
       assertDedicatedOutboxDispatcherDatabaseRole({
-        execute: async () => [{ ...row, can_access_any_relation: true }],
+        execute: async () => [
+          { ...row, accessible_relations: ["public.editable_artifacts", "public.some_seq"] },
+        ],
       } as never),
-    ).rejects.toThrow("unsafe role posture");
+    ).rejects.toThrow(
+      "unsafe role posture: it can directly access public.editable_artifacts, public.some_seq;",
+    );
     await expect(
       assertDedicatedOutboxDispatcherDatabaseRole({
-        execute: async () => [{ ...row, can_access_any_sequence: true }],
+        execute: async () => [
+          { ...row, accessible_relations: ["a.r1", "a.r2", "a.r3", "a.r4", "a.r5", "a.r6"] },
+        ],
       } as never),
-    ).rejects.toThrow("unsafe role posture");
+    ).rejects.toThrow("a.r1, a.r2, a.r3, a.r4, a.r5 and more");
+    await expect(
+      assertDedicatedOutboxDispatcherDatabaseRole({
+        execute: async () => [
+          { ...row, current_role: "opengeni_app", session_role: "opengeni_app" },
+        ],
+      } as never),
+    ).rejects.toThrow("connected as role opengeni_app (session role opengeni_app)");
+    await expect(
+      assertDedicatedOutboxDispatcherDatabaseRole({
+        execute: async () => [{ ...row, accessible_relations: "{}" }],
+      } as never),
+    ).rejects.toThrow("relation access could not be verified");
   });
 });

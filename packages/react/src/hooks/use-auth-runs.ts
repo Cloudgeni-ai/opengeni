@@ -1,8 +1,7 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   AuthRun,
   AuthRunMutationResponse,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   ReportAuthRunRequest,
   StartAuthRunRequest,
   VerifyAuthRunRequest,
@@ -15,7 +14,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseAuthRunsOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseAuthRunsOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   browserSessionId?: string | null | undefined;
   siteAuthConnectionId?: string | null | undefined;
@@ -38,11 +37,6 @@ export type UseAuthRunsResult = {
     authRunId: string,
     request: Omit<ReportAuthRunRequest, "operationId"> & { operationId?: string },
   ) => Promise<AuthRunMutationResponse>;
-  protectedFill: (
-    browserSessionId: string,
-    authRunId: string,
-    request: Omit<ProtectedAuthFillRequest, "operationId"> & { operationId?: string },
-  ) => Promise<ProtectedAuthFillResponse>;
   verify: (
     browserSessionId: string,
     authRunId: string,
@@ -201,25 +195,6 @@ export function useAuthRuns(options: UseAuthRunsOptions = {}): UseAuthRunsResult
     [client, merge, mutate, workspaceId],
   );
 
-  const protectedFill = useCallback(
-    async (
-      scopeBrowserSessionId: string,
-      authRunId: string,
-      request: Omit<ProtectedAuthFillRequest, "operationId"> & { operationId?: string },
-    ): Promise<ProtectedAuthFillResponse> =>
-      await mutate(async () => {
-        const response = await client.protectedBrowserAuthFill(
-          workspaceId,
-          scopeBrowserSessionId,
-          authRunId,
-          { ...request, operationId: request.operationId ?? crypto.randomUUID() },
-        );
-        merge(response.run);
-        return response;
-      }),
-    [client, merge, mutate, workspaceId],
-  );
-
   const verify = useCallback(
     async (
       scopeBrowserSessionId: string,
@@ -248,7 +223,6 @@ export function useAuthRuns(options: UseAuthRunsOptions = {}): UseAuthRunsResult
     refresh,
     start,
     report,
-    protectedFill,
     verify,
   };
 }
@@ -275,4 +249,4 @@ function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-export type AuthRunsClient = EmbeddedBrowserInteractionClientLike;
+export type AuthRunsClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

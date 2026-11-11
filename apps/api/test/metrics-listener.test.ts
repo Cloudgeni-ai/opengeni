@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { getSettings } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../src/app";
 import { createMetricsListenerApp, startApiMetricsListener } from "../src/http/metrics-listener";

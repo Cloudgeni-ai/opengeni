@@ -4,6 +4,9 @@ import {
   createSkillSaveAttemptToolDefinition,
   type SkillSaveRequest,
 } from "../src/activities/agent-turn/skill-save";
+import { createSkillPublishAttemptToolDefinition } from "../src/activities/agent-turn/skill-checkout";
+import { createSkillInstallAttemptToolDefinition } from "../src/activities/agent-turn/skill-install";
+import { createSkillRemoveAttemptToolDefinition } from "../src/activities/agent-turn/skill-remove";
 
 const scope = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -87,7 +90,49 @@ describe("skill_save gateway", () => {
     expect(definition.description).toContain("description");
     expect(definition.description).toContain("instruction_policy_save");
     expect(definition.description).toContain("Off prevents agent authoring");
-    expect(definition.description).toContain("Private chats save personal Skills");
+    expect(definition.description).toContain("Set scope only when the person wants it elsewhere");
+    expect(definition.inputSchema.properties).toHaveProperty("scope");
+  });
+
+  test("tells the agent a pending Skill or change has no effect until approved, and where it is approved", () => {
+    const definition = createSkillSaveAttemptToolDefinition({
+      authorize: async () => {},
+      load: async () => {
+        throw new Error("Discovery must not load content");
+      },
+      save: async () => {
+        throw new Error("Discovery must not save content");
+      },
+    });
+    expect(definition.description).toContain(
+      "A Skill or change pending approval has no effect until someone who can manage it approves it, in Knowledge > Review or from its card in the chat where one is shown; an edited Skill keeps its current version until then. Say so when you report the receipt",
+    );
+  });
+
+  test("every Skill write tool says the same about pending changes and names the Review tab", () => {
+    const refuse = async () => {
+      throw new Error("Discovery must not run");
+    };
+    const pending =
+      "A Skill or change pending approval has no effect until someone who can manage it approves it, in Knowledge > Review or from its card in the chat where one is shown; an edited Skill keeps its current version until then. Say so in your reply.";
+    const install = createSkillInstallAttemptToolDefinition({
+      authorize: async () => {},
+      install: refuse,
+    });
+    const publish = createSkillPublishAttemptToolDefinition({
+      authorize: async () => {},
+      filesystem: refuse,
+      save: refuse,
+    });
+    const remove = createSkillRemoveAttemptToolDefinition({
+      authorize: async () => {},
+      remove: refuse,
+    });
+    expect(install.description).toContain(pending);
+    expect(publish.description).toContain(pending);
+    expect(remove.description).toContain("Knowledge > Review");
+    for (const definition of [install, publish, remove])
+      expect(definition.description).not.toContain("Needs review");
   });
 
   test("preserves omitted files and returns actual pending outcome", async () => {
@@ -132,5 +177,37 @@ describe("skill_save gateway", () => {
     expect(f.writes).toEqual([]);
     await f.call({ ...args, expectedRevisionId: null, files: [original[0]] });
     expect(f.writes).toHaveLength(1);
+  });
+
+  test("normalizes a stringified null creation revision before reads and persistence", async () => {
+    const f = fixture();
+    const creation = { ...args, expectedRevisionId: "null", files: [original[0]] };
+    await f.call(creation);
+    expect(f.calls).toEqual(["authorize"]);
+    expect(f.writes[0]?.expectedRevisionId).toBeNull();
+    expect(f.writes[0]?.files).toEqual([original[0]]);
+    await f.call({ ...creation, expectedRevisionId: null });
+    expect(f.writes[1]).toEqual(f.writes[0]);
+  });
+
+  test("rejects invalid write identities before loading or saving any content", async () => {
+    for (const invalid of [
+      { expectedRevisionId: "not-a-revision" },
+      { expectedRevisionId: "" },
+      { expectedRevisionId: undefined },
+      { expectedRevisionId: false },
+      { skillId: "not-a-skill" },
+      { operationId: "not-an-operation" },
+      { expectedScopeVersion: -1 },
+      { expectedScopeVersion: 1.5 },
+    ]) {
+      const f = fixture();
+      await expect(f.call({ ...args, ...invalid, files: [original[0]] })).rejects.toThrow(
+        Object.keys(invalid)[0]!,
+      );
+      // The outer gateway may reject before dispatch; neither layer may load.
+      expect(f.calls.filter((call) => call !== "authorize")).toEqual([]);
+      expect(f.writes).toEqual([]);
+    }
   });
 });

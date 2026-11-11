@@ -13,10 +13,13 @@ type KnowledgeModelProjection = "entry_list" | "save_preparation";
  * The model-visible copy of a Knowledge discovery result.
  *
  * `knowledge_search` (first-party and Docs servers) and `knowledge_prepare_save`
- * return the complete contract to every caller. Codemode and other programmatic
+ * return the complete contract to programmatic callers. Codemode and other programmatic
  * callers keep those exact bytes; only the model caller receives this
- * projection (see `projectAttemptToolResultForCaller`). It is the same JSON with
- * bookkeeping and repeated text removed:
+ * projection (see `projectAttemptToolResultForCaller`). Search returns discovery
+ * cards: identity, title, kind, scope, outcome and a short snippet. Full text,
+ * exact revision IDs and update versions come from knowledge_get. This projection
+ * runs only when executing a new call, never when replaying stored results.
+ * Save preparation retains its existing lossless projection, removing only:
  *
  * - entry timestamps, rank score, revision lineage/session/batch/number fields;
  * - defaults: `archived: false`, `change: "upsert"`, `sourceKind: null`, and a
@@ -28,7 +31,7 @@ type KnowledgeModelProjection = "entry_list" | "save_preparation";
  * - a collection descriptor's `revisionId` (collections are saved by `id` and
  *   `version` and read by `view`; they are never cited as evidence).
  *
- * Everything needed to act is kept: entry and collection IDs, `version` (the
+ * Save preparation keeps everything needed to act: entry and collection IDs, `version` (the
  * `expectedVersion` for an update), `revision.id` (evidence pins), scope,
  * view/outcome status, titles, kinds, group/parent IDs, descriptions, excerpts
  * with their offsets, index status and pagination cursors. Nothing is truncated.
@@ -75,7 +78,37 @@ function knowledgeModelProjection(identity: AttemptToolIdentity): KnowledgeModel
 
 function compactEntryList(value: unknown): JsonRecord | null {
   if (!KnowledgeEntryListResponse.safeParse(value).success) return null;
-  return compactListResponse(value as JsonRecord);
+  const { entries, nextCursor, ...rest } = value as JsonRecord;
+  return {
+    ...rest,
+    entries: (entries as JsonRecord[]).map((entry) => {
+      const revision = entry.revision as JsonRecord;
+      const excerpts = (entry.excerpts ?? []) as JsonRecord[];
+      const match = excerpts.find(
+        (excerpt) =>
+          excerpt.field === "content" &&
+          typeof excerpt.text === "string" &&
+          excerpt.text.length > 0,
+      );
+      const text = match?.text ?? revision.preview;
+      const snippet = Array.from(text as string)
+        .slice(0, 200)
+        .join("")
+        .trimEnd();
+      return {
+        id: entry.id,
+        title: revision.title,
+        kind: revision.kind,
+        scope: entry.scope,
+        outcome: revision.outcome,
+        ...(entry.archived === true ? { archived: true } : {}),
+        ...(revision.change === "upsert" ? {} : { change: revision.change }),
+        ...(snippet ? { snippet } : {}),
+      };
+    }),
+    ...(nextCursor === null ? {} : { nextCursor }),
+    readWith: "knowledge_get",
+  };
 }
 
 function compactSavePreparation(value: unknown): JsonRecord | null {

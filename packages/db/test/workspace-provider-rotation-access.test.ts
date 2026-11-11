@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   rotateWorkspaceProviderApiKeyConnection,
@@ -25,7 +25,10 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-for (const kind of ["anthropic", "claude_subscription", "openrouter", "vercel_gateway"] as const) {
+// 0598 retires the legacy Claude API-key store. Anthropic/Gateway/OpenRouter
+// keep its rotate/replay contract; Claude subscription connections live in the
+// shared core (design 5.3, C3/C4) and are covered by its conformance suites.
+for (const kind of ["anthropic", "openrouter", "vercel_gateway"] as const) {
   for (const denyAll of [false, true]) {
     test(`${kind} rotation preserves ${denyAll ? "deny-all" : "allowlist"} and policy revision`, async () => {
       if (!shared || !client) throw new Error("Real PostgreSQL required");
@@ -35,12 +38,7 @@ for (const kind of ["anthropic", "claude_subscription", "openrouter", "vercel_ga
         insert into workspaces (account_id, name) values (${account!.id}, 'rotation policy') returning id`;
       const scope = { accountId: account!.id, workspaceId: workspace!.id };
       const subjectId = "rotation-policy-test";
-      const prefix =
-        kind === "vercel_gateway"
-          ? "workspace-gateway"
-          : kind === "claude_subscription"
-            ? "workspace-claude-subscription"
-            : `workspace-${kind}`;
+      const prefix = kind === "vercel_gateway" ? "workspace-gateway" : `workspace-${kind}`;
       const allowedModel = `${prefix}/allowed`;
       const deniedModel = `${prefix}/denied`;
       const original = await upsertWorkspaceProviderApiKeyConnection(client.db, kind, {

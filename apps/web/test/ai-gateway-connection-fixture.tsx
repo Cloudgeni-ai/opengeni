@@ -11,6 +11,7 @@ import { Toaster } from "sonner";
 import {
   AiGatewayConnectionCardWithClient,
   OpenRouterConnectionCardWithClient,
+  OpperConnectionCardWithClient,
 } from "../src/components/ai-gateway-connection";
 import "../src/styles.css";
 
@@ -28,17 +29,49 @@ function customModel(id: string, upstreamModelId: string): WorkspaceGatewayCusto
   };
 }
 
+type FixtureProvider = "gateway" | "openrouter" | "opper";
+
+const PROVIDERS: Record<
+  FixtureProvider,
+  { id: string; providerDomain: string; credentialRole: string; credentialLabel: string }
+> = {
+  gateway: {
+    id: "33333333-3333-4333-8333-333333333333",
+    providerDomain: "ai-gateway.vercel.sh",
+    credentialRole: "vercel_ai_gateway",
+    credentialLabel: "Vercel AI Gateway",
+  },
+  openrouter: {
+    id: "66666666-6666-4666-8666-666666666666",
+    providerDomain: "openrouter.ai",
+    credentialRole: "openrouter",
+    credentialLabel: "OpenRouter",
+  },
+  opper: {
+    id: "99999999-9999-4999-8999-999999999999",
+    providerDomain: "api.opper.ai",
+    credentialRole: "opper",
+    credentialLabel: "Opper",
+  },
+};
+
+function providerOfConnection(connectionId: string): FixtureProvider {
+  return (Object.keys(PROVIDERS) as FixtureProvider[]).find(
+    (provider) => PROVIDERS[provider].id === connectionId,
+  )!;
+}
+
 function connectedProvider(
-  provider: "gateway" | "openrouter",
+  provider: FixtureProvider,
   status: ConnectionMetadata["status"] = "active",
 ): ConnectionMetadata {
-  const gateway = provider === "gateway";
+  const { id, providerDomain, credentialRole, credentialLabel } = PROVIDERS[provider];
   return {
-    id: gateway ? "33333333-3333-4333-8333-333333333333" : "66666666-6666-4666-8666-666666666666",
+    id,
     accountId: "11111111-1111-4111-8111-111111111111",
     workspaceId,
     subjectId: null,
-    providerDomain: gateway ? "ai-gateway.vercel.sh" : "openrouter.ai",
+    providerDomain,
     kind: "api_key",
     status,
     grantedScopes: [],
@@ -47,15 +80,7 @@ function connectedProvider(
     lastUsedAt: null,
     lastError: null,
     version: status === "active" ? 1 : 2,
-    metadata: gateway
-      ? {
-          credentialRole: "vercel_ai_gateway",
-          credentialLabel: "Vercel AI Gateway",
-        }
-      : {
-          credentialRole: "openrouter",
-          credentialLabel: "OpenRouter",
-        },
+    metadata: { credentialRole, credentialLabel },
     createdBySubjectId: "user:fixture-admin",
     updatedBySubjectId: "user:fixture-admin",
     createdAt: timestamp,
@@ -73,14 +98,20 @@ const initialOpenRouterModels = [
   customModel("88888888-8888-4888-8888-888888888888", "moonshotai/kimi-k2"),
 ];
 
+const initialOpperModels = [
+  customModel("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "gemini-3.8-flash"),
+  customModel("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "aws/claude-sonnet-4-6-eu"),
+];
+
 function Fixture() {
   const [receipt, setReceipt] = useState<Record<string, unknown>>({ action: "ready" });
   const gatewayModelsRef = useRef([...initialGatewayModels]);
   const openRouterModelsRef = useRef([...initialOpenRouterModels]);
+  const opperModelsRef = useRef([...initialOpperModels]);
   const clientRef = useRef<OpenGeniBrowserClient | null>(null);
   if (!clientRef.current) {
     const createModel = async (
-      provider: "gateway" | "openrouter",
+      provider: FixtureProvider,
       upstreamModelId: string,
       current: WorkspaceGatewayCustomModel[],
       commit: (models: WorkspaceGatewayCustomModel[]) => void,
@@ -102,7 +133,11 @@ function Fixture() {
     };
 
     clientRef.current = {
-      listConnections: async () => [connectedProvider("gateway"), connectedProvider("openrouter")],
+      listConnections: async () => [
+        connectedProvider("gateway"),
+        connectedProvider("openrouter"),
+        connectedProvider("opper"),
+      ],
       listWorkspaceGatewayCustomModels: async () => ({ models: [...gatewayModelsRef.current] }),
       createWorkspaceGatewayCustomModel: async (_workspaceId, request) =>
         await createModel(
@@ -147,25 +182,45 @@ function Fixture() {
           operationId: request.operationId,
         });
       },
+      listWorkspaceOpperCustomModels: async () => ({
+        models: [...opperModelsRef.current],
+      }),
+      createWorkspaceOpperCustomModel: async (_workspaceId, request) =>
+        await createModel("opper", request.upstreamModelId, opperModelsRef.current, (models) => {
+          opperModelsRef.current = models;
+        }),
+      deleteWorkspaceOpperCustomModel: async (_workspaceId, customModelId, request) => {
+        opperModelsRef.current = opperModelsRef.current.filter(
+          (model) => model.id !== customModelId,
+        );
+        setReceipt({
+          action: "delete-model",
+          provider: "opper",
+          customModelId,
+          operationId: request.operationId,
+        });
+      },
       createConnection: async (_workspaceId, request: CreateConnectionRequest) => {
-        const provider = request.providerDomain === "openrouter.ai" ? "openrouter" : "gateway";
+        const provider = (Object.keys(PROVIDERS) as FixtureProvider[]).find(
+          (candidate) => PROVIDERS[candidate].providerDomain === request.providerDomain,
+        )!;
         setReceipt({ action: "connect", provider, providerDomain: request.providerDomain });
         return connectedProvider(provider);
       },
       updateConnection: async (_workspaceId, connectionId) => {
-        const provider = connectionId.startsWith("6666") ? "openrouter" : "gateway";
+        const provider = providerOfConnection(connectionId);
         setReceipt({ action: "replace-key", provider, connectionId });
         return connectedProvider(provider);
       },
       deleteConnection: async (_workspaceId, connectionId) => {
-        const provider = connectionId.startsWith("6666") ? "openrouter" : "gateway";
+        const provider = providerOfConnection(connectionId);
         setReceipt({ action: "disconnect", provider, connectionId });
         return connectedProvider(provider, "revoked");
       },
     } as unknown as OpenGeniBrowserClient;
   }
 
-  const connectionChanged = (provider: "gateway" | "openrouter") =>
+  const connectionChanged = (provider: FixtureProvider) =>
     setReceipt((current) => ({ ...current, changed: true, provider }));
 
   return (
@@ -203,6 +258,15 @@ function Fixture() {
           canManageConnection
           canManageCustomModels
           onConnectionChange={() => connectionChanged("openrouter")}
+        />
+      </section>
+      <section aria-label="Opper" data-testid="opper-connection-card" className="grid gap-2">
+        <OpperConnectionCardWithClient
+          client={clientRef.current}
+          workspaceId={workspaceId}
+          canManageConnection
+          canManageCustomModels
+          onConnectionChange={() => connectionChanged("opper")}
         />
       </section>
       <button type="button" aria-label="Fixture focus target" className="justify-self-start">

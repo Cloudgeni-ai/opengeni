@@ -31,30 +31,59 @@ export type IntegrationPresentationCopy = {
 export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
   Record<string, IntegrationPresentationCopy>
 > = {
-  "google-drive": {
-    providerName: "Google",
-    icon: "files",
-    introduction: "Let agents work with files in the Google Drive account you choose.",
+  "microsoft-teams": {
+    providerName: "Microsoft",
+    introduction:
+      "Let agents read and search Teams conversations, look up colleagues, and send messages as the work or school account you connect.",
     capabilities: [
       {
-        title: "Find files and folders",
-        description: "Browse and search content in My Drive and shared drives.",
+        title: "Read conversations",
+        description:
+          "Find your teams, channels and chats, then read messages and replies you can access.",
       },
       {
-        title: "Create and update content",
-        description: "Work with files and folders through the reviewed Drive tools.",
+        title: "Search messages",
+        description: "Search chat and channel messages you can access, like Teams search does.",
       },
       {
-        title: "Manage sharing",
-        description: "Review and update links, permissions, and shared-drive content.",
+        title: "Look up colleagues",
+        description: "Find people in your organization and see their role, manager and reports.",
+      },
+      {
+        title: "Send messages",
+        description:
+          "Post chat and channel messages or reply to a channel thread as your connected account.",
       },
     ],
     permissionSummary:
-      "Google asks for access to the Drive account you approve, including files shared with that account.",
+      "Microsoft asks for delegated Teams and directory access. Reading channel messages and full colleague profiles requires tenant administrator consent. This does not install the Teams bot.",
     scopeLabels: {
-      "https://www.googleapis.com/auth/drive": {
-        label: "Work with Google Drive files",
-        description: "See, create, edit, organize, and share files available to this account.",
+      "Team.ReadBasic.All": {
+        label: "List teams",
+        description: "Read basic team details available to your account.",
+      },
+      "Channel.ReadBasic.All": {
+        label: "List channels",
+        description: "Read channel names and basic details.",
+      },
+      "ChannelMessage.Read.All": {
+        label: "Read channel messages",
+        description:
+          "Read messages in channels your account can access; administrator consent is required.",
+      },
+      "ChannelMessage.Send": {
+        label: "Send channel messages",
+        description: "Post messages and replies as your account.",
+      },
+      "Chat.Read": { label: "Read chats", description: "Read your chats and their messages." },
+      "ChatMessage.Send": {
+        label: "Send chat messages",
+        description: "Send messages in your chats as your account.",
+      },
+      "User.Read.All": {
+        label: "Read colleague profiles",
+        description:
+          "Read profiles of people in your organization, including job title, department, manager and reports; administrator consent is required.",
       },
     },
   },
@@ -145,9 +174,9 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
         label: "View and manage contacts",
         description: "Read, create, update, and organize contacts and contact folders.",
       },
-      "People.Read.All": {
+      "People.Read": {
         label: "Find relevant people",
-        description: "Use people suggestions available to the connected account.",
+        description: "Use the connected account's own people suggestions.",
       },
     },
   },
@@ -158,11 +187,11 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
     capabilities: [
       {
         title: "Find files and folders",
-        description: "Browse drives, folders, shared items, and sites available to the account.",
+        description: "Browse drives, folders, and items shared with the account.",
       },
       {
         title: "Create and update content",
-        description: "Work with OneDrive and SharePoint files through reviewed tools.",
+        description: "Work with OneDrive files and opened share links through reviewed tools.",
       },
       {
         title: "Manage sharing",
@@ -170,15 +199,48 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
       },
     ],
     permissionSummary:
-      "Microsoft asks for file and site access anywhere the connected account already has access.",
+      "Microsoft asks for access to files the connected account can already open. Connect SharePoint separately to find sites, lists, and libraries.",
     scopeLabels: {
       "Files.ReadWrite.All": {
         label: "Work with accessible files",
         description: "Read, create, update, and organize files available to this account.",
       },
+    },
+  },
+  "microsoft-sharepoint": {
+    providerName: "Microsoft",
+    icon: "files",
+    introduction:
+      "Let agents find and work with SharePoint sites using the work or school account you connect.",
+    capabilities: [
+      {
+        title: "Find sites and content",
+        description: "Search SharePoint and find sites, document libraries, and lists.",
+      },
+      {
+        title: "Read documents and lists",
+        description: "Read library files and list items the account can already access.",
+      },
+      {
+        title: "Update lists",
+        description: "Create and update list items through reviewed tools.",
+      },
+      {
+        title: "Look up colleagues",
+        description: "Find people in your organization by name or email.",
+      },
+    ],
+    permissionSummary:
+      "Microsoft asks for access to SharePoint sites the connected work or school account can already open. Many organizations require an admin to approve this first. Personal Microsoft accounts are not supported.",
+    scopeLabels: {
       "Sites.ReadWrite.All": {
         label: "Work with accessible sites",
-        description: "Read and update files in SharePoint sites available to this account.",
+        description:
+          "Microsoft grants read and write access to SharePoint sites this account can open. Opengeni uses it to read content and to add or update list items, which ask for approval.",
+      },
+      "User.ReadBasic.All": {
+        label: "Read basic colleague profiles",
+        description: "Read names, email addresses and photos of people in your organization.",
       },
     },
   },

@@ -4,7 +4,7 @@
    attaches/swaps the session's active sandbox + refetches. Dual-consumer safe —
    it reads only the structural client, so an adapter works in any frontend.
    -------------------------------------------------------------------------- */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { useMachines, type MachinesClientLike } from "../src/hooks/use-machines";
@@ -312,13 +312,49 @@ describe("useMachines", () => {
     await flush();
 
     expect(ok).toBe(false);
+    // The server's reason is for the agent; people see plain copy for the code.
     expect(hook.result.current.mutationError?.message).toBe(
-      "The managed sandbox restore is still verifying.",
+      "Its computer is still starting up. Try again in a moment.",
     );
     expect(hook.result.current.attaching).toBe(false);
     expect(hook.result.current.attachingSandboxId).toBeNull();
     await hook.unmount();
   });
+
+  // A refusal another try cannot fix says what to do instead of "Try again."
+  for (const [code, message] of [
+    [
+      "workspace_root_unavailable",
+      "That machine hasn't reported its workspace folder. Update the agent on it and reconnect, then try again.",
+    ],
+    [
+      "invalid_working_directory",
+      "This chat's working folder isn't inside that machine's workspace. Start a new chat on that machine instead.",
+    ],
+  ] as const) {
+    test(`attach explains a ${code} refusal`, async () => {
+      const machinesClient: MachinesClientLike = {
+        listMachines: async () => response,
+        swapActiveSandbox: async () => ({
+          swapped: false,
+          activeSandboxId: null,
+          activeEpoch: 3,
+          code,
+          reason: "server reason for the agent",
+        }),
+      };
+      const hook = await renderHook(
+        () =>
+          useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient, sessionId: "sess-1" }),
+        undefined,
+      );
+      await flush();
+      expect(await actRun(() => hook.result.current.attach("sh-1"))).toBe(false);
+      await flush();
+      expect(hook.result.current.mutationError?.message).toBe(message);
+      await hook.unmount();
+    });
+  }
 
   test("a host-supplied attachMachine adapter wins over swapActiveSandbox", async () => {
     const attachedTo: Array<{ sessionId: string; sandboxId: string }> = [];
@@ -406,6 +442,127 @@ describe("useMachines", () => {
     await flush();
     expect(hook.result.current.error?.message).toBe("nats down");
     expect(hook.result.current.machines.length).toBe(0);
+    await hook.unmount();
+  });
+
+  for (const status of [401, 403, 404]) {
+    test(`a ${status} refusal stops polling until the read is re-enabled`, async () => {
+      let lists = 0;
+      let refuse = true;
+      const machinesClient: MachinesClientLike = {
+        listMachines: async () => {
+          lists += 1;
+          if (refuse) {
+            throw Object.assign(new Error(`Opengeni API ${status}`), { status });
+          }
+          return response;
+        },
+      };
+      const hook = await renderHook(
+        (props: { enabled: boolean }) =>
+          useMachines({
+            client,
+            workspaceId: WORKSPACE_ID,
+            sessionId: `refusal-${status}`,
+            machinesClient,
+            pollIntervalMs: 5,
+            enabled: props.enabled,
+          }),
+        { enabled: true },
+      );
+      await flush();
+      expect(lists).toBe(1);
+      expect(hook.result.current.error?.message).toBe(`Opengeni API ${status}`);
+
+      // Successful reads resume polling. Control the clock so a legitimate
+      // 5 ms poll cannot race the immediate re-enable assertion on a busy host.
+      jest.useFakeTimers();
+      try {
+        // Many poll intervals later: no repeated refused read.
+        await actRun(() => jest.advanceTimersByTime(40));
+        expect(lists).toBe(1);
+        // A permission/workspace change (the host disables then re-enables the
+        // read) forgets the refusal and reads again immediately.
+        refuse = false;
+        await hook.rerender({ enabled: false });
+        expect(hook.result.current.error).toBeNull();
+        await hook.rerender({ enabled: true });
+        expect(lists).toBe(2);
+        expect(hook.result.current.machines.length).toBe(2);
+
+        await actRun(() => jest.advanceTimersByTime(4));
+        expect(lists).toBe(2);
+        await actRun(() => jest.advanceTimersByTime(1));
+        expect(lists).toBe(3);
+        expect(hook.result.current.error).toBeNull();
+
+        // A later refusal halts the resumed poll, too.
+        refuse = true;
+        await actRun(() => jest.advanceTimersByTime(5));
+        expect(lists).toBe(4);
+        expect(hook.result.current.error?.message).toBe(`Opengeni API ${status}`);
+        await actRun(() => jest.advanceTimersByTime(40));
+        expect(lists).toBe(4);
+      } finally {
+        try {
+          await hook.unmount();
+          jest.advanceTimersByTime(0);
+        } finally {
+          jest.useRealTimers();
+        }
+      }
+    });
+  }
+
+  test("a transient failure keeps polling", async () => {
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        throw Object.assign(new Error("Opengeni API 503"), { status: 503 });
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "transient",
+          machinesClient,
+          pollIntervalMs: 5,
+        }),
+      undefined,
+    );
+    await flush();
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 40)));
+    expect(lists).toBeGreaterThan(1);
+    await hook.unmount();
+  });
+
+  test("an explicit refresh retries a refused read once", async () => {
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        throw Object.assign(new Error("Opengeni API 403"), { status: 403 });
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "refresh-after-refusal",
+          machinesClient,
+          pollIntervalMs: 5,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(lists).toBe(1);
+    await actRun(() => hook.result.current.refresh());
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 40)));
+    expect(lists).toBe(2);
     await hook.unmount();
   });
 

@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   checkBillingPortalSurface,
   checkForbiddenProviderImports,
+  checkGithubWebhookAdvertising,
+  checkMcpDefaults,
+  checkUnscopedOperationalRoutes,
   type Finding,
 } from "./check-workspace-billing-static";
 
@@ -11,7 +14,59 @@ async function findingsFor(file: string, source: string): Promise<Finding[]> {
   return findings;
 }
 
+describe("GitHub App webhook advertising guard", () => {
+  const manifestFile = "packages/github/src/index.ts";
+  const receiverPath = ["/v1", "webhooks", "github"].join("/");
+  const manifest = `manifest.hook_attributes = { url: \`\${base}${receiverPath}\`, active: true };`;
+  const baseVariable = `\${base}`;
+  const receiver = 'headers.get("x-hub-signature-256"); headers.get("x-github-delivery");';
+  const run = (file: string, text: string, receiverText: string): Finding[] => {
+    const findings: Finding[] = [];
+    checkGithubWebhookAdvertising(file, text, receiverText, findings);
+    return findings;
+  };
+
+  test("allows the manifest to advertise the signed, idempotent receiver", () => {
+    expect(run(manifestFile, manifest, receiver)).toEqual([]);
+    expect(run(manifestFile, manifest.replace(baseVariable, `\${webhookBase}`), receiver)).toEqual(
+      [],
+    );
+    expect(run(manifestFile, "const manifest = {};", "")).toEqual([]);
+  });
+
+  test("refuses a webhook URL other than the receiver, or a receiver that stops verifying", () => {
+    expect(
+      run(manifestFile, manifest.replace(receiverPath, "/v1/github/webhook"), receiver),
+    ).toHaveLength(1);
+    expect(
+      run(
+        manifestFile,
+        manifest.replace(baseVariable, `https://elsewhere.example${baseVariable}`),
+        receiver,
+      ),
+    ).toHaveLength(1);
+    expect(run(manifestFile, manifest, 'headers.get("x-github-delivery");')).toHaveLength(1);
+    expect(run(manifestFile, manifest, 'headers.get("x-hub-signature-256");')).toHaveLength(1);
+  });
+});
+
 describe("workspace provider import guard", () => {
+  test.each([
+    "apps/api/src/billing-stripe-customer.ts",
+    "apps/api/src/billing-subscriptions.ts",
+    "apps/api/src/billing-auto-top-up.ts",
+    "apps/api/src/routes/billing-auto-top-up.ts",
+    "apps/api/test/billing-auto-top-up.test.ts",
+    "apps/api/test/billing-auto-top-up-adjustments-postgres.test.ts",
+    "apps/api/test/billing-auto-top-up-integration-postgres.test.ts",
+    "apps/api/test/billing-auto-top-up.stripe-proof.ts",
+    "apps/api/test/billing-subscriptions.test.ts",
+    "apps/api/test/billing-subscriptions-review-postgres.test.ts",
+    "apps/api/test/scoped-credit-checkout.test.ts",
+    "apps/api/test/scoped-credits-postgres.test.ts",
+  ])("permits the billing adapter's Stripe contract fixture: %s", async (file) => {
+    expect(await findingsFor(file, 'import Stripe from "stripe";')).toEqual([]);
+  });
   test("confines the Stripe billing portal path to its API and SDK surfaces", () => {
     const portalPath = ["/v1/billing", "portal"].join("/");
     const allowed: Finding[] = [];
@@ -25,6 +80,13 @@ describe("workspace provider import guard", () => {
     checkBillingPortalSurface(
       "packages/sdk/src/site-browser-runtime.gen.ts",
       `const bundledClient = "${portalPath}";`,
+      allowed,
+    );
+    expect(allowed).toEqual([]);
+
+    checkBillingPortalSurface(
+      "packages/contracts/src/app-action-catalog.gen.ts",
+      `const action = { path: "${portalPath}" };`,
       allowed,
     );
     expect(allowed).toEqual([]);
@@ -68,19 +130,19 @@ describe("workspace provider import guard", () => {
     ]);
   });
 
-  test("rejects Stripe module edges outside billing provider code", async () => {
-    const findings = await findingsFor(
-      "apps/api/src/routes/example.ts",
-      'import Stripe from "stripe";',
-    );
+  test.each(["apps/api/src/routes/example.ts", "packages/contracts/src/app-action-catalog.gen.ts"])(
+    "rejects Stripe module edges outside billing provider code: %s",
+    async (file) => {
+      const findings = await findingsFor(file, 'import Stripe from "stripe";');
 
-    expect(findings).toEqual([
-      {
-        file: "apps/api/src/routes/example.ts",
-        message: "imports Stripe outside billing route/provider code",
-      },
-    ]);
-  });
+      expect(findings).toEqual([
+        {
+          file,
+          message: "imports Stripe outside billing route/provider code",
+        },
+      ]);
+    },
+  );
 
   test("retains the managed auth type-only exception", async () => {
     const findings = await findingsFor(
@@ -89,5 +151,151 @@ describe("workspace provider import guard", () => {
     );
 
     expect(findings).toEqual([]);
+  });
+});
+
+describe("workspace and organization MCP route guard", () => {
+  const organizationMcpPath = ["/v1", "mcp"].join("/");
+  const organizationSurfaces = [
+    "apps/api/src/mcp-oauth.ts",
+    "apps/api/src/organization-mcp.ts",
+    "apps/api/test/organization-mcp-e2e.test.ts",
+    "apps/api/test/personal-api-keys.test.ts",
+    "apps/web/src/App.tsx",
+    "apps/web/src/components/organization-access/organization-connected-agents.tsx",
+    "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",
+    "packages/sdk/src/client.ts",
+    "packages/sdk/src/site-browser-runtime.gen.ts",
+    "scripts/public-api/surface.gen.json",
+  ];
+
+  function routeFindings(file: string, source: string): Finding[] {
+    const findings: Finding[] = [];
+    checkUnscopedOperationalRoutes(file, source, findings);
+    checkMcpDefaults(file, source, findings);
+    return findings;
+  }
+
+  test.each([
+    "CHANGELOG.md",
+    "apps/api/CHANGELOG.md",
+    "packages/contracts/CHANGELOG.md",
+    "packages/core/CHANGELOG.md",
+    "packages/db/CHANGELOG.md",
+    "packages/runtime/CHANGELOG.md",
+    "packages\\sdk\\CHANGELOG.md",
+  ])("permits historical route descriptions in %s", (file) => {
+    expect(routeFindings(file, `Removed the old \`${organizationMcpPath}\` default.`)).toEqual([]);
+    const findings: Finding[] = [];
+    checkBillingPortalSurface(
+      file,
+      `Removed \`${["/v1/billing", "portal"].join("/")}\`.`,
+      findings,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  test.each([
+    "README.md",
+    "packages/sdk/README.md",
+    "docs/current-usage.md",
+    "apps/api/src/routes/example.ts",
+    "deploy/helm/opengeni/values.yaml",
+  ])("still checks live routes and current guidance in %s", (file) => {
+    expect(routeFindings(file, `Use \`${organizationMcpPath}\` as the default.`)).toHaveLength(2);
+    const findings: Finding[] = [];
+    checkBillingPortalSurface(file, `Use \`${["/v1/billing", "portal"].join("/")}\`.`, findings);
+    expect(findings).toHaveLength(1);
+  });
+
+  test.each(organizationSurfaces)(
+    "admits only the canonical organization MCP leaf in %s",
+    (file) => {
+      expect(routeFindings(file, `const resource = "${organizationMcpPath}";`)).toEqual([]);
+      expect(
+        routeFindings(file, `const resource = "https://opengeni.example${organizationMcpPath}";`),
+      ).toEqual([]);
+      expect(routeFindings(file, `// Organization server (\`${organizationMcpPath}\`).`)).toEqual(
+        [],
+      );
+      expect(
+        routeFindings(file, JSON.stringify(`const resource = "${organizationMcpPath}";`)),
+      ).toEqual([]);
+    },
+  );
+
+  test.each(organizationSurfaces)(
+    "still rejects escaped workspace MCP child separators in %s",
+    (file) => {
+      for (const child of ["docs", "files", "tools"]) {
+        const escapedPath = String.raw`${organizationMcpPath}\/${child}`;
+        for (const path of [escapedPath, `https://opengeni.example${escapedPath}`]) {
+          const source = `const resource = "${path}";`;
+          expect(routeFindings(file, source)).toHaveLength(1);
+          expect(routeFindings(file, JSON.stringify(source))).toHaveLength(1);
+        }
+      }
+    },
+  );
+
+  test.each(organizationSurfaces)(
+    "still rejects deleted workspace MCP child paths in %s",
+    (file) => {
+      for (const child of ["docs", "files", "tools"]) {
+        const findings = routeFindings(file, `const resource = "${organizationMcpPath}/${child}";`);
+        expect(findings).toHaveLength(2);
+        expect(findings.every((finding) => finding.file === file)).toBe(true);
+      }
+    },
+  );
+
+  test.each([
+    "apps/api/src/routes/example.ts",
+    "apps/web/src/lib/mcp.ts",
+    "packages/sdk/src/example.ts",
+    "deploy/helm/opengeni/values.yaml",
+  ])("still rejects unscoped MCP defaults outside the canonical surfaces: %s", (file) => {
+    expect(routeFindings(file, `const resource = "${organizationMcpPath}";`)).toHaveLength(2);
+    expect(
+      routeFindings(file, `const resource = "https://opengeni.example${organizationMcpPath}";`),
+    ).toHaveLength(1);
+  });
+
+  test.each([
+    "sessions",
+    "files",
+    "document-bases",
+    "scheduled-tasks",
+    "github/app",
+    "github/repositories",
+  ])("still rejects every other deleted operational route in organization code: %s", (path) => {
+    expect(routeFindings("apps/api/src/mcp-oauth.ts", `app.get("/v1/${path}");`)).toHaveLength(1);
+  });
+
+  test("does not mistake organization sign-in request routes for MCP gateway defaults", () => {
+    const file = "apps/api/src/routes/example.ts";
+    expect(
+      routeFindings(file, `app.get("${organizationMcpPath}-connections/requests/:request");`),
+    ).toEqual([]);
+  });
+
+  test("does not mistake authorization discovery for an MCP gateway default", () => {
+    const file = "apps/web/src/server.test.ts";
+    const discoveryPath = ["/.well-known/oauth-authorization-server", "v1", "mcp"].join("/");
+    expect(routeFindings(file, `const discovery = "${discoveryPath}";`)).toEqual([]);
+    expect(
+      routeFindings(
+        file,
+        `const discovery = "${discoveryPath}"; const gateway = "${organizationMcpPath}";`,
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("preserves scoped workspace MCP and third-party absolute URL handling", () => {
+    const file = "apps/api/src/routes/example.ts";
+    expect(routeFindings(file, 'const resource = "/v1/workspaces/{workspaceId}/mcp";')).toEqual([]);
+    expect(
+      routeFindings(file, `const resource = "https://vendor.example${organizationMcpPath}";`),
+    ).toEqual([]);
   });
 });

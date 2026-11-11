@@ -4,7 +4,7 @@
 // self-removal and actor-administration guards fail closed. The last-admin
 // guard remains for workspace-only control; organization control stays authoritative.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   acceptOrganizationInvitation,
@@ -359,6 +359,83 @@ describe("workspace membership removal fencing", () => {
       otherMembership: 1,
       orgStatus: "active",
     });
+  });
+
+  test("replaying an invitation accept does not grant a removed initial workspace again", async () => {
+    if (!available) return;
+    const ownerId = `replay-owner-${crypto.randomUUID()}`;
+    const targetId = `replay-target-${crypto.randomUUID()}`;
+    const ownerSubject = `user:${ownerId}`;
+    const targetSubject = `user:${targetId}`;
+    await ensureManagedAccessForUser(db, {
+      userId: ownerId,
+      email: `${ownerId}@example.test`,
+      name: ownerId,
+    });
+    const [owner] = await listSelfOrganizationMemberships(db, ownerSubject);
+    const organizationId = owner!.organizationId;
+    await admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
+    const [workspaceRow] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name, external_source, external_id)
+      values (${organizationId}, 'replay shared', 'test', ${crypto.randomUUID()})
+      returning id`;
+    const workspaceId = workspaceRow!.id;
+    await admin`
+      insert into workspace_inference_controls (account_id, workspace_id)
+      values (${organizationId}, ${workspaceId})`;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      values (${organizationId}, ${workspaceId}, ${ownerSubject}, 'owner',
+        '["workspace:admin"]'::jsonb)`;
+    const invitation = await createOrganizationInvitation(db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: targetSubject,
+      targetEmail: `${targetId}@example.test`,
+      initialWorkspaceIds: [workspaceId],
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const accept = {
+      organizationId,
+      actorSubjectId: targetSubject,
+      operationId: crypto.randomUUID(),
+      invitationId: invitation.id,
+      expectedRevision: invitation.revision,
+    };
+    const memberRows = async () =>
+      (
+        await admin<{ count: number }[]>`
+          select count(*)::int as count from workspace_memberships
+          where workspace_id = ${workspaceId} and subject_id = ${targetSubject}`
+      )[0]!.count;
+
+    const first = await acceptOrganizationInvitation(db, accept);
+    expect(first.invitation.status).toBe("accepted");
+    expect(await memberRows()).toBe(1);
+
+    expect(
+      await removeWorkspaceMember(db, {
+        accountId: organizationId,
+        workspaceId,
+        actorSubjectId: ownerSubject,
+        targetSubjectId: targetSubject,
+      }),
+    ).toBe(true);
+    expect(await memberRows()).toBe(0);
+
+    const replay = await acceptOrganizationInvitation(db, accept);
+    expect(replay).toEqual(first);
+    expect(await memberRows()).toBe(0);
+    const [membership] = await admin<{ status: string }[]>`
+      select status from organization_memberships
+      where account_id = ${organizationId} and subject_id = ${targetSubject}`;
+    expect(membership!.status).toBe("active");
   });
 
   test("settles a requires_action turn with pending tool calls through the canonical protocol", async () => {

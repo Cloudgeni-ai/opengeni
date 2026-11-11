@@ -1,3 +1,8 @@
+import {
+  isSlackPrivateFileUrl,
+  normalizeSlackScopes,
+  OFFICIAL_SLACK_MCP_URL,
+} from "@opengeni/contracts/slack-rest-mcp";
 import { beginMcpPhase, measureMcpPhase } from "@opengeni/observability";
 import {
   environmentsEncryptionKeyBytes,
@@ -25,6 +30,7 @@ import {
   OAUTH_MAX_RESPONSE_BYTES,
   pinnedFetch,
   readResponseJsonBounded,
+  readResponseTextBounded,
   undiciFetch,
   validateHttpUrl,
   type DnsLookup,
@@ -35,6 +41,11 @@ import { Buffer } from "node:buffer";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./database";
 import { withConnectionRefreshLock } from "./connection-refresh-lock";
+import {
+  IdJagExchangeError,
+  isIdJagCredential,
+  refreshIdJagConnectionCredential,
+} from "./id-jag-issuer";
 import type {
   AcceptedConnectionUseContext,
   AcceptedConnectionUseResolution,
@@ -116,6 +127,8 @@ export type ResolveConnectionCredentialResult =
       connectionId: string;
       /** Exact durable version when the credential came from the local connection store. */
       connectionVersion?: number;
+      /** Actual provider grants; never inferred from requested connection scopes. */
+      grantedScopes?: string[];
       /** Metadata-only owner attribution from the immediate pre-use fence. */
       connectionUseAttribution?: ConnectionUseAttribution;
       /** Metadata-only equality key from current live authority; never credentials or authorization. */
@@ -161,6 +174,12 @@ export type ResolveConnectionCredentialInput = {
   forceRefresh?: boolean;
   /** Internal lookup mode. Preflight must not refresh credentials or record provider usage. */
   credentialResolutionMode?: "execution" | "preflight";
+  /**
+   * Approval preflight only: an expired OAuth access token that still has a
+   * refresh token passes, because execution (never the preflight) refreshes
+   * it. Ignored in execution mode.
+   */
+  preflightAcceptsRefreshableExpiry?: boolean;
   /** Frozen provider authority generation captured by the calling integration/catalog. */
   expectedAuthorityGeneration?: number;
   /** Attribution already authorized for forwarding to a host resolver; never authorizes local use. */
@@ -196,6 +215,58 @@ function isOfficialGmailRestDestination(
     destination.hostname.toLowerCase() === OFFICIAL_GMAIL_REST_HOST &&
     (destination.pathname === "/gmail/v1/users/me" ||
       destination.pathname.startsWith("/gmail/v1/users/me/"))
+  );
+}
+
+/** The reviewed Drive extensions share one personal MCP grant and exact Google API routes. */
+function isOfficialDriveRestDestination(
+  destinationUrl: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.providerDomain !== "drivemcp.googleapis.com" ||
+    ref.kind !== "oauth2" ||
+    ref.subjectScope !== "subject"
+  )
+    return false;
+  const url = new URL(destinationUrl);
+  return (
+    url.origin === "https://www.googleapis.com" &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    (/^\/drive\/v3\/(?:files\/[a-zA-Z0-9_-]+(?:\/permissions(?:\/[a-zA-Z0-9_-]+)?)?|changes(?:\/startPageToken)?)$/u.test(
+      url.pathname,
+    ) ||
+      /^\/upload\/drive\/v3\/files\/[a-zA-Z0-9_-]+$/u.test(url.pathname))
+  );
+}
+
+/**
+ * The Google Calendar bridge reuses the personal grant created for the hosted
+ * Calendar MCP identity and executes every tool against Calendar's REST API.
+ * Like Gmail, this exception is narrower than provider-domain binding: HTTPS,
+ * Google's API origin and only the calendar-list, event and free/busy routes.
+ */
+function isOfficialGoogleCalendarRestDestination(
+  destinationUrl: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.providerDomain.toLowerCase() !== "calendarmcp.googleapis.com" ||
+    ref.kind !== "oauth2" ||
+    ref.subjectScope !== "subject"
+  )
+    return false;
+  const url = new URL(destinationUrl);
+  return (
+    url.origin === "https://www.googleapis.com" &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    /^\/calendar\/v3\/(?:users\/me\/calendarList(?:\/[^/]+)?|calendars\/[^/]+\/events(?:\/[^/]+)?|freeBusy)$/u.test(
+      url.pathname,
+    )
   );
 }
 
@@ -446,6 +517,40 @@ export type ConnectionTokenResolverOptions = {
   transitionPermanentRefreshFailure?: (
     failure: PermanentConnectionRefreshFailure,
   ) => Promise<boolean>;
+  /**
+   * Called when a refresh was attempted and failed for a reason that may pass
+   * (the token endpoint was unreachable, answered 5xx, 408 or 429, or the
+   * refresh raced another change). The connection stays active and the result
+   * is still `refresh_failed`. Not called for a rejected grant or for a
+   * connection that cannot be refreshed at all (see
+   * ConnectionNotRefreshableError): only reconnecting fixes those.
+   */
+  onTransientRefreshFailure?: (failure: { connectionId: string }) => void;
+  /**
+   * Called once, when this resolve is the one that moved an active connection
+   * to `needs_reauth` because its provider rejected the stored grant. A later
+   * resolve of the already-broken connection, a transient failure or a lost
+   * status race never calls it, so the owner can be told exactly once.
+   */
+  onConnectionNeedsReauth?: (broken: ConnectionNeedsReauth) => void | Promise<void>;
+};
+
+/** A connection this resolve just found broken: only reconnecting fixes it. */
+export type ConnectionNeedsReauth = {
+  /** The workspace that holds the connection (a personal account may live elsewhere). */
+  workspaceId: string;
+  connectionId: string;
+  subjectId: string | null;
+  providerDomain: string;
+  httpStatus: number;
+  /** The accepted chat turn whose use found it, when there was one. */
+  use?: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  };
 };
 
 export type RefreshTransportOptions = {
@@ -561,6 +666,12 @@ export function buildConnectionTokenResolver(
       ...(material.placements ? { placements: material.placements } : {}),
       connectionId: cred.id,
       connectionVersion: cred.version,
+      // Reviewed bridges gate each tool on the provider's actual OAuth grants.
+      ...(cred.providerDomain.toLowerCase() === "slack.com"
+        ? { grantedScopes: normalizeSlackScopes(cred.grantedScopes) }
+        : cred.kind === "oauth2"
+          ? { grantedScopes: [...cred.grantedScopes] }
+          : {}),
       ...(connectionUseAttribution ? { connectionUseAttribution } : {}),
       expiresAt: cred.expiresAt,
     };
@@ -576,7 +687,9 @@ export function buildConnectionTokenResolver(
       throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     }
     const refreshed = await measureMcpPhase("oauth_refresh", () =>
-      deps.refresh(cred, ref, settings, options.refreshTransport),
+      isIdJagCredential(cred.credential)
+        ? refreshAutoConnectedCredential(lockedDb, settings, cred, ref, options.refreshTransport)
+        : deps.refresh(cred, ref, settings, options.refreshTransport),
     );
     const refreshRecord: ConnectionTokenRefreshInput = {
       id: cred.id,
@@ -766,7 +879,13 @@ export function buildConnectionTokenResolver(
       credentialResolutionMode === "preflight" &&
       cred.kind === "oauth2" &&
       (input.forceRefresh === true ||
-        (cred.expiresAt !== null && cred.expiresAt.getTime() <= now.getTime()))
+        (cred.expiresAt !== null &&
+          cred.expiresAt.getTime() <= now.getTime() &&
+          !(
+            input.preflightAcceptsRefreshableExpiry === true &&
+            (stringValue((cred.credential as { refresh_token?: unknown }).refresh_token) ||
+              isIdJagCredential(cred.credential))
+          )))
     ) {
       return authNeeded(ref, "refresh_failed", cred.id);
     }
@@ -797,7 +916,7 @@ export function buildConnectionTokenResolver(
             }
           }
           if (!handled) {
-            await deps
+            const transitioned = await deps
               // A personal credential may originate outside the workspace
               // consuming it. Apply the CAS to the same row we refreshed.
               .setStatus(db, cred.workspaceId, "needs_reauth", error.message, {
@@ -805,8 +924,35 @@ export function buildConnectionTokenResolver(
                 version: cred.version,
                 subjectId: cred.subjectId,
               })
-              .catch(() => undefined);
+              .catch(() => false);
+            if (transitioned && options.onConnectionNeedsReauth) {
+              const use = input.connectionUseContext;
+              try {
+                await options.onConnectionNeedsReauth({
+                  workspaceId: cred.workspaceId,
+                  connectionId: cred.id,
+                  subjectId: cred.subjectId,
+                  providerDomain: cred.providerDomain,
+                  httpStatus: error.httpStatus,
+                  ...(use
+                    ? {
+                        use: {
+                          workspaceId: use.workspaceId,
+                          sessionId: use.sessionId,
+                          turnId: use.turnId,
+                          attemptId: use.attemptId,
+                          executionGeneration: use.executionGeneration,
+                        },
+                      }
+                    : {}),
+                });
+              } catch {
+                // Telling the owner never changes the credential result.
+              }
+            }
           }
+        } else if (!(error instanceof ConnectionNotRefreshableError)) {
+          options.onTransientRefreshFailure?.({ connectionId: cred.id });
         }
         return authNeeded(ref, "refresh_failed", cred.id);
       }
@@ -851,8 +997,20 @@ function connectionBindingMatches(
       !binding ||
       (destination !== binding &&
         !(
+          binding === "https://drivemcp.googleapis.com/mcp/v1" &&
+          isOfficialDriveRestDestination(destination, ref)
+        ) &&
+        !(
           binding === canonicalHttpUrl(OFFICIAL_GMAIL_MCP_RESOURCE) &&
           isOfficialGmailRestDestination(destination, ref)
+        ) &&
+        !(
+          binding === "https://calendarmcp.googleapis.com/mcp/v1" &&
+          isOfficialGoogleCalendarRestDestination(destination, ref)
+        ) &&
+        !(
+          binding === canonicalHttpUrl(OFFICIAL_SLACK_MCP_URL) &&
+          isOfficialSlackRestDestination(destination, ref)
         ))
     ) {
       return false;
@@ -883,6 +1041,42 @@ export function connectionMetadataMatchesBinding(
     connectionBindingMatches({ ...connection, credential: {} }, ref, destinationUrl) &&
     missingRequestedScopes(ref.scopes, connection.grantedScopes, connection.providerDomain)
       .length === 0
+  );
+}
+
+/** Only the reviewed Slack bridge methods may reuse the hosted resource grant. */
+function isOfficialSlackRestDestination(
+  destinationUrl: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.providerDomain.toLowerCase() !== "slack.com" ||
+    ref.kind !== "oauth2" ||
+    (ref.subjectScope !== undefined &&
+      ref.subjectScope !== "subject" &&
+      ref.subjectScope !== "workspace")
+  )
+    return false;
+  const url = new URL(destinationUrl);
+  // Private file bytes for files.info results are a separate reviewed host.
+  if (isSlackPrivateFileUrl(url)) return true;
+  return (
+    url.origin === "https://slack.com" &&
+    !url.username &&
+    !url.password &&
+    [
+      "auth.test",
+      "conversations.list",
+      "conversations.info",
+      "conversations.members",
+      "users.list",
+      "users.info",
+      "conversations.history",
+      "conversations.replies",
+      "files.info",
+      "conversations.open",
+      "chat.postMessage",
+    ].some((method) => url.pathname === `/api/${method}`)
   );
 }
 
@@ -924,11 +1118,24 @@ export class ConnectionRefreshHttpError extends Error {
   readonly httpStatus: number;
   readonly oauthErrorCode: string | null;
 
-  constructor(httpStatus: number, oauthErrorCode: string | null = null) {
-    super(`connection refresh failed with HTTP ${httpStatus}`);
+  constructor(httpStatus: number, oauthErrorCode: string | null = null, message?: string) {
+    super(message ?? `connection refresh failed with HTTP ${httpStatus}`);
     this.name = "ConnectionRefreshHttpError";
     this.httpStatus = httpStatus;
     this.oauthErrorCode = oauthErrorCode;
+  }
+}
+
+/**
+ * The connection holds nothing to refresh with (no refresh token or token
+ * endpoint, or an unusable endpoint). Retrying cannot help; a rejected access
+ * token stays rejected until the person reconnects. The connection itself is
+ * left as it is, since its access token may still work for other requests.
+ */
+export class ConnectionNotRefreshableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConnectionNotRefreshableError";
   }
 }
 
@@ -943,6 +1150,36 @@ function isPermanentRefreshError(error: unknown): error is ConnectionRefreshHttp
     error.httpStatus !== 408 &&
     error.httpStatus !== 429
   );
+}
+
+/**
+ * An auto-connected login has no refresh token: a new ID-JAG is signed for
+ * its owner and redeemed. The app refusing it is permanent, like a refused
+ * refresh token; not reaching the app is not.
+ */
+async function refreshAutoConnectedCredential(
+  db: Database,
+  settings: Settings,
+  cred: ConnectionCredentialForBroker,
+  ref: McpServerConnectionRef,
+  transport: RefreshTransportOptions | undefined,
+): Promise<{
+  credential: Record<string, unknown>;
+  expiresAt: Date | null;
+  grantedScopes?: string[];
+  metadata?: Record<string, unknown>;
+}> {
+  try {
+    return await refreshIdJagConnectionCredential(db, settings, cred, ref, transport ?? {});
+  } catch (error) {
+    if (error instanceof IdJagExchangeError)
+      throw new ConnectionRefreshHttpError(
+        error.httpStatus === 0 ? 503 : error.httpStatus,
+        error.oauthErrorCode,
+        error.message,
+      );
+    throw error;
+  }
 }
 
 function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now: Date): boolean {
@@ -999,7 +1236,9 @@ function missingRequestedScopes(
   if (!requested?.length) {
     return [];
   }
-  const grantedSet = new Set(granted.map((scope) => connectionScopeKey(providerDomain, scope)));
+  const actual =
+    providerDomain.toLowerCase() === "slack.com" ? normalizeSlackScopes(granted) : granted;
+  const grantedSet = new Set(actual.map((scope) => connectionScopeKey(providerDomain, scope)));
   return requested.filter((scope) => !grantedSet.has(connectionScopeKey(providerDomain, scope)));
 }
 
@@ -1093,7 +1332,7 @@ export async function refreshOAuthConnectionCredential(
     stringValue((cred.metadata as { token_endpoint?: unknown }).token_endpoint);
   const tokenEndpoint = personalGitHub ? PERSONAL_GITHUB_TOKEN_URL : storedTokenEndpoint;
   if (!refreshToken || !tokenEndpoint) {
-    throw new Error("connection has no refresh token endpoint");
+    throw new ConnectionNotRefreshableError("connection has no refresh token endpoint");
   }
   if (personalGitHub && storedTokenEndpoint !== PERSONAL_GITHUB_TOKEN_URL) {
     throw new ConnectionRefreshHttpError(401, "client_unavailable");
@@ -1105,7 +1344,7 @@ export async function refreshOAuthConnectionCredential(
       allowLoopbackHttp: settings.environment === "local" || settings.environment === "test",
     });
   } catch {
-    throw new Error("connection has an invalid refresh token endpoint");
+    throw new ConnectionNotRefreshableError("connection has an invalid refresh token endpoint");
   }
   const body = new URLSearchParams();
   body.set("grant_type", "refresh_token");
@@ -1146,6 +1385,9 @@ export async function refreshOAuthConnectionCredential(
       ? "json"
       : "form";
   const headers: Record<string, string> = {
+    // GitHub (and other providers) answer form-encoded unless JSON is asked
+    // for, which made every personal GitHub refresh unparseable and silent.
+    accept: "application/json",
     "content-type":
       tokenRequestEncoding === "json" ? "application/json" : "application/x-www-form-urlencoded",
   };
@@ -1196,13 +1438,11 @@ export async function refreshOAuthConnectionCredential(
       await readOAuthRefreshErrorCode(response),
     );
   }
-  const payload = await readResponseJsonBounded<Record<string, unknown>>(
-    response,
-    OAUTH_MAX_RESPONSE_BYTES,
-    "OAuth refresh token response",
-  );
+  const payload = await readOAuthTokenResponse(response);
   const accessToken = stringValue(payload.access_token);
   if (!accessToken) {
+    const oauthErrorCode = stringValue(payload.error);
+    if (oauthErrorCode) throw refreshRefusedIn200(oauthErrorCode);
     throw new Error("connection refresh response did not include access_token");
   }
   const expiresAt = expiresAtFromTokenResponse(payload, cred.expiresAt);
@@ -1273,6 +1513,63 @@ export async function refreshOAuthConnectionCredential(
         }
       : {}),
   };
+}
+
+/**
+ * A token endpoint answer, JSON or form-encoded. We ask for JSON, but GitHub
+ * answers form-encoded without that header (or if a proxy drops it), and an
+ * unparseable success used to fail every refresh silently.
+ */
+async function readOAuthTokenResponse(response: Response): Promise<Record<string, unknown>> {
+  const form = /application\/x-www-form-urlencoded/i.test(
+    response.headers.get("content-type") ?? "",
+  );
+  if (!form) {
+    return await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      "OAuth refresh token response",
+    );
+  }
+  const text = await readResponseTextBounded(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "OAuth refresh token response",
+  );
+  const payload: Record<string, unknown> = {};
+  for (const [key, value] of new URLSearchParams(text)) {
+    const numeric = /^(expires_in|refresh_token_expires_in)$/.test(key) ? Number(value) : NaN;
+    payload[key] = Number.isFinite(numeric) ? numeric : value;
+  }
+  return payload;
+}
+
+// OAuth error codes in a 200 answer that do not mean the person's grant is
+// gone: the provider is busy, or our own client credentials are wrong (a
+// deployment fault that reconnecting cannot fix). They stay transient.
+const TRANSIENT_OAUTH_REFRESH_ERRORS = new Set([
+  "slow_down",
+  "temporarily_unavailable",
+  "server_error",
+  "incorrect_client_credentials",
+  "invalid_client",
+]);
+
+/**
+ * GitHub reports a refused refresh (bad_refresh_token, unauthorized_client) as
+ * HTTP 200 with an OAuth error field. That is the same permanent refusal as a
+ * 400, so the connection asks the person to reconnect instead of failing every
+ * use while it stays active. Unknown codes count as refusals too: a refusal
+ * mistaken for a passing failure is the silent outage this guards against.
+ */
+function refreshRefusedIn200(code: string): ConnectionRefreshHttpError {
+  const safe = /^[a-z0-9_.-]{1,64}$/i.test(code) ? code : null;
+  const transient = safe !== null && TRANSIENT_OAUTH_REFRESH_ERRORS.has(safe);
+  return new ConnectionRefreshHttpError(
+    transient ? 503 : 400,
+    safe,
+    `connection refresh refused by the provider (${safe ?? "unknown error"})`,
+  );
 }
 
 async function readOAuthRefreshErrorCode(response: Response): Promise<string | null> {

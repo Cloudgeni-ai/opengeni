@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import {
+  CLIENT_ERROR_DETAIL_FIELDS,
+  CLIENT_ERROR_DETAIL_MAX_BYTES,
+} from "@opengeni/contracts/client-error-report";
 import { createObservability } from "@opengeni/observability";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 
 import { createApp, isApiContractProtectedMutation, routeLabel } from "../src/app";
@@ -8,6 +13,9 @@ import {
   CLIENT_ERROR_KINDS,
   CLIENT_ERROR_REPORT_MAX_BYTES,
   createClientErrorAdmission,
+  createClientSignalAdmission,
+  createClientWebVitalAdmission,
+  parseClientBeaconReport,
   parseClientErrorReport,
   registerClientErrorRoutes,
 } from "../src/routes/client-errors";
@@ -69,7 +77,7 @@ describe("client error report contract", () => {
     for (const kind of CLIENT_ERROR_KINDS) {
       expect(parseClientErrorReport(JSON.stringify({ ...validReport, kind }))?.kind).toBe(kind);
     }
-    for (const route of ["/", "unknown", "/workspaces/$workspaceId/variable-sets", "/billing"]) {
+    for (const route of ["/", "unknown", "/workspaces/$workspaceId/secrets", "/billing"]) {
       expect(parseClientErrorReport(JSON.stringify({ ...validReport, route }))?.route).toBe(route);
     }
   });
@@ -89,8 +97,62 @@ describe("client error report contract", () => {
       JSON.stringify({ ...validReport, revision: "r".repeat(65) }),
       JSON.stringify({ kind: "route_error", route: "/" }),
       JSON.stringify({ ...validReport, route: `/${"a".repeat(CLIENT_ERROR_REPORT_MAX_BYTES)}` }),
+      JSON.stringify({ ...validReport, error: { message: "x", url: "https://a.test/" } }),
+      JSON.stringify({ ...validReport, error: { message: 42 } }),
+      JSON.stringify({ ...validReport, error: "TypeError: x" }),
+      JSON.stringify({
+        ...validReport,
+        error: { stack: "x".repeat(CLIENT_ERROR_REPORT_MAX_BYTES) },
+      }),
     ];
     for (const body of rejected) expect(parseClientErrorReport(body)).toBeNull();
+  });
+
+  test("refuses a diagnostic field over twice its projected bound before scrubbing it", () => {
+    for (const field of CLIENT_ERROR_DETAIL_FIELDS) {
+      const limit = CLIENT_ERROR_DETAIL_MAX_BYTES[field] * 2;
+      const report = (value: string) =>
+        parseClientErrorReport(JSON.stringify({ ...validReport, error: { [field]: value } }));
+      expect(report("x".repeat(limit))?.error?.[field]?.startsWith("x")).toBe(true);
+      expect(report("x".repeat(limit + 1))).toBeNull();
+    }
+    // A body-sized run of URL prefixes is refused by length, never scrubbed.
+    expect(
+      parseClientErrorReport(
+        JSON.stringify({ ...validReport, error: { stack: "http://".repeat(2_900) } }),
+      ),
+    ).toBeNull();
+  });
+
+  test("re-projects error diagnostics: scrubbed, bounded, and dropped when empty", () => {
+    const report = parseClientErrorReport(
+      JSON.stringify({
+        ...validReport,
+        kind: "route_error",
+        error: {
+          name: "Error",
+          message: "Minified React error #130; visit https://react.dev/errors/130?args[]=undefined",
+          stack: `Error\n    at load (https://app.example.test/a.js?token=abc:1:2)\n${"    at x (b.js:1:1)\n".repeat(400)}`,
+          componentStack: "    at ArtifactPageChrome\n    at Bearer abcdef123456",
+        },
+      }),
+    );
+    expect(report?.error?.name).toBe("Error");
+    expect(report?.error?.message).toBe(
+      "Minified React error #130; visit https://react.dev/errors/130?args[]=undefined",
+    );
+    expect(
+      report?.error?.stack?.startsWith("Error\n    at load (https://app.example.test/a.js:1:2)"),
+    ).toBe(true);
+    expect(report?.error?.stack?.endsWith("…[truncated]")).toBe(true);
+    expect(new TextEncoder().encode(report!.error!.stack!).byteLength).toBeLessThanOrEqual(4096);
+    expect(report?.error?.componentStack).toBe("at ArtifactPageChrome\n    at Bearer [redacted]");
+
+    const blank = parseClientErrorReport(
+      JSON.stringify({ ...validReport, error: { message: " " } }),
+    );
+    expect(blank).toEqual(validReport as never);
+    expect(blank).not.toHaveProperty("error");
   });
 
   test("admission is a per-kind token bucket that refills over time", () => {
@@ -138,6 +200,44 @@ describe("POST /v1/client-errors", () => {
       reason: "chunk_load",
       clientRoute: validReport.route,
       clientRevision: validReport.revision,
+    });
+  });
+
+  test("logs the scrubbed error diagnostics of a detailed report", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
+
+    const { result: response, lines } = await captureWarnings(() =>
+      post(
+        app,
+        JSON.stringify({
+          kind: "route_error",
+          route: "/workspaces/$workspaceId/artifacts",
+          revision: validReport.revision,
+          error: {
+            name: "Error",
+            message:
+              "Minified React error #130; visit https://react.dev/errors/130?args[]=undefined",
+            stack: "Error\n    at Kc (https://app.opengeni.test/assets/index-B3c4SELv.js:9:41)",
+            componentStack: "at ArtifactPageChrome\n    at Suspense\n    password=hunter2",
+          },
+        }),
+        { origin: "https://app.opengeni.test" },
+      ),
+    );
+    expect(response.status).toBe(204);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      message: "Web client error reported",
+      reason: "route_error",
+      clientRoute: "/workspaces/$workspaceId/artifacts",
+      clientErrorName: "Error",
+      clientErrorMessage:
+        "Minified React error #130; visit https://react.dev/errors/130?args[]=undefined",
+      clientErrorStack:
+        "Error\n    at Kc (https://app.opengeni.test/assets/index-B3c4SELv.js:9:41)",
+      clientComponentStack: "at ArtifactPageChrome\n    at Suspense\n    password=[redacted]",
     });
   });
 
@@ -195,12 +295,13 @@ describe("POST /v1/client-errors", () => {
       observability,
     });
     let pulledChunks = 0;
-    const chunk = new TextEncoder().encode("x".repeat(256));
+    const chunkBytes = 4096;
+    const chunk = new TextEncoder().encode("x".repeat(chunkBytes));
     // No Content-Length: the declared-length check cannot see this body.
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
         pulledChunks += 1;
-        if (pulledChunks > 64) controller.close();
+        if (pulledChunks > 256) controller.close();
         else controller.enqueue(chunk);
       },
     });
@@ -213,8 +314,8 @@ describe("POST /v1/client-errors", () => {
       } as RequestInit),
     );
     expect(response.status).toBe(413);
-    // Refused after the third 256-byte chunk, not after reading all 16 KiB.
-    expect(pulledChunks).toBeLessThan(8);
+    // Refused just past the limit, not after reading all 1 MiB.
+    expect(pulledChunks).toBeLessThan(CLIENT_ERROR_REPORT_MAX_BYTES / chunkBytes + 4);
     const metrics = await observability.prometheusMetrics();
     expect(
       metricValue(
@@ -299,5 +400,285 @@ describe("POST /v1/client-errors", () => {
     // Only the beacon's POST is public; other methods keep the deployment key.
     const { result: read } = await captureWarnings(() => app.request("/v1/client-errors"));
     expect(read.status).toBe(401);
+  });
+});
+
+const revision = "0123456789abcdef0123456789abcdef01234567";
+const requestFailure = {
+  signal: "request_failure",
+  action: "send_message",
+  reason: "offline",
+  route: "/workspaces/$workspaceId/sessions/$sessionId",
+  revision,
+};
+const streamEvent = {
+  signal: "stream",
+  stream: "session",
+  event: "long_disconnect",
+  route: "/workspaces/$workspaceId/sessions/$sessionId",
+  revision,
+};
+const webVital = { signal: "web_vital", metric: "lcp", page: "sessions", value: 2.4, revision };
+const desktopBridgeMissing = {
+  signal: "desktop_bridge_missing",
+  platform: "macos",
+  appVersion: "0.1.32",
+  route: "/workspaces/$workspaceId/sessions/$sessionId",
+  revision,
+};
+
+describe("client signal report contract", () => {
+  test("accepts closed request-failure, stream and web-vital reports", () => {
+    for (const report of [
+      requestFailure,
+      streamEvent,
+      webVital,
+      { ...webVital, page: "read-only-chats" },
+      desktopBridgeMissing,
+      { ...desktopBridgeMissing, platform: "windows", appVersion: "1.2.3-beta.4" },
+      { ...desktopBridgeMissing, platform: "linux", appVersion: "unknown" },
+    ]) {
+      expect(parseClientBeaconReport(JSON.stringify(report))).toEqual(report as never);
+      // A signal report is never mistaken for an error report.
+      expect(parseClientErrorReport(JSON.stringify(report))).toBeNull();
+    }
+    expect(
+      parseClientBeaconReport(JSON.stringify({ ...webVital, metric: "cls", value: 0.12 })),
+    ).not.toBeNull();
+  });
+
+  test("rejects open values, content, ids and out-of-range vitals", () => {
+    const rejected = [
+      { ...requestFailure, action: "delete_everything" },
+      { ...requestFailure, reason: "TypeError: Failed to fetch" },
+      { ...requestFailure, route: "/workspaces/7c9e6679-7425-40de-944b-e07fc1f90ae7" },
+      { ...requestFailure, url: "https://api.example.test/v1" },
+      { ...requestFailure, kind: "route_error" },
+      { ...streamEvent, stream: "terminal" },
+      { ...streamEvent, event: "error" },
+      { ...webVital, page: "/workspaces/7c9e6679-7425-40de-944b-e07fc1f90ae7" },
+      { ...webVital, metric: "fcp" },
+      { ...webVital, value: -1 },
+      { ...webVital, value: 601 },
+      { ...webVital, metric: "cls", value: 101 },
+      { ...webVital, value: "2.4" },
+      { ...webVital, route: "/" },
+      { ...desktopBridgeMissing, platform: "ios" },
+      { ...desktopBridgeMissing, appVersion: "0.1" },
+      { ...desktopBridgeMissing, appVersion: "0.1.32 (Macintosh; Intel Mac OS X 10_15_7)" },
+      { ...desktopBridgeMissing, appVersion: "Opengeni/0.1.32" },
+      { ...desktopBridgeMissing, userAgent: "Mozilla/5.0 Opengeni/0.1.32 Electron/44.7.2" },
+      { ...desktopBridgeMissing, route: "/workspaces/7c9e6679-7425-40de-944b-e07fc1f90ae7" },
+      { signal: "unknown", revision },
+    ];
+    for (const body of rejected) expect(parseClientBeaconReport(JSON.stringify(body))).toBeNull();
+  });
+});
+
+describe("POST /v1/client-errors signal reports", () => {
+  test("records read-only chats web vitals using the closed page label", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
+    const response = await post(app, JSON.stringify({ ...webVital, page: "read-only-chats" }), {
+      origin: "https://app.opengeni.test",
+    });
+    expect(response.status).toBe(204);
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(
+        metrics,
+        "opengeni_client_web_vital_count",
+        'metric="lcp",page="read-only-chats"',
+      ),
+    ).toBe(1);
+    expect(
+      metricValue(metrics, "opengeni_client_web_vital_sum", 'metric="lcp",page="read-only-chats"'),
+    ).toBe(2.4);
+  });
+
+  test("increments the closed signal series and the web-vital histogram", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
+    const baseline = await observability.prometheusMetrics();
+    expect(
+      metricValue(
+        baseline,
+        "opengeni_client_request_failures_total",
+        'action="send_message",reason="offline"',
+      ),
+    ).toBe(0);
+    expect(
+      metricValue(
+        baseline,
+        "opengeni_client_stream_events_total",
+        'event="long_disconnect",stream="session"',
+      ),
+    ).toBe(0);
+
+    const { lines } = await captureWarnings(async () => {
+      for (const report of [requestFailure, streamEvent, webVital]) {
+        const response = await post(app, JSON.stringify(report), {
+          origin: "https://app.opengeni.test",
+        });
+        expect(response.status).toBe(204);
+      }
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(
+        metrics,
+        "opengeni_client_request_failures_total",
+        'action="send_message",reason="offline"',
+      ),
+    ).toBe(1);
+    expect(
+      metricValue(
+        metrics,
+        "opengeni_client_stream_events_total",
+        'event="long_disconnect",stream="session"',
+      ),
+    ).toBe(1);
+    expect(
+      metricValue(metrics, "opengeni_client_web_vital_count", 'metric="lcp",page="sessions"'),
+    ).toBe(1);
+    expect(
+      metricValue(metrics, "opengeni_client_web_vital_sum", 'metric="lcp",page="sessions"'),
+    ).toBe(2.4);
+    expect(metricValue(metrics, "opengeni_client_web_vital_bucket", 'le="2.5"')).toBe(1);
+    // Error counters are untouched by signals.
+    expect(metricValue(metrics, "opengeni_client_errors_total", 'kind="route_error"')).toBe(0);
+    // Request failure and degraded stream log their closed fields; vitals do not log.
+    expect(lines.map((line) => JSON.parse(line).message)).toEqual([
+      "Web client request failed before a response",
+      "Web client live stream degraded",
+    ]);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      op: "send_message",
+      reason: "offline",
+      clientRoute: requestFailure.route,
+    });
+  });
+
+  test("counts a desktop page without the bridge by platform and logs its app version", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
+    const baseline = await observability.prometheusMetrics();
+    for (const platform of ["macos", "windows", "linux"]) {
+      expect(
+        metricValue(
+          baseline,
+          "opengeni_client_desktop_bridge_missing_total",
+          `platform="${platform}"`,
+        ),
+      ).toBe(0);
+    }
+    const { lines } = await captureWarnings(async () => {
+      const response = await post(app, JSON.stringify(desktopBridgeMissing), {
+        origin: "https://app.opengeni.test",
+      });
+      expect(response.status).toBe(204);
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(metrics, "opengeni_client_desktop_bridge_missing_total", 'platform="macos"'),
+    ).toBe(1);
+    expect(
+      metricValue(metrics, "opengeni_client_desktop_bridge_missing_total", 'platform="windows"'),
+    ).toBe(0);
+    // The version is not a metric label; only the log line carries it.
+    expect(metrics).not.toContain("0.1.32");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      message: "Desktop app page without the shell bridge",
+      surface: "desktop",
+      op: "macos",
+      reason: "bridge_missing",
+      clientAppVersion: "0.1.32",
+      clientRoute: desktopBridgeMissing.route,
+      clientRevision: revision,
+    });
+  });
+
+  test("signals use their own per-key admission buckets", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, {
+      observability,
+      settings: originSettings,
+      signalAdmission: createClientSignalAdmission({ capacity: 1, refillPerSecond: 0 }),
+    });
+    const send = (report: object) =>
+      captureWarnings(() => post(app, JSON.stringify(report))).then(({ result }) => result.status);
+    expect(await send(requestFailure)).toBe(204);
+    expect(await send(requestFailure)).toBe(429);
+    // Another action and the error kinds keep their budgets.
+    expect(await send({ ...requestFailure, action: "create_session" })).toBe(204);
+    expect(await send(validReport)).toBe(204);
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(
+        metrics,
+        "opengeni_client_error_reports_rejected_total",
+        'kind="request_failure",reason="rate_limited"',
+      ),
+    ).toBe(1);
+  });
+});
+
+describe("signal reports through the full API app", () => {
+  test("an anonymous signal reaches Prometheus on an auth-required deployment", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = createApp({
+      settings: { ...testSettings(), authRequired: true, accessKey: "deployment-key" },
+      db: {} as never,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+      managedAuth: null,
+      observability,
+    });
+    const { result: response } = await captureWarnings(() =>
+      post(app, JSON.stringify({ ...requestFailure, action: "create_session", reason: "network" })),
+    );
+    expect(response.status).toBe(204);
+    const { result: metrics } = await captureWarnings(() =>
+      app.request("/metrics", { headers: { authorization: "Bearer deployment-key" } }),
+    );
+    expect(metrics.status).toBe(200);
+    const exposition = await metrics.text();
+    expect(
+      metricValue(
+        exposition,
+        "opengeni_client_request_failures_total",
+        'action="create_session",reason="network"',
+      ),
+    ).toBe(1);
+  });
+});
+
+describe("web vital admission", () => {
+  test("vitals use a much larger bucket than failure signals", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, {
+      observability,
+      settings: originSettings,
+      signalAdmission: createClientSignalAdmission({ capacity: 1, refillPerSecond: 0 }),
+    });
+    const statuses: number[] = [];
+    for (let index = 0; index < 100; index += 1) {
+      statuses.push((await post(app, JSON.stringify(webVital))).status);
+    }
+    expect(statuses.every((status) => status === 204)).toBe(true);
+    let now = 0;
+    const admission = createClientWebVitalAdmission({ now: () => now });
+    let admitted = 0;
+    for (let index = 0; index < 2_000; index += 1)
+      if (admission.admit("web_vital:lcp")) admitted += 1;
+    expect(admitted).toBe(1_200);
+    now += 1_000;
+    expect(admission.admit("web_vital:lcp")).toBe(true);
   });
 });

@@ -1,4 +1,14 @@
 import {
+  BillingCheckoutStatus,
+  BillingCreditNotification,
+  UpdateBillingAlertSettingsRequest,
+  ListBillingCreditNotificationsResponse,
+  BillingSubscriptionCatalog,
+  BillingSubscriptionChange,
+  CancelBillingSubscriptionRequest,
+  ChangeBillingSubscriptionRequest,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
@@ -7,31 +17,102 @@ import {
   OrganizationUsageWorkspacePageQuery,
   type AccessContext,
   type Permission,
+  type PromotionalCreditScope,
 } from "@opengeni/contracts";
-import { configuredEntitlements } from "@opengeni/config";
+import { OrganizationModelUsageQuery } from "@opengeni/contracts/organization-model-usage";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import { configuredEntitlements, promotionalCreditScope } from "@opengeni/config";
+import { creditScopeMetadata, creditScopeFromMetadata } from "../credit-promotion-snapshot";
 import {
   applyCreditLedgerEntry,
+  getBillingAlertSettings,
+  updateBillingAlertSettings,
+  listBillingCreditNotifications,
+  markBillingCreditNotificationRead,
+  applyCreditLedgerEntryOnce,
   getBillingBalance,
+  readCreditPromotionPolicy,
   getBillingCustomer,
+  getCreditLedgerEntry,
   hasCreditLedgerEntry,
   isStripeWebhookProcessed,
   listUsageEvents,
+  getOrganizationModelUsage,
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
   withSessionRlsActorContext,
+  withRlsContext,
   getManagedAccount,
   markStripeWebhookProcessed,
   recordStripeWebhookEvent,
   upsertBillingCustomer,
 } from "@opengeni/db";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import Stripe from "stripe";
-import { requireAccessContext } from "@opengeni/core";
+import { sql } from "drizzle-orm";
+import { requireAccessContext, MissingPermissionRefusal } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import { subscriptionStore } from "../billing-subscription-store";
+import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscriptions";
+import { serializedStripeCustomer } from "../billing-stripe-customer";
+import { parseRequestBody, parseRequestQuery } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
+import {
+  createBillingAutoTopUpService,
+  registerBillingAutoTopUpRoutes,
+} from "./billing-auto-top-up";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
+  registerBillingAutoTopUpRoutes(app, deps);
+  registerSubscriptionRoutes(app, deps);
+  app.get("/v1/billing/alerts", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    c.header("cache-control", "private, no-store");
+    return c.json(await getBillingAlertSettings(deps.db, accountId));
+  });
+  app.put("/v1/billing/alerts", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const body = parseRequestBody(
+      UpdateBillingAlertSettingsRequest,
+      await c.req.json().catch(() => null),
+      {
+        status: 400,
+        message: "Invalid billing alert settings",
+      },
+    );
+    const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
+    return c.json(await updateBillingAlertSettings(deps.db, { ...body, accountId }));
+  });
+  app.get("/v1/billing/notifications", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      ListBillingCreditNotificationsResponse.parse({
+        notifications: await listBillingCreditNotifications(deps.db, {
+          accountId,
+          subjectId: context.subjectId,
+        }),
+      }),
+    );
+  });
+  app.post("/v1/billing/notifications/:notificationId/read", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    await markBillingCreditNotificationRead(deps.db, {
+      accountId,
+      subjectId: context.subjectId,
+      notificationId: parseRequestBody(
+        BillingCreditNotification.shape.id,
+        c.req.param("notificationId"),
+        { status: 400, message: "Invalid notification id" },
+      ),
+    });
+    return c.json({ ok: true });
+  });
   app.get("/v1/billing", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
@@ -66,27 +147,36 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/billing/usage-summary", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
-    const parsed = OrganizationUsageQuery.safeParse(c.req.query());
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid usage query",
-      });
-    }
+    const parsed = parseRequestQuery(OrganizationUsageQuery, c.req.query(), {
+      status: 400,
+      message: "invalid usage query",
+    });
     return await withBillingUsageActor(deps, context, accountId, async () =>
-      c.json(await getOrganizationUsageSummary(deps.db, { accountId, ...parsed.data })),
+      c.json(await getOrganizationUsageSummary(deps.db, { accountId, ...parsed })),
     );
   });
 
   app.get("/v1/billing/usage-workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
-    const parsed = OrganizationUsageWorkspacePageQuery.safeParse(c.req.query());
-    if (!parsed.success)
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid usage page query",
-      });
+    const parsed = parseRequestQuery(OrganizationUsageWorkspacePageQuery, c.req.query(), {
+      status: 400,
+      message: "invalid usage page query",
+    });
     return await withBillingUsageActor(deps, context, accountId, async () =>
-      c.json(await getOrganizationUsageWorkspacePage(deps.db, { accountId, ...parsed.data })),
+      c.json(await getOrganizationUsageWorkspacePage(deps.db, { accountId, ...parsed })),
+    );
+  });
+
+  app.get("/v1/billing/usage-models", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const parsed = parseRequestQuery(OrganizationModelUsageQuery, c.req.query(), {
+      status: 400,
+      message: "invalid model usage query",
+    });
+    return await withBillingUsageActor(deps, context, accountId, async () =>
+      c.json(await getOrganizationModelUsage(deps.db, { accountId, ...parsed })),
     );
   });
 
@@ -105,33 +195,87 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "stripe billing is not enabled" });
     }
     const context = await requireAccessContext(c, deps);
-    const parsed = CreateCheckoutRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid checkout request",
+    const parsed = parseRequestBody(CreateCheckoutRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid checkout request",
+    });
+    const body = parsed;
+    const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
+    const stripe = stripeClient(deps);
+    const promotion = body.promotionCode
+      ? await resolveCheckoutPromotionCode(stripe, body.promotionCode)
+      : null;
+    const promotionalScope = promotion
+      ? promotionalCreditScope(
+          {
+            creditPromotionPolicy:
+              (await readCreditPromotionPolicy(deps.db)) ?? deps.settings.creditPromotionPolicy,
+          },
+          promotion.couponId,
+        )
+      : undefined;
+    const amountCents =
+      body.amountUsd !== undefined
+        ? usdToCents(body.amountUsd)
+        : (promotion?.amountOffCents ?? null);
+    if (amountCents === null) {
+      throw new HTTPException(422, {
+        message: promotion
+          ? "Choose how many credits to buy with this code."
+          : "amountUsd is required",
       });
     }
-    const body = parsed.data;
-    const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
-    const amountCents = usdToCents(body.amountUsd);
+    if (amountCents < 500 || amountCents > 1_000_000) {
+      throw new HTTPException(422, {
+        message: "Credits must be between $5 and $10,000.",
+      });
+    }
+    if (
+      promotionalScope &&
+      (!promotion?.amountOffCents || amountCents !== promotion.amountOffCents)
+    ) {
+      throw new HTTPException(422, {
+        message:
+          "Redeem this offer for its exact credit amount. Buy additional credits separately.",
+      });
+    }
     const amountMicros = centsToMicros(amountCents);
-    const stripe = stripeClient(deps);
     const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
     const idempotencyKey = `checkout:${accountId}:${amountMicros}:${crypto.randomUUID()}`;
-    const session = await stripe.checkout.sessions.create(
-      stripeCheckoutSessionCreateParams({
-        accountId,
-        customerId,
-        amountCents,
-        amountMicros,
-        creditsProductId: deps.settings.stripeCreditsProductId,
-        publicBaseUrl: deps.settings.publicBaseUrl,
-        successUrl: body.successUrl,
-        cancelUrl: body.cancelUrl,
-        idempotencyKey,
-      }),
-      { idempotencyKey },
-    );
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await stripe.checkout.sessions.create(
+        stripeCheckoutSessionCreateParams({
+          accountId,
+          customerId,
+          amountCents,
+          amountMicros,
+          creditsProductId: deps.settings.stripeCreditsProductId,
+          publicBaseUrl: deps.settings.publicBaseUrl,
+          webBaseUrl: deps.settings.webBaseUrl,
+          successUrl: body.successUrl,
+          cancelUrl: body.cancelUrl,
+          idempotencyKey,
+          promotionalScope,
+          ...(promotion
+            ? {
+                promotionCodeId: promotion.id,
+                couponId: promotion.couponId,
+                fullyDiscounted:
+                  promotion.percentOff === 100 || (promotion.amountOffCents ?? 0) >= amountCents,
+              }
+            : {}),
+        }),
+        { idempotencyKey },
+      );
+    } catch (error) {
+      // Stripe refuses a code whose restrictions this purchase doesn't meet
+      // (first purchase only, a minimum amount, another customer's code).
+      if (promotion && error instanceof Stripe.errors.StripeInvalidRequestError) {
+        throw new HTTPException(422, { message: "This code can't be used for this purchase." });
+      }
+      throw error;
+    }
     if (!session.url) {
       throw new HTTPException(502, { message: "Stripe did not return a checkout URL" });
     }
@@ -139,6 +283,62 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       CreateCheckoutResponse.parse({
         checkoutSessionId: session.id,
         url: session.url,
+        amountUsd: amountCents / 100,
+        promotionalScope,
+      }),
+    );
+  });
+
+  // Where one checkout stands, for the page the customer returns to. Credits
+  // normally post from the webhook; a completed checkout whose webhook has not
+  // arrived yet is settled here from Stripe's own record of the session, under
+  // the same ledger idempotency key, so it grants at most once.
+  app.get("/v1/billing/checkout/:checkoutSessionId", async (c) => {
+    if (deps.settings.billingMode !== "stripe") {
+      throw new HTTPException(404, { message: "stripe billing is not enabled" });
+    }
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const checkoutSessionId = c.req.param("checkoutSessionId");
+    if (!/^cs_[A-Za-z0-9_]{1,250}$/.test(checkoutSessionId)) {
+      throw new HTTPException(404, { message: "checkout not found" });
+    }
+    const stripe = stripeClient(deps);
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await stripe.checkout.sessions.retrieve(checkoutSessionId);
+    } catch (error) {
+      if (error instanceof Stripe.errors.StripeInvalidRequestError) {
+        throw new HTTPException(404, { message: "checkout not found" });
+      }
+      throw error;
+    }
+    if (session.metadata?.opengeni_account_id !== accountId) {
+      throw new HTTPException(404, { message: "checkout not found" });
+    }
+    const credit = creditMetadata(session.metadata, `Stripe checkout session ${session.id}`);
+    let entry = await getCreditLedgerEntry(deps.db, accountId, credit.idempotencyKey);
+    if (!entry && session.status === "complete") {
+      await grantCheckoutSessionCredits(deps, session, {
+        stripeEventId: null,
+        livemode: session.livemode,
+      });
+      entry = await getCreditLedgerEntry(deps.db, accountId, credit.idempotencyKey);
+    }
+    return c.json(
+      BillingCheckoutStatus.parse({
+        checkoutSessionId: session.id,
+        status: session.status ?? "open",
+        credit: {
+          state: entry ? "granted" : "pending",
+          amountMicros: entry?.amountMicros ?? credit.amountMicros,
+          currency: "usd",
+          promotionalScope: creditScopeFromMetadata(session.metadata),
+          free: entry
+            ? entry.sourceType === "stripe_checkout_coupon"
+            : isFreeCouponCheckout(session),
+        },
+        balance: entry ? await getBillingBalance(deps.db, accountId) : null,
       }),
     );
   });
@@ -148,20 +348,19 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "stripe billing is not enabled" });
     }
     const context = await requireAccessContext(c, deps);
-    const parsed = CreateBillingPortalRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid billing portal request",
-      });
-    }
-    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
+    const parsed = parseRequestBody(CreateBillingPortalRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid billing portal request",
+    });
+    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
     const stripe = stripeClient(deps);
     const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
     const session = await stripe.billingPortal.sessions.create(
       stripeBillingPortalSessionCreateParams({
         customerId,
         publicBaseUrl: deps.settings.publicBaseUrl,
-        returnUrl: parsed.data.returnUrl,
+        webBaseUrl: deps.settings.webBaseUrl,
+        returnUrl: parsed.returnUrl,
       }),
     );
     if (!session.url) {
@@ -207,15 +406,126 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         return c.json({ received: true, duplicate: true });
       }
     }
+    // Retain disabled subscription deliveries, but leave them unprocessed so
+    // an operator can replay them after activation. Top-up events remain live.
+    if (subscriptionWebhookEvent(event) && !deps.settings.subscriptionPlansEnabled) {
+      return c.json({ received: true, ignored: true });
+    }
     try {
       await handleStripeWebhookEvent(deps, stripeClient(deps), event);
       await markStripeWebhookProcessed(deps.db, event.id);
       return c.json({ received: true });
     } catch (error) {
       throw new HTTPException(500, {
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
+  });
+}
+
+function requireSubscriptionsEnabled(deps: ApiRouteDeps): void {
+  if (!deps.settings.subscriptionPlansEnabled || deps.settings.billingMode !== "stripe") {
+    throw new HTTPException(404, { message: "subscription plans are not enabled" });
+  }
+}
+
+function subscriptions(deps: ApiRouteDeps, stripe = stripeClient(deps)) {
+  return new StripeSubscriptions(
+    stripe,
+    subscriptionStore(deps.db),
+    deps.settings.subscriptionPlansEnabled,
+    stripeCustomerProvider(deps),
+  );
+}
+
+function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.get("/v1/billing/subscription/plans", async (c) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    return c.json(BillingSubscriptionCatalog.parse(await subscriptions(deps).catalog(accountId)));
+  });
+  app.post("/v1/billing/subscription/checkout", async (c) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const parsed = parseRequestBody(CreateSubscriptionCheckoutRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid subscription checkout request",
+    });
+    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    const stripe = stripeClient(deps);
+    const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
+    return c.json(
+      CreateSubscriptionCheckoutResponse.parse(
+        await subscriptions(deps, stripe).checkout({
+          ...parsed,
+          accountId,
+          customerId,
+          successUrl: checkoutReturnUrl(
+            deps.settings.publicBaseUrl,
+            deps.settings.webBaseUrl,
+            parsed.successUrl,
+            "/billing?subscription=success",
+            "successUrl",
+          ),
+          cancelUrl: checkoutReturnUrl(
+            deps.settings.publicBaseUrl,
+            deps.settings.webBaseUrl,
+            parsed.cancelUrl,
+            "/billing?subscription=cancelled",
+            "cancelUrl",
+          ),
+        }),
+      ),
+    );
+  });
+  const changeSubscription = (action: "upgrade" | "change") => async (c: Context) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const parsed = parseRequestBody(ChangeBillingSubscriptionRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid subscription change request",
+    });
+    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    return c.json(
+      BillingSubscriptionChange.parse(await subscriptions(deps)[action]({ ...parsed, accountId })),
+    );
+  };
+  app.post("/v1/billing/subscription/upgrade", changeSubscription("upgrade"));
+  app.post("/v1/billing/subscription/change", changeSubscription("change"));
+  app.post("/v1/billing/subscription/cancel", async (c) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const parsed = parseRequestBody(CancelBillingSubscriptionRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid subscription cancellation request",
+    });
+    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    return c.json(
+      BillingSubscriptionChange.parse(await subscriptions(deps).cancel({ ...parsed, accountId })),
+    );
+  });
+  app.post("/v1/billing/subscription/portal", async (c) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const parsed = parseRequestBody(CreateBillingPortalRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid billing portal request",
+    });
+    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    const stripe = stripeClient(deps);
+    const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
+    const session = await stripe.billingPortal.sessions.create(
+      stripeBillingPortalSessionCreateParams({
+        customerId,
+        publicBaseUrl: deps.settings.publicBaseUrl,
+        webBaseUrl: deps.settings.webBaseUrl,
+        returnUrl: parsed.returnUrl,
+      }),
+    );
+    return c.json(
+      CreateBillingPortalResponse.parse({ portalSessionId: session.id, url: session.url }),
+    );
   });
 }
 
@@ -226,24 +536,45 @@ export function stripeCheckoutSessionCreateParams(input: {
   amountMicros: number;
   creditsProductId?: string | undefined;
   publicBaseUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
   idempotencyKey: string;
+  /** Apply this promotion code up front instead of letting Stripe ask for one. */
+  promotionCodeId?: string | undefined;
+  couponId?: string | undefined;
+  promotionalScope?: PromotionalCreditScope | undefined;
+  /**
+   * The applied code covers the whole package, so the total is $0. Nothing is
+   * taxable, so Checkout skips tax and with it the billing address: the
+   * customer only confirms.
+   */
+  fullyDiscounted?: boolean | undefined;
 }): Stripe.Checkout.SessionCreateParams {
+  // Without return URLs (a checkout an agent made, or another API caller),
+  // the payment page was opened from somewhere else, usually a chat in
+  // another tab that confirms the credits itself: land on the small page that
+  // sends the person back, which needs no sign-in, so it works from an embed.
   const successUrl = checkoutReturnUrl(
     input.publicBaseUrl,
+    input.webBaseUrl,
     input.successUrl,
-    "/billing?checkout=success",
+    "/checkout-complete.html?checkout=success",
     "successUrl",
   );
   const cancelUrl = checkoutReturnUrl(
     input.publicBaseUrl,
+    input.webBaseUrl,
     input.cancelUrl,
-    "/billing?checkout=cancelled",
+    "/checkout-complete.html?checkout=cancelled",
     "cancelUrl",
   );
   return {
     mode: "payment",
+    // Stripe takes either a code field on its page or one discount up front.
+    ...(input.promotionCodeId
+      ? { discounts: [{ promotion_code: input.promotionCodeId }] }
+      : { allow_promotion_codes: false }),
     customer: input.customerId,
     customer_update: {
       address: "auto",
@@ -251,7 +582,7 @@ export function stripeCheckoutSessionCreateParams(input: {
     },
     success_url: successUrl,
     cancel_url: cancelUrl,
-    automatic_tax: { enabled: true },
+    automatic_tax: { enabled: !(input.promotionCodeId && input.fullyDiscounted) },
     billing_address_collection: "auto",
     line_items: [
       {
@@ -263,7 +594,7 @@ export function stripeCheckoutSessionCreateParams(input: {
             ? { product: input.creditsProductId }
             : {
                 product_data: {
-                  name: "OpenGeni credits",
+                  name: "Opengeni credits",
                   metadata: {
                     app: "opengeni",
                     billing_model: "prepaid_credits",
@@ -274,10 +605,13 @@ export function stripeCheckoutSessionCreateParams(input: {
       },
     ],
     metadata: {
+      ...creditScopeMetadata(input.promotionalScope),
+      ...(input.couponId ? { opengeni_credit_offer_id: input.couponId } : {}),
       opengeni_account_id: input.accountId,
       opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
       opengeni_credit_micros: String(input.amountMicros),
       opengeni_credit_idempotency_key: input.idempotencyKey,
+      opengeni_credit_coupon_v1: "1",
     },
     payment_intent_data: {
       metadata: {
@@ -285,6 +619,7 @@ export function stripeCheckoutSessionCreateParams(input: {
         opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
         opengeni_credit_micros: String(input.amountMicros),
         opengeni_credit_idempotency_key: input.idempotencyKey,
+        opengeni_credit_coupon_v1: "1",
       },
     },
     invoice_creation: {
@@ -295,6 +630,7 @@ export function stripeCheckoutSessionCreateParams(input: {
           opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
           opengeni_credit_micros: String(input.amountMicros),
           opengeni_credit_idempotency_key: input.idempotencyKey,
+          opengeni_credit_coupon_v1: "1",
         },
       },
     },
@@ -304,16 +640,24 @@ export function stripeCheckoutSessionCreateParams(input: {
 export function stripeBillingPortalSessionCreateParams(input: {
   customerId: string;
   publicBaseUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
   returnUrl?: string | undefined;
 }): Stripe.BillingPortal.SessionCreateParams {
   return {
     customer: input.customerId,
-    return_url: checkoutReturnUrl(input.publicBaseUrl, input.returnUrl, "/billing", "returnUrl"),
+    return_url: checkoutReturnUrl(
+      input.publicBaseUrl,
+      input.webBaseUrl,
+      input.returnUrl,
+      "/billing",
+      "returnUrl",
+    ),
   };
 }
 
-function checkoutReturnUrl(
+export function checkoutReturnUrl(
   publicBaseUrl: string | undefined,
+  webBaseUrl: string | undefined,
   candidate: string | undefined,
   fallbackPath: string,
   field: string,
@@ -323,36 +667,57 @@ function checkoutReturnUrl(
       message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe redirects",
     });
   }
-  const base = new URL(publicBaseUrl);
+  const base = new URL(webBaseUrl ?? publicBaseUrl);
   const fallback = new URL(fallbackPath, base).toString();
   if (!candidate) {
     return fallback;
   }
   const parsed = new URL(candidate);
-  if (parsed.origin !== base.origin) {
-    throw new HTTPException(400, { message: `${field} must use the OpenGeni public origin` });
+  const allowedOrigins = new Set([new URL(publicBaseUrl).origin, base.origin]);
+  if (!allowedOrigins.has(parsed.origin)) {
+    throw new HTTPException(400, {
+      message: `${field} must use the Opengeni public${allowedOrigins.size > 1 ? " or web" : ""} origin`,
+    });
   }
   return parsed.toString();
 }
 
-async function handleStripeWebhookEvent(
+export async function handleStripeWebhookEvent(
   deps: ApiRouteDeps,
   stripe: Stripe,
   event: Stripe.Event,
 ): Promise<void> {
+  if (subscriptionWebhookEvent(event)) {
+    await subscriptions(deps, stripe).handleEvent(event);
+    return;
+  }
   switch (event.type) {
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded":
+      if (
+        await createBillingAutoTopUpService(deps, stripe).handleSetup(
+          event.data.object as Stripe.Checkout.Session,
+        )
+      )
+        return;
       await handleCheckoutSessionPayment(deps, event);
       return;
     case "checkout.session.async_payment_failed":
       // A delayed payment method failed. Completion reported it `unpaid`, so
       // no credit was granted and there is nothing to reverse.
       return;
-    case "checkout.session.expired":
     case "payment_intent.succeeded":
     case "payment_intent.payment_failed":
     case "payment_intent.canceled":
+      if (
+        await createBillingAutoTopUpService(deps, stripe).handlePaymentIntent(
+          event.data.object as Stripe.PaymentIntent,
+        )
+      )
+        return;
+      await mirrorPaymentIntentCustomer(deps, event);
+      return;
+    case "checkout.session.expired":
       await mirrorPaymentIntentCustomer(deps, event);
       return;
     case "charge.refunded":
@@ -388,12 +753,13 @@ export type StripeCheckoutCreditDecision =
   | { action: "ignore"; reason: "foreign_checkout" | "not_payment_mode" | "payment_not_paid" };
 
 /**
- * Decides whether a Checkout Session webhook grants OpenGeni credits.
+ * Decides whether a Checkout Session webhook grants Opengeni credits.
  *
- * Sessions created outside OpenGeni on the same Stripe account carry no
- * `opengeni_` metadata and are acknowledged without effect. An OpenGeni
+ * Sessions created outside Opengeni on the same Stripe account carry no
+ * `opengeni_` metadata and are acknowledged without effect. An Opengeni
  * session with malformed credit metadata still throws so the failure stays
- * visible. Credits are granted only once Stripe reports the payment `paid`:
+ * visible. Credits are granted once Stripe reports the payment `paid` or a
+ * completed checkout fully covered by a coupon:
  * on `checkout.session.completed` for immediate methods, or on
  * `checkout.session.async_payment_succeeded` for delayed methods, whose
  * completion event arrives `unpaid`. Both events carry the same session
@@ -408,40 +774,80 @@ export function stripeCheckoutCreditDecision(
   if (session.mode !== "payment") {
     return { action: "ignore", reason: "not_payment_mode" };
   }
-  if (session.payment_status !== "paid") {
+  if (session.payment_status !== "paid" && !isFreeCouponCheckout(session)) {
     return { action: "ignore", reason: "payment_not_paid" };
   }
-  return {
-    action: "grant",
-    credit: creditMetadata(session.metadata, `Stripe checkout session ${session.id}`),
-  };
+  const credit = creditMetadata(session.metadata, `Stripe checkout session ${session.id}`);
+  if (
+    session.metadata?.opengeni_credit_coupon_v1 === "1" &&
+    (session.currency !== "usd" ||
+      session.amount_subtotal !== credit.amountMicros / 10_000 ||
+      typeof session.amount_total !== "number" ||
+      !Number.isSafeInteger(session.amount_total) ||
+      session.amount_total < 0)
+  ) {
+    throw new Error(`Stripe checkout session ${session.id} has invalid credit package totals`);
+  }
+  return { action: "grant", credit };
+}
+
+function isFreeCouponCheckout(session: Stripe.Checkout.Session): boolean {
+  return (
+    (session.payment_status === "paid" || session.payment_status === "no_payment_required") &&
+    session.status === "complete" &&
+    session.amount_total === 0 &&
+    typeof session.amount_subtotal === "number" &&
+    session.amount_subtotal > 0 &&
+    (session.total_details?.amount_discount ?? 0) >= session.amount_subtotal
+  );
 }
 
 async function handleCheckoutSessionPayment(
   deps: ApiRouteDeps,
   event: Stripe.Event,
 ): Promise<void> {
-  const session = event.data.object as Stripe.Checkout.Session;
+  await grantCheckoutSessionCredits(deps, event.data.object as Stripe.Checkout.Session, {
+    stripeEventId: event.id,
+    stripeEventType: event.type,
+    livemode: event.livemode,
+  });
+}
+
+/**
+ * Grants a paid (or fully coupon-covered) Opengeni checkout's credits once.
+ * The webhook calls this with its event; the checkout status read calls it
+ * with the session it retrieved from Stripe when the webhook is late.
+ */
+async function grantCheckoutSessionCredits(
+  deps: ApiRouteDeps,
+  session: Stripe.Checkout.Session,
+  source: { stripeEventId: string | null; stripeEventType?: string; livemode: boolean },
+): Promise<void> {
   const decision = stripeCheckoutCreditDecision(session);
   if (decision.action === "ignore") {
     if (decision.reason === "foreign_checkout") {
-      console.info("[api] stripe webhook ignored a checkout session not created by OpenGeni", {
-        stripeEventType: event.type,
-        livemode: event.livemode,
+      console.info("[api] stripe webhook ignored a checkout session not created by Opengeni", {
+        stripeEventType: source.stripeEventType ?? null,
+        livemode: source.livemode,
       });
     }
     return;
   }
   const credit = decision.credit;
+  const freeCouponCheckout = isFreeCouponCheckout(session);
+  const promotionalScope = creditScopeFromMetadata(session.metadata);
+  if (promotionalScope && !freeCouponCheckout) {
+    throw new Error("Scoped promotional credits require a fully discounted checkout");
+  }
   if (!(await getManagedAccount(deps.db, credit.accountId))) {
-    // Another OpenGeni deployment sharing the Stripe account (or an account
+    // Another Opengeni deployment sharing the Stripe account (or an account
     // removed before a delayed payment settled). Retrying cannot succeed, so
     // acknowledge instead of failing the delivery for days.
     console.info(
       "[api] stripe webhook ignored a checkout session for an account not in this deployment",
       {
-        stripeEventType: event.type,
-        livemode: event.livemode,
+        stripeEventType: source.stripeEventType ?? null,
+        livemode: source.livemode,
       },
     );
     return;
@@ -450,29 +856,139 @@ async function handleCheckoutSessionPayment(
   if (customerId) {
     await upsertBillingCustomer(deps.db, {
       accountId: credit.accountId,
-      provider: stripeCustomerProvider(event),
+      provider: source.livemode ? "stripe:live" : "stripe:test",
       providerCustomerId: customerId,
       email: session.customer_details?.email ?? session.customer_email ?? null,
     });
   }
-  await applyCreditLedgerEntry(deps.db, {
+  if (await hasCreditLedgerEntry(deps.db, credit.accountId, credit.idempotencyKey)) {
+    return;
+  }
+  const { inserted } = await applyCreditLedgerEntryOnce(deps.db, {
     accountId: credit.accountId,
-    type: "credit_topup",
+    type: freeCouponCheckout ? "grant" : "credit_topup",
     amountMicros: credit.amountMicros,
-    sourceType: "stripe_checkout_session",
+    eligibleModelIds: promotionalScope?.eligibleModelIds,
+    sourceType: freeCouponCheckout ? "stripe_checkout_coupon" : "stripe_checkout_session",
     sourceId: session.id,
     idempotencyKey: credit.idempotencyKey,
     metadata: {
-      stripeEventId: event.id,
+      ...(promotionalScope ? { creditOfferLabel: promotionalScope.label } : {}),
+      creditOfferId: session.metadata?.opengeni_credit_offer_id ?? null,
+      stripeEventId: source.stripeEventId,
       stripePaymentIntentId:
         typeof session.payment_intent === "string"
           ? session.payment_intent
           : (session.payment_intent?.id ?? null),
       stripePackageId: credit.packageId,
       stripeCreditAmountUsd: credit.amountUsd,
+      ...(session.metadata?.opengeni_credit_coupon_v1 === "1"
+        ? {
+            stripeAmountTotalCents: session.amount_total,
+            stripeDiscountCents: session.total_details?.amount_discount ?? 0,
+          }
+        : {}),
     },
   });
-  recordCreditMicrosMetric(deps, "topup", credit.amountMicros);
+  // Two deliveries (webhook and the late-webhook status read) may race past
+  // the existence check; only the call that inserted the row counts.
+  if (!inserted) return;
+  recordCreditMicrosMetric(deps, freeCouponCheckout ? "grant" : "topup", credit.amountMicros);
+  if (!freeCouponCheckout) {
+    recordCreditPurchaseMetrics(deps.observability, {
+      livemode: source.livemode,
+      creditMicros: credit.amountMicros,
+      currency: session.currency,
+      amountTotal: session.amount_total,
+    });
+  }
+}
+
+/**
+ * One paid credit purchase (a `credit_topup` ledger row from a Stripe
+ * checkout). Fully discounted coupon checkouts are grants, not purchases, and
+ * are counted by `opengeni_credit_granted_micros_total{grant_class="coupon"}`.
+ * Labels are the closed `mode` (live | test) only; never an account or
+ * customer identifier.
+ */
+export function recordCreditPurchaseMetrics(
+  observability: ApiRouteDeps["observability"],
+  input: {
+    livemode: boolean;
+    creditMicros: number;
+    currency: string | null | undefined;
+    amountTotal: number | null | undefined;
+  },
+): void {
+  if (!observability || !Number.isSafeInteger(input.creditMicros) || input.creditMicros <= 0) {
+    return;
+  }
+  const labels = { mode: input.livemode ? "live" : "test" };
+  observability.incrementCounter({
+    name: "opengeni_credit_purchases_total",
+    help: "Paid credit purchases (Stripe checkout credit top-ups) by mode.",
+    labels,
+  });
+  observability.incrementCounter({
+    name: "opengeni_credit_purchased_micros_total",
+    help: "Credit micros added by paid credit purchases, by mode.",
+    labels,
+    amount: input.creditMicros,
+  });
+  // Stripe amounts are in the currency's minor unit; credit checkouts are USD,
+  // where one cent is 10,000 micros. Other currencies are not converted.
+  if (
+    input.currency === "usd" &&
+    typeof input.amountTotal === "number" &&
+    Number.isSafeInteger(input.amountTotal) &&
+    input.amountTotal > 0
+  ) {
+    observability.incrementCounter({
+      name: "opengeni_credit_purchase_paid_usd_micros_total",
+      help: "USD micros customers paid for credit purchases (after discounts), by mode.",
+      labels,
+      amount: input.amountTotal * 10_000,
+    });
+  }
+}
+
+/**
+ * Looks up a customer-typed promotion code. Stripe matches codes without
+ * regard to case. A fixed USD amount off sets the credits a checkout buys.
+ */
+async function resolveCheckoutPromotionCode(
+  stripe: Stripe,
+  code: string,
+): Promise<{
+  id: string;
+  couponId: string;
+  amountOffCents: number | null;
+  percentOff: number | null;
+}> {
+  const listed = await stripe.promotionCodes.list({
+    code,
+    active: true,
+    limit: 1,
+    expand: ["data.promotion.coupon"],
+  });
+  const promotionCode = listed.data[0];
+  const coupon =
+    promotionCode && typeof promotionCode.promotion?.coupon === "object"
+      ? promotionCode.promotion.coupon
+      : null;
+  if (!promotionCode || !coupon?.valid) {
+    throw new HTTPException(422, { message: "That code isn't valid or has expired." });
+  }
+  const amountOffCents =
+    coupon.amount_off && coupon.currency === "usd"
+      ? coupon.amount_off
+      : (coupon.currency_options?.usd?.amount_off ?? null);
+  return {
+    id: promotionCode.id,
+    couponId: coupon.id,
+    amountOffCents,
+    percentOff: coupon.percent_off ?? null,
+  };
 }
 
 async function mirrorPaymentIntentCustomer(deps: ApiRouteDeps, event: Stripe.Event): Promise<void> {
@@ -525,19 +1041,21 @@ async function applyRefundDebit(
   if (await hasCreditLedgerEntry(deps.db, accountId, idempotencyKey)) {
     return;
   }
+  const debitMicros = await creditAdjustmentMicros(deps, metadata, refund.amount);
   await applyCreditLedgerEntry(deps.db, {
     accountId,
     type: "credit_refund",
-    amountMicros: -centsToMicros(refund.amount),
+    amountMicros: -debitMicros,
     sourceType: "stripe_refund",
     sourceId: refund.id,
     idempotencyKey,
     metadata: {
       stripeRefundId: refund.id,
       stripePaymentIntentId: paymentIntentId(refund.payment_intent),
+      stripeRefundAmountCents: refund.amount,
     },
   });
-  recordCreditMicrosMetric(deps, "refund", centsToMicros(refund.amount));
+  recordCreditMicrosMetric(deps, "refund", debitMicros);
 }
 
 async function holdDisputedCredits(
@@ -551,10 +1069,11 @@ async function holdDisputedCredits(
   if (!accountId) {
     return;
   }
+  const debitMicros = await creditAdjustmentMicros(deps, metadata, dispute.amount);
   await applyCreditLedgerEntry(deps.db, {
     accountId,
     type: "credit_dispute_hold",
-    amountMicros: -centsToMicros(dispute.amount),
+    amountMicros: -debitMicros,
     sourceType: "stripe_dispute",
     sourceId: dispute.id,
     idempotencyKey: `stripe:dispute_hold:${dispute.id}`,
@@ -577,18 +1096,58 @@ async function releaseDisputedCredits(
     return;
   }
   const holdIdempotencyKey = `stripe:dispute_hold:${dispute.id}`;
-  if (!(await hasCreditLedgerEntry(deps.db, accountId, holdIdempotencyKey))) {
-    return;
-  }
-  await applyCreditLedgerEntry(deps.db, {
-    accountId,
-    type: "credit_dispute_release",
-    amountMicros: centsToMicros(dispute.amount),
-    sourceType: "stripe_dispute",
-    sourceId: dispute.id,
-    idempotencyKey: `stripe:dispute_release:${dispute.id}`,
-    metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+  const debitMicros = await creditAdjustmentMicros(deps, metadata, dispute.amount);
+  await withRlsContext(deps.db, { accountId }, async (tx) => {
+    // Stripe can deliver the resolution before the hold. Materialize both
+    // receipts atomically so a late hold cannot withhold restored credits.
+    await applyCreditLedgerEntry(tx, {
+      accountId,
+      type: "credit_dispute_hold",
+      amountMicros: -debitMicros,
+      sourceType: "stripe_dispute",
+      sourceId: dispute.id,
+      idempotencyKey: holdIdempotencyKey,
+      metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+    });
+    await applyCreditLedgerEntry(tx, {
+      accountId,
+      type: "credit_dispute_release",
+      amountMicros: debitMicros,
+      sourceType: "stripe_dispute",
+      sourceId: dispute.id,
+      idempotencyKey: `stripe:dispute_release:${dispute.id}`,
+      metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+    });
   });
+}
+
+async function creditAdjustmentMicros(
+  deps: ApiRouteDeps,
+  metadata: Stripe.Metadata | null,
+  amountCents: number,
+): Promise<number> {
+  if (metadata?.opengeni_credit_coupon_v1 !== "1") return centsToMicros(amountCents);
+  const credit = creditMetadata(metadata, "Stripe adjustment");
+  const entry = await getCreditLedgerEntry(deps.db, credit.accountId, credit.idempotencyKey);
+  const paidCents = entry?.metadata.stripeAmountTotalCents;
+  if (
+    (entry?.sourceType !== "stripe_checkout_session" &&
+      entry?.sourceType !== "stripe_auto_top_up") ||
+    entry.amountMicros !== credit.amountMicros ||
+    typeof paidCents !== "number" ||
+    !Number.isSafeInteger(paidCents) ||
+    paidCents <= 0 ||
+    !Number.isSafeInteger(amountCents) ||
+    amountCents <= 0
+  ) {
+    throw new Error("Stripe credit adjustment is missing a settled checkout");
+  }
+  const proportionalMicros =
+    (BigInt(entry.amountMicros) * BigInt(amountCents) + BigInt(Math.floor(paidCents / 2))) /
+    BigInt(paidCents);
+  return Number(
+    proportionalMicros > BigInt(entry.amountMicros) ? entry.amountMicros : proportionalMicros,
+  );
 }
 
 async function mirrorCustomer(
@@ -628,18 +1187,20 @@ async function metadataForRefund(
   stripe: Stripe,
   refund: Stripe.Refund,
 ): Promise<Stripe.Metadata | null> {
-  if (Object.keys(refund.metadata ?? {}).length > 0) {
+  if (refund.metadata?.opengeni_credit_idempotency_key) {
     return refund.metadata;
   }
   const paymentIntent = paymentIntentId(refund.payment_intent);
-  return paymentIntent ? (await stripe.paymentIntents.retrieve(paymentIntent)).metadata : null;
+  return paymentIntent
+    ? (await stripe.paymentIntents.retrieve(paymentIntent)).metadata
+    : refund.metadata;
 }
 
 async function metadataForDispute(
   stripe: Stripe,
   dispute: Stripe.Dispute,
 ): Promise<Stripe.Metadata | null> {
-  if (Object.keys(dispute.metadata ?? {}).length > 0) {
+  if (dispute.metadata?.opengeni_credit_idempotency_key) {
     return dispute.metadata;
   }
   const paymentIntent = paymentIntentId(
@@ -651,7 +1212,7 @@ async function metadataForDispute(
   }
   const chargeId = typeof dispute.charge === "string" ? dispute.charge : dispute.charge?.id;
   if (!chargeId) {
-    return null;
+    return dispute.metadata;
   }
   const charge = await stripe.charges.retrieve(chargeId);
   const chargePaymentIntent = paymentIntentId(charge.payment_intent);
@@ -676,7 +1237,7 @@ function creditMetadata(
   const amountMicros = Number(metadata?.opengeni_credit_micros);
   const idempotencyKey = metadata?.opengeni_credit_idempotency_key;
   if (!accountId || !Number.isSafeInteger(amountMicros) || amountMicros <= 0 || !idempotencyKey) {
-    throw new Error(`${label} is missing OpenGeni credit metadata`);
+    throw new Error(`${label} is missing Opengeni credit metadata`);
   }
   return {
     accountId,
@@ -689,35 +1250,41 @@ function creditMetadata(
   };
 }
 
-async function getOrCreateStripeCustomer(
+export async function getOrCreateStripeCustomer(
   deps: ApiRouteDeps,
   stripe: Stripe,
   context: AccessContext,
   accountId: string,
 ): Promise<string> {
   const provider = stripeCustomerProvider(deps);
-  const existing = await getBillingCustomer(deps.db, accountId, provider);
-  if (existing) {
-    return existing.providerCustomerId;
-  }
-  const account = await getManagedAccount(deps.db, accountId);
-  if (!account) {
-    throw new HTTPException(404, { message: "account not found" });
-  }
-  const customer = await stripe.customers.create({
-    name: account.name,
-    ...(looksLikeEmail(context.subjectLabel) ? { email: context.subjectLabel } : {}),
-    metadata: {
-      opengeni_account_id: accountId,
-    },
-  });
-  await upsertBillingCustomer(deps.db, {
-    accountId,
+  return await serializedStripeCustomer({
+    stripe,
     provider,
-    providerCustomerId: customer.id,
-    email: customer.email,
+    accountId,
+    ...(looksLikeEmail(context.subjectLabel) ? { email: context.subjectLabel } : {}),
+    locked: (run) =>
+      withRlsContext(deps.db, { accountId, workspaceId: null }, async (tx) => {
+        // Same account lock as credit writers. All top-up/portal/subscription
+        // callers share transactional read/create/persist under this one fence.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${accountId}))`);
+        return await run({
+          read: async () =>
+            (await getBillingCustomer(tx, accountId, provider))?.providerCustomerId ?? null,
+          account: async () => {
+            const account = await getManagedAccount(tx, accountId);
+            if (!account) throw new HTTPException(404, { message: "account not found" });
+            return account;
+          },
+          save: (customer) =>
+            upsertBillingCustomer(tx, {
+              accountId,
+              provider,
+              providerCustomerId: customer.id,
+              email: customer.email,
+            }),
+        });
+      }),
   });
-  return customer.id;
 }
 
 export function stripeCustomerProvider(
@@ -735,7 +1302,7 @@ export function stripeCustomerProvider(
 /** Billing routes do not traverse the workspace actor middleware. Always bind
  * these reads explicitly; only a revalidated live attempt may supply a human
  * initiator. Neither query parameters nor serviceInitiator claims are proof. */
-async function withBillingUsageActor<T>(
+export async function withBillingUsageActor<T>(
   deps: ApiRouteDeps,
   context: AccessContext,
   accountId: string,
@@ -751,7 +1318,7 @@ async function withBillingUsageActor<T>(
   return await withSessionRlsActorContext({ subjectId: context.subjectId }, read);
 }
 
-function requireSelectedAccount(
+export function requireSelectedAccount(
   context: AccessContext,
   requested: string | undefined,
   permission: Permission,
@@ -765,12 +1332,12 @@ function requireSelectedAccount(
     !grant ||
     (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
   ) {
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new MissingPermissionRefusal(permission);
   }
   return accountId;
 }
 
-function stripeClient(deps: ApiRouteDeps): Stripe {
+export function stripeClient(deps: ApiRouteDeps): Stripe {
   if (!deps.settings.stripeSecretKey) {
     throw new HTTPException(500, { message: "Stripe secret key is not configured" });
   }
@@ -793,5 +1360,7 @@ function paymentIntentId(value: string | Stripe.PaymentIntent | null | undefined
 }
 
 function looksLikeEmail(value: string | undefined): value is string {
+  // An account without an email address has a placeholder no mail reaches.
+  if (!accountContactEmail(value)) return false;
   return Boolean(value && value.includes("@"));
 }

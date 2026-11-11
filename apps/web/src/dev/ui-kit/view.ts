@@ -1,6 +1,6 @@
 import { useRouter, useRouterState } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
-import { useAppearance } from "@/lib/appearance";
+import { useAppearance } from "@opengeni/react/app/lib/appearance";
 import type { KitTheme } from "./theme";
 import { isSectionKey, type SectionKey } from "./sections/registry";
 

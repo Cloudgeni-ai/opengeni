@@ -3,7 +3,10 @@ import {
   type IntegrationAdapter,
 } from "@/components/capabilities/use-api-integration-accounts";
 import { OUTLOOK_LOGO_URL } from "@/components/capabilities/use-outlook-mail-integration";
-import type { ApiIntegrationInstallationSummary, IntegrationDefinitionSummary } from "@/types";
+import type {
+  ApiIntegrationInstallationSummary,
+  IntegrationDefinitionSummary,
+} from "@opengeni/react/app/types";
 
 export const OUTLOOK_CALENDAR_DEFINITION_ID = "microsoft-outlook-calendar";
 

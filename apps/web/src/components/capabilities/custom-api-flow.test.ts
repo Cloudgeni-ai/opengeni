@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ApiIntegrationInstallationSummary, ApiIntegrationPreview } from "@/types";
+import type {
+  ApiIntegrationInstallationSummary,
+  ApiIntegrationPreview,
+} from "@opengeni/react/app/types";
 import {
   customApiAuthenticationStepRequired,
   compatibleCustomApiConnections,

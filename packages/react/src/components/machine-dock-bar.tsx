@@ -3,6 +3,7 @@ import { cn } from "../lib/cn";
 import type { MachineKind, MachineState } from "../types/machines";
 import { ConnectionStatusPill, MACHINE_STATE_BADGE_META } from "./machine-status-pill";
 import { connectionStatusForState } from "../types/machines";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type MachineDockBarProps = {
   /** The active machine's display name. */
@@ -23,8 +24,9 @@ export type MachineDockBarProps = {
  * chrome (the dock-parity contract: selfhosted == Modal for the surfaces).
  */
 export function MachineDockBar({ name, kind, state, className }: MachineDockBarProps) {
+  const t = useOpenGeniText();
   const Icon = kind === "selfhosted" || kind === "local" ? LaptopIcon : CpuIcon;
-  const stateBadge = MACHINE_STATE_BADGE_META[state];
+  const stateBadge = MACHINE_STATE_BADGE_META(t)[state];
   return (
     <div
       data-machine-dock-bar
@@ -74,6 +76,7 @@ export function SharedMachineDisclosure({
   density = "compact",
   className,
 }: SharedMachineDisclosureProps) {
+  const t = useOpenGeniText();
   const others = Math.max(0, sharedSessionCount - 1);
   return (
     <div
@@ -88,8 +91,11 @@ export function SharedMachineDisclosure({
     >
       <UsersIcon className="size-3.5 shrink-0 text-og-accent" aria-hidden />
       <span>
-        Shared — {others === 1 ? "another session is" : `${others} other sessions are`} on this
-        machine. They see the same terminal, files, and desktop.
+        {t("machineDockBar.shared")}{" "}
+        {others === 1
+          ? t("machineDockBar.anotherSessionIs")
+          : t("machineDockBar.othersOtherSessionsAre", { others })}{" "}
+        {t("machineDockBar.onThisMachineTheySee")}
       </span>
     </div>
   );

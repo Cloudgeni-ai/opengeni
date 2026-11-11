@@ -1,6 +1,8 @@
 import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
+  ListPrivateScheduledTaskSummariesResponse,
+  PrivateScheduledTaskSummary,
   RefreshScheduledTaskAccessRequest,
   ScheduledTaskSlackChannelId,
   ScheduledTaskSlackChannelListResponse,
@@ -9,13 +11,17 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
+  getScheduledTaskBlockers,
+  getScheduledTaskIncludingDeleted,
   getScheduledTaskRevisionAuthoritySubject,
+  listPrivateScheduledTaskSummaries,
   listScheduledTaskRuns,
   listScheduledTasks,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import type { ScheduledTask } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+import { withAgentScheduleTimeZone } from "../scheduled-task-time-zone";
 import {
   isAuthenticatedPersonAuthorization,
   requireAccessGrant,
@@ -31,9 +37,9 @@ import {
   resolveScheduledTaskPreflightModel,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { requireAgentConfigAdmission, scheduledTaskAgentInput } from "@opengeni/core";
+
 import {
-  captureScheduledTaskRestoreState,
+  type ScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
@@ -41,11 +47,17 @@ import {
   scheduledTaskForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskTriggerToken,
-  requireScheduledTaskForApi,
+  pauseScheduledTaskAsAdmin,
+  pausePrivateScheduledTaskAsAdmin,
+  requirePausableScheduledTask,
+  requireVisibleScheduledTask,
+  scheduledTaskAccess,
+  scheduledTaskViewerForGrant,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
+  manualScheduledTaskTriggerBillingOrigin,
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
@@ -54,10 +66,12 @@ import {
   scheduledTaskAccessSource,
   withScheduledTaskPolicyDrift,
   withScheduledTaskRunAccessFailures,
+  withScheduledTaskEvents,
+  withScheduledTaskRunEventOccurrences,
 } from "@opengeni/core";
 import type { AccessGrantAuthorization } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
-import { permissionsRequiredByFirstPartyTools } from "../mcp/first-party-tool-permissions";
+import { permissionsRequiredByFirstPartyTools } from "@opengeni/contracts";
 import {
   createOpenGeniSlackBotInteractionClient,
   verifyScheduledTaskSlackChannel,
@@ -79,7 +93,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
 
   // Channels a person may choose as a task's fixed Slack destination: active,
-  // non-shared channels the selected OpenGeni bot already belongs to.
+  // non-shared channels the selected Opengeni bot already belongs to.
   app.get("/v1/workspaces/:workspaceId/scheduled-task-slack-channels", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -160,6 +174,36 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     });
   }
 
+  // Why a schedule paused itself or why its owner was told about it. Like
+  // drift, this decorates a read and never fails it.
+  async function withBlockers(tasks: ScheduledTask[]): Promise<ScheduledTask[]> {
+    const workspaceId = tasks[0]?.workspaceId;
+    if (!workspaceId) return tasks;
+    try {
+      const blockers = await getScheduledTaskBlockers(
+        db,
+        workspaceId,
+        tasks.map((task) => task.id),
+      );
+      return tasks.map((task) => {
+        const blocker = blockers.get(task.id);
+        return blocker ? { ...task, blocker } : task;
+      });
+    } catch (error) {
+      deps.observability?.warn("Scheduled task blockers could not be read", {
+        errorClass: error instanceof Error ? error.name : "ScheduledTaskBlockerReadError",
+        origin: "api",
+      });
+      return tasks;
+    }
+  }
+
+  // Event triggers are part of the automation itself, so reading them is not
+  // advisory: a read that cannot load them fails rather than hide them.
+  async function withEventsAndBlockers(tasks: ScheduledTask[]): Promise<ScheduledTask[]> {
+    return await withBlockers(await withScheduledTaskEvents(db, tasks));
+  }
+
   // Registered before `/:taskId` so the literal segment is never read as an id.
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/attention", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -189,15 +233,16 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:manage",
     );
     const grant = authorization.grant;
-    const rawPayload = await readRequestJson(c);
-    const parsedPayload = CreateScheduledTaskRequest.safeParse(rawPayload);
-    if (!parsedPayload.success) {
-      throw new HTTPException(400, {
-        message: "invalid scheduled task create request",
-      });
-    }
-    const payload = parsedPayload.data;
-    requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
+    // An agent's schedule without a zone uses the zone of the message that asked for it.
+    const { input: rawPayload } = await withAgentScheduleTimeZone(
+      db,
+      grant,
+      await readRequestJson(c),
+    );
+    const payload = parseRequestBody(CreateScheduledTaskRequest, rawPayload, {
+      status: 400,
+      message: "invalid scheduled task create request",
+    });
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -221,9 +266,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
+      eventSourceFetch: deps.eventSourceFetch,
+      githubPersonalFetch: deps.githubPersonalFetch,
     });
     await syncCreatedScheduledTask({ db, workflowClient, task });
-    return c.json(scheduledTaskForGrant(task, grant), 201);
+    const [created] = await withScheduledTaskEvents(db, [task]);
+    return c.json(scheduledTaskForGrant(created ?? task, grant), 201);
   });
 
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
@@ -246,19 +294,57 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       }
       await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     }
+    const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const tasks = await listScheduledTasks(
       db,
       workspaceId,
       boundedLimit(c.req.query("limit")),
       offset,
       sessionId,
+      viewer.subjectId,
     );
     return c.json(
-      (await withPolicyDrift(authorization, tasks)).map((task) =>
+      (await withEventsAndBlockers(await withPolicyDrift(authorization, tasks))).map((task) =>
         scheduledTaskForGrant(task, grant),
       ),
     );
   });
+
+  // Registered before `/:taskId`. Admins see that other people's Only me
+  // schedules exist: owner, how often, last run and cost. Never their name,
+  // prompt, settings or runs.
+  app.get("/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
+    // The organization can choose that admins don't see these at all.
+    const schedules = viewer.seesPrivateSummaries
+      ? await listPrivateScheduledTaskSummaries(db, {
+          workspaceId,
+          excludeOwnerSubjectId: viewer.subjectId,
+        })
+      : [];
+    return c.json(ListPrivateScheduledTaskSummariesResponse.parse({ schedules }));
+  });
+
+  // An admin pauses someone else's Only me schedule from its summary. Only its
+  // owner can change, run or resume it.
+  app.post(
+    "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
+      const pausable = await requirePausableScheduledTask(db, grant, c.req.param("taskId"), viewer);
+      if (pausable.access !== "summary")
+        throw new HTTPException(404, { message: "scheduled task not found" });
+      const summary =
+        pausable.summary.status === "paused"
+          ? pausable.summary
+          : await pausePrivateScheduledTaskAsAdmin(db, grant, pausable.summary.id, viewer);
+      return c.json(PrivateScheduledTaskSummary.parse(summary));
+    },
+  );
 
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -269,13 +355,13 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:run",
     );
     const grant = authorization.grant;
-    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    const [withDrift] = await withPolicyDrift(authorization, [task]);
-    return c.json(scheduledTaskForGrant(withDrift ?? task, grant));
+    const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
+    const [decorated] = await withEventsAndBlockers(await withPolicyDrift(authorization, [task]));
+    return c.json(scheduledTaskForGrant(decorated ?? task, grant));
   });
 
   // The owner's explicit access refresh: re-freeze connectors, connector
-  // accounts and an agent-created task's OpenGeni tools with the calling
+  // accounts and an agent-created task's Opengeni tools with the calling
   // person's current authority. It changes neither the schedule nor its
   // status, so the Temporal schedule is untouched.
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/refresh-access", async (c) => {
@@ -286,12 +372,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       workspaceId,
       "scheduled_tasks:manage",
     );
-    const parsed = RefreshScheduledTaskAccessRequest.safeParse(
+    const parsed = parseRequestBody(
+      RefreshScheduledTaskAccessRequest,
       await c.req.json().catch(() => null),
+      { status: 400, message: "invalid scheduled task access refresh request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid scheduled task access refresh request" });
-    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: authorization.grant.accountId,
@@ -304,12 +389,15 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       objectStorage,
       authorization,
       taskId: c.req.param("taskId"),
-      request: parsed.data,
+      request: parsed,
       permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });
-    const [withDrift] = await withPolicyDrift(authorization, [task]);
+    const [withDrift] = await withScheduledTaskEvents(
+      db,
+      await withPolicyDrift(authorization, [task]),
+    );
     return c.json(scheduledTaskForGrant(withDrift ?? task, authorization.grant));
   });
 
@@ -323,17 +411,18 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     const grant = authorization.grant;
     const taskId = c.req.param("taskId");
-    const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
-    const previous = await captureScheduledTaskRestoreState(db, existing);
-    const rawPayload = await readRequestJson(c);
-    const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
-    if (!parsedPayload.success) {
-      throw new HTTPException(400, {
-        message: "invalid scheduled task update request",
-      });
-    }
-    const payload = parsedPayload.data;
-    requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
+    const existing = await requireVisibleScheduledTask(db, grant, taskId);
+    const previous: ScheduledTaskRestoreState = { task: existing };
+    const { input: rawPayload } = await withAgentScheduleTimeZone(
+      db,
+      grant,
+      await readRequestJson(c),
+      existing.schedule,
+    );
+    const payload = parseRequestBody(UpdateScheduledTaskRequest, rawPayload, {
+      status: 400,
+      message: "invalid scheduled task update request",
+    });
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -341,6 +430,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       })
     ).settings;
     const update = await validatedScheduledTaskUpdate({
+      githubPersonalFetch: deps.githubPersonalFetch,
       settings: catalogSettings,
       db,
       objectStorage,
@@ -352,6 +442,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
+      eventSourceFetch: deps.eventSourceFetch,
     });
     const task = await updateScheduledTaskForApi(
       db,
@@ -363,19 +454,24 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         : undefined,
     );
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
-    return c.json(scheduledTaskForGrant(task, grant));
+    const [updated] = await withEventsAndBlockers([task]);
+    return c.json(scheduledTaskForGrant(updated ?? task, grant));
   });
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/pause", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
-    const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    const previous = await captureScheduledTaskRestoreState(db, existing);
-    const task = await updateScheduledTaskForApi(db, grant, existing.id, {
-      status: "paused",
-    });
+    const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
+    const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
+    const previous: ScheduledTaskRestoreState = { task: existing };
+    const ownerPause = viewer.subjectId !== null && existing.ownerSubjectId === viewer.subjectId;
+    const adminPause = viewer.admin && !ownerPause;
+    const task = adminPause
+      ? await pauseScheduledTaskAsAdmin(db, workspaceId, existing.id)
+      : await updateScheduledTaskForApi(db, grant, existing.id, { status: "paused" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
-    return c.json(scheduledTaskForGrant(task, grant));
+    const [paused] = await withEventsAndBlockers([task]);
+    return c.json(scheduledTaskForGrant(paused ?? task, grant));
   });
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/resume", async (c) => {
@@ -387,8 +483,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:manage",
     );
     const grant = authorization.grant;
-    const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    const previous = await captureScheduledTaskRestoreState(db, existing);
+    const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
+    const previous: ScheduledTaskRestoreState = { task: existing };
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -396,6 +492,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       })
     ).settings;
     const update = await validatedScheduledTaskUpdate({
+      githubPersonalFetch: deps.githubPersonalFetch,
       settings: catalogSettings,
       db,
       objectStorage,
@@ -408,7 +505,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     });
     const task = await updateScheduledTaskForApi(db, grant, existing.id, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
-    return c.json(scheduledTaskForGrant(task, grant));
+    const [resumed] = await withEventsAndBlockers([task]);
+    return c.json(scheduledTaskForGrant(resumed ?? task, grant));
   });
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/trigger", async (c) => {
@@ -416,7 +514,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
     // Load the task before the gate so a codex-model scheduled task can be
     // recognised as codex-billed and skip the credit/cost gates at the edge.
-    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
     if (task.action.kind === "agent_turn") {
       const catalogSettings = (
         await resolveWorkspaceCatalogSettings(db, deps.settings, {
@@ -431,7 +529,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         grant,
         targetSessionId: task.targetSessionId,
         runMode: task.runMode,
-        variableSetId: task.variableSetId,
         rigId: task.rigId,
         agentConfig: task.agentConfig,
         missingTargetStatus: 404,
@@ -441,6 +538,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         db,
         grant,
         runMode: task.runMode,
+        reusableSessionId: task.reusableSessionId,
         agentConfig: task.agentConfig,
         requireOnline: true,
       });
@@ -462,6 +560,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
             taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
           action: "agent_run:create",
           quantity: 1,
+          // The run is API use when the caller or the task is.
+          billingOrigin: await manualScheduledTaskTriggerBillingOrigin(db, grant, task.id),
           // A model-less task is checked against the model its occurrence
           // will run (a connected subscription, the credits default, or the
           // deployment default), not always the deployment default.
@@ -474,10 +574,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const body = await c.req.json().catch(() => ({}));
     const { triggerId } = parseRequestBody(TriggerScheduledTaskRequest, body ?? {});
     const triggerToken = scheduledTaskTriggerToken(triggerId);
-    const agentRunUsageIdempotencyKey =
-      task.action.kind === "agent_turn"
-        ? manualScheduledTaskTriggerUsageKey(workspaceId, task.id, triggerToken)
-        : `knowledge-source-sync:manual:${workspaceId}:${task.id}:${triggerToken}`;
+    const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
+      workspaceId,
+      task.id,
+      triggerToken,
+    );
     const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
     await triggerScheduledTaskForGrant(db, grant, workflowClient, {
       task,
@@ -498,12 +599,22 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         idempotencyKey: agentRunUsageIdempotencyKey,
       });
     }
-    return c.json(scheduledTaskForGrant(task, grant), 202);
+    const [triggered] = await withScheduledTaskEvents(db, [task]);
+    return c.json(scheduledTaskForGrant(triggered ?? task, grant), 202);
   });
 
   app.delete("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    // Deleting stays idempotent, but someone else's Only me schedule is
+    // indistinguishable from a missing one.
+    const target = await getScheduledTaskIncludingDeleted(db, workspaceId, c.req.param("taskId"));
+    if (
+      target &&
+      scheduledTaskAccess(await scheduledTaskViewerForGrant(db, grant, deps.settings), target) !==
+        "full"
+    )
+      throw new HTTPException(404, { message: "scheduled task not found" });
     await deleteScheduledTaskWithDurableCleanup(deps, {
       grant,
       taskId: c.req.param("taskId"),
@@ -514,7 +625,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/runs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
-    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
     const taskRuns = await listScheduledTaskRuns(
       db,
       workspaceId,
@@ -526,7 +637,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       settings: deps.settings,
       grant,
       task,
-      runs: taskRuns,
+      runs: await withScheduledTaskRunEventOccurrences(db, taskRuns),
     });
     return c.json(runs.map((run) => scheduledTaskRunForGrant(run, grant)));
   });

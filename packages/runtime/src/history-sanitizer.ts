@@ -34,6 +34,9 @@ import {
 } from "@opengeni/codex";
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
 } from "@opengeni/contracts";
@@ -226,18 +229,14 @@ function analyzeHistoryProtocolItems<T extends HistoryItem>(
   if (dropped.size > 0) {
     // Rule 3: drop reasoning items stranded by a dropped tool call. A reasoning
     // item is stranded when the next non-reasoning item after it is dropped.
-    for (let index = 0; index < items.length; index += 1) {
-      if (dropped.has(index) || itemType(items[index]) !== "reasoning") {
-        continue;
-      }
-      for (let next = index + 1; next < items.length; next += 1) {
-        if (itemType(items[next]) === "reasoning") {
-          continue;
-        }
-        if (dropped.has(next)) {
-          dropped.add(index);
-        }
-        break;
+    // Walk backwards so each reasoning run shares its next non-reasoning
+    // item's decision instead of searching through the same run repeatedly.
+    let nextNonReasoningDropped = false;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      if (itemType(items[index]) === "reasoning") {
+        if (nextNonReasoningDropped) dropped.add(index);
+      } else {
+        nextNonReasoningDropped = dropped.has(index);
       }
     }
   }
@@ -333,20 +332,37 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
  */
 export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
 
-/** Remove OpenGeni-only durable fields before an SDK/provider sees the item. */
+/**
+ * Durable field on a reply copy that compaction retained after a request:
+ * the turn that originally gave the reply. The copy's row is stored without a
+ * turn id, so turn-keyed readers (a message fork's reply boundary) only ever
+ * see the original reply row, while a later compaction can still pair the copy
+ * with its request. Stripped at the model wire like the other Opengeni fields.
+ */
+export const RETAINED_REPLY_TURN_FIELD = "opengeni_retained_reply_turn";
+
+/** Remove Opengeni-only durable fields before an SDK/provider sees the item. */
 export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
   const withoutResume = stripInternalResumeMarker(item);
   if (
     !(MODEL_ATTACHMENT_CATALOG_MARKER in withoutResume) &&
+    !(MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD in withoutResume) &&
+    !(MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD in withoutResume) &&
+    !(MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD in withoutResume) &&
     !(MODEL_ATTACHMENT_REFS_FIELD in withoutResume) &&
-    !(MODEL_TIMELINE_ANNOTATIONS_FIELD in withoutResume)
+    !(MODEL_TIMELINE_ANNOTATIONS_FIELD in withoutResume) &&
+    !(RETAINED_REPLY_TURN_FIELD in withoutResume)
   ) {
     return withoutResume;
   }
   const clone = { ...withoutResume } as Record<string, unknown>;
   delete clone[MODEL_ATTACHMENT_CATALOG_MARKER];
+  delete clone[MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD];
+  delete clone[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+  delete clone[MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD];
   delete clone[MODEL_ATTACHMENT_REFS_FIELD];
   delete clone[MODEL_TIMELINE_ANNOTATIONS_FIELD];
+  delete clone[RETAINED_REPLY_TURN_FIELD];
   return clone as T;
 }
 

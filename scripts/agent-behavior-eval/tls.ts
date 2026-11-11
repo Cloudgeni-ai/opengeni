@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { startTestMcpServer, type TestMcpServer } from "@opengeni/testing";
+import { startTestMcpServer, type TestMcpServer } from "@opengeni/testing/mcp";
 
 /**
  * Per-session MCP servers must be `https:` (SessionMcpServerInput). The shared

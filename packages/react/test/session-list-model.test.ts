@@ -1,0 +1,352 @@
+import { describe, expect, test } from "bun:test";
+import type { Session } from "@opengeni/sdk";
+
+import {
+  applySessionPinToLists,
+  groupSessionsByProject,
+  groupSessionsForRail,
+  homeSessionSections,
+  recentSessionModelPresentation,
+  recentSessionStatus,
+  recentSessionsForHome,
+  recentSessionsWithOpened,
+  relativeTimeLabel,
+  sessionAutomationWait,
+  sessionHasPendingWake,
+  sessionHasUpcomingSchedule,
+  sessionRepoLabel,
+  withLineageAutomationFacts,
+} from "../src/session-list-model";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
+
+const now = new Date("2026-10-03T12:00:00Z");
+
+function session(id: string, overrides: Partial<Session> = {}): Session {
+  return {
+    id,
+    status: "idle",
+    updatedAt: "2026-10-03T11:00:00Z",
+    createdAt: "2026-10-03T10:00:00Z",
+    pinned: false,
+    pinnedAt: null,
+    effectiveControl: { state: "active" },
+    inputWait: null,
+    resources: [],
+    model: "codex/gpt-6-luna",
+    ...overrides,
+  } as unknown as Session;
+}
+
+describe("session-list-model", () => {
+  test("project sections: server order, running first, Default last, sub-agents left out", () => {
+    const projects = [
+      { id: "p1", name: "Launch" },
+      { id: "p2", name: "Empty" },
+    ];
+    const sections = groupSessionsByProject(
+      [
+        session("a", { channelId: "p1", updatedAt: "2026-10-03T11:00:00Z" } as Partial<Session>),
+        session("b", {
+          channelId: "p1",
+          status: "running",
+          updatedAt: "2026-10-03T08:00:00Z",
+        } as Partial<Session>),
+        session("c", { channelId: null } as Partial<Session>),
+        session("d", { channelId: "gone" } as Partial<Session>),
+        session("e", { channelId: "p1", parentSessionId: "a" } as Partial<Session>),
+      ],
+      projects,
+    );
+    expect(
+      sections.map((section) => [section.name, section.sessions.map((row) => row.id)]),
+    ).toEqual([
+      ["Launch", ["b", "a"]],
+      ["Default", ["d", "c"]],
+    ]);
+    expect(groupSessionsByProject([], projects, { keepEmpty: true }).map((s) => s.name)).toEqual([
+      "Launch",
+      "Empty",
+    ]);
+  });
+
+  test("relative time labels", () => {
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:59:30Z", now)).toBe("now");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:59:10Z", now)).toBe("1m");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:55:00Z", now)).toBe("5m");
+    expect(relativeTimeLabel(englishText, "2026-10-03T09:00:00Z", now)).toBe("3h");
+    expect(relativeTimeLabel(englishText, "2026-10-01T12:00:00Z", now)).toBe("2d");
+    // Calendar days in local time, as the long form counts them: from 20:00
+    // three days back to 12:00 today is 2 days 16 hours, and reads 3d.
+    const localNoon = new Date(2026, 9, 3, 12, 0);
+    const threeEveningsAgo = new Date(2026, 8, 30, 20, 0).toISOString();
+    expect(relativeTimeLabel(englishText, threeEveningsAgo, localNoon)).toBe("3d");
+    expect(relativeTimeLabel(englishText, "not a date", now)).toBe("");
+  });
+
+  test("home order: pins, then running, then recency", () => {
+    const pinned = session("p", { pinned: true, pinnedAt: "2026-10-03T08:00:00Z" });
+    const running = session("r", { status: "running", updatedAt: "2026-10-01T00:00:00Z" });
+    const recent = session("a", { updatedAt: "2026-10-03T11:30:00Z" });
+    const older = session("b", { updatedAt: "2026-09-01T00:00:00Z" });
+    const rows = recentSessionsForHome(
+      englishText,
+      [older, pinned, recent, running],
+      [pinned],
+      6,
+      now,
+    );
+    expect(rows.map((row) => row.id)).toEqual(["p", "r", "a", "b"]);
+    expect(
+      recentSessionsForHome(englishText, [older, recent, running], [], 2, now).map((row) => row.id),
+    ).toEqual(["r", "a"]);
+    expect(
+      groupSessionsForRail(englishText, [older, recent], now).grouped.map((group) => group.label),
+    ).toEqual(["Today", "Older"]);
+  });
+
+  test("home leaves sub-agents to their parent, unless pinned, so they never crowd out conversations", () => {
+    const mine = session("mine", { updatedAt: "2026-10-03T10:00:00Z" });
+    const agents = Array.from({ length: 8 }, (_, index) =>
+      session(`agent-${index}`, {
+        status: "running",
+        parentSessionId: "mine",
+        updatedAt: "2026-10-03T11:50:00Z",
+      }),
+    );
+    const pinnedAgent = session("pinned-agent", { pinned: true, parentSessionId: "mine" });
+    expect(
+      recentSessionsForHome(englishText, [...agents, mine, pinnedAgent], [pinnedAgent], 6, now).map(
+        (row) => row.id,
+      ),
+    ).toEqual(["pinned-agent", "mine"]);
+  });
+
+  test("home leads with the chats opened here, so busy running sessions never hide them", () => {
+    const runningOthers = Array.from({ length: 8 }, (_, index) =>
+      session(`running-${index}`, { status: "running", updatedAt: "2026-10-03T11:50:00Z" }),
+    );
+    const listedOpened = session("opened-listed", { updatedAt: "2026-10-03T09:00:00Z" });
+    const pinned = session("p", { pinned: true });
+    const entries = recentSessionsWithOpened(
+      englishText,
+      [...runningOthers, listedOpened, pinned],
+      [pinned],
+      [
+        {
+          id: "opened-unlisted",
+          title: "Ledger audit",
+          openedAt: Date.parse("2026-10-03T11:00:00Z"),
+        },
+        { id: "opened-listed", title: "Old title", openedAt: Date.parse("2026-10-03T10:00:00Z") },
+        { id: "opened-unlisted", title: "Ledger audit", openedAt: 1 },
+      ],
+      6,
+      now,
+    );
+    const ids = entries.map((entry) =>
+      entry.kind === "session" ? entry.session.id : `~${entry.chat.id}`,
+    );
+    expect(ids.slice(0, 3)).toEqual(["~opened-unlisted", "opened-listed", "p"]);
+    expect(ids.slice(3).every((id) => id.startsWith("running-"))).toBe(true);
+    expect(ids).toHaveLength(6);
+    // A listed chat shows as its row, with its live status.
+    expect(entries[1]).toEqual({ kind: "session", session: listedOpened });
+    // Nothing opened here: the list is the plain home order.
+    expect(
+      recentSessionsWithOpened(englishText, [...runningOthers, pinned], [pinned], [], 3, now).map(
+        (entry) => (entry.kind === "session" ? entry.session.id : entry.chat.id),
+      ),
+    ).toEqual(
+      recentSessionsForHome(englishText, [...runningOthers, pinned], [pinned], 3, now).map(
+        (row) => row.id,
+      ),
+    );
+  });
+
+  test("phone home sections: every pin (pinned sub-agents too), then recent work that pins never crowd out", () => {
+    const pins = Array.from({ length: 7 }, (_, index) =>
+      session(`pin-${index}`, { pinned: true, updatedAt: "2026-10-03T11:40:00Z" }),
+    );
+    const pinnedAgent = session("pinned-agent", { pinned: true, parentSessionId: "mine" });
+    const running = session("r", { status: "running", updatedAt: "2026-10-01T00:00:00Z" });
+    const recent = session("a", { updatedAt: "2026-10-03T11:30:00Z" });
+    const older = session("b", { updatedAt: "2026-09-01T00:00:00Z" });
+    const agent = session("agent", { status: "running", parentSessionId: "a" });
+    const sections = homeSessionSections(
+      englishText,
+      [older, ...pins, recent, agent, running],
+      [...pins, pinnedAgent],
+      15,
+      now,
+    );
+    expect(sections.pinned.map((row) => row.id)).toEqual([
+      ...pins.map((pin) => pin.id),
+      "pinned-agent",
+    ]);
+    expect(sections.recent.map((row) => row.id)).toEqual(["r", "a", "b"]);
+    expect(
+      homeSessionSections(englishText, [older, recent, running], [], 2, now).recent.map(
+        (row) => row.id,
+      ),
+    ).toEqual(["r", "a"]);
+  });
+
+  test("status dot: background commands read as running", () => {
+    expect(recentSessionStatus(session("x"))).toEqual({ tone: "idle", pulse: false });
+    expect(recentSessionStatus(session("x", { status: "requires_action" }))).toEqual({
+      tone: "waiting",
+      pulse: false,
+    });
+    expect(
+      recentSessionStatus(
+        session("x", { backgroundCommandActivity: {} as Session["backgroundCommandActivity"] }),
+      ),
+    ).toEqual({ tone: "running", pulse: true });
+  });
+
+  test("row metadata: catalog label, codex fallback and repo", () => {
+    expect(recentSessionModelPresentation("codex/gpt-6-luna", [])).toEqual({
+      label: expect.any(String),
+      billingClass: "codex_subscription",
+    });
+    expect(
+      sessionRepoLabel(
+        session("x", {
+          resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+        } as Partial<Session>),
+      ),
+    ).toBe("acme/app");
+  });
+});
+
+describe("applySessionPinToLists", () => {
+  const older = session("older", { updatedAt: "2026-10-03T08:00:00Z", pinVersion: 1 });
+  const newer = session("newer", { updatedAt: "2026-10-03T11:30:00Z", pinVersion: 0 });
+  const pinnedA = session("pinned-a", {
+    pinned: true,
+    pinnedAt: "2026-10-02T09:00:00Z",
+    pinVersion: 3,
+  });
+  const lists = { pinned: [pinnedA], sessions: [newer, older] };
+  const ids = (value: { pinned: Session[]; sessions: Session[] }) => ({
+    pinned: value.pinned.map((row) => row.id),
+    sessions: value.sessions.map((row) => row.id),
+  });
+
+  test("pinning moves a row to the pinned section, newest pin first", () => {
+    const next = applySessionPinToLists(lists, {
+      id: "older",
+      pinned: true,
+      pinnedAt: "2026-10-03T12:00:00Z",
+      pinVersion: 2,
+    });
+    expect(ids(next)).toEqual({ pinned: ["older", "pinned-a"], sessions: ["newer"] });
+    expect(next.pinned[0]).toMatchObject({ pinned: true, pinVersion: 2 });
+  });
+
+  test("unpinning returns the row to the ordinary rows by activity", () => {
+    const next = applySessionPinToLists(lists, { id: "pinned-a", pinned: false, pinVersion: 4 });
+    expect(ids(next)).toEqual({ pinned: [], sessions: ["newer", "pinned-a", "older"] });
+    expect(next.sessions[1]).toMatchObject({ pinned: false, pinnedAt: null, pinVersion: 4 });
+  });
+
+  test("a response older than the row shown changes nothing", () => {
+    expect(applySessionPinToLists(lists, { id: "pinned-a", pinned: false, pinVersion: 2 })).toBe(
+      lists,
+    );
+  });
+
+  test("a session in neither list is left out", () => {
+    expect(applySessionPinToLists(lists, { id: "elsewhere", pinned: true, pinVersion: 1 })).toBe(
+      lists,
+    );
+  });
+
+  test("an authoritative read replaces an optimistic revision", () => {
+    const optimistic = applySessionPinToLists(lists, {
+      id: "newer",
+      pinned: true,
+      pinnedAt: "2026-10-03T12:00:00Z",
+      pinVersion: 1,
+    });
+    const restored = applySessionPinToLists(
+      optimistic,
+      { id: "newer", pinned: false, pinnedAt: null, pinVersion: 0 },
+      { authoritative: true },
+    );
+    expect(ids(restored)).toEqual(ids(lists));
+    expect(restored.sessions[0]).toMatchObject({ pinned: false, pinVersion: 0 });
+  });
+});
+
+describe("sessionHasUpcomingSchedule", () => {
+  test("only a schedule that can still fire shows as upcoming", () => {
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true, hasUpcomingSchedules: true })).toBe(
+      true,
+    );
+    // Paused, or a one-time schedule whose time passed: still linked, not upcoming.
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true, hasUpcomingSchedules: false })).toBe(
+      false,
+    );
+    expect(sessionHasUpcomingSchedule({ hasSchedules: false, hasUpcomingSchedules: false })).toBe(
+      false,
+    );
+    // Servers that predate the upcoming flag keep the earlier meaning.
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true })).toBe(true);
+    expect(sessionHasUpcomingSchedule({})).toBe(false);
+  });
+});
+
+describe("sessionHasPendingWake", () => {
+  const wait = { deadlineAt: "2026-10-03T12:30:00Z", reason: "Waiting for CI" };
+  test("a timed wait or an automation that can still run wakes the session", () => {
+    expect(sessionHasPendingWake(session("a"))).toBe(false);
+    expect(sessionHasPendingWake(session("a", { inputWait: wait }))).toBe(true);
+    expect(sessionHasPendingWake(session("a", { hasUpcomingSchedules: true }))).toBe(true);
+    expect(sessionHasPendingWake(session("a", { waitingForEvents: true }))).toBe(true);
+    // A spent schedule wakes nothing, and a wait only counts while idle and active.
+    expect(
+      sessionHasPendingWake(session("a", { hasSchedules: true, hasUpcomingSchedules: false })),
+    ).toBe(false);
+    expect(sessionHasPendingWake(session("a", { status: "running", inputWait: wait }))).toBe(false);
+  });
+
+  test("the lineage read's automation facts replace the session's own", () => {
+    const plain = session("a", { hasSchedules: false, hasUpcomingSchedules: false });
+    expect(withLineageAutomationFacts(plain, null)).toBe(plain);
+    expect(withLineageAutomationFacts(plain, {})).toBe(plain);
+    const merged = withLineageAutomationFacts(plain, {
+      sessionHasSchedules: true,
+      sessionHasUpcomingSchedules: true,
+    });
+    expect(merged).toMatchObject({
+      hasSchedules: true,
+      hasUpcomingSchedules: true,
+      waitingForEvents: false,
+    });
+    expect(sessionHasPendingWake(merged)).toBe(true);
+    // An older server sends only the schedules flag, which keeps its meaning.
+    expect(withLineageAutomationFacts(plain, { sessionHasSchedules: true })).toMatchObject({
+      hasUpcomingSchedules: true,
+    });
+  });
+});
+
+describe("sessionAutomationWait", () => {
+  test("an event that can still arrive outranks the next scheduled run", () => {
+    expect(sessionAutomationWait({ waitingForEvents: true, hasUpcomingSchedules: true })).toBe(
+      "event",
+    );
+    expect(sessionAutomationWait({ waitingForEvents: true })).toBe("event");
+    expect(sessionAutomationWait({ waitingForEvents: false, hasUpcomingSchedules: true })).toBe(
+      "schedule",
+    );
+    // A finished once-automation or a paused schedule waits for nothing.
+    expect(sessionAutomationWait({ waitingForEvents: false, hasUpcomingSchedules: false })).toBe(
+      null,
+    );
+    expect(sessionAutomationWait({})).toBe(null);
+  });
+});

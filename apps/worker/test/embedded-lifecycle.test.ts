@@ -1,16 +1,19 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { createTurnActivities } from "../src/activities-turn";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   type Database,
+  type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
 import * as opengeniDb from "@opengeni/db";
 import {
@@ -30,6 +33,7 @@ import {
   combineWorkerRunTargets,
   constructWithOwnedConnection,
   createWorkerServiceLifecycle,
+  createWorkerCleanupContainment,
 } from "../src/worker-service-lifecycle";
 
 const temporaryRoots: string[] = [];
@@ -41,6 +45,68 @@ afterEach(async () => {
 });
 
 describe("embedded worker lifecycle contract", () => {
+  test("bare turn activities refuse execution without the host cleanup drain edge", async () => {
+    const activities = createTurnActivities();
+    await expect(activities.runAgentTurn({} as never)).rejects.toThrow(
+      "host requestWorkerDrain lifecycle edge",
+    );
+  });
+
+  test("cleanup containment drains once and keeps the host exit backstop until successful shutdown", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-turn" });
+    let drains = 0;
+    let exits = 0;
+    const containment = createWorkerCleanupContainment({
+      drain: () => {
+        drains++;
+        return true;
+      },
+      terminate: () => {
+        exits++;
+      },
+      observability,
+      timeoutMs: 40,
+    });
+    containment.request();
+    containment.request();
+    expect(drains).toBe(1);
+    expect(exits).toBe(0);
+    await Bun.sleep(60);
+    expect(exits).toBe(1);
+    containment.finished();
+
+    const healthy = createWorkerCleanupContainment({
+      drain: () => true,
+      terminate: () => {
+        exits++;
+      },
+      observability,
+      timeoutMs: 10,
+    });
+    healthy.request();
+    healthy.finished();
+    await Bun.sleep(20);
+    expect(exits).toBe(1);
+  });
+
+  test("a rejected cleanup drain still preserves final host containment", async () => {
+    let exits = 0;
+    const containment = createWorkerCleanupContainment({
+      drain: () => {
+        throw new Error("shutdown request failed");
+      },
+      terminate: () => {
+        exits++;
+      },
+      observability: createObservability(testSettings(), { component: "worker-turn" }),
+      timeoutMs: 10,
+    });
+    containment.request();
+    await Bun.sleep(20);
+    expect(exits).toBe(1);
+    containment.finished();
+  });
+
   test("a multi-queue worker starts and drains every Temporal poller as one service", async () => {
     let finishFirst!: () => void;
     let finishSecond!: () => void;
@@ -374,7 +440,7 @@ describe("embedded worker lifecycle contract", () => {
     await rm(join(dist, "workflow-bundle.js"));
     expect(() =>
       resolveOpenGeniWorkflowDefinition(pathToFileURL(join(dist, "index.js")).href),
-    ).toThrow("OpenGeni workflow bundle is missing");
+    ).toThrow("Opengeni workflow bundle is missing");
   });
 
   test("worker database readiness enforces supplied posture and retains the embedded probe", async () => {
@@ -418,10 +484,16 @@ describe("embedded worker lifecycle contract", () => {
           rolcreatedb: false,
           rolreplication: false,
           rolbypassrls: false,
+          variable_set_cutover_present: true,
+          codex_cutover_activation_present: true,
+          receipt_reader_present: true,
         },
       ],
-      [{ activated: false }],
-      [{ present: true }],
+      // Migration 0751: no retired subscription object remains.
+      [],
+      // Migration 0712: the cutover receipt reader exists and every provider holds
+      // its receipt.
+      [{ provider: "claude" }, { provider: "codex" }, { provider: "xai" }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -432,6 +504,8 @@ describe("embedded worker lifecycle contract", () => {
       [
         ...[
           "api_keys",
+          "auth_sessions",
+          "agent_calls",
           "company_profile_activation_events",
           "company_profile_agent_automatic_activation_receipts",
           "company_profile_agent_confirmation_receipts",
@@ -493,6 +567,9 @@ describe("embedded worker lifecycle contract", () => {
           "preference_registry_revisions",
           "preference_registry_events",
           "self_service_organization_setup_receipts",
+          "session_attempt_model_context_snapshots",
+          "session_attempt_tool_catalogs",
+          "session_content_blobs",
           "session_human_input_requests",
           "session_tenancy_activations",
           "session_turn_attempts",
@@ -502,6 +579,7 @@ describe("embedded worker lifecycle contract", () => {
           "workspaces",
         ].map((name) => ({
           name,
+          private_schema: false,
           owner: "opengeni_migrator",
           rls_enabled: false,
           rls_forced: false,
@@ -534,6 +612,7 @@ describe("embedded worker lifecycle contract", () => {
           "session_tenancy_additional_organization_activation_evidence",
         ].map((name) => ({
           name,
+          private_schema: false,
           owner: "opengeni_migrator",
           rls_enabled: true,
           rls_forced: true,
@@ -549,52 +628,100 @@ describe("embedded worker lifecycle contract", () => {
           can_references: false,
           can_trigger: false,
         })),
-      ],
-      [
-        {
-          name: "personal_resource_delegation_capabilities",
-          owner: "opengeni_migrator",
-          can_select: false,
-          can_insert: false,
-          can_update: false,
-          can_delete: false,
-        },
-        {
-          name: "scheduled_personal_resource_capabilities",
-          owner: "opengeni_migrator",
-          can_select: false,
-          can_insert: false,
-          can_update: false,
-          can_delete: false,
-        },
-        {
-          name: "personal_document_authority_capabilities",
-          owner: "opengeni_migrator",
-          can_select: false,
-          can_insert: false,
-          can_update: false,
-          can_delete: false,
-        },
-        {
-          name: "document_migration_capabilities",
-          owner: "opengeni_migrator",
-          can_select: false,
-          can_insert: false,
-          can_update: false,
-          can_delete: false,
-        },
-        {
-          name: "connection_tenancy_backfill_capabilities",
-          owner: "opengeni_migrator",
-          can_select: false,
-          can_insert: false,
-          can_update: false,
-          can_delete: false,
-        },
+        ...[
+          ...["native_push_devices", "native_push_deliveries", "session_content_collections"].map(
+            (name) => ({
+              name,
+              owner: "opengeni_migrator",
+              rls_enabled: false,
+              rls_forced: false,
+              rls_active: false,
+              policy_count: 0,
+              can_select: false,
+              can_insert: false,
+              can_update: false,
+              can_delete: false,
+              can_truncate: false,
+              can_references: false,
+              can_trigger: false,
+            }),
+          ),
+          {
+            name: "modal_native_origin_read_capabilities",
+            owner: "opengeni_migrator",
+            rls_enabled: true,
+            rls_forced: true,
+            rls_active: true,
+            can_select: false,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+            can_truncate: false,
+            can_references: false,
+            can_trigger: false,
+          },
+          {
+            name: "credit_promotion_policy_revisions",
+            owner: "opengeni_migrator",
+            can_select: true,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+          },
+          {
+            name: "subscription_plan_catalog_revisions",
+            owner: "opengeni_migrator",
+            can_select: true,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+          },
+          {
+            name: "personal_resource_delegation_capabilities",
+            owner: "opengeni_migrator",
+            can_select: false,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+          },
+          {
+            name: "scheduled_personal_resource_capabilities",
+            owner: "opengeni_migrator",
+            can_select: false,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+          },
+          {
+            name: "personal_document_authority_capabilities",
+            owner: "opengeni_migrator",
+            can_select: false,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+          },
+          {
+            name: "document_migration_capabilities",
+            owner: "opengeni_migrator",
+            can_select: false,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+          },
+          {
+            name: "connection_tenancy_backfill_capabilities",
+            owner: "opengeni_migrator",
+            can_select: false,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+          },
+        ].map((row) => ({ ...row, private_schema: true })),
       ],
       [
         ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
           name,
+          private_schema: false,
           owner: "opengeni_migrator",
           can_execute: true,
           public_execute: (
@@ -606,6 +733,7 @@ describe("embedded worker lifecycle contract", () => {
         })),
         ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
           name,
+          private_schema: false,
           owner: "opengeni_migrator",
           can_execute: false,
           public_execute: false,
@@ -613,49 +741,185 @@ describe("embedded worker lifecycle contract", () => {
             name,
           ),
         })),
+        ...[
+          {
+            name: "workspace_rls_visible(uuid, uuid)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+          },
+          {
+            name: "personal_resource_delegation_capability_active(text)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+          },
+          {
+            name: "scheduled_personal_resource_capability_active(text)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+          },
+          {
+            name: "personal_document_authority_capability_active(text)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+          },
+          {
+            name: "document_migration_capability_active(text)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+          },
+          {
+            name: "connection_tenancy_backfill_capability_active(uuid)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+          },
+          // Migration 0730: the Knowledge claim's read-only work check.
+          {
+            name: "knowledge_index_due_v1(text, integer)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            configuration: ["search_path=pg_catalog"],
+          },
+          // Migration 0988: the queued-turn hold summary, created without
+          // runtime EXECUTE; 1274 granted it.
+          {
+            name: "summarize_queued_turns_by_hold()",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          },
+          // Migration 1239 grants all six routines withheld by 1107.
+          ...[
+            "native_push_device_v2(text)",
+            "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+            "claim_native_push_deliveries_v2(uuid, integer, integer)",
+            "agent_call_device_count_v1(text, boolean)",
+            "agent_call_ringing_v1(text)",
+            "ring_agent_call_v1(uuid, boolean)",
+          ].map((name) => ({
+            name,
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          })),
+          // Migration 1344: ends a settled call's ring on the other phones,
+          // created without runtime EXECUTE until a later migration grants it.
+          {
+            name: "end_agent_call_rings_v1(uuid)",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
+          // Migration 1359: the session content collector and its inventory,
+          // created without runtime EXECUTE until a later migration grants them.
+          ...[
+            "session_content_garbage_candidates_v1(integer)",
+            "collect_session_content_garbage_v1(uuid, uuid, integer)",
+          ].map((name) => ({
+            name,
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          })),
+          // Migration 1103: the subscription account-administrator grant,
+          // created without runtime EXECUTE; 1149 granted it.
+          {
+            name: "grant_subscription_account_administrator(jsonb)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
+          // Migration 1343 activates the external identity reader introduced
+          // by 1172 after the previous release recognizes either grant state.
+          {
+            name: "read_external_identity_v1(uuid, text, text)",
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=public, pg_catalog, pg_temp"],
+          },
+          ...[
+            "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+            "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+            "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+            "resolve_subscription_codex_apps_designation(uuid, uuid)",
+            "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
+            "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
+            "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+            "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+            "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+            "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
+            "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
+            "subscription_codex_owner_membership_held(uuid, uuid)",
+            ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+            ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
+            ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES,
+          ].map((name) => ({
+            name,
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            configuration: [
+              name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+              name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
+                ? "search_path=pg_catalog, opengeni_private, pg_temp"
+                : "search_path=pg_catalog, public, opengeni_private, pg_temp",
+            ],
+          })),
+        ].map((row) => ({ ...row, private_schema: true })),
       ],
       [
-        {
-          name: "workspace_rls_visible(uuid, uuid)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-        },
-        {
-          name: "personal_resource_delegation_capability_active(text)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        {
-          name: "scheduled_personal_resource_capability_active(text)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        {
-          name: "personal_document_authority_capability_active(text)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        {
-          name: "document_migration_capability_active(text)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        {
-          name: "connection_tenancy_backfill_capability_active(uuid)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-      ],
+        "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+        "drop_subscription_codex_owner_capabilities(uuid)",
+        "derive_scheduled_revision_subscription_authority()",
+        ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
+      ].map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      })),
     ];
     const db = {
       execute: async () => {
@@ -674,7 +938,7 @@ describe("embedded worker lifecycle contract", () => {
         }),
     } as unknown as Database;
 
-    await dbReadyCheck(db, {
+    const posture: RuntimeDatabasePostureOptions = {
       rlsStrategy: "force",
       expectedRole: "opengeni_app",
       targetSchema: "public",
@@ -711,8 +975,13 @@ describe("embedded worker lifecycle contract", () => {
         "organization_user_setup_delivery_attempts",
         "session_tenancy_additional_organization_activation_evidence",
       ],
-    })();
-    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    };
+    await dbReadyCheck(db, posture)();
+    expect(
+      (catalogResults[8] as Array<{ name: string; private_schema: boolean }>)
+        .filter((row) => !row.private_schema)
+        .map((routine) => routine.name),
+    ).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -721,10 +990,54 @@ describe("embedded worker lifecycle contract", () => {
 
     await dbReadyCheck(db)();
     expect(directExecutions).toBe(1);
+
+    // A revoked runtime EXECUTE grant on a declared private routine disables
+    // only that feature: readiness reports it as degraded and stays ready,
+    // while the strict release-gate evaluation still rejects it.
+    const routines = catalogResults[8] as Array<{ name: string; can_execute: boolean }>;
+    const revoked = routines.find((row) => row.name === "knowledge_index_due_v1(text, integer)")!;
+    const identity = (catalogResults[0] as Array<{ rolbypassrls: boolean }>)[0]!;
+    try {
+      revoked.can_execute = false;
+      const missing =
+        "runtime role lacks EXECUTE on private routine knowledge_index_due_v1(text, integer)";
+      // Its maintenance-work check also requires the grant; with the grant
+      // present that finding goes away, so it is degraded as well.
+      const maintenance =
+        "maintenance work check knowledge_index_due_v1(text, integer) is missing or has unsafe posture";
+      const degraded: (readonly string[])[] = [];
+      catalogQueries = 0;
+      await dbReadyCheck(db, posture, undefined, (findings) => degraded.push(findings))();
+      expect(degraded).toEqual([[maintenance, missing]]);
+      catalogQueries = 0;
+      await expect(opengeniDb.assertRuntimeDatabasePosture(db, posture)).rejects.toThrow(missing);
+
+      // Excess privilege stays fatal, even while the missing grant is degraded.
+      identity.rolbypassrls = true;
+      catalogQueries = 0;
+      const error = await dbReadyCheck(db, posture, undefined, (findings) =>
+        degraded.push(findings),
+      )().catch((caught: unknown) => caught);
+      // The readiness error names only the fatal findings.
+      expect(error).toBeInstanceOf(opengeniDb.RuntimeDatabasePostureError);
+      expect((error as opengeniDb.RuntimeDatabasePostureError).violations).toEqual([
+        "runtime role has BYPASSRLS",
+      ]);
+      expect(degraded.at(-1)).toEqual([maintenance, missing]);
+    } finally {
+      identity.rolbypassrls = false;
+      revoked.can_execute = true;
+    }
   });
 
-  test("embedded readiness enforces durable session-tenancy activation for both switch states", async () => {
-    const embeddedDb = (activated: boolean, variableSetCutoverPresent = true) => {
+  test("embedded readiness enforces runtime receipts without a session-tenancy activation interlock", async () => {
+    // Migration 0611 retired the activation startup interlock: the embedded
+    // probe no longer queries session-tenancy activation at all.
+    const embeddedDb = (
+      variableSetCutoverPresent = true,
+      retiredSubscriptionObjects: string[] = [],
+      codexCutoverActivationPresent = true,
+    ) => {
       const results: unknown[] = [
         [
           {
@@ -741,10 +1054,13 @@ describe("embedded worker lifecycle contract", () => {
             rolcreatedb: false,
             rolreplication: false,
             rolbypassrls: false,
+            variable_set_cutover_present: variableSetCutoverPresent,
+            codex_cutover_activation_present: codexCutoverActivationPresent,
+            receipt_reader_present: true,
           },
         ],
-        [{ activated }],
-        [{ present: variableSetCutoverPresent }],
+        retiredSubscriptionObjects.map((object) => ({ object })),
+        [{ provider: "claude" }, { provider: "codex" }, { provider: "xai" }],
       ];
       let index = 0;
       return {
@@ -763,18 +1079,23 @@ describe("embedded worker lifecycle contract", () => {
     };
     const options = { rlsStrategy: "scoped" as const, targetSchema: "embedded" };
 
-    await expect(dbReadyCheck(embeddedDb(true), options)()).rejects.toThrow(
-      /session-tenancy product activation is durable/,
-    );
-    await expect(
-      dbReadyCheck(embeddedDb(true), {
-        ...options,
-        organizationTenancyCanonicalActivationEnabled: true,
-      })(),
-    ).resolves.toBeUndefined();
-    await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
-    await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
+    await expect(dbReadyCheck(embeddedDb(), options)()).resolves.toBeUndefined();
+    await expect(dbReadyCheck(embeddedDb(false), options)()).rejects.toThrow(
       /missing the 0352 session Variable Set attachment runtime receipt/,
+    );
+    // The embedded (scoped) topology also requires the drained retirement.
+    await expect(
+      dbReadyCheck(
+        embeddedDb(true, [
+          "routine embedded.resolve_claude_authority_pool(uuid, uuid, text, jsonb)",
+        ]),
+        options,
+      )(),
+    ).rejects.toThrow(
+      /retired subscription routine embedded\.resolve_claude_authority_pool\(uuid, uuid, text, jsonb\) is present; apply the drained retirement migration 0751_subscription_core_legacy_retirement\.sql/,
+    );
+    await expect(dbReadyCheck(embeddedDb(true, [], false), options)()).rejects.toThrow(
+      /missing the 0689 Codex subscription-core cutover receipt/,
     );
   });
 
@@ -802,6 +1123,65 @@ describe("embedded worker lifecycle contract", () => {
     await Promise.all([first, second]);
     await check();
     expect(executions).toBe(2);
+  });
+
+  test("timed-out readiness requests reuse the pending catalog check", async () => {
+    let executions = 0;
+    let catalogChecks = 0;
+    let release!: () => void;
+    let started!: () => void;
+    const catalogStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const catalogPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const db = {
+      execute: async () => {
+        executions += 1;
+        return [];
+      },
+    } as unknown as Database;
+    const check = dbReadyCheck(db, undefined, async () => {
+      catalogChecks += 1;
+      if (catalogChecks === 1) {
+        started();
+        await catalogPending;
+      }
+    });
+    const pending = check();
+    await catalogStarted;
+    const settings = testSettings();
+    const fetch = createWorkerHttpHandler({
+      settings,
+      observability: createObservability(settings, { component: "worker-test" }),
+      checks: { db: check, nats: () => undefined, temporal: () => undefined },
+      timeoutMs: 5,
+    });
+    const responses = await Promise.all([
+      fetch(new Request("http://localhost/readyz")),
+      fetch(new Request("http://localhost/readyz")),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([503, 503]);
+    expect(executions).toBe(1);
+    expect(catalogChecks).toBe(1);
+    release();
+    await pending;
+    expect((await fetch(new Request("http://localhost/readyz"))).status).toBe(200);
+    expect(executions).toBe(2);
+    expect(catalogChecks).toBe(2);
+  });
+
+  test("catalog failure resets database readiness for a later successful check", async () => {
+    let catalogChecks = 0;
+    const db = { execute: async () => [] } as unknown as Database;
+    const check = dbReadyCheck(db, undefined, async () => {
+      catalogChecks += 1;
+      if (catalogChecks === 1) throw new Error("catalog unavailable");
+    });
+    await expect(check()).rejects.toThrow("catalog unavailable");
+    await expect(check()).resolves.toBeUndefined();
+    expect(catalogChecks).toBe(2);
   });
 
   test("readiness follows role lifecycle while health stays live during drain", async () => {

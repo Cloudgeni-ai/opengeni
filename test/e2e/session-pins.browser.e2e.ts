@@ -10,20 +10,18 @@ import {
   grantWorkspaceAccess,
   removeWorkspaceMember,
   updateSessionTitle,
+  setSessionPin,
+  requestSessionArchive,
+  withWorkspaceRls,
 } from "@opengeni/db";
+import { sql } from "drizzle-orm";
 import { signDelegatedAccessToken, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  runCommand,
-  startProcess,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { runCommand, startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   chromium,
   type Browser,
@@ -31,9 +29,14 @@ import {
   type BrowserContextOptions,
   type Page,
   type Response as PlaywrightResponse,
+  type Request as PlaywrightRequest,
+  type Frame as PlaywrightFrame,
   type Route,
 } from "playwright";
 import postgres from "postgres";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "sessionpin-owner" };
@@ -60,6 +63,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   let apiBaseUrl: string;
   let webBaseUrl: string;
   let bus: MemoryEventBus;
+  let http2Proxy: StartedProcess | undefined;
+  let tlsDirectory: string | undefined;
 
   async function publishAnswer(workspaceId: string, sessionId: string, text: string) {
     // The workflow is stubbed: settle the fixture explicitly, otherwise its
@@ -84,6 +89,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     apiBaseUrl = `http://127.0.0.1:${apiPort}`;
     const webPort = await freePort();
     webBaseUrl = `http://127.0.0.1:${webPort}`;
+    const http2Port = process.env.OPENGENI_TEST_LIST_HTTP2 === "1" ? await freePort() : undefined;
+    if (http2Port) apiBaseUrl = webBaseUrl = `https://127.0.0.1:${http2Port}`;
     const webEnv = {
       NODE_ENV: "production",
       VITE_API_BASE_URL: apiBaseUrl,
@@ -104,7 +111,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       throw new Error("session pin browser E2E requires real PostgreSQL; no skip is allowed");
     }
     shared = acquired;
-    dbClient = createDb(shared.appUrl);
+    dbClient = createDb(shared.appUrl, {
+      ...(process.env.OPENGENI_TEST_LIST_NOTIFICATIONS === "0"
+        ? {}
+        : { notificationDatabaseUrl: shared.appUrl }),
+    });
     bus = new MemoryEventBus();
     const app = createApp({
       // Exercise the normal configured-principal access path so independent
@@ -144,18 +155,70 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         env: webEnv,
         ready: async () =>
           (
-            await fetch(webBaseUrl, {
+            await fetch(`http://127.0.0.1:${webPort}`, {
               signal: AbortSignal.timeout(2_000),
             }).catch(() => null)
           )?.ok === true,
         timeoutMs: 45_000,
       },
     );
-    browser = await chromium.launch();
+    if (http2Port) {
+      tlsDirectory = await mkdtemp(join(tmpdir(), "opengeni-sidebar-tls-"));
+      const key = join(tlsDirectory, "key.pem");
+      const cert = join(tlsDirectory, "cert.pem");
+      const generated = await runCommand(
+        [
+          "openssl",
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-keyout",
+          key,
+          "-out",
+          cert,
+          "-days",
+          "1",
+          "-subj",
+          "/CN=localhost",
+          "-addext",
+          "subjectAltName=IP:127.0.0.1",
+        ],
+        { cwd: repoRoot, timeoutMs: 10_000 },
+      );
+      if (generated.exitCode !== 0) throw new Error("Fixture TLS certificate generation failed");
+      http2Proxy = await startProcess(
+        [
+          "node",
+          "test/e2e/fixtures/http2-proxy.mjs",
+          String(http2Port),
+          String(apiPort),
+          String(webPort),
+          key,
+          cert,
+        ],
+        {
+          cwd: repoRoot,
+          ready: async () =>
+            (await fetch(webBaseUrl, { tls: { rejectUnauthorized: false } }).catch(() => null))
+              ?.ok === true,
+          timeoutMs: 10_000,
+        },
+      );
+    }
+    // OPENGENI_TEST_CHROMIUM points at a system Chromium where Playwright's
+    // own build can't load (NixOS, for example), as other browser tests allow.
+    browser = await chromium.launch(
+      process.env.OPENGENI_TEST_CHROMIUM
+        ? { executablePath: process.env.OPENGENI_TEST_CHROMIUM, args: ["--no-sandbox"] }
+        : {},
+    );
   }, 180_000);
 
   afterAll(async () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
+    await http2Proxy?.stop();
     // Closing the browser stops new polling first; then drain requests that
     // already entered the API before closing its database pool. Force-stopping
     // the listener and immediately ending the pool races those handlers and
@@ -163,7 +226,203 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await api?.stop(false);
     await dbClient?.close().catch(() => undefined);
     await shared?.release();
+    if (tlsDirectory) await rm(tlsDirectory, { recursive: true });
   }, 60_000);
+
+  for (const platform of ["browser", "macos"] as const)
+    test(`commit hints keep an idle ${platform} sidebar quiet and refresh remote edits`, async () => {
+      const fixtureSessionIds: string[] = [];
+      const context = await configuredContext(browser, {
+        viewport: { width: 1280, height: 800 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      if (platform === "macos")
+        await context.addInitScript(() => {
+          Object.assign(window, {
+            opengeniDesktop: {
+              version: 1,
+              platform: "macos",
+              capabilities: [],
+              productName: "Opengeni",
+              setAppearance() {},
+              commands: { onCommand: () => () => {} },
+            },
+          });
+        });
+      const page = await context.newPage();
+      try {
+        await page.goto(webBaseUrl);
+        const workspaceId = await workspaceFromPage(page);
+        const accessResponse = await page.request.get(`${apiBaseUrl}/v1/access/me`);
+        expect(accessResponse.ok()).toBe(true);
+        const { subjectId } = (await accessResponse.json()) as { subjectId: string };
+        const session = await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          `Quiet ${platform} conversation`,
+        );
+        fixtureSessionIds.push(session.id);
+        const child = await createTitledSession(dbClient.db, {
+          accountId: session.accountId,
+          workspaceId,
+          parentSessionId: session.id,
+          initialMessage: `Child ${platform} command`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId },
+        });
+        fixtureSessionIds.push(child.id);
+        const commandId = crypto.randomUUID();
+        // A retained command receipt, not a real process: this fixture exercises
+        // the list projection and commit notification without running a worker.
+        await shared.admin`insert into session_background_commands
+          (id, account_id, workspace_id, session_id, provider, state,
+           control_workspace_id, enrollment_id, connection_instance_id, op_id)
+          values (${commandId}, ${session.accountId}, ${workspaceId}, ${child.id},
+           'connected_machine', 'running', ${workspaceId}, ${crypto.randomUUID()}, 'fixture', ${commandId})`;
+        const archived = await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          `Archive ${platform} remotely`,
+        );
+        fixtureSessionIds.push(archived.id);
+        const deleted = await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          `Delete ${platform} remotely`,
+        );
+        fixtureSessionIds.push(deleted.id);
+        await navigateWithProjectPages(page, workspaceId, () => page.reload());
+        const row = page.locator(`a[data-session-row="${session.id}"]`);
+        await row.waitFor();
+        await row
+          .locator("xpath=../..")
+          .getByRole("button", { name: "Expand spawned sessions" })
+          .click();
+        const childRow = page.locator(`a[data-session-row="${child.id}"]`);
+        await childRow.waitFor();
+        expect(await childRow.getAttribute("aria-label")).toContain("Background command running");
+        const archiveRow = page.locator(`a[data-session-row="${archived.id}"]`);
+        const deleteRow = page.locator(`a[data-session-row="${deleted.id}"]`);
+        await archiveRow.waitFor();
+        await deleteRow.waitFor();
+        // Drain startup reconciliation and the preceding fixture writes before
+        // observing two full legacy poll intervals without any user activity.
+        await page.waitForTimeout(17_000);
+        let listReads = 0;
+        const countRead = (request: PlaywrightRequest) => {
+          if (
+            request.method() === "GET" &&
+            new URL(request.url()).pathname === `/v1/workspaces/${workspaceId}/sessions`
+          )
+            listReads++;
+        };
+        page.on("request", countRead);
+        const started = performance.now();
+        await page.waitForTimeout(31_000);
+        const idleReads = listReads;
+        const idleSeconds = (performance.now() - started) / 1000;
+        console.log(
+          JSON.stringify({
+            platform,
+            idleReads,
+            idleSeconds,
+            protocol: await page.evaluate(
+              () =>
+                (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming)
+                  .nextHopProtocol,
+            ),
+          }),
+        );
+        if (
+          process.env.OPENGENI_TEST_LIST_NOTIFICATIONS === "0" ||
+          process.env.OPENGENI_TEST_LIST_HTTP2 !== "1"
+        )
+          expect(idleReads).toBeGreaterThan(0);
+        else expect(idleReads).toBe(0);
+        // Direct committed server edit: no local mutation callback or BroadcastChannel.
+        const changedAt = performance.now();
+        await updateSessionTitle(dbClient.db, {
+          workspaceId,
+          sessionId: session.id,
+          title: `Remote ${platform} edit`,
+          source: "user",
+        });
+        await setSessionPin(dbClient.db, {
+          workspaceId,
+          sessionId: session.id,
+          subjectId,
+          pinned: true,
+        });
+        await requestSessionArchive(dbClient.db, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: archived.id,
+          subjectId,
+        });
+        await shared.admin`delete from sessions where id=${deleted.id}`;
+        await row
+          .getByText(`Remote ${platform} edit`, { exact: true })
+          .waitFor({ timeout: 18_000 });
+        await page
+          .getByRole("group", { name: "Pinned", exact: true })
+          .locator(`a[data-session-row="${session.id}"]`)
+          .waitFor({ timeout: 18_000 });
+        await archiveRow.waitFor({ state: "detached", timeout: 18_000 });
+        await deleteRow.waitFor({ state: "detached", timeout: 18_000 });
+        const visibleMs = performance.now() - changedAt;
+        console.log(
+          JSON.stringify({
+            platform,
+            notifications: process.env.OPENGENI_TEST_LIST_NOTIFICATIONS !== "0",
+            idleReads,
+            idleSeconds,
+            visibleMs,
+            listReadsAfterEdit: listReads - idleReads,
+          }),
+        );
+        expect(visibleMs).toBeLessThan(18_000);
+        // No session edit accompanies this change. A child command observation
+        // must invalidate the already-expanded branch without a parent event.
+        const commandChangedAt = performance.now();
+        await shared.admin`update session_background_commands set state='exited', exit_code=0,
+          settled_at=statement_timestamp(), settlement_reason='fixture completed' where id=${commandId}`;
+        await waitFor(
+          async () => {
+            const label = await childRow.getAttribute("aria-label");
+            return label !== null && !label.includes("Background command running");
+          },
+          { timeoutMs: 18_000 },
+        );
+        console.log(
+          JSON.stringify({ platform, commandVisibleMs: performance.now() - commandChangedAt }),
+        );
+        await expectNoPageOverflow(page);
+        if (process.env.OPENGENI_SESSION_SIDEBAR_ARTIFACT_DIR) {
+          await page.screenshot({
+            path: `${process.env.OPENGENI_SESSION_SIDEBAR_ARTIFACT_DIR}/idle-${platform}.png`,
+          });
+          await page.setViewportSize({ width: 390, height: 844 });
+          await expectNoPageOverflow(page);
+          await page.screenshot({
+            path: `${process.env.OPENGENI_SESSION_SIDEBAR_ARTIFACT_DIR}/idle-${platform}-narrow.png`,
+          });
+        }
+      } finally {
+        await context.close();
+        // These cases share the configured owner's workspace with the rest of
+        // this file. Leave no pinned/archived roots or children behind.
+        if (fixtureSessionIds.length)
+          await shared.admin`delete from sessions where id = any(${fixtureSessionIds}::uuid[])`;
+      }
+    }, 90_000);
 
   test("moves sessions using the context menu and folder drag targets", async () => {
     const context = await configuredContext(browser, {
@@ -342,14 +601,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         },
       ]);
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${session.id}`);
-      await page.getByRole("img", { name: "session-only.svg" }).waitFor();
+      // The sent message shows the file as the composer did: a chip named
+      // after it whose thumbnail is read through this session's authority.
+      await page.getByRole("button", { name: "Preview session-only.svg" }).waitFor();
+      const thumbnail = page.locator("[data-og-message-attachments] img");
+      await thumbnail.waitFor();
       expect(
-        await page
-          .getByRole("img", { name: "session-only.svg" })
-          .evaluate(
-            (image) =>
-              (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
-          ),
+        await thumbnail.evaluate(
+          (image) =>
+            (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
+        ),
       ).toBe(true);
       expect(seen).toContain(
         `/v1/workspaces/${workspaceId}/files/${fileId}?sessionId=${session.id}`,
@@ -489,6 +750,103 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
+  test("defers hidden sidebar invalidations and reconciles pins when visible", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    let cleanupPin: (() => Promise<unknown>) | null = null;
+    try {
+      const sender = await context.newPage();
+      await sender.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(sender);
+      const target = await createSessionThroughApi(
+        sender,
+        apiBaseUrl,
+        workspaceId,
+        "Background reconciliation example",
+      );
+      const background = await context.newPage();
+      await background.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      await background.locator(`a[data-session-row="${target.id}"]`).waitFor();
+      // Native headless tabs can all report visible. Drive the same browser
+      // visibility events consumed by polling and cross-document listeners.
+      await background.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await background.waitForTimeout(3_000);
+      let readsWhileHidden = 0;
+      const listPath = `/v1/workspaces/${workspaceId}/sessions`;
+      background.on("request", (request) => {
+        if (
+          request.method() === "GET" &&
+          new URL(request.url()).pathname === listPath &&
+          request.url().includes("view=page") &&
+          backgroundReadsEnabled
+        )
+          readsWhileHidden++;
+      });
+      let backgroundReadsEnabled = true;
+      const pinnedTarget = await setSessionPinThroughApi(
+        sender,
+        apiBaseUrl,
+        workspaceId,
+        target,
+        true,
+      );
+      cleanupPin = () =>
+        setSessionPinThroughApi(sender, apiBaseUrl, workspaceId, pinnedTarget, false);
+      await sender.evaluate(
+        async ({ workspaceId: broadcastWorkspaceId, sessionId }) => {
+          const channel = new BroadcastChannel(`opengeni.session-pins:${broadcastWorkspaceId}`);
+          try {
+            for (let index = 0; index < 8; index++) {
+              channel.postMessage({
+                type: "session-pin.changed",
+                sessionId,
+                messageId: crypto.randomUUID(),
+              });
+              await new Promise((resolve) => setTimeout(resolve, 150));
+            }
+          } finally {
+            channel.close();
+          }
+        },
+        { workspaceId, sessionId: target.id },
+      );
+      await background.waitForTimeout(300);
+      expect(readsWhileHidden).toBe(0);
+      backgroundReadsEnabled = false;
+      const reconciledPins = background.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId) &&
+          new URL(response.url()).searchParams.get("pinsOnly") === "true",
+      );
+      await background.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          value: "visible",
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("focus"));
+      });
+      const response = (await (await reconciledPins).json()) as BrowserSessionPage;
+      expect(response.pinned.some((session) => session.id === target.id)).toBe(true);
+      await background
+        .getByRole("group", { name: "Pinned" })
+        .locator(`a[data-session-row="${target.id}"]`)
+        .waitFor();
+      expect(browserPageErrors.get(context)).toEqual([]);
+    } finally {
+      try {
+        await cleanupPin?.();
+      } finally {
+        await context.close();
+      }
+    }
+  }, 90_000);
+
   test("loads project pages independently without pagination on empty projects", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -545,13 +903,33 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       }
 
       const paginationRequests: URL[] = [];
-      page.on("request", (request) => {
+      const sessionPageRead = (request: PlaywrightRequest): URL | null => {
         const url = new URL(request.url());
-        if (
-          request.method() === "GET" &&
+        return request.method() === "GET" &&
           url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
           url.searchParams.get("view") === "page"
-        ) {
+          ? url
+          : null;
+      };
+      // The home page's Recent sessions panel also reads top-level roots
+      // (parentSessionId=null), but with the full projection because it shows
+      // model labels. It carries no archive filter, pin or project scope.
+      const isRecentSessionsRead = (url: URL) =>
+        url.searchParams.get("parentSessionId") === "null" &&
+        !url.searchParams.has("archiveStatus") &&
+        !url.searchParams.has("channelId") &&
+        !url.searchParams.has("pinsOnly");
+      // Identify sidebar reads by their query shape, independently of projection:
+      // the rail's root page always sends its archive filter, project windows a
+      // channelId, and the global pin section pinsOnly.
+      const isSidebarRead = (url: URL) =>
+        (url.searchParams.get("parentSessionId") === "null" &&
+          url.searchParams.has("archiveStatus")) ||
+        url.searchParams.has("channelId") ||
+        url.searchParams.get("pinsOnly") === "true";
+      page.on("request", (request) => {
+        const url = sessionPageRead(request);
+        if (url && isSidebarRead(url)) {
           paginationRequests.push(url);
         }
       });
@@ -561,17 +939,50 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
             successfulSessionPageResponse(response, workspaceId, { cursor }) &&
             new URL(response.url()).searchParams.get("channelId") === channelId,
         );
+      const recentSessionsRequest = page.waitForRequest((request) => {
+        const url = sessionPageRead(request);
+        return url !== null && isRecentSessionsRead(url);
+      });
       const [projectAResponse, projectBResponse, emptyProjectResponse] = await Promise.all([
         projectPage(projectA.id, null),
         projectPage(projectB.id, null),
         projectPage(emptyProject.id, null),
         page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`),
       ]);
+      // Prove the classification instead of depending on request order: the
+      // Recent panel's read is observed on every load and is never counted as
+      // a sidebar read, wherever it lands relative to the project windows.
+      const recentSessionsUrl = sessionPageRead(await recentSessionsRequest)!;
+      expect(isSidebarRead(recentSessionsUrl)).toBe(false);
       const projectAPage = (await projectAResponse.json()) as BrowserSessionPage;
       const projectBPage = (await projectBResponse.json()) as BrowserSessionPage;
       const emptyProjectPage = (await emptyProjectResponse.json()) as BrowserSessionPage;
-      expect(projectAPage.sessions).toHaveLength(50);
-      expect(projectBPage.sessions).toHaveLength(50);
+      expect(
+        paginationRequests.every((request) => request.searchParams.get("projection") === "summary"),
+      ).toBe(true);
+      expect(
+        paginationRequests.some((request) => request.searchParams.get("pinsOnly") === "true"),
+      ).toBe(true);
+      expect(
+        paginationRequests.some(
+          (request) =>
+            request.searchParams.get("parentSessionId") === "null" &&
+            !request.searchParams.has("channelId"),
+        ),
+      ).toBe(true);
+      for (const project of [projectA, projectB, emptyProject]) {
+        expect(
+          paginationRequests.some(
+            (request) => request.searchParams.get("channelId") === project.id,
+          ),
+        ).toBe(true);
+      }
+      expect(projectAPage.sessions).toHaveLength(4);
+      expect(projectAPage.sessions[0]).not.toHaveProperty("initialMessage");
+      expect(projectAPage.sessions[0]).not.toHaveProperty("metadata");
+      expect(projectBPage.sessions).toHaveLength(4);
+      expect(projectAPage.pinned).toEqual([]);
+      expect(projectBPage.pinned).toEqual([]);
       expect(projectAPage.nextCursor).toEqual(expect.any(String));
       expect(projectBPage.nextCursor).toEqual(expect.any(String));
       expect(projectAPage.nextCursor).not.toBe(projectBPage.nextCursor);
@@ -582,7 +993,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           paginationRequests.some(
             (request) =>
               request.searchParams.get("channelId") === project.id &&
-              request.searchParams.get("limit") === "50" &&
+              request.searchParams.get("limit") === "4" &&
+              request.searchParams.get("includePinned") === "false" &&
               !request.searchParams.has("cursor"),
           ),
         ).toBe(true);
@@ -593,6 +1005,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const projectBRows = projectBGroup.locator("a[data-session-row]");
       await waitFor(async () => (await projectARows.count()) === 4, { timeoutMs: 30_000 });
       await waitFor(async () => (await projectBRows.count()) === 4, { timeoutMs: 30_000 });
+      await page.screenshot({ path: "/tmp/opengeni-project-page-window.png", fullPage: true });
       const loadProjectA = projectAGroup.getByRole("button", {
         name: `Show 4 more sessions in ${projectA.name}`,
       });
@@ -615,20 +1028,27 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .boundingBox();
       const continuationRequests = () =>
         paginationRequests.filter((request) => request.searchParams.has("cursor"));
-      // Explicit disclosure uses the cached 50-row page without growing any
-      // other project or issuing continuation requests.
+      // Each disclosure fetches only its small window; the other project stays
+      // at four rows and scrolling never triggers hidden-page prefetch.
+      let projectACursor = projectAPage.nextCursor;
       for (let visible = 8; visible <= 48; visible += 4) {
-        await loadProjectA.click();
+        const [response] = await Promise.all([
+          projectPage(projectA.id, projectACursor),
+          loadProjectA.click(),
+        ]);
+        const olderPage = (await response.json()) as BrowserSessionPage;
+        expect(olderPage.sessions).toHaveLength(4);
+        projectACursor = olderPage.nextCursor;
         await waitFor(async () => (await projectARows.count()) === visible, {
           timeoutMs: 30_000,
         });
         expect(await projectBRows.count()).toBe(4);
-        expect(continuationRequests()).toHaveLength(0);
+        expect(continuationRequests()).toHaveLength(visible / 4 - 1);
       }
       await loadProjectA.scrollIntoViewIfNeeded();
       // Scrolling through folders must not grow the rail and hide Archived.
       await page.waitForTimeout(500);
-      expect(continuationRequests()).toHaveLength(0);
+      expect(continuationRequests()).toHaveLength(11);
       expect(await projectARows.count()).toBe(48);
       expect(await projectBRows.count()).toBe(4);
       const scroll = await page.locator("[data-rail-scroll-viewport]").evaluate((element) => ({
@@ -642,52 +1062,81 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(scroll.total).toBeGreaterThan(scroll.height);
       expect(scroll.listOverflow).toBe("visible");
       const [projectAOlderResponse] = await Promise.all([
-        projectPage(projectA.id, projectAPage.nextCursor),
+        projectPage(projectA.id, projectACursor),
         loadProjectA.click(),
       ]);
       const projectAOlderPage = (await projectAOlderResponse.json()) as BrowserSessionPage;
-      expect(projectAOlderPage.sessions).toHaveLength(6);
-      expect(projectAOlderPage.nextCursor).toBeNull();
+      expect(projectAOlderPage.sessions).toHaveLength(4);
+      expect(projectAOlderPage.nextCursor).toEqual(expect.any(String));
       await waitFor(async () => (await projectARows.count()) === 52, { timeoutMs: 30_000 });
       expect(await projectBRows.count()).toBe(4);
-      expect(continuationRequests()).toHaveLength(1);
+      expect(continuationRequests()).toHaveLength(12);
       expect(continuationRequests()[0]!.searchParams.get("channelId")).toBe(projectA.id);
       expect(continuationRequests()[0]!.searchParams.get("cursor")).toBe(projectAPage.nextCursor);
-      expect(continuationRequests()[0]!.searchParams.get("limit")).toBe("50");
-      await loadProjectA.click();
+      expect(continuationRequests()[0]!.searchParams.get("limit")).toBe("4");
+      const [projectALastResponse] = await Promise.all([
+        projectPage(projectA.id, projectAOlderPage.nextCursor),
+        loadProjectA.click(),
+      ]);
+      expect(((await projectALastResponse.json()) as BrowserSessionPage).nextCursor).toBeNull();
       await waitFor(async () => (await projectARows.count()) === 56, { timeoutMs: 30_000 });
-      expect(continuationRequests()).toHaveLength(1);
+      expect(continuationRequests()).toHaveLength(13);
 
       const footerAfter = await page
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
       expect(footerAfter?.y).toBe(footerBefore?.y);
+      let projectBCursor = projectBPage.nextCursor;
       for (let visible = 8; visible <= 48; visible += 4) {
-        await loadProjectB.click();
+        const [response] = await Promise.all([
+          projectPage(projectB.id, projectBCursor),
+          loadProjectB.click(),
+        ]);
+        const olderPage = (await response.json()) as BrowserSessionPage;
+        expect(olderPage.sessions).toHaveLength(4);
+        projectBCursor = olderPage.nextCursor;
         await waitFor(async () => (await projectBRows.count()) === visible, {
           timeoutMs: 30_000,
         });
         expect(await projectARows.count()).toBe(56);
-        expect(continuationRequests()).toHaveLength(1);
+        expect(continuationRequests()).toHaveLength(13 + visible / 4 - 1);
       }
       const [projectBOlderResponse] = await Promise.all([
-        projectPage(projectB.id, projectBPage.nextCursor),
+        projectPage(projectB.id, projectBCursor),
         loadProjectB.click(),
       ]);
       const projectBOlderPage = (await projectBOlderResponse.json()) as BrowserSessionPage;
-      expect(projectBOlderPage.sessions).toHaveLength(6);
-      expect(projectBOlderPage.nextCursor).toBeNull();
+      expect(projectBOlderPage.sessions).toHaveLength(4);
+      expect(projectBOlderPage.nextCursor).toEqual(expect.any(String));
       await waitFor(async () => (await projectBRows.count()) === 52, { timeoutMs: 30_000 });
       expect(await projectARows.count()).toBe(56);
-      expect(continuationRequests()).toHaveLength(2);
-      expect(continuationRequests()[1]!.searchParams.get("channelId")).toBe(projectB.id);
-      expect(continuationRequests()[1]!.searchParams.get("cursor")).toBe(projectBPage.nextCursor);
-      expect(continuationRequests()[1]!.searchParams.get("limit")).toBe("50");
-      await loadProjectB.click();
+      expect(continuationRequests()).toHaveLength(25);
+      expect(continuationRequests()[13]!.searchParams.get("channelId")).toBe(projectB.id);
+      expect(continuationRequests()[13]!.searchParams.get("cursor")).toBe(projectBPage.nextCursor);
+      expect(continuationRequests()[13]!.searchParams.get("limit")).toBe("4");
+      const [projectBLastResponse] = await Promise.all([
+        projectPage(projectB.id, projectBOlderPage.nextCursor),
+        loadProjectB.click(),
+      ]);
+      expect(((await projectBLastResponse.json()) as BrowserSessionPage).nextCursor).toBeNull();
       await waitFor(async () => (await projectBRows.count()) === 56, { timeoutMs: 30_000 });
-      expect(continuationRequests()).toHaveLength(2);
+      expect(continuationRequests()).toHaveLength(26);
       expect(await loadProjectA.count()).toBe(0);
       expect(await loadProjectB.count()).toBe(0);
+      // Revalidation reads the retained window in one bounded request, rather
+      // than issuing one request for every earlier disclosure click.
+      const [refreshedA, refreshedB] = await Promise.all([
+        projectPage(projectA.id, null),
+        projectPage(projectB.id, null),
+        page.evaluate(() => window.dispatchEvent(new Event("focus"))),
+      ]);
+      expect(new URL(refreshedA.url()).searchParams.get("limit")).toBe("56");
+      expect(new URL(refreshedB.url()).searchParams.get("limit")).toBe("56");
+      expect(((await refreshedA.json()) as BrowserSessionPage).sessions).toHaveLength(56);
+      expect(((await refreshedB.json()) as BrowserSessionPage).sessions).toHaveLength(56);
+      await waitFor(
+        async () => (await projectARows.count()) === 56 && (await projectBRows.count()) === 56,
+      );
     } finally {
       await context.close();
     }
@@ -759,15 +1208,29 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.getByRole("button", { name: /^Session view/ }).click();
       expect(await page.getByText("Selected", { exact: true }).count()).toBe(0);
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
+      const groupedPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId, { cursor: null }) &&
+          url.searchParams.get("limit") === "50" &&
+          url.searchParams.get("parentSessionId") === "null" &&
+          url.searchParams.get("projection") === "summary" &&
+          url.searchParams.get("sortBy") === "updatedAt" &&
+          url.searchParams.get("archiveStatus") === "active" &&
+          !url.searchParams.has("createdBySubjectId") &&
+          !url.searchParams.has("channelId")
+        );
+      });
       await page.getByRole("menuitemradio", { name: "Created date" }).click();
+      const groupedRoots = ((await (await groupedPage).json()) as BrowserSessionPage).sessions;
       await page.getByRole("button", { name: "Session view, customized" }).waitFor();
       const liveRegion = rail.locator('[aria-live="polite"]');
-      await page.waitForFunction(() => {
-        const message = document.querySelector(
-          '[data-sessionpin-session-list] [aria-live="polite"]',
-        )?.textContent;
-        return Boolean(message && message !== "1 matching session.");
-      });
+      await page.waitForFunction((count) => {
+        return (
+          document.querySelector('[data-sessionpin-session-list] [aria-live="polite"]')
+            ?.textContent === `${count} matching session${count === 1 ? "" : "s"}.`
+        );
+      }, groupedRoots.length);
       const rootCountAnnouncement = await liveRegion.textContent();
       expect(rootCountAnnouncement).toMatch(/^\d+ matching sessions?\.$/);
 
@@ -861,6 +1324,30 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // only be caused by the event appended below, not by a second initial
       // render of the same chat.
       await page.waitForTimeout(1_500);
+      const attemptsBeforeStreaming = acknowledgementAttempts;
+      for (let batch = 0; batch < 16; batch += 1) {
+        const deltas = await appendSessionEvents(
+          dbClient.db,
+          workspaceId,
+          target.id,
+          Array.from({ length: 32 }, () => ({
+            type: "agent.message.delta" as const,
+            payload: { text: "token ", messageId: "live-progress", phase: "commentary" },
+          })),
+        );
+        await bus.publish(workspaceId, target.id, deltas);
+        await Bun.sleep(20);
+      }
+      const progress = await appendSessionEvents(dbClient.db, workspaceId, target.id, [
+        {
+          type: "agent.message.completed",
+          payload: { text: "Still working", phase: "commentary", messageId: "live-progress" },
+        },
+      ]);
+      await bus.publish(workspaceId, target.id, progress);
+      await page.getByText("Still working", { exact: true }).waitFor();
+      await page.waitForTimeout(500);
+      expect(acknowledgementAttempts).toBe(attemptsBeforeStreaming);
       await page.evaluate((sessionId) => {
         const observedWindow = window as Window & { __activeSessionUnreadFlash?: boolean };
         observedWindow.__activeSessionUnreadFlash = false;
@@ -1209,7 +1696,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       status: initialPinResponse.status(),
       body: await initialPinResponse.text(),
     }).toEqual({ status: 200, body: expect.any(String) });
-    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .waitFor();
     // Session navigation now starts the real capture-backed workbench while the
     // session record is still loading. Keep a bounded render budget that includes
     // that intentional parallel surface instead of measuring the rail alone.
@@ -1241,8 +1731,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const unpinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
       timeout: 10_000,
     });
-    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).click();
-    await pageA.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
+    await pageA
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .click();
+    await pageA
+      .locator("header")
+      .getByRole("button", { name: "Pin session", exact: true })
+      .waitFor();
     await Promise.all([unpinMutation, sameTabUnpinRefresh]);
     await sameTabPinnedTarget.waitFor({ state: "detached" });
 
@@ -1253,8 +1749,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const repinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
       timeout: 10_000,
     });
-    await pageA.locator("header").getByRole("button", { name: "Pin session" }).click();
-    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
+    await pageA
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .waitFor();
     await Promise.all([repinMutation, sameTabRepinRefresh]);
     await sameTabPinnedTarget.waitFor();
     expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(128);
@@ -1268,10 +1767,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const pageB = await deviceB.newPage();
     await pageB.goto(targetUrl);
-    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .waitFor();
     await createSessionThroughApi(pageB, apiBaseUrl, workspaceId, "Newer unrelated activity");
     await pageB.reload();
-    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .waitFor();
     const pinnedB = pageB.getByRole("group", { name: "Pinned" });
     await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     expect(
@@ -1290,7 +1795,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const otherPage = await otherMember.newPage();
     await otherPage.goto(targetUrl);
-    await otherPage.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
+    await otherPage
+      .locator("header")
+      .getByRole("button", { name: "Pin session", exact: true })
+      .waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Server-backed workspace search is a separate dialog, not a rail filter.
@@ -1411,12 +1919,24 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // online through the same header action succeeds without a second logical
     // pin state or an OCC dead end.
     await deviceB.setOffline(true);
-    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).click();
+    await pageB
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .click();
     await pageB.getByText("Couldn't unpin session", { exact: true }).waitFor();
-    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .waitFor();
     await deviceB.setOffline(false);
-    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).click();
-    await pageB.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
+    await pageB
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .click();
+    await pageB
+      .locator("header")
+      .getByRole("button", { name: "Pin session", exact: true })
+      .waitFor();
 
     // A different device has no shared browser channel. Returning focus must
     // trigger a real server reconciliation without reloading the document.
@@ -1432,18 +1952,30 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     );
     await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
     await crossDeviceRefresh;
-    await pageA.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
+    await pageA
+      .locator("header")
+      .getByRole("button", { name: "Pin session", exact: true })
+      .waitFor();
     await pageA.getByRole("group", { name: "Pinned" }).waitFor({ state: "detached" });
     expect(await pageA.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Pin from the header as a fresh OCC revision, then prove both the second
     // owner device and the other member reconcile to their respective truths.
-    await pageA.locator("header").getByRole("button", { name: "Pin session" }).click();
-    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
+    await pageA
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .waitFor();
     await pageB.reload();
-    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB
+      .locator("header")
+      .getByRole("button", { name: "Unpin session", exact: true })
+      .waitFor();
     await otherPage.reload();
-    await otherPage.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
+    await otherPage
+      .locator("header")
+      .getByRole("button", { name: "Pin session", exact: true })
+      .waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     expect(browserPageErrors.get(deviceA)).toEqual([]);
@@ -1532,7 +2064,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // action so a refresh cannot move focus before keyboard activation.
       await unpin.press("Enter");
       await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
-      await targetRow.getByRole("button", { name: "Unpin session" }).waitFor();
+      await targetRow.getByRole("button", { name: "Unpin session", exact: true }).waitFor();
       await page.waitForFunction(
         (sessionId) =>
           document.activeElement?.getAttribute("data-session-actions") === sessionId &&
@@ -1595,9 +2127,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const archivedResponse = page.waitForResponse(
         (response) => new URL(response.url()).pathname === archivePath && response.ok(),
       );
+      // No question first: the chat leaves the list at once, with Undo.
       await row.getByRole("button", { name: "Archive session", exact: true }).press("Enter");
-      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
+      const notification = page
+        .locator("[data-sonner-toast]")
+        .filter({ hasText: "Archived “Archive undo target”" });
       await notification.waitFor();
+      await notification.getByText(/restore it from there/).waitFor();
       const undoRequest = page.waitForRequest(
         (request) => new URL(request.url()).pathname === archivePath,
       );
@@ -1605,14 +2141,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await notification.getByRole("button", { name: "Undo", exact: true }).click();
       const archived = await (await archivedResponse).json();
       expect(archived.archived).toBe(true);
-      expect((await undoRequest).postDataJSON()).toMatchObject({
-        archived: false,
-        expectedVersion: archived.archiveVersion,
-      });
+      expect((await undoRequest).postDataJSON()).toEqual({ archived: false });
       const toaster = page.locator("[data-sonner-toaster]");
       expect(await toaster.getAttribute("data-x-position")).toBe("right");
       expect(await toaster.getAttribute("data-y-position")).toBe("bottom");
-      await page.getByText("Chat restored", { exact: true }).waitFor();
+      await page.getByText("Archive undone.", { exact: true }).waitFor();
       await row.getByRole("button", { name: "Archive session", exact: true }).waitFor();
       const restored = await page.request.get(
         `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`,
@@ -1688,7 +2221,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           await page
             .locator("[data-sonner-toast]")
             .filter({
-              hasText: /Chat archived|Couldn't archive the chat/,
+              hasText: /Archived “|Couldn't archive the chat/,
             })
             .count(),
         ).toBe(0);
@@ -1700,7 +2233,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }, 90_000);
   }
 
-  test("Undo does not overwrite a newer archive decision from another client", async () => {
+  test("Undo after the undo window still brings the chat back", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -1709,41 +2242,34 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
-      const target = await createSessionThroughApi(
-        page,
-        apiBaseUrl,
-        workspaceId,
-        "Archive conflict",
-      );
+      const target = await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Archive final");
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
       await page
         .locator(`a[data-session-row="${target.id}"]`)
         .locator("xpath=..")
         .getByRole("button", { name: "Archive session", exact: true })
         .press("Enter");
-      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
+      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Archived “" });
       await notification.waitFor();
-      // Keep the notification alive while another device makes two real writes.
+      // Keep the notification open while the window passes.
       await notification.hover();
+      await shared.admin`update sessions set archived_at = archived_at - interval '1 minute'
+        where id = ${target.id}`;
       const sessionUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`;
-      let latest = await (await page.request.get(sessionUrl)).json();
-      for (const archived of [false, true]) {
-        const response = await page.request.put(`${sessionUrl}/archive`, {
-          data: { archived, expectedVersion: latest.archiveVersion },
-        });
-        expect(response.ok()).toBe(true);
-        latest = await response.json();
-      }
-      const conflict = page.waitForResponse(
-        (response) => response.url() === `${sessionUrl}/archive` && response.status() === 409,
+      const unarchived = page.waitForResponse(
+        (response) => response.url() === `${sessionUrl}/archive` && response.ok(),
       );
       await notification.getByRole("button", { name: "Undo", exact: true }).click();
-      await conflict;
-      await page.getByText("Couldn't restore the chat.", { exact: true }).waitFor();
-      const current = await (await page.request.get(sessionUrl)).json();
-      expect(current.archived).toBe(true);
-      expect(current.archiveVersion).toBe(latest.archiveVersion);
-      expect(await page.getByText("Chat restored", { exact: true }).count()).toBe(0);
+      // Past the window the archive is no longer a one-way door: the chat
+      // returns at once, or from long-term storage if it already moved there.
+      const body = await (await unarchived).json();
+      expect(body.archived === false || body.retention?.archive?.restoring === true).toBe(true);
+      await page
+        .locator("[data-sonner-toast]")
+        .filter({ hasText: /Archive undone\.|Restoring “Archive final”/ })
+        .first()
+        .waitFor();
+      expect(await page.getByText("Couldn't undo the archive.", { exact: true }).count()).toBe(0);
     } finally {
       await context.close();
     }
@@ -1751,11 +2277,17 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
   test("retains group rows and leaves unrelated pagination failures retryable", async () => {
     const context = await configuredContext(browser, {
-      viewport: { width: 1280, height: 800 },
+      // This proof counts the rail's four-row Show more steps across page
+      // boundaries. A short rail has no spare height, so it adds no automatic
+      // fill rows and keeps that exact step contract.
+      viewport: { width: 1280, height: 400 },
       extraHTTPHeaders: ownerHeaders,
     });
     const page = await context.newPage();
     try {
+      // Keep this search/cursor fixture in one Today bucket. Date is fixed,
+      // but real timers and polling still run; midnight is a different query.
+      await page.clock.setFixedTime(new Date());
       await page.goto(webBaseUrl);
       await workspaceFromPage(page, "Last activity");
       // Isolate browse pagination without relying on the retired inline filter.
@@ -2564,11 +3096,19 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.goto(parentUrl);
       await page.getByTestId("failed-session-banner").waitFor();
       const delivered = page.locator("details[data-og-machine-input-batch]");
-      await delivered.getByText("2 agent results received", { exact: true }).click();
+      // The pill names the child from session lineage once it is known; a
+      // result only means the child went idle, so it never says "finished".
+      const deliveredLabel = (await delivered.locator("summary").first().textContent()) ?? "";
       expect(
-        await delivered.getByRole("button", { name: "View session", exact: true }).count(),
-      ).toBe(2);
-      await delivered.getByRole("button", { name: "View session", exact: true }).first().click();
+        ["2 agent results received", "2 updates from "].some((label) =>
+          deliveredLabel.startsWith(label),
+        ),
+      ).toBe(true);
+      expect(deliveredLabel).not.toContain("finished");
+      await delivered.locator("summary").first().click();
+      const openChild = delivered.getByRole("button", { name: /^Open / });
+      expect(await openChild.count()).toBe(2);
+      await openChild.first().click();
       await page.waitForURL(`**/sessions/${child.id}`);
       expect(new URL(page.url()).pathname.endsWith(child.id)).toBe(true);
       await page.goBack();
@@ -2632,6 +3172,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
+      // These scenarios share a configured workspace, so earlier fixtures can
+      // legitimately contribute attention outside the painted project window.
+      const attentionBefore = await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId);
       const parent = await createSessionThroughApi(
         page,
         apiBaseUrl,
@@ -2717,9 +3260,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         pause: "paused",
       });
       expect(evidence.direct).toEqual([child.id]);
+      // New idle roots push the attention tree outside the four-row project window.
+      for (let index = 0; index < 6; index++)
+        await createSessionThroughApi(page, apiBaseUrl, workspaceId, `New idle fixture ${index}`);
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
+      expect(await page.locator(`a[data-session-row="${parent.id}"]`).count()).toBe(0);
       // The rail's "Needs you" view keeps the failed workstream with its
       // spawned agents, so every waiting depth stays one click away.
-      await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
+      const needsYouCount = attentionBefore + 1;
+      expect(await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId)).toBe(needsYouCount);
+      await page
+        .getByRole("button", {
+          name: `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`,
+          exact: true,
+        })
+        .click();
       await page.getByRole("menuitem", { name: /^Status/ }).focus();
       await page.keyboard.press("ArrowRight");
       await page.getByRole("menuitemradio", { name: /^Needs you/ }).click();
@@ -2740,6 +3295,89 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.screenshot({ path: "/tmp/ux-needs-you-child-routing.png", fullPage: true });
       await nested.click();
       await waitFor(() => page.url().endsWith(`/sessions/${grandchild.id}`));
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("keeps pinned workstreams with attention beyond the painted-tree depth", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const attentionBefore = await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId);
+      const root = await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Deep pinned root");
+      await withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
+        await scoped.execute(sql`update workspaces
+          set settings = settings || '{"maxNestedAgentDepth":64}'::jsonb
+          where id = ${workspaceId}`);
+      });
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        root.id,
+        [{ type: "session.status.changed", payload: { status: "idle" } }],
+        { status: "idle" },
+      );
+      let parentId = root.id;
+      for (let depth = 1; depth <= 33; depth++) {
+        const child = await createTitledSession(dbClient.db, {
+          accountId: root.accountId,
+          workspaceId,
+          initialMessage: `Deep child ${depth}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          parentSessionId: parentId,
+          createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+        });
+        parentId = child.id;
+      }
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        parentId,
+        [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+        { status: "requires_action" },
+      );
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, root, true);
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
+      // The depth-33 descendant contributes exactly one more root workstream,
+      // independent of earlier fixtures and the treeStats painted-depth cap.
+      const needsYouCount = attentionBefore + 1;
+      expect(await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId)).toBe(needsYouCount);
+      await page
+        .getByRole("button", {
+          name: `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`,
+          exact: true,
+        })
+        .click();
+      await page.getByRole("menuitem", { name: /^Status/ }).focus();
+      await page.keyboard.press("ArrowRight");
+      const filteredPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname.endsWith("/sessions") &&
+          url.searchParams.get("needsYouOnly") === "true" &&
+          url.searchParams.get("includeTotals") === "true"
+        );
+      });
+      await page.getByRole("menuitemradio", { name: /^Needs you/ }).click();
+      const receipt = await (await filteredPage).json();
+      expect(receipt.pinned.map((session: { id: string }) => session.id)).toEqual([root.id]);
+      expect(receipt.pinned[0].treeStats.attentionDescendants).toBe(0);
+      await page
+        .getByRole("button", { name: "Session view, showing sessions that need you", exact: true })
+        .waitFor();
+      await page.locator(`a[data-session-row="${root.id}"]`).waitFor();
+      await page.screenshot({ path: "/tmp/ux-needs-you-deep-pinned.png", fullPage: true });
     } finally {
       await context.close();
     }
@@ -2969,12 +3607,65 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await queueChip.getByText("2 queued", { exact: true }).waitFor();
 
-      // Pause is a durable workstream barrier. Row Steer is one atomic action:
-      // it moves that row to the head and resumes the branch. The accepted row
-      // is presented separately as the active direction, never as still queued.
+      // Pause's mutation receipt updates the toolbar before the independent
+      // queue read necessarily catches up. Hold that old read deliberately:
+      // Steer must reject its stale control fence, not silently resume Pause.
+      const queueUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${manager.id}/queue`;
+      const staleQueue = await (await desktopPage.request.get(queueUrl)).json();
+      expect(staleQueue.effectiveControl.state).toBe("active");
+      await desktopPage.route(queueUrl, (route) => route.fulfill({ json: staleQueue }));
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      const staleSteerResponsePromise = desktopPage.waitForResponse(
+        (response) => response.request().method() === "POST" && response.url().endsWith("/steer"),
+      );
       await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
+      const staleSteerResponse = await staleSteerResponsePromise;
+      expect(staleSteerResponse.request().postDataJSON().controlEtag).toBe(
+        staleQueue.effectiveControl.controlEtag,
+      );
+      expect(staleSteerResponse.status()).toBe(409);
+      expect(await staleSteerResponse.json()).toMatchObject({ code: "CONTROL_CHANGED" });
+      await chrome
+        .getByText("Not confirmed. Check the queue before retrying.", { exact: true })
+        .waitFor();
+      const pausedQueue = await (await desktopPage.request.get(queueUrl)).json();
+      expect(pausedQueue.effectiveControl.state).toBe("paused");
+      expect(pausedQueue.effectiveControl.controlEtag).not.toBe(
+        staleQueue.effectiveControl.controlEtag,
+      );
+      expect(pausedQueue.version).toBe(staleQueue.version);
+      expect(pausedQueue.items).toEqual(staleQueue.items);
+
+      // Explicitly refresh after the refusal. This also proves Pause and the
+      // exact queue survive a reload; no mutation is automatically retried.
+      // The fresh row Steer still atomically resumes and advances that same
+      // prompt into chat, rather than leaving it in the waiting queue.
+      await desktopPage.unroute(queueUrl);
+      await desktopPage.reload();
+      await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      await queueChip.getByText("2 queued", { exact: true }).waitFor();
+      if ((await queueChip.getAttribute("aria-expanded")) !== "true") await queueChip.click();
+      await expectRowPrompt(queuedRows, 1, "A second prompt queued from the composer (edited)");
+      const steerResponsePromise = desktopPage.waitForResponse(
+        (response) => response.request().method() === "POST" && response.url().endsWith("/steer"),
+      );
+      await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
+      const steerResponse = await steerResponsePromise;
+      const steerReceipt = await steerResponse.json();
+      expect(steerResponse.url()).toBe(staleSteerResponse.url());
+      expect(steerResponse.request().postDataJSON().clientEventId).not.toBe(
+        staleSteerResponse.request().postDataJSON().clientEventId,
+      );
+      expect(steerResponse.request().postDataJSON()).toMatchObject({
+        controlEtag: pausedQueue.effectiveControl.controlEtag,
+        expectedTurnVersion: pausedQueue.items[1].version,
+      });
+      expect(steerResponse.request().postDataJSON()).not.toHaveProperty("interrupt");
+      expect({ status: steerResponse.status(), receipt: steerReceipt }).toMatchObject({
+        status: 200,
+        receipt: { snapshot: { effectiveControl: { state: "active" } } },
+      });
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
       try {
         await timeline
@@ -3030,8 +3721,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // A recursive Pause is visible and actionable from a deeply nested
       // session. Sending there remains inert in that selected branch's queue;
       // it does not silently resume the child, manager, or workspace. The
-      // header breadcrumb remains bounded and exposes every
-      // ancestor (the middle ancestors collapse into one explicit menu).
+      // header breadcrumb remains bounded and exposes every ancestor: the
+      // earlier ones share one explicit menu, and the parent stays a visible
+      // link even with the paused control and a long title on the same row.
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       const deepChildUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${deepChild.id}`;
@@ -3040,8 +3732,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         name: "Session ancestry",
       });
       await ancestry.waitFor();
-      await ancestry.getByRole("button", { name: "1 intermediate ancestor sessions" }).waitFor();
-      expect(await ancestry.getByRole("link").count()).toBe(2);
+      await ancestry.getByRole("button", { name: "2 earlier sessions" }).waitFor();
+      const parentLink = ancestry.getByRole("link");
+      expect(await parentLink.count()).toBe(1);
+      const parentBox = await parentLink.boundingBox();
+      expect(parentBox?.width ?? 0).toBeGreaterThanOrEqual(40);
       await desktopPage
         .getByRole("button", {
           name: /^Paused by .*\. Open workstream controls$/,
@@ -3154,11 +3849,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
     // Wait for the session shell before sampling React commits — a cold goto can
     // read the probe at 0 before the first paint registers.
-    await page.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
+    // Phones pin from the header's "…" menu.
+    const more = page.locator("header").getByRole("button", { name: "More session actions" });
+    await more.waitFor();
     const initialCommits = await reactCommitCount(page);
     expect(initialCommits).toBeGreaterThan(0);
-    await page.locator("header").getByRole("button", { name: "Pin session" }).click();
-    await page.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await more.click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    await page.getByText("Session pinned.").waitFor({ state: "attached" });
     expect((await reactCommitCount(page)) - initialCommits).toBeLessThanOrEqual(64);
 
     // Stress the compact pinned section with many long rows through the normal
@@ -3177,17 +3875,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // the responsive assertion from a fresh server projection instead of
     // racing the rail's 15-second background reconciliation interval.
     await page.reload();
-    await page.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
+    await more.click();
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
 
     for (const viewport of mobileViewports) {
       await page.setViewportSize(viewport);
       for (const theme of ["light", "dark"] as const) {
         await setTheme(page, theme);
         await expectNoPageOverflow(page);
-        const pin = page.locator("header").getByRole("button", { name: /^(Pin|Unpin) session$/ });
         const inspector = page.getByRole("button", { name: /^(Open|Hide) workspace$/ });
         const hamburger = page.getByRole("button", { name: "Open navigation" });
-        for (const control of [pin, inspector, hamburger]) {
+        for (const control of [more, inspector, hamburger]) {
           const box = await control.boundingBox();
           expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
           expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
@@ -3565,24 +4264,29 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         activatedIds.push(session.id);
       }
       for (let index = 0; index < 60; index += 1) await seed(`Newer idle root ${index}`);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.getByRole("button", { name: /^Session view/ }).click();
+      await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       const discoveryPage = page.waitForResponse((response) => {
         const url = new URL(response.url());
         return (
-          successfulSessionPageResponse(response, workspaceId) &&
+          successfulSessionPageResponse(response, workspaceId, { cursor: null }) &&
           url.searchParams.get("limit") === "50" &&
           url.searchParams.get("parentSessionId") === "null" &&
-          !url.searchParams.has("archivedOnly")
+          url.searchParams.get("projection") === "summary" &&
+          url.searchParams.get("sortBy") === "updatedAt" &&
+          url.searchParams.get("archiveStatus") === "active" &&
+          !url.searchParams.has("createdBySubjectId") &&
+          !url.searchParams.has("channelId")
         );
       });
-      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
       const discovery = (await (await discoveryPage).json()) as BrowserSessionPage;
       expect(
         discovery.sessions.some((row) => row.id === activeRoot.id || row.id === ancestor.id),
       ).toBe(false);
       expect(discovery.nextCursor).toBeTruthy();
-      await page.getByRole("button", { name: /^Session view/ }).click();
-      await page.getByRole("menuitem", { name: /^Group by/ }).hover();
-      await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
+      await page.locator(`a[data-session-row="${discovery.sessions[0]!.id}"]`).waitFor();
       const activeGroup = page.getByRole("group", { name: "Active", exact: true });
       const discoverOlder = activeGroup.getByRole("button", {
         name: "Show 4 more sessions in Active",
@@ -3590,7 +4294,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       });
       await discoverOlder.waitFor();
       expect(await activeGroup.locator("a[data-session-row]").count()).toBe(0);
+      const continuation = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId, { cursor: discovery.nextCursor }) &&
+          url.searchParams.get("parentSessionId") === "null" &&
+          url.searchParams.get("projection") === "summary" &&
+          !url.searchParams.has("channelId") &&
+          !url.searchParams.has("createdBySubjectId")
+        );
+      });
       await discoverOlder.click();
+      const continued = (await (await continuation).json()) as BrowserSessionPage;
+      expect(continued.sessions.some((row) => row.id === activeRoot.id)).toBe(true);
+      expect(continued.sessions.some((row) => row.id === ancestor.id)).toBe(true);
       await activeGroup.locator(`a[data-session-row="${activeRoot.id}"]`).waitFor();
       await activeGroup.locator(`a[data-session-row="${ancestor.id}"]`).waitFor();
       // Other scenarios in this shared workspace can also leave active roots.
@@ -3619,23 +4336,37 @@ async function navigateWithProjectPages(
   // Workspace rows can paint before independent folder reads finish. Wait for
   // every first page and its loading state before dragging or snapshotting rows.
   const firstPages = new Map<string, Promise<unknown>>();
+  const newDocumentRequests = new Set<PlaywrightRequest>();
+  let navigationCommitted = false;
+  const observeNavigation = (frame: PlaywrightFrame) => {
+    if (frame === page.mainFrame()) navigationCommitted = true;
+  };
+  const observeRequest = (request: PlaywrightRequest) => {
+    if (navigationCommitted) newDocumentRequests.add(request);
+  };
   const observePage = (response: PlaywrightResponse) => {
+    if (!newDocumentRequests.has(response.request())) return;
     if (!successfulSessionPageResponse(response, workspaceId, { cursor: null })) return;
     const channelId = new URL(response.url()).searchParams.get("channelId");
     if (channelId !== null) firstPages.set(channelId, response.json());
   };
+  // Ignore refreshes from the document being replaced by this navigation.
+  page.on("framenavigated", observeNavigation);
+  page.on("request", observeRequest);
   page.on("response", observePage);
   try {
-    const [channelsResponse] = await Promise.all([
-      page.waitForResponse(
-        (response) =>
-          response.ok() &&
-          response.request().method() === "GET" &&
-          new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
-      ),
+    const [channels] = await Promise.all([
+      page
+        .waitForResponse(
+          (response) =>
+            newDocumentRequests.has(response.request()) &&
+            response.ok() &&
+            response.request().method() === "GET" &&
+            new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
+        )
+        .then((response) => response.json() as Promise<BrowserChannel[]>),
       navigate(),
     ]);
-    const channels = (await channelsResponse.json()) as BrowserChannel[];
     const channelIds = ["null", ...channels.map((channel) => channel.id)];
     await waitFor(() => channelIds.every((channelId) => firstPages.has(channelId)), {
       timeoutMs: 30_000,
@@ -3648,12 +4379,18 @@ async function navigateWithProjectPages(
       { timeoutMs: 30_000 },
     );
   } finally {
+    page.off("framenavigated", observeNavigation);
+    page.off("request", observeRequest);
     page.off("response", observePage);
   }
 }
 
 async function openWorkspaceSearch(page: Page, query: string) {
   await page.getByRole("button", { name: "Search sessions", exact: true }).first().click();
+  await page
+    .getByRole("dialog", { name: "Command menu", exact: true })
+    .getByRole("option", { name: "Search messages", exact: true })
+    .click();
   const dialog = page.getByRole("dialog", { name: "Search sessions", exact: true });
   await dialog
     .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
@@ -3676,6 +4413,7 @@ type BrowserSessionPage = {
   pinned: BrowserSession[];
   sessions: BrowserSession[];
   nextCursor: string | null;
+  totals?: { needsYouCount: number };
 };
 
 function sessionPageResponse(
@@ -3720,7 +4458,10 @@ async function configuredContext(
   browser: Browser,
   options: BrowserContextOptions,
 ): Promise<BrowserContext> {
-  const context = await browser.newContext(options);
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: process.env.OPENGENI_TEST_LIST_HTTP2 === "1",
+    ...options,
+  });
   const diagnostics: string[] = [];
   const pageErrors: string[] = [];
   browserDiagnostics.set(context, diagnostics);
@@ -3813,7 +4554,7 @@ async function workspaceFromPage(
   if (groupBy !== null) {
     // The rail is available before draft hydration performs its initial autofocus.
     await page
-      .getByRole("textbox", { name: "Message the agent", exact: true })
+      .getByRole("textbox", { name: "Ask anything", exact: true })
       .and(page.locator(":focus"))
       .waitFor();
     await page.getByRole("button", { name: /^Session view/ }).press("Enter");
@@ -4054,7 +4795,13 @@ async function listPageFromBrowser(
   page: Page,
   apiBaseUrl: string,
   workspaceId: string,
-  options: { limit: number; cursor?: string; search?: string },
+  options: {
+    limit: number;
+    cursor?: string;
+    search?: string;
+    parentSessionId?: null;
+    includeTotals?: boolean;
+  },
 ): Promise<BrowserSessionPage> {
   return await page.evaluate(
     async ({
@@ -4068,6 +4815,8 @@ async function listPageFromBrowser(
       });
       if (pageOptions.cursor) query.set("cursor", pageOptions.cursor);
       if (pageOptions.search) query.set("search", pageOptions.search);
+      if (pageOptions.parentSessionId === null) query.set("parentSessionId", "null");
+      if (pageOptions.includeTotals) query.set("includeTotals", "true");
       const response = await fetch(
         `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions?${query.toString()}`,
       );
@@ -4078,6 +4827,21 @@ async function listPageFromBrowser(
     },
     { apiBaseUrl, workspaceId, options },
   );
+}
+
+async function needsYouCountFromBrowser(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+): Promise<number> {
+  // A one-row root page must still report the complete, member-scoped total.
+  const response = await listPageFromBrowser(page, apiBaseUrl, workspaceId, {
+    limit: 1,
+    parentSessionId: null,
+    includeTotals: true,
+  });
+  expect(response.totals).toBeDefined();
+  return response.totals!.needsYouCount;
 }
 
 async function expectNoPageOverflow(page: Page): Promise<void> {
@@ -4134,10 +4898,26 @@ async function expectRowPrompt(
   }
 }
 
+// A 44px target is either a 44px box or a slimmer box with an invisible hit
+// area (::before); for the latter, hit-test points 22px either side of the centre.
 async function expectTouchTarget(locator: ReturnType<Page["getByRole"]>): Promise<void> {
-  const box = await locator.boundingBox();
-  expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-  expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+  const hits = await locator.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    if (box.width >= 44 && box.height >= 44) return [true, true, true, true];
+    const x = box.left + box.width / 2;
+    const y = box.top + box.height / 2;
+    const reach = 21.5;
+    return [
+      [x - reach, y],
+      [x + reach, y],
+      [x, y - reach],
+      [x, y + reach],
+    ].map(([px, py]) => {
+      const hit = document.elementFromPoint(px!, py!);
+      return hit !== null && element.contains(hit);
+    });
+  });
+  expect(hits).toEqual([true, true, true, true]);
 }
 
 async function expectContainedInViewport(

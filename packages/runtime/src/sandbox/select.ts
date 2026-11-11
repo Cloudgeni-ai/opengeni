@@ -347,7 +347,8 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     // (that x11vnc path exists only for Modal boxes). It is VIEW-ONLY in v1 (the
     // frame client does not forward input yet), so its mode is always read-only
     // regardless of the take-control policy.
-    const selfhostedFrames = ctx.backend === "selfhosted";
+    // A compute sandbox's desktop is its agent's framebuffer too.
+    const selfhostedFrames = ctx.backend === "selfhosted" || ctx.backend === "compute";
     const interactive = available && !selfhostedFrames && ctx.desktopInteractive !== false;
     const mode = interactive ? ("interactive" as const) : ("read-only" as const);
     return {

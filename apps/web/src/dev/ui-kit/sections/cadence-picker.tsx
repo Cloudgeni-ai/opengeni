@@ -10,7 +10,7 @@ import {
   type CadencePickerVariant,
   type CadenceRule,
   type CadenceValue,
-} from "@/components/ui/cadence-picker";
+} from "@opengeni/react/ui/cadence-picker";
 import { KIT_NOW, KIT_TIME_ZONE, cadenceExamples, scheduleById, timeZones } from "../fixtures";
 import {
   Alternative,
@@ -218,12 +218,12 @@ export default function CadencePickerSection() {
         </StateCell>
         <StateCell
           label="Fewer frequencies"
-          note="Knowledge source sync only offers hourly, daily and weekly."
+          note="A caller can offer only hourly, daily and weekly."
           align="stretch"
           canvas="surface"
         >
           <CadenceDemo
-            label="Sync"
+            label="Runs"
             initial={valueOf({ frequency: "daily", time: "06:00" })}
             frequencies={["hourly", "daily", "weekly"]}
           />
@@ -253,7 +253,7 @@ export default function CadencePickerSection() {
 
       <UsageNotes
         use={[
-          "Saying when something runs: schedules, knowledge source sync",
+          "Saying when something runs: schedules",
           "Any recurring rule where the time zone matters to the people reading it",
         ]}
         avoid={[

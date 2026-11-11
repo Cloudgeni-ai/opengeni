@@ -46,4 +46,5 @@ export const LEGACY_PROMPT_CASES: Record<string, BuildAgentOptions> = {
       { credentialBindingId: "b", provider: "github", token: "y" },
     ],
   },
+  unattended: { unattended: true },
 };

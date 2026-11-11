@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { workspaceUpdateRequestsAccountTransfer } from "../src/routes/workspaces";
 

@@ -1,14 +1,27 @@
 // Preview-only data/context wiring. SessionList, its hooks, and its styles are real.
-import type { OpenGeniClient, SessionListPageOptions } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
-import { SessionChannelProjectionAuthority } from "../src/lib/session-pins";
-import type { Session } from "../src/types";
+import type {
+  OpenGeniClient,
+  SessionListPageOptions,
+  SiteConversationGroup,
+  WorkspaceLiveStreamOptions,
+  WorkspaceSessionListEvent,
+} from "@opengeni/sdk";
+import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
+import { SessionChannelProjectionAuthority } from "@opengeni/react/app/lib/session-pins";
+import type { Session } from "@opengeni/react/app/types";
+import { siteViewPreviewClient } from "./site-view-preview-client";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const subjectId = "sidebar-preview";
 export const redesignId = "00000000-0000-4000-8000-000000000001";
 export const bugfixesId = "00000000-0000-4000-8000-000000000002";
 const previewParameters = new URLSearchParams(window.location.search);
+// Row actions build on the Sites data: Site rows, a workstream with a spawned
+// chat, and pin and archive on every row.
+const rowActionsScenario = previewParameters.get("scenario") === "row-actions";
+const sitesScenario = previewParameters.get("scenario") === "sites" || rowActionsScenario;
 const now = Date.now();
 const alex = { kind: "subject", subjectId, label: "Alex Morgan" } as const;
 const jamie = { kind: "subject", subjectId: "jamie-preview", label: "Jamie Chen" } as const;
@@ -25,6 +38,7 @@ function session(
     id: `00000000-0000-4000-9000-${String(number).padStart(12, "0")}`,
     workspaceId,
     title,
+    metadata: {},
     channelId,
     parentSessionId: null,
     createdBy,
@@ -39,6 +53,15 @@ function session(
     archiveVersion: 0,
     unread: false,
     treeStats: { directChildren: 0, totalDescendants: 0, truncated: false },
+    // What the regular chat beside a Site reads from its session.
+    resources: [],
+    activeTurnId: null,
+    lastSequence: 0,
+    model: "preview-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    tools: [],
+    toolPolicy: { mode: "workspace_default" },
   } as Session;
 }
 
@@ -139,6 +162,469 @@ if (previewParameters.get("scenario") === "keyboard-focus") {
   );
 }
 
+const siteConversationId = (number: number) =>
+  `00000000-0000-4000-9000-${String(number).padStart(12, "0")}`;
+const usageSiteHtml = `<!doctype html><html><head><style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--fg:#1d1d1b;--muted:#6b6b66;--line:#e6e5e1;--bar:#4c6fff;--card:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#18181a;--fg:#ededec;--muted:#9b9b97;--line:#2c2c2f;--bar:#7f98ff;--card:#202023}}
+body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+main{padding:28px 32px;max-width:980px}
+h1{font-size:20px;font-weight:600;margin:0 0 4px}p{margin:0;color:var(--muted)}
+.range{display:flex;gap:6px;margin:18px 0 22px}.range span{border:1px solid var(--line);border-radius:999px;padding:3px 12px;font-size:12px;color:var(--muted)}
+.range .on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.card b{display:block;font-size:22px;margin:2px 0 12px}.label{font-size:12px;color:var(--muted)}
+.bars{display:flex;align-items:flex-end;gap:5px;height:84px}.bars i{flex:1;background:var(--bar);border-radius:3px 3px 0 0;opacity:.85}
+</style></head><body><main><h1>Opengeni usage</h1><p>Workspace activity across the organization</p>
+<div class="range"><span>7 days</span><span class="on">30 days</span><span>90 days</span></div>
+<div class="grid">
+<div class="card"><span class="label">Weekly active users</span><b>831</b><div class="bars">${[38, 44, 41, 52, 49, 58, 61, 57, 66, 72, 70, 78].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
+<div class="card"><span class="label">Sessions</span><b>12,408</b><div class="bars">${[50, 47, 55, 61, 58, 64, 60, 69, 74, 71, 80, 84].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
+<div class="card"><span class="label">Tokens</span><b>1.9B</b><div class="bars">${[30, 36, 33, 45, 51, 48, 56, 62, 59, 64, 69, 75].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
+<div class="card"><span class="label">Spend</span><b>$18,240</b><div class="bars">${[42, 40, 46, 49, 55, 53, 58, 63, 60, 67, 71, 73].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
+</div></main></body></html>`;
+
+/** The same sample layout under another Site's own heading. */
+const siteHtml = (title: string, subtitle: string) =>
+  usageSiteHtml.replace(
+    "<h1>Opengeni usage</h1><p>Workspace activity across the organization</p>",
+    `<h1>${title}</h1><p>${subtitle}</p>`,
+  );
+
+/** Conversations that run inside a Site; ordinary pages leave them out. */
+const siteConversationIds = new Set<string>();
+export const usageSiteId = "00000000-0000-4000-a000-000000000001";
+export const ipoSiteId = "00000000-0000-4000-a000-000000000002";
+export const pricingSiteId = "00000000-0000-4000-a000-000000000003";
+export const checklistSiteId = "00000000-0000-4000-a000-000000000004";
+/**
+ * When each Site with conversations last got a new version. A Site row's
+ * time is its newest publish; its conversations' messages never move it.
+ */
+const sitePublishedAt = new Map<string, string>();
+/**
+ * Sites a listed chat created that have no conversations yet. Each sits in
+ * its creating chat's project, ordered by its newest publish.
+ */
+const createdSites: Array<{
+  siteId: string;
+  title: string;
+  channelId: string | null;
+  updatedAt: string;
+}> = [];
+/** This person's Site sidebar state: pinned, or archived from their sidebar. */
+const siteSidebar = new Map<string, { pinnedAt: string | null; archived: boolean }>();
+if (sitesScenario) {
+  const siteConversation = (
+    number: number,
+    title: string,
+    site: { siteId: string; title: string },
+    channelId: string | null,
+    age: number,
+  ): Session => {
+    const row = { ...session(number, title, channelId, age), metadata: {} } as Session;
+    row.metadata = { _opengeniSiteOrigin: site };
+    siteConversationIds.add(row.id);
+    return row;
+  };
+  const usage = { siteId: usageSiteId, title: "Opengeni usage" };
+  const ipo = { siteId: ipoSiteId, title: "IPO research dashboard" };
+  rows.splice(
+    0,
+    rows.length,
+    session(1, "Slack community connection test", null, 60),
+    session(2, "Paused Slack QA schedule", null, 120),
+    session(3, "Frequent external Opengeni users", null, 1380),
+    session(4, "Gmail demo draft summary", null, 1500),
+    session(5, "Workspace Site planning", null, 2900),
+    session(6, "Homepage hero refresh", redesignId, 30),
+    session(7, "Pricing page copy", redesignId, 400),
+    session(8, "Flaky checkout test", bugfixesId, 200),
+    siteConversation(901, "Time filters across all graphs", usage, null, 2),
+    siteConversation(902, "Weekly active users by plan", usage, null, 180),
+    siteConversation(903, "Export usage to CSV", usage, null, 2600),
+    siteConversation(904, "Compare IPO filings", ipo, redesignId, 44),
+  );
+  // "Opengeni usage" was last published well before its newest conversation
+  // (2 minutes ago), so it sits below "Slack community connection test".
+  sitePublishedAt.set(usageSiteId, timeBefore(90));
+  sitePublishedAt.set(ipoSiteId, timeBefore(300));
+  // "Pricing page copy" (Website redesign) and "Workspace Site planning"
+  // (Default) each made a Site nobody has asked anything yet.
+  createdSites.push(
+    {
+      siteId: pricingSiteId,
+      title: "Pricing calculator",
+      channelId: redesignId,
+      updatedAt: timeBefore(390),
+    },
+    {
+      siteId: checklistSiteId,
+      title: "Launch checklist",
+      channelId: null,
+      updatedAt: timeBefore(2880),
+    },
+  );
+  if (rowActionsScenario) {
+    // A workstream whose agent spawned a chat, nested under it in the rail.
+    const parent = rows.find((row) => row.title === "Slack community connection test")!;
+    parent.treeStats = { directChildren: 1, totalDescendants: 1, truncated: false } as never;
+    rows.push({
+      ...session(11, "Check Slack bot scopes", null, 58),
+      parentSessionId: parent.id,
+      rootSessionId: parent.id,
+    } as Session);
+  }
+}
+
+if (previewParameters.get("scenario") === "hover") {
+  // Sample data for the sidebar hover preview. Every fact below is a field the
+  // real compact list row carries; the values are illustrative.
+  const activeControl = {
+    state: "active",
+    controlVersion: 1,
+    controlEtag: "preview",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const stats = (overrides: Record<string, number | boolean> = {}) => ({
+    directChildren: 0,
+    totalDescendants: 0,
+    runningDescendants: 0,
+    queuedDescendants: 0,
+    waitingDescendants: 0,
+    attentionDescendants: 0,
+    pausedDescendants: 0,
+    failedDescendants: 0,
+    unreadDescendants: 0,
+    unreadFailedDescendants: 0,
+    truncated: false,
+    ...overrides,
+  });
+  const hoverRow = (
+    number: number,
+    title: string,
+    age: number,
+    overrides: Partial<Session> & Record<string, unknown>,
+    createdBy: Session["createdBy"] = alex,
+  ): Session =>
+    ({
+      ...session(number, title, null, age, createdBy),
+      effectiveControl: activeControl,
+      treeStats: stats(),
+      ...overrides,
+    }) as Session;
+  const working = hoverRow(3001, "Astra strategy takeover - preserve and improve Grocery Bot", 2, {
+    status: "running",
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "max",
+    backgroundCommandActivity: { state: "running", count: 2 },
+    treeStats: stats({
+      directChildren: 5,
+      totalDescendants: 5,
+      runningDescendants: 2,
+      attentionDescendants: 1,
+      pausedDescendants: 1,
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+    }),
+  });
+  const needsYou = hoverRow(3002, "Approve the staging database migration", 6, {
+    status: "requires_action",
+    requiresActionSince: timeBefore(24),
+    model: "organization-claude-subscription/claude-opus-5-5",
+    reasoningEffort: "high",
+  });
+  const waiting = hoverRow(3003, "Watch the nightly import and verify row counts", 9, {
+    status: "idle",
+    inputWait: {
+      deadlineAt: new Date(now + 35 * 60_000).toISOString(),
+      reason: "Waiting for the nightly import to finish before checking the row counts.",
+    },
+    model: "codex/gpt-6.1-sol",
+    reasoningEffort: "xhigh",
+  });
+  const parent = hoverRow(3004, "Grocery Bot setup", 14, {
+    status: "idle",
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "high",
+    effectiveControl: {
+      ...activeControl,
+      state: "paused",
+      directState: "paused",
+      primaryBlocker: {
+        kind: "session",
+        sessionId: "00000000-0000-4000-9000-000000003004",
+        displayName: "Grocery Bot setup",
+        actor: "Alex Morgan",
+        reason: "Holding until the store API key is rotated.",
+        changedAt: timeBefore(12),
+        revision: 1,
+      },
+    },
+    treeStats: stats({ directChildren: 1, totalDescendants: 1, pausedDescendants: 1 }),
+  });
+  const pausedChild = hoverRow(3005, "Compare grocery prices across three stores", 13, {
+    status: "idle",
+    parentSessionId: parent.id,
+    rootSessionId: parent.id,
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "medium",
+    effectiveControl: {
+      ...activeControl,
+      state: "paused",
+      directState: "active",
+      primaryBlocker: parent.effectiveControl.primaryBlocker,
+    },
+  });
+  const nextRun = new Date(Date.now() + 20 * 60 * 60_000);
+  nextRun.setMinutes(0, 0, 0);
+  const finished = hoverRow(
+    3006,
+    "Quarterly cloud cost report",
+    48,
+    {
+      status: "idle",
+      unread: true,
+      hasSchedules: true,
+      hasUpcomingSchedules: true,
+      automationWait: { nextRunAt: nextRun.toISOString(), event: null, automations: 1 },
+      model: "codex/gpt-6-astra",
+      reasoningEffort: "medium",
+    },
+    jamie,
+  );
+  // A "wake me when" on CI and an automation answering Slack mentions: both
+  // apps are named.
+  const checks = {
+    source: { kind: "github" as const, name: "GitHub" },
+    eventTypes: ["check_suite.completed"],
+  };
+  const wakeOnEvent = hoverRow(3008, "Ship the billing migration", 90, {
+    status: "idle",
+    hasSchedules: true,
+    waitingForEvents: true,
+    automationWait: {
+      nextRunAt: null,
+      event: checks,
+      events: [
+        checks,
+        { source: { kind: "slack", name: "Acme Slack" }, eventTypes: ["app_mention"] },
+      ],
+      automations: 2,
+    },
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "high",
+  });
+  // Targeted only by a paused or already-past one-time schedule: no clock icon.
+  const lapsedSchedule = hoverRow(3007, "Release stabilization checkpoint", 300, {
+    status: "idle",
+    hasSchedules: true,
+    hasUpcomingSchedules: false,
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "high",
+  });
+  rows.splice(
+    0,
+    rows.length,
+    working,
+    needsYou,
+    waiting,
+    parent,
+    pausedChild,
+    finished,
+    wakeOnEvent,
+    lapsedSchedule,
+  );
+}
+
+if (previewParameters.get("scenario") === "unread-reply") {
+  // Managers that answered while their workers still run, next to the same
+  // states without a reply, so the row markers can be compared side by side.
+  const control = {
+    state: "active",
+    controlVersion: 1,
+    controlEtag: "preview",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const tree = (overrides: Record<string, number> = {}) => ({
+    directChildren: 0,
+    totalDescendants: 0,
+    runningDescendants: 0,
+    queuedDescendants: 0,
+    waitingDescendants: 0,
+    attentionDescendants: 0,
+    pausedDescendants: 0,
+    failedDescendants: 0,
+    unreadDescendants: 0,
+    unreadFailedDescendants: 0,
+    truncated: false,
+    ...overrides,
+  });
+  const row = (number: number, title: string, age: number, overrides: Partial<Session>) =>
+    ({
+      ...session(number, title, null, age),
+      effectiveControl: control,
+      treeStats: tree(),
+      ...overrides,
+    }) as Session;
+  const inputWait = {
+    deadlineAt: new Date(now + 30 * 60_000).toISOString(),
+    reason: "Waiting for the workers to finish.",
+  };
+  const replied = row(4001, "Sidebar unread priority", 0, {
+    unread: true,
+    inputWait,
+    treeStats: tree({ directChildren: 2, totalDescendants: 2, runningDescendants: 2 }),
+  });
+  rows.splice(
+    0,
+    rows.length,
+    replied,
+    {
+      ...row(4002, "Implement the rail change", 1, { status: "running" }),
+      parentSessionId: replied.id,
+      rootSessionId: replied.id,
+    } as Session,
+    {
+      ...row(4003, "Review the rail change", 1, { status: "running" }),
+      parentSessionId: replied.id,
+      rootSessionId: replied.id,
+    } as Session,
+    row(4004, "Release notes draft", 3, {
+      unread: true,
+      treeStats: tree({ directChildren: 1, totalDescendants: 1, runningDescendants: 1 }),
+    }),
+    row(4005, "Nightly import check", 5, {
+      unread: true,
+      status: "running",
+    }),
+    row(4006, "Billing migration", 8, {
+      inputWait,
+      treeStats: tree({ directChildren: 1, totalDescendants: 1, runningDescendants: 1 }),
+    }),
+    row(4007, "Staging database approval", 12, {
+      unread: true,
+      treeStats: tree({ directChildren: 1, totalDescendants: 1, attentionDescendants: 1 }),
+    }),
+    row(4008, "Watch CI on the PR", 20, { inputWait }),
+    row(4009, "Quarterly cost report", 180, { unread: true }),
+  );
+}
+
+if (previewParameters.get("scenario") === "paused") {
+  // A working chat beside chats whose work Pause parked: the chat's own pause,
+  // a parent's pause reaching its workers, and a paused chat with nothing left.
+  const control = (state: "active" | "paused", directState: "active" | "paused" = state) => ({
+    state,
+    controlVersion: 1,
+    controlEtag: `preview-${state}`,
+    directState,
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  });
+  const tree = (overrides: Record<string, number> = {}) => ({
+    directChildren: 0,
+    totalDescendants: 0,
+    runningDescendants: 0,
+    queuedDescendants: 0,
+    waitingDescendants: 0,
+    attentionDescendants: 0,
+    pausedDescendants: 0,
+    pausedWorkDescendants: 0,
+    failedDescendants: 0,
+    unreadDescendants: 0,
+    unreadFailedDescendants: 0,
+    truncated: false,
+    ...overrides,
+  });
+  const row = (number: number, title: string, age: number, overrides: Partial<Session>) =>
+    ({
+      ...session(number, title, null, age),
+      effectiveControl: control("active"),
+      treeStats: tree(),
+      ...overrides,
+    }) as Session;
+  const manager = row(5003, "Nightly cost report", 2, {
+    effectiveControl: control("paused"),
+    treeStats: tree({
+      directChildren: 2,
+      totalDescendants: 2,
+      pausedDescendants: 2,
+      pausedWorkDescendants: 2,
+    }),
+  } as Partial<Session>);
+  // Finished its own work and is not paused; only the workers it started are.
+  const owner = row(5007, "Stale pull request sweep", 3, {
+    pinned: true,
+    pinnedAt: timeBefore(60),
+    treeStats: tree({
+      directChildren: 3,
+      totalDescendants: 3,
+      pausedDescendants: 3,
+      pausedWorkDescendants: 3,
+    }),
+  } as Partial<Session>);
+  const pausedWorker = (number: number, title: string) =>
+    ({
+      ...row(number, title, 3, {
+        activeTurnId: "turn-1",
+        effectiveControl: control("paused", "paused"),
+      } as Partial<Session>),
+      parentSessionId: owner.id,
+      rootSessionId: owner.id,
+    }) as Session;
+  rows.splice(
+    0,
+    rows.length,
+    owner,
+    pausedWorker(5008, "Close stale issues"),
+    pausedWorker(5009, "Rebase open pull requests"),
+    pausedWorker(5010, "Triage flaky checks"),
+    row(5001, "Ship the pause indicator", 0, { status: "running", activeTurnId: "turn-1" }),
+    row(5002, "Migrate the staging database", 1, {
+      activeTurnId: "turn-1",
+      effectiveControl: control("paused"),
+    } as Partial<Session>),
+    manager,
+    {
+      ...row(5004, "Collect AWS costs", 2, {
+        activeTurnId: "turn-1",
+        effectiveControl: control("paused", "active"),
+      } as Partial<Session>),
+      parentSessionId: manager.id,
+      rootSessionId: manager.id,
+    } as Session,
+    {
+      ...row(5005, "Collect GCP costs", 2, {
+        status: "queued",
+        effectiveControl: control("paused", "active"),
+      } as Partial<Session>),
+      parentSessionId: manager.id,
+      rootSessionId: manager.id,
+    } as Session,
+    row(5006, "Quarterly cost review", 30, {
+      effectiveControl: control("paused"),
+    } as Partial<Session>),
+  );
+}
+
 type RecordedOptions = Omit<SessionListPageOptions, "signal">;
 export type SessionSidebarEvidence = {
   listCalls: {
@@ -152,28 +638,53 @@ export type SessionSidebarEvidence = {
     workspaceId: string;
     sessionId: string;
     archived: boolean;
-    expectedVersion: number;
     previousChannelId: string | null;
     returnedChannelId: string | null;
   }[];
+  /** Sites this person opened, in order. */
+  siteOpens: string[];
+  /** Site sidebar changes, in order. */
+  siteSidebarCalls: { siteId: string; pinned?: boolean; archived?: boolean }[];
+  /** Site rows moved to another project, in order. */
+  siteProjectCalls: { siteId: string; fromChannelId: string | null; channelId: string | null }[];
+  failSiteProject: boolean;
   failChannelId: string | null;
   failCursor: string | null;
   failTodayCursor: string | null;
   holdTodayCursor: string | null;
+  holdChannelId: string | null;
+  holdChannelCursor: string | null;
   heldPageStarted: boolean;
   releaseHeldPage: () => void;
+  /** `?hints=1` only: another device archives a row and the server sends its commit hint. */
+  archiveRemotely: (sessionId: string) => void;
   snapshot: () => Session[];
 };
 
 export const evidence: SessionSidebarEvidence = {
   listCalls: [],
   archiveCalls: [],
+  siteOpens: [],
+  siteSidebarCalls: [],
+  siteProjectCalls: [],
+  failSiteProject: false,
   failChannelId: previewParameters.get("fail") === "bugfixes" ? bugfixesId : null,
   failCursor: null,
   failTodayCursor: null,
   holdTodayCursor: null,
+  holdChannelId: null,
+  holdChannelCursor: null,
   heldPageStarted: false,
   releaseHeldPage: () => {},
+  archiveRemotely: (sessionId) => {
+    const row = rows.find((candidate) => candidate.id === sessionId);
+    if (!row) throw new Error("Preview session not found");
+    row.archived = true;
+    row.archivedAt = new Date().toISOString();
+    row.archiveVersion = (row.archiveVersion ?? 0) + 1;
+    row.updatedAt = row.archivedAt;
+    publishHint([sessionId]);
+  },
   snapshot: () => structuredClone(rows),
 };
 
@@ -182,12 +693,23 @@ function filteredRows(options: SessionListPageOptions): Session[] {
   const selected = rows.filter((row) => {
     if (archiveStatus !== "all" && row.archived !== (archiveStatus === "archived")) return false;
     if (options.archivedOnly && !row.archived) return false;
+    // Matches the server: Site conversations only for a Site filter or `include`.
+    if (options.originSiteId) {
+      if (
+        !siteConversationIds.has(row.id) ||
+        (row.metadata._opengeniSiteOrigin as { siteId?: string } | undefined)?.siteId !==
+          options.originSiteId
+      )
+        return false;
+    } else if (siteConversationIds.has(row.id) && options.siteConversations !== "include")
+      return false;
     if (options.parentSessionId !== undefined && row.parentSessionId !== options.parentSessionId)
       return false;
     if (options.channelId !== undefined && row.channelId !== options.channelId) return false;
     if (
       options.createdBy &&
-      (row.createdBy.kind !== options.createdBy.kind ||
+      // Like the server: no kind matches every session the subject created.
+      ((options.createdBy.kind !== undefined && row.createdBy.kind !== options.createdBy.kind) ||
         row.createdBy.subjectId !== options.createdBy.subjectId)
     )
       return false;
@@ -210,6 +732,80 @@ function filteredRows(options: SessionListPageOptions): Session[] {
             : b.updatedAt.localeCompare(a.updatedAt);
     return order || a.id.localeCompare(b.id);
   });
+}
+
+/** The server's complete Site rows for a grouped root page. */
+function previewSiteGroups(options: SessionListPageOptions): SiteConversationGroup[] {
+  const groups = new Map<string, SiteConversationGroup>();
+  for (const row of filteredRows({ ...options, siteConversations: "include" })) {
+    if (!siteConversationIds.has(row.id)) continue;
+    const origin = row.metadata._opengeniSiteOrigin as { siteId: string; title: string };
+    const key = `${origin.siteId}:${row.channelId ?? ""}`;
+    const current = groups.get(key);
+    const active = row.status === "running" ? 1 : 0;
+    if (current) {
+      current.conversations += 1;
+      current.total += 1;
+      current.active += active;
+      // Without a publish the row keeps its first conversation's start.
+      if (!sitePublishedAt.has(origin.siteId) && row.createdAt < current.updatedAt)
+        current.updatedAt = row.createdAt;
+      if (row.createdAt > current.createdAt) current.createdAt = row.createdAt;
+      continue;
+    }
+    groups.set(key, {
+      siteId: origin.siteId,
+      channelId: row.channelId ?? null,
+      title: origin.title,
+      conversations: 1,
+      // The newest publish, never its conversations' messages.
+      updatedAt: sitePublishedAt.get(origin.siteId) ?? row.createdAt,
+      createdAt: row.createdAt,
+      total: 1,
+      attention: 0,
+      attentionSince: null,
+      failed: 0,
+      active,
+      queued: 0,
+      waiting: 0,
+      unread: 0,
+      activeWork: 0,
+    });
+  }
+  // Archived Sites leave this person's sidebar with their conversations.
+  for (const [key, group] of groups)
+    if (siteSidebar.get(group.siteId)?.archived) groups.delete(key);
+  const listed = new Set([...groups.values()].map((group) => group.siteId));
+  if (!options.needsYouOnly && options.archiveStatus !== "archived")
+    for (const created of createdSites) {
+      if (listed.has(created.siteId)) continue;
+      if (options.channelId !== undefined && options.channelId !== created.channelId) continue;
+      groups.set(created.siteId, {
+        siteId: created.siteId,
+        channelId: created.channelId,
+        title: created.title,
+        conversations: 0,
+        // Opening a Site lists it but is not activity, so it never moves the row.
+        updatedAt: created.updatedAt,
+        createdAt: created.updatedAt,
+        total: 0,
+        attention: 0,
+        attentionSince: null,
+        failed: 0,
+        active: 0,
+        queued: 0,
+        waiting: 0,
+        unread: 0,
+        activeWork: 0,
+      });
+    }
+  return [...groups.values()]
+    .filter((group) => !siteSidebar.get(group.siteId)?.archived)
+    .map((group) => {
+      const pinnedAt = siteSidebar.get(group.siteId)?.pinnedAt;
+      return pinnedAt ? { ...group, pinned: true as const, pinnedAt } : group;
+    })
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export const client = {
@@ -242,8 +838,16 @@ export const client = {
     };
     evidence.listCalls.push(call);
     const todayPage = options.updatedFrom !== undefined && options.updatedBefore === undefined;
-    if (todayPage && evidence.holdTodayCursor && options.cursor === evidence.holdTodayCursor) {
+    const heldChannelPage =
+      evidence.holdChannelId !== null &&
+      options.channelId === evidence.holdChannelId &&
+      (options.cursor ?? null) === evidence.holdChannelCursor;
+    if (
+      heldChannelPage ||
+      (todayPage && evidence.holdTodayCursor && options.cursor === evidence.holdTodayCursor)
+    ) {
       evidence.holdTodayCursor = null;
+      evidence.holdChannelId = null;
       evidence.heldPageStarted = true;
       await new Promise<void>((resolve) => {
         evidence.releaseHeldPage = resolve;
@@ -262,8 +866,18 @@ export const client = {
       throw new Error("Preview project page failed once");
     }
     if (options.pinsOnly)
-      return { sessions: [], pinned: [], nextCursor: null, filtersApplied: true };
-    const selected = filteredRows(options);
+      return {
+        sessions: [],
+        pinned: structuredClone(
+          filteredRows({ ...options, parentSessionId: undefined, siteConversations: "include" })
+            .filter((row) => row.pinned)
+            .sort((a, b) => (b.pinnedAt ?? "").localeCompare(a.pinnedAt ?? "")),
+        ),
+        nextCursor: null,
+        filtersApplied: true,
+      };
+    // Pinned rows are returned separately, never as ordinary rows.
+    const selected = filteredRows(options).filter((row) => !row.pinned);
     const offset = Number(options.cursor ?? 0);
     const limit = options.limit ?? 50;
     if (!Number.isInteger(offset) || offset < 0) throw new Error("Invalid preview cursor");
@@ -271,17 +885,19 @@ export const client = {
     const nextCursor = offset + limit < selected.length ? String(offset + limit) : null;
     call.returnedIds = page.map((row) => row.id);
     call.nextCursor = nextCursor;
-    return { sessions: structuredClone(page), pinned: [], nextCursor, filtersApplied: true };
+    return {
+      sessions: structuredClone(page),
+      pinned: [],
+      nextCursor,
+      filtersApplied: true,
+      ...(options.siteConversations === "group" && options.cursor === undefined
+        ? { siteConversations: "group" as const, siteGroups: previewSiteGroups(options) }
+        : {}),
+    };
   },
-  updateSessionArchive: async (
-    workspace: string,
-    id: string,
-    request: { archived: boolean; expectedVersion: number },
-  ) => {
+  updateSessionArchive: async (workspace: string, id: string, request: { archived: boolean }) => {
     const row = rows.find((candidate) => candidate.id === id);
     if (!row) throw new Error("Preview session not found");
-    if (request.expectedVersion !== row.archiveVersion)
-      throw new Error("Preview archive version changed");
     const previousChannelId = row.channelId ?? null;
     row.archived = request.archived;
     row.archivedAt = request.archived ? new Date().toISOString() : null;
@@ -297,25 +913,423 @@ export const client = {
     return structuredClone(row);
   },
 } as unknown as OpenGeniClient;
+client.listSessionSummaryPage = async (workspace, options) => {
+  const page = await client.listSessionPage(workspace, options);
+  return {
+    ...page,
+    projection: "summary",
+    sessions: page.sessions.map(sessionListEntry),
+    pinned: page.pinned.map(sessionListEntry),
+  };
+};
+
+// The Site view: each Site's page and its conversations' history.
+if (sitesScenario) {
+  const siteClient = siteViewPreviewClient({
+    workspaceId,
+    rows,
+    // `?published=1`: the usage Site is on the web, so the header says Published.
+    // `?publishable=1`: publishing is set up, so an unpublished Site offers Publish.
+    // `?publishDelay=<ms|hold>`: Publish takes that long (hold: never finishes).
+    // `?htmlDelay=<ms>`: loading a version takes that long, to show Updating.
+    publishedHost: previewParameters.has("published")
+      ? (siteId) => (siteId === usageSiteId ? "usage.sites.opengeni.ai" : "")
+      : undefined,
+    publishable: previewParameters.has("publishable") || previewParameters.has("published"),
+    publishDelayMs:
+      previewParameters.get("publishDelay") === "hold"
+        ? Number.POSITIVE_INFINITY
+        : Number(previewParameters.get("publishDelay") ?? 0) || undefined,
+    htmlDelayMs: Number(previewParameters.get("htmlDelay") ?? 0) || undefined,
+    // "Make the header blue": the agent publishes the Site with a blue header.
+    edit: (text) =>
+      /blue/iu.test(text)
+        ? {
+            tool: "artifact_publish",
+            arguments: { siteId: usageSiteId, entrypoint: "index.html" },
+            html: (current) =>
+              current.replace(
+                "</style>",
+                "main>h1{color:#fff;background:#3157f5;margin:-28px -32px 0;padding:24px 32px 4px}main>h1+p{color:#dfe6ff;background:#3157f5;margin:0 -32px;padding:0 32px 22px}</style>",
+              ),
+            reply:
+              "Done. The header is now a blue band with white text, published as version 5. It's live beside this chat; Undo in the version menu puts version 4 back.",
+          }
+        : null,
+    sites: [
+      { id: usageSiteId, title: "Opengeni usage", html: usageSiteHtml },
+      { id: ipoSiteId, title: "IPO research dashboard", html: usageSiteHtml },
+      {
+        id: pricingSiteId,
+        title: "Pricing calculator",
+        html: siteHtml("Pricing calculator", "Plans, seats and annual pricing"),
+      },
+      {
+        id: checklistSiteId,
+        title: "Launch checklist",
+        html: siteHtml("Launch checklist", "Readiness across teams for the next release"),
+      },
+    ],
+    history: new Map([
+      [
+        siteConversationId(901),
+        [
+          [
+            "Can the date range apply to every graph at once?",
+            "Yes. The range picker at the top now filters all four graphs together: active users, sessions, tokens and spend. Each graph keeps its own zoom, and the range is kept in the address so a shared link opens the same view.",
+          ],
+        ],
+      ],
+      [
+        siteConversationId(902),
+        [
+          [
+            "Break weekly active users down by plan.",
+            "Weekly active users last week: Team 412, Pro 268, Free 151. Team grew 9% week over week; Free was flat.",
+          ],
+        ],
+      ],
+      [
+        siteConversationId(903),
+        [
+          [
+            "Export the usage table to CSV.",
+            "The export has one row per workspace and week, with sessions, tokens and spend. Use **Download CSV** above the table.",
+          ],
+        ],
+      ],
+    ]),
+  });
+  Object.assign(client, siteClient, {
+    recordSiteOpened: async (_workspace: string, siteId: string) => {
+      evidence.siteOpens.push(siteId);
+      // Opening a Site again restores it to the sidebar.
+      const state = siteSidebar.get(siteId);
+      if (state) state.archived = false;
+      return { openedAt: new Date().toISOString() };
+    },
+    updateSiteSidebarState: async (
+      _workspace: string,
+      siteId: string,
+      request: { pinned?: boolean; archived?: boolean },
+    ) => {
+      evidence.siteSidebarCalls.push({ siteId, ...request });
+      const state = siteSidebar.get(siteId) ?? { pinnedAt: null, archived: false };
+      if (request.pinned !== undefined)
+        state.pinnedAt = request.pinned ? (state.pinnedAt ?? new Date().toISOString()) : null;
+      if (request.archived !== undefined) state.archived = request.archived;
+      siteSidebar.set(siteId, state);
+      return {
+        siteId,
+        pinned: state.pinnedAt !== null,
+        pinnedAt: state.pinnedAt,
+        archived: state.archived,
+        archivedAt: state.archived ? new Date().toISOString() : null,
+      };
+    },
+    // As the server does: the row's conversations move with it, and the Site
+    // itself when the row is its own project's.
+    updateSiteProject: async (
+      _workspace: string,
+      siteId: string,
+      request: { fromChannelId: string | null; channelId: string | null },
+    ) => {
+      evidence.siteProjectCalls.push({ siteId, ...request });
+      if (evidence.failSiteProject) throw new Error("Preview move refused");
+      const movedSessionIds: string[] = [];
+      for (const row of rows) {
+        if (!siteConversationIds.has(row.id) || row.parentSessionId) continue;
+        const origin = row.metadata._opengeniSiteOrigin as { siteId?: string } | undefined;
+        if (origin?.siteId !== siteId || (row.channelId ?? null) !== request.fromChannelId)
+          continue;
+        row.channelId = request.channelId;
+        movedSessionIds.push(row.id);
+      }
+      const created = createdSites.find((candidate) => candidate.siteId === siteId);
+      const siteMoved = created?.channelId === request.fromChannelId;
+      if (created && siteMoved) created.channelId = request.channelId;
+      return { siteId, channelId: request.channelId, siteMoved, movedSessionIds };
+    },
+    tools: {
+      forWorkspace: () => ({
+        $catalog: async () => ({ tools: [], revision: "preview" }),
+      }),
+    },
+    // The regular chat beside the Site: what it reads to draw, served as an
+    // empty workspace (no connections, machines, secrets or other agents).
+    connectTransport: () => ({}),
+    listWorkspaceMembers: async () => [],
+    listWorkspaceSkills: async () => ({ skills: [], nextCursor: null }),
+    getWorkspaceRealtimeModelCatalog: async () => ({ models: [] }),
+    getWorkspaceModelCatalog: async () => ({
+      models: [
+        {
+          id: "preview-model",
+          label: "GPT-5.5",
+          provider: "openai",
+          providerLabel: "OpenAI",
+          api: "responses",
+          capabilities: {
+            reasoning: { efforts: ["low", "medium", "high"], defaultEffort: "medium" },
+            latencyModes: [],
+            input: { image: true },
+          },
+          cost: "included",
+          credentialReadiness: {
+            status: "ready",
+            reason: null,
+            basis: "configuration",
+            checkedAt: null,
+          },
+          policyAllowed: true,
+          availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+        },
+      ],
+    }),
+  });
+  // Preview control for checks: a version published elsewhere (another
+  // person, an agent in another chat) shows in the open Site view.
+  Object.assign(window, {
+    sitePreviewPublishElsewhere: () =>
+      siteClient.publishPreviewVersion(usageSiteId, (current) =>
+        current.replace("<h1>Opengeni usage</h1>", "<h1>Opengeni usage · Q4</h1>"),
+      ),
+  });
+}
+
+// `?hints=1` serves the workspace live stream, so the sidebar runs in commit
+// hint mode: no list polling, and only a published hint invalidates rows.
+const pendingHints: WorkspaceSessionListEvent[] = [];
+let wakeHintStream = () => {};
+function publishHint(sessionIds: string[] | null) {
+  pendingHints.push({
+    type: "workspace.sessions.changed",
+    workspaceId,
+    available: true,
+    sessionIds,
+  });
+  wakeHintStream();
+}
+if (previewParameters.has("hints")) {
+  Object.assign(client, {
+    getClientConfig: async () => ({}),
+    getWorkspace: async (id: string) => ({ id, inferenceControl: { revision: 0 } }),
+    streamWorkspaceLiveEvents: async function* (
+      workspace: string,
+      options: WorkspaceLiveStreamOptions = {},
+    ) {
+      options.onStateChange?.("live");
+      yield {
+        type: "workspace.sessions.changed",
+        workspaceId: workspace,
+        available: true,
+        sessionIds: null,
+      } satisfies WorkspaceSessionListEvent;
+      while (!options.signal?.aborted) {
+        const hint = pendingHints.shift();
+        if (hint) {
+          yield hint;
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          wakeHintStream = resolve;
+          options.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+    },
+  });
+}
+
+/**
+ * The Site view's chat is the app's regular chat route, which reads more of
+ * the API than the sidebar. Calls this preview doesn't serve answer as an API
+ * without that route (404), which the real components already handle, so the
+ * chat draws as it would against such a server.
+ */
+// Calls the components only make when the client offers them (they check
+// first), so the preview leaves them out rather than refusing them.
+const OPTIONAL_CALLS = new Set([
+  "appendRecordingLiveSegments",
+  "attachMachine",
+  "continueSessionWaitingWork",
+  "createFileDownloadUrl",
+  "createRecordingLiveSession",
+  "createRetainedArtifactDownloadUrl",
+  "createVideoArtifactPlaybackSource",
+  "downloadRetainedArtifact",
+  "downloadRetainedScreenshot",
+  "findGoal",
+  "fsRead",
+  "getAccessContext",
+  "getClientConfig",
+  "getMyUsage",
+  "getWorkspace",
+  "getWorkspaceArtifactCurrent",
+  "listApiIntegrations",
+  "listArtifactCatalog",
+  "listCapabilities",
+  "listEventPage",
+  "removeEnrollment",
+  "requestJson",
+  "streamWorkspaceInteractionRevisions",
+  "streamWorkspaceLiveEvents",
+  "swapActiveSandbox",
+  "transcribeAudio",
+  "updateMachineAgent",
+  "updateMachineOperationPolicy",
+  "updateRecording",
+  "updateSessionToolPolicy",
+  "withHeaders",
+]);
+
+function withUnservedCallsRefused(served: OpenGeniClient): OpenGeniClient {
+  const refused = new Map<string, () => Promise<never>>();
+  return new Proxy(served, {
+    get(target, property, receiver) {
+      if (
+        property in target ||
+        typeof property !== "string" ||
+        property === "then" ||
+        OPTIONAL_CALLS.has(property)
+      )
+        return Reflect.get(target, property, receiver);
+      let unserved = refused.get(property);
+      if (!unserved) {
+        unserved = () =>
+          Promise.reject(
+            new OpenGeniApiError(404, JSON.stringify({ unserved: property }), {
+              code: "preview_unserved",
+            }),
+          );
+        refused.set(property, unserved);
+      }
+      return unserved;
+    },
+  });
+}
+
+/** The client the app and the SDK hooks use; the Sites scenario also draws the regular chat. */
+export const previewClient = sitesScenario ? withUnservedCallsRefused(client) : client;
 
 const invocation = { workspaceId };
 const context = {
-  client,
-  session: null,
-  accessContext: { subjectId },
+  client: previewClient,
+  // The regular chat beside a Site reads the workspace and the server's
+  // switches: uploads are on, so files can be attached there. The publish
+  // form names the workspace and checks it isn't Personal.
+  workspaces: [
+    {
+      id: workspaceId,
+      name: "Product engineering",
+      kind: "shared",
+      accountId: "preview",
+      settings: {},
+    },
+  ],
+  authSession: null,
+  managedSelfContext: null,
+  accessKeyVersion: 0,
+  inspectorOpen: false,
+  setInspectorOpen: () => {},
+  sessionCreationHandoff: null,
+  personalGitHubAuthority: null,
+  toolMcpServers: [],
+  workspaceDefaultToolIds: [],
+  workspaceMcpCatalogReady: true,
+  workspaceMcpCatalogLoadedSuccessfully: true,
+  workspaceCapabilityCatalog: [],
+  currentResources: [],
+  refreshWorkspaceMcpServers: async () => {},
+  refreshGitHub: async () => {},
+  refreshPersonalGitHub: async () => {},
+  githubRepos: [],
+  githubStatus: null,
+  githubStatusFailed: false,
+  githubCatalogReady: true,
+  personalGitHubStatus: null,
+  personalGitHubRepositories: [],
+  personalGitHubSelection: null,
+  personalGitHubCatalogReady: true,
+  personalGitHubBusy: false,
+  selectedPersonalGitHubRepoIds: new Set(),
+  selectedPersonalGitHubRepoRefs: {},
+  selectedRepoIds: new Set(),
+  selectedRepoRefs: {},
+  selectedCapabilityToolIds: new Set(),
+  manualRepos: [],
+  repositoryGroups: [],
+  repositoryValidationError: null,
+  busy: false,
+  repoBusy: false,
+  githubAppBusy: false,
+  workspaceStateOwnerId: workspaceId,
+  // In the Sites scenario the session route supplies the open session, as in
+  // the app; the rail injects it. Other scenarios keep no open session.
+  get session() {
+    if (!sitesScenario) return null;
+    const id = /\/sessions\/([^/]+)/u.exec(window.location.pathname)?.[1];
+    return (id && rows.find((row) => row.id === id)) || null;
+  },
+  accessContext: {
+    subjectId,
+    accountGrants: [],
+    workspaceGrants: [
+      {
+        workspaceId,
+        // Row actions run as a controller, so archive pauses rather than hides.
+        // `?publish=1`: a member who may publish, so the Site view edits live.
+        permissions: [
+          "sessions:create",
+          ...(rowActionsScenario ? ["sessions:control"] : []),
+          "artifacts:read",
+          ...(previewParameters.has("publish") ? ["artifacts:publish"] : []),
+        ],
+      },
+    ],
+  },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
+  clientConfig: { fileUploads: { enabled: true }, auth: { mode: "none" } },
   captureWorkspaceInvocation: () => invocation,
   ownsWorkspaceInvocation: (_workspace: string, accepted: unknown) => accepted === invocation,
   setSession: () => {},
   resetSessionView: () => {},
+  updateSessionPin: async (_workspace: string, id: string, pinned: boolean) => {
+    const row = rows.find((candidate) => candidate.id === id);
+    if (!row) return null;
+    row.pinned = pinned;
+    row.pinnedAt = pinned ? new Date().toISOString() : null;
+    row.pinVersion = (row.pinVersion ?? 0) + 1;
+    return structuredClone(row);
+  },
 } as unknown as AppContextValue;
 
 export const useAppContext = () => context;
+// The regular chat beside a Site keeps its own event feed; the app's is for the page's chat.
+export function createSessionEventFeedStore() {
+  let snapshot: unknown = null;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    },
+    set: (feed: unknown) => {
+      if (snapshot === feed) return;
+      snapshot = feed;
+      for (const listener of listeners) listener();
+    },
+  };
+}
+// The session header reads the context optionally; the sidebar preview always provides it.
+export const useOptionalAppContext = () => context;
 export const useRail = () => ({
   workspaceId,
   isMobile: window.innerWidth < 768,
   setDrawerOpen: () => {},
 });
+// The settings shell reads the rail where it may be absent; it has no sidebar state here.
+export const useOptionalRail = () => null;
 
 declare global {
   interface Window {

@@ -5,12 +5,12 @@ import type {
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { TextInput } from "@/components/ui/field";
-import { RowButton } from "@/components/ui/page-actions";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { Section } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { TextInput } from "@opengeni/react/ui/field";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { Section } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import {
   dollarsInputValue,
   formatBudget,
@@ -19,6 +19,7 @@ import {
   parseDollars,
 } from "@/lib/usage-allowances";
 import type { BudgetDraft } from "./use-workspace-budget";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type MemberMode = "equal_share" | "none";
 
@@ -116,7 +117,7 @@ export function BudgetForm({
       });
       toast.success(config ? "Budget saved" : `${workspaceName} now has a monthly budget`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     } finally {
       setSaving(false);
     }

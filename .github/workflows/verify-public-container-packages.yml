@@ -12,8 +12,8 @@ permissions:
 
 jobs:
   verify:
-    name: Verify anonymous OpenGeni image access
-    runs-on: ubuntu-latest
+    name: Verify anonymous Opengeni image access
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Verify anonymous image discovery

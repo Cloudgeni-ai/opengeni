@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/ogtool",
-  "version": "0.3.47",
-  "description": "Codemode CLI and typed client entrypoint for an OpenGeni execution attempt.",
+  "version": "6.14.0",
+  "description": "Codemode CLI and typed client entrypoint for an Opengeni execution attempt.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -31,13 +31,14 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "test": "bun test",
     "build": "bun build.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@opengeni/codemode": "workspace:*"
+    "@opengeni/codemode": "workspace:*",
+    "@opengeni/contracts": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

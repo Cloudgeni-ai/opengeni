@@ -46,6 +46,16 @@ export type ModelPreparationMeasurement = {
   outcome: "completed" | "failed";
   durationSeconds: number;
   count?: number;
+  /** Bounded failure class for a failed phase that classifies its errors
+   * (currently repository skill discovery). `handling` says whether the turn
+   * continued without the phase's result or the error reached turn recovery. */
+  failure?: Readonly<{
+    errorClass: string;
+    handling: "propagated" | "degraded" | "unreachable";
+  }>;
+  /** Bounded classes of entries a completed phase skipped (one unusable
+   * repository skill search path or folder each), for the failure counter. */
+  skipped?: readonly string[];
 };
 
 type ModelPreparationObserver = (measurement: ModelPreparationMeasurement) => void;
@@ -57,6 +67,9 @@ type ModelPreparationObservation = {
   repositorySkillDiscoveryEndedAt?: number;
   firstSandboxOperationStartedAt?: number;
   firstSandboxOperationEndedAt?: number;
+  /** When the first model request entered transport. A lazily prepared MCP catalog can be
+   * snapshotted after that, and the runner gap would then include model time, not preparation. */
+  firstModelTransportAt?: number;
   runnerGapRecorded: boolean;
   postMcpGapRecorded: boolean;
   postRepositorySkillDiscoveryGapRecorded: boolean;
@@ -64,7 +77,26 @@ type ModelPreparationObservation = {
 };
 
 const modelPreparationObserver = new AsyncLocalStorage<ModelPreparationObservation>();
-const modelTransportStartedObserver = new AsyncLocalStorage<() => Promise<void> | void>();
+
+/** Work that starts after the first model request entered transport is the
+ * turn's own (a tool call), not preparation of that request. */
+function startedAfterFirstModelRequest(
+  observation: ModelPreparationObservation,
+  startedAt: number,
+): boolean {
+  return (
+    observation.firstModelTransportAt !== undefined && observation.firstModelTransportAt < startedAt
+  );
+}
+export type ModelTransportDispatchClock = {
+  dispatchedAtUnixMs: number;
+  monotonicTimeMs: number;
+};
+
+const modelTransportStartedObserver = new AsyncLocalStorage<{
+  started: (() => Promise<void> | void) | undefined;
+  dispatched: ((clock: ModelTransportDispatchClock) => void) | undefined;
+}>();
 type ModelTransportAdmission = { refusal?: { error: unknown } };
 type ModelTransportFetch = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
 const modelTransportAdmission = new AsyncLocalStorage<ModelTransportAdmission>();
@@ -95,7 +127,7 @@ class ModelPreparationTraceProcessor implements TracingProcessor {
   async forceFlush(): Promise<void> {}
 }
 
-// OpenGeni exports observability through its own OTLP pipeline. Replace the
+// Opengeni exports observability through its own OTLP pipeline. Replace the
 // Agents SDK default batch exporter instead of adding to it: the default has no
 // OpenAI tracing key on Azure/Codex deployments and its async timer can leak a
 // rejected export promise into the SDK's process-global unhandled-rejection
@@ -127,18 +159,56 @@ export function withModelPreparationObserver<T>(
 export function withModelTransportStartedObserver<T>(
   observer: (() => Promise<void> | void) | undefined,
   callback: () => T,
+  dispatched?: (clock: ModelTransportDispatchClock) => void,
 ): T {
-  return observer ? modelTransportStartedObserver.run(observer, callback) : callback();
+  return observer || dispatched
+    ? modelTransportStartedObserver.run({ started: observer, dispatched }, callback)
+    : callback();
+}
+
+/** Mark the first model request of the current preparation scope (see firstModelTransportAt). */
+export function markModelPreparationTransportStarted(): void {
+  try {
+    const observation = modelPreparationObserver.getStore();
+    if (observation && observation.firstModelTransportAt === undefined) {
+      observation.firstModelTransportAt = performance.now();
+    }
+  } catch {
+    // Diagnostics must never affect model dispatch.
+  }
 }
 
 export async function recordModelTransportStarted(): Promise<void> {
+  markModelPreparationTransportStarted();
   try {
     await beforeModelRequest();
-    await modelTransportStartedObserver.getStore()?.();
+    await modelTransportStartedObserver.getStore()?.started?.();
   } catch (error) {
-    const admission = modelTransportAdmission.getStore();
-    if (admission) admission.refusal = { error };
-    throw error;
+    refuseModelTransport(error);
+  }
+}
+
+/** Refuse a model request before it is sent. Under the SDK fetch wrapper the
+ * refusal is surfaced once, as this exact error, never retried. */
+export function refuseModelTransport(error: unknown): never {
+  const admission = modelTransportAdmission.getStore();
+  if (admission) admission.refusal = { error };
+  throw error;
+}
+
+/** Synchronous diagnostic after admission: plain fetch entry, or the send
+ * reported by a Responses transport after its body/connection preparation.
+ * This is not a remote receipt. Never join the observer or change outcomes. */
+export function recordModelTransportDispatched(monotonicTimeMs: number): void {
+  const observer = modelTransportStartedObserver.getStore()?.dispatched;
+  if (!observer) return;
+  try {
+    const result = observer({ dispatchedAtUnixMs: Date.now(), monotonicTimeMs }) as unknown;
+    // The contract is synchronous, but an accidentally async diagnostic must
+    // neither be joined nor leak a rejected promise into the provider loop.
+    if (result instanceof Promise) void result.catch(() => undefined);
+  } catch {
+    // A diagnostic cannot fence, retry or fail the provider request.
   }
 }
 
@@ -186,6 +256,8 @@ export function markModelPreparationFirstSandboxOperation(durationSeconds: numbe
     if (!observation || observation.firstSandboxOperationEndedAt !== undefined) return;
     const endedAt = performance.now();
     const startedAt = endedAt - Math.max(0, durationSeconds) * 1_000;
+    // A box first used by a tool is not part of preparing the first request.
+    if (startedAfterFirstModelRequest(observation, startedAt)) return;
     observation.firstSandboxOperationStartedAt = startedAt;
     observation.firstSandboxOperationEndedAt = endedAt;
     if (!observation.runnerGapRecorded) {
@@ -208,15 +280,31 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
 
     const endedAt = performance.now();
     const startedAt = endedAt - measurement.durationSeconds * 1_000;
+    // Repository skills read on demand by a tool (a deferred index) would
+    // otherwise report the box create, setup and clone that tool waited on,
+    // and the model's own time before it, as startup.
+    if (
+      measurement.phase === "repository_skill_discovery" &&
+      startedAfterFirstModelRequest(observation, startedAt)
+    ) {
+      return;
+    }
     let reportedMeasurement = measurement;
     if (measurement.phase === "mcp_tools_snapshot") {
       if (!observation.runnerGapRecorded) {
         observation.runnerGapRecorded = true;
-        observation.observer({
-          phase: "runner_before_mcp_tools",
-          outcome: measurement.outcome,
-          durationSeconds: Math.max(0, startedAt - observation.startedAt) / 1_000,
-        });
+        // Only a snapshot taken before the first model request is pre-first-token preparation;
+        // a later (lazy) snapshot would charge the model's own time to this gap.
+        if (
+          observation.firstModelTransportAt === undefined ||
+          observation.firstModelTransportAt >= startedAt
+        ) {
+          observation.observer({
+            phase: "runner_before_mcp_tools",
+            outcome: measurement.outcome,
+            durationSeconds: Math.max(0, startedAt - observation.startedAt) / 1_000,
+          });
+        }
       }
       if (
         !observation.sdkAfterSandboxRecorded &&

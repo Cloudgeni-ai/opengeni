@@ -1,7 +1,7 @@
 import { Fragment, useState, type ReactNode } from "react";
 import { ArchiveIcon, KeyRoundIcon, Trash2Icon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DestructiveConfirm,
   DestructiveConfirmPanel,
@@ -9,10 +9,10 @@ import {
   showUndoToast,
   type ConfirmDependency,
   type DestructiveConfirmContentProps,
-} from "@/components/ui/destructive-confirm";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { PageHeader } from "@/components/ui/page-header";
+} from "@opengeni/react/app/components/ui/destructive-confirm";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import { Alternative, Fork, KitBlock, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import {
   apiKeys,
@@ -423,7 +423,7 @@ export default function DestructiveConfirmSection() {
                   kind: "environment",
                   kindLabel: "Sandbox environment default",
                   name: "Platform CI",
-                  href: "/dev/ui-kit?section=page-variable-sets",
+                  href: "/dev/ui-kit?section=page-general",
                 },
                 {
                   id: "c",

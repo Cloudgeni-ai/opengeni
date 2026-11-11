@@ -1,0 +1,455 @@
+import { describe, expect, mock, test } from "bun:test";
+import type { ConnectProvider } from "@opengeni/connect";
+import { renderToStaticMarkup } from "react-dom/server";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  SocialConnection,
+} from "@opengeni/react/app/types";
+import { IntegrationPage } from "./integration-page";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
+import {
+  nativeCatalogItemNotice,
+  nativeCatalogItemVisible,
+  nativeCatalogProviderId,
+  nativeIntegrationModel,
+  nativeIntegrationVisible,
+  type NativeConnectCatalog,
+} from "@opengeni/react/app/components/capabilities/native-connect-readiness";
+import { featuredConnectors } from "./featured-connectors";
+
+function catalog(providers: Array<[string, ConnectProvider["readiness"]]>): NativeConnectCatalog {
+  return {
+    status: "ready",
+    providers: providers.map(([id, readiness]) => ({
+      id,
+      label: id,
+      family: id,
+      readiness,
+      ownership: ["personal"],
+      setup: ["oauth"],
+    })),
+  };
+}
+function model(id: string, patch: Partial<IntegrationViewModel> = {}): IntegrationViewModel {
+  return {
+    id,
+    name: id,
+    description: "Read your connected account",
+    mark: { monogram: "C" },
+    chip: { label: "Not connected", tone: "idle" },
+    connection: [],
+    options: [],
+    footer: { kind: "setup", onSetup: () => {} },
+    ...patch,
+  };
+}
+function connection(patch: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
+  return {
+    id: "00000000-0000-4000-8000-000000000001",
+    accountId: "00000000-0000-4000-8000-000000000002",
+    workspaceId: "00000000-0000-4000-8000-000000000003",
+    subjectId: "user:test",
+    providerDomain: "gmailmcp.googleapis.com",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: {},
+    createdBySubjectId: "user:test",
+    updatedBySubjectId: "user:test",
+    createdAt: "2026-10-03T00:00:00.000Z",
+    updatedAt: "2026-10-03T00:00:00.000Z",
+    ...patch,
+  };
+}
+function socialConnection(patch: Partial<SocialConnection> = {}): SocialConnection {
+  return {
+    id: "00000000-0000-4000-8000-000000000004",
+    accountId: "00000000-0000-4000-8000-000000000002",
+    workspaceId: "00000000-0000-4000-8000-000000000003",
+    provider: "x",
+    status: "connected",
+    ownership: "workspace",
+    accountHandle: "existing-account",
+    accountName: "Existing account",
+    externalAccountId: null,
+    scopes: [],
+    credentialRef: null,
+    tokenMetadata: {},
+    metadata: {},
+    createdAt: "2026-10-03T00:00:00.000Z",
+    updatedAt: "2026-10-03T00:00:00.000Z",
+    ...patch,
+  };
+}
+function item(patch: Partial<CapabilityCatalogItem> = {}): CapabilityCatalogItem {
+  return {
+    kind: "mcp",
+    mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+    endpointUrl: null,
+    enabled: false,
+    metadata: {},
+    ...patch,
+  } as CapabilityCatalogItem;
+}
+
+describe("native connection readiness", () => {
+  test("fresh native rows use exact provider IDs and require available readiness", () => {
+    for (const [row, provider] of [
+      ["slack", "slack-personal"],
+      ["github", "github-app"],
+      ["outlook-mail", "microsoft-outlook-mail"],
+      ["outlook-calendar", "microsoft-outlook-calendar"],
+      ["outlook-contacts", "microsoft-outlook-contacts"],
+      ["onedrive", "microsoft-onedrive"],
+    ]) {
+      expect(
+        nativeIntegrationVisible(model(row!), catalog([[provider!, "available"]]), false),
+      ).toBe(true);
+      for (const readiness of ["needs_configuration", "unsupported", "operator_only"] as const) {
+        const unavailable = catalog([[provider!, readiness]]);
+        expect(nativeIntegrationVisible(model(row!), unavailable, false)).toBe(false);
+        expect(nativeIntegrationModel(model(row!), unavailable, false, () => {}).footer.kind).toBe(
+          "locked",
+        );
+      }
+      expect(nativeIntegrationVisible(model(row!), catalog([]), false)).toBe(false);
+    }
+    expect(
+      nativeIntegrationVisible(model("slack"), catalog([["slack-personal", "available"]]), true),
+    ).toBe(false);
+    expect(
+      nativeIntegrationVisible(model("slack"), catalog([["slack-bot", "available"]]), true),
+    ).toBe(true);
+  });
+
+  test("a native direct link cannot expose Set up while pending, failed, or unsupported", () => {
+    const retry = mock(() => {});
+    for (const state of [
+      { status: "loading", providers: [] },
+      { status: "error", providers: [] },
+      catalog([]),
+    ] as NativeConnectCatalog[]) {
+      const guarded = nativeIntegrationModel(model("outlook-mail"), state, false, retry);
+      const markup = renderToStaticMarkup(<IntegrationPage model={guarded} onBack={() => {}} />);
+      expect(markup).not.toContain(">Set up<");
+      expect(markup).not.toContain("Not connected");
+      expect(guarded.notice?.title).toBeDefined();
+      if (state.status === "error") {
+        expect(markup).toContain("Retry");
+        guarded.notice!.action!.onClick();
+      }
+    }
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  test("connected and attention management survive unavailable setup", () => {
+    const remove = mock(() => {});
+    for (const label of ["Connected", "Needs attention"] as const) {
+      const connected = model("onedrive", {
+        chip: { label, tone: label === "Connected" ? "ok" : "warn" },
+        footer: {
+          kind: label === "Connected" ? "connected" : "repair",
+          onReconnect: () => {},
+          onDisconnect: remove,
+        },
+      });
+      expect(nativeIntegrationVisible(connected, catalog([]), false)).toBe(true);
+      const guarded = nativeIntegrationModel(connected, catalog([]), false, () => {});
+      expect(guarded.footer).toBe(connected.footer);
+      expect(guarded.chip).toBe(connected.chip);
+    }
+  });
+
+  test("each GitHub section keeps only an action its own provider can start", () => {
+    const connect = mock(() => {});
+    const install = mock(() => {});
+    const fresh = model("github", {
+      footer: { kind: "actions" },
+      sections: [
+        {
+          id: "github-personal",
+          title: "Your GitHub",
+          description: "Work appears under your name.",
+          action: { label: "Connect", onClick: connect, connectProviderId: "github-personal" },
+        },
+        {
+          id: "github-app",
+          title: "Opengeni app",
+          description: "Work appears as the Opengeni bot.",
+          action: { label: "Install app", onClick: install, connectProviderId: "github-app" },
+        },
+      ],
+    });
+    const personalOnly = catalog([
+      ["github-personal", "available"],
+      ["github-app", "needs_configuration"],
+    ]);
+    const guarded = nativeIntegrationModel(fresh, personalOnly, false, () => {});
+    expect(nativeIntegrationVisible(guarded, personalOnly, false)).toBe(true);
+    expect(guarded.chip).toBe(fresh.chip);
+    expect(guarded.sections?.[0]?.action?.onClick).toBe(connect);
+    expect(guarded.sections?.[1]?.action).toBeUndefined();
+    expect(guarded.sections?.[1]?.note).toBeTruthy();
+    const appOnly = nativeIntegrationModel(
+      fresh,
+      catalog([["github-app", "available"]]),
+      false,
+      () => {},
+    );
+    expect(appOnly.sections?.[0]?.action).toBeUndefined();
+    expect(appOnly.sections?.[1]?.action?.onClick).toBe(install);
+    const loading = nativeIntegrationModel(
+      fresh,
+      { status: "loading", providers: [] },
+      false,
+      () => {},
+    );
+    expect(loading.sections?.every((section) => section.action?.disabled === true)).toBe(true);
+    const chooseRepos = {
+      ...fresh,
+      sections: [{ ...fresh.sections![0]!, action: { label: "Choose repos", onClick: connect } }],
+    };
+    expect(nativeIntegrationModel(chooseRepos, catalog([]), false, () => {}).sections).toEqual(
+      chooseRepos.sections,
+    );
+  });
+
+  test("new account controls use their own provider readiness without disabling existing account repair", () => {
+    const add = mock(() => {});
+    const change = mock(() => {});
+    const drive = model("onedrive", {
+      chip: { label: "Connected", tone: "ok" },
+      access: {
+        title: "Connected accounts",
+        editLabel: "Add account",
+        onEdit: add,
+        items: [
+          {
+            name: "Existing account",
+            actions: [
+              { label: "Reconnect", onClick: change },
+              { label: "Remove", onClick: change },
+            ],
+          },
+        ],
+      },
+      footer: { kind: "connected", onReconnect: change, onDisconnect: change },
+    });
+    const readOnly = catalog([["microsoft-outlook-mail", "available"]]);
+    const guarded = nativeIntegrationModel(drive, readOnly, false, () => {});
+    expect(guarded.access?.onEdit).toBeUndefined();
+    expect(guarded.access?.editLabel).toBeUndefined();
+    expect(guarded.access?.items).toBe(drive.access?.items);
+    expect(guarded.footer).toBe(drive.footer);
+    expect(
+      nativeIntegrationModel(drive, catalog([["microsoft-onedrive", "available"]]), false, () => {})
+        .access?.onEdit,
+    ).toBe(add);
+    const folders = {
+      ...drive,
+      access: { ...drive.access!, editLabel: "Change folders", onEdit: change },
+    };
+    expect(nativeIntegrationModel(folders, catalog([]), false, () => {}).access).toBe(
+      folders.access,
+    );
+    for (const id of ["outlook-mail", "outlook-calendar", "outlook-contacts", "sharepoint"]) {
+      expect(
+        nativeIntegrationModel({ ...drive, id }, catalog([]), false, () => {}).access?.onEdit,
+      ).toBeUndefined();
+    }
+  });
+
+  test("saved native credentials and disabled social history remain reachable before catalog enablement", () => {
+    for (const mcpUrl of [
+      "https://gmailmcp.googleapis.com/mcp/v1",
+      "https://mcp.slack.com/mcp",
+      "https://mcp.figma.com/mcp",
+    ]) {
+      const disabled = item({ mcpUrl, source: "registry", enabled: false });
+      const facts = {
+        connections: [
+          connection({
+            providerDomain: new URL(mcpUrl).hostname,
+            metadata: { mcpUrl },
+            status: "needs_reauth",
+          }),
+        ],
+        socialConnections: [],
+      };
+      expect(nativeCatalogItemVisible(disabled, catalog([]), facts)).toBe(true);
+      expect(nativeCatalogItemNotice(disabled, catalog([]), () => {}, facts)).toBeUndefined();
+      const unrelated = {
+        ...facts,
+        connections: [
+          { ...facts.connections[0]!, metadata: { mcpUrl: "https://unrelated.example/mcp" } },
+        ],
+      };
+      expect(nativeCatalogItemVisible(disabled, catalog([]), unrelated)).toBe(false);
+    }
+    for (const provider of ["x", "reddit"] as const) {
+      const disabled = item({
+        kind: "api",
+        enabled: false,
+        surfaceType: "provider_integration",
+        metadata: { providerAdapter: "social", provider, connectionCounts: { connected: 1 } },
+      });
+      for (const status of ["connected", "needs_reauth", "disabled"] as const) {
+        const facts = {
+          connections: [],
+          socialConnections: [socialConnection({ provider, status })],
+        };
+        expect(nativeCatalogItemVisible(disabled, catalog([]), facts)).toBe(true);
+        expect(nativeCatalogItemNotice(disabled, catalog([]), () => {}, facts)).toBeUndefined();
+      }
+      expect(
+        nativeCatalogItemVisible(disabled, catalog([]), { connections: [], socialConnections: [] }),
+      ).toBe(false);
+    }
+    const fiken = item({ kind: "api", surfaceType: "first_party_fiken" });
+    const facts = {
+      connections: [
+        connection({
+          id: "00000000-0000-4000-8000-000000000005",
+          subjectId: null,
+          kind: "api_key",
+          providerDomain: "fiken.no",
+          metadata: { credentialRole: "fiken_api_token" },
+        }),
+      ],
+      socialConnections: [],
+    };
+    expect(nativeCatalogItemVisible(fiken, catalog([]), facts)).toBe(true);
+    expect(nativeCatalogItemNotice(fiken, catalog([]), () => {}, facts)).toBeUndefined();
+    expect(
+      nativeCatalogItemVisible(item(), catalog([]), { connections: null, socialConnections: [] }),
+    ).toBe(true);
+  });
+
+  test("only a fresh registry Figma listing is withheld while approved-client access is unavailable", () => {
+    const stock = item({ source: "registry", mcpUrl: "https://mcp.figma.com/mcp" });
+    expect(nativeCatalogItemVisible(stock, catalog([]))).toBe(false);
+    expect(nativeCatalogItemVisible(stock, { status: "loading", providers: [] })).toBe(false);
+    expect(nativeCatalogItemNotice(stock, catalog([]), () => {})?.title).toBe(
+      "Figma requires an approved client",
+    );
+    expect(nativeCatalogItemNotice(stock, catalog([]), () => {})?.description).toContain(
+      "Opengeni isn't currently listed",
+    );
+    for (const source of ["manual", "configured", "public_registry"] as const) {
+      const custom = { ...stock, source };
+      expect(nativeCatalogItemVisible(custom, catalog([]))).toBe(true);
+      expect(nativeCatalogItemNotice(custom, catalog([]), () => {})).toBeUndefined();
+    }
+    const existing = { ...stock, enabled: true };
+    expect(nativeCatalogItemVisible(existing, catalog([]))).toBe(true);
+    expect(nativeCatalogItemNotice(existing, catalog([]), () => {})).toBeUndefined();
+    const otherEndpoint = { ...stock, mcpUrl: "https://figma.example/mcp" };
+    expect(nativeCatalogItemVisible(otherEndpoint, catalog([]))).toBe(true);
+  });
+
+  test("official Drive uses its dedicated setup readiness while other endpoints stay generic", () => {
+    const drive = item({ mcpUrl: "https://drivemcp.googleapis.com/mcp/v1" });
+    expect(nativeCatalogProviderId(drive)).toBe("google-drive");
+    expect(nativeCatalogItemVisible(drive, catalog([["google-drive", "available"]]))).toBe(true);
+    expect(
+      nativeCatalogItemVisible(drive, catalog([["google-drive", "needs_configuration"]])),
+    ).toBe(false);
+    expect(nativeCatalogItemVisible({ ...drive, enabled: true }, catalog([]))).toBe(true);
+    for (const mcpUrl of [
+      "https://drivemcp.googleapis.com/another-path",
+      "https://drivemcp.googleapis.com/mcp/v1?custom=1",
+    ]) {
+      expect(nativeCatalogProviderId(item({ mcpUrl }))).toBeNull();
+    }
+  });
+
+  test("native built-ins are gated by identity while historical and custom MCP stay visible", () => {
+    expect(nativeCatalogItemVisible(item(), catalog([]))).toBe(false);
+    expect(nativeCatalogItemVisible(item(), catalog([["gmail", "available"]]))).toBe(true);
+    expect(
+      nativeCatalogItemNotice(item(), { status: "error", providers: [] }, () => {})?.action?.label,
+    ).toBe("Retry");
+    expect(nativeCatalogItemVisible(item({ enabled: true }), catalog([]))).toBe(true);
+    expect(nativeCatalogItemNotice(item({ enabled: true }), catalog([]), () => {})).toBeUndefined();
+    for (const mcpUrl of [
+      "https://mcp.linear.app/mcp",
+      "https://custom.example/mcp",
+      "https://gmailmcp.googleapis.com/another-path",
+    ]) {
+      expect(nativeCatalogProviderId(item({ mcpUrl }))).toBeNull();
+      expect(nativeCatalogItemVisible(item({ mcpUrl }), catalog([]))).toBe(true);
+    }
+    expect(nativeCatalogProviderId(item({ mcpUrl: "https://mcp.slack.com/mcp" }))).toBe(
+      "slack-personal",
+    );
+    expect(
+      nativeCatalogProviderId(
+        item({
+          kind: "api",
+          surfaceType: "provider_integration",
+          metadata: { providerAdapter: "social", provider: "reddit" },
+        }),
+      ),
+    ).toBe("reddit");
+    const fiken = item({ kind: "api", surfaceType: "first_party_fiken" });
+    expect(nativeCatalogItemVisible(fiken, catalog([["fiken-token", "available"]]))).toBe(true);
+    expect(nativeCatalogItemVisible(fiken, catalog([["fiken-oauth", "available"]]))).toBe(true);
+    expect(nativeCatalogItemVisible(fiken, catalog([]))).toBe(false);
+  });
+
+  test("a connector whose provider needs an unconfigured operator OAuth client is not offered", () => {
+    const asana = (patch: Partial<CapabilityCatalogItem> = {}) =>
+      item({
+        mcpUrl: "https://mcp.asana.com/v2/mcp",
+        source: "registry",
+        metadata: { curation: { curated: true, featured: true } },
+        runtime: { available: true, notes: null, operatorOAuthClient: { configured: false } },
+        ...patch,
+      });
+    const noAccounts = { connections: [], socialConnections: [] };
+    expect(nativeCatalogItemVisible(asana(), catalog([]), noAccounts)).toBe(false);
+    expect(nativeCatalogItemVisible(asana(), catalog([]))).toBe(false);
+    // Featured is derived from the visible connector set, so it drops out too.
+    expect(
+      featuredConnectors([asana()].filter((row) => nativeCatalogItemVisible(row, catalog([])))),
+    ).toEqual([]);
+    // A configured operator client, an enabled install, an existing account, or
+    // an unreadable account list keep the row reachable.
+    const configured = asana({
+      runtime: { available: true, notes: null, operatorOAuthClient: { configured: true } },
+    });
+    expect(nativeCatalogItemVisible(configured, catalog([]), noAccounts)).toBe(true);
+    expect(featuredConnectors([configured]).map((row) => row.mcpUrl)).toEqual([
+      "https://mcp.asana.com/v2/mcp",
+    ]);
+    expect(nativeCatalogItemVisible(asana({ enabled: true }), catalog([]), noAccounts)).toBe(true);
+    expect(
+      nativeCatalogItemVisible(asana(), catalog([]), {
+        connections: [
+          connection({
+            providerDomain: "mcp.asana.com",
+            metadata: { mcpUrl: "https://mcp.asana.com/v2/mcp" },
+          }),
+        ],
+        socialConnections: [],
+      }),
+    ).toBe(true);
+    expect(
+      nativeCatalogItemVisible(asana(), catalog([]), { connections: null, socialConnections: [] }),
+    ).toBe(true);
+    // Rows without the requirement keep the existing behavior.
+    expect(
+      nativeCatalogItemVisible(
+        item({ mcpUrl: "https://mcp.linear.app/mcp", source: "registry" }),
+        catalog([]),
+        noAccounts,
+      ),
+    ).toBe(true);
+  });
+});

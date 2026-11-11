@@ -5,6 +5,11 @@ import {
   withXaiSubscriptionCatalogProvider,
   withOrganizationGatewayCatalogProvider,
   withOrganizationOpenRouterCatalogProvider,
+  withOrganizationOpperCatalogProvider,
+  withOrganizationDirectCatalogProvider,
+  withOrganizationCompatibleProviders,
+  organizationCompatibleProviderId,
+  organizationDirectModelIdPrefix,
 } from "@opengeni/config";
 import { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/contracts";
 import {
@@ -13,19 +18,42 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  deliverSubscriptionCoreWake,
   getModelConnectionAccess,
+  listModelConnectionAdministeredWorkspaceIds,
+  listOrganizationAdministrationMembers,
+  nestedPostgresSqlState,
+  readSubscriptionCoreProviderModelConnectionAccess,
+  removeSubscriptionCoreProviderModelConnectionFromWorkspace,
+  subscriptionCoreAccessChangeWake,
+  ModelConnectionAccessForbiddenError,
+  SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessMoveRequiredError,
+  SubscriptionCoreAccessPeopleUnlistableError,
+  SubscriptionCoreAccessPersonNotInOrganizationError,
+  SubscriptionCoreAccessWorkspaceNotAdministeredError,
+  ModelConnectionWorkspaceNotInOrganizationError,
   updateModelConnectionAccess,
+  updateSubscriptionCoreProviderModelConnectionAccess,
   getOrganizationAdministrationOverview,
-  getXaiSubscriptionAccountAuthoritySnapshot,
+  listSharedWorkspacesForAccount,
   listOrganizationModelProviderCustomModels,
+  getOrganizationModelProviderConnection,
   getWorkspaceProviderApiKeyConnectionMetadata,
+  listOrganizationCompatibleEndpoints,
   type ModelConnectionTarget,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
-import { managedCookieHuman, requireScopeMutation } from "./supergrok";
+import {
+  requireOrganizationCodexHuman,
+  requireOrganizationSubscriptionAdministrator,
+  requireOrganizationSubscriptionMutationOrigin,
+} from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { parsePathParam } from "../http/path-identifier";
+import { parseRequestBody } from "../http/request-body";
 
 const Kind = z.enum([
   "codex",
@@ -34,61 +62,98 @@ const Kind = z.enum([
   "openrouter",
   "anthropic",
   "claude_subscription",
+  "opper",
+  "openai",
+  "azure_openai",
+  "openai_compatible",
 ]);
 function modelPrefix(target: ModelConnectionTarget) {
+  if (target.kind === "openai_compatible")
+    return `${organizationCompatibleProviderId(target.connectionId)}/`;
+  if (target.kind === "openai" || target.kind === "azure_openai")
+    return organizationDirectModelIdPrefix(target.kind);
   if (target.kind === "anthropic" || target.kind === "claude_subscription")
     return (
       claudeProviderId(target.kind, target.workspaceId === null ? "organization" : "workspace") +
       "/"
     );
   if (target.kind === "codex" || target.kind === "supergrok") return `${target.kind}/`;
-  return `${target.workspaceId === null ? "organization" : "workspace"}-${target.kind === "vercel_gateway" ? "gateway" : "openrouter"}/`;
+  return `${target.workspaceId === null ? "organization" : "workspace"}-${target.kind === "vercel_gateway" ? "gateway" : target.kind === "opper" ? "opper" : "openrouter"}/`;
+}
+
+/**
+ * Codex, SuperGrok and Claude subscription access policies live on the shared
+ * core connection; every other connection kind keeps its own access row.
+ */
+function onSubscriptionCore(kind: ModelConnectionTarget["kind"]): boolean {
+  return kind === "codex" || kind === "supergrok" || kind === "claude_subscription";
 }
 
 export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
   for (const scope of ["organizations", "workspaces"] as const) {
     const path = `/v1/${scope}/:scopeId/model-connections/:kind/:connectionId/access`;
-    async function target(c: Context, mutate: boolean): Promise<ModelConnectionTarget> {
-      const kind = Kind.parse(c.req.param("kind"));
+    async function target(
+      c: Context,
+      mutate: boolean,
+    ): Promise<{ connection: ModelConnectionTarget; core: boolean; person: boolean }> {
+      const kind = parsePathParam(c, "kind", Kind);
       if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled)
         throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
-      const scopeId = z.string().uuid().parse(c.req.param("scopeId"));
-      let connectionId = c.req.param("connectionId")!;
-      if (kind === "codex" || kind === "supergrok")
-        connectionId = z.string().uuid().parse(connectionId);
+      const scopeId = parsePathParam(c, "scopeId", z.string().uuid());
+      let connectionId = parsePathParam(
+        c,
+        "connectionId",
+        kind === "codex" ||
+          kind === "supergrok" ||
+          kind === "claude_subscription" ||
+          kind === "openai_compatible"
+          ? z.string().uuid()
+          : z.union([z.literal("current"), z.string().uuid()]),
+      );
       if (scope === "organizations") {
-        if (mutate) requireSameOriginBrowserMutation(c, deps);
-        const human = await requireOrganizationCodexHuman(c, deps, scopeId);
+        // A subscription account's access is the subscription writers'; they
+        // accept every account administrator. Gateway and direct provider
+        // connections stay with the organization's people.
+        const subscription =
+          kind === "codex" || kind === "supergrok" || kind === "claude_subscription";
+        if (mutate) {
+          if (subscription) requireOrganizationSubscriptionMutationOrigin(c, deps);
+          else requireSameOriginBrowserMutation(c, deps);
+        }
+        const human = subscription
+          ? await requireOrganizationSubscriptionAdministrator(c, deps, scopeId)
+          : await requireOrganizationCodexHuman(c, deps, scopeId);
         return {
-          kind,
-          connectionId,
-          accountId: scopeId,
-          workspaceId: null,
-          subjectId: human.subjectId,
+          connection: {
+            kind,
+            connectionId,
+            accountId: scopeId,
+            workspaceId: null,
+            subjectId: human.subjectId,
+          },
+          core: onSubscriptionCore(kind),
+          person: human.accountAdministrator !== true,
         };
       }
+      // Workspace OpenAI and Azure OpenAI connections are exact direct
+      // connections with no shared access policy; only the organization's has one.
+      if (kind === "openai" || kind === "azure_openai" || kind === "openai_compatible")
+        throw new HTTPException(404, { message: "Connection not found" });
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
-      if (kind === "supergrok") {
-        const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
-          workspaceId: scopeId,
-          subjectId: grant.subjectId,
-          credentialId: connectionId,
-        });
-        if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
-        if (snapshot.scope === "user") {
-          const human = await managedCookieHuman(c, deps);
-          if (!human || human.subjectId !== grant.subjectId)
-            throw new HTTPException(403, {
-              message: "Subscription owner browser session required",
-            });
-        }
-        if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
-      } else if (mutate) await requireAccessGrant(c, deps, scopeId, "workspace:admin");
+      // On the core a SuperGrok or Claude access policy is a shared connection's, which
+      // the core editor authorizes; only the legacy pools have private rows.
+      const sharedCore = kind === "supergrok" || kind === "claude_subscription";
+      if (mutate) {
+        // A core Claude change keeps the legacy same-origin browser check.
+        if (kind === "claude_subscription" && !c.req.header("authorization"))
+          requireSameOriginBrowserMutation(c, deps);
+        await requireAccessGrant(c, deps, scopeId, "workspace:admin");
+      }
       if (
         kind === "vercel_gateway" ||
         kind === "openrouter" ||
         kind === "anthropic" ||
-        kind === "claude_subscription"
+        kind === "opper"
       ) {
         const metadata = await getWorkspaceProviderApiKeyConnectionMetadata(deps.db, scopeId, kind);
         if (!metadata || (connectionId !== "current" && metadata.connectionId !== connectionId))
@@ -96,18 +161,40 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         connectionId = metadata.connectionId;
       }
       return {
-        kind,
-        connectionId,
-        accountId: grant.accountId,
-        workspaceId: scopeId,
-        subjectId: grant.subjectId,
+        connection: {
+          kind,
+          connectionId,
+          accountId: grant.accountId,
+          workspaceId: scopeId,
+          subjectId: grant.subjectId,
+        },
+        core:
+          kind === "supergrok" || kind === "claude_subscription"
+            ? sharedCore
+            : onSubscriptionCore(kind),
+        person: true,
       };
     }
     app.get(path, async (c) => {
       c.header("cache-control", "private, no-store");
-      const connection = await target(c, false);
-      const policy = await getModelConnectionAccess(deps.db, connection);
+      const { connection, core, person } = await target(c, false);
+      const coreAccess = core
+        ? await readSubscriptionCoreProviderModelConnectionAccess(deps.db, connection)
+        : null;
+      const policy = core
+        ? coreAccess && {
+            ...coreAccess.policy,
+            allowedPeople: coreAccess.policy.allowedPeople ?? undefined,
+          }
+        : await getModelConnectionAccess(deps.db, connection);
       if (!policy) throw new HTTPException(404, { message: "Connection not found" });
+      // Shared core connections at organization scope can be limited to people
+      // and report the workspaces that use them as their own (design 5.4).
+      const organizationCore = coreAccess !== null && connection.workspaceId === null;
+      // A workspace's own subscription account can also serve other shared
+      // workspaces (D-52): its route offers the ones the person administers,
+      // plus the ones it already serves.
+      const workspaceCore = coreAccess !== null && connection.workspaceId !== null;
       let settings =
         connection.workspaceId === null
           ? (await deps.resolveCatalogSettings()).settings
@@ -119,15 +206,40 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             ).settings;
       settings = withCodexCatalogProvider(withXaiSubscriptionCatalogProvider(settings));
       let workspaces: Array<{ id: string; name: string }> = [];
+      if (workspaceCore && connection.workspaceId !== null) {
+        const [administered, shared] = await Promise.all([
+          listModelConnectionAdministeredWorkspaceIds(deps.db, {
+            accountId: connection.accountId,
+            workspaceId: connection.workspaceId,
+            subjectId: connection.subjectId,
+          }),
+          listSharedWorkspacesForAccount(deps.db, connection.accountId),
+        ]);
+        const offered = new Set([...administered, ...(coreAccess.policy.allowedWorkspaces ?? [])]);
+        workspaces = shared
+          .filter((workspace) => offered.has(workspace.id))
+          .map(({ id, name }) => ({ id, name }));
+      }
       if (connection.workspaceId === null) {
         const actor = {
           organizationId: connection.accountId,
           actorSubjectId: connection.subjectId,
         };
-        workspaces = (await getOrganizationAdministrationOverview(deps.db, actor)).workspaces.map(
-          ({ id, name }) => ({ id, name }),
-        );
-        if (connection.kind === "anthropic" || connection.kind === "claude_subscription") {
+        // The administration overview and organization custom models are
+        // read for a person; an account administrator without one (for
+        // example the deployment's access key) gets the organization's shared
+        // workspaces and the provider's default catalog.
+        workspaces = person
+          ? (await getOrganizationAdministrationOverview(deps.db, actor)).workspaces.map(
+              ({ id, name }) => ({ id, name }),
+            )
+          : (await listSharedWorkspacesForAccount(deps.db, connection.accountId)).map(
+              ({ id, name }) => ({ id, name }),
+            );
+        if (
+          person &&
+          (connection.kind === "anthropic" || connection.kind === "claude_subscription")
+        ) {
           const customModels = await listOrganizationModelProviderCustomModels(deps.db, {
             organizationId: connection.accountId,
             actorSubjectId: connection.subjectId,
@@ -137,7 +249,11 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             [connection.kind]: { models: customModels },
           });
         }
-        if (connection.kind === "vercel_gateway" || connection.kind === "openrouter") {
+        if (
+          connection.kind === "vercel_gateway" ||
+          connection.kind === "openrouter" ||
+          connection.kind === "opper"
+        ) {
           const models = await listOrganizationModelProviderCustomModels(deps.db, {
             ...actor,
             providerKind: connection.kind,
@@ -145,9 +261,62 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           settings =
             connection.kind === "vercel_gateway"
               ? withOrganizationGatewayCatalogProvider(settings, models)
-              : withOrganizationOpenRouterCatalogProvider(settings, models);
+              : connection.kind === "opper"
+                ? withOrganizationOpperCatalogProvider(settings, models)
+                : withOrganizationOpenRouterCatalogProvider(settings, models);
+        }
+        if (connection.kind === "openai" || connection.kind === "azure_openai") {
+          const [models, direct] = await Promise.all([
+            listOrganizationModelProviderCustomModels(deps.db, {
+              ...actor,
+              providerKind: connection.kind,
+            }),
+            getOrganizationModelProviderConnection(deps.db, {
+              ...actor,
+              providerKind: connection.kind,
+            }),
+          ]);
+          settings = withOrganizationDirectCatalogProvider(settings, connection.kind, {
+            endpoint: direct?.endpoint ?? null,
+            models,
+          });
+        }
+        if (connection.kind === "openai_compatible") {
+          const endpoint = (await listOrganizationCompatibleEndpoints(deps.db, actor)).find(
+            (candidate) => candidate.endpoint.id === connection.connectionId,
+          );
+          if (endpoint)
+            settings = withOrganizationCompatibleProviders(settings, [
+              { ...endpoint.endpoint, models: endpoint.models },
+            ]);
         }
       }
+      // The people an administrator can choose, or null when the account
+      // can't be limited to people or the organization has more members than
+      // its member list shows (people are then not offered).
+      const people =
+        organizationCore && coreAccess?.peopleSupported && person
+          ? await listOrganizationAdministrationMembers(deps.db, {
+              organizationId: connection.accountId,
+              actorSubjectId: connection.subjectId,
+            }).then(
+              (members) =>
+                members
+                  .filter(
+                    (member) =>
+                      member.status === "active" &&
+                      member.revokedAt === null &&
+                      member.subjectId.startsWith("user:"),
+                  )
+                  .map(({ id, name, email }) => ({ id, name, email })),
+              (error: unknown) => {
+                // The member list refuses organizations above its bound
+                // (SQLSTATE 54000); people are then not offered.
+                if (nestedPostgresSqlState(error) === "54000") return null;
+                throw error;
+              },
+            )
+          : null;
       return c.json(
         ModelConnectionAccessResponse.parse({
           policy,
@@ -155,32 +324,126 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           models: configuredModels(settings)
             .filter((model) => model.id.startsWith(modelPrefix(connection)))
             .map(({ id, label }) => ({ id, label })),
-          personalWorkspacesSupported:
-            connection.workspaceId === null &&
-            (connection.kind === "codex" || connection.kind === "supergrok"),
+          // Every organization account, subscription or API key, can serve
+          // Personal workspaces; a workspace's own account serves only it.
+          personalWorkspacesSupported: connection.workspaceId === null,
+          ...(organizationCore
+            ? {
+                ...(people ? { peopleSupported: true, people } : { peopleSupported: false }),
+                localWorkspaceIds: coreAccess.localWorkspaceIds,
+                managedByWorkspaceId: coreAccess.managedByWorkspaceId,
+                ...(coreAccess.personalSharingSupported ? { personalSharingSupported: true } : {}),
+              }
+            : workspaceCore
+              ? {
+                  peopleSupported: false,
+                  localWorkspaceIds: coreAccess.localWorkspaceIds,
+                  managedByWorkspaceId: coreAccess.managedByWorkspaceId,
+                }
+              : {}),
         }),
       );
     });
     app.put(path, async (c) => {
-      const connection = await target(c, true);
-      const parsed = ModelConnectionAccessPolicy.safeParse(await c.req.json().catch(() => null));
-      if (!parsed.success)
-        throw new HTTPException(422, { message: "Invalid connection access policy" });
-      const policy = parsed.data;
+      // Access of a provider on the shared core lives there; the frozen legacy row is never written.
+      const { connection, core } = await target(c, true);
+      const parsed = parseRequestBody(
+        ModelConnectionAccessPolicy,
+        await c.req.json().catch(() => null),
+        { status: 422, message: "Invalid connection access policy" },
+      );
+      const policy = parsed;
+      if (policy.sharePersonal && (!core || connection.workspaceId !== null))
+        throw new HTTPException(422, {
+          message: "Personal sharing requires the organization subscription route",
+        });
+      if (policy.moveToOrganization && (!core || connection.workspaceId !== null))
+        throw new HTTPException(422, {
+          message: "Only the organization can take over a workspace's account",
+        });
       if (policy.allowedModels?.some((id) => !id.startsWith(modelPrefix(connection))))
         throw new HTTPException(422, {
           message: "Model belongs to a different connection provider",
         });
-      if (connection.workspaceId !== null && policy.allowedWorkspaces !== null)
+      // A workspace's own subscription account can serve chosen shared
+      // workspaces (D-52); other workspace connections serve only their own.
+      if (
+        connection.workspaceId !== null &&
+        (policy.allowedPeople != null ||
+          policy.allowPersonalWorkspaces ||
+          (!core && policy.allowedWorkspaces !== null))
+      )
         throw new HTTPException(422, {
           message: "Workspace connections cannot be assigned to other workspaces",
         });
-      const updated = await updateModelConnectionAccess(deps.db, connection, policy);
+      if (!core && policy.allowedPeople != null)
+        throw new HTTPException(422, { message: "This account cannot be limited to people" });
+      let updated;
+      try {
+        updated = core
+          ? await updateSubscriptionCoreProviderModelConnectionAccess(deps.db, connection, policy)
+          : await updateModelConnectionAccess(deps.db, connection, policy);
+      } catch (error) {
+        if (error instanceof ModelConnectionWorkspaceNotInOrganizationError)
+          throw new HTTPException(422, { message: error.message });
+        if (
+          error instanceof SubscriptionCoreAccessPersonNotInOrganizationError ||
+          error instanceof SubscriptionCoreAccessPeopleUnlistableError ||
+          error instanceof SubscriptionCoreAccessInvalidError ||
+          error instanceof SubscriptionCoreAccessMoveRequiredError
+        )
+          throw new HTTPException(422, { message: error.message });
+        if (
+          error instanceof ModelConnectionAccessForbiddenError ||
+          error instanceof SubscriptionCoreAccessWorkspaceNotAdministeredError
+        )
+          throw new HTTPException(403, { message: error.message });
+        throw error;
+      }
       if (!updated)
         throw new HTTPException(409, {
           message: "Connection access changed. Reload before saving.",
         });
+      if (core) {
+        // A wider scope or model list can make waiting work placeable.
+        try {
+          const change = subscriptionCoreAccessChangeWake(connection.kind, connection.accountId);
+          if (change)
+            await deliverSubscriptionCoreWake(
+              deps.db,
+              change.provider,
+              change.wake,
+              change.displayName,
+            );
+        } catch {
+          // Every core waiter has its own bounded recheck; a lost wake only delays.
+        }
+      }
       return c.json(updated);
     });
+    if (scope === "workspaces")
+      // A workspace another workspace's own subscription account serves can
+      // stop using it here; only its owner changes it otherwise (D-52).
+      app.delete(path, async (c) => {
+        const { connection, core } = await target(c, true);
+        if (!core || connection.workspaceId === null)
+          throw new HTTPException(404, { message: "Connection not found" });
+        let removed;
+        try {
+          removed = await removeSubscriptionCoreProviderModelConnectionFromWorkspace(deps.db, {
+            ...connection,
+            workspaceId: connection.workspaceId,
+          });
+        } catch (error) {
+          if (error instanceof ModelConnectionAccessForbiddenError)
+            throw new HTTPException(403, { message: error.message });
+          throw error;
+        }
+        if (!removed)
+          throw new HTTPException(404, {
+            message: "No other workspace's account is shared with this workspace under that id",
+          });
+        return c.body(null, 204);
+      });
   }
 }

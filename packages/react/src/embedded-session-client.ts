@@ -1,3 +1,4 @@
+import type { ChatClient, OpenGeniClient } from "@opengeni/sdk";
 import type { ComposerDraft } from "@opengeni/sdk";
 import type { EmbeddedSessionClientLike } from "./client";
 
@@ -7,12 +8,12 @@ export type ComposerDraftMapContext = {
   sessionId: string;
 };
 
-export type CreateEmbeddedSessionClientOptions = {
+export type CreateEmbeddedSessionClientOptions<Client extends ChatClient = OpenGeniClient> = {
   /**
    * Explicit host-owned method replacements. Methods inherited from `base`
    * retain `base` as their receiver; overrides retain this object as theirs.
    */
-  overrides?: Partial<EmbeddedSessionClientLike> | undefined;
+  overrides?: Partial<EmbeddedSessionClientLike<Client>> | undefined;
   /** Presentation/policy projection for every draft entering the React layer. */
   mapComposerDraft?:
     | ((draft: ComposerDraft, context: ComposerDraftMapContext) => ComposerDraft)
@@ -36,7 +37,14 @@ const requiredMethods = [
   "pauseSession",
   "resumeSession",
   "sendApprovalDecision",
-] as const satisfies readonly (keyof EmbeddedSessionClientLike)[];
+] as const satisfies readonly (keyof EmbeddedSessionClientLike<ChatClient>)[];
+
+/** Bound when the base or an override provides them; the session works without. */
+const optionalMethods = [
+  "setWorkspaceInferenceState",
+  "updateSessionAttention",
+  "listEventPage",
+] as const satisfies readonly (keyof EmbeddedSessionClientLike<ChatClient>)[];
 
 /**
  * Build the exact client required by `@opengeni/react/session` from a full SDK
@@ -46,10 +54,18 @@ const requiredMethods = [
  */
 export function createEmbeddedSessionClient(
   base: EmbeddedSessionClientLike,
-  options: CreateEmbeddedSessionClientOptions = {},
-): EmbeddedSessionClientLike {
+  options?: CreateEmbeddedSessionClientOptions,
+): EmbeddedSessionClientLike;
+export function createEmbeddedSessionClient(
+  base: EmbeddedSessionClientLike<ChatClient>,
+  options?: CreateEmbeddedSessionClientOptions<ChatClient>,
+): EmbeddedSessionClientLike<ChatClient>;
+export function createEmbeddedSessionClient(
+  base: EmbeddedSessionClientLike<ChatClient>,
+  options: CreateEmbeddedSessionClientOptions<ChatClient> = {},
+): EmbeddedSessionClientLike<ChatClient> {
   const overrides = options.overrides ?? {};
-  const client = {} as EmbeddedSessionClientLike;
+  const client = {} as EmbeddedSessionClientLike<ChatClient>;
   for (const key of requiredMethods) {
     const override = overrides[key];
     const method = override ?? base[key];
@@ -59,13 +75,12 @@ export function createEmbeddedSessionClient(
     client[key] = method.bind(override === undefined ? base : overrides) as never;
   }
 
-  const inferenceOverride = overrides.setWorkspaceInferenceState;
-  const inferenceBase = base.setWorkspaceInferenceState;
-  const inferenceMethod = inferenceOverride ?? inferenceBase;
-  if (typeof inferenceMethod === "function") {
-    client.setWorkspaceInferenceState = inferenceMethod.bind(
-      inferenceOverride === undefined ? base : overrides,
-    );
+  for (const key of optionalMethods) {
+    const override = overrides[key];
+    const method = override ?? base[key];
+    if (typeof method === "function") {
+      client[key] = method.bind(override === undefined ? base : overrides) as never;
+    }
   }
 
   const mapDraft = options.mapComposerDraft;

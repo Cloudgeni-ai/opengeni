@@ -1,17 +1,32 @@
-import { installAnalyticsObserver } from "./analytics-observer";
-import { clearLoginAnalytics, takeSuccessfulLogin } from "./analytics-login";
+import type {
+  AnalyticsEventName,
+  AnalyticsProperties,
+} from "@opengeni/react/app/lib/analytics-types";
+export type {
+  AnalyticsEventName,
+  AnalyticsProperties,
+  AnalyticsProperty,
+} from "@opengeni/react/app/lib/analytics-types";
+import { installAnalyticsObserver } from "@opengeni/react/app/lib/analytics-observer";
+import { clearLoginAnalytics, takeSuccessfulLogin } from "@opengeni/react/app/lib/analytics-login";
+import {
+  beginIntegrationConnect,
+  captureIntegrationConnectReturn,
+  modelConnectionClass,
+} from "@opengeni/react/app/lib/integration-connect-analytics";
 import {
   ANALYTICS_COLLECTION_ENABLED_EVENT,
   analyticsHasProviders,
   storedAnalyticsConsent,
-} from "@/lib/analytics-consent";
-import type { AnalyticsConsent } from "@/lib/analytics-consent";
-import type { ClientConfig } from "@/types";
+} from "@opengeni/react/app/lib/analytics-consent";
+import type { AnalyticsConsent } from "@opengeni/react/app/lib/analytics-consent";
+import type { ClientConfig } from "@opengeni/react/app/types";
 import {
   journeyMilestone,
   journeyOperation,
   journeyOutcome,
   journeyPage,
+  type JourneyMilestone,
 } from "./analytics-journey";
 import {
   isSignupAttributionValue,
@@ -20,35 +35,7 @@ import {
   type AuthReturnEvent,
 } from "./signup-attribution";
 
-export type AnalyticsEventName =
-  | "signup_submitted"
-  | "workspace_created"
-  | "session_started"
-  | "login_completed"
-  | "app_opened"
-  | "app_active"
-  | "navigation_clicked"
-  | "product_clicked"
-  | "credits_required_viewed"
-  | "session_start_blocked"
-  | "session_start_blocker_viewed"
-  | "session_create_attempted"
-  | "session_create_finished"
-  | "session_command_attempted"
-  | "session_command_finished"
-  | "model_connection_attempted"
-  | "model_connection_finished"
-  | "model_connection_resolved"
-  | "signup_completed"
-  | "email_verified"
-  | "organization_setup_completed"
-  | "checkout_started"
-  | "checkout_completed"
-  | "first_turn_completed";
-
 type AnalyticsConfig = ClientConfig["analytics"];
-export type AnalyticsProperty = boolean | number | string;
-export type AnalyticsProperties = Record<string, AnalyticsProperty>;
 export type AnalyticsIdentity = Readonly<{
   userId: string;
   accountId: string | null;
@@ -78,6 +65,12 @@ let ga4Active = false;
 let reoActive = false;
 let latestPathname: string | null = null;
 let latestSearch = "";
+/**
+ * Pages whose address is itself private: a chat share link's address is the
+ * key to the conversation, so it must never reach a provider that records
+ * the ambient URL.
+ */
+const PRIVATE_ADDRESS_PATH = /^\/share(?:\/|$)/u;
 let lastPageViewKey: string | null = null;
 let identityGeneration = 0;
 let activeIdentity: AnalyticsIdentity | null = null;
@@ -97,14 +90,24 @@ declare global {
   }
 }
 
+/**
+ * Whether the current address must stay away from GA4 and Reo: a route with
+ * a query, or a page whose address is private (a chat share link). PostHog
+ * still runs there, with every URL property removed before it is sent.
+ */
+function ambientAddressPrivate(): boolean {
+  return Boolean(latestSearch) || PRIVATE_ADDRESS_PATH.test(latestPathname ?? "");
+}
+
 export function syncAnalytics(config: AnalyticsConfig, pathname: string, search = ""): void {
   suspended = false;
   activeConfig = config;
   latestPathname = pathname;
   latestSearch = search;
-  // Reo observes the ambient URL itself. Keep it off query-bearing routes;
-  // PostHog and GA4 below receive only our explicit content-free projection.
-  if (search) {
+  // Reo observes the ambient URL itself. Keep it off query-bearing routes and
+  // private addresses; PostHog and GA4 below receive only our explicit
+  // content-free projection.
+  if (ambientAddressPrivate()) {
     try {
       window.Reo?.unload?.();
     } catch {
@@ -119,7 +122,7 @@ export function syncAnalytics(config: AnalyticsConfig, pathname: string, search 
   }
   if (initialization) {
     if (providersReady) {
-      if (!search) {
+      if (!ambientAddressPrivate()) {
         if (config.providers.reo && !reoActive)
           void initializeReo(config.providers.reo.clientId).catch(() => {});
         if (config.providers.ga4 && !ga4Active)
@@ -183,12 +186,12 @@ export function captureAnalyticsEvent(
       return;
     const facts = { ...context, ...properties };
     posthogClient?.capture(name, facts);
-    if (ga4Active && !latestSearch)
+    if (ga4Active && !ambientAddressPrivate())
       window.gtag?.("event", name, {
         ...facts,
         page_location: window.location.origin,
         page_referrer: "",
-        page_title: "OpenGeni",
+        page_title: "Opengeni",
       });
   };
   if (providersReady && analyticsCollectionAllowed()) {
@@ -218,6 +221,7 @@ async function initializeProviders(config: AnalyticsConfig): Promise<void> {
       applyActiveIdentity();
       dispatchPageView(latestPathname);
       captureAuthReturn(takePendingAuthReturn());
+      captureIntegrationConnectReturn();
       window.dispatchEvent?.(new Event(ANALYTICS_COLLECTION_ENABLED_EVENT));
     }
   });
@@ -258,18 +262,18 @@ function dispatchPageView(pathname: string): void {
     $current_url: `${window.location.origin}${pathname}`,
     ...facts,
   });
-  if (ga4MeasurementId && ga4Active && !latestSearch) {
+  if (ga4MeasurementId && ga4Active && !ambientAddressPrivate()) {
     window.gtag?.("event", "page_view", {
       page_location: `${window.location.origin}${pathname}`,
       page_referrer: "",
-      page_title: "OpenGeni",
+      page_title: "Opengeni",
       send_to: ga4MeasurementId,
     });
   }
 }
 
 async function initializeReo(clientId: string): Promise<void> {
-  if (!analyticsCollectionAllowed() || latestSearch) {
+  if (!analyticsCollectionAllowed() || ambientAddressPrivate()) {
     return;
   }
   if (!window.Reo) {
@@ -280,14 +284,14 @@ async function initializeReo(clientId: string): Promise<void> {
     script.src = `https://static.reo.dev/${encodeURIComponent(clientId)}/reo.js`;
     await appendExternalScript(script);
   }
-  if (!analyticsCollectionAllowed() || latestSearch || !window.Reo) {
+  if (!analyticsCollectionAllowed() || ambientAddressPrivate() || !window.Reo) {
     return;
   }
   reoActive = true;
   window.Reo.init({
     clientID: clientId,
     // Reo's beacon otherwise observes clipboard/code-copy and supported AI-widget
-    // interactions. OpenGeni deliberately permits page intent only.
+    // interactions. Opengeni deliberately permits page intent only.
     dnt: ["copy", "ai"],
   });
 }
@@ -478,9 +482,10 @@ export function beginAnalyticsRequest(
 }
 
 /** A funnel milestone is reported only when its request was accepted. */
-function milestoneFinisher(
-  name: "checkout_started" | "organization_setup_completed",
-): (status: number | null) => void {
+function milestoneFinisher({
+  name,
+  properties,
+}: JourneyMilestone): (status: number | null) => void {
   if (!analyticsCollectionAllowed()) return () => {};
   const generation = identityGeneration;
   const consentGeneration = initializationGeneration;
@@ -489,20 +494,26 @@ function milestoneFinisher(
     if (finished) return;
     finished = true;
     if (generation !== identityGeneration || consentGeneration !== initializationGeneration) return;
-    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name);
+    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name, properties);
   };
 }
 
 /** Bind asynchronous provider results to the initiating identity and consent. */
 export function trackModelConnection(
-  provider: "codex" | "supergrok" | "ai-gateway" | "openrouter",
+  provider: "codex" | "supergrok" | "ai-gateway" | "openrouter" | "opper",
   workspaceId: string,
 ): (outcome: "connected" | "expired" | "denied" | "outcome_unknown") => void {
   const generation = identityGeneration;
   const consentGeneration = initializationGeneration;
   const allowed = analyticsCollectionAllowed();
+  // The same flow is also one step of the integration connect journey.
+  const journey = beginIntegrationConnect(
+    modelConnectionClass(provider) ?? "other",
+    provider === "codex" || provider === "supergrok" ? "device_code" : "api_key",
+  );
   let finished = false;
   return (outcome) => {
+    journey.finish(outcome === "expired" ? "abandoned" : outcome);
     if (
       !allowed ||
       finished ||
@@ -530,7 +541,7 @@ function resetProviderIdentity(force = false): void {
 }
 
 async function initializeGa4(measurementId: string): Promise<void> {
-  if (!analyticsCollectionAllowed() || latestSearch) {
+  if (!analyticsCollectionAllowed() || ambientAddressPrivate()) {
     return;
   }
   window.dataLayer ??= [];
@@ -553,7 +564,7 @@ async function initializeGa4(measurementId: string): Promise<void> {
     allow_google_signals: false,
     page_location: window.location.origin,
     page_referrer: "",
-    page_title: "OpenGeni",
+    page_title: "Opengeni",
     send_page_view: false,
   });
 

@@ -220,12 +220,22 @@ impl GlobalSpoolBudget {
         if bytes == 0 {
             return;
         }
-        let result = self
-            .used_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_sub(bytes)
-            });
-        debug_assert!(result.is_ok(), "spool ledger release exceeds usage");
+        let mut used = self.used_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = used.checked_sub(bytes) else {
+                debug_assert!(used >= bytes, "spool ledger release exceeds usage");
+                return;
+            };
+            match self.used_bytes.compare_exchange_weak(
+                used,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => used = actual,
+            }
+        }
     }
 }
 
@@ -554,6 +564,24 @@ impl RetentionLog {
     #[must_use]
     pub fn floor(&self) -> u64 {
         self.floor
+    }
+
+    /// Continues a predecessor process's log: every frame up to `floor` was
+    /// already acknowledged, so the next append is assigned `floor + 1`. The
+    /// caller re-appends the predecessor's retained frames in order; their
+    /// sequence numbers then match the ones the consumer has already seen.
+    #[must_use]
+    pub fn resuming_after(
+        config: RetentionConfig,
+        spool_dir: PathBuf,
+        memory_budget: Arc<GlobalMemoryBudget>,
+        spool_budget: Arc<GlobalSpoolBudget>,
+        floor: u64,
+    ) -> Self {
+        let mut log = Self::with_budgets(config, spool_dir, memory_budget, spool_budget);
+        log.floor = floor;
+        log.next_seq = floor.saturating_add(1);
+        log
     }
 
     /// The highest assigned sequence number (0 = nothing appended yet).

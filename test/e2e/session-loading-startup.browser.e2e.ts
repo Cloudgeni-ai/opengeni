@@ -1,12 +1,13 @@
 // Production app + staged API responses, not a component imitation.
-// The production artifact is built once and shared by both viewport tests.
+// The production artifact is built once and shared by the suite.
 import { afterAll, beforeAll, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
-import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { OPENGENI_API_CONTRACT_REVISION, type BrowserSession } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
 const repo = new URL("../..", import.meta.url).pathname;
@@ -17,6 +18,7 @@ const accountId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
 const otherSessionId = "33333333-3333-4333-8333-444444444444";
 const turnId = "44444444-4444-4444-8444-444444444444";
+const bundleRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 let base: string;
 let web: StartedProcess | undefined;
 let browser: Browser;
@@ -34,7 +36,11 @@ beforeAll(async () => {
     // with one build for the suite rather than a build per viewport/state.
     const build = await runCommand(["bun", "run", "build"], {
       cwd: `${repo}/apps/web`,
-      env: { NODE_ENV: "production", VITE_API_BASE_URL: "" },
+      env: {
+        NODE_ENV: "production",
+        VITE_API_BASE_URL: "",
+        VITE_OPENGENI_DEPLOYMENT_REVISION: bundleRevision,
+      },
       timeoutMs: 180_000,
     });
     if (build.exitCode !== 0)
@@ -53,7 +59,8 @@ beforeAll(async () => {
       "The public newest-message hook retains its optional production chunk",
     );
     questionAsset = questionEntry[1].file;
-    composerMenuAsset = manifest["src/components/composer-mobile-plus-panel.tsx"]!.file;
+    composerMenuAsset =
+      manifest["../../packages/react/src/app/components/composer-mobile-plus-panel.tsx"]!.file;
     assert.ok(composerMenuAsset, "Composer menu must retain its optional production chunk");
     const eager = new Set<string>();
     const visit = (key: string) => {
@@ -62,9 +69,9 @@ beforeAll(async () => {
       for (const dependency of manifest[key]?.imports ?? []) visit(dependency);
     };
     for (const [key, entry] of Object.entries(manifest))
-      if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
+      if (entry.isEntry || key === "src/routes/session-route.tsx") visit(key);
     assert.equal(
-      eager.has("src/components/composer-mobile-plus-panel.tsx"),
+      eager.has("../../packages/react/src/app/components/composer-mobile-plus-panel.tsx"),
       false,
       "Composer menu must remain outside the eager production graph",
     );
@@ -267,7 +274,16 @@ function fixtures() {
     paginatedHistory: false,
     enableCreate: false,
     created: false,
+    deploymentRevision: "",
+    configContractRevision: OPENGENI_API_CONTRACT_REVISION,
+    configContractHeader: OPENGENI_API_CONTRACT_REVISION,
+    configReads: 0,
     failStream: false,
+    holdStreams: false,
+    streamHold: gate(),
+    // A connection kept open until the test releases it, then ended normally.
+    parkStream: undefined as ReturnType<typeof gate> | undefined,
+    streamRequests: [] as { after: number; replayed: number }[],
     failQueue: false,
     deferQueue: false,
     nextQueueTransition: "" as "" | "fail" | "withdraw" | "hold",
@@ -320,14 +336,20 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       route.fulfill({
         status,
         contentType: "application/json",
-        headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
+        headers: {
+          "x-opengeni-api-contract":
+            path === "/v1/config/client"
+              ? state.configContractHeader
+              : OPENGENI_API_CONTRACT_REVISION,
+        },
         body: JSON.stringify(body),
       });
     if (path === "/v1/config/client") {
+      state.configReads++;
       await state.gates.config.wait();
       return json({
-        deploymentRevision: "",
-        apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+        deploymentRevision: state.deploymentRevision,
+        apiContractRevision: state.configContractRevision,
         defaultModel: state.session.model,
         allowedModels: [state.session.model],
         models: [],
@@ -404,22 +426,76 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       };
       return json(state.session);
     }
-    if (path === `/v1/workspaces/${workspaceId}/sessions`)
+    if (path === `/v1/workspaces/${workspaceId}/sessions`) {
+      const params = new URL(request.url()).searchParams;
+      const rows =
+        state.enableCreate && !state.created
+          ? []
+          : [
+              state.session,
+              {
+                ...state.session,
+                id: otherSessionId,
+                rootSessionId: otherSessionId,
+                title: "Unloaded other session",
+              },
+            ];
+      const needsYou = (row: (typeof rows)[number]) =>
+        row.status === "requires_action" || row.status === "failed";
+      const needsYouOnly = params.get("needsYouOnly") === "true";
+      const pinsOnly = params.get("pinsOnly") === "true";
+      const archiveStatus = params.get("archiveStatus") ?? "active";
+      const filtered = needsYouOnly ? rows.filter(needsYou) : rows;
+      // All fixture roots are unarchived and unpinned. Global pin metadata
+      // remains complete when ordinary browse rows are filtered or absent.
+      const measured = pinsOnly ? rows : archiveStatus === "archived" ? [] : filtered;
       return json({
         sessions:
-          state.enableCreate && !state.created
+          pinsOnly ||
+          archiveStatus === "archived" ||
+          (params.has("parentSessionId") && params.get("parentSessionId") !== "null")
             ? []
-            : [
-                state.session,
-                { ...state.session, id: otherSessionId, title: "Unloaded other session" },
-              ],
+            : filtered,
         pinned: [],
         pinnedTruncated: false,
         nextCursor: null,
         filtersApplied: true,
-        sortBy: new URL(request.url()).searchParams.get("sortBy") ?? "updated",
-        archiveStatus: new URL(request.url()).searchParams.get("archiveStatus") ?? "active",
+        sortBy: params.get("sortBy") ?? "updatedAt",
+        archiveStatus,
+        ...(needsYouOnly ? { needsYouOnly: true } : {}),
+        ...(params.get("includeTotals") === "true"
+          ? {
+              totals: {
+                needsYouCount: rows.filter(needsYou).length,
+                groups: measured.length
+                  ? [
+                      {
+                        channelId: null,
+                        total: measured.length,
+                        attention: measured.filter((row) => row.status === "requires_action")
+                          .length,
+                        attentionSince: null,
+                        failed: 0,
+                        active: measured.filter(
+                          (row) =>
+                            row.effectiveControl.state !== "paused" &&
+                            (row.status === "running" || row.status === "recovering"),
+                        ).length,
+                        queued: measured.filter(
+                          (row) =>
+                            row.effectiveControl.state !== "paused" &&
+                            (row.status === "queued" || row.status === "waiting_capacity"),
+                        ).length,
+                        unread: 0,
+                        activeWork: 0,
+                      },
+                    ]
+                  : [],
+              },
+            }
+          : {}),
       });
+    }
     if (
       path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}` ||
       path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}/events`
@@ -445,17 +521,29 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       }
       await state.gates.stream.wait();
       const after = Number(new URL(request.url()).searchParams.get("after") ?? 0);
+      const replay = state.events.filter((event) => Number(event.sequence) > after);
+      state.streamRequests.push({ after, replayed: replay.length });
+      // A connection that never answers, like one that died in a sleep.
+      if (state.holdStreams) {
+        await state.streamHold.wait();
+        return route.abort("connectionclosed").catch(() => {});
+      }
+      const park = state.parkStream;
+      if (park) await park.wait();
       return route.fulfill({
         contentType: "text/event-stream",
-        body: state.events
-          .filter((event) => Number(event.sequence) > after)
+        body: replay
           .map((event) => `id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`)
           .join(""),
       });
     }
     if (path.endsWith("/events")) {
       await state.gates.history.wait();
-      if (state.failHistory) return json({ message: "Initial history unavailable" }, 503);
+      // A definitive failure, so the error and Retry appear at once. A 502-504
+      // or retryable read is ridden out quietly for about 20 seconds first;
+      // packages/react/test/transient-read-retry.test.tsx covers that.
+      if (state.failHistory)
+        return json({ message: "Initial history unavailable", retryable: false }, 500);
       if (state.paginatedHistory) {
         const params = new URL(request.url()).searchParams;
         const limit = Number(params.get("limit") ?? 200);
@@ -687,6 +775,8 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
     if (path.endsWith("/connection-authorities")) return json({ authorities: [] });
     if (path.endsWith("/skills") || path.endsWith("/skills/content"))
       return json({ skills: [], nextCursor: null });
+    if (path.endsWith("/capabilities/discovery/plugins"))
+      return json({ items: [], total: 0, nextOffset: null });
     if (path.endsWith("/plugins")) return json({ plugins: [] });
     if (path.endsWith("/github/app"))
       return json({ configured: false, missing: [], installUrl: null });
@@ -796,7 +886,7 @@ for (const width of [1280, 390]) {
       await capture("empty-history-ready");
       assert.equal(await page.getByRole("button", { name: "Retry conversation" }).count(), 0);
       await page
-        .getByRole("textbox", { name: /Message|Prompt/i })
+        .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
         .first()
         .waitFor();
       await state.gates.streamError.entered;
@@ -808,7 +898,7 @@ for (const width of [1280, 390]) {
         1,
       );
       await page
-        .getByRole("textbox", { name: /Message|Prompt/i })
+        .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
         .first()
         .waitFor();
       await capture("post-open-stream-error");
@@ -840,17 +930,20 @@ for (const width of [1280, 390]) {
       await transcript.getByText(state.session.initialMessage, { exact: true }).waitFor();
       await page.locator("[data-sonner-toast]").waitFor({ state: "hidden" });
       await capture("ready");
-      const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+      const input = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
       await input.fill("Start this next step.");
       await input.press("Enter");
       await state.gates.send.entered;
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
+      const startup = page.locator(".og-genie-loading");
+      assert.equal(await startup.count(), 0, "pending Send has not been accepted yet");
       await capture("optimistic");
       state.gates.send.release();
       await page
-        .locator('[data-session-dispatch-wait] [role="status"]')
-        .getByText("Starting", { exact: true })
+        .locator('.og-genie-loading [role="status"]')
+        .getByText("Preparing your task.", { exact: true })
         .waitFor();
+      assert.equal(await startup.count(), 1, "accepted work has one startup indicator");
       assert.equal(await transcript.getByText("Start this next step.", { exact: true }).count(), 1);
       assert.equal(await page.getByRole("button", { name: /queued prompt/i }).count(), 0);
       assert.equal(await page.locator('[data-og-session-chrome-panel="queue"]').count(), 0);
@@ -859,7 +952,10 @@ for (const width of [1280, 390]) {
         "Starting",
       );
       await state.gates.dispatchDetail.entered;
-      assert.equal(await page.getByText("Still waiting to start", { exact: true }).count(), 0);
+      assert.equal(
+        await startup.getByText("A little longer than usual…", { exact: true }).count(),
+        0,
+      );
       await capture("delayed-detail");
       state.deferDetail = false;
       state.gates.dispatchDetail.release();
@@ -867,21 +963,46 @@ for (const width of [1280, 390]) {
       // A hard reconnect must recover durable admission without moving the bubble.
       await page.reload();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
+      await startup
+        .getByRole("status")
+        .getByText("Preparing your task.", { exact: true })
+        .waitFor();
+      assert.equal(await startup.count(), 1);
       await capture("reconnected");
-      state.session.updatedAt = new Date(Date.now() - 60_000).toISOString();
+      const acceptedAt = new Date(Date.now() - 65_000).toISOString();
+      for (const event of state.events) {
+        if (event.turnId === turnId) event.occurredAt = acceptedAt;
+      }
+      state.session.updatedAt = acceptedAt;
       await page.reload();
-      await page.getByText("Still waiting to start", { exact: true }).waitFor();
+      await startup
+        .getByRole("status")
+        .getByText("Preparing your task. Taking longer than usual.", { exact: true })
+        .waitFor();
+      await startup.getByText("A little longer than usual…", { exact: true }).waitFor();
+      await startup.getByRole("button", { name: "Behind the magic" }).click();
+      await page.getByText("No agent turn is running yet.", { exact: true }).waitFor();
+      await page
+        .getByText("The start request was accepted; a worker has not started the turn yet.", {
+          exact: true,
+        })
+        .waitFor();
       assert.equal(await transcript.getByText("Start this next step.", { exact: true }).count(), 1);
       await capture("stalled");
       state.session.dispatchWait = {
         state: "pending",
         attempts: 3,
-        nextAttemptAt: null,
+        nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
         lastError: "Worker dispatch unavailable",
       };
       await page.reload();
-      await page.getByText("Unable to start yet", { exact: true }).waitFor();
-      await page.getByText("Start details", { exact: true }).click();
+      await startup
+        .getByRole("status")
+        .getByText("Unable to start yet.", { exact: true })
+        .waitFor();
+      await startup.getByRole("button", { name: "Behind the magic" }).click();
+      await page.getByText("3 dispatch attempts.", { exact: true }).waitFor();
+      await page.getByText(/Automatic start retry at/).waitFor();
       await page
         .getByText("Last recorded dispatch error: Worker dispatch unavailable", { exact: true })
         .waitFor();
@@ -889,13 +1010,16 @@ for (const width of [1280, 390]) {
       Object.assign(state.session, { status: "waiting_capacity" });
       await page.reload();
       await page.locator("header [data-status=waiting_capacity]:visible").waitFor();
+      assert.equal(await startup.count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
       await capture("capacity");
       Object.assign(state.session, { status: "running", activeTurnId: turnId });
       state.turns = [];
       await page.reload();
       await page.locator("header [data-status=running]:visible").waitFor();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
-      assert.equal(await page.locator("[data-session-dispatch-wait]").count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
+      assert.equal(await page.getByText("Unable to start yet.", { exact: true }).count(), 0);
       await capture("running");
       state.turns = [
         {
@@ -918,11 +1042,13 @@ for (const width of [1280, 390]) {
       await page.reload();
       await page.getByRole("button", { name: /1 queued prompt/ }).waitFor();
       await page.getByRole("list", { name: "Queued prompts" }).waitFor();
+      assert.equal(await startup.count(), 1, "a queued follow-up must not add another startup");
       await capture("genuine-queue");
       state.session.effectiveControl = { ...control, state: "paused", directState: "paused" };
       await page.reload();
       await page.getByRole("list", { name: "Queued prompts" }).waitFor();
-      assert.equal(await page.locator("[data-session-dispatch-wait]").count(), 0);
+      assert.equal(await startup.count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
       await capture("paused-queue");
       state.denyAccess = true;
       await page.reload();
@@ -980,7 +1106,7 @@ for (const width of [1280, 390]) {
       const capture = (name: string) =>
         page.screenshot({ path: `${output}/${width}-${origin}-${name}.png` });
       const transcript = page.locator('[data-testid="timeline-user"]');
-      const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+      const input = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
       const assertRetained = async () => {
         assert.equal(
           await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
@@ -992,7 +1118,9 @@ for (const width of [1280, 390]) {
       try {
         if (origin === "created") {
           await page.goto(`${base}/workspaces/${workspaceId}/sessions`);
-          const create = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+          const create = page
+            .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
+            .first();
           await create.fill(state.session.initialMessage);
           await create.press("Enter");
           await state.gates.create.entered;
@@ -1012,7 +1140,8 @@ for (const width of [1280, 390]) {
         } else await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
         await transcript.getByText("History question 5000", { exact: true }).waitFor();
         if (origin === "created") {
-          await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
+          // Ctrl/Cmd+F opens Find at every width (phones keep the button in "…").
+          await page.keyboard.press("Control+f");
           await page
             .getByRole("searchbox", { name: "Find in conversation", exact: true })
             .fill("History question 4000");
@@ -1300,7 +1429,7 @@ for (const width of [1280, 390]) {
         await page.getByRole("button", { name: "Open navigation", exact: true }).click();
       await page.locator(`a[data-session-row="${otherSessionId}"]:visible`).click();
       await page
-        .getByRole("textbox", { name: /Message|Prompt/i })
+        .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
         .first()
         .waitFor();
       await assertNotFocused();
@@ -1335,7 +1464,7 @@ for (const width of [1280, 390]) {
     await page.route(`**/${composerMenuAsset}`, (route) => route.abort("failed"));
     try {
       await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
-      const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+      const input = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
       await input.waitFor();
       // Preserve the app's existing one-time stale-chunk reload; exercise the
       // local fallback when that recovery has already been attempted.
@@ -1379,7 +1508,7 @@ for (const width of [1280, 390]) {
       await (++requests === 1 ? first : second).wait();
       await route.abort("failed");
     });
-    const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+    const input = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
     const openFiles = async () => {
       const open = page.getByRole("button", { name: "Open workspace", exact: true });
       if (await open.isVisible()) await open.click();
@@ -1457,4 +1586,912 @@ for (const width of [1280, 390]) {
       await context.close();
     }
   }, 45_000);
+}
+
+for (const cause of ["reconnect", "sleep"] as const) {
+  test(`production chat ${cause === "sleep" ? "waking from a sleep" : "reconnecting"} shows the newest messages without replaying the backlog`, async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    const state = fixtures();
+    state.paginatedHistory = true;
+    const message = (sequence: number) => ({
+      id: crypto.randomUUID(),
+      workspaceId,
+      sessionId,
+      turnId: crypto.randomUUID(),
+      sequence,
+      type: "user.message",
+      payload: { text: `History question ${sequence}`, resources: [] },
+      occurredAt: state.session.createdAt,
+    });
+    state.events = Array.from({ length: 40 }, (_, index) => message(index + 1));
+    state.session.lastSequence = 40;
+    // "reconnect": every response ends, so the SDK keeps reconnecting by
+    // itself. "sleep": the connection never answers, as after a laptop sleep,
+    // and only the page noticing the wake can restore it.
+    state.holdStreams = cause === "sleep";
+    for (const name of ["config", "access", "detail", "history", "stream"] as const)
+      state.gates[name].release();
+    await installApi(page, state);
+    const transcript = page.locator('[data-testid="timeline-user"]');
+    const waitForStreamAfter = async (sequence: number) => {
+      const deadline = Date.now() + 20_000;
+      while (!state.streamRequests.some((request) => request.after >= sequence)) {
+        if (Date.now() > deadline)
+          throw new Error(`No stream after ${sequence}: ${JSON.stringify(state.streamRequests)}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    try {
+      if (cause === "sleep") await page.clock.install();
+      await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      await transcript.getByText("History question 40", { exact: true }).waitFor();
+      await waitForStreamAfter(40);
+      // "reconnect": hold the chat on its next open connection, so the
+      // messages arrive between connections rather than between a
+      // reconnect's head check and its stream request (which would hand that
+      // request the whole backlog as if it had been live for it).
+      const park = cause === "reconnect" ? (state.parkStream = gate()) : undefined;
+      if (park) await park.entered;
+      const before = state.streamRequests.length;
+      // 3,000 messages arrive while the chat is away: far more than the
+      // conversation catch-up appends, so the newest window loads instead.
+      state.events.push(...Array.from({ length: 3_000 }, (_, index) => message(41 + index)));
+      state.session.lastSequence = 3_040;
+      // The held connection ends normally; the SDK reconnects by itself.
+      state.parkStream = undefined;
+      park?.release();
+      if (cause === "sleep") await page.clock.fastForward(5 * 60_000);
+      await transcript.getByText("History question 3040", { exact: true }).waitFor();
+      await waitForStreamAfter(3_040);
+      const rejoined = state.streamRequests.slice(before);
+      assert(
+        rejoined.every((request) => request.replayed <= 16),
+        `The stream replayed the backlog: ${JSON.stringify(rejoined)}`,
+      );
+      assert.equal(
+        await transcript.getByText("History question 41", { exact: true }).count(),
+        0,
+        "The chat shows the newest window, not the missed backlog",
+      );
+      await page.screenshot({ path: `${output}/stream-rejoin-${cause}.png` });
+    } finally {
+      state.parkStream?.release();
+      state.streamHold.release();
+      for (const deferred of Object.values(state.gates)) deferred.release();
+      await context.close();
+    }
+  }, 90_000);
+}
+
+test("a mounted tab refreshes a changed deployment while retaining its URL, draft and browser", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    reducedMotion: "reduce",
+  });
+  const page = await context.newPage();
+  const state = fixtures();
+  state.deploymentRevision = bundleRevision;
+  for (const pendingGate of Object.values(state.gates)) pendingGate.release();
+  const browserId = "77777777-7777-4777-8777-777777777777";
+  const retainedBrowser: BrowserSession = {
+    id: browserId,
+    accountId,
+    workspaceId,
+    name: "Retained browser",
+    lifecycle: "active",
+    placement: { kind: "sandbox_group", sandboxGroupId: sessionId },
+    controller: {
+      controllerId: "opengeni-browserd",
+      controllerGeneration: "controller-1",
+      placementInstanceId: "placement-1",
+    },
+    driverId: "opengeni.cdp.v1",
+    engine: "chromium",
+    engineVersion: "151",
+    headless: true,
+    identityId: null,
+    baseRevisionId: null,
+    networkRouteId: null,
+    linkedComputerSessionId: null,
+    capabilities: {
+      semanticObservation: false,
+      screenshots: false,
+      liveFrames: false,
+      humanInput: false,
+      tabs: true,
+      downloads: false,
+      uploads: false,
+      clipboard: false,
+      permissions: false,
+      diagnostics: false,
+      rawCdp: false,
+      linkedComputer: false,
+      privateCheckpoint: false,
+      identityPublication: false,
+      parallelTargets: true,
+    },
+    associations: [
+      {
+        sessionId,
+        turnId: null,
+        attemptId: null,
+        relationship: "using",
+        actorSubjectId: "fixture",
+        lastUsedAt: state.session.updatedAt,
+      },
+    ],
+    createdBySubjectId: "fixture",
+    createdAt: state.session.createdAt,
+    lastUsedAt: state.session.updatedAt,
+    failureCode: null,
+  };
+  let browserReads = 0;
+  const pin = gate();
+  const lifecycleWrites: string[] = [];
+  let documents = 0;
+  page.on("request", (request) => {
+    if (
+      request.isNavigationRequest() &&
+      request.resourceType() === "document" &&
+      request.frame() === page.mainFrame()
+    )
+      documents++;
+  });
+  await installApi(page, state);
+  await page.route(
+    `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
+    async (route) => {
+      await pin.wait();
+      return route.fulfill({
+        contentType: "application/json",
+        headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
+        body: JSON.stringify({
+          ...state.session,
+          pinned: true,
+          pinVersion: 1,
+          pinnedAt: state.session.updatedAt,
+        }),
+      });
+    },
+  );
+  await page.route(`${base}/v1/workspaces/${workspaceId}/browser-sessions**`, async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    let payload: unknown;
+    if (path.endsWith("/heartbeat") && request.method() === "POST") {
+      payload = { browserSessionId: browserId, controllerGeneration: "controller-1", alive: true };
+    } else if (request.method() !== "GET") {
+      lifecycleWrites.push(path);
+      return route.fulfill({ status: 500, body: "Unexpected browser lifecycle write" });
+    } else if (path.endsWith("/browser-sessions")) {
+      browserReads++;
+      payload = { revision: 1, sessions: [retainedBrowser] };
+    } else if (path.endsWith(`/${browserId}`)) payload = retainedBrowser;
+    else if (path.endsWith("/targets"))
+      payload = { browserSessionId: browserId, activeTargetId: null, targets: [] };
+    else return route.fallback();
+    return route.fulfill({
+      contentType: "application/json",
+      headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
+      body: JSON.stringify(payload),
+    });
+  });
+  try {
+    await page.clock.install();
+    const url = `${base}/workspaces/${workspaceId}/sessions/${sessionId}`;
+    await page.goto(url);
+    const input = page.getByRole("textbox", { name: "Message the agent" });
+    await input.waitFor();
+    await page.getByRole("button", { name: "Open workspace", exact: true }).click();
+    await page.getByRole("tab", { name: "Browser", exact: true }).click();
+    await page.getByText("Retained browser", { exact: true }).first().waitFor();
+    assert.equal(documents, 1);
+    assert(browserReads > 0);
+    await input.fill("Keep this unsent draft.");
+    state.deploymentRevision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const beforeCheck = state.configReads;
+    const configResponse = page.waitForResponse((response) =>
+      response.url().endsWith("/v1/config/client"),
+    );
+    await page.clock.fastForward(60_001);
+    await configResponse;
+    assert(state.configReads > beforeCheck);
+    assert.equal(documents, 1, "A deployment check must leave an unsent draft mounted");
+    assert.equal(await input.inputValue(), "Keep this unsent draft.");
+    assert.equal(
+      await page.evaluate(
+        (revision) => sessionStorage.getItem(`opengeni.reloadForRevision:${revision}`),
+        state.deploymentRevision,
+      ),
+      null,
+      "Deferring for a draft must not consume the reload loop guard",
+    );
+    await page.screenshot({ path: `${output}/deployment-refresh-draft-protected.png` });
+    await input.fill("");
+    await page.clock.runFor(1_000);
+    await page.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
+    await pin.entered;
+    const duringPin = page.waitForResponse((response) =>
+      response.url().endsWith("/v1/config/client"),
+    );
+    await page.clock.fastForward(60_001);
+    await duringPin;
+    await page.clock.runFor(1_000);
+    assert.equal(documents, 1, "A deployment check must leave an active mutation running");
+    assert.equal(
+      await page.evaluate(
+        (revision) => sessionStorage.getItem(`opengeni.reloadForRevision:${revision}`),
+        state.deploymentRevision,
+      ),
+      null,
+    );
+    const pinned = page.waitForResponse((response) => response.url().endsWith(`/${sessionId}/pin`));
+    pin.release();
+    await pinned;
+    await page.clock.runFor(1_000);
+    const navigation = page.waitForNavigation({ waitUntil: "domcontentloaded" });
+    await page.clock.fastForward(60_001);
+    await navigation;
+    await page.getByText("Retained browser", { exact: true }).first().waitFor();
+    assert.equal(page.url(), url);
+    assert.equal(documents, 2);
+    assert(browserReads > 1, "Reload rehydrates the same owned browser");
+    assert.equal(retainedBrowser.id, browserId);
+    assert.equal(retainedBrowser.controller?.controllerGeneration, "controller-1");
+    assert.deepEqual(lifecycleWrites, []);
+    await page.clock.fastForward(120_001);
+    assert.equal(documents, 2, "The existing revision guard prevents repeated reloads");
+  } finally {
+    pin.release();
+    await context.close();
+  }
+}, 45_000);
+
+for (const [mismatch, width] of [
+  ["header", 1280],
+  ["config", 1280],
+  ["header", 390],
+] as const) {
+  test(`contract ${mismatch} notice preserves controls and drafts at ${width}px`, async () => {
+    const context = await browser.newContext({
+      viewport: { width, height: 900 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    const state = fixtures();
+    for (const pendingGate of Object.values(state.gates)) pendingGate.release();
+    let documents = 0;
+    page.on("request", (request) => {
+      if (
+        request.isNavigationRequest() &&
+        request.resourceType() === "document" &&
+        request.frame() === page.mainFrame()
+      )
+        documents++;
+    });
+    await installApi(page, state);
+    const pin = gate();
+    const pinWrites: boolean[] = [];
+    await page.route(
+      `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
+      async (route) => {
+        const request = route.request().postDataJSON() as { pinned: boolean };
+        pinWrites.push(request.pinned);
+        await pin.wait();
+        Object.assign(state.session, {
+          pinned: request.pinned,
+          pinVersion: pinWrites.length,
+          pinnedAt: request.pinned ? state.session.updatedAt : null,
+        });
+        return route.fulfill({
+          contentType: "application/json",
+          headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
+          body: JSON.stringify(state.session),
+        });
+      },
+    );
+    try {
+      await page.clock.install();
+      const url = `${base}/workspaces/${workspaceId}/sessions/${sessionId}`;
+      await page.goto(url);
+      const input = page.getByRole("textbox", { name: "Message the agent" });
+      await input.waitFor();
+      await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+      await input.fill("Preserve the existing draft.");
+      const contract = "synthetic-contract-next";
+      const setContract = (revision: string) => {
+        if (mismatch === "header") state.configContractHeader = revision;
+        else state.configContractRevision = revision;
+      };
+      const key = `opengeni.reloadForApiContract:${contract}`;
+      const reloadNotice =
+        mismatch === "header"
+          ? page.locator("#opengeni-api-update-notice")
+          : page.getByText("Opengeni updated — reloading…", { exact: true });
+      const check = async () => {
+        const checked = page.waitForResponse(
+          (response) =>
+            response.url().endsWith("/v1/config/client") &&
+            response.request().headers()["content-type"] === "application/json",
+        );
+        await page.evaluate(() => window.dispatchEvent(new Event("online")));
+        await (await checked).finished();
+      };
+      // Returning also reconciles the stock provider. It must not bypass the
+      // console's guard with an independent unconditional reload.
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await page.clock.runFor(2_001);
+      setContract(contract);
+      const returned = page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/v1/config/client") &&
+          response.request().headers()["content-type"] === "application/json",
+      );
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          value: "visible",
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await (await returned).finished();
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        null,
+        "The stock provider must leave the contract guard unconsumed while a draft is active",
+      );
+      await page.clock.runFor(151);
+      assert.equal(documents, 1, "A contract update must preserve an existing draft");
+      assert.equal(await input.count(), 1, "The stock provider must keep the draft mounted");
+      assert.equal(await input.inputValue(), "Preserve the existing draft.");
+      const notice = page.locator("#opengeni-api-update-notice");
+      await notice.waitFor();
+      const noticeBounds = await notice.boundingBox();
+      const headerBounds = await page.locator("header").boundingBox();
+      const inputBounds = await input.boundingBox();
+      assert(noticeBounds && headerBounds && inputBounds);
+      assert(
+        noticeBounds.y + noticeBounds.height <= headerBounds.y,
+        "The update notice must reserve space above the header controls",
+      );
+      assert(
+        inputBounds.y >= headerBounds.y + headerBounds.height &&
+          inputBounds.y + inputBounds.height <= 900,
+        "The notice must leave the composer within the viewport",
+      );
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+        true,
+        "The notice must not introduce horizontal overflow",
+      );
+      await page.screenshot({
+        path: `${output}/contract-${mismatch}-${width}-notice-controls.png`,
+      });
+      // Phones pin from the header's "…" menu; wider headers keep the button.
+      const phone = width < 640;
+      const moreButton = page
+        .locator("header")
+        .getByRole("button", { name: "More session actions", exact: true });
+      if (phone) {
+        await moreButton.click();
+        await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+      } else {
+        await page
+          .locator("header")
+          .getByRole("button", { name: "Pin session", exact: true })
+          .click();
+      }
+      await pin.entered;
+      assert.deepEqual(pinWrites, [true], "A real pointer click must reach the save exactly once");
+      await input.fill("");
+      await page.clock.runFor(1_000);
+      await check();
+      await page.clock.runFor(151);
+      assert.equal(documents, 1, "A contract update must leave a save running");
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        null,
+      );
+      await input.fill("Preserve while the save settles.");
+      const pinned = page.waitForResponse((response) =>
+        response.url().endsWith(`/${sessionId}/pin`),
+      );
+      pin.release();
+      await pinned;
+      await page.clock.runFor(1_000);
+      const unpinButton = phone
+        ? page.getByRole("menuitem", { name: "Unpin", exact: true })
+        : page.locator("header").getByRole("button", { name: "Unpin session", exact: true });
+      if (phone) {
+        await moreButton.focus();
+        await moreButton.press("Enter");
+        await unpinButton.waitFor();
+      }
+      await unpinButton.focus();
+      const unpinned = page.waitForResponse((response) =>
+        response.url().endsWith(`/${sessionId}/pin`),
+      );
+      await unpinButton.press("Enter");
+      await unpinned;
+      assert.deepEqual(pinWrites, [true, false], "Keyboard activation must reach the second save");
+      assert.equal(await input.inputValue(), "Preserve while the save settles.");
+      assert.equal(documents, 1, "The notice and both saves must leave the draft mounted");
+      setContract(OPENGENI_API_CONTRACT_REVISION);
+      await page.clock.runFor(1_000);
+      await input.fill("");
+      await page.clock.runFor(1_000);
+      setContract(contract);
+      await check();
+      await reloadNotice.waitFor();
+      await page.clock.runFor(149);
+      await input.fill("Draft started during the update notice.");
+      await page.clock.runFor(2);
+      assert.equal(documents, 1, "The delayed reload must recheck foreground work");
+      assert.equal(await input.inputValue(), "Draft started during the update notice.");
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        null,
+      );
+      await page.screenshot({
+        path: `${output}/contract-${mismatch}-${width}-draft-protected.png`,
+      });
+      setContract(OPENGENI_API_CONTRACT_REVISION);
+      await page.clock.runFor(1_000);
+      await input.fill("");
+      await page.clock.runFor(1_000);
+      setContract(contract);
+      await check();
+      await reloadNotice.waitFor();
+      await page.clock.runFor(149);
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await page.clock.runFor(2);
+      assert.equal(documents, 1, "The delayed reload must leave a hidden tab alone");
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        null,
+      );
+      const available = page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/v1/config/client") &&
+          response.request().headers()["content-type"] === "application/json",
+      );
+      // Resume ordinary browser time for the successful reload; only the
+      // foreground-work races above need a precisely paused clock.
+      await page.clock.resume();
+      const navigation = page.waitForNavigation({ waitUntil: "domcontentloaded" });
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          value: "visible",
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await (await available).finished();
+      await navigation;
+      assert.equal(page.url(), url);
+      assert.equal(documents, 2);
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        OPENGENI_API_CONTRACT_REVISION,
+      );
+      await page.clock.runFor(1_000);
+      assert.equal(documents, 2, "The contract guard still prevents repeated reloads");
+    } finally {
+      pin.release();
+      await context.close();
+    }
+  }, 45_000);
+}
+
+// Review the shipped chat surface against exact saved facts, including on a cold reload.
+for (const width of [390, 1440]) {
+  test(`production account tool choices ${width}px`, async () => {
+    const { CapabilityCatalogItem } = await import("@opengeni/contracts");
+    const { default: AxeBuilder } = await import("@axe-core/playwright");
+    const context = await browser.newContext({
+      viewport: { width, height: 950 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage(),
+      state = fixtures();
+    Object.values(state.gates).forEach((value) => value.release());
+    await installApi(page, state);
+    const capabilityId = "mcp:synthetic-mail";
+    const item = CapabilityCatalogItem.parse({
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Example Mail",
+      category: "communication",
+      description: "Manage synthetic messages.",
+      enabled: true,
+      runtime: { available: true },
+      mcpUrl: "https://mail.example.test/mcp",
+      authKind: "none",
+      actions: ["configure", "inspect"],
+    });
+    await page.route(`${base}/v1/workspaces/${workspaceId}/capabilities`, (route) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ items: [item], installations: [] }),
+      }),
+    );
+    const accounts = [
+      { connectionId: "account-a", label: "First · first@example.test", scope: "personal" },
+      { connectionId: "account-b", label: "Second · second@example.test", scope: "personal" },
+    ];
+    let permission = "ask",
+      revision = "initial",
+      conflict = true;
+    const writes: Record<string, unknown>[] = [];
+    const reads: string[] = [];
+    const clientErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") clientErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => clientErrors.push(error.message));
+    await page.route(
+      `${base}/v1/workspaces/${workspaceId}/capabilities/*/tool-permissions*`,
+      async (route) => {
+        if (route.request().method() === "PATCH") {
+          const input = route.request().postDataJSON();
+          writes.push(input);
+          if (conflict) {
+            conflict = false;
+            revision = "changed-elsewhere";
+            return route.fulfill({
+              status: 409,
+              contentType: "application/json",
+              body: JSON.stringify({ message: "Tool permissions changed. Reload before saving." }),
+            });
+          }
+          permission = input.permission ?? "ask";
+          revision = "saved";
+          return route.fulfill({
+            contentType: "application/json",
+            body: JSON.stringify({ updated: true }),
+          });
+        }
+        const connectionId =
+          new URL(route.request().url()).searchParams.get("connectionId") ??
+          accounts[0]!.connectionId;
+        reads.push(connectionId);
+        await route.fulfill({
+          contentType: "application/json",
+          body: JSON.stringify({
+            connectionId,
+            serverId: "synthetic-mail",
+            defaultPermission: null,
+            revision,
+            accountLabel: accounts.find((a) => a.connectionId === connectionId)!.label,
+            accounts,
+            tools: [
+              {
+                name: "organize",
+                title: "Organize messages",
+                group: "write",
+                permission,
+                inherited: false,
+                approvalRequired: true,
+                source: "tool",
+                conditional: revision === "initial",
+                actionPermissions:
+                  revision === "initial" ? [{ actionName: "trash", permission: "block" }] : [],
+                resetReason: revision !== "saved" ? "operation_changed" : undefined,
+              },
+            ],
+            discoveryError: null,
+            canManage: true,
+            appliesTo: "next_attempt",
+          }),
+        });
+      },
+    );
+    try {
+      await page.goto(
+        `${base}/workspaces/${workspaceId}/plugins?open=${encodeURIComponent(`item:${capabilityId}`)}`,
+      );
+      const permissions = page.getByRole("region", { name: "Tool permissions" });
+      await permissions.getByRole("combobox", { name: "Account for tool permissions" }).waitFor();
+      assert.ok((await permissions.innerText()).includes("Some actions changed"));
+      assert.ok(
+        (
+          await permissions
+            .getByRole("combobox", { name: "Tools that make changes permission" })
+            .innerText()
+        ).includes("Mixed"),
+      );
+      await permissions.getByRole("combobox", { name: "Account for tool permissions" }).click();
+      await page.getByRole("option", { name: "Second · second@example.test" }).click();
+      await page.waitForFunction(() =>
+        document
+          .querySelector('[aria-label="Account for tool permissions"]')
+          ?.textContent?.includes("Second"),
+      );
+      await permissions.getByRole("button", { name: "Tools that make changes" }).click();
+      const choice = permissions.getByRole("combobox", {
+        name: "Permission for Organize messages",
+        exact: true,
+      });
+      await choice.click();
+      await page.getByRole("option", { name: "Allow", exact: false }).click();
+      await permissions.getByText(/Couldn't save tool permissions/).waitFor();
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0]!.connectionId, "account-b");
+      assert.equal(writes[0]!.expectedRevision, "initial");
+      await permissions.getByRole("button", { name: "Retry" }).click();
+      await choice.waitFor();
+      await choice.click();
+      await page.getByRole("option", { name: "Allow", exact: false }).click();
+      await permissions.getByText("Permissions saved.", { exact: true }).waitFor();
+      assert.equal(writes[1]!.expectedRevision, "changed-elsewhere");
+      await choice.click();
+      await page.getByRole("option", { name: "Use default", exact: true }).click();
+      await permissions.getByText("Permissions saved.", { exact: true }).waitFor();
+      assert.equal(writes[2]!.permission, null);
+      if (width === 390) await page.evaluate(() => document.documentElement.classList.add("dark"));
+      const scan = await new AxeBuilder({ page })
+        .include('[aria-label="Tool permissions"]')
+        .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+        .analyze();
+      assert.deepEqual(
+        scan.violations.filter((v) => v.impact === "serious" || v.impact === "critical"),
+        [],
+      );
+      assert.equal(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+        ),
+        true,
+      );
+      for (const choiceControl of await permissions.getByRole("combobox").all()) {
+        const bounds = await choiceControl.boundingBox();
+        assert.ok(
+          bounds && bounds.x >= 0 && bounds.x + bounds.width <= width - 16,
+          "Permission choices remain inside the page padding",
+        );
+      }
+      await page.screenshot({ path: `${output}/permissions-${width}.png`, fullPage: true });
+    } catch (error) {
+      await page.screenshot({ path: `${output}/permissions-failure-${width}.png`, fullPage: true });
+      await Bun.write(
+        `${output}/permissions-failure-${width}.json`,
+        JSON.stringify({
+          reads,
+          writes,
+          clientErrors,
+          text: await page.locator("body").innerText(),
+        }),
+      );
+      throw error;
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [390, 768, 1440]) {
+    test(`production tool review ${width}px ${theme}`, async () => {
+      const { toolReviewAction, toolReviewFields, toolReviewDetails } =
+        await import("@opengeni/contracts");
+      const { default: AxeBuilder } = await import("@axe-core/playwright");
+      const context = await browser.newContext({
+        viewport: { width, height: 950 },
+        colorScheme: theme,
+        reducedMotion: "reduce",
+        hasTouch: width === 390,
+      });
+      const page = await context.newPage();
+      const state = fixtures();
+      const approvalId = "synthetic-mail-action";
+      const args = {
+        messageIds: Array.from({ length: 600 }, (_, i) => `synthetic-${i + 1}`),
+        addLabelIds: ["TRASH", "ExampleLabel"],
+        removeLabelIds: ["INBOX"],
+      };
+      const hints = { kind: "gmail" as const, accountLabel: "Mail · mailbox@example.test" };
+      let decisions = 0;
+      const review = {
+        version: 1 as const,
+        id: approvalId,
+        actionDigest: "b".repeat(64),
+        revision: "1",
+        status: "pending" as const,
+        ...toolReviewAction("batch_modify_messages", args, hints),
+        ...toolReviewFields(args, hints),
+        accountLabel: hints.accountLabel,
+        reason: "Your permission setting for this action is Ask.",
+        createdAt: state.session.createdAt,
+        updatedAt: state.session.updatedAt,
+        availableActions: ["approve", "reject"],
+        detailsAvailable: true,
+      };
+      state.session.status = "requires_action";
+      state.session.activeTurnId = turnId;
+      for (const [type, payload] of [
+        ["turn.started", {}],
+        [
+          "agent.toolCall.created",
+          { id: approvalId, name: "mcp_example__batch_modify_messages", arguments: args },
+        ],
+        [
+          "session.requiresAction",
+          {
+            approvals: [
+              { id: approvalId, name: "mcp_example__batch_modify_messages", arguments: args },
+            ],
+          },
+        ],
+      ] as const)
+        state.events.push({
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId,
+          sequence: state.events.length + 1,
+          type,
+          payload,
+          occurredAt: state.session.createdAt,
+        });
+      state.session.lastSequence = state.events.length;
+      Object.values(state.gates).forEach((value) => value.release());
+      await installApi(page, state);
+      await page.route(
+        `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/tool-reviews/**`,
+        async (route) => {
+          const url = new URL(route.request().url());
+          await route.fulfill({
+            contentType: "application/json",
+            body: JSON.stringify(
+              url.pathname.endsWith("/details")
+                ? {
+                    version: 1,
+                    id: approvalId,
+                    actionDigest: review.actionDigest,
+                    ...toolReviewDetails(
+                      args,
+                      hints,
+                      url.searchParams.get("path") ?? "",
+                      Number(url.searchParams.get("offset") ?? 0),
+                    ),
+                  }
+                : review,
+            ),
+          });
+        },
+      );
+      await page.route(
+        `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
+        async (route) => {
+          if (route.request().method() !== "POST") return route.fallback();
+          const input = route.request().postDataJSON();
+          assert.equal(input.type, "user.approvalDecision");
+          assert.equal(input.payload.approvalId, approvalId);
+          decisions++;
+          const event = {
+            ...input,
+            id: crypto.randomUUID(),
+            workspaceId,
+            sessionId,
+            turnId,
+            sequence: state.events.length + 1,
+            occurredAt: new Date().toISOString(),
+          };
+          state.events.push(event);
+          state.session.lastSequence = state.events.length;
+          review.availableActions = [];
+          Object.assign(review, {
+            status: input.payload.decision === "approve" ? "approved" : "rejected",
+            revision: "2",
+          });
+          await route.fulfill({ contentType: "application/json", body: JSON.stringify(event) });
+        },
+      );
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      try {
+        await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        await page.evaluate(
+          (value) => document.documentElement.classList.toggle("dark", value === "dark"),
+          theme,
+        );
+        const surface = page.locator("[data-og-approval-surface]");
+        await surface.getByRole("heading", { name: "Move 600 messages to Trash" }).waitFor();
+        const verifyForcedColorsFocus = async (selector: string) => {
+          await page.emulateMedia({ forcedColors: "active" });
+          const heading = page.locator(selector).getByRole("heading");
+          await heading.focus();
+          assert.deepEqual(
+            await heading.evaluate((element) => {
+              const style = getComputedStyle(element);
+              return { style: style.outlineStyle, width: style.outlineWidth };
+            }),
+            { style: "solid", width: "2px" },
+          );
+          await page.emulateMedia({ forcedColors: "none" });
+        };
+        await verifyForcedColorsFocus("[data-og-approval-surface]");
+        assert.ok((await surface.innerText()).includes("ExampleLabel"));
+        assert.ok((await surface.innerText()).includes(hints.accountLabel));
+        assert.equal(await surface.locator("pre").count(), 0);
+        const scan = async (selector: string) => {
+          const report = await new AxeBuilder({ page })
+            .include(selector)
+            .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+            .analyze();
+          assert.deepEqual(
+            report.violations.filter(
+              (item) => item.impact === "serious" || item.impact === "critical",
+            ),
+            [],
+          );
+          assert.equal(
+            await page.evaluate(
+              () =>
+                document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+            ),
+            true,
+          );
+        };
+        await scan("[data-og-approval-surface]");
+        await page.screenshot({ path: `${output}/review-${width}-${theme}.png`, fullPage: true });
+        const open = surface.getByRole("button", { name: "View all 600 messages" });
+        await open.focus();
+        await page.keyboard.press("Enter");
+        const details = page.locator("[data-og-review-details]");
+        await details.getByText("synthetic-25", { exact: true }).waitFor();
+        await verifyForcedColorsFocus("[data-og-review-details]");
+        assert.equal(await details.getByText("synthetic-26", { exact: true }).count(), 0);
+        await details.getByRole("button", { name: "Next", exact: true }).click();
+        await details.getByText("synthetic-50", { exact: true }).waitFor();
+        await scan("[data-og-review-details]");
+        await details.getByRole("button", { name: "Back to review" }).click();
+        await surface.waitFor();
+        // The surface restores focus to the opener in the next animation frame,
+        // so wait for it instead of reading focus in the same frame as the render.
+        assert.equal(
+          await open.evaluate(
+            (element) =>
+              new Promise<boolean>((resolve) => {
+                const deadline = performance.now() + 5_000;
+                const check = () => {
+                  if (element === document.activeElement) resolve(true);
+                  else if (performance.now() > deadline) resolve(false);
+                  else requestAnimationFrame(check);
+                };
+                check();
+              }),
+          ),
+          true,
+        );
+        if (width === 768) {
+          await page.evaluate(() => {
+            document.documentElement.style.zoom = "2";
+          });
+          await scan("[data-og-approval-surface]");
+        }
+        await surface.getByRole("button", { name: "Move to Trash", exact: true }).click();
+        await surface.waitFor({ state: "hidden" });
+        assert.equal(decisions, 1);
+        assert.deepEqual(errors, []);
+        await page.reload();
+        await page.locator('[data-testid="session-timeline"]').waitFor();
+        assert.equal(await page.locator("[data-og-approval-surface]").count(), 0);
+        assert.equal(decisions, 1);
+      } finally {
+        await context.close();
+      }
+    }, 120_000);
+  }
 }

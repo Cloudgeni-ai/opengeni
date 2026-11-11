@@ -15,6 +15,7 @@ import {
   splitSlackLeadingMention,
   parseSlackWorkspacePrefix,
   resolveSlackWorkspaceRoute,
+  slackRouteChoicesForPersonalWorkspaces,
   slackRoutedRequestText,
   type SlackRouteInputs,
 } from "../src/integrations/slack-routing";
@@ -359,7 +360,7 @@ describe("the bot mention", () => {
 describe("what may address a message", () => {
   test("a message shortcut never takes a prefix out of someone else's message", () => {
     // The text belongs to the message being acted on, not to the person
-    // invoking OpenGeni, so a prefix there was never an instruction.
+    // invoking Opengeni, so a prefix there was never an instruction.
     expect(
       resolveSlackWorkspaceRoute(
         inputs({
@@ -453,7 +454,7 @@ describe("the post-ledger seed", () => {
     // later message of a labelled one renders different bytes from what an
     // older image renders for it. An unlabelled one renders the same bytes in
     // both formats and keeps its id.
-    const line = "<https://app.example.test/w/s|OpenGeni started this task>.";
+    const line = "<https://app.example.test/w/s|Opengeni started this task>.";
     expect(
       slackPostSeed({ routedWorkspaceLabel: null, startMessageLine: line }, "slack-delivery:abc"),
     ).toBe("slack-delivery:abc");
@@ -474,7 +475,7 @@ describe("the post-ledger seed", () => {
     const legacy = slackAcknowledgementOperationId({ ...interaction, startMessageLine: null });
     const compact = slackAcknowledgementOperationId({
       ...interaction,
-      startMessageLine: "<https://app.example.test/w/s|OpenGeni started this task>.",
+      startMessageLine: "<https://app.example.test/w/s|Opengeni started this task>.",
     });
     expect(compact).not.toBe(legacy);
     // Nor with the unlabelled, line-less id an older image would also compute.
@@ -499,14 +500,14 @@ describe("the first message's opening sentence", () => {
         routedWorkspaceLabel: null,
         origin: { kind: "task" },
       }),
-    ).toBe(`<${sessionUrl}|OpenGeni started this task>.`);
+    ).toBe(`<${sessionUrl}|Opengeni started this task>.`);
     expect(
       renderSlackStartMessageLine({
         sessionUrl,
         routedWorkspaceLabel: "Platform",
         origin: { kind: "task" },
       }),
-    ).toBe(`<${sessionUrl}|OpenGeni started this task> in *Platform*.`);
+    ).toBe(`<${sessionUrl}|Opengeni started this task> in *Platform*.`);
   });
 
   test("keeps the privacy sentence on private tasks", () => {
@@ -517,7 +518,7 @@ describe("the first message's opening sentence", () => {
         origin: { kind: "private_dm_message" },
       }),
     ).toBe(
-      `<${sessionUrl}|OpenGeni started a private task> in *Platform* from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`,
+      `<${sessionUrl}|Opengeni started a private task> in *Platform* from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`,
     );
     expect(
       renderSlackStartMessageLine({
@@ -526,7 +527,7 @@ describe("the first message's opening sentence", () => {
         origin: { kind: "private_conversation" },
       }),
     ).toBe(
-      `<${sessionUrl}|OpenGeni started a private task> from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`,
+      `<${sessionUrl}|Opengeni started a private task> from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`,
     );
   });
 
@@ -538,7 +539,7 @@ describe("the first message's opening sentence", () => {
         origin: { kind: "reaction", emoji: "genie" },
       }),
     ).toBe(
-      `<${sessionUrl}|OpenGeni started this task> from the :genie: reaction. If the request is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`,
+      `<${sessionUrl}|Opengeni started this task> from the :genie: reaction. If the request is unclear, Opengeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`,
     );
   });
 
@@ -549,7 +550,7 @@ describe("the first message's opening sentence", () => {
         routedWorkspaceLabel: "R&D <!channel>",
         origin: { kind: "task" },
       }),
-    ).toBe(`<${sessionUrl}|OpenGeni started this task> in *R&amp;D &lt;!channel&gt;*.`);
+    ).toBe(`<${sessionUrl}|Opengeni started this task> in *R&amp;D &lt;!channel&gt;*.`);
   });
 });
 
@@ -581,5 +582,46 @@ describe("the workspace line", () => {
     expect(first.text).toBe(second.text);
     expect(first.text.endsWith("\n-> Platform")).toBe(true);
     expect(first.text.length).toBeLessThanOrEqual(3_500);
+  });
+});
+
+describe("an organization with Personal workspaces turned off", () => {
+  const dm = { ...inputs().entry, triggerKind: "dm" as const, slackChannelId: "D-SAM" };
+  function routeDm(dmRoute: ReturnType<typeof channelRoute> | null, enabled: boolean) {
+    const choices = slackRouteChoicesForPersonalWorkspaces({
+      personalWorkspacesEnabled: enabled,
+      candidates: [ACME, PERSONAL],
+      dmRoute,
+    });
+    return resolveSlackWorkspaceRoute(
+      inputs({
+        entry: dm,
+        ...choices,
+        personalWorkspaceId:
+          choices.candidates.find((candidate) => candidate.personal)?.workspaceId ?? null,
+      }),
+    );
+  }
+
+  test("a direct message goes to the shared workspace instead of the hidden Personal one", () => {
+    expect(routeDm(null, true)).toMatchObject({
+      workspaceId: PERSONAL.workspaceId,
+      source: "dm_personal",
+    });
+    expect(routeDm(null, false)).toMatchObject({
+      kind: "resolved",
+      workspaceId: ACME.workspaceId,
+      source: "sole_candidate",
+    });
+  });
+
+  test("a remembered direct-message answer pointing at the Personal workspace is set aside", () => {
+    const toPersonal = { ...channelRoute(PERSONAL.workspaceId), slackUserId: "U-SAM" };
+    expect(routeDm(toPersonal, false)).toMatchObject({ workspaceId: ACME.workspaceId });
+    const toAcme = { ...channelRoute(ACME.workspaceId), slackUserId: "U-SAM" };
+    expect(routeDm(toAcme, false)).toMatchObject({
+      workspaceId: ACME.workspaceId,
+      source: "dm_route",
+    });
   });
 });

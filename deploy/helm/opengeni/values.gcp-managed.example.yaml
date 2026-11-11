@@ -37,6 +37,8 @@ externalSecret:
     kind: ClusterSecretStore
   dataFrom:
     - extract:
+        # Must equal the GCP Terraform runtime_secret_id output: the runtime
+        # service account may read only that secret.
         key: opengeni-runtime
 
 networkPolicy:
@@ -59,13 +61,13 @@ postgres:
 
 temporal:
   # Production should use Temporal Cloud, an existing endpoint, or the official
-  # Temporal chart managed by the stack wrapper outside OpenGeni's chart.
+  # Temporal chart managed by the stack wrapper outside Opengeni's chart.
   # Set true only for smoke.
   enabled: false
 
 nats:
   # Production should use an existing NATS endpoint or the official NATS chart
-  # managed by the stack wrapper outside OpenGeni's chart.
+  # managed by the stack wrapper outside Opengeni's chart.
   # Set true only for local/preview/cloud smoke fixtures.
   enabled: false
   url: "nats://opengeni-nats.opengeni-platform.svc.cluster.local:4222"

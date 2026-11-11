@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildConnectionTokenResolver,
   createDb,

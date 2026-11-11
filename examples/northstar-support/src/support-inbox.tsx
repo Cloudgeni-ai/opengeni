@@ -1,5 +1,6 @@
-import { InboxIcon, SearchIcon, SparklesIcon } from "lucide-react";
-import { useDeferredValue, useState } from "react";
+import { InboxIcon, SearchIcon, UserRoundPlusIcon } from "lucide-react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { Kbd, MOD_KEY, PRIORITY_LABEL, PriorityGlyph, StatusGlyph } from "./ticket-glyphs";
 import type { SupportCase, SupportWorkspaceState } from "./types";
 
 type InboxFilter = "mine" | "unassigned";
@@ -7,13 +8,9 @@ type InboxFilter = "mine" | "unassigned";
 function relativeTime(value: string): string {
   const minutes = Math.max(1, Math.round((Date.now() - Date.parse(value)) / 60_000));
   if (minutes < 60) return `${minutes}m`;
-  return `${Math.round(minutes / 60)}h`;
-}
-
-function priorityLabel(priority: SupportCase["ticket"]["priority"]): string {
-  if (priority === "urgent") return "Urgent";
-  if (priority === "high") return "High";
-  return "";
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
 }
 
 export function SupportInbox({
@@ -29,6 +26,7 @@ export function SupportInbox({
 }) {
   const [filter, setFilter] = useState<InboxFilter>("mine");
   const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const mineCount = state.cases.filter(({ ticket }) => ticket.inbox === "mine").length;
   const unassignedCount = state.cases.filter(({ ticket }) => ticket.inbox === "unassigned").length;
@@ -40,6 +38,18 @@ export function SupportInbox({
     );
   });
 
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   function switchFilter(nextFilter: InboxFilter) {
     setFilter(nextFilter);
     setQuery("");
@@ -50,105 +60,142 @@ export function SupportInbox({
   }
 
   return (
-    <aside className="flex h-dvh min-h-0 flex-col border-r border-[#d9d9d4] bg-[#f1f1ee] text-[#1f2421]">
-      <header className="shrink-0 px-5 pb-4 pt-5">
-        <div className="flex items-center gap-3">
-          <div className="grid size-9 place-items-center rounded-lg bg-[#173f35] text-[13px] font-bold text-white">
-            N
-          </div>
-          <div>
-            <p className="text-[14px] font-bold tracking-[-0.01em]">Northstar</p>
-            <p className="mt-0.5 text-[11px] text-[#77766f]">Customer support</p>
-          </div>
-          <div className="ml-auto flex items-center gap-1.5 text-[10px] font-medium text-[#507166]">
-            <span className="size-1.5 rounded-full bg-[#31926f]" /> Online
-          </div>
+    <aside className="flex h-full min-h-0 flex-col text-ns-ink">
+      <header className="shrink-0 px-3 pt-3">
+        <div className="flex h-8 items-center gap-2 px-2">
+          <NorthstarMark className="size-5 text-ns-navy" />
+          <p className="text-[15px] font-bold tracking-[-0.02em] text-ns-navy">Northstar</p>
         </div>
 
-        <div className="mt-7 flex items-end justify-between">
-          <div>
-            <p className="text-[11px] font-medium text-[#85857f]">Support queue</p>
-            <h1 className="mt-1 text-[24px] font-semibold tracking-[-0.035em]">Inbox</h1>
-          </div>
-          <div className="mb-0.5 grid size-8 place-items-center text-[#356a59]">
-            <InboxIcon className="size-4" />
-          </div>
-        </div>
-
-        <label className="mt-4 flex h-10 items-center gap-2.5 rounded-lg border border-[#d7d7d2] bg-white px-3 text-[#8a8982] focus-within:border-[#6c9185]">
-          <SearchIcon className="size-4" />
-          <span className="sr-only">Search tickets</span>
+        <label className="mt-4 flex h-9 items-center gap-2 rounded-lg bg-ns-sheet/70 px-2.5 text-ns-subtle shadow-[inset_0_0_0_1px_var(--color-ns-line)] transition-shadow focus-within:bg-ns-sheet focus-within:shadow-[inset_0_0_0_1.5px_var(--color-ns-navy)]">
+          <SearchIcon className="size-3.5 shrink-0" />
           <input
+            ref={searchRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setQuery("");
+                event.currentTarget.blur();
+              }
+            }}
             aria-label="Search tickets"
-            placeholder="Search customers or tickets"
-            className="min-w-0 flex-1 bg-transparent text-[13px] text-[#242b28] outline-none placeholder:text-[#9a9992]"
+            placeholder="Search"
+            className="min-w-0 flex-1 bg-transparent text-[13px] text-ns-ink outline-none placeholder:text-ns-subtle"
           />
           {query ? (
             <button
               type="button"
               onClick={() => setQuery("")}
-              className="text-[11px] font-semibold text-[#587468]"
+              className="text-[12px] font-medium text-ns-muted hover:text-ns-ink"
             >
               Clear
             </button>
-          ) : null}
+          ) : (
+            <Kbd>{`${MOD_KEY}K`}</Kbd>
+          )}
         </label>
 
-        <div className="mt-3 grid grid-cols-2 border-b border-[#d9d9d4]">
-          <InboxFilterButton
+        <nav className="mt-3 space-y-px" aria-label="Inbox views">
+          <ViewButton
+            icon={<InboxIcon className="size-4" />}
             active={filter === "mine"}
             label="My inbox"
             count={mineCount}
             onClick={() => switchFilter("mine")}
           />
-          <InboxFilterButton
+          <ViewButton
+            icon={<UserRoundPlusIcon className="size-4" />}
             active={filter === "unassigned"}
             label="Unassigned"
             count={unassignedCount}
             onClick={() => switchFilter("unassigned")}
           />
-        </div>
+        </nav>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-        <div className="mb-1 mt-1 flex items-center justify-between px-3 text-[10px] font-medium text-[#8d8b84]">
-          <span>{filter === "mine" ? "Assigned to Maya" : "Needs an owner"}</span>
-          <span>{visibleCases.length}</span>
-        </div>
+      <div className="mx-5 mt-3 h-px shrink-0 bg-ns-line" />
 
-        <div className="space-y-1.5">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-2">
+        <ul className="space-y-px">
           {visibleCases.map((supportCase) => (
-            <TicketRow
-              key={supportCase.ticket.id}
-              supportCase={supportCase}
-              selected={supportCase.ticket.id === selectedTicketId}
-              agentConnected={agentEnabled && supportCase.ticket.id === selectedTicketId}
-              onClick={() => onSelectTicket(supportCase.ticket.id)}
-            />
+            <li key={supportCase.ticket.id}>
+              <TicketRow
+                supportCase={supportCase}
+                selected={supportCase.ticket.id === selectedTicketId}
+                agentConnected={agentEnabled && supportCase.ticket.id === selectedTicketId}
+                onClick={() => onSelectTicket(supportCase.ticket.id)}
+              />
+            </li>
           ))}
-          {visibleCases.length === 0 ? (
-            <div className="rounded-[18px] border border-dashed border-black/15 px-4 py-10 text-center">
-              <SearchIcon className="mx-auto size-5 text-[#96948d]" />
-              <p className="mt-3 text-[13px] font-semibold text-[#5a5b56]">No matching tickets</p>
-              <p className="mt-1 text-[11px] text-[#92918b]">Try another search or inbox.</p>
-            </div>
-          ) : null}
-        </div>
+        </ul>
+        {visibleCases.length === 0 ? (
+          <div className="px-2 py-8">
+            <p className="text-[13px] font-semibold text-ns-ink">
+              {query ? `No tickets match “${query}”` : "Nothing waiting here"}
+            </p>
+            <p className="mt-1 text-[12px] leading-5 text-ns-muted">
+              {query
+                ? "Search looks at ticket numbers, subjects, and customer names."
+                : "New tickets land here as customers write in."}
+            </p>
+          </div>
+        ) : null}
       </div>
 
-      <footer className="flex shrink-0 items-center gap-3 border-t border-[#d9d9d4] px-5 py-4">
-        <div className="grid size-8 place-items-center rounded-full bg-[#cbbdaa] text-[10px] font-bold text-[#594c3e]">
+      <footer className="flex shrink-0 items-center gap-2.5 px-5 pb-4 pt-2">
+        <div className="grid size-7 place-items-center rounded-full bg-[#d9cdbd] text-[11px] font-semibold text-[#4d4134]">
           MC
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-[12px] font-semibold">Maya Chen</p>
-          <p className="mt-0.5 text-[10px] text-[#818078]">Support lead</p>
+          <p className="text-[13px] font-semibold leading-4">Maya Chen</p>
+          <p className="text-[12px] leading-4 text-ns-muted">Support lead</p>
         </div>
-        <span className="size-2 rounded-full bg-[#31926f]" />
       </footer>
     </aside>
+  );
+}
+
+export function NorthstarMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={className}>
+      <path
+        fill="currentColor"
+        d="M 12 1.5c.5 5.6 2.4 8.4 5.2 9.7l5.3 0.8-5.3.8c-2.8 1.3-4.7 4.1-5.2 9.7-.5-5.6-2.4-8.4-5.2-9.7L1.5 12l5.3-.8C9.6 9.9 11.5 7.1 12 1.5Z"
+      />
+      <circle cx="18.6" cy="5.4" r="1.6" fill="var(--color-ns-star)" />
+    </svg>
+  );
+}
+
+function ViewButton({
+  icon,
+  active,
+  label,
+  count,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  active: boolean;
+  label: string;
+  count: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={
+        active
+          ? "flex h-8 w-full items-center gap-2.5 rounded-md bg-black/[0.06] px-2 text-[13px] font-semibold text-ns-ink"
+          : "flex h-8 w-full items-center gap-2.5 rounded-md px-2 text-[13px] font-medium text-ns-muted transition-colors hover:bg-black/[0.04] hover:text-ns-ink"
+      }
+    >
+      <span className={active ? "text-ns-navy" : "text-ns-subtle"}>{icon}</span>
+      <span className="flex-1 text-left">{label}</span>
+      <span className="text-[12px] font-medium tabular-nums text-ns-subtle">{count}</span>
+    </button>
   );
 }
 
@@ -164,7 +211,6 @@ function TicketRow({
   onClick: () => void;
 }) {
   const { customer, ticket } = supportCase;
-  const priority = priorityLabel(ticket.priority);
   return (
     <button
       type="button"
@@ -172,93 +218,54 @@ function TicketRow({
       aria-current={selected ? "page" : undefined}
       className={
         selected
-          ? "group relative w-full overflow-hidden rounded-xl border border-[#d5d5d0] bg-white px-3.5 py-3.5 text-left"
-          : "group w-full rounded-xl border border-transparent px-3.5 py-3.5 text-left transition hover:bg-white/60"
+          ? "relative w-full rounded-lg bg-ns-sheet px-2.5 py-2.5 text-left shadow-[0_1px_2px_rgba(18,26,51,0.08),0_0_0_1px_var(--color-ns-line)]"
+          : "relative w-full rounded-lg px-2.5 py-2.5 text-left transition-colors hover:bg-black/[0.04]"
       }
     >
-      {selected ? <span className="absolute inset-y-3 left-0 w-[3px] bg-[#27715e]" /> : null}
-      <div className="flex items-start gap-3.5">
-        <div
-          className={
-            selected
-              ? "grid size-9 shrink-0 place-items-center rounded-lg bg-[#1d2925] text-[10px] font-bold text-white"
-              : "grid size-9 shrink-0 place-items-center rounded-lg bg-black/[0.055] text-[9px] font-bold text-[#67706a]"
-          }
-        >
-          {customer.initials}
-        </div>
+      <div className="flex items-start gap-2.5">
+        <span className="mt-[3px]" title={ticket.status.replaceAll("_", " ")}>
+          <StatusGlyph status={ticket.status} />
+        </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[#555b57]">
-              {customer.name}
-            </span>
-            {ticket.unread ? <span className="size-2 rounded-full bg-[#d86c4f]" /> : null}
-            <span className="shrink-0 text-[10px] text-[#999992]">
-              {relativeTime(ticket.createdAt)}
-            </span>
-          </div>
           <p
             className={
-              selected
-                ? "mt-1.5 line-clamp-2 text-[13px] font-semibold leading-[1.4] tracking-[-0.01em] text-[#202622]"
-                : "mt-1.5 line-clamp-2 text-[13px] leading-[1.4] text-[#666a66]"
+              ticket.unread || selected
+                ? "line-clamp-2 text-[13.5px] font-semibold leading-[1.35] tracking-[-0.01em] text-ns-ink"
+                : "line-clamp-2 text-[13.5px] leading-[1.35] text-ns-ink/75"
             }
           >
             {ticket.subject}
           </p>
-          <div className="mt-3 flex min-h-5 items-center justify-between gap-2">
-            {priority ? (
-              <span
-                className={
-                  ticket.priority === "urgent"
-                    ? "rounded-full bg-[#ffede6] px-2 py-1 text-[9px] font-bold uppercase tracking-[0.06em] text-[#b74e34]"
-                    : "rounded-full bg-[#fff0d5] px-2 py-1 text-[9px] font-bold uppercase tracking-[0.06em] text-[#93621e]"
-                }
-              >
-                {priority}
-              </span>
-            ) : (
-              <span className="text-[10px] font-medium capitalize text-[#91918b]">
-                {ticket.status.replaceAll("_", " ")}
-              </span>
-            )}
+          <div className="mt-1.5 flex items-center gap-2 text-[12px] text-ns-subtle">
+            <span title={`${PRIORITY_LABEL[ticket.priority]} priority`}>
+              <PriorityGlyph priority={ticket.priority} className="size-3" />
+            </span>
+            <span className="min-w-0 truncate">{customer.name}</span>
             {agentConnected ? (
-              <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-[#6558cc]">
-                <SparklesIcon className="size-3" /> OpenGeni
+              <span
+                className="ml-auto inline-flex shrink-0 items-center gap-1 font-medium text-og-green"
+                style={{ fontFamily: "var(--font-og)" }}
+              >
+                <span className="relative flex size-1.5">
+                  <span className="absolute inset-0 animate-ping rounded-full bg-og-green/50" />
+                  <span className="relative size-1.5 rounded-full bg-og-green" />
+                </span>
+                Opengeni
               </span>
             ) : (
-              <span className="text-[10px] text-[#9c9b95]">{ticket.id}</span>
+              <span className="ml-auto shrink-0 tabular-nums">
+                {ticket.unread ? (
+                  <span
+                    className="mr-1.5 inline-block size-1.5 -translate-y-px rounded-full bg-ns-star"
+                    aria-label="Unread"
+                  />
+                ) : null}
+                {relativeTime(ticket.createdAt)}
+              </span>
             )}
           </div>
         </div>
       </div>
-    </button>
-  );
-}
-
-function InboxFilterButton({
-  active,
-  label,
-  count,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  count: number;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={
-        active
-          ? "border-b-2 border-[#2c725f] px-3 py-2.5 text-[11px] font-semibold text-[#285e4f]"
-          : "border-b-2 border-transparent px-3 py-2.5 text-[11px] font-medium text-[#7d7c76] transition hover:text-[#494c49]"
-      }
-    >
-      {label} <span className="ml-1.5 opacity-55">{count}</span>
     </button>
   );
 }

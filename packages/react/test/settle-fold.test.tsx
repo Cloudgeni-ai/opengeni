@@ -8,7 +8,7 @@ import {
 } from "../src/timeline/fold-memory";
 import { MOTION_INSPECT_SCALE } from "../src/lib/motion-inspect";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 const BEAT_AND_MARGIN_MS = 1400 * MOTION_INSPECT_SCALE;
 /** Keep in sync with `--og-duration-disclose` / TurnSummary DISCLOSE_MS. */

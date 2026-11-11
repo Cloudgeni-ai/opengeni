@@ -8,6 +8,7 @@ import { chromium, type Page } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { createInteractionUiFixture } from "./interaction-ui-live-fixture";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type Metric =
   | "browserFirstFrame"
@@ -397,7 +398,7 @@ try {
         schemaVersion: "opengeni/interaction-ui-live-acceptance/v1",
         generatedAt: new Date().toISOString(),
         status: "failed",
-        error: cause instanceof Error ? cause.message : String(cause),
+        error: errorMessage(cause),
         workspaceId: fixture.workspaceId,
         sessionId: fixture.sessionId,
         browserSessionId: fixture.browserSessionId,

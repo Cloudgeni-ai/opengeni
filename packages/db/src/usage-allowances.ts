@@ -4,12 +4,20 @@ import { currentCreditDebitAttribution } from "./credit-debit-attribution";
 
 /** All amounts are integer USD micros, never dollars or floating-point credits. */
 export type MemberAllowanceRule = { share: number } | { credits: number } | null;
+/**
+ * How model calls that spend no Opengeni credits (subscription connections,
+ * workspace keys, deployments without credit billing) count. "ignore" (the
+ * default) keeps the allowance credit-only; "list_price" counts them at the
+ * configured list-price estimate and admits their turns against it.
+ */
+export type UnbilledUsageMetering = "ignore" | "list_price";
 export type WorkspaceAllowanceConfig = {
   includedCredits: number;
   period: "monthly" | "none";
   anchorDay?: number;
   memberDefault?: "none" | "equal_share" | Exclude<MemberAllowanceRule, null>;
   thresholds?: { workspace?: number[]; member?: number[] };
+  unbilledUsage?: UnbilledUsageMetering;
 };
 export type WorkspaceAllowance = WorkspaceAllowanceConfig & { version: number };
 export type WorkspaceAllowanceState = { version: number; config: WorkspaceAllowance | null };
@@ -28,6 +36,9 @@ export type MemberAllowance = {
   version: number;
 };
 export type WorkspaceUsage = {
+  /** Every amount is an integer USD micro: 1 USD = 1,000,000. */
+  unit: "usd_micros";
+  /** The window the counters cover, configured or not; null when unknown or lifetime. */
   period: { start: string | null; end: string | null };
   workspace: AllowanceUsage & { includedCredits: number; grantsRemaining: number };
   members: (AllowanceUsage &
@@ -87,6 +98,13 @@ export function validateWorkspaceAllowanceConfig(config: WorkspaceAllowanceConfi
     throw new Error("anchorDay must be an integer from 1 to 31");
   }
   if (
+    config.unbilledUsage !== undefined &&
+    config.unbilledUsage !== "ignore" &&
+    config.unbilledUsage !== "list_price"
+  ) {
+    throw new Error('unbilledUsage must be "ignore" or "list_price"');
+  }
+  if (
     config.memberDefault !== undefined &&
     config.memberDefault !== "none" &&
     config.memberDefault !== "equal_share"
@@ -118,6 +136,7 @@ async function command<T>(db: Database, input: Scope & Record<string, unknown>):
   }
   try {
     const mutation = ["set", "clear", "member", "grant"].includes(String(input.action));
+    const read = input.action === "usage" || input.action === "check";
     return await withRlsContext(
       db,
       input,
@@ -132,12 +151,29 @@ async function command<T>(db: Database, input: Scope & Record<string, unknown>):
         }
         if (typeof input.actorSubjectId === "string")
           await setSubjectRlsContext(scoped, input.actorSubjectId);
-        const [row] = await rawRows<{ result: T }>(
+        const commandCall = sql`usage_allowance_command(${JSON.stringify(input)}::jsonb)`;
+        // Reads also take the organization's per-person limit for Personal
+        // workspaces, in the same statement (see personalWorkspaceConfig).
+        const [row] = await rawRows<{ result: T; personal_monthly_credits?: string | null }>(
           scoped,
-          sql`select usage_allowance_command(${JSON.stringify(input)}::jsonb) as result`,
+          read
+            ? sql`select ${commandCall} as result, (
+                select preferences.personal_workspace_monthly_credits
+                from organization_privacy_preferences preferences
+                where preferences.account_id = ${input.accountId}::uuid
+                  and preferences.personal_workspace_monthly_credits is not null
+                  and get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) = 'personal'
+              ) as personal_monthly_credits`
+            : sql`select ${commandCall} as result`,
         );
         if (!row) throw new Error("Usage allowance command returned no result");
-        return row.result;
+        if (!read) return row.result;
+        const credits = row.personal_monthly_credits;
+        return {
+          ...(row.result as object),
+          personalMonthlyCredits:
+            credits === null || credits === undefined ? null : Number(credits),
+        } as T;
       },
       undefined,
       mutation ? "none" : "shared",
@@ -183,6 +219,7 @@ export async function setWorkspaceAllowance(
     ...(input.anchorDay === undefined ? {} : { anchorDay: input.anchorDay }),
     ...(input.memberDefault === undefined ? {} : { memberDefault: input.memberDefault }),
     ...(input.thresholds === undefined ? {} : { thresholds: input.thresholds }),
+    ...(input.unbilledUsage === undefined ? {} : { unbilledUsage: input.unbilledUsage }),
   };
   version(expectedVersion);
   validateWorkspaceAllowanceConfig(config);
@@ -253,7 +290,22 @@ type RawUsage = {
     used: number;
     externalIdentity: { source: string; externalId: string } | null;
   })[];
+  /** The organization's per-person limit when this is a Personal workspace. */
+  personalMonthlyCredits?: number | null;
 };
+
+/**
+ * A Personal workspace without a budget of its own takes its organization's
+ * per-person monthly limit, metered by the calendar-month counters every
+ * workspace keeps. The limit applies to the running month only: a past month
+ * without a budget of its own has no recorded window (`end` is null), and the
+ * organization keeps no history of the limit.
+ */
+function personalWorkspaceConfig(raw: RawUsage): WorkspaceAllowanceConfig | null {
+  const credits = raw.personalMonthlyCredits;
+  if (credits === null || credits === undefined || raw.period.end === null) return null;
+  return { includedCredits: credits, period: "monthly" };
+}
 
 export function allowanceUsage(
   limit: number | null,
@@ -300,11 +352,14 @@ export async function getWorkspaceUsage(
 }
 
 function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
-  const config = raw.config;
+  const config = raw.config ?? personalWorkspaceConfig(raw);
+  // The period's whole pool: included credits plus the grants spent this
+  // period and those still left. Usage counts the whole period, so its
+  // ceilings must too: against what is left, every credit spent would shrink
+  // every member's share.
   const pool = config
     ? config.includedCredits + Number(raw.grantsUsed) + Number(raw.grantsRemaining)
     : null;
-  const memberPool = config ? config.includedCredits + Number(raw.grantsRemaining) : null;
   const resetsAt = config ? raw.period.end : null;
   const members = raw.members.slice(0, pageSize).map((member) => {
     let rule = member.rule;
@@ -322,9 +377,9 @@ function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
         ? null
         : "credits" in rule
           ? rule.credits
-          : memberPool === null
+          : pool === null
             ? null
-            : Math.min(Number.MAX_SAFE_INTEGER, Math.floor(memberPool * rule.share));
+            : Math.min(Number.MAX_SAFE_INTEGER, Math.floor(pool * rule.share));
     return {
       ...member,
       rule: member.rule,
@@ -332,7 +387,10 @@ function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
     };
   });
   return {
-    period: config ? raw.period : { start: null, end: null },
+    unit: "usd_micros",
+    // The window these counters were read for. Without a budget, usage still
+    // counts per calendar month, so the month is still the answer.
+    period: raw.period,
     workspace: {
       ...allowanceUsage(pool, Number(raw.used), resetsAt, config?.thresholds?.workspace),
       includedCredits: config?.includedCredits ?? 0,
@@ -345,7 +403,14 @@ function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
 
 export async function checkWorkspaceAllowance(
   db: Database,
-  input: Scope & { subjectId?: string | null },
+  input: Scope & {
+    subjectId?: string | null;
+    /**
+     * The work spends no Opengeni credits. It is admitted against the allowance
+     * only when the allowance opts into `unbilledUsage: "list_price"`.
+     */
+    fundedWithoutCredits?: boolean;
+  },
 ): Promise<AllowanceExhausted | null> {
   const raw = await command<RawUsage>(db, {
     accountId: input.accountId,
@@ -354,6 +419,7 @@ export async function checkWorkspaceAllowance(
     limit: 1,
     action: "check",
   });
+  if (input.fundedWithoutCredits && raw.config?.unbilledUsage !== "list_price") return null;
   const usage = projectUsage(raw, 1);
   if (usage.workspace.status === "exhausted") {
     return {

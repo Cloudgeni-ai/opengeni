@@ -12,12 +12,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { readSignedState } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  startTestMcpServer,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import { createApp } from "../src/app";
 import { buildAuthorizationUrl } from "../src/integrations/oauth-client";
@@ -78,7 +75,6 @@ beforeAll(async () => {
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: rawKey.toString("base64"),
     integrationsEnabled: true,
-    integrationsOauthShortStateEnabled: true,
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
   }) as Settings;
@@ -192,7 +188,6 @@ describe("catalog OAuth profiles", () => {
     expect(profile).not.toBeNull();
     expect(profile!.key).toBe("catalog:https://mcp.pinned.example/mcp");
     expect(profile!.clientSource).toBe("dcr");
-    expect(profile!.exactMcpBinding).toBe(true);
     expect(profile!.requireExactMcpUrl?.url).toBe("https://mcp.pinned.example/mcp");
     expect(profile!.sendResourceParameter).toBe(false);
     expect(profile!.requestedScopes).toEqual(["files:read"]);
@@ -214,7 +209,6 @@ describe("catalog OAuth profiles", () => {
   test("an empty profile keeps the default behavior and malformed profiles fail closed", () => {
     const empty = oauthProfileFromCatalog("https://mcp.example/mcp", {});
     expect(defaultOwnershipFor(empty)).toBe("workspace");
-    expect(empty.exactMcpBinding).toBe(false);
     expect(empty.sendResourceParameter).toBe(true);
     expect(empty.authorizationServer).toBeUndefined();
 

@@ -1,15 +1,10 @@
 // One sandbox environment as its own page: Overview, Versions and Changes
 // tabs, a quiet aside, and Edit details / Edit setup as their own pages
 // (?view=edit, ?view=edit-setup). Reads poll so verification and promotion
-// move live. rigs:manage gates edit/promote/activate/default/delete;
-// rigs:use gates read + propose.
-import {
-  useOpenGeni,
-  useRig,
-  useRigChanges,
-  useRigVersions,
-  useVariableSets,
-} from "@opengeni/react";
+// move live. rigs:manage gates edit/promote/activate/delete; choosing the
+// workspace default also needs workspace settings authority; rigs:use gates
+// read + propose.
+import { useOpenGeni, useRig, useRigChanges, useRigVersions } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
@@ -29,41 +24,51 @@ import { RigChangesQueue } from "@/components/rigs/rig-changes-queue";
 import { RigOverview } from "@/components/rigs/rig-overview";
 import { RigSetupEditPage } from "@/components/rigs/rig-setup-section";
 import { RigVersionsTimeline } from "@/components/rigs/rig-versions-timeline";
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@/components/ui/flush-form-page";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@opengeni/react/ui/flush-form-page";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Skeleton } from "@/components/ui/skeleton";
+} from "@opengeni/react/ui/line-tabs";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { resourceScopeLabel } from "@/components/resource-scope-picker";
-import { userFacingError } from "@/components/variable-sets/variable-set-model";
-import { LoadFailure } from "@/components/variable-sets/variable-set-pages";
-import { useAppContext } from "@/context";
-import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import {
+  OrganizationComputeReachDialog,
+  organizationComputeReachSummary,
+} from "@/components/organization-compute-reach-dialog";
+import { useOrganizationName } from "@/lib/use-organization-name";
+import { userFacingError } from "@opengeni/react/ui/api-error";
+import { LoadFailure } from "@opengeni/react/ui/load-failure";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
+import {
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import { rigActorLabel } from "@/lib/rig-status";
+import { usePersonName } from "@opengeni/react/app/lib/use-person-name";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
-import type { Rig } from "@/types";
-import { MoreMenu } from "@/components/ui/page-actions";
+import type { Rig } from "@opengeni/react/app/types";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 // Live cadence: fast enough that a verifying change resolves without a manual
 // refresh, slow enough to stay quiet.
@@ -90,20 +95,30 @@ export function RigDetailRoute({
   const navigate = useNavigate();
   const { client } = useOpenGeni();
   const canView = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
-  const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
+  const canManageRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
 
   const rig = useRig(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const versions = useRigVersions(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const changes = useRigChanges(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
-  const variableSets = useVariableSets();
+  // Who made each version or change, by name.
+  const personName = usePersonName(workspaceId, canView);
 
   const [tab, setTab] = useState<Tab>("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
-
-  const variableSetName = useMemo(() => {
-    const byId = new Map(variableSets.variableSets.map((set) => [set.id, set.name]));
-    return (id: string) => byId.get(id) ?? "Variable set you can't see";
-  }, [variableSets.variableSets]);
+  const [reachOpen, setReachOpen] = useState(false);
+  // An organization rig works in the workspaces its organization picks; the
+  // organization's owner or an admin changes that, as the server allows.
+  const organizationId = rig.rig?.scope === "organization" ? rig.rig.accountId : "";
+  const organizationAdmin = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: organizationId,
+  });
+  // Changing an organization rig also needs the organization's owner or an
+  // admin, as the API asks; without that its edit actions would only be refused.
+  const canManage = canManageRigs && (rig.rig?.scope !== "organization" || organizationAdmin);
+  const organizationName =
+    useOrganizationName(organizationId, organizationAdmin) ?? "your organization";
 
   const versionLabel = useMemo(() => {
     const byId = new Map(versions.versions.map((version) => [version.id, `v${version.version}`]));
@@ -188,6 +203,12 @@ export function RigDetailRoute({
   ).length;
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
   const isDefaultRig = workspace?.defaultRigId === current.id;
+  // Which environment new sessions start on is a workspace setting.
+  const canSetDefault = canManageWorkspaceSettings(
+    context.accessContext,
+    workspace ?? null,
+    context.managedSelfContext,
+  );
   const health = rigHealth(current);
 
   if (view === "edit" && canManage) {
@@ -214,8 +235,6 @@ export function RigDetailRoute({
       <RigSetupEditPage
         rigName={current.name}
         activeVersion={active}
-        rigScope={current.scope}
-        variableSets={variableSets.variableSets}
         onClose={() => openRig()}
         onPropose={async (request) => {
           try {
@@ -258,6 +277,22 @@ export function RigDetailRoute({
       <DetailAsideItem label="Available to" icon={SCOPE_ICON[current.scope]}>
         {current.scope === "workspace" ? "This workspace" : resourceScopeLabel(current.scope)}
       </DetailAsideItem>
+      {current.scope === "organization" && current.reach ? (
+        <DetailAsideItem label="Available in">
+          {organizationComputeReachSummary(current.reach)}
+          {canManage ? (
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="block h-auto p-0"
+              onClick={() => setReachOpen(true)}
+            >
+              Change where it works
+            </Button>
+          ) : null}
+        </DetailAsideItem>
+      ) : null}
       <DetailAsideItem label="Workspace default">
         {isDefaultRig ? "Yes. New sessions use it." : "No"}
       </DetailAsideItem>
@@ -265,7 +300,8 @@ export function RigDetailRoute({
         <DetailAsideItem label="Active version">
           Version {active.version}
           <span className="block text-xs leading-4.5 text-fg-muted">
-            {rigActorLabel(active.createdBy)} · <RelativeTime date={active.createdAt} inSentence />
+            {rigActorLabel(active.createdBy, personName)} ·{" "}
+            <RelativeTime date={active.createdAt} inSentence />
           </span>
         </DetailAsideItem>
       ) : null}
@@ -326,14 +362,16 @@ export function RigDetailRoute({
               ) : null}
               {canManage ? (
                 <MoreMenu label={`More actions for ${current.name}`} disabled={rig.mutating}>
-                  <DropdownMenuItem onSelect={() => void toggleDefault()}>
-                    {isDefaultRig ? (
-                      <StarOffIcon aria-hidden="true" />
-                    ) : (
-                      <StarIcon aria-hidden="true" />
-                    )}
-                    {isDefaultRig ? "Stop using as default" : "Use for new sessions"}
-                  </DropdownMenuItem>
+                  {canSetDefault ? (
+                    <DropdownMenuItem onSelect={() => void toggleDefault()}>
+                      {isDefaultRig ? (
+                        <StarOffIcon aria-hidden="true" />
+                      ) : (
+                        <StarIcon aria-hidden="true" />
+                      )}
+                      {isDefaultRig ? "Stop using as default" : "Use for new sessions"}
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem onSelect={() => openRig({ view: "edit" })}>
                     <PencilIcon aria-hidden="true" />
                     Edit details
@@ -387,16 +425,9 @@ export function RigDetailRoute({
                 <RigOverview
                   rig={current}
                   changes={changes.changes}
-                  variableSetName={variableSetName}
                   canUse={canView}
                   mutating={rig.mutating}
                   onVerify={rig.verify}
-                  onOpenVariableSet={(id) =>
-                    void navigate({
-                      to: "/workspaces/$workspaceId/variable-sets/$variableSetId",
-                      params: { workspaceId, variableSetId: id },
-                    })
-                  }
                 />
               </div>
             </LineTabsContent>
@@ -415,7 +446,7 @@ export function RigDetailRoute({
                   <RigVersionsTimeline
                     versions={versions.versions}
                     activeVersionId={active?.id ?? null}
-                    variableSetName={variableSetName}
+                    personName={personName}
                     canManage={canManage}
                     mutating={rig.mutating}
                     onActivate={async (versionId) => {
@@ -442,6 +473,7 @@ export function RigDetailRoute({
                   <RigChangesQueue
                     changes={changes.changes}
                     versionLabel={versionLabel}
+                    personName={personName}
                     canManage={canManage}
                     mutating={rig.mutating}
                     onVerify={async (changeId) => {
@@ -486,6 +518,35 @@ export function RigDetailRoute({
           openList();
         }}
       />
+      {current.scope === "organization" && current.reach && canManage ? (
+        <OrganizationComputeReachDialog
+          open={reachOpen}
+          onOpenChange={setReachOpen}
+          client={context.client}
+          kind="rig"
+          name={current.name}
+          reach={current.reach}
+          organizationId={organizationId}
+          organizationName={organizationName}
+          hereId={workspaceId}
+          save={async (next) =>
+            (await context.client.updateRigReach(workspaceId, current.id, next)).reach
+          }
+          onSaved={(reach) => {
+            setReachOpen(false);
+            const personal = workspace?.kind === "personal";
+            const stillHere =
+              reach.homeWorkspaceId === workspaceId ||
+              (personal
+                ? reach.allowPersonalWorkspaces
+                : reach.allowedWorkspaceIds === null ||
+                  reach.allowedWorkspaceIds.includes(workspaceId));
+            // Taken out of this workspace: it is no longer found here.
+            if (stillHere) void rig.refresh();
+            else openList();
+          }}
+        />
+      ) : null}
     </DetailPage>,
   );
 }

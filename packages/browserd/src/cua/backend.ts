@@ -1,0 +1,3466 @@
+import { CuaNativeTools } from "./native-tools";
+import {
+  type AgentInput,
+  agentInput as processAgentInput,
+  type PersonInputReader,
+  reachesHidTimers,
+  recentPersonInput,
+} from "./macos-person-input";
+import { COMPUTER_LOCATOR_WAIT_MS, type ComputerNativeCallRequest } from "@opengeni/contracts";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+import type {
+  ComputerLocator,
+  ComputerSessionCapabilities,
+  InteractionSemanticNodeValue,
+} from "@opengeni/contracts";
+import {
+  ComputerBackendError,
+  type ComputerBackend,
+  type ComputerBackendTarget,
+  type ComputerBackendObservation,
+  type ComputerBackendFrame,
+  type ComputerBackendCaptureOptions,
+  type ComputerBackendActionCommand,
+  type ComputerBackendClipboard,
+  type ComputerBackendErrorCode,
+  type ComputerBackendRoleStandIn,
+} from "../computer-backend";
+import {
+  callDesktop,
+  deliveredUnconfirmed,
+  CuaFailure,
+  runSteps,
+  walkIncompleteness,
+  Windows,
+  WindowState,
+  type CuaDesktopRuntime,
+  type ListedWindow,
+  type RunStepsOutcome,
+  WINDOWS_SET_VALUE_REFUSED,
+} from "./wire";
+import {
+  dateFieldFormat,
+  dateFields,
+  dateFieldTyping,
+  distinctElements,
+  locate,
+  observedRole,
+  opensOnInvoke,
+  parseDateValue,
+  projectElements,
+  readWindowTitle,
+  TOGGLE_ROLES,
+  unindexedRows,
+  unindexedTextByElement,
+  type DateSegment,
+  type UnindexedRow,
+} from "./projection";
+import type { MacConsoleState, MacWindowPresence, MacWindows } from "./macos-windows";
+import type { WindowFronting } from "./windows-foreground";
+
+type Target = {
+  native: ComputerBackendTarget;
+  pid: number;
+  windowId: number;
+  /** The window's own title and app, as CUA names them in its reports. */
+  title: string;
+  appName: string;
+  /** False when CUA lists the window as not on screen. */
+  onScreen: boolean;
+  /** A macOS window that is minimized or whose app is hidden: reading it
+   * first brings it back on screen, behind the person's front window. */
+  restorable: boolean;
+};
+type Frame = {
+  targetId: string;
+  width: number;
+  height: number;
+  windowWidth: number;
+  windowHeight: number;
+};
+type Operation = {
+  name:
+    | "click"
+    | "drag"
+    | "scroll"
+    | "set_value"
+    | "type_text"
+    | "press_key"
+    | "hotkey"
+    | "bring_to_front";
+  args: Record<string, unknown>;
+  /** The value a date field must read once this step's input has run. */
+  expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
+  /** A text or number field's value before set_value wrote this one: a
+   * field that still reads it afterwards did not take the write. A number
+   * field (`numeric`) compares as numbers, and reading empty fails too. */
+  expectText?: {
+    ref: string;
+    value: string;
+    before: string;
+    numeric?: "number field" | "slider";
+  };
+  /** This step only fills a field (a part of a date field's input), so it
+   * cannot submit or clear another field. */
+  fillsField?: true;
+  /** The checked state a checkbox or switch this step presses must read
+   * once the step has run. */
+  expectToggle?: { ref: string; wanted: boolean };
+  /** run_steps options of a step that names its element instead of carrying
+   * a token: how long CUA waits for it, the check that holds first, and for
+   * a checkbox or switch the checked state it is pressed into when it reads
+   * the other one. */
+  stepOptions?: { timeout_ms: number; wait_for: Record<string, unknown>; toggle_to?: boolean };
+};
+
+/** Every CUA action waits for the agent cursor to reach its target, and the
+ * default timing makes each move take at least 600 ms. Keep the cursor visible
+ * but quick, without a pause after each click. */
+const CURSOR_MOTION = { timing: "fixed", glide_duration_ms: 150, dwell_after_click_ms: 0 };
+
+/** An untitled window with a side shorter than this is a strip attached to
+ * another window (Chrome's status bubble is 22 px tall, an Android
+ * emulator's toolbar 54 px wide), never the window in front. */
+const UNTITLED_STRIP_MAX_SIDE = 100;
+
+/** How long a field check waits before reading a window again, when the
+ * reading straight after the input does not show it yet. */
+const INPUT_REREAD_MS = 150;
+/** CUA's refusal of background typing when the window's focused element is
+ * not a text input (see typeAtClick). */
+const NO_FOCUSED_TEXT_INPUT = "no_focused_text_input";
+
+/** How long the reading after an action waits for work the action started,
+ * such as a save or a load the page shows as "Saving..." or a busy element,
+ * and how often it reads the window again meanwhile. Work shown only by text
+ * gets less time: a text that just ends in "..." (a chat message, an
+ * editor's placeholder) can be content that stays. */
+const SETTLE_MAX_MS = 5_000;
+const SETTLE_TEXT_MAX_MS = 2_500;
+/** A reading of an ordinary window takes about 50 ms, so a save or load
+ * that finishes is seen within about a tenth of a second. */
+const SETTLE_POLL_MS = 100;
+
+/** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
+ * Every call is serialized, including preview captures and shutdown. */
+export class CuaComputerBackend implements ComputerBackend {
+  readonly identity: { platform: "macos" | "windows" | "linux"; adapterId: string };
+  readonly initialCapabilities: ComputerSessionCapabilities;
+  private readonly session = `opengeni-${randomUUID()}`;
+  private readonly nativeSession = `opengeni-${randomUUID()}`;
+  private nativeSessionStarted = false;
+  private readonly cursorMotionSet = new Set<string>();
+  private readonly targetsById = new Map<string, Target>();
+  private readonly observations = new Map<string, ComputerBackendObservation>();
+  /** The signs of work in progress each semantic reading shows (see
+   * progressSigns), read from its elements and its Markdown rows. */
+  private readonly progress = new WeakMap<ComputerBackendObservation, ProgressSigns>();
+  /** The title of the document each semantic reading shows (see
+   * documentTitle). */
+  private readonly documents = new WeakMap<ComputerBackendObservation, string>();
+  /** Recent semantic observations per window, newest last. A ref names the
+   * observation the model read it from; an action that omits its fence is
+   * checked against a fresh observation, which mints new refs, so the ref is
+   * resolved in the observation it came from and CUA validates its token. */
+  private readonly recentObservations = new Map<string, ComputerBackendObservation[]>();
+  /** Readings the app did not answer (see unansweredObservation). They show
+   * no focused element, so keys are not sent on them. */
+  private readonly unansweredReadings = new WeakSet<ComputerBackendObservation>();
+  /** CUA's element token behind each ref of a window's latest reading. CUA
+   * accepts only the tokens of a window's latest snapshot; a ref outlives
+   * readings for as long as its element stays (see stabilizeRefs). */
+  private readonly tokens = new Map<string, Map<string, string>>();
+  /** Per window, the CUA tokens of its latest reading whose invoke opens the
+   * element (AXOpen) instead of pressing it. */
+  private readonly openingTokens = new Map<string, Set<string>>();
+  /** Per window, the web date and time fields of its latest reading: each
+   * field's parts by its CUA token, the tokens of those parts in order, the
+   * field each part (or its date picker button) belongs to, and those picker
+   * buttons. */
+  private readonly dateFieldTokens = new Map<
+    string,
+    {
+      fields: Map<string, DateSegment[]>;
+      parts: Map<string, string[]>;
+      owners: Map<string, string>;
+      pickers: Set<string>;
+    }
+  >();
+  /** Per window, the element's own label behind each CUA token of its latest
+   * reading: what CUA's lookup by name matches. An observed name can instead
+   * come from the element's text or drop Chrome's live memory figure. */
+  private readonly ownLabels = new Map<string, Map<string, string>>();
+  private lastRef = 0;
+  private readonly frames = new Map<string, Frame>();
+  /** Per window, the point of a click that was its latest action, in the
+   * screenshot pixels of the frame the click used (with that frame's size):
+   * where typing goes next when the window's content is not in its
+   * accessibility tree (see typeAtClick). Any other action forgets it. */
+  private readonly clickedPoints = new Map<
+    string,
+    { x: number; y: number; width: number; height: number }
+  >();
+  private tail: Promise<unknown> = Promise.resolve();
+  private closing = false;
+  private closePromise: Promise<void> | null = null;
+  private pending = 0;
+  private nativeTools: CuaNativeTools | null = null;
+  private nativeObservations = false;
+  /** Windows CUA could not read because they are sheets of another window. */
+  private readonly unreadableSheets = new Set<string>();
+  /** macOS windows on the current Space that their app never shows. A window
+   * stays this way until it comes on screen or goes away. */
+  private readonly neverShown = new Set<string>();
+  /** macOS windows named by their id that the listing of every app leaves
+   * out, because they sit on a level above an app's working windows (a
+   * sign-in or other dialog an app raises there). CUA reads any window by its
+   * id, so they stay targets while their app lists them. */
+  private readonly namedWindows = new Set<string>();
+
+  private constructor(
+    private readonly runtime: CuaDesktopRuntime,
+    permissions: { accessibility: boolean; screen_recording: boolean },
+    platform: "macos" | "windows" | "linux",
+    private readonly parentPid: (pid: number) => number | null,
+    actionBatches: boolean,
+    private readonly launchWindowWaitMs: number,
+    private readonly macWindows: MacWindows | null,
+    private readonly frontWindow: WindowFronting | null,
+    private readonly personInput: PersonInputReader | null,
+    private readonly agentInput: AgentInput,
+    private readonly cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity,
+  ) {
+    this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
+    this.initialCapabilities = {
+      semanticObservation: permissions.accessibility,
+      appDiscovery: true,
+      // CUA launches apps in the background without taking focus.
+      appLaunch: true,
+      windowCapture: permissions.screen_recording,
+      screenCapture: false,
+      semanticActions: permissions.accessibility,
+      pointerInput: permissions.accessibility && permissions.screen_recording,
+      keyboardInput: permissions.accessibility,
+      clipboard: false,
+      backgroundActions: permissions.accessibility,
+      backgroundInput: platform === "macos" && permissions.accessibility,
+      // CUA runs a batch as one run_steps call where that call can stop at a
+      // stale token (see dispatchBatch); elsewhere each action is its own.
+      actionBatches,
+      parallelApps: false,
+      // Only macOS brings a window to the front (see dispatchFocus).
+      targetFocus: platform === "macos" && permissions.accessibility,
+    };
+  }
+
+  static async open(
+    runtime: CuaDesktopRuntime,
+    platform: "macos" | "windows" | "linux" = "macos",
+    options: {
+      cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
+      /** A process's parent, to tie a Linux launcher's app to its window.
+       * CUA runs in this process, so it sees the same processes. */
+      parentPid?: (pid: number) => number | null;
+      /** How long a launch waits for the launched app's first window. */
+      launchWindowWaitMs?: number;
+      /** Native macOS window presence and restore; without it, a window that
+       * is not on screen stays unreadable. */
+      macWindows?: MacWindows | null;
+      /** Windows: bring a window to the foreground before CUA sends it
+       * pointer or keyboard input (see windows-foreground.ts). */
+      frontWindow?: WindowFronting | null;
+      /** macOS: how long ago a person used the keyboard, mouse or trackpad
+       * (see macos-person-input.ts). Listings and observations say so when
+       * it was within the last minute. */
+      personInput?: PersonInputReader | null;
+      /** The input agents send through this process that the person-input
+       * reading would also see; shared by every session by default. */
+      agentInput?: AgentInput;
+    } = {},
+  ): Promise<CuaComputerBackend> {
+    try {
+      const permissions = await readPermissions(runtime, platform);
+      const backend = new CuaComputerBackend(
+        runtime,
+        permissions,
+        platform,
+        options.parentPid ?? procParentPid,
+        await runStepsStopsAtStaleTokens(runtime),
+        options.launchWindowWaitMs ??
+          (platform === "macos" ? MACOS_LAUNCH_WINDOW_WAIT_MS : LAUNCH_WINDOW_WAIT_MS),
+        platform === "macos" ? (options.macWindows ?? null) : null,
+        platform === "windows" ? (options.frontWindow ?? null) : null,
+        platform === "macos" ? (options.personInput ?? null) : null,
+        options.agentInput ?? processAgentInput,
+        options.cursorIdentity,
+      );
+      await backend.startSession(backend.session);
+      return backend;
+    } catch (error) {
+      await runtime.shutdown();
+      throw error;
+    }
+  }
+
+  validateNative(request: ComputerNativeCallRequest): Promise<void> {
+    return this.run(async () => {
+      await this.assertOnScreen(true);
+      this.nativeTools ??= new CuaNativeTools(
+        this.runtime,
+        this.nativeSession,
+        this.identity.platform,
+      );
+      await this.nativeTools.validate(request);
+    });
+  }
+  callNative(request: ComputerNativeCallRequest) {
+    return this.run(async () => {
+      // Native tools send input and read windows directly, so they are
+      // checked in full before anything runs, like actions.
+      await this.assertOnScreen(true);
+      this.nativeTools ??= new CuaNativeTools(
+        this.runtime,
+        this.nativeSession,
+        this.identity.platform,
+      );
+      await this.nativeTools.validate(request);
+      // CUA reclaims idle sessions independently of ComputerSession. Reassert
+      // the same owned label before dispatch; active snapshots stay intact and
+      // revived sessions reject their expired tokens through CUA's own checks.
+      await this.startSession(this.nativeSession);
+      this.nativeSessionStarted = true;
+      this.nativeObservations = true;
+      this.observations.clear();
+      const { delivery_mode, window_id } = request.arguments as Record<string, unknown>;
+      const fronted =
+        typeof window_id === "number"
+          ? await this.front(window_id, [{ name: request.tool, args: { delivery_mode } }])
+          : null;
+      try {
+        // Input the person-input reading would also see is noted, so it is
+        // not reported as a person's afterwards.
+        const nativeTools = this.nativeTools;
+        return reachesHidTimers(request.tool, request.arguments)
+          ? await this.agentInput.around(() => nativeTools.call(request))
+          : await nativeTools.call(request);
+      } finally {
+        await fronted?.giveBack();
+      }
+    });
+  }
+
+  capabilities(): Promise<ComputerSessionCapabilities> {
+    return this.run(async () => {
+      const permissions = await readPermissions(this.runtime, this.identity.platform);
+      const macos = this.identity.platform === "macos";
+      return {
+        ...this.initialCapabilities,
+        semanticObservation: permissions.accessibility,
+        semanticActions: permissions.accessibility,
+        keyboardInput: permissions.accessibility,
+        backgroundActions: permissions.accessibility,
+        backgroundInput: macos && permissions.accessibility,
+        targetFocus: macos && permissions.accessibility,
+        windowCapture: permissions.screen_recording,
+        pointerInput: permissions.accessibility && permissions.screen_recording,
+      };
+    });
+  }
+
+  targets(): Promise<ComputerBackendTarget[]> {
+    return this.run(async () => {
+      await this.assertOnScreen(true);
+      const targets = await this.discover();
+      const personInputSecondsAgo = this.recentPersonInput();
+      return personInputSecondsAgo === undefined
+        ? targets
+        : targets.map((target) => ({ ...target, personInputSecondsAgo }));
+    });
+  }
+  observe(targetId: string): Promise<ComputerBackendObservation> {
+    return this.run(async () => {
+      const observation = await this.whileOnScreen(false, () =>
+        this.readOnScreen(targetId, () => this.observeTarget(targetId)),
+      );
+      const personInputSecondsAgo = this.recentPersonInput();
+      return personInputSecondsAgo === undefined
+        ? observation
+        : { ...observation, target: { ...observation.target, personInputSecondsAgo } };
+    });
+  }
+
+  /** Whole seconds since a person used the keyboard, mouse or trackpad, when
+   * that was within the last minute and clearly after any input agents sent
+   * through this process that the same reading sees. A reading that fails
+   * says nothing. */
+  private recentPersonInput(): number | undefined {
+    try {
+      if (!this.personInput) return undefined;
+      return recentPersonInput(this.agentInput.personOnly(this.personInput()));
+    } catch {
+      return undefined;
+    }
+  }
+  capture(
+    targetId: string,
+    options?: ComputerBackendCaptureOptions,
+  ): Promise<ComputerBackendFrame> {
+    return this.run(() =>
+      this.whileOnScreen(false, () =>
+        this.readOnScreen(targetId, () => this.captureTarget(targetId, options)),
+      ),
+    );
+  }
+  captureStill(
+    targetId: string,
+    options: ComputerBackendCaptureOptions,
+  ): Promise<ComputerBackendFrame> {
+    return this.capture(targetId, options);
+  }
+  startCapture(targetId: string, _options: ComputerBackendCaptureOptions): Promise<void> {
+    return this.run(async () => {
+      await this.target(targetId);
+    });
+  }
+  stopCapture(_targetId: string): Promise<void> {
+    return this.run(async () => {});
+  }
+  clipboard(): Promise<ComputerBackendClipboard> {
+    return this.run(async () => {
+      throw unsupported("CUA clipboard is not admitted by this adapter");
+    });
+  }
+  validate(command: ComputerBackendActionCommand): Promise<void> {
+    // Input sent to a locked screen goes nowhere, and may still be reported
+    // delivered: every action is checked in full before it is sent.
+    return this.run(() =>
+      this.whileOnScreen(true, async () => {
+        if (command.action.type === "launch") {
+          await this.target(command.targetId);
+          return;
+        }
+        if (command.action.type === "batch") {
+          await this.batchSteps(command);
+          return;
+        }
+        await this.operations(command);
+      }),
+    );
+  }
+
+  dispatch(
+    command: ComputerBackendActionCommand,
+    standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
+  ): Promise<ComputerBackendObservation | null> {
+    if (command.action.type === "launch")
+      return this.dispatchLaunch(command, command.action.applicationId);
+    return this.run(async () => {
+      // Only a click that is the window's latest action says where typing goes.
+      const clickedAt = this.clickedPoints.get(command.targetId);
+      this.clickedPoints.delete(command.targetId);
+      if (command.action.type === "batch")
+        return await this.dispatchBatch(command, false, standIn, unconfirmed);
+      if (command.action.type === "focus") return await this.dispatchFocus(command);
+      // Passive previews never change the native action frame. Human pointer
+      // input obtains its own fresh frame under the same serialized queue.
+      // CUA then refuses stale native pixel/zoom input until the agent re-reads.
+      if (command.action.type === "pointer") {
+        await this.operations(command);
+        const source = this.frames.get(command.action.frameId)!;
+        const fresh = await this.captureTarget(command.targetId, undefined, true);
+        const current = this.frames.get(fresh.frameId)!;
+        if (
+          Math.abs(source.windowWidth - current.windowWidth) >= 0.5 ||
+          Math.abs(source.windowHeight - current.windowHeight) >= 0.5
+        )
+          throw new ComputerBackendError(
+            "frame_stale",
+            "Window resized; read a fresh frame before input",
+            false,
+            false,
+          );
+      }
+      const operations = await this.operations(command);
+      const clickFrame =
+        command.action.type === "pointer" &&
+        command.action.action === "click" &&
+        (command.action.button ?? "left") === "left"
+          ? this.latestFrame(command.targetId)
+          : undefined;
+      // Filling a date field takes several steps, and a checkbox found by
+      // name reads its state as its step runs: run them as one batch.
+      if (
+        (operations.length > 1 || operations.some((operation) => operation.stepOptions)) &&
+        command.action.type === "semantic" &&
+        this.initialCapabilities.actionBatches
+      )
+        return await this.dispatchBatch(
+          { ...command, action: { type: "batch", actions: [command.action] } },
+          true,
+          standIn,
+          unconfirmed,
+        );
+      const observed = this.observations.get(command.targetId);
+      this.observations.delete(command.targetId);
+      const acted = await this.target(command.targetId);
+      const known = new Set(this.targetsById.keys());
+      const fronted = await this.front(acted.windowId, operations);
+      let report = "";
+      // A click, key press or press of an element CUA could only send, with
+      // nothing confirming the app acted on it. An app in the background can
+      // take a press through accessibility and do nothing (a toolbar button
+      // that opens its flyout only while its app is active).
+      const rawInput =
+        command.action.type === "keyboard" ||
+        (command.action.type === "pointer" &&
+          (command.action.action === "click" || command.action.action === "double_click"));
+      let unconfirmedInput = false;
+      try {
+        for (let index = 0; index < operations.length; index++) {
+          const operation = operations[index]!;
+          try {
+            const call = await callDesktop(this.runtime, operation.name, operation.args, true);
+            report += openedWindowsReport(call.result.text);
+            const press =
+              command.action.type === "semantic" &&
+              command.action.action === "invoke" &&
+              operation.name === "click";
+            if ((rawInput || press) && deliveredUnconfirmed(call)) unconfirmedInput = true;
+          } catch (error) {
+            if (index > 0)
+              throw new ComputerBackendError(
+                "outcome_unknown",
+                "CUA delivered only part of the input",
+                false,
+                true,
+              );
+            const atClick = this.typeAtClick(command, operation, error, clickedAt);
+            if (atClick) {
+              const call = await callDesktop(this.runtime, atClick.name, atClick.args, true);
+              report += openedWindowsReport(call.result.text);
+              if (deliveredUnconfirmed(call)) unconfirmedInput = true;
+              operations[index] = atClick;
+              continue;
+            }
+            if (error instanceof CuaFailure && error.cuaCode === WINDOWS_SET_VALUE_REFUSED) {
+              // CUA resolved the token and refused before writing. It does
+              // not expose that element's native control identity. Matching
+              // a descendant by its rectangle is not a safe fallback: an
+              // omitted child or sibling can occupy the same rectangle.
+              throw new ComputerBackendError(
+                "unsupported",
+                "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+                false,
+                false,
+              );
+            }
+            // CUA's own wording names its raw tools; say what the caller does.
+            if (
+              error instanceof ComputerBackendError &&
+              error.code === "observation_stale" &&
+              !error.dispatched
+            )
+              throw new ComputerBackendError(
+                "observation_stale",
+                "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
+                false,
+                false,
+              );
+            if (error instanceof CuaFailure && !error.dispatched)
+              throw (
+                (command.action.type === "keyboard"
+                  ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
+                  : null) ??
+                (await this.elementWindowRefusal(
+                  command.targetId,
+                  error.cuaCode,
+                  error.code,
+                  error.message,
+                )) ??
+                error
+              );
+            // macOS can answer an accessibility action with an error even
+            // when it pressed the button or opened the item, often because
+            // the window changed or closed meanwhile (see cannotComplete).
+            // The windows read afterwards say whether it did.
+            if (
+              operation.name === "click" &&
+              operation.args.element_token !== undefined &&
+              cannotComplete(error)
+            )
+              return await this.afterUnconfirmed(command.targetId, acted, known, observed);
+            throw error;
+          }
+        }
+      } finally {
+        await fronted.giveBack();
+      }
+      if (unconfirmedInput) unconfirmed?.();
+      const after = await this.observeAfter(command.targetId, acted, known, report, observed);
+      const click = operations[0];
+      if (
+        clickFrame &&
+        operations.length === 1 &&
+        click?.name === "click" &&
+        after?.target.id === command.targetId
+      )
+        this.clickedPoints.set(command.targetId, {
+          x: Number(click.args.x),
+          y: Number(click.args.y),
+          width: clickFrame.width,
+          height: clickFrame.height,
+        });
+      if (after?.target.id !== command.targetId) return after;
+      const confirmed = await this.confirmInput(after, operations);
+      if (confirmed.failures.length)
+        throw new ComputerBackendError(
+          "driver_failed",
+          `The value was written, but ${confirmed.failures.join("; ")}`,
+          false,
+          true,
+        );
+      return confirmed.after;
+    });
+  }
+
+  /** The window's most recent frame: the pixels pointer input uses now. */
+  private latestFrame(targetId: string): Frame | undefined {
+    return [...this.frames.values()].reverse().find((entry) => entry.targetId === targetId);
+  }
+
+  /**
+   * Typing in a background Mac window is refused when no text input has the
+   * keyboard focus as far as the window's accessibility tree shows. Where
+   * the content is not in that tree (a Simulator device, a sign-in sheet in
+   * one, a remote screen), the field the agent clicked just before has the
+   * focus all the same. The typing then goes to that click's point: CUA
+   * clicks the field again to focus it and makes this window its app's key
+   * window before sending any key, so the keys reach this window only. The
+   * refused attempt sent nothing. Only a click that was this window's latest
+   * action counts.
+   */
+  private typeAtClick(
+    command: ComputerBackendActionCommand,
+    operation: Operation,
+    error: unknown,
+    clickedAt: { x: number; y: number; width: number; height: number } | undefined,
+  ): Operation | null {
+    if (
+      !clickedAt ||
+      command.action.type !== "keyboard" ||
+      command.action.action !== "type" ||
+      operation.name !== "type_text" ||
+      !(error instanceof CuaFailure) ||
+      error.dispatched ||
+      error.cuaCode !== NO_FOCUSED_TEXT_INPUT
+    )
+      return null;
+    const latest = this.latestFrame(command.targetId);
+    if (!latest) return null;
+    const { element_token: _focused, ...args } = operation.args;
+    return {
+      ...operation,
+      args: {
+        ...args,
+        x: (clickedAt.x * latest.width) / clickedAt.width,
+        y: (clickedAt.y * latest.height) / clickedAt.height,
+      },
+    };
+  }
+
+  /** The checks of `steps` a reading after their input fails, read once more
+   * a moment later before any counts: an app's accessibility tree can show a
+   * write a little after it took. */
+  private async confirmInput(
+    after: ComputerBackendObservation,
+    steps: readonly Operation[],
+  ): Promise<{ after: ComputerBackendObservation; failures: string[] }> {
+    const failures = inputFailures(after, steps);
+    if (!failures.length) return { after, failures };
+    await new Promise((resolve) => setTimeout(resolve, INPUT_REREAD_MS));
+    const again = await this.observeTarget(after.target.id).catch(() => null);
+    if (again?.target.id !== after.target.id) return { after, failures };
+    return { after: again, failures: inputFailures(again, steps) };
+  }
+
+  /** The window an action left in front: the one CUA reports it opened, or
+   * its own. A failed read cannot turn a delivered action into a pre-dispatch
+   * rejection, so it observes nothing and the receipt still completes. */
+  private async observeAfter(
+    targetId: string,
+    acted: Target,
+    known: Set<string>,
+    report: string,
+    before?: ComputerBackendObservation,
+  ): Promise<ComputerBackendObservation | null> {
+    try {
+      // CUA names the windows it saw the action open. Nothing else proves
+      // that a window appearing meanwhile is the action's.
+      const opened = report
+        ? await this.openedWindow(acted, known, report).catch(() => null)
+        : null;
+      if (opened) {
+        const reading = await this.observeTarget(opened).catch(() => null);
+        if (reading) return reading;
+      }
+      return await this.settled(await this.observeTarget(targetId), before);
+    } catch {
+      return null;
+    }
+  }
+
+  /** The window once the work an action started there has finished: while
+   * a reading shows a sign of work in progress that the reading before the
+   * action did not (a busy or progress element, for up to SETTLE_MAX_MS; or
+   * a text, label or disabled control reading "Saving..." or "Loading…"
+   * that the window did not show before, for up to SETTLE_TEXT_MAX_MS), it
+   * reads the window again. Otherwise the first reading stands, so an action
+   * on a page that is not busy costs no extra read. Each reading taken while
+   * waiting replaces the one before it among the window's recent readings,
+   * so the readings the model planned from stay valid, and refs carry over
+   * from the reading before the action. */
+  private async settled(
+    reading: ComputerBackendObservation,
+    before: ComputerBackendObservation | undefined,
+  ): Promise<ComputerBackendObservation> {
+    if (!before || before.target.id !== reading.target.id) return reading;
+    const earlier = this.progress.get(before);
+    if (!earlier) return reading;
+    const busyBefore = new Set(earlier.busy);
+    /** How long to wait for what a reading shows, from the start: 0 when it
+     * shows no new sign of work. */
+    const patience = (observation: ComputerBackendObservation) => {
+      const signs = this.progress.get(observation);
+      if (!signs) return 0;
+      if (signs.busy.some((sign) => !busyBefore.has(sign))) return SETTLE_MAX_MS;
+      if (signs.texts.some((text) => !earlier.shown.has(text))) return SETTLE_TEXT_MAX_MS;
+      return 0;
+    };
+    const start = Date.now();
+    let current = reading;
+    while (Date.now() + SETTLE_POLL_MS < start + patience(current)) {
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
+      const again = await this.rereadInPlace(current);
+      if (again?.target.id !== current.target.id) break;
+      current = again;
+    }
+    return current;
+  }
+
+  /** A fresh reading of `current`'s window that takes its place among the
+   * window's recent readings instead of pushing out an older one. If the
+   * read fails, `current` stays the latest. */
+  private async rereadInPlace(
+    current: ComputerBackendObservation,
+  ): Promise<ComputerBackendObservation | null> {
+    const targetId = current.target.id;
+    const recent = this.recentObservations.get(targetId) ?? [];
+    const latest = recent.at(-1) === current;
+    if (latest) this.recentObservations.set(targetId, recent.slice(0, -1));
+    const again = await this.observeTarget(targetId).catch(() => null);
+    if (!again && latest) this.recentObservations.set(targetId, recent);
+    return again;
+  }
+
+  /** After an element action macOS did not confirm: the window's reading if
+   * it changed, or the one window the app opened if the action closed it.
+   * Otherwise the outcome stays unknown, and the failure says what is known. */
+  private async afterUnconfirmed(
+    targetId: string,
+    acted: Target,
+    known: ReadonlySet<string>,
+    observed: ComputerBackendObservation | undefined,
+  ): Promise<ComputerBackendObservation> {
+    const unknown = (message: string) =>
+      new ComputerBackendError("outcome_unknown", message, false, true);
+    const after = await this.observeTarget(targetId).catch(() => null);
+    if (after) {
+      if (!sameReading(after, observed)) return after;
+      throw unknown(
+        "macOS did not confirm the action, and the window reads the same as before; observe it before trying again",
+      );
+    }
+    await this.discover().catch(() => undefined);
+    if (this.targetsById.has(targetId))
+      throw unknown(
+        "macOS did not confirm the action, and the window could not be read after it; observe it before trying again",
+      );
+    const opened = [...this.targetsById.entries()]
+      .filter(([id, target]) => !known.has(id) && target.pid === acted.pid)
+      .map(([id]) => id);
+    if (opened.length === 1) {
+      const reading = await this.observeTarget(opened[0]!).catch(() => null);
+      if (reading) return reading;
+    }
+    throw unknown(
+      `macOS did not confirm the action, but ${targetId} has closed since${
+        opened.length ? ` and ${opened.slice(0, 5).join(", ")} opened` : ""
+      }, so it likely took effect; list the app's windows and observe the one to act on`,
+    );
+  }
+
+  /** macOS: brings a window to the front, activating its app, and leaves it
+   * there, for what works only in the front app (a toolbar button that opens
+   * its menu only while its app is active). CUA reports it done only once
+   * the window is the front app's focused window. */
+  private async dispatchFocus(
+    command: ComputerBackendActionCommand,
+  ): Promise<ComputerBackendObservation | null> {
+    if (command.action.type !== "focus") throw new Error("not a focus action");
+    const [operation] = await this.operations(command);
+    const targetId = command.action.targetId;
+    const acted = await this.target(targetId);
+    const known = new Set(this.targetsById.keys());
+    const observed = this.observations.get(targetId);
+    this.observations.delete(targetId);
+    try {
+      await callDesktop(this.runtime, operation!.name, operation!.args, "caller-settles");
+    } catch (error) {
+      if (error instanceof ComputerBackendError && !error.dispatched) throw error;
+      throw new ComputerBackendError(
+        "outcome_unknown",
+        "macOS was asked to bring this window to the front, but it was not confirmed as the front app's focused window: observe it before acting on it",
+        false,
+        true,
+      );
+    }
+    return await this.observeAfter(targetId, acted, known, "", observed);
+  }
+
+  /** Each action of a batch as its CUA steps, and the action each step
+   * belongs to. Every one is checked against the observation the batch names,
+   * the only state its refs come from, before any of them runs. */
+  private async batchSteps(
+    command: ComputerBackendActionCommand,
+  ): Promise<{ steps: Operation[]; actionOf: number[] }> {
+    if (command.action.type !== "batch") throw new Error("not a batch");
+    const { actions } = command.action;
+    const steps: Operation[] = [];
+    const actionOf: number[] = [];
+    for (const [index, action] of actions.entries()) {
+      try {
+        const operations = await this.operations(
+          { ...command, action },
+          index > 0,
+          steps.some((step) => step.stepOptions !== undefined),
+          true,
+        );
+        for (const operation of operations) {
+          steps.push(operation);
+          actionOf.push(index);
+        }
+      } catch (error) {
+        if (!(error instanceof ComputerBackendError) || actions.length === 1) throw error;
+        const refused = new ComputerBackendError(
+          error.code,
+          `Action ${index + 1} of the batch: ${error.message}. No action of the batch ran.`,
+          error.retryable,
+          false,
+        );
+        throw refused;
+      }
+    }
+    return { steps, actionOf };
+  }
+
+  /** A batch runs as one CUA run_steps call (or a few, when its actions take
+   * more steps than one call runs): CUA paces the steps for a batch and the
+   * window is observed once, after the last one. A batch CUA stopped part way
+   * says how many actions completed, so the caller can report each. One
+   * action that takes several steps (filling a date field) runs the same way,
+   * and reports as that action alone. */
+  private async dispatchBatch(
+    command: ComputerBackendActionCommand,
+    single = false,
+    standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
+  ): Promise<ComputerBackendObservation | null> {
+    const { steps, actionOf } = await this.batchSteps(command);
+    const standIns: ComputerBackendRoleStandIn[] = [];
+    const actions = command.action.type === "batch" ? command.action.actions : [];
+    const observed = this.observations.get(command.targetId);
+    this.observations.delete(command.targetId);
+    const acted = await this.target(command.targetId);
+    const known = new Set(this.targetsById.keys());
+    const fronted = await this.front(acted.windowId, steps);
+    let report = "";
+    let stopped: { step: number; outcome: Extract<RunStepsOutcome, { kind: "stopped" }> } | null =
+      null;
+    // Raw input (a key press, or a press CUA could only send) with nothing
+    // confirming the app took it, as for one action (see dispatch).
+    let unconfirmedInput = false;
+    try {
+      for (let start = 0; start < steps.length && !stopped; start += MAX_RUN_STEPS) {
+        const chunk = steps.slice(start, start + MAX_RUN_STEPS);
+        let outcome: RunStepsOutcome;
+        try {
+          outcome = await runSteps(this.runtime, {
+            ...this.args(acted),
+            // Each step was checked against the batch's observation. A token CUA
+            // finds stale names an element of a window that changed since: the
+            // batch stops there instead of acting on a lookalike CUA finds again.
+            refind_stale: false,
+            steps: chunk.map((step) => ({ tool: step.name, args: step.args, ...step.stepOptions })),
+          });
+        } catch (error) {
+          // A later call refused before it ran: the earlier calls still did.
+          if (start === 0 || !(error instanceof ComputerBackendError) || error.dispatched)
+            throw error;
+          outcome = {
+            kind: "stopped",
+            completed: 0,
+            definite: false,
+            code: null,
+            cuaCode: null,
+            message: error.message,
+            standIns: [],
+          };
+        }
+        // CUA used the one element of a role pressed alike for a step that
+        // named its element by role and name (see namedOperation).
+        for (const used of outcome.standIns) {
+          const actionIndex = actionOf[start + used.step]!;
+          const action = actions[actionIndex];
+          if (action?.type !== "semantic" || action.locator.kind !== "role") continue;
+          standIns.push({
+            actionIndex,
+            requestedRole: action.locator.role,
+            role: observedRole(used.role),
+            name: used.name,
+          });
+        }
+        if (outcome.kind === "completed") {
+          report += openedWindowsReport(outcome.windowChanges);
+          for (const index of outcome.unconfirmed) {
+            const action = actions[actionOf[start + index]!];
+            if (
+              action?.type === "keyboard" ||
+              (action?.type === "semantic" &&
+                action.action === "invoke" &&
+                steps[start + index]?.name === "click")
+            )
+              unconfirmedInput = true;
+          }
+        } else stopped = { step: start + outcome.completed, outcome };
+      }
+    } finally {
+      await fronted.giveBack();
+    }
+    // The actions that ran in full acted on their stand-ins.
+    const ran = stopped ? actionOf[stopped.step]! : actions.length;
+    const reported = new Set<number>();
+    if (standIn)
+      for (const used of standIns.sort((a, b) => a.actionIndex - b.actionIndex))
+        if (used.actionIndex < ran && !reported.has(used.actionIndex)) {
+          reported.add(used.actionIndex);
+          standIn(used);
+        }
+    if (!stopped) {
+      if (unconfirmedInput) unconfirmed?.();
+      const after = await this.observeAfter(command.targetId, acted, known, report, observed);
+      if (after?.target.id !== command.targetId) return after;
+      const { after: confirmed, failures } = await this.confirmInput(after, steps);
+      if (failures.length) {
+        const count = command.action.type === "batch" ? command.action.actions.length : 1;
+        const failure = new ComputerBackendError(
+          "driver_failed",
+          `${single ? "The keys were typed" : `All ${count} actions of the batch ran`}, but ${failures.join("; ")}`,
+          false,
+          true,
+        );
+        // Every action ran: the batch reports its last one as the one
+        // whose outcome is unknown, never later actions as not run.
+        if (!single && count > 1)
+          failure.details = {
+            batchActionsCompleted: count - 1,
+            batchStoppedActionState: "outcome_unknown",
+          };
+        throw failure;
+      }
+      return confirmed;
+    }
+    const { step, outcome } = stopped;
+    const action = actionOf[step]!;
+    // An action that stopped after its first step ran in part.
+    const definite = outcome.definite && actionOf.indexOf(action) === step;
+    const stoppedAction =
+      command.action.type === "batch" ? command.action.actions[action] : undefined;
+    const refusal = definite
+      ? ((stoppedAction?.type === "keyboard"
+          ? this.keyboardRefusal(
+              command.targetId,
+              outcome.cuaCode,
+              outcome.code ?? "invalid_action",
+              observed,
+            )
+          : null) ??
+        (await this.elementWindowRefusal(
+          command.targetId,
+          outcome.cuaCode,
+          outcome.code ?? "invalid_action",
+          outcome.message,
+        )))
+      : null;
+    const reason =
+      refusal?.message ??
+      (outcome.cuaCode === "ambiguous" ? ambiguityForRefs(outcome.message) : outcome.message);
+    const message = single
+      ? `CUA stopped part way through the input: ${reason}`
+      : `CUA stopped the batch at action ${action + 1}: ${reason}`;
+    if (step === 0 && definite)
+      throw new ComputerBackendError(outcome.code ?? "driver_failed", message, false, false);
+    const failure = new ComputerBackendError(
+      definite ? (outcome.code ?? "driver_failed") : "outcome_unknown",
+      message,
+      false,
+      true,
+    );
+    if (!single)
+      failure.details = {
+        batchActionsCompleted: action,
+        batchStoppedActionState: definite ? "failed" : "outcome_unknown",
+      };
+    throw failure;
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    this.closePromise = this.tail.then(async () => {
+      try {
+        if (this.nativeSessionStarted)
+          await callDesktop(this.runtime, "end_session", { session: this.nativeSession });
+        await callDesktop(this.runtime, "end_session", { session: this.session });
+      } finally {
+        this.observations.clear();
+        this.frames.clear();
+        this.targetsById.clear();
+        await this.runtime.shutdown();
+      }
+    });
+    return this.closePromise;
+  }
+
+  private run<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.closing)
+      return Promise.reject(
+        new ComputerBackendError("unavailable", "CUA backend is closed", false, false),
+      );
+    if (this.pending >= 64)
+      return Promise.reject(
+        new ComputerBackendError("unavailable", "CUA backend queue is full", true, false),
+      );
+    this.pending++;
+    const result = this.tail
+      .then(async () => {
+        const data = await this.startSession(this.session);
+        if (data.revived === true) {
+          this.observations.clear();
+          this.frames.clear();
+        }
+        return await operation();
+      })
+      .finally(() => {
+        this.pending--;
+      });
+    this.tail = result.catch(() => undefined);
+    return result;
+  }
+
+  /** Refuses to present or touch this login session's windows while they
+   * are not on the Mac's screen. macOS keeps listing them while the screen
+   * is locked or another user's session is on it, but reads of them come
+   * back empty and input never reaches them. The full check runs a native
+   * helper that reads whose session is on the console; the quick one only
+   * notices that this user does not own the console device, which is when
+   * another session may be on screen. */
+  private async assertOnScreen(full: boolean): Promise<void> {
+    if (!this.macWindows || (!full && !consoleHeldByAnotherUser())) return;
+    // A check that cannot run never blocks the computer.
+    const state = await this.macWindows.console().catch(() => "available" as const);
+    if (state !== "available")
+      throw new ComputerBackendError("machine_locked", CONSOLE_UNAVAILABLE[state], false, false);
+  }
+
+  /** Runs a read, or an action before its input is delivered. When it
+   * fails, a locked screen or another user's session on it is the reason
+   * given, not the empty read it caused. */
+  private async whileOnScreen<T>(full: boolean, operation: () => Promise<T>): Promise<T> {
+    await this.assertOnScreen(full);
+    try {
+      return await operation();
+    } catch (error) {
+      if (
+        !full &&
+        (!(error instanceof ComputerBackendError) ||
+          (!error.dispatched && error.code !== "machine_locked"))
+      )
+        await this.assertOnScreen(true);
+      throw error;
+    }
+  }
+
+  /** Start or reassert a CUA session, setting its cursor motion once per
+   * session and again whenever CUA revives it with defaults. */
+  private async startSession(session: string): Promise<Record<string, unknown>> {
+    const { data } = await callDesktop(this.runtime, "start_session", {
+      session,
+      cursor_identity: {
+        label: this.cursorIdentity?.label ?? "Agent",
+        ...(this.cursorIdentity?.avatarPng ? { avatar_png: this.cursorIdentity.avatarPng } : {}),
+      },
+    });
+    if (data.revived === true || !this.cursorMotionSet.has(session)) {
+      this.cursorMotionSet.add(session);
+      // Cosmetic: a host without a cursor overlay must still act.
+      await callDesktop(this.runtime, "set_agent_cursor_motion", {
+        session,
+        ...CURSOR_MOTION,
+      }).catch(() => undefined);
+    }
+    return data;
+  }
+
+  private async discover(): Promise<ComputerBackendTarget[]> {
+    const { data } = await callDesktop(this.runtime, "list_windows", {});
+    const macos = this.identity.platform === "macos";
+    const listed = Windows.parse(data).windows;
+    const windows = [...listed, ...(await this.namedWindowsListed(listed))].filter(
+      (window) =>
+        // Another CUA worker's cursor overlay (another computer session, or
+        // another agent on this desktop) spans the screen above every app. It
+        // is never a window a person or an agent works in.
+        window.app_name !== CUA_WORKER_APP &&
+        // macOS keeps windows ordered out that no person ever sees, on no
+        // Space at all: a headless browser's page windows (the browser from
+        // browser_open among them), a closed popover kept for reuse.
+        !(macos && window.is_on_screen === false && window.space_ids === null),
+    );
+    const presences = await this.offScreenPresences(windows);
+    // The frontmost ordinary window is the one the person has in front: CUA
+    // reports stacking, not keyboard focus. Windows' listing also stacks
+    // cloaked and always-on-top windows as ordinary ones, so it marks none.
+    // An untitled strip stacked above its app's window is part of that
+    // window, not one a person works in: Chrome's link status bubble, an
+    // emulator's side toolbar.
+    let front: { id: string; z: number } | null = null;
+    for (const window of this.identity.platform === "windows" ? [] : windows) {
+      const id = `cua:window:${window.pid}:${window.window_id}`;
+      if (
+        typeof window.z_index !== "number" ||
+        (window.layer ?? 0) !== 0 ||
+        presences.has(id) ||
+        // Minimized, hidden or unmapped on every platform.
+        window.is_on_screen === false ||
+        (!window.title.trim() &&
+          Math.min(window.bounds.width, window.bounds.height) < UNTITLED_STRIP_MAX_SIDE)
+      )
+        continue;
+      if (!front || window.z_index > front.z) front = { id, z: window.z_index };
+    }
+    const live = new Set<string>();
+    for (const window of windows) {
+      const id = `cua:window:${window.pid}:${window.window_id}`;
+      const presence = presences.get(id);
+      if (presence === "not_shown") continue;
+      live.add(id);
+      const old = this.targetsById.get(id);
+      // Only macOS cannot read a window that is off screen; Windows and
+      // Linux read minimized or covered windows through their trees.
+      const onScreen = !macos || window.is_on_screen !== false;
+      const restorable = presence === "minimized" || presence === "application_hidden";
+      this.targetsById.set(id, {
+        pid: window.pid,
+        windowId: window.window_id,
+        title: window.title,
+        appName: window.app_name,
+        onScreen,
+        restorable,
+        native: {
+          id,
+          targetGeneration: old?.native.targetGeneration ?? randomUUID(),
+          kind: "window",
+          // The app that owns the window, as CUA names its process: the app's
+          // name on macOS, the executable (notepad.exe) on Windows, the window
+          // class (Gedit) on Linux.
+          applicationId: appIdentity(window.app_name),
+          processId: window.pid,
+          title: window.title || window.app_name,
+          bounds: window.bounds,
+          focused: id === front?.id,
+          ...(onScreen || restorable ? {} : { offScreen: true as const }),
+        },
+      });
+    }
+    for (const id of this.targetsById.keys())
+      if (!live.has(id)) {
+        this.targetsById.delete(id);
+        this.observations.delete(id);
+        for (const [frameId, frame] of this.frames)
+          if (frame.targetId === id) this.frames.delete(frameId);
+      }
+    // A sheet that has gone away is no longer one that cannot be read: its
+    // window closed, is kept off screen for reuse (AppKit keeps file panels),
+    // or no longer lies within another window of its app.
+    for (const id of this.unreadableSheets) {
+      const target = this.targetsById.get(id);
+      if (!target || !target.onScreen || !this.sheetHosts(target).length)
+        this.unreadableSheets.delete(id);
+    }
+    return [...this.targetsById.values()].map((target) => target.native);
+  }
+
+  /** Why each macOS window on the current Space that is not on screen is not
+   * shown. A window on another Space is left as it is: reading it would mean
+   * switching the person's screen to that Space. */
+  private async offScreenPresences(
+    windows: readonly ListedWindow[],
+  ): Promise<Map<string, MacWindowPresence>> {
+    const presences = new Map<string, MacWindowPresence>();
+    if (!this.macWindows) return presences;
+    const listed = new Set<string>();
+    const asked: Array<{ id: string; window: ListedWindow }> = [];
+    for (const window of windows) {
+      const id = `cua:window:${window.pid}:${window.window_id}`;
+      listed.add(id);
+      if (window.is_on_screen !== false) this.neverShown.delete(id);
+      else if (this.neverShown.has(id)) presences.set(id, "not_shown");
+      else if (window.on_current_space === true) asked.push({ id, window });
+    }
+    for (const id of this.neverShown) if (!listed.has(id)) this.neverShown.delete(id);
+    if (asked.length === 0) return presences;
+    // Without an answer every window keeps its listing: off screen.
+    const answers = await this.macWindows
+      .presence(
+        asked.map(({ window }) => ({
+          processId: window.pid,
+          title: window.title,
+          bounds: window.bounds,
+        })),
+      )
+      .catch(() => asked.map(() => "unknown" as const));
+    asked.forEach(({ id }, index) => {
+      const presence = answers[index]!;
+      presences.set(id, presence);
+      if (presence === "not_shown") this.neverShown.add(id);
+    });
+    return presences;
+  }
+
+  private async target(targetId: string): Promise<Target> {
+    const target = this.targetsById.get(targetId) ?? (await this.findTarget(targetId));
+    if (!target)
+      throw new ComputerBackendError(
+        "target_not_found",
+        "CUA window is no longer present",
+        false,
+        false,
+      );
+    return target;
+  }
+
+  /** A target the last listing does not have: the listing may predate the
+   * window, or, on macOS, leave it out because it sits above the levels of an
+   * app's working windows while CUA still reads it by its id. */
+  private async findTarget(targetId: string): Promise<Target | undefined> {
+    const named =
+      this.identity.platform === "macos" && /^cua:window:\d{1,10}:\d{1,10}$/.test(targetId);
+    if (named) this.namedWindows.add(targetId);
+    await this.discover().catch(() => undefined);
+    const target = this.targetsById.get(targetId);
+    if (!target) this.namedWindows.delete(targetId);
+    return target;
+  }
+
+  /** The windows in {@link namedWindows} that their app still lists, on any
+   * level, beside the windows `listed` for every app. A window its app no
+   * longer lists leaves the set. */
+  private async namedWindowsListed(listed: readonly ListedWindow[]): Promise<ListedWindow[]> {
+    const seen = new Set(listed.map((window) => `cua:window:${window.pid}:${window.window_id}`));
+    const pids = new Set<number>();
+    for (const id of this.namedWindows)
+      if (seen.has(id)) this.namedWindows.delete(id);
+      else pids.add(Number(id.split(":")[2]));
+    const found: ListedWindow[] = [];
+    for (const pid of pids) {
+      const windows = await callDesktop(this.runtime, "list_windows", { pid })
+        .then(({ data }) => Windows.parse(data).windows)
+        .catch(() => null);
+      for (const id of this.namedWindows) {
+        if (Number(id.split(":")[2]) !== pid) continue;
+        const window = windows?.find((own) => `cua:window:${own.pid}:${own.window_id}` === id);
+        if (window) found.push(window);
+        else this.namedWindows.delete(id);
+      }
+    }
+    return found;
+  }
+
+  /** A window that is not on screen (minimized, hidden, on another Space or
+   * beyond every display) has neither pixels nor, often, controls CUA can
+   * read, and CUA can take half a minute to find that out. A minimized window
+   * or a hidden app's window is first brought back on screen, behind the
+   * person's front window and without activating its app. Any other window
+   * listed off screen is refused at once, and a failed read of a window that
+   * left the screen since says so instead of reporting a driver failure. A
+   * failed read of a window still listed on screen is tried once more a
+   * moment later (CUA can fail the first read of a window that is changing
+   * size, and read it at once afterwards); only a read was asked, so nothing
+   * is sent twice. A second failure is refused as unavailable, with what to
+   * do next. */
+  private async readOnScreen<T>(targetId: string, read: () => Promise<T>): Promise<T> {
+    const offScreen = () =>
+      new ComputerBackendError(
+        "unsupported",
+        "This window is not on screen (it is on another Space, such as a full-screen app, or otherwise not shown), so it can be neither captured nor read. Observe a window that is on screen instead.",
+        false,
+        false,
+      );
+    if (!(await this.target(targetId)).onScreen) {
+      // The listing may predate the window coming back on screen.
+      await this.discover();
+      const target = await this.target(targetId);
+      if (!target.onScreen && !(await this.restore(target))) throw offScreen();
+    }
+    try {
+      return await read();
+    } catch (error) {
+      if (
+        !(error instanceof ComputerBackendError) ||
+        error.dispatched ||
+        (error.code !== "driver_failed" && error.code !== "target_stale")
+      )
+        throw error;
+      // The listing may predate the window leaving the screen.
+      await this.discover().catch(() => undefined);
+      const target = this.targetsById.get(targetId);
+      if (!target)
+        throw new ComputerBackendError(
+          "target_not_found",
+          "CUA window is no longer present",
+          false,
+          false,
+        );
+      if (!target.onScreen) throw offScreen();
+      if (error.code !== "driver_failed") throw error;
+      await new Promise((resolve) => setTimeout(resolve, READ_RETRY_DELAY_MS));
+      try {
+        return await read();
+      } catch (again) {
+        if (
+          !(again instanceof ComputerBackendError) ||
+          again.dispatched ||
+          again.code !== "driver_failed"
+        )
+          throw again;
+        throw new ComputerBackendError(
+          "unavailable",
+          `${targetId} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
+          // Not retryable: it was tried again already, and a frame stream
+          // must not replace the helper for one window's failed read.
+          false,
+          false,
+        );
+      }
+    }
+  }
+
+  /** Brings a minimized window or a hidden app's window back on screen.
+   * Restoring takes effect at once, but the window server reports the window
+   * on screen only a moment later, so the read that follows is trusted to
+   * find it there and a failed read is checked against a fresh listing. */
+  private async restore(target: Target): Promise<boolean> {
+    const bounds = target.native.bounds;
+    if (!target.restorable || !this.macWindows || !bounds) return false;
+    const before = await this.macWindows
+      .restore({ processId: target.pid, title: target.title, bounds })
+      .catch(() => null);
+    if (before !== "minimized" && before !== "application_hidden") return false;
+    target.onScreen = true;
+    target.restorable = false;
+    return true;
+  }
+
+  private args(target: Target): Record<string, unknown> {
+    return { pid: target.pid, window_id: target.windowId, session: this.session };
+  }
+
+  /** The window an action opened, such as a new document or a dialog: the
+   * one window of the acted window's app not listed before the action that
+   * CUA's report of the windows the action opened names. A window lying
+   * within another window of its app is a sheet or part of a panel, read
+   * through that window, so it never counts. Two candidates are never
+   * guessed between. */
+  private async openedWindow(
+    acted: Target,
+    known: ReadonlySet<string>,
+    report: string,
+  ): Promise<string | null> {
+    await this.discover();
+    const opened = [...this.targetsById.entries()]
+      .filter(
+        ([id, target]) =>
+          !known.has(id) &&
+          target.pid === acted.pid &&
+          reportNames(report, target) &&
+          this.sheetHosts(target).length === 0,
+      )
+      .map(([id]) => id);
+    return opened.length === 1 ? opened[0]! : null;
+  }
+
+  /** Other windows of the same macOS app that a window lies within: where a
+   * sheet (a Save panel, a Go to Folder prompt) it may be is attached. */
+  private sheetHosts(target: Target): Target[] {
+    const inner = target.native.bounds;
+    if (this.identity.platform !== "macos" || !inner) return [];
+    return [...this.targetsById.values()].filter((other) => {
+      const outer = other.native.bounds;
+      return (
+        other !== target &&
+        other.pid === target.pid &&
+        !!outer &&
+        inner.x >= outer.x &&
+        inner.y >= outer.y &&
+        inner.x + inner.width <= outer.x + outer.width &&
+        inner.y + inner.height <= outer.y + outer.height &&
+        inner.width * inner.height < outer.width * outer.height
+      );
+    });
+  }
+
+  /** A sheet has a window id of its own, but CUA reads its controls only
+   * through the window it is attached to, as an AXSheet with the sheet's
+   * bounds. Geometry cannot tell which window that is (or whether this is a
+   * sheet at all), so read the windows it lies within and name a parent only
+   * when exactly one of them shows it now. */
+  private async sheetError(target: Target): Promise<ComputerBackendError> {
+    const inner = target.native.bounds!;
+    const hosts = this.sheetHosts(target).slice(0, 4);
+    const near = (a: number, b: number) => Math.abs(a - b) <= 2;
+    const shown: Target[] = [];
+    let unread = 0;
+    for (const host of hosts) {
+      const reading = await this.observeTarget(host.native.id).catch(() => null);
+      if (!reading) unread += 1;
+      if (
+        reading?.roots.some(
+          (node) =>
+            node.role === "AXSheet" &&
+            !!node.bounds &&
+            near(node.bounds.x, inner.x) &&
+            near(node.bounds.y, inner.y) &&
+            near(node.bounds.width, inner.width) &&
+            near(node.bounds.height, inner.height),
+        )
+      )
+        shown.push(host);
+    }
+    const hostList = hosts.map((host) => host.native.id).join(", ");
+    // Every window it lies within was read and none shows it: pointing at
+    // them again would only lead back here.
+    if (!shown.length && hosts.length && !unread)
+      return new ComputerBackendError(
+        "target_stale",
+        `${target.native.id} cannot be read through accessibility, so its controls cannot be used from here: use another way the app offers, or ask the person to finish it at the computer`,
+        false,
+        false,
+      );
+    return new ComputerBackendError(
+      "target_stale",
+      shown.length === 1
+        ? `${target.native.id} is a sheet attached to the window ${shown[0]!.native.id}, and its controls are read and used through that window: observe ${shown[0]!.native.id} and act on its refs`
+        : `${target.native.id} cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of ${hostList}) and act on its refs`,
+      false,
+      false,
+    );
+  }
+
+  /** CUA's refusals of background input name CUA's own options (a foreground
+   * delivery mode the caller does not have). Say what the caller can do. */
+  private keyboardRefusal(
+    targetId: string,
+    cuaCode: string | null | undefined,
+    code: ComputerBackendErrorCode,
+    observed: ComputerBackendObservation | undefined,
+  ): ComputerBackendError | null {
+    const target = this.targetsById.get(targetId);
+    // Typing right after a click on the field is retried at that click's
+    // point (see typeAtClick); this refusal is for typing without one.
+    if (target && cuaCode === NO_FOCUSED_TEXT_INPUT)
+      return new ComputerBackendError(
+        code,
+        "No text field in this window has the keyboard focus as far as its accessibility tree shows, so nothing was typed (keys sent anyway could act on the window instead). If the field is on screen but not in the tree, as in a Simulator device, click it with a pointer action and then type as the next action in this window; otherwise focus the field or set its value",
+        false,
+        false,
+      );
+    if (
+      !target ||
+      this.identity.platform !== "macos" ||
+      (cuaCode !== "window_not_key" &&
+        cuaCode !== "key_focus_unknown" &&
+        cuaCode !== "window_not_main")
+    )
+      return null;
+    // A shortcut goes to the app's main window, whichever window has focus.
+    if (cuaCode === "window_not_main")
+      return new ComputerBackendError(
+        code,
+        "Keys to this window could reach another of its app's windows, since an app's shortcuts go to its main window and this window could not be made main (when its app is the one in front, that would move the window the person is using), so none were sent: use this window's controls instead (set_value on a field, invoke on a button)",
+        false,
+        false,
+      );
+    // The app named no focused window, or did not answer in time: nothing
+    // is known about where keys would go.
+    if (cuaCode === "key_focus_unknown")
+      return new ComputerBackendError(
+        code,
+        "Keys reach only the focused window of a background app, and the app did not say which of its windows has focus, so none were sent: observe this window and try again, or use its controls instead",
+        false,
+        false,
+      );
+    if (observed?.roots.some((node) => node.role === "AXSheet"))
+      return new ComputerBackendError(
+        code,
+        "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: in a file dialog invoke a sidebar place or a folder to go into it and invoke a file to choose it; set_value on a text field, invoke on a button",
+        false,
+        false,
+      );
+    const others = [...this.targetsById.values()]
+      .filter((other) => other !== target && other.pid === target.pid)
+      .map((other) => other.native.id);
+    // The focused window is one of the others; when every one of them has
+    // already proven unreadable, acting on it is no way forward.
+    if (others.length && others.every((id) => this.unreadableSheets.has(id)))
+      return new ComputerBackendError(
+        code,
+        `Keys reach only the focused window of a background app, and that window (one of ${others
+          .slice(0, 5)
+          .join(
+            ", ",
+          )}) cannot be read through accessibility, so no keys were sent: use another way the app offers, or ask the person to finish it at the computer`,
+        false,
+        false,
+      );
+    return new ComputerBackendError(
+      code,
+      `Keys reach only the focused window of a background app, and another of its windows has focus${
+        others.length ? ` (one of ${others.slice(0, 5).join(", ")})` : ""
+      }, so none were sent: act on that window, or close it first`,
+      false,
+      false,
+    );
+  }
+
+  /** CUA refuses input to an element outside the addressed window, and names
+   * CUA's own tools and window numbers when it does. Say what the caller can
+   * do instead:
+   * - an element of a bubble or popover the window shows as its own takes
+   *   accessibility actions (invoke, set_value) but no pointer or key input,
+   *   which would land on the window under it;
+   * - an item of a menu the app has open over the window takes invoke, and
+   *   the control that opened the menu takes set_value, but pointer and key
+   *   input would not reach the menu;
+   * - an element of another window of the app is that window's to act on,
+   *   pointed at only when it is a target the caller can observe;
+   * - a window no longer on screen takes no input: an earlier action (often
+   *   the one before it in a batch) closed or hid it, and the app's other
+   *   windows are the ones to act on. */
+  private async elementWindowRefusal(
+    targetId: string,
+    cuaCode: string | null | undefined,
+    code: ComputerBackendErrorCode,
+    message: string,
+  ): Promise<ComputerBackendError | null> {
+    const target = this.targetsById.get(targetId);
+    if (!target) return null;
+    // CUA's wording names an input mode this tool does not offer. The
+    // window's own focus action opens the way to the menu, so name it with
+    // the window's target: the dropdown lists a focus action too, which only
+    // moves the keyboard focus. Not where that focus would be refused (see
+    // dispatchFocus): then set_value is the way.
+    if (cuaCode === "select_menu_would_raise_window")
+      return new ComputerBackendError(
+        code,
+        `Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text${
+          this.identity.platform === "macos" && this.recentPersonInput() === undefined
+            ? `; to open the menu itself, first bring the window to the front with the action {type:'focus',targetId:'${targetId}'} (focus on the dropdown's ref only moves the keyboard focus), then invoke it again`
+            : ""
+        }`,
+        false,
+        false,
+      );
+    if (cuaCode === "popup_option_without_text")
+      return new ComputerBackendError(
+        code,
+        "That option has no text to choose it by, and pressing it in the background can open its dropdown's menu, so nothing was sent. Choose an option with set_value on the dropdown's ref and the option's text",
+        false,
+        false,
+      );
+    if (cuaCode === "element_in_attached_window")
+      return new ComputerBackendError(
+        code,
+        "That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode === "element_in_open_menu")
+      return new ComputerBackendError(
+        code,
+        "That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode === "off_space_or_ax_unresolved" || cuaCode === "window_not_on_screen")
+      return new ComputerBackendError(
+        code,
+        "This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
+        false,
+        false,
+      );
+    if (cuaCode !== "element_outside_target_window") return null;
+    const owner = /belongs to window (\d{1,10})\b/.exec(message)?.[1];
+    if (!owner) return null;
+    const other = `cua:window:${target.pid}:${owner}`;
+    await this.discover().catch(() => undefined);
+    return new ComputerBackendError(
+      code,
+      this.targetsById.has(other)
+        ? `That element is in another window of this app (${other}), not in ${targetId}, so nothing was done: observe ${other} and act on its refs there`
+        : `That element is in another window of this app, not in ${targetId}, so nothing was done`,
+      false,
+      false,
+    );
+  }
+
+  private async observeTarget(targetId: string): Promise<ComputerBackendObservation> {
+    const target = await this.target(targetId);
+    if (
+      this.initialCapabilities.windowCapture &&
+      ![...this.frames.values()].some((frame) => frame.targetId === targetId)
+    )
+      await this.captureTarget(targetId).catch((error: unknown) => {
+        // CUA captures nothing for a sheet's own window; its tree read below
+        // says whether this is one.
+        if (!this.sheetHosts(target).length) throw error;
+      });
+    // Viewer polling must never retire a native CUA element-token snapshot.
+    // Once native tools own observations, the legacy viewer receives geometry
+    // and pixels only. The native result carries its exact tree unchanged.
+    if (this.nativeObservations) {
+      const observation: ComputerBackendObservation = {
+        observationId: this.session + ":viewer",
+        target: target.native,
+        frameId:
+          [...this.frames.entries()]
+            .reverse()
+            .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+        roots: [],
+        nodeCount: 0,
+        readByNativeTools: true,
+        focusedRef: null,
+        changedRegions: [],
+      };
+      this.observations.set(targetId, observation);
+      return observation;
+    }
+    const { data } = await callDesktop(this.runtime, "get_window_state", {
+      ...this.args(target),
+      include_screenshot: false,
+      include_accessibility_tree: true,
+      // Both: the elements carry tokens and frames; the Markdown tree also has
+      // the unindexed text inside rows and cells, which the elements omit. CUA
+      // returns only Markdown when tree_format is omitted, on every platform.
+      tree_format: "both",
+      // UIA answers ordinary windows (Notepad, the Run dialog) in about two
+      // seconds; CUA's one-second default returned zero nodes for them.
+      ...(this.identity.platform === "windows" ? { timeout_ms: 5_000 } : {}),
+      max_elements: 2000,
+      max_depth: 25,
+    });
+    const state = WindowState.parse(data);
+    if (
+      state.pid === target.pid &&
+      state.window_id === target.windowId &&
+      !state.snapshot_id &&
+      String(data.degraded_reason ?? "").startsWith("ax_app_unresponsive")
+    )
+      return this.unansweredObservation(targetId, target, state);
+    if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id) {
+      if (
+        this.sheetHosts(target).length &&
+        String(data.degraded_reason ?? "").startsWith("ax_window_unresolved")
+      ) {
+        this.unreadableSheets.add(targetId);
+        throw await this.sheetError(target);
+      }
+      throw new ComputerBackendError(
+        "target_stale",
+        `CUA observation did not bind the requested window (snapshot=${state.snapshot_id ?? "missing"}, reason=${data.degraded_reason ?? "none"})`,
+        false,
+        false,
+      );
+    }
+    // It read, so it is no longer a sheet that cannot be.
+    this.unreadableSheets.delete(targetId);
+    const projected = projectElements(
+      state.elements,
+      this.identity.platform,
+      unindexedTextByElement(state.tree_markdown, this.identity.platform),
+      state.web_content_takes_press === true,
+    );
+    const shownTitle = readWindowTitle(state.elements, this.identity.platform);
+    const document = documentTitle(shownTitle, target.native.title);
+    const roots = this.stabilizeRefs(targetId, document, projected);
+    // The rows folded into a field are its text, typed by the person.
+    const refTokens = this.tokens.get(targetId);
+    const fieldTokens = new Set(
+      roots.filter((node) => node.actions.includes("set_value")).map((n) => refTokens?.get(n.ref)),
+    );
+    const fieldIndexes = new Set(
+      state.elements
+        .filter((element) => element.element_token && fieldTokens.has(element.element_token))
+        .map((element) => element.element_index),
+    );
+    const signs = progressSigns(
+      roots,
+      unindexedRows(state.tree_markdown, this.identity.platform).filter(
+        (row) => !fieldIndexes.has(row.owner),
+      ),
+    );
+    this.openingTokens.delete(targetId);
+    this.openingTokens.set(
+      targetId,
+      new Set(
+        this.identity.platform === "macos"
+          ? state.elements
+              .filter((element) => element.element_token && opensOnInvoke(element))
+              .map((element) => element.element_token!)
+          : [],
+      ),
+    );
+    while (this.openingTokens.size > 32)
+      this.openingTokens.delete(this.openingTokens.keys().next().value!);
+    this.ownLabels.delete(targetId);
+    this.ownLabels.set(
+      targetId,
+      new Map(
+        state.elements
+          .filter((element) => element.element_token && element.label)
+          .map((element) => [element.element_token!, element.label!]),
+      ),
+    );
+    while (this.ownLabels.size > 32) this.ownLabels.delete(this.ownLabels.keys().next().value!);
+    this.dateFieldTokens.delete(targetId);
+    if (this.identity.platform === "macos") {
+      const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
+      const fields = new Map<string, DateSegment[]>();
+      const parts = new Map<string, string[]>();
+      const owners = new Map<string, string>();
+      const pickers = new Set<string>();
+      const dateFieldByIndex = new Map<number, string>();
+      for (const [index, field] of dateFields(state.elements)) {
+        const token = byIndex.get(index)!.element_token!;
+        fields.set(token, field.segments);
+        dateFieldByIndex.set(index, token);
+        const partTokens = field.parts.map((part) => byIndex.get(part)?.element_token);
+        for (const partToken of partTokens) if (partToken) owners.set(partToken, token);
+        if (partTokens.every((partToken) => partToken !== undefined))
+          parts.set(token, partTokens as string[]);
+      }
+      // Chrome shows a "Show date picker" button inside the field. Its menu
+      // would bring the browser in front, so it is refused, as a <select> is.
+      for (const element of state.elements) {
+        const field =
+          element.parent_index === undefined
+            ? undefined
+            : dateFieldByIndex.get(element.parent_index);
+        if (field && element.role === "AXPopUpButton" && element.element_token) {
+          owners.set(element.element_token, field);
+          pickers.add(element.element_token);
+        }
+      }
+      if (fields.size) this.dateFieldTokens.set(targetId, { fields, parts, owners, pickers });
+      while (this.dateFieldTokens.size > 32)
+        this.dateFieldTokens.delete(this.dateFieldTokens.keys().next().value!);
+    }
+    const incomplete = walkIncompleteness(state);
+    const observation: ComputerBackendObservation = {
+      observationId: `${this.session}:${state.snapshot_id}`,
+      // Named as the reading shows the window: its listed title is the one it
+      // had when the windows were last listed, the page before an action.
+      target: {
+        ...target.native,
+        title: shownTitle ?? target.native.title,
+        bounds: state.window_bounds ?? target.native.bounds,
+        // Which window is in front is known only when windows are listed;
+        // a reading after an action or a switch would show it stale.
+        focused: false,
+      },
+      frameId:
+        [...this.frames.entries()]
+          .reverse()
+          .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+      roots,
+      nodeCount: roots.length,
+      ...(incomplete ? { incomplete } : {}),
+      focusedRef: roots.find((node) => node.states.includes("focused"))?.ref ?? null,
+      changedRegions: [],
+    };
+    this.observations.delete(targetId);
+    this.observations.set(targetId, observation);
+    this.progress.set(observation, signs);
+    this.documents.set(observation, document);
+    while (this.observations.size > 32)
+      this.observations.delete(this.observations.keys().next().value!);
+    const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
+    this.recentObservations.delete(targetId);
+    this.recentObservations.set(targetId, [...recent, observation]);
+    while (this.recentObservations.size > 32)
+      this.recentObservations.delete(this.recentObservations.keys().next().value!);
+    return observation;
+  }
+
+  /** A reading the app did not answer in time (CUA's ax_app_unresponsive):
+   * its main thread was busy, as while it shows a menu, so nothing was read.
+   * That says nothing about the window, and CUA keeps its last snapshot, so
+   * the refs of the last reading stay the ones actions resolve. The reading
+   * itself lists no elements and says it stopped because the app answered
+   * too slowly, beside the screenshot, instead of failing. It shows no
+   * focused element, so keys are refused on it (see unansweredReadings). */
+  private unansweredObservation(
+    targetId: string,
+    target: Target,
+    state: ReturnType<typeof WindowState.parse>,
+  ): ComputerBackendObservation {
+    const observation: ComputerBackendObservation = {
+      observationId: `${this.session}:unanswered:${randomUUID()}`,
+      target: {
+        ...target.native,
+        bounds: state.window_bounds ?? target.native.bounds,
+        focused: false,
+      },
+      frameId:
+        [...this.frames.entries()]
+          .reverse()
+          .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+      roots: [],
+      nodeCount: 0,
+      incomplete: {
+        reason: "time_budget",
+        unreadCount: Math.min(state.nodes_pending ?? 0, 1_000_000),
+      },
+      focusedRef: null,
+      changedRegions: [],
+    };
+    const last = this.observations.get(targetId);
+    // An action naming this reading acts on the last one's elements.
+    const actedOn = last ? { ...last, observationId: observation.observationId } : observation;
+    this.unansweredReadings.add(actedOn);
+    if (last) {
+      const signs = this.progress.get(last);
+      if (signs) this.progress.set(actedOn, signs);
+      const document = this.documents.get(last);
+      if (document !== undefined) this.documents.set(actedOn, document);
+    }
+    this.observations.delete(targetId);
+    this.observations.set(targetId, actedOn);
+    const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
+    this.recentObservations.delete(targetId);
+    this.recentObservations.set(targetId, [...recent, actedOn]);
+    return observation;
+  }
+
+  /** Gives each element of a fresh reading the ref it had in the window's
+   * previous reading, so refs stay valid while their element stays and a
+   * reading after an action differs from the one before only where the window
+   * changed. An element keeps its ref when its role, name, description and
+   * actions match. Elements alike in all of those keep theirs only when they
+   * are as many as before, matched in order: one added or removed among them
+   * could otherwise move a ref onto a neighbour. A window whose title changed
+   * shows another document, where a button alike (Delete) acts on something
+   * else, so none of its refs carry over. The title is the one each reading
+   * shows (see documentTitle), so two readings of a page an action opened
+   * compare alike. Every other element gets a new ref. CUA's token for each
+   * ref is kept for the action that names it. */
+  private stabilizeRefs(
+    targetId: string,
+    title: string,
+    roots: InteractionSemanticNodeValue[],
+  ): InteractionSemanticNodeValue[] {
+    const last = this.recentObservations.get(targetId)?.at(-1);
+    const previous = last && this.documents.get(last) === title ? last : undefined;
+    const identity = (node: InteractionSemanticNodeValue) =>
+      JSON.stringify([
+        node.ref.startsWith("read-only:"),
+        node.role,
+        node.name ?? null,
+        node.description ?? null,
+        node.actions,
+      ]);
+    const earlier = new Map<string, string[]>();
+    for (const node of previous?.roots ?? []) {
+      const key = identity(node);
+      earlier.set(key, [...(earlier.get(key) ?? []), node.ref]);
+    }
+    const current = new Map<string, number>();
+    for (const node of roots) current.set(identity(node), (current.get(identity(node)) ?? 0) + 1);
+    const tokens = new Map<string, string>();
+    const used = new Map<string, number>();
+    const stable = roots.map((node) => {
+      const key = identity(node);
+      const refs = earlier.get(key);
+      const index = used.get(key) ?? 0;
+      used.set(key, index + 1);
+      const readOnly = node.ref.startsWith("read-only:");
+      const ref =
+        refs && refs.length === current.get(key)
+          ? refs[index]!
+          : `${readOnly ? "read-only:" : ""}e${++this.lastRef}`;
+      if (!readOnly) tokens.set(ref, node.ref);
+      return { ...node, ref };
+    });
+    this.tokens.delete(targetId);
+    this.tokens.set(targetId, tokens);
+    while (this.tokens.size > 32) this.tokens.delete(this.tokens.keys().next().value!);
+    return stable;
+  }
+
+  /** CUA's token for a ref of the window's latest reading. */
+  private elementToken(targetId: string, ref: string): string {
+    const token = this.tokens.get(targetId)?.get(ref);
+    if (!token)
+      throw new ComputerBackendError(
+        "observation_stale",
+        `CUA ref ${ref} is not in the latest observation of this window; observe it again`,
+        false,
+        false,
+      );
+    return token;
+  }
+
+  /** The web date or time field a part (ref) belongs to, from the window's
+   * latest reading, or null when the ref is not such a part. */
+  private dateFieldOf(
+    targetId: string,
+    ref: string,
+  ): {
+    ref: string;
+    name: string | undefined;
+    segments: DateSegment[];
+    picker: boolean;
+  } | null {
+    const known = this.dateFieldTokens.get(targetId);
+    const token = this.tokens.get(targetId)?.get(ref);
+    const fieldToken = token === undefined ? undefined : known?.owners.get(token);
+    if (!known || fieldToken === undefined) return null;
+    const fieldRef = [...(this.tokens.get(targetId) ?? [])].find(
+      ([, candidate]) => candidate === fieldToken,
+    )?.[0];
+    if (!fieldRef) return null;
+    const name = this.observations.get(targetId)?.roots.find((node) => node.ref === fieldRef)?.name;
+    return {
+      ref: fieldRef,
+      name,
+      segments: known.fields.get(fieldToken)!,
+      picker: known.pickers.has(token!),
+    };
+  }
+
+  /**
+   * The input that fills a web date or time field: for each part, give it
+   * the keyboard focus through accessibility and type its digits. Pressing
+   * the field instead focuses no part while the browser is not the active
+   * app, so its keys are dropped; and a browser moves on to the next part by
+   * itself after some parts only, so each part is focused on its own. Typing
+   * over a part replaces what it held, so a filled field is changed the same
+   * way. Without a token for every part, the field is pressed and each part
+   * reached from the first one with Left and Right.
+   */
+  private dateFieldInput(
+    args: Record<string, unknown>,
+    token: string,
+    parts: readonly string[] | undefined,
+    texts: readonly string[],
+  ): Operation[] {
+    const delivery_mode = this.inputDelivery();
+    const type = (text: string): Operation => ({
+      name: "type_text",
+      args: { ...args, text, delivery_mode },
+      fillsField: true,
+    });
+    if (parts?.length === texts.length)
+      return texts.flatMap((text, index): Operation[] => [
+        {
+          name: "click",
+          args: {
+            ...args,
+            element_token: parts[index]!,
+            action: "focus",
+            delivery_mode: "background",
+          },
+          fillsField: true,
+        },
+        type(text),
+      ]);
+    const key = (name: "left" | "right"): Operation => ({
+      name: "press_key",
+      args: { ...args, key: name, modifiers: [], delivery_mode },
+      fillsField: true,
+    });
+    const input: Operation[] = [
+      {
+        name: "click",
+        args: { ...args, element_token: token, button: "left", delivery_mode: "background" },
+        fillsField: true,
+      },
+    ];
+    texts.forEach((text, index) => {
+      if (texts.length > 1)
+        for (let step = 0; step < texts.length - 1; step++) input.push(key("left"));
+      for (let step = 0; step < index; step++) input.push(key("right"));
+      input.push(type(text));
+    });
+    return input;
+  }
+
+  private async captureTarget(
+    targetId: string,
+    options?: ComputerBackendCaptureOptions,
+    actionCapture = false,
+  ): Promise<ComputerBackendFrame> {
+    const target = await this.target(targetId);
+    const bounds = target.native.bounds!;
+    // PNG is intentionally retained; do not claim a JPEG encoder or scale the
+    // pixels after CUA has minted its coordinate-bound capture authority.
+    const longEdge = options
+      ? Math.max(
+          1,
+          Math.floor(
+            Math.max(bounds.width, bounds.height) *
+              Math.min(options.maxWidth / bounds.width, options.maxHeight / bounds.height),
+          ),
+        )
+      : 0;
+    const { data, result } = await callDesktop(this.runtime, "get_window_state", {
+      ...this.args(target),
+      include_accessibility_tree: false,
+      include_screenshot: true,
+      max_image_dimension: longEdge,
+      ...(this.identity.platform !== "windows" && !actionCapture ? { display_only: true } : {}),
+    });
+    const state = WindowState.parse(data);
+    const image = result.images[0];
+    if (
+      state.pid !== target.pid ||
+      state.window_id !== target.windowId ||
+      ((actionCapture || this.identity.platform === "windows") && !state.capture_id) ||
+      (this.identity.platform !== "windows"
+        ? state.screenshot_frame_valid !== true
+        : state.screenshot_frame_valid === false || data.screenshot_error !== undefined) ||
+      !state.screenshot_width ||
+      !state.screenshot_height ||
+      result.images.length !== 1 ||
+      image?.mimeType !== "image/png" ||
+      image.dataBase64.length > 90_000_000
+    )
+      throw new ComputerBackendError(
+        "driver_failed",
+        "CUA returned no exact window capture",
+        false,
+        false,
+      );
+    if (
+      options &&
+      (state.screenshot_width > options.maxWidth || state.screenshot_height > options.maxHeight)
+    )
+      throw new ComputerBackendError(
+        "driver_failed",
+        "CUA capture exceeded requested dimensions",
+        false,
+        false,
+      );
+    const bytes = Buffer.from(image.dataBase64, "base64");
+    if (
+      bytes.length < 24 ||
+      bytes.length > 64 * 1024 * 1024 ||
+      bytes.readUInt32BE(0) !== 0x89504e47 ||
+      bytes.readUInt32BE(16) !== state.screenshot_width ||
+      bytes.readUInt32BE(20) !== state.screenshot_height
+    )
+      throw new ComputerBackendError(
+        "driver_failed",
+        "CUA capture dimensions did not match its image",
+        false,
+        false,
+      );
+    const frameId = `${this.session}:${state.capture_id ?? randomUUID()}`;
+    this.frames.set(frameId, {
+      targetId,
+      width: state.screenshot_width,
+      height: state.screenshot_height,
+      windowWidth: state.window_bounds?.width ?? bounds.width,
+      windowHeight: state.window_bounds?.height ?? bounds.height,
+    });
+    while (this.frames.size > 32) this.frames.delete(this.frames.keys().next().value!);
+    return {
+      frameId,
+      targetId,
+      targetGeneration: target.native.targetGeneration,
+      width: state.screenshot_width,
+      height: state.screenshot_height,
+      mimeType: "image/png",
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      data: bytes,
+    };
+  }
+
+  /** The CUA calls for one action. `laterInBatch` marks an action that runs
+   * after earlier actions of its batch changed the window: the observation
+   * still names its element, but not the element's state or the focus. */
+  private async operations(
+    command: ComputerBackendActionCommand,
+    laterInBatch = false,
+    /** An earlier action of the batch names its element (see namedOperation). */
+    afterNamed = false,
+    inBatch = false,
+  ): Promise<Operation[]> {
+    if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
+    if (command.action.type === "pointer" && command.action.clickCount === 2) {
+      throw unsupported(
+        'This computer cannot turn an earlier click into a double-click, so nothing was sent: send one pointer action with action "double_click" at that point instead',
+      );
+    }
+    const target = await this.target(command.targetId);
+    if (target.native.targetGeneration !== command.expectedTargetGeneration)
+      throw new ComputerBackendError("target_stale", "CUA target generation changed", false, false);
+    const args = this.args(target),
+      action = command.action;
+    if (action.type === "pointer") {
+      const frame = this.frames.get(action.frameId);
+      if (
+        !frame ||
+        frame.targetId !== command.targetId ||
+        command.expectedFrameId !== action.frameId
+      )
+        throw new ComputerBackendError(
+          "frame_stale",
+          "CUA action requires a known coordinate mapping for this window",
+          false,
+          false,
+        );
+      if (
+        !Number.isFinite(action.x) ||
+        !Number.isFinite(action.y) ||
+        action.x < 0 ||
+        action.y < 0 ||
+        action.x >= frame.width ||
+        action.y >= frame.height
+      )
+        throw new ComputerBackendError(
+          "invalid_action",
+          "CUA coordinates are outside the captured image",
+          false,
+          false,
+        );
+      // Frames describe coordinates, not a requirement that the UI stay frozen.
+      // CUA's window route uses its latest screenshot scale. Translate a click
+      // from any retained viewer profile into that scale, without taking another
+      // screenshot or rejecting ordinary repeated scroll/drag gestures.
+      const latest = [...this.frames.values()]
+        .reverse()
+        .find((entry) => entry.targetId === command.targetId)!;
+      const x = (action.x * latest.width) / frame.width,
+        y = (action.y * latest.height) / frame.height;
+      const delivery = { ...args, delivery_mode: this.inputDelivery() };
+      if (action.action === "click" || action.action === "double_click")
+        return [
+          {
+            name: "click",
+            args: {
+              ...delivery,
+              x,
+              y,
+              button: action.button ?? "left",
+              count: action.action === "double_click" ? 2 : 1,
+            },
+          },
+        ];
+      if (action.action === "drag") {
+        if (
+          action.endX === undefined ||
+          action.endY === undefined ||
+          !Number.isFinite(action.endX) ||
+          !Number.isFinite(action.endY) ||
+          action.endX < 0 ||
+          action.endY < 0 ||
+          action.endX >= frame.width ||
+          action.endY >= frame.height
+        )
+          throw new ComputerBackendError(
+            "invalid_action",
+            "CUA drag endpoint is outside the captured window",
+            false,
+            false,
+          );
+        return [
+          {
+            name: "drag",
+            args: {
+              ...delivery,
+              from_x: x,
+              from_y: y,
+              to_x: (action.endX * latest.width) / frame.width,
+              to_y: (action.endY * latest.height) / frame.height,
+              button: action.button ?? "left",
+            },
+          },
+        ];
+      }
+      if (action.action === "scroll") {
+        // Browser wheel deltas are CSS pixels; this CUA API takes wheel notches.
+        // Keep both axes; one conventional 100-pixel wheel step maps to a notch.
+        const steps: Operation[] = [];
+        for (const [delta, negative, positive] of [
+          [action.deltaX ?? 0, "left", "right"],
+          [action.deltaY ?? 0, "up", "down"],
+        ] as const) {
+          if (!Number.isFinite(delta))
+            throw new ComputerBackendError(
+              "invalid_action",
+              "CUA scroll delta must be finite",
+              false,
+              false,
+            );
+          if (delta !== 0)
+            steps.push({
+              name: "scroll",
+              args: {
+                ...delivery,
+                x,
+                y,
+                direction: delta < 0 ? negative : positive,
+                by: "line",
+                amount: Math.min(50, Math.max(1, Math.round(Math.abs(delta) / 100))),
+              },
+            });
+        }
+        if (!steps.length)
+          throw new ComputerBackendError(
+            "invalid_action",
+            "CUA scroll requires a nonzero delta",
+            false,
+            false,
+          );
+        return steps;
+      }
+      throw unsupported("CUA's move_cursor controls its overlay, not native hover input");
+    }
+    if (action.type === "focus") {
+      if (this.identity.platform !== "macos")
+        throw unsupported(
+          "CUA acts on windows in the background without bringing them to the front, so it has no focus action: act on the window itself",
+        );
+      // macOS brings the window to the front and leaves it there: a focus
+      // action asks for exactly that (see dispatchFocus).
+      const focused = await this.target(action.targetId);
+      // Not while someone else is using the computer: the front app is the
+      // one they are working in.
+      const personInputSecondsAgo = this.recentPersonInput();
+      if (personInputSecondsAgo !== undefined)
+        throw new ComputerBackendError(
+          "invalid_action",
+          `Someone other than Opengeni used this computer's keyboard, mouse or trackpad ${personInputSecondsAgo} s ago, so this window was not brought to the front: ask them first, or keep working in the background`,
+          false,
+          false,
+        );
+      return [{ name: "bring_to_front", args: { pid: focused.pid, window_id: focused.windowId } }];
+    }
+    if (action.type !== "semantic" && action.type !== "keyboard")
+      throw unsupported("This CUA operation is not admitted by the desktop adapter");
+    const observed = this.observations.get(command.targetId);
+    // A ref is its own fence: it resolves only to the same element, unchanged,
+    // in the latest reading of the window (see locateObserved). So a ref
+    // action may name any recent observation of this window.
+    const refFenced =
+      action.type === "semantic" &&
+      action.locator.kind === "ref" &&
+      (this.recentObservations.get(command.targetId) ?? []).some(
+        (recent) => recent.observationId === command.expectedObservationId,
+      );
+    // Keys go to the window's focused element in its latest reading. Another
+    // read of the window since the caller's (the person's viewer, a parallel
+    // read) changes nothing they land on while that reading shows the same
+    // document with the same element focused, which keeps its ref across
+    // readings of one document. With nothing focused the keys carry no
+    // element and land wherever the focus is by then, so only the latest
+    // reading fences them. A reading the app did not answer showed the
+    // caller no focused element, so it fences no keys either, even once a
+    // later reading has one.
+    const fencedOn =
+      action.type === "keyboard" && observed
+        ? (this.recentObservations.get(command.targetId) ?? []).find(
+            (recent) => recent.observationId === command.expectedObservationId,
+          )
+        : undefined;
+    const sameDocument =
+      fencedOn !== undefined &&
+      this.documents.get(fencedOn) !== undefined &&
+      this.documents.get(fencedOn) === this.documents.get(observed!);
+    const keyFenced =
+      sameDocument &&
+      !this.unansweredReadings.has(fencedOn!) &&
+      observed!.focusedRef !== null &&
+      fencedOn!.focusedRef === observed!.focusedRef;
+    if (
+      !observed ||
+      !command.expectedObservationId ||
+      (observed.observationId !== command.expectedObservationId && !refFenced && !keyFenced)
+    ) {
+      if (this.unreadableSheets.has(command.targetId) && this.sheetHosts(target).length)
+        throw await this.sheetError(target);
+      if (sameDocument && fencedOn!.focusedRef !== observed?.focusedRef)
+        throw new ComputerBackendError(
+          "observation_stale",
+          "The focused element of this window changed since that observation, so no keys were sent; observe the window again",
+          false,
+          false,
+        );
+      throw new ComputerBackendError(
+        "observation_stale",
+        "CUA action requires the current semantic observation",
+        false,
+        false,
+      );
+    }
+    if (action.type === "semantic") {
+      let node: InteractionSemanticNodeValue;
+      try {
+        node = this.locateObserved(command.targetId, observed, action.locator);
+      } catch (error) {
+        // Not in the batch's observation: an earlier action may bring it up,
+        // or the element shown under the other role pressed alike may be the
+        // one meant, which CUA's step decides once the window has settled.
+        // Several shown by that name: an earlier action may narrow them (a
+        // search filtering a list), and CUA's step waits for the window to
+        // settle before it reports them.
+        const unseen = error instanceof ComputerBackendError && error.code === "locator_not_found";
+        const several =
+          laterInBatch &&
+          error instanceof ComputerBackendError &&
+          error.code === "locator_ambiguous" &&
+          action.locator.kind !== "ref" &&
+          action.locator.kind !== "identifier";
+        const named =
+          (unseen ? laterInBatch || (inBatch && mayStandIn(observed.roots, action)) : several) &&
+          (ACTIONS_ON_UNSEEN.has(action.action) ||
+            // select or deselect means a state only on a checkbox or switch.
+            ((action.action === "select" || action.action === "deselect") &&
+              action.locator.kind === "role" &&
+              TOGGLE_ROLES.has(action.locator.role)))
+            ? namedOperation(this.identity.platform, args, action, null)
+            : null;
+        if (!named) throw error;
+        return [named];
+      }
+      // A date field's picker button opens a menu that would bring the
+      // browser in front; the field itself takes the whole value.
+      const picker = this.dateFieldOf(command.targetId, node.ref);
+      if (picker?.picker)
+        throw unsupported(
+          `This button opens the date picker of the date or time field ${picker.ref}${
+            picker.name ? ` ("${picker.name}")` : ""
+          }, which would bring the browser in front of the person's window, so nothing was sent: set_value on ${picker.ref} with its value in the form ${dateFieldFormat(picker.segments)}`,
+        );
+      // set_value true or false (or select, deselect) on a checkbox or switch
+      // presses it only when it is not in that state already.
+      const wanted = toggleWanted(node.role, action);
+      if (wanted !== null && !afterNamed) {
+        // The observation shows its state before the action only: once an
+        // earlier action of the batch ran, CUA reads it as the step runs.
+        const state = laterInBatch ? undefined : checkedState(node);
+        if (state === wanted) return [];
+        if (!laterInBatch && node.states.includes("disabled"))
+          throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+        if (state !== undefined) {
+          const presses = await this.operations(
+            {
+              ...command,
+              action: { type: "semantic", locator: action.locator, action: "invoke" },
+            },
+            laterInBatch,
+            afterNamed,
+            inBatch,
+          );
+          return presses.map((step, index) =>
+            index === presses.length - 1
+              ? { ...step, expectToggle: { ref: node.ref, wanted } }
+              : step,
+          );
+        }
+        // CUA reads its state when the step runs, which needs the element's
+        // own label to find it by.
+        const token = this.elementToken(command.targetId, node.ref);
+        const findable =
+          node.name !== undefined &&
+          node.name === this.ownLabels.get(command.targetId)?.get(token) &&
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length === 1;
+        const named = findable ? namedOperation(this.identity.platform, args, action, node) : null;
+        if (!named || !this.initialCapabilities.actionBatches)
+          throw unsupported(
+            laterInBatch
+              ? "This checkbox or switch cannot be told apart by its label once earlier actions of the batch ran, so it cannot be set to checked or not there: act on it in its own call"
+              : "This window does not show whether this element is checked, so it cannot be set to checked or not: invoke it to toggle it",
+          );
+        return [named];
+      }
+      if (
+        wanted === null &&
+        !node.actions.includes(action.action) &&
+        !selectsByPressing(node, action.action)
+      ) {
+        const field = this.dateFieldOf(command.targetId, node.ref);
+        if (field)
+          throw unsupported(
+            `This is one part of the date or time field ${field.ref}${
+              field.name ? ` ("${field.name}")` : ""
+            }, which is filled as a whole: set_value on ${field.ref} with its value in the form ${dateFieldFormat(field.segments)}`,
+          );
+        throw unsupported(
+          action.action === "focus"
+            ? this.identity.platform === "macos"
+              ? "This element cannot take the keyboard focus: invoke it, or set its value"
+              : "Elements cannot be focused on their own here: invoke the element, or set its value"
+            : node.actions.length > 0
+              ? `This element does not offer ${action.action}; use one it offers: ${node.actions.join(", ")}`
+              : "This element offers no actions; act on a nearby control or its window instead",
+        );
+      }
+      // An earlier action of the batch can enable it; CUA refuses it if not.
+      if (!laterInBatch && node.states.includes("disabled"))
+        throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+      if (afterNamed) {
+        // An earlier step found its element by name, which re-read the window
+        // and so retired every token of the batch's observation: this element
+        // is found by name too.
+        const token = this.elementToken(command.targetId, node.ref);
+        const special =
+          (action.action === "set_value" &&
+            this.dateFieldTokens.get(command.targetId)?.fields.has(token)) ||
+          (action.action === "invoke" && this.openingTokens.get(command.targetId)?.has(token));
+        // CUA finds an element by its own label only, and by that label it
+        // must find this one element.
+        const findable =
+          node.name !== undefined && node.name === this.ownLabels.get(command.targetId)?.get(token);
+        if (
+          findable &&
+          !special &&
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length > 1
+        )
+          throw unsupported(
+            "Several elements here have this element's role and name, and it comes after an action that names an element not yet shown, so it cannot be told apart in the same batch: act on it in its own call",
+          );
+        const named =
+          special || !findable ? null : namedOperation(this.identity.platform, args, action, node);
+        if (!named)
+          throw unsupported(
+            special
+              ? "This field or file comes after an action that names an element not yet shown, so it cannot be filled or opened in the same batch: act on it in its own call"
+              : "This element has no label of its own, and it comes after an action that names an element not yet shown, so it cannot be found again in the same batch: act on it in its own call",
+          );
+        return [named];
+      }
+      if (action.action === "focus")
+        return [
+          {
+            name: "click",
+            args: {
+              ...args,
+              element_token: this.elementToken(command.targetId, node.ref),
+              action: "focus",
+              delivery_mode: "background",
+            },
+          },
+        ];
+      if (action.action === "set_value") {
+        if (action.value === undefined)
+          throw new ComputerBackendError(
+            "invalid_action",
+            "set_value requires a value",
+            false,
+            false,
+          );
+        const token = this.elementToken(command.targetId, node.ref);
+        const known = this.dateFieldTokens.get(command.targetId);
+        const segments = known?.fields.get(token);
+        if (segments) {
+          const typing = dateFieldTyping(segments, String(action.value));
+          if ("error" in typing)
+            throw new ComputerBackendError("invalid_action", typing.error, false, false);
+          const input = this.dateFieldInput(args, token, known!.parts.get(token), typing.texts);
+          input[0]!.expectDate = { ref: node.ref, value: String(action.value), segments };
+          return input;
+        }
+        return [
+          {
+            name: "set_value",
+            args: {
+              ...args,
+              element_token: token,
+              value: String(action.value),
+              ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
+            },
+            // A slider is only checked when the window reads its value as a
+            // number: many native sliders expose a range but no readable
+            // value, and some read it as text such as "50 %".
+            ...(((node.role === "textbox" || node.role === "spinbutton") &&
+              (node.value === undefined || typeof node.value === "string")) ||
+            (node.role === "slider" &&
+              typeof node.value === "string" &&
+              node.value.trim() !== "" &&
+              Number.isFinite(Number(node.value)))
+              ? {
+                  expectText: {
+                    ref: node.ref,
+                    value: String(action.value),
+                    before: node.value ?? "",
+                    ...(node.role === "spinbutton"
+                      ? { numeric: "number field" as const }
+                      : node.role === "slider"
+                        ? { numeric: "slider" as const }
+                        : {}),
+                  },
+                }
+              : {}),
+          },
+        ];
+      }
+      const token = this.elementToken(command.targetId, node.ref);
+      return [
+        {
+          name: "click",
+          args: {
+            ...args,
+            element_token: token,
+            // Both the pinned SDK and the current typed click contract use
+            // right for a semantic context menu; invoke uses the default left.
+            button: action.action === "show_menu" ? "right" : "left",
+            // A folder or file of a file dialog opens instead of pressing:
+            // into the folder, or choosing the file.
+            ...(action.action === "invoke" && this.openingTokens.get(command.targetId)?.has(token)
+              ? { action: "open" }
+              : {}),
+            delivery_mode: "background",
+          },
+        },
+      ];
+    }
+    // A reading the app did not answer showed no focused element: keys sent
+    // on it would go to one the caller never saw.
+    if (!laterInBatch && this.unansweredReadings.has(observed))
+      throw new ComputerBackendError(
+        "invalid_action",
+        "The app did not answer the latest reading of this window, so it shows no focused element and no keys were sent: observe the window again, then send them",
+        false,
+        false,
+      );
+    // Window-scoped delivery never falls back to the foreground desktop. An
+    // observed focused element is carried when CUA supplies that information.
+    // After earlier actions of a batch the focus may have moved (clicking a
+    // field focuses it), so the keys go to whatever has the focus then.
+    const focused =
+      !laterInBatch && observed.focusedRef && !observed.focusedRef.startsWith("read-only:")
+        ? { element_token: this.elementToken(command.targetId, observed.focusedRef) }
+        : {};
+    if (action.action === "type")
+      return [
+        {
+          name: "type_text",
+          args: {
+            ...args,
+            ...focused,
+            text: action.value,
+            delivery_mode: this.inputDelivery(),
+          },
+        },
+      ];
+    const keys = action.value.split("+").map((key) => key.toLowerCase());
+    const key = keys.pop()!;
+    const { aliases: modifierAliases, allowed: allowedModifiers } =
+      KEY_MODIFIERS[this.identity.platform];
+    const modifiers = keys.map((modifier) => modifierAliases[modifier] ?? modifier);
+    if (modifiers.some((modifier) => !allowedModifiers.includes(modifier)))
+      throw unsupported("CUA keyboard modifier is unsupported");
+    const named = key === "enter" ? "return" : key;
+    // Keys posted to a background Mac app never reach its menus, so a
+    // shortcut such as cmd+s would report success and do nothing. CUA's
+    // hotkey runs the menu item behind the shortcut through accessibility
+    // instead, and refuses when macOS keeps that item disabled.
+    if (this.identity.platform === "macos" && modifiers.length > 0)
+      return [
+        {
+          name: "hotkey",
+          args: {
+            ...args,
+            ...focused,
+            keys: [...modifiers, named],
+            delivery_mode: this.inputDelivery(),
+          },
+        },
+      ];
+    return [
+      {
+        name: "press_key",
+        args: {
+          ...args,
+          ...focused,
+          key: named,
+          modifiers,
+          delivery_mode: this.inputDelivery(),
+        },
+      },
+    ];
+  }
+
+  /** Start an app (or bring up its existing instance) in the background. */
+  private async launch(applicationId: string): Promise<LaunchedApp> {
+    const id = applicationId.trim();
+    const { data } = await callDesktop(
+      this.runtime,
+      "launch_app",
+      launchArguments(this.identity.platform, id),
+      "caller-settles",
+    );
+    // Launching may have happened even without a reported process. On Linux
+    // the app starts through a launcher process, which CUA reports instead.
+    if (typeof data.pid !== "number" && typeof data.launcher_pid !== "number")
+      throw new ComputerBackendError(
+        "outcome_unknown",
+        `CUA did not report a running process for ${id}; observe the desktop before launching it again`,
+        false,
+        true,
+      );
+    const reported = Windows.safeParse({ windows: data.windows });
+    return {
+      pid: typeof data.pid === "number" ? data.pid : null,
+      launcherPid: typeof data.launcher_pid === "number" ? data.launcher_pid : null,
+      windows: reported.success ? reported.data.windows : [],
+    };
+  }
+
+  /** Launch an app, then observe its window, so the caller can act on it
+   * directly; no observation when no window of the app is found.
+   * When the action's own target is one of the app's windows (the window the
+   * caller already works in), that window is observed: an app that is already
+   * running may show windows other callers work in, and the window launch_app
+   * reports first can be any of them.
+   * Once the app runs, the launch succeeded whatever happens next. A cold app
+   * can take seconds to show its first window, so its windows are searched
+   * until one appears or the wait runs out. Each search is its own step in the
+   * serialized queue, so previews, human input and close are not held up
+   * between searches. A macOS document app launched in the background may
+   * stay running without any window; one that still shows none after a while
+   * is launched once more, which CUA delivers as a reopen, the way a Dock
+   * click asks a running app for its window (or Open panel), still without
+   * taking focus. */
+  private async dispatchLaunch(
+    command: ComputerBackendActionCommand,
+    applicationId: string,
+  ): Promise<ComputerBackendObservation | null> {
+    let launched = await this.run(async () => {
+      await this.target(command.targetId);
+      return await this.launch(applicationId);
+    });
+    try {
+      const started = performance.now();
+      const deadline = started + this.launchWindowWaitMs;
+      let reopenAt =
+        this.identity.platform === "macos" && launched.pid !== null
+          ? started + MACOS_LAUNCH_REOPEN_AFTER_MS
+          : Number.POSITIVE_INFINITY;
+      for (let attempt = 0; ; attempt++) {
+        const current = launched;
+        const found = await this.run(async () => {
+          const windows = await this.launchedWindows(current, command.targetId);
+          for (const windowTarget of windows) {
+            const reading = await this.observeTarget(windowTarget).catch(() => null);
+            if (reading) return { windows: windows.length, reading };
+          }
+          return { windows: windows.length, reading: null };
+        });
+        if (found.reading) return found.reading;
+        // A window that exists but cannot be read will not become readable by
+        // waiting for it.
+        if (found.windows > 0) break;
+        const now = performance.now();
+        const remaining = deadline - now;
+        if (remaining <= 0 || this.closing) break;
+        if (now >= reopenAt) {
+          reopenAt = Number.POSITIVE_INFINITY;
+          const reopened = await this.run(() => this.launch(applicationId)).catch(() => null);
+          if (reopened)
+            launched = { ...launched, windows: [...launched.windows, ...reopened.windows] };
+          continue;
+        }
+        // Poll quickly at first, when most windows appear, then less often.
+        const pause = attempt < 4 ? LAUNCH_WINDOW_FAST_POLL_MS : LAUNCH_WINDOW_SLOW_POLL_MS;
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(pause, remaining, Math.max(0, reopenAt - now))),
+        );
+      }
+      // No window of the app: the action's own target is not the app's (it
+      // would have been found), so observing it would pass another app's
+      // window off as the launched one.
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The targets of the launched app's windows, best first: `preferred` when
+   * it is one of them, then the windows the launch reported, then the listed
+   * windows of its process. On Linux the app
+   * may run as a child of the launcher process CUA reports, so a window of a
+   * descendant counts too. A window that cannot be tied to the launch is never
+   * guessed. A window lying within another of the app's windows (part of a
+   * panel, such as an Open panel's accessory view) comes after the windows it
+   * lies in. */
+  private async launchedWindows(launched: LaunchedApp, preferred: string): Promise<string[]> {
+    const ownsWindow = (processId: number | null): boolean => {
+      if (processId === null) return false;
+      if (processId === launched.pid || processId === launched.launcherPid) return true;
+      if (launched.launcherPid === null) return false;
+      // Walk up the window's process ancestry, at most a few generations.
+      let current: number | null = processId;
+      for (let depth = 0; depth < 16 && current !== null && current > 1; depth++) {
+        current = this.parentPid(current);
+        if (current === launched.launcherPid) return true;
+      }
+      return false;
+    };
+    const targets = await this.discover();
+    const reported = launched.windows
+      .map((window) => `cua:window:${window.pid}:${window.window_id}`)
+      .filter((id) => this.targetsById.has(id));
+    const owned = targets
+      .filter((target) => ownsWindow(target.processId))
+      .map((target) => target.id);
+    const found = new Set([...reported, ...owned]);
+    const candidates = found.has(preferred)
+      ? [preferred, ...[...found].filter((id) => id !== preferred)]
+      : [...found];
+    const inner = (id: string) => this.sheetHosts(this.targetsById.get(id)!).length > 0;
+    return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
+  }
+
+  /** The element a locator names. A ref from an earlier observation of the
+   * same window names the same element in the latest one only while the
+   * window is unchanged: CUA honours only the tokens of its latest reading,
+   * so when every element still reads the same, in the same order, the ref
+   * acts through its element's current token. Otherwise it is refused. A ref
+   * seen nowhere says which observation is current. */
+  private locateObserved(
+    targetId: string,
+    observed: ComputerBackendObservation,
+    locator: ComputerLocator,
+  ): InteractionSemanticNodeValue {
+    try {
+      return locate(observed.roots, locator);
+    } catch (error) {
+      if (
+        locator.kind !== "ref" ||
+        !(error instanceof ComputerBackendError) ||
+        error.code !== "locator_not_found"
+      )
+        throw error;
+      const recent = this.recentObservations.get(targetId) ?? [];
+      const latest = recent.at(-1);
+      if (latest && latest !== observed) {
+        const node = latest.roots.find((candidate) => candidate.ref === locator.ref);
+        if (node) return node;
+      }
+      // Refs carry over between readings while their element stays, so a ref
+      // only an earlier reading has names an element that changed or went.
+      if (recent.some((earlier) => earlier.roots.some((node) => node.ref === locator.ref)))
+        // Names no label: one could be a typed secret.
+        throw new ComputerBackendError(
+          "observation_stale",
+          `CUA ref ${locator.ref} is from an earlier observation, and the window has changed since; use a ref from the latest observation (${latest!.observationId.split(":").pop()})`,
+          false,
+          false,
+        );
+      throw new ComputerBackendError(
+        "locator_not_found",
+        `CUA ref ${locator.ref} is not in a recent observation of this window; observe it again and use a ref from the latest observation (${observed.observationId.split(":").pop()})`,
+        false,
+        false,
+      );
+    }
+  }
+
+  /** Pointer and keyboard delivery. Linux owns an isolated seat, so viewer
+   * input may focus within it. macOS posts events to the target process
+   * without raising it. Windows delivers through SendInput after briefly
+   * fronting the window and restoring the previous foreground window:
+   * background PostMessage input is silently dropped by Chromium, Electron,
+   * WinUI and other common surfaces, which would leave ordinary clicks and
+   * typing unreliable. Semantic UIA actions stay in the background everywhere. */
+  private inputDelivery(): "foreground" | "background" {
+    return this.identity.platform === "macos" ? "background" : "foreground";
+  }
+
+  /** Windows sends foreground input to whichever window is in front, so the
+   * window is brought there first, past a Start menu or Search left open,
+   * and the input is refused, with none of it sent, while Windows keeps
+   * another window in front. After keyboard input the foreground goes back to
+   * the window that had it, as CUA does for input it fronts a window for.
+   * After a click it deliberately stays with the clicked window, unlike CUA:
+   * taking it away would close a menu or popup the click opened. */
+  private async front(
+    windowId: number,
+    steps: readonly { name: string; args: Record<string, unknown> }[],
+  ): Promise<{ giveBack(): Promise<void> }> {
+    const none = { giveBack: async () => {} };
+    if (!this.frontWindow || !steps.some(inForeground)) return none;
+    const fronted = await this.frontWindow.front(windowId);
+    if (!fronted.front)
+      throw new ComputerBackendError(
+        "unavailable",
+        `Windows kept ${fronted.inFront} in front and would not bring this window forward, so none of this action's input was sent. Close or dismiss that window first, then try again`,
+        false,
+        false,
+      );
+    const frontWindow = this.frontWindow;
+    if (!fronted.previous || steps.some(clicks)) return none;
+    return { giveBack: async () => await frontWindow.giveBack(windowId, fronted.previous) };
+  }
+}
+
+/** The CUA tools that click with the pointer. A window they clicked keeps the
+ * foreground (see front). */
+const CLICK_TOOLS = new Set(["click", "double_click", "right_click", "drag"]);
+
+function clicks(step: { name: string; args: Record<string, unknown> }): boolean {
+  return inForeground(step) && CLICK_TOOLS.has(step.name);
+}
+
+function inForeground(operation: { args: Record<string, unknown> }): boolean {
+  return operation.args.delivery_mode === "foreground";
+}
+
+const RECENT_OBSERVATIONS = 4;
+
+/** How long a failed read of a window still on screen waits before it is
+ * tried once more. */
+const READ_RETRY_DELAY_MS = 500;
+
+/** The most steps CUA runs in one run_steps call. */
+const MAX_RUN_STEPS = 64;
+
+/** Roles chosen by pressing them: a radio button or a tab. */
+const PRESS_TO_SELECT_ROLES = new Set(["radio", "radio button", "tab", "page tab", "TabItem"]);
+
+/** What a later action of a batch may do to an element its observation does
+ * not show yet: an action whose meaning does not depend on the element's kind. */
+const ACTIONS_ON_UNSEEN: ReadonlySet<string> = new Set([
+  "invoke",
+  "show_menu",
+  "set_value",
+  "focus",
+]);
+
+/** How long a batch step that names its element waits for it to appear and
+ * enable: CUA's longest wait for one step. Action request deadlines are
+ * derived from the same bound. */
+const NAMED_STEP_WAIT_MS = COMPUTER_LOCATOR_WAIT_MS;
+
+/** How long its lookup then waits, once the check found the element. */
+const NAMED_STEP_FIND_MS = 1_000;
+
+/** Roles pressed alike: CUA's step that names one may use the one element
+ * of the other with that name, once the window has settled. */
+const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
+
+/** CUA's ambiguity message, worded for an action here: CUA's lookup can take
+ * an `nth`, while an action here names one element of several by its ref.
+ * CUA's `nth` and element numbers are left out of each candidate the message
+ * lists; names and window titles are kept as they are. */
+export function ambiguityForRefs(message: string): string {
+  const reworded = message.replace(
+    "; add `nth` or a more exact name: ",
+    "; give a more exact name, or observe the window and act on the one meant by its ref: ",
+  );
+  for (const lead of ["act on the one meant by its ref: ", "name the role of the one meant: "]) {
+    const at = reworded.lastIndexOf(lead);
+    if (at < 0) continue;
+    const listStart = at + lead.length;
+    const candidates = reworded
+      .slice(listStart)
+      .split("; ")
+      .map((candidate) => candidate.replace(/^(?:nth \d+: )?(?:\[\d+\] )?/, ""));
+    return reworded.slice(0, listStart) + candidates.join("; ");
+  }
+  return reworded;
+}
+
+/** Whether the first action of a batch, naming a button or link its
+ * observation does not show, may mean an element shown with that name under
+ * the other role: its step then goes to CUA by role and name, which uses that
+ * element only when the window's complete reading settles with exactly one
+ * such element and no element of the role named. Otherwise the action fails
+ * at once, as before. */
+function mayStandIn(
+  roots: readonly InteractionSemanticNodeValue[],
+  action: SemanticAction,
+): boolean {
+  const { locator } = action;
+  if (
+    locator.kind !== "role" ||
+    locator.name === undefined ||
+    !PRESSED_ALIKE_ROLES.has(locator.role) ||
+    !["invoke", "show_menu", "focus"].includes(action.action)
+  )
+    return false;
+  const wanted = locator.name.trim().toLowerCase();
+  return roots.some(
+    (node) =>
+      node.role !== locator.role &&
+      PRESSED_ALIKE_ROLES.has(node.role) &&
+      node.name?.trim().toLowerCase() === wanted,
+  );
+}
+
+/** The roles macOS and Windows observations show, as CUA's lookup names
+ * them where they differ ("text" there is a text field; here it is static
+ * text). Linux observations show AT-SPI roles, which CUA reads as they are. */
+const CUA_LOOKUP_ROLES: Readonly<Record<string, string>> = {
+  textbox: "textfield",
+  text: "statictext",
+  radio: "radiobutton",
+  combobox: "popupbutton",
+  spinbutton: "incrementor",
+};
+
+type SemanticAction = Extract<ComputerBackendActionCommand["action"], { type: "semantic" }>;
+
+/** The step for a later action of a batch that names its element by role
+ * and name instead of carrying a token: CUA finds the element when the step
+ * runs, after waiting for it to appear and enable. `node` is the element as
+ * the batch's observation shows it, when it shows it; a ref or identifier
+ * locator then names it by its role and exact name. Null when the element
+ * cannot be named: a ref or identifier the observation does not show, or an
+ * element without a role and name. */
+export function namedOperation(
+  platform: "macos" | "windows" | "linux",
+  args: Record<string, unknown>,
+  action: SemanticAction,
+  node: InteractionSemanticNodeValue | null,
+): Operation | null {
+  if (action.action === "set_value" && action.value === undefined) return null;
+  const { locator } = action;
+  const byLocator = locator.kind === "role" || locator.kind === "label" || locator.kind === "text";
+  if (!byLocator && !node) return null;
+  const role = locator.kind === "role" ? locator.role : byLocator ? undefined : node!.role;
+  const name = byLocator ? (locator.kind === "role" ? locator.name : locator.text) : node!.name;
+  const exact = byLocator ? locator.exact === true : true;
+  const selector = {
+    ...(role !== undefined
+      ? { role: platform === "linux" ? role : (CUA_LOOKUP_ROLES[role] ?? role) }
+      : {}),
+    ...(name !== undefined && name !== "" ? { name, ...(exact ? { exact: true } : {}) } : {}),
+  };
+  if (!("name" in selector) && (byLocator ? !("role" in selector) : true)) return null;
+  // A checkbox or switch set to a state is pressed only when CUA reads it
+  // in the other one as the step runs. An element named by label or text
+  // alone is taken as one when the value is true or false.
+  const toggleTo =
+    role !== undefined
+      ? toggleWanted(role, action)
+      : action.action === "set_value" && typeof action.value === "boolean"
+        ? action.value
+        : null;
+  // The check waits for the element; the lookup after it finds it at once.
+  const stepOptions = {
+    timeout_ms: NAMED_STEP_FIND_MS,
+    wait_for: {
+      ...selector,
+      pid: args.pid,
+      window_id: args.window_id,
+      enabled: true,
+      timeout_ms: NAMED_STEP_WAIT_MS,
+    },
+    ...(toggleTo !== null ? { toggle_to: toggleTo } : {}),
+  };
+  if (action.action === "set_value" && toggleTo === null)
+    return {
+      name: "set_value",
+      args: { ...args, ...selector, value: String(action.value) },
+      stepOptions,
+    };
+  return {
+    name: "click",
+    args: {
+      ...args,
+      ...selector,
+      button: action.action === "show_menu" ? "right" : "left",
+      ...(action.action === "focus" ? { action: "focus" } : {}),
+      delivery_mode: "background",
+    },
+    stepOptions,
+  };
+}
+
+/** `select` is the natural verb for a radio button or tab, which the platform
+ * offers only as a press, so it presses one rather than being refused. */
+function selectsByPressing(
+  node: { readonly role: string; readonly actions: readonly string[] },
+  action: string,
+): boolean {
+  return (
+    action === "select" && node.actions.includes("invoke") && PRESS_TO_SELECT_ROLES.has(node.role)
+  );
+}
+
+const CHECKED_WORDS: Readonly<Record<string, boolean>> = {
+  true: true,
+  on: true,
+  checked: true,
+  yes: true,
+  "1": true,
+  false: false,
+  off: false,
+  unchecked: false,
+  no: false,
+  "0": false,
+};
+
+/** The checked state an action asks of a checkbox or switch: set_value true
+ * or false (or on, off, checked, 1, 0...), select or deselect. Null when the
+ * element is no checkbox or switch, or the action asks no state. */
+export function toggleWanted(role: string, action: SemanticAction): boolean | null {
+  if (!TOGGLE_ROLES.has(role)) return null;
+  if (action.action === "select") return true;
+  if (action.action === "deselect") return false;
+  if (action.action !== "set_value" || action.value === undefined) return null;
+  const wanted =
+    typeof action.value === "boolean"
+      ? action.value
+      : CHECKED_WORDS[String(action.value).trim().toLowerCase()];
+  if (wanted === undefined)
+    throw unsupported("A checkbox or switch takes set_value true (checked) or false (not checked)");
+  return wanted;
+}
+
+/** Whether an observed checkbox or switch reads checked, when its value says,
+ * or "mixed". */
+function checkedState(node: InteractionSemanticNodeValue): boolean | "mixed" | undefined {
+  if (typeof node.value !== "string") return undefined;
+  const value = node.value.trim().toLowerCase();
+  // Neither state (indeterminate; "2" on macOS): never already as asked.
+  return value === "2" || value === "mixed" ? "mixed" : CHECKED_WORDS[value];
+}
+/** The app name CUA's worker process lists its own overlay windows under. */
+const CUA_WORKER_APP = "cua-driver";
+
+/** A Linux process's parent from /proc, or null when it cannot be read. */
+function procParentPid(pid: number): number | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // The command name is in parentheses and may contain spaces or ")".
+    const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    return Number.isInteger(parent) ? parent : null;
+  } catch {
+    return null;
+  }
+}
+
+/** How long a launch waits for the app's first window. A cold macOS launch
+ * of a document app (TextEdit to its Open panel) can take several seconds;
+ * there the launched process reliably owns its window. On Linux and Windows a
+ * launch often hands off to a process that cannot be tied to it (D-Bus
+ * activation, a single-instance app, a stub executable), so a longer wait
+ * would mostly be spent on windows it can never find. */
+const MACOS_LAUNCH_WINDOW_WAIT_MS = 6_000;
+/** How long a launched macOS app may show no window before it is reopened. */
+const MACOS_LAUNCH_REOPEN_AFTER_MS = 2_000;
+const LAUNCH_WINDOW_WAIT_MS = 1_000;
+const LAUNCH_WINDOW_FAST_POLL_MS = 250;
+const LAUNCH_WINDOW_SLOW_POLL_MS = 500;
+
+/** The part of a CUA action result naming the windows it saw the action
+ * open, as `App ("Title", …); Other` (an untitled window by its app only).
+ * A window the previous action opened late is reported separately and is
+ * not this action's. */
+/** An AX action error whose action may still have happened: "cannot
+ * complete" (kAXErrorCannotComplete, -25204), which an app returns when it
+ * did not answer in time, and -25205, which file dialogs return for an
+ * AXOpen that opened its item (and some windows for a press that closed
+ * them), although it stands for an unsupported attribute. */
+function cannotComplete(error: unknown): boolean {
+  return (
+    error instanceof ComputerBackendError && /-2520[45]\b|cannot complete/i.test(error.message)
+  );
+}
+
+/** Whether a reading after an action shows the same window, elements and
+ * values as the one before it. */
+function sameReading(
+  after: ComputerBackendObservation,
+  before: ComputerBackendObservation | undefined,
+): boolean {
+  if (!before || after.target.id !== before.target.id) return false;
+  const shape = (nodes: readonly InteractionSemanticNodeValue[]): string =>
+    JSON.stringify(nodes, (key, value) => (key === "ref" ? undefined : value));
+  return shape(after.roots) === shape(before.roots);
+}
+
+/** Roles whose text describes the page rather than being something to choose
+ * or type: their "Saving..." means the page is working. A menu item's
+ * "Print…" or a field's typed value does not. */
+const DESCRIPTIVE_ROLE =
+  /^(?:AX)?(?:static ?text|text|label|status|alert|heading|web ?area|document|group|cell)$/iu;
+const IN_PROGRESS_ROLE = /busy|progress/iu;
+const TRAILING_ELLIPSIS = /(?:\.\.\.|…)\s*$/u;
+/** A message of work in progress is short ("Saving...", "Loading your
+ * accounts…"); a longer text ending in an ellipsis is content cut short, such
+ * as a preview or a snippet, which stays on the page. */
+const MAX_PROGRESS_WORDS = 6;
+
+/** Whether one text reads as work in progress: a short text ending in an
+ * ellipsis. */
+function inProgressText(text: string): boolean {
+  if (!TRAILING_ELLIPSIS.test(text)) return false;
+  const words = text.replace(TRAILING_ELLIPSIS, "").trim().split(/\s+/u).filter(Boolean);
+  return words.length > 0 && words.length <= MAX_PROGRESS_WORDS;
+}
+
+/** The title of the document a reading shows: its window element's own
+ * label, which the reading itself carries, or else the window's listed title
+ * (never the page text an unlabeled window element is named by). A window's
+ * listed title is the one it had when the windows were last listed, so after
+ * an action that opened another page it still names the page before. */
+function documentTitle(shown: string | undefined, listed: string): string {
+  return shown !== undefined ? `window\u0000${shown}` : listed;
+}
+
+/** A button among the rows CUA leaves unindexed: on macOS a disabled button
+ * (one reading "Saving...") is such a row, folded into the page's web area. */
+const BUTTON_ROW = /^(?:AX)?(?:push ?)?button$/iu;
+
+/** What a reading shows of work in progress. */
+type ProgressSigns = {
+  /** A busy element or a spinner (a progress element without a value; a bar
+   * showing a value can be a static meter), one string per element. */
+  busy: string[];
+  /** The short texts ending in an ellipsis ("Saving...", "Loading…") of its
+   * descriptive elements and rows, its disabled elements and its folded
+   * buttons. None from a menu, whose "Move to…" is a choice, or a field,
+   * whose typed value is the person's. */
+  texts: string[];
+  /** Every text the reading shows, so that a sign counts only when the
+   * window did not show its text before: a control that becomes disabled
+   * as it was ("Options…") is not work in progress. */
+  shown: Set<string>;
+};
+
+function progressSigns(
+  nodes: readonly InteractionSemanticNodeValue[],
+  rows: readonly UnindexedRow[],
+): ProgressSigns {
+  const signs: ProgressSigns = { busy: [], texts: [], shown: new Set() };
+  const visit = (node: InteractionSemanticNodeValue, inMenu: boolean): void => {
+    const menu = inMenu || /menu/iu.test(node.role);
+    const value = typeof node.value === "string" ? node.value.trim() : undefined;
+    const name = node.name?.trim();
+    for (const text of [name, value]) if (text) signs.shown.add(text);
+    if (!menu) {
+      if (
+        node.states.includes("busy") ||
+        (IN_PROGRESS_ROLE.test(node.role) && node.value === undefined)
+      ) {
+        signs.busy.push(`${node.role}\u0000${name ?? ""}`);
+      } else if (
+        (DESCRIPTIVE_ROLE.test(node.role) && !node.actions.includes("set_value")) ||
+        node.states.includes("disabled")
+      ) {
+        for (const text of [name, value]) if (text && inProgressText(text)) signs.texts.push(text);
+      }
+    }
+    for (const child of node.children ?? []) visit(child, menu);
+  };
+  for (const node of nodes) visit(node, false);
+  for (const row of rows) {
+    const text = row.text.trim();
+    signs.shown.add(text);
+    if (
+      !row.inMenu &&
+      (DESCRIPTIVE_ROLE.test(row.role) || BUTTON_ROW.test(row.role)) &&
+      inProgressText(text)
+    )
+      signs.texts.push(text);
+  }
+  return signs;
+}
+
+function openedWindowsReport(text: string): string {
+  const match = /(?:^|\n)🪟 Action opened new window\(s\): (.*)\.$/mu.exec(text);
+  return match ? `${match[1]}; ` : "";
+}
+
+/** Whether CUA's report names a window: by its quoted title, or, untitled,
+ * by its app. */
+function reportNames(report: string, target: Target): boolean {
+  if (target.title) return report.includes(`"${target.title}"`);
+  return report.split("; ").includes(target.appName);
+}
+
+/** How long an action whose window can no longer be read waits for the
+ * window it opened. */
+
+/** A launched app's processes and the windows launch_app reported, which
+ * have list_windows' shape. */
+type LaunchedApp = {
+  pid: number | null;
+  /** The process a Linux launch started the app through. */
+  launcherPid: number | null;
+  windows: { pid: number; window_id: number }[];
+};
+
+/** A reverse-DNS bundle identifier such as com.apple.TextEdit; anything else is an app name. */
+const BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
+
+/** A listed window's owning app as a target's application ID, or null when
+ * CUA names none (or an implausibly long one). */
+function appIdentity(appName: string): string | null {
+  const name = appName.trim();
+  return name && name.length <= 1_024 ? name : null;
+}
+
+/** How CUA's launch_app names an app on each platform. */
+function launchArguments(
+  platform: "macos" | "windows" | "linux",
+  id: string,
+): Record<string, string> {
+  switch (platform) {
+    case "macos": {
+      // "TextEdit.app" names the app; a bundle identifier has more than one dot.
+      const name = id.replace(/^([^./]+)\.app$/iu, "$1");
+      return BUNDLE_ID.test(name) ? { bundle_id: name } : { name };
+    }
+    case "windows":
+      // A full path runs that executable; a packaged app's AUMID
+      // ({PackageFamilyName}!{AppId}) activates that app; a name is looked up
+      // among the installed apps, then on PATH.
+      if (/^(?:[A-Za-z]:[\\/]|\\\\)/u.test(id)) return { path: id };
+      if (id.includes("!")) return { aumid: id };
+      return { name: id };
+    case "linux":
+      // A name runs as a command, or matches an installed application.
+      return { name: id };
+  }
+}
+
+const KEY_MODIFIERS: Record<
+  "macos" | "windows" | "linux",
+  { aliases: Record<string, string>; allowed: string[] }
+> = {
+  macos: {
+    aliases: {
+      meta: "cmd",
+      command: "cmd",
+      super: "cmd",
+      win: "cmd",
+      control: "ctrl",
+      alt: "option",
+      opt: "option",
+    },
+    allowed: ["cmd", "ctrl", "option", "shift", "fn"],
+  },
+  windows: {
+    aliases: { meta: "win", super: "win", cmd: "win", control: "ctrl", option: "alt" },
+    allowed: ["win", "ctrl", "alt", "shift"],
+  },
+  linux: {
+    aliases: {
+      meta: "super",
+      cmd: "super",
+      command: "super",
+      win: "super",
+      control: "ctrl",
+      option: "alt",
+    },
+    allowed: ["super", "ctrl", "alt", "shift"],
+  },
+};
+
+async function readPermissions(
+  runtime: CuaDesktopRuntime,
+  platform: "macos" | "windows" | "linux",
+) {
+  const { data } = await callDesktop(
+    runtime,
+    "check_permissions",
+    platform !== "macos" ? {} : { prompt: false, probe_direct_capture: false },
+  );
+  return {
+    accessibility:
+      platform === "windows"
+        ? data.uia === true && data.post_message === true
+        : platform === "linux"
+          ? data.atspi === true
+          : data.accessibility === true,
+    // Windows has no Screen Recording grant. Interactive-seat admission is
+    // checked before opening the SDK; each target capture still must prove its
+    // native capture ID, exact window identity, PNG dimensions and bytes.
+    screen_recording:
+      platform === "linux"
+        ? data.x11 === true
+        : platform === "windows" || data.screen_recording === true,
+  };
+}
+
+/** What the input a set of steps sent did not do, read from the window
+ * afterwards: a date field that reads another value than the one typed into
+ * its parts, a text field that still reads what it did before set_value, a
+ * number field or slider that reads anything but the number it was given.
+ * The input ran either way, so these are not refusals. A date field reads
+ * what its parts read (see projectElements). A field the reading no longer
+ * shows is left to the caller's own look. */
+function inputFailures(
+  observation: ComputerBackendObservation,
+  steps: readonly Operation[],
+): string[] {
+  const failures: string[] = [];
+  const read = (ref: string) => {
+    const node = observation.roots.find((candidate) => candidate.ref === ref);
+    return node && (node.value === undefined || typeof node.value === "string")
+      ? { found: true as const, value: node.value }
+      : { found: false as const };
+  };
+  for (const [index, step] of steps.entries()) {
+    if (step.expectToggle) {
+      const expected = step.expectToggle;
+      // A later step can press it again or change it with another control.
+      if (steps.slice(index + 1).some((later) => later.fillsField !== true)) continue;
+      const node = observation.roots.find((candidate) => candidate.ref === expected.ref);
+      const state = node ? checkedState(node) : undefined;
+      if (state !== undefined && state !== expected.wanted)
+        failures.push(
+          `the checkbox or switch ${expected.ref} still reads ${
+            state === "mixed" ? "mixed" : state ? "checked" : "not checked"
+          } after its press; observe it before pressing it again`,
+        );
+    }
+    if (step.expectDate) {
+      const expected = step.expectDate;
+      const reading = read(expected.ref);
+      if (!reading.found) continue;
+      const reads = reading.value ?? "";
+      const want = parseDateValue(expected.value);
+      const got = parseDateValue(reads);
+      const zeroed = (segment: DateSegment) => segment === "seconds" || segment === "milliseconds";
+      const same =
+        want !== null &&
+        got !== null &&
+        expected.segments.every(
+          (segment) =>
+            segment === "meridiem" ||
+            (want[segment] ?? (zeroed(segment) ? 0 : undefined)) ===
+              (got[segment] ?? (zeroed(segment) ? 0 : undefined)),
+        );
+      if (!same)
+        failures.push(
+          `the date field ${expected.ref} reads ${
+            reads ? `"${reads.slice(0, 64)}"` : "empty"
+          } instead of the value it was given; observe it and set its value again`,
+        );
+    }
+    if (step.expectText) {
+      const expected = step.expectText;
+      // A later step that may submit the form or clear the field (Enter in
+      // a message box, a click on Send) leaves its reading saying nothing
+      // about this write.
+      if (
+        steps
+          .slice(index + 1)
+          .some((later) => later.name !== "set_value" && later.fillsField !== true)
+      )
+        continue;
+      const reading = read(expected.ref);
+      if (!reading.found) continue;
+      const now = reading.value ?? "";
+      if (expected.numeric) {
+        // A number field or slider reads its number back as a number ("7.50"
+        // reads "7.5"). Anything else is not the value it was given: its old
+        // value, nothing (a number field that refused text), or where a
+        // slider's steps or range stopped it.
+        const number = (text: string) => (text.trim() === "" ? Number.NaN : Number(text));
+        // A slider that no longer reads a value says nothing about the write.
+        if (expected.numeric === "slider" && now.trim() === "") continue;
+        if (now !== expected.value && number(now) !== number(expected.value))
+          failures.push(
+            `the ${expected.numeric} ${expected.ref} reads ${
+              now.trim() ? `"${now.slice(0, 64)}"` : "empty"
+            } instead of the value it was given; ${
+              expected.numeric === "slider"
+                ? "give it a value within its range that its steps reach"
+                : "give it a plain number, such as 42 or 7.5"
+            }`,
+          );
+        continue;
+      }
+      // The value is not repeated: it may be a secret typed at dispatch.
+      if (now === expected.before && now !== expected.value)
+        failures.push(
+          `the text field ${expected.ref} still reads ${
+            now ? `"${now.slice(0, 64)}"` : "empty"
+          }: the app did not take the value; invoke the field and type the text instead`,
+        );
+    }
+  }
+  return failures;
+}
+
+function unsupported(message: string): ComputerBackendError {
+  return new ComputerBackendError("unsupported", message, false, false);
+}
+
+/** What a person must do before this login session's windows can be read or
+ * clicked again. */
+const CONSOLE_UNAVAILABLE: Record<Exclude<MacConsoleState, "available">, string> = {
+  locked:
+    "This Mac's screen is locked, so nothing on it can be read or clicked. Ask a person to unlock it, then try again.",
+  other_user:
+    "Another user's session is on this Mac's screen, so nothing in this user's session can be read or clicked. Ask a person to switch back to this user, then try again.",
+};
+
+/** Whether another user owns the console device: the user who last logged in
+ * at the console, or root at the login window. That is also the case while
+ * this session is on screen and a second user is logged in in the background,
+ * so it only says when the full check must decide (about 6 ms for the helper
+ * there). Microseconds, unlike the full check. */
+function consoleHeldByAnotherUser(): boolean {
+  try {
+    return statSync("/dev/console").uid !== process.getuid?.();
+  } catch {
+    return false;
+  }
+}
+
+/** Whether this CUA's run_steps can be told to stop at a stale element token
+ * rather than act on a lookalike it finds again by role and label. */
+async function runStepsStopsAtStaleTokens(runtime: CuaDesktopRuntime): Promise<boolean> {
+  if (!runtime.listToolsJson) return false;
+  const { tools } = JSON.parse(await runtime.listToolsJson()) as {
+    tools: { name: string; inputSchema?: { properties?: Record<string, unknown> } }[];
+  };
+  return tools.some(
+    (tool) => tool.name === "run_steps" && tool.inputSchema?.properties?.refind_stale !== undefined,
+  );
+}

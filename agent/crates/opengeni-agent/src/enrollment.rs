@@ -87,6 +87,12 @@ pub struct EnrollmentRequest {
 /// Errors raised during enrollment.
 #[derive(Debug, Error)]
 pub enum EnrollmentError {
+    /// The deployment cannot verify a proof from the machine's current clock.
+    #[error("machine clock differs from the deployment; correct it before credential renewal")]
+    ClockSkew,
+    /// The authoritative deployment explicitly rejected this credential grant.
+    #[error("enrollment requires an explicit reconnect")]
+    ReconnectRequired,
     /// The HTTP client could not be built or a request failed at the transport
     /// level (DNS, TLS, connection).
     #[error("enrollment transport error: {0}")]
@@ -260,6 +266,43 @@ fn bearer_expiry(bearer: &str) -> Option<u64> {
     value.get("exp")?.as_u64()
 }
 
+/// Local renewal detection only, never authentication: all claims except expiry
+/// must stay identical. Unknown/malformed envelopes take the full reconnect path.
+pub(crate) fn same_bearer_authority(previous: &str, next: &str) -> bool {
+    fn authority(bearer: &str) -> Option<serde_json::Value> {
+        let (payload, _) = bearer.strip_prefix("oge_")?.split_once('.')?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?;
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let claims = value.as_object_mut()?;
+        claims.get("credentialGeneration")?.as_u64()?;
+        claims.remove("exp")?.as_u64()?;
+        Some(value)
+    }
+    match (authority(previous), authority(next)) {
+        (Some(previous), Some(next)) => previous == next,
+        _ => false,
+    }
+}
+
+/// The deployment's correlation id for a failed request, so the failure can be
+/// matched to its server log entry. Only a plain token is accepted, so a server
+/// cannot place arbitrary text in the machine's log.
+fn correlation_id(response: &reqwest::Response) -> Option<String> {
+    let value = response
+        .headers()
+        .get("x-opengeni-correlation-id")?
+        .to_str()
+        .ok()?;
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+    .then(|| value.to_owned())
+}
+
 /// Refresh only this approved enrollment. The install key proves possession even
 /// when the machine was offline longer than the transport credential lifetime.
 pub(crate) async fn renew_connection(
@@ -273,7 +316,7 @@ pub(crate) async fn renew_connection(
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let response = client
+    let mut response = client
         .post(join_url(&connection.api_url, "/v1/enrollments/renew"))
         .json(&serde_json::json!({
             "bearer": bearer, "signedAt": now,
@@ -283,10 +326,43 @@ pub(crate) async fn renew_connection(
         .await?;
     // Do not include an untrusted response body (potential credential echo) in logs.
     if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let correlation = correlation_id(&response);
+        // Older servers' generic 401 also covers clock skew and configuration
+        // outages. Only the new closed code is a definitive terminal decision.
+        if status == 401 {
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if body.len() + chunk.len() > 4096 {
+                    body.clear();
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            match serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("code")
+                        .and_then(|code| code.as_str())
+                        .map(str::to_owned)
+                })
+                .as_deref()
+            {
+                Some("enrollment_reconnect_required") => {
+                    return Err(EnrollmentError::ReconnectRequired)
+                }
+                Some("enrollment_clock_skew") => return Err(EnrollmentError::ClockSkew),
+                _ => {}
+            }
+        }
         return Err(EnrollmentError::Status {
             path: "/v1/enrollments/renew".into(),
-            status: response.status().as_u16(),
-            body: "credential renewal unavailable".into(),
+            status,
+            body: match correlation {
+                Some(id) => format!("credential renewal unavailable (correlation id {id})"),
+                None => "credential renewal unavailable".into(),
+            },
         });
     }
     let wire = response.json::<wire::ExchangeResponse>().await?;
@@ -307,6 +383,7 @@ pub(crate) async fn renew_connection(
     credentials.last_known_epoch = connection.credentials.last_known_epoch;
     let mut renewed = connection.clone();
     renewed.credentials = credentials;
+    renewed.authentication_state = None;
     Ok(renewed)
 }
 
@@ -369,7 +446,8 @@ pub async fn enroll(
     };
     on_prompt(&pending);
 
-    poll_until_resolved(&client, req, &start).await
+    let credentials = poll_until_resolved(&client, req, &start).await?;
+    prove_new_enrollment(&req.api_base_url, identity, credentials).await
 }
 
 /// `POST /enrollments/device/start`. Isolated so the request/response field names
@@ -474,7 +552,59 @@ pub async fn exchange_token(
     };
     let resp = client.post(&url).json(&body).send().await?;
     let exchange = parse_json::<wire::ExchangeResponse>(resp, EXCHANGE_PATH).await?;
-    Ok(exchange.credentials.into_proto())
+    prove_new_enrollment(
+        &req.api_base_url,
+        identity,
+        exchange.credentials.into_proto(),
+    )
+    .await
+}
+
+/// Prove install-key possession immediately, before saving a new connection.
+/// Enrollment alone accepts a public key; this existing signed renewal protocol
+/// makes that key usable as verified abuse-detection evidence. Older APIs that
+/// have no renewal endpoint retain their existing enrollment behavior.
+async fn prove_new_enrollment(
+    api_url: &str,
+    identity: &InstallIdentity,
+    credentials: EnrollmentCredentials,
+) -> Result<EnrollmentCredentials, EnrollmentError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let bearer = &credentials.nats_credentials;
+    let proof = format!("opengeni:enrollment-renew:v1\n{now}\n{bearer}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let response = client
+        .post(join_url(api_url, "/v1/enrollments/renew"))
+        .json(&serde_json::json!({"bearer": bearer, "signedAt": now,
+            "signature": identity.sign_base64(proof.as_bytes())}))
+        .send()
+        .await?;
+    if matches!(response.status().as_u16(), 404 | 405) {
+        return Ok(credentials);
+    }
+    if !response.status().is_success() {
+        return Err(EnrollmentError::Status {
+            path: "/v1/enrollments/renew".into(),
+            status: response.status().as_u16(),
+            body: "initial machine proof unavailable".into(),
+        });
+    }
+    let renewed = response
+        .json::<wire::ExchangeResponse>()
+        .await?
+        .credentials
+        .into_proto();
+    if renewed.agent_id != credentials.agent_id || renewed.workspace_id != credentials.workspace_id
+    {
+        return Err(EnrollmentError::MissingCredentials);
+    }
+    Ok(renewed)
 }
 
 /// Joins a base URL and a path without doubling or dropping the separating slash.
@@ -706,6 +836,80 @@ mod wire {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn initial_enrollment_proves_key_and_keeps_older_servers_compatible() {
+        use ed25519_dalek::{Signature, Verifier as _};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        for status in [200, 401, 404] {
+            let identity = InstallIdentity::generate();
+            let key = identity.signing_key.verifying_key();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let body = loop {
+                    let mut buf = [0; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert_ne!(n, 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                        assert!(headers.starts_with("POST /v1/enrollments/renew HTTP/1.1"));
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            break serde_json::from_slice::<serde_json::Value>(
+                                &bytes[end + 4..end + 4 + length],
+                            )
+                            .unwrap();
+                        }
+                    }
+                };
+                let signed_at = body["signedAt"].as_u64().unwrap();
+                assert_eq!(body["bearer"], "original");
+                let signature = base64::engine::general_purpose::STANDARD_NO_PAD
+                    .decode(body["signature"].as_str().unwrap())
+                    .unwrap();
+                key.verify(
+                    format!("opengeni:enrollment-renew:v1\n{signed_at}\noriginal").as_bytes(),
+                    &Signature::from_slice(&signature).unwrap(),
+                )
+                .unwrap();
+                let response = serde_json::json!({"credentials": {
+                    "agentId":"a","workspaceId":"w","bearer":"renewed","natsUrls":[],
+                    "relayUrl":"","relayToken":"","updatePublicKey":"",
+                    "consentedWholeMachine":true,"consentedScreenControl":false
+                }})
+                .to_string();
+                socket.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+            });
+            let result = prove_new_enrollment(
+                &url,
+                &identity,
+                EnrollmentCredentials {
+                    agent_id: "a".into(),
+                    workspace_id: "w".into(),
+                    nats_credentials: "original".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            server.await.unwrap();
+            match status {
+                200 => assert_eq!(result.unwrap().nats_credentials, "renewed"),
+                404 => assert_eq!(result.unwrap().nats_credentials, "original"),
+                _ => assert!(result.is_err()),
+            }
+        }
+    }
+
     // A real HTTP exchange checks the native client's wire proof and persisted
     // continuation state independently of the server-side authorization tests.
     #[tokio::test]
@@ -730,6 +934,8 @@ mod tests {
             "expired",
             "denied",
             "redirect",
+            "unavailable",
+            "unavailable_bad_correlation",
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -808,6 +1014,16 @@ mod tests {
                 .unwrap();
                 let (status, extra, response) = match case {
                     "denied" => ("401 Unauthorized", "", "DO-NOT-LOG-CREDENTIAL".into()),
+                    "unavailable" => (
+                        "500 Internal Server Error",
+                        "X-OpenGeni-Correlation-Id: a697386b-36df-4bda-b1dd-da96b5146f89\r\n",
+                        "DO-NOT-LOG-CREDENTIAL".into(),
+                    ),
+                    "unavailable_bad_correlation" => (
+                        "500 Internal Server Error",
+                        "X-OpenGeni-Correlation-Id: forged text; DO-NOT-LOG\r\n",
+                        String::new(),
+                    ),
                     "redirect" => (
                         "307 Temporary Redirect",
                         "Location: http://127.0.0.1:1/must-not-follow\r\n",
@@ -839,6 +1055,14 @@ mod tests {
                 assert!(!error.contains("DO-NOT-LOG-CREDENTIAL"));
                 if case == "redirect" {
                     assert!(error.contains("307"));
+                }
+                if case == "unavailable" {
+                    assert!(error.contains("500"));
+                    assert!(error.contains("correlation id a697386b-36df-4bda-b1dd-da96b5146f89"));
+                }
+                if case == "unavailable_bad_correlation" {
+                    assert!(!error.contains("DO-NOT-LOG"));
+                    assert!(!error.contains("correlation id"));
                 }
             }
         }

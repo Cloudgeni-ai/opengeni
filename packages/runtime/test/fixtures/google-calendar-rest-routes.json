@@ -1,0 +1,162 @@
+{
+  "discoveryUrl": "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest",
+  "revision": "20261021",
+  "methods": [
+    {
+      "id": "calendar.calendarList.list",
+      "httpMethod": "GET",
+      "path": "calendar/v3/users/me/calendarList",
+      "queryParameters": [
+        "maxResults",
+        "minAccessRole",
+        "pageToken",
+        "showDeleted",
+        "showHidden",
+        "showOwnOrganizationOnly",
+        "syncToken"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.calendarlist",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "id": "calendar.calendarList.get",
+      "httpMethod": "GET",
+      "path": "calendar/v3/users/me/calendarList/{calendarId}",
+      "queryParameters": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.calendarlist",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "id": "calendar.events.list",
+      "httpMethod": "GET",
+      "path": "calendar/v3/calendars/{calendarId}/events",
+      "queryParameters": [
+        "alwaysIncludeEmail",
+        "eventTypes",
+        "iCalUID",
+        "maxAttendees",
+        "maxResults",
+        "orderBy",
+        "pageToken",
+        "privateExtendedProperty",
+        "q",
+        "sharedExtendedProperty",
+        "showDeleted",
+        "showHiddenInvitations",
+        "singleEvents",
+        "syncToken",
+        "timeMax",
+        "timeMin",
+        "timeZone",
+        "updatedMin"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+        "https://www.googleapis.com/auth/calendar.events.owned",
+        "https://www.googleapis.com/auth/calendar.events.owned.readonly",
+        "https://www.googleapis.com/auth/calendar.events.public.readonly",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "id": "calendar.events.get",
+      "httpMethod": "GET",
+      "path": "calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "queryParameters": [
+        "alwaysIncludeEmail",
+        "maxAttendees",
+        "timeZone"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+        "https://www.googleapis.com/auth/calendar.events.owned",
+        "https://www.googleapis.com/auth/calendar.events.owned.readonly",
+        "https://www.googleapis.com/auth/calendar.events.public.readonly",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "id": "calendar.events.insert",
+      "httpMethod": "POST",
+      "path": "calendar/v3/calendars/{calendarId}/events",
+      "queryParameters": [
+        "conferenceDataVersion",
+        "eventLabelVersion",
+        "maxAttendees",
+        "sendNotifications",
+        "sendUpdates",
+        "supportsAttachments"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.owned"
+      ]
+    },
+    {
+      "id": "calendar.events.patch",
+      "httpMethod": "PATCH",
+      "path": "calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "queryParameters": [
+        "alwaysIncludeEmail",
+        "conferenceDataVersion",
+        "eventLabelVersion",
+        "maxAttendees",
+        "sendNotifications",
+        "sendUpdates",
+        "supportsAttachments"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.owned"
+      ]
+    },
+    {
+      "id": "calendar.events.delete",
+      "httpMethod": "DELETE",
+      "path": "calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "queryParameters": [
+        "sendNotifications",
+        "sendUpdates"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.owned"
+      ]
+    },
+    {
+      "id": "calendar.freebusy.query",
+      "httpMethod": "POST",
+      "path": "calendar/v3/freeBusy",
+      "queryParameters": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+        "https://www.googleapis.com/auth/calendar.freebusy",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    }
+  ]
+}

@@ -70,10 +70,11 @@ impl std::fmt::Display for AttachError {
 }
 
 /// A per-side connection generation. Every attach to a `(key, role)` mints a fresh
-/// generation; a [`detach`](ChannelRegistry::detach) only clears the side when its
-/// generation MATCHES the live one — so the delayed teardown of an OLD connection
-/// (a reconnect's stale socket finally closing) can never clobber the NEW connection
-/// that already re-attached. This is the relay's reconnect-safety invariant.
+/// generation; forwarding, `Close` and [`detach`](ChannelRegistry::detach) only act
+/// when the caller's generation MATCHES the live one — so an OLD connection (a
+/// reconnect's stale socket still draining buffered input or finally closing) can
+/// never inject into, tear down or clobber the NEW connection that already
+/// re-attached. This is the relay's reconnect-safety invariant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnGen(u64);
 
@@ -111,6 +112,15 @@ pub struct Attached {
     /// This connection's generation — pass it back to [`detach`](ChannelRegistry::detach)
     /// so a stale teardown cannot clobber a newer reconnect.
     pub gen: ConnGen,
+}
+
+/// Whether `gen` is still the live connection for `role` on this channel.
+fn owns_connection(channel: &LiveChannel, role: Role, gen: ConnGen) -> bool {
+    let side = match role {
+        Role::Agent => channel.agent.as_ref(),
+        Role::Client => channel.client.as_ref(),
+    };
+    side.is_some_and(|side| side.gen == gen)
 }
 
 /// One side's live state within a channel.
@@ -305,6 +315,7 @@ impl ChannelRegistry {
         &self,
         key: &ChannelKey,
         from_role: Role,
+        gen: ConnGen,
         frame: StreamFrame,
         now: Instant,
     ) -> bool {
@@ -312,6 +323,10 @@ impl ChannelRegistry {
         let Some(chan) = channels.get_mut(key) else {
             return false;
         };
+        // A replaced connection must not produce into its successor's channel.
+        if !owns_connection(chan, from_role, gen) {
+            return false;
+        }
         chan.last_touch = now;
         let bytes = frame.data.len() as u64;
 
@@ -377,12 +392,22 @@ impl ChannelRegistry {
     }
 
     /// Forward a non-frame message (a typed `DesktopInput`, or a `StreamClose`) from
-    /// `from_role` to the peer verbatim. Returns whether a peer received it.
-    pub fn forward_message(&self, key: &ChannelKey, from_role: Role, msg: RelayMessage) -> bool {
+    /// the live `from_role` connection `gen` to the peer verbatim. Returns whether a
+    /// peer received it.
+    pub fn forward_message(
+        &self,
+        key: &ChannelKey,
+        from_role: Role,
+        gen: ConnGen,
+        msg: RelayMessage,
+    ) -> bool {
         let channels = self.channels();
         let Some(chan) = channels.get(key) else {
             return false;
         };
+        if !owns_connection(chan, from_role, gen) {
+            return false;
+        }
         let peer = match from_role {
             Role::Agent => chan.client.as_ref(),
             Role::Client => chan.agent.as_ref(),
@@ -431,14 +456,27 @@ impl ChannelRegistry {
     }
 
     /// Tear a channel down entirely (a `StreamClose`/`FENCED`): notify any live peer
-    /// then remove it.
-    pub fn close(&self, key: &ChannelKey, from_role: Role, close: RelayMessage) {
-        // Notify the peer first (best-effort), then drop the channel.
-        self.forward_message(key, from_role, close);
+    /// then remove it. Only the live `from_role` connection `gen` may do this.
+    pub fn close(&self, key: &ChannelKey, from_role: Role, gen: ConnGen, close: RelayMessage) {
+        // Fence, notify and remove under one lock: a stale socket's buffered Close
+        // must never tear down a connection that re-attached concurrently.
         let mut channels = self.channels();
-        if channels.remove(key).is_some() {
-            self.metrics.channel_closed();
+        let Some(chan) = channels.get(key) else {
+            return;
+        };
+        if !owns_connection(chan, from_role, gen) {
+            return;
         }
+        let peer = match from_role {
+            Role::Agent => chan.client.as_ref(),
+            Role::Client => chan.agent.as_ref(),
+        };
+        if let Some(side) = peer {
+            // Best-effort notify, exactly as before.
+            let _ = side.sink.try_send(close);
+        }
+        channels.remove(key);
+        self.metrics.channel_closed();
     }
 
     /// Whether a channel currently has both ends connected (paired + splicing).
@@ -517,6 +555,80 @@ mod tests {
         ChannelRegistry::new(&RelayConfig::for_test("s"), RelayMetrics::new())
     }
 
+    /// The live generation of an attached side (tests forward as that connection).
+    fn live_gen(reg: &ChannelRegistry, key: &ChannelKey, role: Role) -> ConnGen {
+        let channels = reg.channels();
+        let channel = channels.get(key).expect("channel is live");
+        match role {
+            Role::Agent => channel.agent.as_ref().expect("agent attached").gen,
+            Role::Client => channel.client.as_ref().expect("client attached").gen,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replaced_connection_cannot_forward_or_close_on_its_successor() {
+        for role in [Role::Agent, Role::Client] {
+            let reg = registry();
+            let now = Instant::now();
+            let peer_role = match role {
+                Role::Agent => Role::Client,
+                Role::Client => Role::Agent,
+            };
+            let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(16);
+            reg.attach(&key(), peer_role, ViewerEpochs::default(), 0, peer_tx, now)
+                .unwrap();
+            let (old_tx, _old_rx) = tokio::sync::mpsc::channel(16);
+            let old = reg
+                .attach(&key(), role, ViewerEpochs::default(), 0, old_tx, now)
+                .unwrap();
+            // A reconnect replaces the old connection on the same key.
+            let (new_tx, _new_rx) = tokio::sync::mpsc::channel(16);
+            let new = reg
+                .attach(&key(), role, ViewerEpochs::default(), 0, new_tx, now)
+                .unwrap();
+            assert_ne!(old.gen, new.gen);
+
+            let input = RelayMessage::DesktopInput(v1::DesktopInput {
+                channel_id: "ch".to_string(),
+                ..Default::default()
+            });
+            let close = RelayMessage::Close(v1::StreamClose {
+                channel_id: "ch".to_string(),
+                ..Default::default()
+            });
+            // The stale socket's buffered input and Close are all dropped.
+            assert!(!reg.forward(&key(), role, old.gen, frame(0, "stale"), now));
+            assert!(!reg.forward_message(&key(), role, old.gen, input.clone()));
+            reg.close(&key(), role, old.gen, close.clone());
+            assert!(
+                reg.is_paired(&key()),
+                "a stale Close must not tear the channel down"
+            );
+            assert!(matches!(
+                peer_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+
+            // The live connection keeps every capability.
+            assert!(reg.forward(&key(), role, new.gen, frame(0, "live"), now));
+            match peer_rx.recv().await.unwrap() {
+                RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"live"),
+                other => panic!("expected the live frame, got {other:?}"),
+            }
+            assert!(reg.forward_message(&key(), role, new.gen, input));
+            assert!(matches!(
+                peer_rx.recv().await.unwrap(),
+                RelayMessage::DesktopInput(_)
+            ));
+            reg.close(&key(), role, new.gen, close);
+            assert!(matches!(
+                peer_rx.recv().await.unwrap(),
+                RelayMessage::Close(_)
+            ));
+            assert!(!reg.is_paired(&key()));
+        }
+    }
+
     #[tokio::test]
     async fn pairs_and_splices_both_directions() {
         let reg = registry();
@@ -545,13 +657,25 @@ mod tests {
         assert!(reg.is_paired(&key()));
 
         // agent → client.
-        assert!(reg.forward(&key(), Role::Agent, frame(0, "tty"), now));
+        assert!(reg.forward(
+            &key(),
+            Role::Agent,
+            live_gen(&reg, &key(), Role::Agent),
+            frame(0, "tty"),
+            now
+        ));
         match client_rx.recv().await.unwrap() {
             RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"tty"),
             other => panic!("expected a frame, got {other:?}"),
         }
         // client → agent (input).
-        assert!(reg.forward(&key(), Role::Client, frame(0, "key"), now));
+        assert!(reg.forward(
+            &key(),
+            Role::Client,
+            live_gen(&reg, &key(), Role::Client),
+            frame(0, "key"),
+            now
+        ));
         match agent_rx.recv().await.unwrap() {
             RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"key"),
             other => panic!("expected a frame, got {other:?}"),
@@ -647,7 +771,13 @@ mod tests {
         .unwrap();
 
         // A frame on channel A reaches A's viewer only.
-        reg.forward(&key_a, Role::Agent, frame(0, "secretA"), now);
+        reg.forward(
+            &key_a,
+            Role::Agent,
+            live_gen(&reg, &key_a, Role::Agent),
+            frame(0, "secretA"),
+            now,
+        );
         match client_a_rx.recv().await.unwrap() {
             RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"secretA"),
             other => panic!("expected a frame, got {other:?}"),
@@ -707,8 +837,20 @@ mod tests {
         )
         .unwrap();
 
-        assert!(reg.forward(&key_a, Role::Agent, frame(0, "shell-a"), now));
-        assert!(reg.forward(&key_b, Role::Agent, frame(0, "shell-b"), now));
+        assert!(reg.forward(
+            &key_a,
+            Role::Agent,
+            live_gen(&reg, &key_a, Role::Agent),
+            frame(0, "shell-a"),
+            now
+        ));
+        assert!(reg.forward(
+            &key_b,
+            Role::Agent,
+            live_gen(&reg, &key_b, Role::Agent),
+            frame(0, "shell-b"),
+            now
+        ));
         match client_a_rx.recv().await.unwrap() {
             RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"shell-a"),
             other => panic!("expected shell-a frame, got {other:?}"),
@@ -730,7 +872,13 @@ mod tests {
         // The agent produces 3 frames while the client is absent — buffered in the
         // to_client ring.
         for s in 0..3 {
-            reg.forward(&key(), Role::Agent, frame(s, &format!("f{s}")), now);
+            reg.forward(
+                &key(),
+                Role::Agent,
+                live_gen(&reg, &key(), Role::Agent),
+                frame(s, &format!("f{s}")),
+                now,
+            );
         }
 
         // The client attaches (reconnect) resuming from seq 1 — it replays f1, f2.
@@ -768,9 +916,21 @@ mod tests {
         )
         .unwrap();
 
-        assert!(reg.forward(&key(), Role::Agent, frame(0, "a"), now));
+        assert!(reg.forward(
+            &key(),
+            Role::Agent,
+            live_gen(&reg, &key(), Role::Agent),
+            frame(0, "a"),
+            now
+        ));
         // The queue (cap 1) is full; the next forward sheds.
-        let forwarded = reg.forward(&key(), Role::Agent, frame(1, "b"), now);
+        let forwarded = reg.forward(
+            &key(),
+            Role::Agent,
+            live_gen(&reg, &key(), Role::Agent),
+            frame(1, "b"),
+            now,
+        );
         assert!(!forwarded, "a full peer queue sheds the frame");
     }
 
@@ -792,13 +952,25 @@ mod tests {
                 now,
             )
             .unwrap();
-        reg.forward(&key(), Role::Agent, frame(0, "x"), now);
+        reg.forward(
+            &key(),
+            Role::Agent,
+            live_gen(&reg, &key(), Role::Agent),
+            frame(0, "x"),
+            now,
+        );
 
         // The client drops — the channel survives (agent still present).
         reg.detach(&key(), Role::Client, client.gen);
         assert!(!reg.is_paired(&key()));
         // The agent keeps producing into the ring.
-        reg.forward(&key(), Role::Agent, frame(1, "y"), now);
+        reg.forward(
+            &key(),
+            Role::Agent,
+            live_gen(&reg, &key(), Role::Agent),
+            frame(1, "y"),
+            now,
+        );
 
         // The client reconnects resuming from 1 → replays y (seq 1).
         let (c2_tx, _c2_rx) = tokio::sync::mpsc::channel(16);
@@ -852,7 +1024,13 @@ mod tests {
             now,
         )
         .unwrap();
-        assert!(reg.forward(&key(), Role::Client, frame(0, "input"), now));
+        assert!(reg.forward(
+            &key(),
+            Role::Client,
+            live_gen(&reg, &key(), Role::Client),
+            frame(0, "input"),
+            now
+        ));
         match a2_rx.recv().await.unwrap() {
             RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"input"),
             other => panic!("expected the input frame on the new agent, got {other:?}"),
@@ -882,7 +1060,12 @@ mod tests {
             reason: v1::StreamCloseReason::Fenced as i32,
             message: "swapped away".to_string(),
         });
-        reg.close(&key(), Role::Agent, close);
+        reg.close(
+            &key(),
+            Role::Agent,
+            live_gen(&reg, &key(), Role::Agent),
+            close,
+        );
         // The viewer is notified.
         match c_rx.recv().await.unwrap() {
             RelayMessage::Close(c) => assert_eq!(c.reason, v1::StreamCloseReason::Fenced as i32),

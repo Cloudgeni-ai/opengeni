@@ -1,3 +1,16 @@
+export type {
+  ModelDecisionRequest,
+  ModelDecisionResponse,
+  DecisionQuestion,
+  DecisionResult,
+  DecisionUsage,
+  DecisionAnswer,
+  DecisionAnswerFor,
+  DecisionRefusal,
+  DecisionPredicateQuestion,
+  DecisionChoiceQuestion,
+  DecisionScoreQuestion,
+} from "@opengeni/contracts";
 /** Backward-compatible non-artifact client surface. */
 export { OpenGeniDocumentAuthorityClient as OpenGeniCoreClient } from "./document-authority-client";
 export {
@@ -31,10 +44,15 @@ export {
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
+  formatErrorMessage,
+  isMaintenanceError,
+  isApprovalRequiresAccountOwnerError,
+  APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE,
   isRetryableStreamError,
+  OPENGENI_MAINTENANCE_ERROR_CODE,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
-export { parseDeprecationNotice } from "./deprecation";
-export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
+export { isTransientRequestError } from "./read-retry";
+export type { OpenGeniReadRetryOptions } from "./read-retry";
 export { resolveWorkspaceVoiceInputEnabled } from "./transcription";
 export { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";

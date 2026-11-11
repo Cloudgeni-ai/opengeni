@@ -1,11 +1,21 @@
 import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { isDeepStrictEqual } from "node:util";
+import { withSandboxOperationPurpose } from "./sandbox/operation-purpose";
 
 /** Record already-materialized directory placeholders after lazy setup. This is
  * not manifest application: never change environment, permissions, grants,
  * mounts, files, or existing entries. Non-placeholder deltas remain visible to
  * the SDK's normal validation/invalidation path. */
 export async function recordLazyMaterializedDirectories(
+  session: SandboxSessionLike,
+  target: Manifest,
+): Promise<void> {
+  await withSandboxOperationPurpose("lazy_manifest", () =>
+    recordLazyMaterializedDirectoriesUnscoped(session, target),
+  );
+}
+
+async function recordLazyMaterializedDirectoriesUnscoped(
   session: SandboxSessionLike,
   target: Manifest,
 ): Promise<void> {

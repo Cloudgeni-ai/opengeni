@@ -4,6 +4,7 @@ import {
   createCodexRealtimeController,
   projectSessionRealtimeLifecycle,
 } from "../src/codex-realtime-controller";
+import { createAzureLiveTransportStarter } from "../src/azure-live-transport";
 import { CODEX_REALTIME_V3_PENDING_MAX_BYTES } from "../src/codex-realtime-v3";
 import type { SessionRealtimeLifecycleProjection } from "../src/codex-realtime-lifecycle";
 import { OpenGeniApiError } from "../src/errors";
@@ -334,6 +335,213 @@ function dispatchProviderMessage(events: RTCDataChannel, payload: string): void 
 }
 
 describe("Codex realtime browser controller", () => {
+  test("incoming provider preconnection uses gated audio but holds context and remote output until acceptance", async () => {
+    const browser = browserFixture();
+    const calls: string[] = [];
+    Object.defineProperty(browser.peer, "addTransceiver", {
+      value: () => ({
+        sender: {
+          replaceTrack: async (track: MediaStreamTrack) => {
+            expect(track).toBe(browser.track as unknown as MediaStreamTrack);
+            calls.push("attach");
+          },
+        },
+      }),
+    });
+    let current = mode({
+      state: "preparing",
+      leaseExpiresAt: new Date(Date.now() + 40_000).toISOString(),
+    });
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      createPeerConnection: () => browser.peer,
+      getUserMedia: async () => {
+        calls.push("microphone");
+        return browser.media;
+      },
+      ...noIntervals(),
+      client: {
+        beginSessionRealtime: async (_w, _s, request) => {
+          calls.push(request.incomingCall?.answered ? "accept" : "prepare");
+          current = {
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+            ...(request.incomingCall?.answered ? { state: "active", version: 2 } : {}),
+          };
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          calls.push("provider");
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: CONNECTION_ID,
+            connectionEpoch: 1,
+            startupFenceSequence: 0,
+            modeVersion: 1,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async () => {
+          calls.push("activate");
+          return { mode: current, replay: false };
+        },
+        syncSessionRealtimeLedger: async () => {
+          calls.push("sync");
+          return { accepted: [], outbound: [], lastSequence: 0 };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        endSessionRealtime: async () => ({ mode: { ...current, state: "ended" }, replay: false }),
+      },
+    });
+    const preparing = controller.prepareIncoming!({
+      callId: "11111111-1111-4111-8111-111111111111",
+      device: "phone",
+    });
+    await eventually(
+      () => browser.calls.includes("setRemoteDescription:answer"),
+      "provider did not connect during ring",
+    );
+    expect(calls).toEqual(["prepare", "microphone", "attach", "provider"]);
+    expect(browser.sent).toEqual([]);
+    expect(controller.snapshot().mode?.state).toBe("preparing");
+    browser.dispatchRemoteTrack();
+    dispatchProviderMessage(
+      browser.events,
+      JSON.stringify({ type: "session.started", session: { id: "held-provider" } }),
+    );
+    await Promise.resolve();
+    expect(calls).not.toContain("sync");
+    expect(browser.sent).toEqual([]);
+    expect(browser.remoteMedia.getTracks()[0]!.enabled).toBe(false);
+    expect(browser.remoteAudio.muted).toBe(true);
+    await controller.start();
+    await preparing;
+    expect(calls).toEqual(expect.arrayContaining(["accept", "microphone", "attach", "activate"]));
+    expect(calls.indexOf("attach")).toBeLessThan(calls.indexOf("accept"));
+    expect(calls.filter((call) => call === "microphone")).toHaveLength(1);
+    expect(controller.snapshot().status).toBe("active");
+    expect(browser.remoteMedia.getTracks()[0]!.enabled).toBe(true);
+    await controller.stop();
+    controller.close();
+  });
+  test.each(["begin", "provider", "accept"] as const)(
+    "retiring incoming preparation during %s fences late completion and ends its mode",
+    async (phase) => {
+      const browser = browserFixture();
+      const calls: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let current = mode({
+        state: "preparing",
+        leaseExpiresAt: new Date(Date.now() + 40_000).toISOString(),
+      });
+      const controller = createCodexRealtimeController({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        storage: storageFixture(),
+        remoteAudio: browser.remoteAudio,
+        createPeerConnection: () => browser.peer,
+        getUserMedia: async () => browser.media,
+        ...noIntervals(),
+        client: {
+          beginSessionRealtime: async (_w, _s, request) => {
+            const step = request.incomingCall?.answered ? "accept" : "begin";
+            calls.push(step);
+            if (phase === step) await gate;
+            current = {
+              ...current,
+              operationId: request.operationId,
+              browserInstanceId: request.browserInstanceId,
+              ...(request.incomingCall?.answered ? { state: "active", version: 2 } : {}),
+            };
+            return { mode: current, replay: false };
+          },
+          negotiateCodexRealtimeWebrtc: async () => {
+            calls.push("provider");
+            if (phase === "provider") await gate;
+            return {
+              sdp: ANSWER,
+              version: "v3",
+              model: "gpt-live-1-boulder-alpha",
+              connectionId: CONNECTION_ID,
+              connectionEpoch: 1,
+              startupFenceSequence: 0,
+              modeVersion: 1,
+              replay: false,
+            };
+          },
+          activateCodexRealtimeConnection: async () => {
+            calls.push("activate");
+            return { mode: current, replay: false };
+          },
+          syncSessionRealtimeLedger: async () => {
+            calls.push("sync");
+            return { accepted: [], outbound: [] };
+          },
+          heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+          endSessionRealtime: async (_w, _s, _id, request) => {
+            calls.push(`end:${request.expectedVersion}`);
+            return { mode: { ...current, state: "ended" }, replay: false };
+          },
+        },
+      });
+      const preparing = controller.prepareIncoming!({
+        callId: "11111111-1111-4111-8111-111111111111",
+        device: "phone",
+      }).catch(() => undefined);
+      let answering: Promise<void> | undefined;
+      if (phase === "accept") {
+        await eventually(
+          () => browser.calls.includes("setRemoteDescription:answer"),
+          "provider did not connect",
+        );
+        answering = controller.start().catch(() => undefined);
+      }
+      await eventually(() => calls.includes(phase), `did not reach ${phase}`);
+      controller.close();
+      release();
+      await preparing;
+      await answering;
+      expect(calls.some((call) => call.startsWith("end:"))).toBe(true);
+      if (phase === "accept") expect(calls).toContain("end:2");
+      expect(calls).not.toContain("activate");
+      expect(calls).not.toContain("sync");
+      expect(browser.sent).toEqual([]);
+      expect(browser.calls).toContain("peer.close");
+      if (phase !== "begin") expect(browser.calls).toContain("track.stop");
+    },
+  );
+  test("ring preparation owns only one local peer and survives an empty lifecycle until disposal", async () => {
+    const browser = rotatingBrowserFixture();
+    const controller = createCodexRealtimeController({
+      client: {} as Parameters<typeof createCodexRealtimeController>[0]["client"],
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      ...noIntervals(),
+    });
+    await Promise.all([controller.prepare?.(), controller.prepare?.()]);
+    expect(browser.peers).toHaveLength(1);
+    expect(browser.media).toHaveLength(0);
+    expect(controller.snapshot().status).toBe("idle");
+    await controller.observeLifecycle(null);
+    expect(browser.calls).not.toContain("peer.0.close");
+    controller.close();
+    expect(browser.calls).toContain("peer.0.close");
+    expect(browser.calls).toContain("events.0.close");
+    expect(browser.media).toHaveLength(0);
+  });
+
   test("drives normal -> realtime -> normal with real WebRTC/V3 bridge semantics", async () => {
     const browser = browserFixture();
     const storage = storageFixture();
@@ -936,7 +1144,7 @@ describe("Codex realtime browser controller", () => {
     }
   });
 
-  test("rotates at OpenGeni's proactive-rotation interval, reuses media, and retires the old generation only after activation", async () => {
+  test("rotates at Opengeni's proactive-rotation interval, reuses media, and retires the old generation only after activation", async () => {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();
     const storage = storageFixture();
@@ -1383,6 +1591,146 @@ describe("Codex realtime browser controller", () => {
     await recovered.stop();
   });
 
+  test("a reload keeps what was said since the last delegation for the next one", async () => {
+    const browser = rotatingBrowserFixture();
+    const storage = storageFixture();
+    const syncRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    let current = mode();
+    let context = "first route context";
+    let contextReads = 0;
+    let uuid = 300;
+    const delegation = (providerEventId: string) =>
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: providerEventId,
+        item: {
+          id: "reload-unsynced-delegation",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate across reload" }],
+        },
+      });
+    const providerStarted = (providerEventId: string) =>
+      JSON.stringify({
+        type: "session.started",
+        event_id: providerEventId,
+        session: { id: `provider-${providerEventId}` },
+      });
+    const client = {
+      beginSessionRealtime: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: { operationId: string; browserInstanceId: string },
+      ) => {
+        const replay = current.operationId === request.operationId;
+        if (!replay) {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+        }
+        return { mode: current, replay };
+      },
+      negotiateCodexRealtimeWebrtc: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: CodexRealtimeWebrtcRequest,
+      ) => {
+        const connectionEpoch = request.rotate
+          ? current.connectionEpoch + 1
+          : current.connectionEpoch;
+        return {
+          sdp: ANSWER,
+          version: "v3" as const,
+          model: "gpt-live-1-boulder-alpha" as const,
+          connectionId: `32000000-0000-4000-8000-${String(connectionEpoch).padStart(12, "0")}`,
+          connectionEpoch,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        };
+      },
+      activateCodexRealtimeConnection: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _realtimeId: string,
+        _connectionId: string,
+        request: { connectionEpoch: number },
+      ) => {
+        const rotated = request.connectionEpoch !== current.connectionEpoch;
+        current = mode({
+          ...current,
+          version: current.version + (rotated ? 1 : 0),
+          connectionEpoch: request.connectionEpoch,
+        });
+        return { mode: current, replay: false };
+      },
+      heartbeatSessionRealtime: async () => {
+        current = mode({ ...current, version: current.version + 1 });
+        return { mode: current, replay: false };
+      },
+      syncSessionRealtimeLedger: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _realtimeId: string,
+        request: SyncSessionRealtimeLedgerRequest,
+      ) => {
+        if (request.entries?.some((entry) => entry.kind === "delegation_call")) {
+          syncRequests.push(request);
+        }
+        return { accepted: [], outbound: [] };
+      },
+      endSessionRealtime: async () => ({
+        mode: mode({
+          ...current,
+          state: "ended",
+          version: current.version + 1,
+          endedAt: "2026-07-29T07:01:00.000Z",
+          endReason: "user_stop",
+        }),
+        replay: false,
+      }),
+    };
+    const createController = () =>
+      createCodexRealtimeController({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        storage,
+        remoteAudio: browser.remoteAudio,
+        randomUUID: () => `31000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+        createPeerConnection: browser.createPeerConnection,
+        getUserMedia: browser.getUserMedia,
+        getModelContext: () => {
+          contextReads += 1;
+          return context;
+        },
+        ...noIntervals(),
+        client,
+      });
+
+    const first = createController();
+    await first.start();
+    await first.ingestProviderEvent(providerStarted("startup-first"));
+    await first.ingestProviderEvent(
+      JSON.stringify({
+        type: "turn.done",
+        event_id: "said-before-reload",
+        turn: { id: "turn-before-reload", role: "user", transcript: "Do it yourself" },
+      }),
+    );
+    first.close();
+
+    const recovered = createController();
+    await recovered.observeLifecycle(null);
+    await recovered.ingestProviderEvent(providerStarted("startup-recovered"));
+    await recovered.ingestProviderEvent(delegation("delegation-after-reload"));
+
+    const call = syncRequests.at(-1)?.entries?.find((entry) => entry.kind === "delegation_call");
+    expect(call?.text).toContain("user: Do it yourself");
+    expect(contextReads).toBeGreaterThan(0);
+    await recovered.stop();
+  });
+
   test("coalesces duplicate peer failures and retries with capped backoff until one replacement succeeds", async () => {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();
@@ -1699,6 +2047,155 @@ describe("Codex realtime browser controller", () => {
     );
   });
 
+  function refusalController(options: {
+    heartbeatStop?: boolean;
+    negotiateRefusal?: boolean;
+    negotiateTerminal?: boolean;
+  }) {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    let current = mode();
+    const ends: string[] = [];
+    let uuid = 500;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `72000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          if (options.negotiateTerminal) {
+            throw new OpenGeniApiError(
+              409,
+              JSON.stringify({
+                error: {
+                  code: "GATEWAY_REALTIME_CREDENTIAL_UNAVAILABLE",
+                  message: "Opengeni voice is temporarily unavailable. Try another voice model.",
+                  retryable: false,
+                },
+              }),
+            );
+          }
+          if (options.negotiateRefusal) {
+            throw new OpenGeniApiError(
+              402,
+              JSON.stringify({
+                code: "insufficient_credits",
+                message: "Live voice needs credits. Add credits to continue.",
+              }),
+            );
+          }
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: "73000000-0000-4000-8000-000000000001",
+            connectionEpoch: request.expectedConnectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        heartbeatSessionRealtime: async () =>
+          options.heartbeatStop
+            ? {
+                mode: current,
+                replay: false,
+                stop: {
+                  code: "insufficient_credits",
+                  message: "Live voice needs credits. Add credits to continue.",
+                },
+              }
+            : { mode: current, replay: false },
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          ends.push(request.reason);
+          current = mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+    return { controller, browser, ends };
+  }
+
+  test("a heartbeat stop instruction ends the call gracefully with a credit refusal", async () => {
+    const { controller, browser, ends } = refusalController({ heartbeatStop: true });
+    await controller.start();
+    expect(controller.snapshot().status).toBe("active");
+    await controller.heartbeat();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      error: "Live voice needs credits. Add credits to continue.",
+      refusal: { code: "insufficient_credits" },
+      diagnostic: { kind: "terminal_stop", recoverable: false },
+    });
+    expect(browser.calls).toEqual(expect.arrayContaining(["peer.0.close", "track.0.stop"]));
+  });
+
+  test("a definitive failure before any connection ends the mode with the server's message", async () => {
+    const { controller, ends } = refusalController({ negotiateTerminal: true });
+    await expect(controller.start()).rejects.toThrow();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      refusal: null,
+      error: "Opengeni voice is temporarily unavailable. Try another voice model.",
+    });
+    // The server's later end projection must not wipe the explanation.
+    await controller.observeLifecycle(null);
+    expect(controller.snapshot().error).toBe(
+      "Opengeni voice is temporarily unavailable. Try another voice model.",
+    );
+    // Nor may the ended lifecycle event for the mode that failed to start.
+    await controller.observeLifecycle({
+      state: "ended",
+      realtimeId: "abababab-abab-4bab-8bab-abababababab",
+      operationId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+      version: 2,
+      connectionEpoch: 1,
+      reason: "user_stop",
+    });
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      error: "Opengeni voice is temporarily unavailable. Try another voice model.",
+    });
+  });
+
+  test("a credit refusal at negotiation ends the owned mode instead of retrying", async () => {
+    const { controller, ends } = refusalController({ negotiateRefusal: true });
+    await controller.start();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      refusal: { code: "insufficient_credits" },
+      error: "Live voice needs credits. Add credits to continue.",
+    });
+  });
+
   test("stop during replacement negotiation fences a late answer and leaves no reconnect timers", async () => {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();
@@ -1861,7 +2358,7 @@ describe("Codex realtime browser controller", () => {
     await controller.stop();
   });
 
-  test("turns a microphone prompt that never resolves into a user-retryable device failure", async () => {
+  test("ends a call whose microphone prompt never resolves and says how to retry", async () => {
     const timers = timerFixture();
     let current = mode();
     const controller = createCodexRealtimeController({
@@ -1908,15 +2405,230 @@ describe("Codex realtime browser controller", () => {
     await expect(starting).rejects.toThrow(
       "Microphone did not become available before voice startup timed out",
     );
+    // No conversation started: the empty call ends instead of waiting on a
+    // "reconnecting" spinner, and the user learns what to do.
     expect(controller.snapshot()).toMatchObject({
-      status: "recovering",
-      microphone: "acquisition_failed",
+      status: "error",
+      mode: null,
       reconnectAttempt: 0,
-      diagnostic: { kind: "device_failure", recoverable: true },
-      error: "Microphone did not become available before voice startup timed out",
+      diagnostic: { kind: "terminal_stop", recoverable: false },
+      error:
+        "Microphone access wasn't granted in time. Allow it when your browser asks, then try again.",
     });
     expect(timers.timeoutDelays()).not.toContain(10);
     await controller.stop();
+  });
+
+  test("an earlier call's end does not re-begin a call waiting on the microphone prompt", async () => {
+    let current = mode();
+    let begins = 0;
+    let micRequested = false;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      ...timerFixture(),
+      getUserMedia: async () => {
+        micRequested = true;
+        return await new Promise<MediaStream>(() => undefined);
+      },
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          begins += 1;
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+            version: current.version + (begins > 1 ? 1 : 0),
+          });
+          return { mode: current, replay: begins > 1 };
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("provider negotiation must not start without a microphone");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start without a microphone");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => {
+          current = mode({ ...current, state: "ended", version: current.version + 1 });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+
+    void controller.start().catch(() => undefined);
+    await eventually(() => micRequested, "microphone was not requested");
+    // The session's events still project the previous call's end.
+    await controller.observeLifecycle({
+      state: "ended",
+      realtimeId: "abababab-abab-4bab-8bab-abababababab",
+      operationId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+      version: 2,
+      connectionEpoch: 1,
+      reason: "user_stop",
+    });
+    expect(begins).toBe(1);
+    expect(controller.snapshot()).toMatchObject({ status: "starting", error: null });
+    await controller.stop();
+  });
+
+  test("an earlier call whose lease ran out does not fail a call that is starting", async () => {
+    let current = mode();
+    let micRequested = false;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      now: () => new Date("2026-07-29T07:05:00.000Z"),
+      randomUUID: uuidSource(),
+      ...timerFixture(),
+      getUserMedia: async () => {
+        micRequested = true;
+        return await new Promise<MediaStream>(() => undefined);
+      },
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("provider negotiation must not start without a microphone");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start without a microphone");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => {
+          current = mode({ ...current, state: "ended", version: current.version + 1 });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+
+    void controller.start().catch(() => undefined);
+    await eventually(() => micRequested, "microphone was not requested");
+    // The session's events still project an earlier call as active: it was
+    // abandoned, and its lease ran out before the server recorded its end.
+    await controller.observeLifecycle({
+      state: "active",
+      realtimeId: "abababab-abab-4bab-8bab-abababababab",
+      operationId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+      model: "gpt-live-1-boulder-alpha",
+      version: 1,
+      connectionEpoch: 1,
+      leaseExpiresAt: "2026-07-29T07:00:30.000Z",
+    });
+    expect(controller.snapshot()).toMatchObject({ status: "starting", error: null });
+    await controller.stop();
+  });
+
+  test("ends a call when microphone permission is denied before it connects", async () => {
+    let current = mode();
+    const ends: string[] = [];
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      ...timerFixture(),
+      getUserMedia: async () => {
+        throw new DOMException("Permission denied", "NotAllowedError");
+      },
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("provider negotiation must not start without a microphone");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start without a microphone");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          ends.push(request.reason);
+          current = mode({ ...current, state: "ended", version: current.version + 1 });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+
+    await expect(controller.start()).rejects.toThrow();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      error: "Microphone access is blocked. Allow it in site settings, then try again.",
+    });
+  });
+
+  test("acquires the microphone while begin is in flight and releases it when begin is refused", async () => {
+    const stopped: string[] = [];
+    let resolveBegin: (() => void) | null = null;
+    let getUserMediaCalls = 0;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      ...timerFixture(),
+      getUserMedia: async () => {
+        getUserMediaCalls += 1;
+        const track = {
+          kind: "audio",
+          enabled: true,
+          readyState: "live",
+          stop: () => stopped.push("track"),
+        } as unknown as MediaStreamTrack;
+        return {
+          getAudioTracks: () => [track],
+          getTracks: () => [track],
+        } as unknown as MediaStream;
+      },
+      client: {
+        beginSessionRealtime: async () => {
+          await new Promise<void>((resolve) => {
+            resolveBegin = resolve;
+          });
+          throw new Error("Voice is unavailable for this session");
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("negotiation must not start after a refused begin");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start after a refused begin");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: mode(), replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({ mode: mode({ state: "ended" }), replay: false }),
+      },
+    });
+
+    const starting = controller.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The permission prompt overlaps the begin request instead of following it.
+    expect(getUserMediaCalls).toBe(1);
+    expect(resolveBegin).not.toBeNull();
+    resolveBegin!();
+    await expect(starting).rejects.toThrow("Voice is unavailable for this session");
+    expect(stopped).toEqual(["track"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      microphone: "inactive",
+      error: "Voice is unavailable for this session",
+    });
   });
 
   test("aborts a data channel that misses the 20-second open deadline and fences late open", async () => {
@@ -2309,5 +3021,460 @@ describe("Codex realtime browser controller", () => {
     });
     expect(browser.calls).toEqual(expect.arrayContaining(["events.close", "peer.close"]));
     await controller.stop();
+  });
+});
+
+test("Azure rotation persists final speech before the replacement reads startup context", async () => {
+  const browser = rotatingBrowserFixture();
+  const timers = timerFixture();
+  let current = mode({ model: "opengeni-azure/gpt-live-1" });
+  const persisted: string[] = [];
+  const startupSnapshots: string[][] = [];
+  const emit = (index: number, value: unknown) =>
+    browser.peers[index]!.events.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(value) }),
+    );
+  const controller = createCodexRealtimeController({
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    model: "opengeni-azure/gpt-live-1",
+    storage: storageFixture(),
+    getUserMedia: browser.getUserMedia,
+    startTransport: createAzureLiveTransportStarter({
+      createPeerConnection: browser.createPeerConnection,
+      remoteAudio: browser.remoteAudio,
+    }),
+    connectionRotationIntervalMs: 900,
+    reconnectBackoffMs: [10],
+    ...timers,
+    client: {
+      beginSessionRealtime: async (_w, _s, request) => {
+        current = mode({
+          ...current,
+          operationId: request.operationId,
+          browserInstanceId: request.browserInstanceId,
+        });
+        return { mode: current, replay: false };
+      },
+      negotiateCodexRealtimeWebrtc: async (_w, _s, request) => {
+        startupSnapshots.push([...persisted]);
+        return {
+          sdp: ANSWER,
+          version: "v3",
+          model: "opengeni-azure/gpt-live-1",
+          connectionId: crypto.randomUUID(),
+          connectionEpoch: current.connectionEpoch + (request.rotate ? 1 : 0),
+          startupFenceSequence: persisted.length,
+          modeVersion: current.version,
+          replay: false,
+        };
+      },
+      activateCodexRealtimeConnection: async (_w, _s, _r, _c, request) => {
+        current = mode({
+          ...current,
+          version: current.version + 1,
+          connectionEpoch: request.connectionEpoch,
+        });
+        return { mode: current, replay: false };
+      },
+      heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+      syncSessionRealtimeLedger: async (_w, _s, _r, request) => {
+        for (const entry of request.entries ?? [])
+          if (
+            (entry.kind === "user_transcript" || entry.kind === "assistant_transcript") &&
+            entry.text
+          )
+            persisted.push(entry.text);
+        return { accepted: [], outbound: [] };
+      },
+      endSessionRealtime: async () => ({
+        mode: mode({ ...current, state: "ended" }),
+        replay: false,
+      }),
+    },
+  });
+  try {
+    await controller.start();
+    expect(startupSnapshots).toEqual([[]]);
+    timers.runTimeout(900);
+    timers.runTimeout(0);
+    await eventually(
+      () => browser.peers[0]!.sent.some((x) => JSON.parse(x).type === "session.close"),
+      "close not requested",
+    );
+    expect(startupSnapshots).toHaveLength(1);
+    emit(0, {
+      type: "session.input_transcript.delta",
+      delta: "Last user request",
+      start_ms: 1,
+      end_ms: 2,
+    });
+    emit(0, { type: "session.closed" });
+    await eventually(
+      () =>
+        controller.snapshot().status === "active" &&
+        controller.snapshot().connectionGeneration === 2,
+      "rotation not active",
+    );
+    expect(startupSnapshots[1]).toEqual(["Last user request"]);
+    const stop = controller.stop();
+    emit(1, {
+      type: "session.output_transcript.delta",
+      delta: "Final response",
+      start_ms: 3,
+      end_ms: 4,
+    });
+    emit(1, { type: "session.closed" });
+    await stop;
+    expect(persisted).toEqual(["Last user request", "Final response"]);
+    expect(controller.snapshot().status).toBe("idle");
+  } finally {
+    controller.close();
+  }
+});
+
+test("each provider connection carries the host's current conversation language and voice settings", async () => {
+  const browser = browserFixture();
+  const timers = timerFixture();
+  let language = "nb-NO";
+  const languages: Array<string | undefined> = [];
+  let voiceSettings: { voice?: string; turnEagerness?: "low" | "medium" | "high" } = {
+    voice: "library-voice-id",
+  };
+  const voices: unknown[] = [];
+  let current = mode({ model: "workspace-elevenlabs/eleven_realtime_v1_max" });
+  const controller = createCodexRealtimeController({
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    model: "workspace-elevenlabs/eleven_realtime_v1_max",
+    storage: storageFixture(),
+    getUserMedia: async () => browser.media,
+    getLanguage: () => language,
+    getVoiceSettings: () => voiceSettings,
+    startTransport: async (input) => {
+      languages.push(input.language);
+      voices.push(input.voiceSettings);
+      throw new Error("transport unavailable in this test");
+    },
+    reconnectBackoffMs: [10],
+    ...timers,
+    client: {
+      beginSessionRealtime: async (_w, _s, request) => {
+        current = mode({
+          ...current,
+          operationId: request.operationId,
+          browserInstanceId: request.browserInstanceId,
+        });
+        return { mode: current, replay: false };
+      },
+      negotiateCodexRealtimeWebrtc: async () => {
+        throw new Error("WebSocket models do not negotiate WebRTC");
+      },
+      activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+      heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+      syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+      endSessionRealtime: async () => ({
+        mode: mode({ ...current, state: "ended" }),
+        replay: false,
+      }),
+    },
+  });
+  try {
+    await controller.start().catch(() => undefined);
+    await eventually(() => languages.length === 1, "transport not started");
+    language = "sv";
+    voiceSettings = { turnEagerness: "low" };
+    timers.runTimeout(10);
+    await eventually(() => languages.length === 2, "transport not retried");
+    expect(languages).toEqual(["nb-NO", "sv"]);
+    expect(voices).toEqual([{ voice: "library-voice-id" }, { turnEagerness: "low" }]);
+  } finally {
+    controller.close();
+  }
+});
+
+describe("reply audio without a host audio element", () => {
+  // A host that supplies no element must still hear the replies whose
+  // transcript arrives: silence beside a transcript is the failure.
+  function fakeAudioElements() {
+    const elements: Array<{ srcObject: unknown; muted: boolean; plays: number }> = [];
+    let rejectNext = 0;
+    class FakeAudio {
+      autoplay = false;
+      muted = false;
+      srcObject: unknown = null;
+      plays = 0;
+      constructor() {
+        elements.push(this);
+      }
+      async play(): Promise<void> {
+        this.plays += 1;
+        if (rejectNext > 0) {
+          rejectNext -= 1;
+          throw new DOMException("play() needs a user gesture", "NotAllowedError");
+        }
+      }
+      pause(): void {}
+    }
+    return { FakeAudio, elements, rejectNextPlay: () => (rejectNext += 1) };
+  }
+
+  function replyController(model: SessionRealtimeMode["model"]) {
+    const browser = rotatingBrowserFixture();
+    let current = mode({ model });
+    let uuid = 900;
+    const synced: SyncSessionRealtimeLedgerRequest[] = [];
+    const options = {
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: () => `74000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      ...timerFixture(),
+      client: {
+        beginSessionRealtime: async (
+          _workspaceId: string,
+          _sessionId: string,
+          request: { operationId: string; browserInstanceId: string },
+        ) => {
+          current = mode({
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (
+          _workspaceId: string,
+          _sessionId: string,
+          request: CodexRealtimeWebrtcRequest,
+        ): Promise<CodexRealtimeWebrtcResponse> => ({
+          sdp: ANSWER,
+          version: "v3",
+          model: model as CodexRealtimeWebrtcResponse["model"],
+          connectionId: "75000000-0000-4000-8000-000000000001",
+          connectionEpoch: request.expectedConnectionEpoch,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        }),
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async (
+          _workspaceId: string,
+          _sessionId: string,
+          _realtimeId: string,
+          request: SyncSessionRealtimeLedgerRequest,
+        ) => {
+          synced.push(request);
+          return { accepted: [], outbound: [] };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({ ...current, state: "ended" }),
+          replay: false,
+        }),
+      },
+    };
+    return { browser, options, synced };
+  }
+
+  async function speakReply(
+    controller: ReturnType<typeof createCodexRealtimeController>,
+    browser: ReturnType<typeof rotatingBrowserFixture>,
+  ): Promise<void> {
+    // A browser fires the provider's reply track while it applies the answer.
+    browser.peers[0]!.dispatchRemoteTrack();
+    await controller.ingestProviderEvent(
+      JSON.stringify({ type: "session.started", session: { id: "provider-session" } }),
+    );
+    await controller.ingestProviderEvent(
+      JSON.stringify({
+        type: "turn.done",
+        event_id: "reply-final",
+        turn: { id: "reply", role: "assistant", transcript: "Loud and clear." },
+      }),
+    );
+  }
+
+  for (const model of ["gpt-live-1-boulder-alpha", "opengeni-azure/gpt-live-1"] as const) {
+    test(`${model}: a reply with a transcript is also played`, async () => {
+      const audio = fakeAudioElements();
+      const previousAudio = globalThis.Audio;
+      globalThis.Audio = audio.FakeAudio as unknown as typeof Audio;
+      const { browser, options, synced } = replyController(model);
+      const { createSessionRealtimeController } = await import("../src/realtime");
+      const controller = createSessionRealtimeController({ ...options, model });
+      try {
+        await controller.start();
+        expect(controller.snapshot().status).toBe("active");
+        await speakReply(controller, browser);
+        await eventually(() => controller.snapshot().audibleOutput === "audible", "no audio");
+
+        expect(synced.flatMap((request) => request.entries ?? [])).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ kind: "assistant_transcript", text: "Loud and clear." }),
+          ]),
+        );
+        expect(audio.elements).toHaveLength(1);
+        expect(audio.elements[0]).toMatchObject({ muted: false, plays: 1 });
+        expect(audio.elements[0]!.srcObject).not.toBeNull();
+      } finally {
+        controller.close();
+        globalThis.Audio = previousAudio;
+      }
+    });
+  }
+
+  test("a blocked reply says so and plays once the person asks", async () => {
+    const audio = fakeAudioElements();
+    const previousAudio = globalThis.Audio;
+    globalThis.Audio = audio.FakeAudio as unknown as typeof Audio;
+    audio.rejectNextPlay();
+    const { browser, options } = replyController("gpt-live-1-boulder-alpha");
+    const controller = createCodexRealtimeController(options);
+    try {
+      await controller.start();
+      await speakReply(controller, browser);
+      await eventually(() => controller.snapshot().audibleOutput === "blocked", "not blocked");
+      expect(controller.snapshot().diagnostic).toMatchObject({ kind: "autoplay_blocked" });
+
+      expect(await controller.retryAudibleOutput()).toBe(true);
+      expect(controller.snapshot().audibleOutput).toBe("audible");
+      expect(audio.elements[0]).toMatchObject({ plays: 2 });
+    } finally {
+      controller.close();
+      globalThis.Audio = previousAudio;
+    }
+  });
+
+  // A connected call can still be silent on one side: the phone's microphone
+  // hands WebRTC nothing but silence, or replies arrive and never play.
+  function audioFlowController() {
+    const { browser, options } = replyController("gpt-live-1-boulder-alpha");
+    let clock = Date.parse("2026-07-29T07:00:00.000Z");
+    const energy = { input: 0, output: 0 };
+    const intervals = new Map<number, { callback: () => void; delay: number }>();
+    let nextInterval = 1;
+    const controller = createCodexRealtimeController({
+      ...options,
+      now: () => new Date(clock),
+      setInterval: (callback: () => void, delay: number) => {
+        intervals.set(nextInterval, { callback, delay });
+        return nextInterval++;
+      },
+      clearInterval: (handle: unknown) => intervals.delete(Number(handle)),
+      createPeerConnection: () => {
+        const peer = browser.createPeerConnection();
+        Object.defineProperty(peer, "getStats", {
+          value: async () =>
+            new Map<string, unknown>([
+              ["source", { type: "media-source", kind: "audio", totalAudioEnergy: energy.input }],
+              ["inbound", { type: "inbound-rtp", kind: "audio", totalAudioEnergy: energy.output }],
+            ]),
+        });
+        return peer;
+      },
+    });
+    const settle = async () => {
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    };
+    return {
+      browser,
+      controller,
+      energy,
+      intervalDelays: () => [...intervals.values()].map((timer) => timer.delay),
+      async seconds(count: number, add: { input?: number; output?: number } = {}) {
+        for (let index = 0; index < count; index += 1) {
+          await settle();
+          clock += 1_000;
+          energy.input += add.input ?? 0;
+          energy.output += add.output ?? 0;
+          for (const timer of [...intervals.values()]) {
+            if (timer.delay === 1_000) timer.callback();
+          }
+          await settle();
+        }
+      },
+    };
+  }
+
+  test("a live call whose microphone hands over only silence says so, and clears once sound arrives", async () => {
+    const call = audioFlowController();
+    try {
+      await call.controller.start();
+      expect(call.controller.snapshot().status).toBe("active");
+      await call.seconds(9);
+      expect(call.controller.snapshot()).toMatchObject({
+        status: "active",
+        diagnostic: { kind: "no_input_audio", recoverable: true },
+        error: expect.stringContaining("microphone isn't picking up any sound"),
+      });
+
+      await call.seconds(1, { input: 1e-3 });
+      expect(call.controller.snapshot()).toMatchObject({
+        status: "active",
+        diagnostic: null,
+        error: null,
+      });
+    } finally {
+      call.controller.close();
+    }
+    // Closing the call stops reading its statistics.
+    expect(call.intervalDelays()).not.toContain(1_000);
+  });
+
+  test("a muted microphone is never reported as silent", async () => {
+    const call = audioFlowController();
+    try {
+      await call.controller.start();
+      call.controller.setInputMuted(true);
+      await call.seconds(20);
+      expect(call.controller.snapshot().diagnostic?.kind).not.toBe("no_input_audio");
+    } finally {
+      call.controller.close();
+    }
+  });
+
+  test("a reply that played no audio says so", async () => {
+    const audio = fakeAudioElements();
+    const previousAudio = globalThis.Audio;
+    globalThis.Audio = audio.FakeAudio as unknown as typeof Audio;
+    const call = audioFlowController();
+    try {
+      await call.controller.start();
+      await call.seconds(1, { input: 1e-3 });
+      await speakReply(call.controller, call.browser);
+      await call.seconds(4, { input: 1e-3 });
+      expect(call.controller.snapshot()).toMatchObject({
+        status: "active",
+        diagnostic: { kind: "output_silent", recoverable: true },
+        error: expect.stringContaining("couldn't be played"),
+      });
+
+      await call.seconds(1, { input: 1e-3, output: 1e-3 });
+      expect(call.controller.snapshot()).toMatchObject({ diagnostic: null, error: null });
+    } finally {
+      call.controller.close();
+      globalThis.Audio = previousAudio;
+    }
+  });
+
+  test("a reply that played is not flagged", async () => {
+    const audio = fakeAudioElements();
+    const previousAudio = globalThis.Audio;
+    globalThis.Audio = audio.FakeAudio as unknown as typeof Audio;
+    const call = audioFlowController();
+    try {
+      await call.controller.start();
+      await call.seconds(2, { input: 1e-3, output: 2e-3 });
+      await speakReply(call.controller, call.browser);
+      await call.seconds(5, { input: 1e-3 });
+      expect(call.controller.snapshot().diagnostic?.kind).not.toBe("output_silent");
+      expect(call.controller.snapshot().error).toBeNull();
+    } finally {
+      call.controller.close();
+      globalThis.Audio = previousAudio;
+    }
   });
 });

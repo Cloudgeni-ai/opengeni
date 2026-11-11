@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AccessContext } from "@/types";
+import type { AccessContext } from "@opengeni/react/app/types";
 import { organizationAdministrationAccountIds } from "./organization-workspace-administration";
 
 function accessContext(): AccessContext {

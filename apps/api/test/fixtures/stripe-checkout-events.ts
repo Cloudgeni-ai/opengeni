@@ -13,7 +13,7 @@ export type CheckoutSessionFixture = Record<string, unknown> & {
   metadata: Record<string, string>;
 };
 
-/** The metadata OpenGeni stamps on every credit Checkout Session it creates. */
+/** The metadata Opengeni stamps on every credit Checkout Session it creates. */
 export function openGeniCheckoutMetadata(input: {
   accountId: string;
   amountCents?: number;
@@ -31,7 +31,7 @@ export function openGeniCheckoutMetadata(input: {
 }
 
 /**
- * A Checkout Session OpenGeni created for a credit top-up. `delayed` models a
+ * A Checkout Session Opengeni created for a credit top-up. `delayed` models a
  * delayed-notification payment method (US bank account): Stripe completes the
  * session `unpaid` and reports the outcome later through the async events.
  */

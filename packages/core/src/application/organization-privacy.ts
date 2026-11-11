@@ -1,0 +1,216 @@
+import type { Settings } from "@opengeni/config";
+import type {
+  OrganizationPrivacySettings,
+  UpdateOrganizationPrivacySettingsRequest,
+} from "@opengeni/contracts";
+import {
+  getOrganizationPrivacyPreferences,
+  getPrivateSessionCreatePolicy,
+  personalWorkspaceClosedToNewWork,
+  SessionTenancyNotActivatedError,
+  updateOrganizationPrivacyPreferences,
+  type Database,
+  type OrganizationPrivacyPreferences,
+} from "@opengeni/db";
+
+/**
+ * Privacy: who can see chats, schedules and their runs. An organization's
+ * owners and admins choose whether Only me is allowed (the private session
+ * setting), the default audience for new chats and schedules, and whether
+ * admins see that other people's Only me schedules exist. A deployment, such
+ * as a product that embeds Opengeni, can only narrow those choices. See
+ * docs/design/privacy-audiences-2026-10-11.md.
+ */
+
+export type PrivacySettings = Pick<
+  Settings,
+  | "privacyOnlyMeAllowed"
+  | "privacyWorkspaceDefaultRequired"
+  | "privacyAdminScheduleSummariesRequired"
+> &
+  // Setting the Personal workspace limit takes the same switch as workspace budgets.
+  Partial<Pick<Settings, "usageAllowancesEnabled">>;
+
+export type PrivacyDeploymentLimits = OrganizationPrivacySettings["limits"];
+
+export function privacyDeploymentLimits(settings: PrivacySettings): PrivacyDeploymentLimits {
+  const onlyMeAllowed = settings.privacyOnlyMeAllowed !== false;
+  return {
+    onlyMeAllowed,
+    // Without Only me, Workspace is the only possible default.
+    defaultVisibilityLocked: !onlyMeAllowed || settings.privacyWorkspaceDefaultRequired === true,
+    adminsSeePrivateSchedulesLocked: settings.privacyAdminScheduleSummariesRequired === true,
+  };
+}
+
+export type EffectiveOrganizationPrivacy = {
+  defaultVisibility: "private" | "workspace";
+  adminsSeePrivateSchedules: boolean;
+};
+
+/** The organization's choices with the deployment's limits applied. */
+export function effectiveOrganizationPrivacy(
+  preferences: Pick<
+    OrganizationPrivacyPreferences,
+    "defaultVisibility" | "adminsSeePrivateSchedules"
+  >,
+  limits: PrivacyDeploymentLimits,
+): EffectiveOrganizationPrivacy {
+  return {
+    defaultVisibility:
+      !limits.defaultVisibilityLocked && preferences.defaultVisibility === "user_private"
+        ? "private"
+        : "workspace",
+    adminsSeePrivateSchedules:
+      limits.adminsSeePrivateSchedulesLocked || preferences.adminsSeePrivateSchedules,
+  };
+}
+
+export async function resolveOrganizationPrivacy(
+  deps: { db: Database; settings: PrivacySettings },
+  accountId: string,
+): Promise<EffectiveOrganizationPrivacy> {
+  return effectiveOrganizationPrivacy(
+    await getOrganizationPrivacyPreferences(deps.db, accountId),
+    privacyDeploymentLimits(deps.settings),
+  );
+}
+
+/**
+ * Refuse a new Only me chat or schedule in a shared workspace when this
+ * deployment turns Only me off. A Personal workspace is only ever its owner's,
+ * so it is unaffected. Existing Only me items keep their audience: narrowing
+ * is always allowed, widening never happens silently.
+ */
+export async function requireDeploymentAllowsOnlyMe(
+  deps: { db: Database; settings: PrivacySettings },
+  input: { workspaceId: string; actorSubjectId: string },
+): Promise<void> {
+  if (privacyDeploymentLimits(deps.settings).onlyMeAllowed) return;
+  const policy = await getPrivateSessionCreatePolicy(deps.db, input).catch(() => null);
+  if (!policy?.personalWorkspace) throw new SessionTenancyNotActivatedError();
+}
+
+/**
+ * Raised when someone starts a new chat or schedule in a Personal workspace
+ * after the organization turned Personal workspaces off.
+ */
+export class PersonalWorkspacesOffError extends Error {
+  readonly name = "PersonalWorkspacesOffError";
+  readonly code = "personal_workspaces_off";
+  constructor() {
+    super(
+      "Personal workspaces are turned off in this organization. Start new chats and schedules in a shared workspace.",
+    );
+  }
+}
+
+/**
+ * Refuse new work (a chat or a schedule) in a Personal workspace once the
+ * organization turned Personal workspaces off. Existing chats there stay
+ * readable and keep working; the person's machines, browsers and vaults that
+ * the workspace anchors keep working from shared workspaces.
+ */
+export async function requirePersonalWorkspaceOpenToNewWork(
+  deps: { db: Database },
+  input: { accountId: string; workspaceId: string },
+): Promise<void> {
+  if (await personalWorkspaceClosedToNewWork(deps.db, input)) {
+    throw new PersonalWorkspacesOffError();
+  }
+}
+
+/** Raised when a change would go past what this deployment allows. */
+export class OrganizationPrivacyLockedError extends Error {
+  readonly name = "OrganizationPrivacyLockedError";
+}
+
+function settingsResponse(
+  organizationId: string,
+  preferences: OrganizationPrivacyPreferences,
+  limits: PrivacyDeploymentLimits,
+): OrganizationPrivacySettings {
+  return {
+    organizationId,
+    membersConnectOwnMachines: preferences.membersConnectOwnMachines,
+    ...effectiveOrganizationPrivacy(preferences, limits),
+    personalWorkspaces: preferences.personalWorkspacesEnabled,
+    personalWorkspaceMonthlyCredits: preferences.personalWorkspaceMonthlyCredits,
+    limits,
+    updatedAt: preferences.updatedAt,
+  };
+}
+
+export async function getOrganizationPrivacySettings(
+  deps: { db: Database; settings: PrivacySettings },
+  organizationId: string,
+): Promise<OrganizationPrivacySettings> {
+  return settingsResponse(
+    organizationId,
+    await getOrganizationPrivacyPreferences(deps.db, organizationId),
+    privacyDeploymentLimits(deps.settings),
+  );
+}
+
+/**
+ * Change the organization's privacy choices. Only an owner or admin may, and
+ * never past the deployment's limits.
+ */
+export async function updateOrganizationPrivacySettings(
+  deps: { db: Database; settings: PrivacySettings },
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    request: UpdateOrganizationPrivacySettingsRequest;
+  },
+): Promise<OrganizationPrivacySettings> {
+  const limits = privacyDeploymentLimits(deps.settings);
+  if (input.request.defaultVisibility === "private" && limits.defaultVisibilityLocked) {
+    throw new OrganizationPrivacyLockedError(
+      limits.onlyMeAllowed
+        ? "New chats and schedules always start as Workspace here."
+        : "Only me is turned off here.",
+    );
+  }
+  if (input.request.adminsSeePrivateSchedules === false && limits.adminsSeePrivateSchedulesLocked) {
+    throw new OrganizationPrivacyLockedError(
+      "Admins always see that Only me schedules exist here.",
+    );
+  }
+  // Like a workspace budget, an operator can opt out of new limits with
+  // OPENGENI_USAGE_ALLOWANCES_ENABLED=false. Removing one is always allowed.
+  if (
+    input.request.personalWorkspaceMonthlyCredits !== undefined &&
+    input.request.personalWorkspaceMonthlyCredits !== null &&
+    deps.settings.usageAllowancesEnabled === false
+  ) {
+    throw new OrganizationPrivacyLockedError(
+      "Usage allowance changes are not enabled on this deployment (OPENGENI_USAGE_ALLOWANCES_ENABLED=false).",
+    );
+  }
+  const preferences = await updateOrganizationPrivacyPreferences(deps.db, {
+    organizationId: input.organizationId,
+    actorSubjectId: input.actorSubjectId,
+    ...(input.request.membersConnectOwnMachines !== undefined
+      ? { membersConnectOwnMachines: input.request.membersConnectOwnMachines }
+      : {}),
+    ...(input.request.defaultVisibility
+      ? {
+          defaultVisibility:
+            input.request.defaultVisibility === "private"
+              ? ("user_private" as const)
+              : ("workspace_shared" as const),
+        }
+      : {}),
+    ...(input.request.adminsSeePrivateSchedules !== undefined
+      ? { adminsSeePrivateSchedules: input.request.adminsSeePrivateSchedules }
+      : {}),
+    ...(input.request.personalWorkspaces !== undefined
+      ? { personalWorkspacesEnabled: input.request.personalWorkspaces }
+      : {}),
+    ...(input.request.personalWorkspaceMonthlyCredits !== undefined
+      ? { personalWorkspaceMonthlyCredits: input.request.personalWorkspaceMonthlyCredits }
+      : {}),
+  });
+  return settingsResponse(input.organizationId, preferences, limits);
+}

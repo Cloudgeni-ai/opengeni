@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /* ----------------------------------------------------------------------------
    Phase 5 sandbox workspace hook tests: capability negotiation drives gated
    rendering; 409 (consent) and 429 (viewer cap) surface as typed signals; the
@@ -836,7 +837,7 @@ describe("useSandboxFiles", () => {
     let activeProviderReads = 0;
     let maxActiveProviderReads = 0;
     const initialReadOrder: string[] = [];
-    const gitStatus: SessionClientLike["gitStatus"] = async () => ({
+    const gitStatus: SessionClientLike<ChatClient>["gitStatus"] = async () => ({
       isRepo: true,
       head: "main",
       detached: false,
@@ -1630,7 +1631,11 @@ describe("useSandboxGit", () => {
     const diffRoots: string[] = [];
     const includeUntracked: (boolean | undefined)[] = [];
     let batchCalls = 0;
-    const gitStatus: SessionClientLike["gitStatus"] = async (_workspaceId, _sessionId, request) => {
+    const gitStatus: SessionClientLike<ChatClient>["gitStatus"] = async (
+      _workspaceId,
+      _sessionId,
+      request,
+    ) => {
       const root = request?.path ?? "";
       statusRoots.push(root);
       return {
@@ -1644,7 +1649,11 @@ describe("useSandboxGit", () => {
         revision: 1,
       };
     };
-    const gitDiff: SessionClientLike["gitDiff"] = async (_workspaceId, _sessionId, request) => {
+    const gitDiff: SessionClientLike<ChatClient>["gitDiff"] = async (
+      _workspaceId,
+      _sessionId,
+      request,
+    ) => {
       const root = request?.path ?? "";
       diffRoots.push(root);
       includeUntracked.push(request?.includeUntracked);

@@ -62,13 +62,14 @@ test("public batch saturation exposes drops and never creates concurrent export 
         calls++;
         active++;
         peak = Math.max(peak, active);
-        expect((body as any).resourceSpans.length).toBeLessThanOrEqual(32);
+        expect((body as any).resourceSpans.length).toBeLessThanOrEqual(256);
         await blocked;
         active--;
       },
     },
   );
-  for (let i = 0; i < 10000; i++) obs.startSpan("bounded").end();
+  // Enough spans to overflow the bounded lane (256 batches of up to 256 spans) behind one blocked export.
+  for (let i = 0; i < 80000; i++) obs.startSpan("bounded").end();
   await obs.flush(5);
   expect(peak).toBe(1);
   expect(calls).toBe(1);
@@ -79,5 +80,5 @@ test("public batch saturation exposes drops and never creates concurrent export 
   release();
   await obs.flush();
   expect(peak).toBe(1);
-  expect(calls).toBeLessThanOrEqual(9);
+  expect(calls).toBeLessThanOrEqual(258);
 });

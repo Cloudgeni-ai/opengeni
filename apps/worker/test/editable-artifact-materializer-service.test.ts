@@ -82,6 +82,16 @@ describe("editable artifact materializer sidecar service", () => {
         "unsafe role posture",
       );
     }
+    await expect(
+      assertDedicatedMaterializerDatabaseRole(
+        postureDatabase({ current_role: "opengeni_app", session_role: "opengeni_app" }),
+      ),
+    ).rejects.toThrow("connected as role opengeni_app (session role opengeni_app)");
+    await expect(
+      assertDedicatedMaterializerDatabaseRole(
+        postureDatabase({ can_select_jobs: true, can_delete_jobs: true }),
+      ),
+    ).rejects.toThrow("direct SELECT, DELETE on editable_artifact_materialization_jobs");
   });
 
   test("disabled sidecar ignores ordinary DB configuration and never starts accidentally", () => {
@@ -218,6 +228,30 @@ describe("editable artifact materializer sidecar service", () => {
         OPENGENI_ARTIFACT_MATERIALIZER_HTTP_HOST: "0.0.0.0",
       }),
     ).toThrow("loopback HTTP listener");
+  });
+
+  test("development storage validates the effective server-side endpoint", () => {
+    const complete = developmentEnvironment();
+    expect(
+      readEditableArtifactMaterializerSidecarEnvironment({
+        ...complete,
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "https://objects.example.test",
+        OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: "http://127.0.0.1:13900",
+      }),
+    ).not.toBeNull();
+    expect(() =>
+      readEditableArtifactMaterializerSidecarEnvironment({
+        ...complete,
+        OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: "https://objects.example.test",
+      }),
+    ).toThrow("loopback object storage");
+    expect(() =>
+      readEditableArtifactMaterializerSidecarEnvironment({
+        ...complete,
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "https://objects.example.test",
+        OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: " ",
+      }),
+    ).toThrow("loopback object storage");
   });
 
   test("ordinary Temporal worker entry never imports or starts the sidecar", async () => {

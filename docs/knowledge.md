@@ -45,14 +45,24 @@ not parse or publish them into Knowledge. The agent first identifies useful
 lasting information, then explicitly retains supporting evidence or a reusable
 reference when warranted.
 Off leaves the file available to the chat while refusing new agent Knowledge.
-Document parsing and indexing are mechanical infrastructure. Configured Drive
-and Atlassian sources are ordinary scheduled agent tasks: their exact source and
-connection selection lives in `agentConfig.knowledgeSource` and is frozen in the
-accepted run. The attempt-only `knowledge_source_fetch` tool transfers and
-prepares source content with provider ACLs and durable checkpoints;
-`knowledge_source_read` lists content changed in that run and reads bounded
-passages. The agent selects findings and saves them with `knowledge_save`.
-No separate ingestion workflow decides what the company should remember.
+Document parsing and indexing are mechanical infrastructure.
+
+Integrations give agents tools and access; they do not import provider content
+into Knowledge. For recurring work, such as summarising a Drive folder or a Jira
+project every morning, create an ordinary agent schedule that uses the
+integration's tools; the agent saves lasting findings with `knowledge_save`
+under the usual learning policy. No separate ingestion workflow or integration
+scheduler decides what the company should remember.
+
+Integration Knowledge sync (Google Drive, OneDrive, Jira/Confluence) was
+removed. Migration 1275 deleted the leftover source sync tasks with their runs,
+sync state and wakes, and the stored `knowledge_source` facets. Requests that
+still carry `agentConfig.knowledgeSource`, or call the remaining source routes
+of the public SDK, answer 410 with the message in
+`packages/contracts/src/knowledge-source-sync-retirement.ts` until the next SDK
+major. Imported Documents, Knowledge entries and source provenance remain
+readable. See [Atlassian](atlassian.md) and
+[Google Drive](google-drive.md) for their MCP connections.
 
 A failed vector-index batch keeps its last completed projection and the durable
 queue retries it with backoff. The stored job reason stays the SQL lifecycle's
@@ -73,6 +83,20 @@ connection owner's accepted human revision authority.
 
 ## Selective retention and discovery
 
+Learning is part of ordinary work under the accepted destination policy. A user
+need not say "remember" or separately approve useful retention in Automatic mode,
+including Slack tasks. Direct user corrections, accepted decisions, product
+preferences, constraints and their reasoning can be learning signals; task-only
+tweaks and unaccepted assistant proposals are not settled reusable decisions.
+Explicit requests not to retain particular information remain authoritative.
+Standing behavioral preferences still follow Instructions/Skills routing and their
+own settings, tools and writable scope.
+
+Retrieve relevant published Knowledge before work that relies on prior decisions
+or requirements; unrelated turns do not require a search. Update one conclusion
+entry per experiment rather than saving every round. For incidents retain settled
+impact, cause, fix/workaround and outcome when known, rather than live status.
+
 A saved entry should help answer a plausible future question. Routine approvals,
 acknowledgments, temporary task instructions and status chatter stay in the
 conversation. Agents inspect screenshots visually and retain a supported
@@ -87,6 +111,14 @@ Exact get, evidence traversal, Files-related inspection, history and review keep
 their existing authority checks. Explicit `includeEvidence: true` searches or
 the browser's **Include supporting evidence** control expose supporting sources.
 Collection membership does not change source purpose or access.
+
+Entry listing and search accept optional `createdSince`, a timezone-qualified ISO
+datetime (for example `2026-10-01T00:00:00Z`). It includes entries whose original
+`createdAt` is at or after the cutoff; editing, revising or publishing an older
+entry does not make it newly created. Rolling migration **0640** applies this
+filter in the authorized database candidate set before keyword/vector ranking
+and pagination, for every view and scope. It grants no access. Omission preserves
+existing behavior, and changing the cutoff invalidates an existing search cursor.
 
 Historical agent-prepared file sources and non-migrated conversation sources are
 classified by typed preparation/provenance identity; migrated reference records
@@ -132,7 +164,7 @@ cannot become accepted answers. An unavailable prepare tool falls back to
 ordinary search in both views and collection browsing, without widening the
 task's selected tools or permissions.
 
-A create omits `entryId` and passes `expectedVersion: 0`. OpenGeni derives the
+A create omits `entryId` and passes `expectedVersion: 0`. Opengeni derives the
 id from `operationId` (`knowledgeEntryIdForOperation` in
 `packages/db/src/knowledge-entries.ts`), so an exact retry replays the same
 receipt. A correction passes an existing `entryId` and its current version. The
@@ -148,7 +180,22 @@ and other programmatic callers receive the exact bytes. Only a model tool call
 receives a compact copy, projected in the worker at the per-caller seam
 (`projectAttemptToolResultForCaller` with
 `packages/runtime/src/knowledge-model-projection.ts`), never in the API tool.
-It is the same JSON without bookkeeping or repeated text:
+Search returns discovery cards: entry `id`, title, kind, scope, revision outcome,
+and at most 200 Unicode code points of the best content excerpt (or preview when
+there is no excerpt). Nondefault archive/change state is preserved. Search mode,
+fallback reason and a non-null pagination cursor remain visible. Use
+`knowledge_get` to read full text, revision IDs for citations, and the current
+version before updating. A snippet is a relevance hint, not the complete finding.
+Pending results remain explicitly `outcome: "pending"`.
+
+Both MCP search tools default to five results; callers can request up to 50 or
+paginate. This default also applies to Codemode's MCP calls, although their
+result shape stays complete. HTTP/SDK list defaults remain 20. The MCP input
+schema uses UUID/date format annotations without long regex patterns; server
+validation remains the same. Advanced scope, group, date, kind and mode filters
+remain available.
+
+Save preparation retains its existing lossless projection:
 
 - kept: entry and collection IDs, `version` (the `expectedVersion` for an
   update), `revision.id` (for evidence pins), scope, `revision.outcome` and
@@ -175,10 +222,28 @@ contract passes through unchanged. The model call's history item and timeline
 event record the compact copy the model received; past tool outputs are never
 re-rendered. MCP transport bounds the exact result to 1 MiB before this
 projection, so compaction only shrinks results that already fit; a result that
-is still over 1 MiB for the model spills its exact bytes like any tool. On contract-valid fixtures sized to staging medians
-(`packages/runtime/test/knowledge-model-projection.test.ts`), an eight-entry
-search result shrinks from 17.9 KB to 10.0 KB (44%) and a save preparation
-from 21.7 KB to 14.1 KB (35%).
+is still over 1 MiB for the model spills its exact bytes like any tool. Tests in
+`packages/runtime/test/knowledge-model-projection.test.ts` cover exact Codemode
+results, non-mutating model projection, and the unchanged save-preparation shape.
+
+### Search availability and existing sessions
+
+New configured sessions with Knowledge enabled mark only `knowledge_search`
+eager on their already-selected first-party server (or Docs server when that is
+the available search). Creation saves the normal `ToolRef.eager` selection;
+scheduled occurrences freeze it with their accepted execution. No server,
+permission or disabled capability is added. Other Knowledge tools stay deferred.
+This uses the existing first-request preparation barrier in native OpenAI,
+native Codex and generic-dispatch transports, not a second discovery mechanism.
+
+Existing sessions' selections and accepted scheduled executions are not updated.
+They stay deferred unless already explicitly eager. The compact search schema is
+an ordinary schema update: deferred sessions see it on their next disclosure;
+sessions that already explicitly exposed search eagerly may incur a one-time
+tool-prefix cache miss on their next prepared attempt. New result projections
+apply only at execution; previously stored model inputs and tool outputs are
+never rewritten. No adoption marker, catalog version or compaction rewrite is
+introduced.
 
 ## Personal and shared Knowledge
 
@@ -194,34 +259,100 @@ The original file, source entry, evidence and findings all retain their authorit
 A shared finding cannot point at private evidence. The human UI offers **Share with workspace** as an explicit, editable new entry. That action does not copy the
 private graph, grant access to its original files, or keep the two entries synced.
 Personal originals and Knowledge do not disappear just because their original
-shared workspace is removed. Migration derives original-file ownership from typed
+shared workspace is removed: they stay in the owner's Personal workspace and the
+other workspaces where the owner turned them on. Migration derives original-file ownership from typed
 chat resources, document authority and generated-artifact session references.
 If several private owners already used the same original, each keeps access;
 unrelated workspace readers do not. An original already referenced by a shared
 chat or document keeps its existing shared authority. Unbound historical files
 retain their prior workspace ownership instead of guessing an owner.
 
+### Where Knowledge works
+
+Every entry has a home: the workspace it was added in. The home always has the
+entry, so it can always be managed from there. Beyond the home, each scope
+follows the organization-wide ownership and reach rules:
+
+- **Workspace** Knowledge works only in its workspace.
+- **Organization** Knowledge works in every shared workspace of the
+  organization, or only in the listed ones, plus members' Personal workspaces
+  when that switch is on. This is the same shape as organization Skills, model
+  keys, connectors, vaults and machines. Existing entries keep working in every
+  workspace, Personal ones included.
+- **Personal** Knowledge works in its home, its owner's Personal workspace and
+  the workspaces the owner turned it on in, as their Only me meetings and files
+  do. New entries start with no other workspaces. Entries saved before this
+  change keep working in every workspace, until their owner narrows them.
+
+The reach is enforced by `knowledge_scope_visible`, the row policy every
+Knowledge read and write already uses, so it applies the same way to people,
+agent turns, search, citations and review. A workspace an entry no longer works
+in stops finding it on its next read. An entry that cites evidence can also be
+hidden in a workspace where that evidence is not available.
+
+`GET` and `PUT /v1/workspaces/{workspaceId}/knowledge/entries/{entryId}/reach`
+(`getKnowledgeEntryReach` and `updateKnowledgeEntryReach` in the SDK) read and
+change where an entry works, from any workspace that has it. The body is
+`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean }`;
+`null` means every workspace, and the home is never stored. Whoever may write
+the organization's Knowledge changes an organization entry, choosing from its
+shared workspaces. Only the owner changes a personal entry, choosing from the
+organization's workspaces they belong to, and its Personal switch stays on.
+Agents cannot read or change reach. Workspace entries return 409, unknown
+workspaces or a Personal switch turned off on a personal entry return 422, and
+people without write access return 403. A reach change is not a revision of the
+entry: it keeps its version and review state, and is recorded in the audit log
+as `knowledge.reach.changed`.
+
 ## Browsing Knowledge
 
 The **Knowledge** page (`/state`) has **Library**, **Instructions** and
 **Review** tabs; Review shows only while proposals wait. Entries, collections,
-the Learning settings and add/edit flows open as pages with a back link, each
+the Agent learning settings and add/edit flows open as pages with a back link, each
 addressed by URL. Files are a **Files** Type filter in the Library, and
 **Add → Upload files** saves originals that become File entries. Opening a file
 shows its preview, extracted text and a link to related Knowledge. Old
 `view=files` links open the Library filtered to files, and `view=skills` links
-open Capabilities → Skills. Old Memory and Documents links redirect to Knowledge.
+open Capabilities → Skills. Old Memory and Documents links redirect to Knowledge;
+a Documents `?authority=` link, and `?scope=` on `/state`, open the Library
+filtered to that scope (Organization identity > Organization documents uses it).
+
+**Agent learning** (Settings → Workspace → Agent learning; Knowledge ⋯ → Agent
+learning opens the same page) holds the workspace defaults
+for shared chats and your private-chat defaults, each row Off / Review first /
+Automatic. Organization owners and admins also see an **Organization identity** row there,
+in the same words, for the separate company-profile agent policy. One chat's own
+override lives in the session dock's **Agent** tab, next to its identity and
+capabilities; the composer's **+ → Chat settings** opens it. A new chat still
+sets its draft choice in **+ → Chat settings**, and a schedule on its form.
 
 The workspace rail marks Knowledge with an indicator while accessible Knowledge
 proposals await review. That link opens the Review tab directly.
 The indicator refreshes after local decisions, on window focus, and every 30 seconds
 while visible; a transient refresh failure preserves the last known pending state.
 
-The Library shows a flat list or a **By collection** layout: one section per
-top-level collection (no visible parent in the selected scope) listing its
-sub-collections first, as rows that open their own page, then its direct
-entries, and finally the entries not in a collection. A nested collection
-therefore appears once, inside its parent. Rows open the entry's or collection's
+The Library's one **Entries | Collections** control switches between a flat list
+of entries and a flat list of top-level collections (no visible parent in the
+selected scope). Every list without search text shows the most recently updated
+first. An entry's change time is the latest decision on the revision the list
+shows (publication, proposal or rejection), so approving a proposal moves it
+up while a pending or rejected proposal never moves the published Library.
+Archiving keeps the published revision, so the Archived view orders by that
+too. A collection's is the newest of its own and that of any non-archived entry or
+sub-collection below it that the reader can see in the selected scope; the walk
+descends through sub-collections by membership. Collection rows show that date.
+Writes keep each collection's newest change, and the member it came through, up
+to date (migration 1032), so a list follows that chain and checks it for the
+reader instead of walking every member. The walk still answers any collection
+whose chain passes a member the reader cannot see or the scope filter excludes,
+the Review queue, and organizations not yet built by their first Knowledge write.
+Search keeps relevance order, with each row's own change breaking ties; an
+**Added** window orders by creation time, the date it filters on. Review groups
+and the Review queue also list the newest proposal first. Collections hides the
+Type filter, keeping its value for Entries; search and the other filters find
+nested collections too. Uploads and old Files links open Entries filtered to
+files.
+Rows open the entry's or collection's
 own page with its content and evidence. A collection page lists its
 sub-collections as their own group before its entries, and every entry or
 collection page shows the path of parent collections (first parent at each
@@ -232,10 +363,16 @@ remain discoverable regardless of their parents. Only collections and files carr
 an icon; other kinds are named in the row's meta line ("Decision · updated 3
 days ago").
 
-The section list uses `kind: "group"` with `rootOnly`, and the loose list
-`rootOnly`, both before server pagination; each collection pages its direct
-sub-collections (`groupId` with `kind: "group"`) and its direct members using
-`groupId`. A parent outside the selected scope,
+`knowledge_entry_read` orders a list by `order` (`updated` by default from the
+API, `created` with `createdSince`) and pages with a keyset on score, that
+order's timestamp and id; it returns the timestamp as `lastChangedAt`. Callers
+that send no `order` keep the old score and id order, and a cursor without an
+order key continues in that order. Like any recency sort, a row whose change
+time moves between pages can appear twice; the web list skips repeats. The
+Collections view uses
+`kind: "group"` with `rootOnly` before server pagination; each collection pages
+its direct sub-collections (`groupId` with `kind: "group"`) and its direct
+members using `groupId`, both newest first. A parent outside the selected scope,
 archived parent, or inaccessible parent does not hide an accessible child from
 the root. Published and outstanding pending membership edges are checked for
 cycles under the publication lock, including at approval and restoration.
@@ -253,8 +390,10 @@ All finding types share retrieval, review, permissions and revision history.
 
 ## Agent learning settings
 
-**Knowledge → Learning** groups three destinations together (the old
-Settings → Agent learning URL redirects there):
+**Settings → Agent learning** (`/settings?section=learning`) groups three
+destinations together. Knowledge's ⋯ menu, an empty Review and the chat Settings tab
+link to it, and old `/state?page=learning` links redirect there. The page also
+links to Knowledge → Review, where Review first changes wait:
 
 | Destination | New-workspace default | Storage authority |
 | --- | --- | --- |
@@ -269,7 +408,7 @@ snapshots are unchanged; no existing policy is migrated.
 Each destination supports **Automatic**, **Review first** and **Off**. These
 control agent authoring and publication. Off does not remove existing Knowledge,
 disable installed Skills, prevent a human edit, or forbid a human plugin install.
-Organization identity keeps its separate organization-owner policy. External
+Organization identity keeps its separate organization owner/admin policy. External
 message sending, tool approvals, secrets and other action permissions remain
 separate from learning policy.
 
@@ -286,9 +425,56 @@ same owner layer the task actually uses, otherwise the write is rejected.
 
 `agent_learning_revisions` stores immutable policy history.
 `agent_learning_snapshots` freezes the effective categories, owner and producer
-context for an accepted logical turn. Scheduled work resolves against its accepted
+context for an accepted logical turn.
+The worker presents the effective modes and Knowledge destination to the agent
+through the governance prompt. It renders stable mode/scope facts, without
+attempt identifiers or personal identities; the database snapshot remains the
+enforcement authority.
+Scheduled work resolves against its accepted
 run time. Child work and recovery preserve their accepted producer policy; changing
 settings affects subsequent accepted work, not an already running turn.
+
+Sharing a private chat preserves the accepted turn's Personal destination for
+that same verified initiating human, including tool operations, provider failover
+and human Retry. It does not promote Personal writes into the workspace or rewrite
+the snapshot or earlier model context. Newly accepted turns use the shared chat's
+current destination. A genuinely incompatible retained scope fails at startup
+with an explanation to send a new message; Retry cannot reopen that same turn.
+
+A Personal workspace learns exactly like a shared workspace. Nobody but its
+owner can be in it, and organization admins, other members and other workspaces
+cannot reach it, so its Workspace layer is as private as the owner's Personal
+layer. An Only me chat, or a chat that chose user memory, learns for its
+verified person; a workspace chat, and work with no person such as a published
+Site's guest chat, learns to the Workspace layer under that workspace's modes.
+As in a shared workspace, only work that learns for its person reads that
+person's Personal Knowledge and Only me files: a workspace chat there reads
+neither, and the files it makes are Workspace files. Migration 1095 copied each
+owner's saved Personal defaults, and their chat and task overrides from that
+workspace, to the Personal workspace's own layer when it had none, so its chats
+keep the modes the owner chose. Existing personal entries, Skills, instructions
+and Only me files made there are unchanged; the owner and their Only me chats
+keep them. Workspace chats and schedules there, including ones from before 1095
+that learned for the owner, no longer read that earlier personal Knowledge or
+those Only me files. A schedule that uses an Only me file needs an Only me
+target chat, or the file shared with the workspace, as in a shared workspace.
+
+An agent saves to the destination it explicitly chooses, beyond its chat's
+default. From a chat that learns for its person, saving a workspace instruction,
+changing an existing workspace Skill or Knowledge entry by its id, or creating a
+Skill or entry with scope `workspace` reaches the workspace. From a shared chat,
+changing the initiating person's own personal Skill by its id, or creating a
+Skill with scope `user`, reaches that person. Such a change is governed by the
+stricter of the chat's own mode and the destination owner's mode (the workspace's
+or the person's) for that category, as of acceptance: Off refuses it, and Review
+first leaves a pending proposal in that owner's review. Work with no verified
+initiating person cannot choose a personal destination, nobody else's personal
+Skill is reachable, permanent Skill deletion stays within the chat's own scope,
+and shared Knowledge still cannot point at private evidence. The one deletion
+exception is work the verified owner started in their own Personal workspace
+(their chats and scheduled tasks): that workspace has no other member, so it
+may also permanently remove the workspace's Skills under its own Skills mode
+(migration 1070).
 
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,
@@ -372,8 +558,7 @@ downloads and entry/history reads retain their ordinary permission checks.
 
 - Contracts: `packages/contracts/src/knowledge-entries.ts`, `agent-learning.ts`,
   `agent-instruction-changes.ts`.
-- Persistence and lifecycle: `packages/db/drizzle/0461_unified_knowledge.sql`,
-  `packages/db/src/knowledge-entries.ts`, `knowledge-migration.ts`,
+- Persistence and lifecycle: `packages/db/src/knowledge-entries.ts`,
   `knowledge-document-preparation.ts`, `knowledge-indexing.ts`.
 - Host authority, source preparation and search: `packages/core/src/domain/knowledge*.ts`
   and `file-owner.ts`.

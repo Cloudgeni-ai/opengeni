@@ -2,12 +2,14 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { canonicalMcpUrl } from "./catalog-curation";
 import { probeCatalogSnapshot, type ProbedCatalogSnapshot } from "./integrations-catalog-probe";
+import { screenCatalogRowLogos, type LogoScreenSummary } from "./screen-catalog-logos";
 import {
   catalogCandidateRows,
   normalizeCatalogSnapshot,
   readSnapshotFile,
   type NormalizedCatalogSnapshot,
 } from "./import-integrations-catalog";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const DEFAULT_SOURCE_URL = "https://integrations.sh/api.json";
 const DEFAULT_OUTPUT_PATH = "data/catalog/integrations-snapshot.json";
@@ -243,7 +245,7 @@ export async function hydrateSurfaceDocs(
         seenDomains.add(resolvedDomain);
         surfaceDocs.push({ ...doc, domain: resolvedDomain });
       } catch (error) {
-        failed.push({ domain, reason: error instanceof Error ? error.message : String(error) });
+        failed.push({ domain, reason: errorMessage(error) });
       }
     }
   }
@@ -296,9 +298,9 @@ function committedRowUrl(row: UnknownRecord): string {
     return canonicalMcpUrl(row.mcpUrl);
   } catch (error) {
     throw new Error(
-      `committed snapshot row for ${domain} has an invalid mcpUrl ${JSON.stringify(row.mcpUrl)}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `committed snapshot row for ${domain} has an invalid mcpUrl ${JSON.stringify(row.mcpUrl)}: ${errorMessage(
+        error,
+      )}`,
       { cause: error },
     );
   }
@@ -328,12 +330,9 @@ export function parseCommittedRows(text: string, path: string): UnknownRecord[] 
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    throw new Error(
-      `committed snapshot ${path} is not valid JSON: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      { cause: error },
-    );
+    throw new Error(`committed snapshot ${path} is not valid JSON: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
   const rows = asRecord(parsed)?.importRows;
   if (!Array.isArray(rows)) {
@@ -370,6 +369,8 @@ export type RefreshedSnapshotDocument = {
     googleapisDropped: number;
   };
   retention: RetentionSummary;
+  /** Rows whose logo host served a generated letter; their logo source is null. */
+  logoScreen?: LogoScreenSummary;
   importRows: ProbedCatalogSnapshot["rows"];
   skipped: ProbedCatalogSnapshot["skipped"];
   quarantined: Array<{ row: unknown; reason: string }>;
@@ -530,9 +531,19 @@ if (import.meta.main) {
     allowShrink: args.allowShrink,
     outputPath: args.outputPath,
   });
+  // A generated letter is not the provider's logo; record "no logo" instead.
+  const screen = await screenCatalogRowLogos(result.document.importRows);
+  const { importRows: _unscreened, skipped, quarantined, ...header } = result.document;
+  const document: RefreshedSnapshotDocument = {
+    ...header,
+    logoScreen: screen.summary,
+    importRows: screen.rows,
+    skipped,
+    quarantined,
+  };
   await mkdir(dirname(args.outputPath), { recursive: true });
-  await writeFile(args.outputPath, serializeRefreshedSnapshot(result.document));
-  const { document, hydration, normalized, probed } = result;
+  await writeFile(args.outputPath, serializeRefreshedSnapshot(document));
+  const { hydration, normalized, probed } = result;
   console.log(
     JSON.stringify(
       {
@@ -552,6 +563,8 @@ if (import.meta.main) {
         dropped: probed.probe.dropped,
         unverified: probed.probe.unverified,
         googleapisDropped: probed.probe.googleapisDropped,
+        logoPlaceholders: screen.summary.placeholderRows.length,
+        logoUnreachable: screen.summary.unreachable,
         skipped: probed.skipped.length,
         quarantined: probed.quarantined.length,
         cleaning: probed.cleaning,

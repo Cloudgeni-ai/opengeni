@@ -1,4 +1,5 @@
 import { Column, getTableName, is, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import type { SessionEventType } from "@opengeni/contracts";
 
 function correlatedReference(reference: SQLWrapper): SQLWrapper {
   // Drizzle's single-table SELECT projection removes Column table qualifiers,
@@ -34,14 +35,52 @@ export const MEANINGFUL_SESSION_EVENT_TYPES = [
 ] as const;
 
 /**
+ * Events that never count as session activity by themselves: raw stream
+ * deltas, and infrastructure diagnostics such as the idle reaper's
+ * `sandbox.box.terminated` fan-out to every session sharing a drained box. A
+ * statement whose events are all of these advances the durable cursor and
+ * `last_sequence`, but neither `updated_at` (the rail's "last activity" time)
+ * nor `activity_xid` (rail order and incremental discovery). Any other event
+ * in the same statement keeps the ordinary activity projection. Attention
+ * events (`sandbox.box.lost`, `machine.link.lost`, ...) are deliberately
+ * absent: something a person must act on is activity.
+ *
+ * Migration 0904 holds the same literal list in the event cursor trigger;
+ * a change here needs a new migration.
+ */
+export const SESSION_ACTIVITY_NEUTRAL_EVENT_TYPES = [
+  "agent.message.delta",
+  "agent.reasoning.delta",
+  "sandbox.command.output.delta",
+  "terminal.pty.output.delta",
+  "sandbox.box.created",
+  "sandbox.box.terminated",
+  "sandbox.box.snapshot",
+  "sandbox.env.drift",
+  "session.route.reconciled",
+  "workspace.revision.captured",
+  "machine.op.recovered",
+  "machine.link.restored",
+  "machine.runner.restarted",
+] as const satisfies readonly SessionEventType[];
+
+/**
  * `0503` is that migration's index predicate. `0527` adds two changes: completed
  * commentary is activity, and a `turn.completed` recording the `reply` a human
  * or API message received before its turn waited for input is an answer even
- * though its `output` is empty.
+ * though its `output` is empty. `0774` adds one more: a turn stopped because
+ * its task reached its usage limit (`segmentLimit: "session_usage_limit"`) is
+ * an actionable boundary — only a person can raise or clear the limit — so it
+ * needs attention exactly like a failure, without any explanatory model call.
+ * Other segment limits (`max_turns`, `budget_exhausted`) keep their meaning.
  */
-function attentionSessionEventSql(alias: string, revision: "0503" | "0527"): SQL {
+function attentionSessionEventSql(alias: string, revision: "0503" | "0527" | "0774"): SQL {
   const e = sql.identifier(alias);
   const turnResult = sql`coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result')`;
+  const usageLimitStop =
+    revision === "0774"
+      ? sql`(${e}.payload ->> 'segmentLimit') = 'session_usage_limit' or `
+      : sql``;
   // These are code-owned literals, not request values. Literal predicates let
   // PostgreSQL use the matching partial index even with a generic cached plan.
   return sql`${e}.type in (${sql.join(
@@ -51,10 +90,10 @@ function attentionSessionEventSql(alias: string, revision: "0503" | "0527"): SQL
     and ${e}.duplicate_of_event_id is null
     and (${e}.turn_association is null or ${e}.turn_association = 'current')
     and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'text', '') <> '')${
-      revision === "0527"
+      revision !== "0503"
         ? sql`
     and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'phase', '') <> 'commentary')
-    and (${e}.type <> 'turn.completed' or (
+    and (${e}.type <> 'turn.completed' or ${usageLimitStop}(
       not (${e}.payload ?| array['maintenance', 'segmentLimit'])
       and ((
         ${turnResult} is not null
@@ -75,9 +114,64 @@ function attentionSessionEventSql(alias: string, revision: "0503" | "0527"): SQL
  * never creates attention on its own; the answer or turn outcome that follows
  * does. A turn that ends waiting for input has no output, but when a human or
  * API message started it, the `reply` it records is that answer. Exactly the
- * migration 0527 partial-index predicate.
+ * migration 0774 partial-index predicate, which also counts a task usage limit
+ * stop as an actionable boundary.
+ *
+ * Since migration 1289 an answer that is exactly the no-reply token is not
+ * attention either (`noReplyAnswerExcludedSql`): it is nothing for the person
+ * and no timeline draws it. That exclusion is a filter on top of the 0774
+ * index predicate, so queries keep using that index.
  */
 export function meaningfulSessionEventSql(alias: string): SQL {
+  return sql`${attentionSessionEventSql(alias, "0774")}
+    and ${noReplyAnswerExcludedSql(alias)}`;
+}
+
+/**
+ * Exactly the migration 0774 partial-index predicate
+ * (`session_events_meaningful_attention_v3_idx`). Attention queries use
+ * `meaningfulSessionEventSql`, which implies it.
+ */
+export function meaningfulAttentionIndexPredicateSql(alias: string): SQL {
+  return attentionSessionEventSql(alias, "0774");
+}
+
+/**
+ * The no-reply token test, as SQL over a text expression: the same
+ * normalization as `isNoReplyText` in `@opengeni/contracts/no-reply` and
+ * migration 1289's `opengeni_private.no_reply_text_v1`. Code-owned literals,
+ * so the predicate needs no runtime routine or parameter.
+ */
+export function noReplyTextSql(text: SQL): SQL {
+  return sql`coalesce(char_length(${text}) <= 256 and upper(regexp_replace(${text}, ${sql.raw(
+    NO_REPLY_WRAPPING_PATTERN_LITERAL,
+  )}, '', 'g')) = 'NO_REPLY', false)`;
+}
+
+const NO_REPLY_WRAPPING_PATTERN_LITERAL = `'^[[:space:]\`*_"''“”]+|[[:space:]\`*_"''“”.!]+$'`;
+
+/**
+ * An agent message, or a turn's output, that is the no-reply token is not an
+ * answer for the person: migration 1289's cursor trigger does not count it as
+ * attention, so a quiet run sets no unread mark. A turn that recorded a
+ * `reply` keeps it.
+ */
+export function noReplyAnswerExcludedSql(alias: string): SQL {
+  const e = sql.identifier(alias);
+  return sql`(${e}.type <> 'agent.message.completed' or not ${noReplyTextSql(
+    sql`${e}.payload ->> 'text'`,
+  )})
+    and (${e}.type <> 'turn.completed' or not ${noReplyTextSql(
+      sql`${e}.payload ->> 'output'`,
+    )} or coalesce(${e}.payload ->> 'reply', '') <> '')`;
+}
+
+/**
+ * The migration 0527 index predicate (no usage-limit stops). Pre-0774 API
+ * processes still probe with it during a rolling deploy; nothing current
+ * queries it.
+ */
+export function commentaryExclusiveMeaningfulSessionEventSql(alias: string): SQL {
   return attentionSessionEventSql(alias, "0527");
 }
 
@@ -90,10 +184,12 @@ export function commentaryInclusiveMeaningfulSessionEventSql(alias: string): SQL
 }
 
 /** A stored audit preview can still need attention, but cannot stand in for
- * consumption of the original content, even when the reader returned it whole. */
+ * consumption of the original content, even when the reader returned it whole.
+ * This is about what a reader received, so an answer that is the no-reply
+ * token is still content a parent agent can have read. */
 export function completeMeaningfulSessionEventSql(alias: string): SQL {
   const e = sql.identifier(alias);
-  return sql`${meaningfulSessionEventSql(alias)}
+  return sql`${meaningfulAttentionIndexPredicateSql(alias)}
     and coalesce(${e}.payload -> 'truncation' ->> 'truncated', 'false') <> 'true'
     and coalesce(${e}.payload ->> 'sourceOmitted', 'false') <> 'true'`;
 }

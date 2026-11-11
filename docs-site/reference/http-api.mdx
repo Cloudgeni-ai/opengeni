@@ -1,10 +1,14 @@
 ---
 title: "HTTP API overview"
-description: "The shape of the public OpenGeni HTTP API behind the SDK."
+description: "The shape of the public Opengeni HTTP API behind the SDK."
 icon: "globe"
 ---
 
-OpenGeni's public contract is a workspace-scoped HTTP API. Most integrations should use [`@opengeni/sdk`](/reference/sdk), which wraps these routes with types, retries, and stream recovery. Every request authenticates first (see [Authentication](/reference/authentication)); protected routes include the workspace id in the path and are authorized against it.
+Opengeni's public API is a workspace-scoped HTTP API. Most integrations should use [`@opengeni/sdk`](/reference/sdk), which wraps these routes with types, retries, and stream recovery. Every request authenticates first (see [Authentication](/reference/authentication)).
+
+## Billing
+
+API and embedded-product usage spends credits, not plan credit. Connected AI subscriptions are available only in the Opengeni apps on Pro ($20/month), Max, or Enterprise; API requests that explicitly select one return `403` with `subscription_api_unavailable`. A self-hosted deployment can allow them for API requests with `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true`; see [Self-host](/guides/self-host#connected-subscriptions-over-the-api). See [Going to production](/integrate/production) for billing and model selection.
 
 ## Discovery
 
@@ -16,26 +20,29 @@ OpenGeni's public contract is a workspace-scoped HTTP API. Most integrations sho
 
 ## Main route families
 
-| Family              | Routes                                                                                                    |
-| ------------------- | --------------------------------------------------------------------------------------------------------- |
-| Organizations       | `/v1/organizations/:organizationId/...`: API keys, members, workspaces, organization-wide session lists   |
-| External workspaces | `PUT /v1/workspaces/external` (idempotent `ensureWorkspace`)                                              |
-| Sessions            | `POST /v1/workspaces/:workspaceId/sessions`, `GET .../sessions/:sessionId`                                |
-| Events              | `GET .../sessions/:sessionId/events` (replay), `POST .../events` (messages, decisions, control)           |
-| Live stream         | `GET .../sessions/:sessionId/events/stream` (Server-Sent Events, resumable by sequence)                   |
-| Goals               | `GET`, `PATCH`, and `DELETE` on `.../sessions/:sessionId/goal`                                            |
-| Files               | Upload begin and complete, download URLs                                                                  |
-| Scheduled tasks     | `/v1/workspaces/:workspaceId/scheduled-tasks/...`                                                         |
-| Automations         | `/v1/workspaces/:workspaceId/automations/...`, and the public `POST /v1/webhooks/automations/:endpointId` |
-| Integrations        | `/v1/workspaces/:workspaceId/integrations/...` (preview, install, uninstall)                              |
-| Connected Machines  | `/v1/workspaces/:workspaceId/enrollments/...`                                                             |
+| Family                | Routes                                                                                                                                |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Organizations         | `/v1/organizations/:organizationId/...`: API keys, members, workspaces, organization-wide session lists                               |
+| External workspaces   | `PUT /v1/workspaces/external` (idempotent `ensureWorkspace`)                                                                          |
+| Sessions              | `POST /v1/workspaces/:workspaceId/sessions`, `GET .../sessions/:sessionId`                                                            |
+| Events                | `GET .../sessions/:sessionId/events` (replay), `POST .../events` (messages, approvals, answers)                                       |
+| Control               | `POST .../sessions/:sessionId/steer`, `POST .../sessions/:sessionId/control` (pause, resume, cancel)                                  |
+| Live stream           | `GET .../sessions/:sessionId/events/stream` (Server-Sent Events, resumable by sequence)                                               |
+| Goals                 | `GET`, `PATCH`, and `DELETE` on `.../sessions/:sessionId/goal`                                                                        |
+| Files                 | Upload begin and complete, download URLs                                                                                              |
+| Scheduled tasks       | `/v1/workspaces/:workspaceId/scheduled-tasks/...`, including their event triggers                                                     |
+| Event sources         | `/v1/workspaces/:workspaceId/event-sources/...`, and the public webhook URL each source returns                                       |
+| Integrations          | `/v1/workspaces/:workspaceId/integrations/...` (preview, install, uninstall)                                                          |
+| Connected Machines    | `/v1/workspaces/:workspaceId/enrollments/...`                                                                                         |
+| Webhooks, credentials | `/v1/workspaces/:workspaceId/webhooks/...` and `.../credential-provider`, plus the same under `/v1/organizations/:organizationId/...` |
+| Usage allowances      | `.../allowance`, `.../usage/me` on a workspace (or `/v1/workspaces/external/:source/:externalId`)                                     |
 
 ## Streaming
 
-The event stream is Server-Sent Events. Every event has a contiguous sequence number, so a client can reconnect with the last sequence it saw and backfill any gap from the replay route. Postgres is the source of truth; the stream only fans out what was already written. Configure proxies with buffering disabled and read timeouts of at least an hour.
+The event stream is Server-Sent Events. Every event has a sequence number, so a client can reconnect with the last sequence it saw and fill any gap from the replay route. Disable proxy buffering and set read timeouts of at least an hour.
 
 ## Compatibility
 
-Within a major version, the API only grows: clients ignore unknown response fields and event types, and servers ignore unknown request fields. See [Going to production](/integrate/production#keep-sdk-and-server-compatible).
+The API only grows, and server updates don't break existing integrations: servers accept every request a published SDK sends, and clients ignore unknown fields and event types. Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes. See [Going to production](/integrate/production#keep-sdk-and-server-compatible).
 
 The full route list is in the repository's [HTTP API overview](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/http-api.md).

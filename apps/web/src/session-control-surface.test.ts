@@ -7,8 +7,8 @@ async function source(path: string): Promise<string> {
 describe("session control surface architecture", () => {
   test("all three account-inventory callsites pass the live tri-state read grant", async () => {
     for (const [path, workspace] of [
-      ["routes/session.tsx", "props.session.workspaceId"],
-      ["routes/sessions-index.tsx", "workspaceId"],
+      ["../../../packages/react/src/app/routes/session.tsx", "props.session.workspaceId"],
+      ["../../../packages/react/src/app/routes/sessions-index.tsx", "workspaceId"],
       ["components/schedules/schedule-form-page.tsx", "workspaceId"],
     ] as const) {
       const route = await source(path);
@@ -24,7 +24,7 @@ describe("session control surface architecture", () => {
   });
 
   test("new-session Send stays available when background draft saving conflicts", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
     expect(route).toContain("draftConflict: null,");
     expect(route).toContain("newSessionDraft.flushForSend(submittedSnapshot)");
     expect(route).toContain("<NewSessionDraftSyncNotice />");
@@ -32,14 +32,35 @@ describe("session control surface architecture", () => {
     expect(route).toContain("suspendAutosave: submitting");
     expect(route).toContain("disabled={newSessionDraft.loading || submitting}");
     expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
+    // Send is never checked against the draft, so there is no retry loop. Only
+    // an older server can still refuse it; that one attempt must not leave
+    // "Draft not saved" up or autosave paused.
+    expect(route).toMatch(
+      /if \(draftConflict\) \{\s*await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: draftConflictDuringSendText\(draftChangedElsewhere\),/,
+    );
+    // Other tabs are named only when the refusal showed the draft moved on.
+    expect(route).toContain("newSessionDraftConflictRevision(error) !== flushed.revision");
+    expect(route).not.toContain("for (let attempt");
     expect(route).not.toContain("newSessionDraft.conflict ||");
     expect(route).not.toContain("!newSessionDraft.conflict &&");
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");
   });
 
+  test("new-chat outage shows one calm notice instead of raw errors", async () => {
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
+    expect(route).toContain("{OPENGENI_UPDATING_NOTICE(t)}");
+    expect(route).toContain("newSessionDraft.unavailable || connectionAccounts.unavailable");
+    expect(route).toContain(
+      "error: newSessionDraft.unavailable || newSessionDraft.conflict ? null : newSessionDraft.error",
+    );
+    expect(route).toContain("newSessionDraft.reportUnavailable(error)");
+    expect(route).toContain('"Couldn\'t send your message. Try again."');
+    expect(route).not.toContain("Couldn't check connected accounts. Retry to send your message.");
+  });
+
   test("new and existing composers use the same popover pattern", async () => {
-    const newSession = await source("routes/sessions-index.tsx");
-    const existingSession = await source("routes/session.tsx");
+    const newSession = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
+    const existingSession = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(newSession).not.toContain('expandedPanelPresentation="dialog"');
     expect(newSession).toContain('menuSide="bottom"');
     expect(newSession).toContain("draftChatSettings={{");
@@ -48,8 +69,12 @@ describe("session control surface architecture", () => {
     expect(existingSession).not.toContain('expandedPanelPresentation="dialog"');
     expect(newSession).not.toContain("voiceModel={{");
     expect(newSession).toContain('modelMenu="split"');
-    const plus = await source("components/composer-mobile-plus.tsx");
-    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    const plus = await source(
+      "../../../packages/react/src/app/components/composer-mobile-plus.tsx",
+    );
+    const panel = await source(
+      "../../../packages/react/src/app/components/composer-mobile-plus-panel.tsx",
+    );
     expect(plus).toContain('import("./composer-mobile-plus-panel")');
     expect(plus).toContain("{open ? (");
     expect(panel).toContain('setPanel("settings")');
@@ -57,8 +82,28 @@ describe("session control surface architecture", () => {
     expect(plus).not.toContain("setSettingsOpen");
   });
 
+  test("an existing chat's Chat settings opens the dock's Settings tab at Agent learning", async () => {
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    // The composer hands the click to the route, which opens the dock...
+    expect(route).toContain("onOpen: props.onOpenAgentSettings,");
+    // (Only where the dock exists: an embed without it has no Settings tab to open.)
+    expect(route).toContain("onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}");
+    expect(route).toContain("openAgentSettingsRequest={");
+    // ...on its Settings tab (always present for a loaded chat), focused on Agent learning.
+    expect(route).toContain('tab: "agent",');
+    expect(route).toContain("openTabRequest={currentTabRequest}");
+    expect(route).toContain("learningFocusRequest={agentLearningFocus}");
+    expect(route).not.toContain("agentConfig?.enabled");
+    // There is no second copy of the per-chat editor in the composer.
+    const panel = await source(
+      "../../../packages/react/src/app/components/composer-mobile-plus-panel.tsx",
+    );
+    expect(panel).not.toContain("AgentLearningSettingsEditor");
+    expect(panel).toContain("props.chatSettings?.onOpen()");
+  });
+
   test("renders SessionChrome above the composer", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route.match(/<SessionChrome\b/g)).toHaveLength(1);
     expect(route).not.toContain("<QueueSurface");
     expect(route).not.toContain("<GoalSurface");
@@ -68,11 +113,33 @@ describe("session control surface architecture", () => {
     // page gutter. Putting the gutter inside only SessionChrome makes it 48px
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
-    expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
+    // The status row and the composer region share one gutter (narrower when
+    // the chat sits in a panel beside a Site).
+    expect(route).toContain(
+      'const gutter = props.placement === "panel" ? "px-3" : "px-4 sm:px-6";',
+    );
+    expect(route).toContain(
+      'className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}',
+    );
+    expect(route.match(/\bgutter,\n\s+readOnlyArchive && "hidden"/g)).toHaveLength(1);
+    // An archived chat is read-only, so a failed last turn offers no Retry.
+    expect(route).toMatch(/const failureRecovery =\s*!props\.hasNewer &&\s*!readOnlyArchive &&/);
+    // The wait status is a chip in SessionChrome, not a separate banner row.
+    expect(route).not.toContain("<LazySessionWaitStatus");
+  });
+
+  test("current model pacing is shown above the composer, never on an older history page", async () => {
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    expect(route).toContain("const modelRecovery = props.hasNewer");
+    expect(route).toContain(
+      "currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events)",
+    );
+    expect(route.match(/<ModelRecoveryNotice\b/g)).toHaveLength(1);
+    expect(route.indexOf("<ModelRecoveryNotice")).toBeLessThan(route.indexOf("<ConsoleComposer"));
   });
 
   test("makes the full chat viewport a file drop target", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).toContain("<ChatViewportFileDropTarget");
     expect(route).toContain('data-workspace-scroll-owner="self-managed"');
     expect(route).toContain(
@@ -83,11 +150,13 @@ describe("session control surface architecture", () => {
 
   test("shares one route-level attachment lightbox across the timeline and composer", async () => {
     const [sessionRoute, newSessionRoute, chatComposer] = await Promise.all([
-      source("routes/session.tsx"),
-      source("routes/sessions-index.tsx"),
+      source("../../../packages/react/src/app/routes/session.tsx"),
+      source("../../../packages/react/src/app/routes/sessions-index.tsx"),
       source("../../../packages/react/src/components/chat-composer.tsx"),
     ]);
-    const provider = sessionRoute.indexOf("createElement(\n    LightboxProvider,");
+    const providerPattern = /createElement\(\s+LightboxProvider,/g;
+    expect([...sessionRoute.matchAll(providerPattern)]).toHaveLength(1);
+    const provider = sessionRoute.search(providerPattern);
     const timeline = sessionRoute.indexOf("<MessageTimeline", provider);
     const composer = sessionRoute.indexOf("<ConsoleComposer", timeline);
     const providerEnd = sessionRoute.indexOf("</ChatViewportFileDropTarget>,", composer);
@@ -96,32 +165,32 @@ describe("session control surface architecture", () => {
     expect(timeline).toBeGreaterThan(provider);
     expect(composer).toBeGreaterThan(timeline);
     expect(providerEnd).toBeGreaterThan(composer);
-    expect(newSessionRoute).toContain("createElement(\n    LightboxProvider,");
+    expect([...newSessionRoute.matchAll(providerPattern)]).toHaveLength(1);
     expect(chatComposer).not.toContain("<LightboxProvider>");
   });
 
   test("wires the authenticated retained screenshot loader into the production timeline", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).toContain("createSessionRetainedScreenshotLoader(");
     expect(route).toContain("loadRetainedScreenshot={loadRetainedScreenshot}");
   });
 
   test("keeps host-owned auth recovery out of the native connection broker", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     const hostGuard = route.indexOf('if (item.authoritySource === "host")');
     const nativeRecovery = route.indexOf("if (item.capability)", hostGuard);
     const hostBranch = route.slice(hostGuard, nativeRecovery);
 
     expect(hostGuard).toBeGreaterThan(-1);
     expect(nativeRecovery).toBeGreaterThan(hostGuard);
-    expect(hostBranch).toContain("window.location.assign(item.authorizationUrl)");
+    expect(hostBranch).toContain("page.assign(item.authorizationUrl)");
     expect(hostBranch).not.toContain("listConnections");
     expect(hostBranch).not.toContain("startConnectionOAuth");
   });
 
   test("offers failed-session model recovery to Personal workspace connection owners", async () => {
-    const route = await source("routes/session.tsx");
-    const recoveryGateStart = route.indexOf("canConnectModel={hasWorkspacePermission(");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    const recoveryGateStart = route.indexOf("const canConnectModel = hasWorkspacePermission(");
     const recoveryGate = route.slice(recoveryGateStart, recoveryGateStart + 240);
 
     expect(recoveryGateStart).toBeGreaterThan(-1);
@@ -130,7 +199,7 @@ describe("session control surface architecture", () => {
   });
 
   test("failed-session recovery uses an execution control, never a synthetic user message", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).not.toContain("FAILURE_CONTINUATION_MESSAGE");
     expect(route).not.toContain("Continue from the last failure");
     expect(route).toContain("context.client.retrySession(");
@@ -143,16 +212,16 @@ describe("session control surface architecture", () => {
   });
 
   test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");
     expect(route).not.toContain("downloadSandboxFileArtifact");
   });
 
   test("has no second Agents home in the header or dock", async () => {
     const [header, lineage, route] = await Promise.all([
-      source("components/rail/session-header.tsx"),
-      source("components/session/subagents.tsx"),
-      source("routes/session.tsx"),
+      source("../../../packages/react/src/app/components/rail/session-header.tsx"),
+      source("../../../packages/react/src/app/components/session/subagents.tsx"),
+      source("../../../packages/react/src/app/routes/session.tsx"),
     ]);
     expect(header).not.toContain("agentsSlot");
     expect(lineage).not.toContain("AgentsPanel");
@@ -160,7 +229,7 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps the folder above the prompt and context actions inside plus on new sessions", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
     const controls = route.indexOf("controls={");
     const model = route.indexOf("<SessionModelControl", controls);
     const actions = route.indexOf("actions={", model);
@@ -174,10 +243,10 @@ describe("session control surface architecture", () => {
     expect(header).toBeGreaterThan(voice);
     expect(setup).toBeGreaterThan(header);
 
-    const setupImplementation = route.slice(
-      route.indexOf("function SessionSetupStrip"),
-      route.indexOf("function SessionModelControl"),
+    const setupImplementation = await source(
+      "../../../packages/react/src/app/components/session/new-session-setup-strip.tsx",
     );
+    expect(setupImplementation).toContain("export function SessionSetupStrip");
     expect(route).toContain("<ComposerMobilePlus");
     expect(route).toContain("<RepositoryContextMenuBody");
     expect(setupImplementation).not.toContain("<SessionToolPicker");
@@ -188,17 +257,15 @@ describe("session control surface architecture", () => {
 
   test("preserves an explicit Default-folder target from the rail into new-session launch", async () => {
     const [rail, route, focusRequest, hydration] = await Promise.all([
-      source("components/rail/session-list.tsx"),
-      source("routes/sessions-index.tsx"),
-      source("lib/create-composer-focus.ts"),
-      source("routes/sessions-index-hydration.ts"),
+      source("../../../packages/react/src/app/components/rail/session-list.tsx"),
+      source("../../../packages/react/src/app/routes/sessions-index.tsx"),
+      source("../../../packages/react/src/app/lib/create-composer-focus.tsx"),
+      source("../../../packages/react/src/app/routes/sessions-index-hydration.tsx"),
     ]);
-    expect(rail).toContain(
-      'props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }',
-    );
+    expect(rail).toContain('channelId === undefined ? {} : { channelId: channelId ?? "default" }');
     expect(rail).toContain("channelId={props.channelId}");
     expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
-    expect(rail).toContain("requestCreateComposerFocus(props.channelId)");
+    expect(rail).toContain("requestCreateComposerFocus(windowEvents, channelId)");
     expect(focusRequest).toContain("new CustomEvent<CreateComposerFocusIntent>(");
     expect(route).toContain("const requestedChannelId = (");
     expect(route).toContain("nextFocusedNewSessionProjectLaunchIntent(");
@@ -208,7 +275,7 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps manual folder selection from retriggering launch selection", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
     const selectionStart = route.indexOf("const selectedChannelIdRef = useRef(selectedChannelId);");
     const selectionEnd = route.indexOf(
       "useEffect(() => {\n    resetSessionView();",
@@ -238,12 +305,14 @@ describe("session control surface architecture", () => {
     expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
     // Machine and folder choices live under "+" > Runs on and go through the
     // explicit compute path, never the launch-selection draft setter.
-    const runsOn = await source("components/session/new-session-settings-menu.tsx");
+    const runsOn = await source(
+      "../../../packages/react/src/app/components/session/new-session-settings-menu.tsx",
+    );
     expect(runsOn).toContain("props.onComputeChange({");
   });
 
   test("hydrates durable project provenance before normal and realtime create", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
 
     expect(route).toContain(
       "projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}",
@@ -260,125 +329,26 @@ describe("session control surface architecture", () => {
     expect(route.match(/channelId: selectedChannelId/g)).toHaveLength(2);
   });
 
-  test("keeps Variable Sets editable through create and established composer actions", async () => {
-    const [
-      route,
-      establishedRoute,
-      establishedControl,
-      establishedPicker,
-      newPicker,
-      shortlistEditor,
-    ] = await Promise.all([
-      source("routes/sessions-index.tsx"),
-      source("routes/session.tsx"),
-      source("components/personal-resource-attachment-control.tsx"),
-      source("components/session/session-variable-set-picker.tsx"),
-      source("components/session/new-session-variable-set-picker.tsx"),
-      source("components/session/variable-set-shortlist-editor.tsx"),
+  test("Variable Sets are gone from the create and established composers", async () => {
+    const [route, establishedRoute] = await Promise.all([
+      source("../../../packages/react/src/app/routes/sessions-index.tsx"),
+      source("../../../packages/react/src/app/routes/session.tsx"),
     ]);
-    expect(route).toContain("<NewSessionVariableSetPicker");
-    expect(route).toContain("const showVariableSets = props.variableSetsOnly === true");
-    expect(route).toContain("canAttachVariableSets={canAttachVariableSets}");
-    expect(route).toContain("canUseVariableSets={canUseVariableSets}");
-    expect(route).toContain("canAttach={props.canAttachVariableSets === true}");
-    expect(route).toContain("canUse={props.canUseVariableSets === true}");
-    expect(newPicker).toContain("<VariableSetShortlistEditor");
-    expect(newPicker).toContain("const canEnable = props.canAttach && props.canUse");
-    expect(newPicker).toContain("canAdd={!props.disabled && canEnable}");
-    expect(newPicker).toContain("if (props.disabled || unauthorizedAddition) return");
-    expect(newPicker).toContain("props.onChange(variableSetRuntimeIds(rows))");
-    expect(shortlistEditor).toContain("Add variable sets");
-    expect(shortlistEditor).toContain("enabledCount >= 25");
-    expect(shortlistEditor).toContain(
-      "props.disabled || (enabled && (!props.canAdd || enabledCount >= 25))",
-    );
-    expect(route).toContain("PersonalResourceAccessInline");
-    expect(route).not.toContain("PersonalResourceScopeChoice");
-    expect(route).not.toContain("personalScopeChoice");
-    expect(route).not.toContain("setPersonalScopeGeneration");
-    expect(route).toContain("personalResourceCount: selectedPersonalResourceCount");
-    expect(route).toContain("will be available for your work in this session.");
-    expect(route).not.toContain("personalResourceSendBlocker");
-    expect(route).not.toContain("Confirm private credential or resource use before sending");
-    expect(route).not.toContain("PersonalResourceAttachmentControl");
-    expect(route).not.toContain("Your resource access");
-    expect(route).not.toContain("loadPersonalResourceCatalog");
-    expect(route).toContain("reconcileNewSessionFixedResources");
-    expect(route).toContain("newSessionFixedResourceCatalogFailed");
-    expect(route).toContain('"variable-sets:list"');
-    expect(route).toContain('"secrets:list"');
-    expect(route).toContain("resolveVariableSetAttachments");
-    expect(route).toContain("fixedResourceSelection.selectionResolved");
-    expect(route).toContain("personalResourceSelectionIdentityKey");
-    expect(route).toContain("recoverPersonalResourceAttachment(error, request)");
-    expect(route.match(/newSessionDraft\.captureConflict\(error\)/g)).toHaveLength(2);
-    expect(route).toContain("recoverNewSessionPersonalResourceAttachment");
-    expect(route).toContain("refreshPersonalResourceCatalogs");
-    expect(route).toContain("canLoadVariableSetCatalog");
-    expect(route).toContain("canResolveVariableSetAttachments");
-    expect(route).toMatch(
-      /newSessionDraftOptionsFromSessionDraft\(\s*draft,\s*defaultFirstPartyMcpTools,\s*createVisibility/,
-    );
-    expect(route).toContain("const selectedRigDefaultVariableSetIds =");
-    expect(route).toContain("selectedRigDefaultVariableSetIds,");
-    expect(route).toContain(
-      "selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey",
-    );
-    expect(route).toContain("Couldn’t verify the selected Variable Set or Sandbox Environment");
-    expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
-    expect(establishedRoute).toContain("<SessionVariableSetPicker");
-    expect(establishedPicker).toContain("<VariableSetShortlistEditor");
-    expect(establishedPicker).toContain("canAdd={canAdd}");
-    expect(establishedPicker).toContain("all attachments must be removed together");
-    expect(establishedPicker).toContain("The complete attachment selection can still be cleared.");
-    expect(establishedPicker).toContain("The update committed");
-    expect(establishedPicker).toContain("Retry refresh");
-    expect(establishedPicker).toContain("updateSessionVariableSets");
-    expect(establishedPicker.replace(/\s+/g, " ")).toContain(
-      "const visible = refreshRequired || currentIds.length > 0 ||",
-    );
-    expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
-    expect(establishedRoute).toContain("const variableSetComposerBlocked =");
-    expect(establishedRoute).toContain("variableSetPickerState.saving ||");
-    expect(establishedRoute).toMatch(/useSessionVariableSetPickerState\(\s*props\.session,?\s*\)/);
-    expect(establishedRoute).toContain("getComposerSendBlocker({");
-    expect(establishedRoute).toContain("variableSetBlocked: variableSetComposerBlocked,");
-    expect(establishedRoute).toContain("sendBlocked: () => composerSendBlocker() !== null,");
-    expect(establishedPicker).toContain("props.canControl && props.canAttach");
+    for (const text of [route, establishedRoute]) {
+      expect(text).not.toContain("session-variable-set-picker");
+      expect(text).not.toContain("variableSetIds");
+    }
     expect(
-      establishedRoute.match(
-        /<SessionVariableSetPicker\s+session=\{props\.session\}\s+canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
-      ),
-    ).toHaveLength(1);
-    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(1);
-    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(1);
-    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(1);
-    expect(establishedRoute).toContain(
-      "const [variableSetPickerState, setVariableSetPickerState] =",
-    );
-    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(1);
-    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(1);
-    expect(establishedPicker).toContain(
-      "const busy = workPending || props.goalActive || props.voiceActive",
-    );
-    expect(establishedPicker).toContain("sessionHasVariableSetBlockingWork(props.session)");
-    expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
-    expect(establishedPicker).toContain(
-      "Attached Only-me Variable Sets are available for your work in this session.",
-    );
-    expect(establishedControl).not.toContain("PersonalResourceScopeChoice");
-    expect(establishedControl).not.toContain('value: "once"');
-    expect(establishedControl).not.toContain('value: "session"');
-    expect(establishedControl).not.toContain('value: "always"');
-    expect(establishedControl).not.toContain('type="checkbox"');
-    expect(establishedControl).not.toContain("is available in this private session");
-    expect(establishedControl).not.toContain("will be used only for messages you send");
+      await Bun.file(
+        `${import.meta.dir}/components/session/session-variable-set-picker-panel.tsx`,
+      ).exists(),
+    ).toBe(false);
   });
 
   test("announces pin results through an independent live region", async () => {
     const [header, list] = await Promise.all([
-      source("components/rail/session-header.tsx"),
-      source("components/rail/session-list.tsx"),
+      source("../../../packages/react/src/app/components/rail/session-header.tsx"),
+      source("../../../packages/react/src/app/components/rail/session-list.tsx"),
     ]);
     // A persistent description on the action button would replay the previous
     // pin/unpin result every time keyboard focus returns. The result belongs in
@@ -392,7 +362,11 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps pin and archive one click away while the full row menu stays on right-click", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const [list, shared, siteRow] = await Promise.all([
+      source("../../../packages/react/src/app/components/rail/session-list.tsx"),
+      source("../../../packages/react/src/app/components/rail/rail-row-quick-actions.tsx"),
+      source("../../../packages/react/src/app/components/rail/site-session-group-heading.tsx"),
+    ]);
     const rowStart = list.indexOf("function SessionRow(");
     const quickActionsStart = list.indexOf("function RowQuickActions(");
     const overflowStart = list.indexOf("function RowActionsMenu(");
@@ -403,23 +377,39 @@ describe("session control surface architecture", () => {
       list.indexOf("function EmptySessions", overflowStart),
     );
 
-    expect(row).toContain("<ContextMenu>");
+    // The row's menu closes its hover preview when it opens (#5368), so the
+    // root takes props; match the root element, not ContextMenuTrigger etc.
+    expect(row).toMatch(/<ContextMenu[\s>]/);
     expect(row).toContain("<ContextMenuContent");
     expect(row).toContain("<RowQuickActions");
-    expect(quickActions).toContain('aria-label={session.pinned ? "Unpin session" : "Pin session"}');
+    expect(quickActions).toContain('label={session.pinned ? "Unpin session" : "Pin session"}');
+    // There is one archive, for people who can control the chat: no personal
+    // hide and no Restore (an archived chat is not in the list at all).
     expect(quickActions).toContain(
-      'aria-label={session.archived ? "Restore session" : "Archive session"}',
+      'label={session.parentSessionId !== null ? archiveLabel : "Archive session"}',
     );
-    expect(quickActions).toContain("group-hover:opacity-100");
-    expect(quickActions).toContain("group-focus-within:opacity-100");
-    expect(quickActions).toContain("pointer-coarse:hidden");
+    expect(quickActions).not.toContain("Hide for me");
+    expect(quickActions).not.toContain("Restore session");
+    // A spawned row archives its workstream instead of offering nothing.
+    expect(quickActions).not.toContain("parentSessionId === null");
+    expect(quickActions).toContain("onArchive(target, true");
+    // Session and Site rows share one placement and one tooltip button.
+    expect(quickActions).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
+    expect(siteRow).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
+    expect(siteRow).toContain("<ContextMenuContent");
+    expect(siteRow).toContain("RAIL_ROW_OVERFLOW_TRIGGER_CLASS");
+    expect(shared).toContain("group-hover:opacity-100");
+    expect(shared).toContain("group-focus-within:opacity-100");
+    expect(shared).toContain("pointer-coarse:hidden");
+    expect(shared).toContain("pointer-coarse:inline-flex");
+    expect(shared).toContain("<TooltipContent");
     expect(quickActions).not.toContain("<DropdownMenu>");
     expect(overflow).toContain('data-session-actions-mode="overflow"');
-    expect(overflow).toContain("pointer-coarse:inline-flex");
+    expect(overflow).toContain("RAIL_ROW_OVERFLOW_TRIGGER_CLASS");
   });
 
   test("keeps rail optimistic pin overrides out of the header projection", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain("const serverSessions = useMemo");
     expect(list).toContain("const projected = serverSessions.find");
     const paginationKey = list.match(/const paginationKey = sessionPageKey\([\s\S]*?\n  \);/)?.[0];
@@ -430,9 +420,12 @@ describe("session control surface architecture", () => {
   });
 
   test("loads the first page and older sessions independently in each project", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain('sessionPaginationProjectGroup(null, "Default")');
-    expect(list).toContain("limit: 50");
+    expect(list).toContain(
+      'const pageSize = group.kind === "channel" ? SESSION_GROUP_VISIBLE_STEP : 50;',
+    );
+    expect(list).toContain("includePinned: false");
     expect(list).toContain('if (!channelMode || search || browseStatus === "archived") return;');
     expect(list).toContain("void loadMoreInGroup(group);");
     expect(list).toContain("sessionPaginationProjectGroup(section.channelId, section.name)");
@@ -440,17 +433,41 @@ describe("session control surface architecture", () => {
   });
 
   test("bounds rendered groups independently of cached pages and keyboard navigation", async () => {
-    const list = await source("components/rail/session-list.tsx");
-    expect(list).toContain(
-      "sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId)",
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
+    expect(list).toMatch(
+      /sessionGroupWindowNodes\(\s*nodes,\s*visibleCountForGroup\(key\),\s*activeSessionId,/,
     );
     expect(list).toContain("visibleForestRows(visibleForest, expanded, activeSessionId)");
     expect(list).toContain("visibleNodes={visibleNodesForGroup(");
     expect(list).toContain("Show ${revealCount} more");
   });
 
+  test("fills spare rail height before offering Show more", async () => {
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
+    // The window is the manual step plus a measured fill, and fill loads stay quiet.
+    expect(list).toContain("baseCountForGroup(key) + fillCountForGroup(key)");
+    expect(list).toContain(
+      "planSessionGroupFill(fillTargetsRef.current, counts, freeRows, shrink)",
+    );
+    expect(list).toContain('list?.closest<HTMLElement>("[data-rail-scroll-viewport]")');
+    expect(list).toContain(
+      "void loadMoreInGroup(target.group, false, visible - target.loaded, false);",
+    );
+  });
+
+  test("restores manual Show more windows when the rail remounts", async () => {
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
+    expect(list).toContain("readSessionGroupWindows(groupWindowMemoryId, paginationKey)");
+    expect(list).toContain(
+      "writeSessionGroupWindows(groupWindowMemoryId, paginationKey, groupWindows.counts)",
+    );
+    expect(list).toContain("sessionGroupWindowMemoryId(\n    context.accessContext.subjectId,");
+    // Restored windows load their rows even with no spare height to fill.
+    expect(list).toContain("const restored = target.base > SESSION_GROUP_VISIBLE_STEP;");
+  });
+
   test("separates archive browsing and hydrates sparse creator groups", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain("browseSessions.filter((session) => !session.archived)");
     expect(list).toContain('browseStatus === "archived" || session.archived');
     expect(list).toContain('label="Archived"');
@@ -463,7 +480,7 @@ describe("session control surface architecture", () => {
   });
 
   test("hands keyboard focus across optimistic project-move remounts", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');
     // Default (channel id null) is the first row of the same project list.
     expect(list).toContain('[{ id: null, name: "Default" }, ...channels].map');
@@ -475,10 +492,13 @@ describe("session control surface architecture", () => {
   });
 
   test("reconciles the open session project without regressing an owned optimistic move", async () => {
-    const list = await source("components/rail/session-list.tsx");
-    const move = await source("lib/session-channel-move.ts");
-    const route = await source("routes/session.tsx");
-    const appContext = await source("context.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
+    const move = await source("../../../packages/react/src/app/lib/session-channel-move.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    const appContext = [
+      await source("context.tsx"),
+      await source("../../../packages/react/src/app/app-state.tsx"),
+    ].join("\n");
     const lineageHook = await source("../../../packages/react/src/hooks/use-session-lineage.ts");
     expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
@@ -552,7 +572,7 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps creator grouping while removing the retired creator/date filter controls", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain("const creatorSessions = useMemo");
     expect(list).toContain("sessionCreatorLabelMap(creatorSessions)");
     expect(list).not.toContain("Date filter field");
@@ -560,41 +580,51 @@ describe("session control surface architecture", () => {
     expect(list).toContain("archiveStatus: browseStatus");
     expect(list).toContain("sortBy: browseSortBy");
     expect(list).toContain("onClick={openSearchDialog}");
-    expect(list).toContain("() => requestSessionSearch(rail.workspaceId)");
+    // Search opens the command menu, whose "Search messages" action leads to
+    // full-history search; the menu returns focus to its opener itself.
+    expect(list).toContain(
+      "const openSearchDialog = useCallback(() => requestCommandMenu(windowEvents), [windowEvents]);",
+    );
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
     expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
   });
 
   test("the rail owns the lazy search dialog across conversation navigation", async () => {
-    const rail = await source("components/rail/rail-context.tsx");
-    expect(rail).toContain('lazy(() => import("@/components/session/session-search-dialog"))');
-    expect(rail).toContain("window.addEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
-    expect(rail).toContain("window.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
-    expect(rail).toContain(".detail?.workspaceId !== workspaceId");
+    const rail = await source("../../../packages/react/src/app/components/rail/rail-context.tsx");
+    expect(rail).toContain('lazy(() => import("../session/session-search-dialog"))');
+    expect(rail).toContain("windowEvents.addEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
+    expect(rail).toContain("windowEvents.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
+    expect(rail).toContain("detail?.workspaceId !== workspaceId");
     expect(rail.match(/<SessionSearchDialog\b/g)).toHaveLength(1);
     expect(rail).toContain("key={`${appContext.accessContext.subjectId}:${workspaceId}`}");
     expect(rail).toContain("workspaceId={workspaceId}");
     expect(rail).toContain("open={searchOpen}");
-    expect(rail).toContain("onOpenChange={setSearchOpen}");
-  });
-
-  test("the established-session Variable Set editor stays behind its lazy panel", async () => {
-    // A direct session load must not carry the editor: the "+" menu mounts it
-    // on demand (see test/e2e/session-lazy-panels.browser.e2e.ts).
-    const route = await source("routes/session.tsx");
-    expect(route).toContain('from "@/components/session/session-variable-set-picker-panel"');
-    expect(route).not.toContain('from "@/components/session/session-variable-set-picker"');
-    const panel = await source("components/session/session-variable-set-picker-panel.tsx");
-    expect(panel).toContain('import("@/components/session/session-variable-set-picker")');
-    // Only a type-only import of the implementation module is allowed.
-    expect(panel).not.toMatch(
-      /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
-    );
-    expect(panel).toContain(".catch(() => SessionVariableSetPickerLoadFailed)");
+    expect(rail).toContain("onOpenChange={changeSearchOpen}");
   });
 
   test("the retired client-side queue model is gone", async () => {
     expect(await Bun.file(`${import.meta.dir}/lib/queue.ts`).exists()).toBe(false);
+  });
+
+  // A Codex remote-compaction chat whose ChatGPT plan was disconnected used to
+  // show "Connect a model" with nothing to pick: the picker and the
+  // unavailable-model replacement were limited to Codex models.
+  test("a Codex chat's picker and model replacement offer every model", async () => {
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    const picker = route.slice(
+      route.indexOf("<ModelPicker"),
+      route.indexOf("/>", route.indexOf("<ModelPicker")),
+    );
+    expect(picker).toContain("rows={modelCatalog.rows}");
+    expect(picker).not.toContain("codexOnly");
+    const replacement = route.slice(
+      route.indexOf("unavailableModelReplacement({"),
+      route.indexOf("})", route.indexOf("unavailableModelReplacement({")),
+    );
+    expect(replacement).toContain("rows: modelCatalog.rows");
+    expect(replacement).not.toContain("codexOnly");
+    const mobile = await source("../../mobile/app/session/[id].tsx");
+    expect(mobile).not.toContain("codexOnly");
   });
 });

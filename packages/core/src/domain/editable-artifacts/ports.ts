@@ -25,6 +25,7 @@ import type {
   EditableArtifactClientTransactionId,
   EditableArtifactCommittedTransactionRecord,
   EditableArtifactModality,
+  EditableArtifactAudience,
   EditableArtifactRequestHash,
   EditableArtifactSerialized,
   EditableArtifactSerializedCommittedTransactionRecord,
@@ -222,6 +223,8 @@ export type CreateEditableArtifactStoreRequest = Readonly<{
   modality: EditableArtifactModality;
   title: string;
   createdBySubjectId: string;
+  /** Who can open it; absent means the whole workspace with no owner. */
+  audience?: EditableArtifactAudience;
   genesisSnapshot: EditableArtifactSnapshotMetadata;
   originalImport?: Readonly<
     EditableArtifactOriginalImport & { blobRefId: EditableArtifactStableId }
@@ -409,6 +412,14 @@ export interface EditableArtifactStorePort {
     artifactId: EditableArtifactId,
     expectedAuthorizationRevision: number,
   ): Promise<ReadEditableArtifactAtAuthorizationRevisionResult>;
+  /** Optional bounded metadata read; each result retains its own revision fence. */
+  readArtifactsAtAuthorizationRevisions?(
+    scope: EditableArtifactScope,
+    requests: readonly Readonly<{
+      artifactId: EditableArtifactId;
+      expectedAuthorizationRevision: number;
+    }>[],
+  ): Promise<readonly PromiseSettledResult<ReadEditableArtifactAtAuthorizationRevisionResult>[]>;
   /** Short consistent read; no write lock may remain held after it resolves. */
   readTransactionBasis(
     scope: EditableArtifactScope,

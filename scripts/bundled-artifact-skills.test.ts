@@ -3,17 +3,13 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS } from "@opengeni/contracts";
-const ARTIFACT_SKILL_NAMES = [
-  "opengeni-spreadsheets",
-  "opengeni-documents",
-  "opengeni-presentations",
-] as const;
-const SITE_SKILL_NAMES = ["opengeni-sites"] as const;
-const VIDEO_SKILL_NAMES = ["opengeni-video-generation"] as const;
+const ARTIFACT_SKILL_NAMES = ["spreadsheets", "documents", "presentations"] as const;
+const SITE_SKILL_NAMES = ["sites"] as const;
+const VIDEO_SKILL_NAMES = ["video-generation"] as const;
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMMAND_KINDS_BY_SKILL = {
-  "opengeni-documents": [
+  documents: [
     "document.flags.set",
     "paragraph.add",
     "paragraph.edit",
@@ -30,14 +26,8 @@ const COMMAND_KINDS_BY_SKILL = {
     "comment.resolved.set",
     "tracked-change.add",
   ],
-  "opengeni-spreadsheets": [
-    "sheet.create",
-    "sheet.rename",
-    "sheet.delete",
-    "cells.set",
-    "range.clear",
-  ],
-  "opengeni-presentations": [
+  spreadsheets: ["sheet.create", "sheet.rename", "sheet.delete", "cells.set", "range.clear"],
+  presentations: [
     "master.create",
     "layout.create",
     "slide.create",
@@ -62,6 +52,7 @@ describe("bundled editable-artifact skills", () => {
     expect((await readdir(join(repoRoot, ".agents", "skills"))).sort()).toEqual([
       "opengeni",
       "opengeni-client",
+      "opengeni-setup",
       "run-opengeni",
     ]);
   });
@@ -113,17 +104,27 @@ describe("bundled editable-artifact skills", () => {
 
   test("teaches Sites to respect viewer authority and normal tool approvals", async () => {
     for (const name of SITE_SKILL_NAMES) {
-      const skill = await readFile(
-        join(repoRoot, "packages/runtime/src/bundled_site_skills", name, "SKILL.md"),
-        "utf8",
+      const directory = join(repoRoot, "packages/runtime/src/bundled_site_skills", name);
+      const main = await readFile(join(directory, "SKILL.md"), "utf8");
+      expect(main).toStartWith("---\nname:");
+      expect(main).toContain("opengeni__artifacts_create");
+      expect(main).toContain("opengeni__artifacts_get_source");
+      expect(main).toContain("opengeni__artifacts_publish");
+      // App guidance lives in references the main file names.
+      const references = await Promise.all(
+        (await readdir(join(directory, "references"))).map(async (file) => {
+          expect(main).toContain(`references/${file}`);
+          return await readFile(join(directory, "references", file), "utf8");
+        }),
       );
-      expect(skill).toStartWith("---\nname:");
+      const skill = [main, ...references].join("\n");
       expect(skill).toContain('from "@opengeni/sdk/site"');
-      expect(skill).toContain("opengeni__artifacts_create");
-      expect(skill).toContain("opengeni__artifacts_get_source");
-      expect(skill).toContain("opengeni__artifacts_publish");
       expect(skill).toContain("publishing it grants\n   no tool authority");
       expect(skill).toContain("normal tool approval rules");
+      // In Opengeni the frame asks the viewer; a published hostname cannot.
+      expect(skill).toContain("in Opengeni the frame asks the viewer to confirm");
+      expect(skill).toContain("site_tool_consent_requires_opengeni");
+      expect(skill).toContain("offer to set it to Allow in the chat");
       expect(skill).toContain("viewer's\n   live workspace, permission, and connection authority");
       expect(skill).not.toContain("declined approvals");
       expect(skill).not.toContain("one-shot approval dialog");

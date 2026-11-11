@@ -5,6 +5,8 @@ import {
   DelegatedAccessTokenPayload,
   FIRST_PARTY_MCP_TOOL_NAMES,
   RETIRED_AGENT_LEARNING_TOOL_NAMES,
+  RETIRED_SECRET_TOOL_NAMES,
+  SESSION_APP_ACTION_TOOL_NAMES,
 } from "../src";
 
 const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
@@ -28,7 +30,6 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "reddit_thread_fetch",
   "reddit_posts_sync",
   "reddit_post_reply",
-  "slack_bot_list_channels",
   "slack_bot_search",
   "slack_bot_channel_history",
   "slack_bot_thread_replies",
@@ -39,8 +40,10 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "slack_bot_upload_file",
   "slack_bot_post_message",
   "slack_bot_delete_message",
-  "slack_bot_prepare_message",
-  "slack_bot_send_prepared_message",
+  "slack_agent_handoff",
+  "slack_agent_suggest",
+  "slack_agent_chats",
+  "slack_agent_propose",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -79,13 +82,28 @@ describe("first-party MCP tool-name contract", () => {
   });
 
   test("keeps connector-wide tools outside the ordinary default selection", () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toEqual(
+      expect.arrayContaining([
+        "slack_bot_list_channels",
+        "slack_bot_prepare_message",
+        "slack_bot_send_prepared_message",
+      ]),
+    );
     expect(
       FIRST_PARTY_MCP_TOOL_NAMES.filter(
         (name) =>
           !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(name) &&
-          !(RETIRED_AGENT_LEARNING_TOOL_NAMES as readonly string[]).includes(name),
+          !(RETIRED_AGENT_LEARNING_TOOL_NAMES as readonly string[]).includes(name) &&
+          !(RETIRED_SECRET_TOOL_NAMES as readonly string[]).includes(name),
       ),
     ).toEqual([...EXPLICIT_ONLY_CONNECTOR_TOOLS]);
+  });
+
+  test("selects the app-action tools by default, so every chat a person started has them", () => {
+    for (const name of SESSION_APP_ACTION_TOOL_NAMES) {
+      expect(FIRST_PARTY_MCP_TOOL_NAMES).toContain(name);
+      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain(name);
+    }
   });
 
   test("selects structured Knowledge tools and excludes retired learning tools by default", () => {

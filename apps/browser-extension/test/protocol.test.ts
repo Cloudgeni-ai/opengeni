@@ -4,19 +4,31 @@ import {
   browserProduct,
   extensionArchitecture,
   extensionPlatform,
+  isAllowedDebuggerMethod,
   parseExtensionCommand,
   parseExtensionReady,
   tabUnavailableReason,
 } from "../src/protocol";
 
 describe("attached browser extension protocol", () => {
+  test("admits focus emulation and clearing a size, but no other Emulation method", () => {
+    expect(isAllowedDebuggerMethod("Emulation.setFocusEmulationEnabled")).toBe(true);
+    expect(isAllowedDebuggerMethod("Emulation.clearDeviceMetricsOverride")).toBe(true);
+    expect(isAllowedDebuggerMethod("DOMSnapshot.captureSnapshot")).toBe(true);
+    expect(isAllowedDebuggerMethod("DOMSnapshot.enable")).toBe(false);
+    expect(isAllowedDebuggerMethod("Input.dispatchMouseEvent")).toBe(true);
+    expect(isAllowedDebuggerMethod("Emulation.setDeviceMetricsOverride")).toBe(false);
+    expect(isAllowedDebuggerMethod("Browser.close")).toBe(false);
+    expect(isAllowedDebuggerMethod("Input")).toBe(false);
+  });
+
   test("projects ordinary tabs and marks Chrome-owned pages unavailable", () => {
     expect(
       attachedTab({
         id: 7,
         windowId: 2,
         index: 1,
-        title: "OpenGeni",
+        title: "Opengeni",
         url: "https://opengeni.ai/",
         active: true,
         pinned: false,
@@ -111,6 +123,71 @@ describe("attached browser extension protocol", () => {
         connectionGeneration: "generation-1",
         payload: { type: "debugger.poll", afterSequence: 0, limit: 1, surprise: true },
       }),
+    ).toThrow("unknown fields");
+  });
+
+  test("parses a command fenced to one debugger attachment", () => {
+    const envelope = (attachment: unknown) => ({
+      type: "command",
+      protocolVersion: 1,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      deviceId: "22222222-2222-4222-8222-222222222222",
+      connectionGeneration: "generation-1",
+      payload: {
+        type: "debugger.command",
+        tabId: "7",
+        attachment,
+        method: "DOM.enable",
+        params: {},
+      },
+    });
+    expect(parseExtensionCommand(envelope(3)).payload).toEqual({
+      type: "debugger.command",
+      tabId: "7",
+      attachment: 3,
+      method: "DOM.enable",
+      params: {},
+    });
+    for (const invalid of [0, -1, 1.5, "3"])
+      expect(() => parseExtensionCommand(envelope(invalid))).toThrow();
+  });
+
+  test("parses a bounded download lookup", () => {
+    const envelope = (payload: Record<string, unknown>) => ({
+      type: "command",
+      protocolVersion: 1,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      deviceId: "22222222-2222-4222-8222-222222222222",
+      connectionGeneration: "generation-1",
+      payload,
+    });
+    expect(
+      parseExtensionCommand(
+        envelope({
+          type: "downloads.find",
+          url: "https://example.test/report",
+          startedAfter: "2026-10-22T13:00:00.000Z",
+        }),
+      ).payload,
+    ).toEqual({
+      type: "downloads.find",
+      url: "https://example.test/report",
+      startedAfter: "2026-10-22T13:00:00.000Z",
+    });
+    expect(() =>
+      parseExtensionCommand(
+        envelope({ type: "downloads.find", url: "https://example.test/", startedAfter: "soon" }),
+      ),
+    ).toThrow();
+    expect(() =>
+      parseExtensionCommand(
+        envelope({
+          type: "downloads.find",
+          url: "https://example.test/",
+          startedAfter: "2026-10-22T13:00:00.000Z",
+          query: "all",
+        }),
+      ),
     ).toThrow("unknown fields");
   });
 

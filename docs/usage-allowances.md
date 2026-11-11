@@ -2,16 +2,20 @@
 
 Usage allowances let a product set a workspace spending ceiling and optional
 member ceilings without building its own model-usage meter. They govern actual
-OpenGeni credit debits, not tokens, estimated provider expense, or purchased
+Opengeni credit debits, not tokens, estimated provider expense, or purchased
 seat counts. The organization's credit balance and ordinary execution
 authority remain separate requirements.
+
+Allowances are separate from [task usage limits](session-usage-limits.md),
+which stop one task (a root session and its descendants) at an
+API-equivalent model-usage amount whatever funds it. A task stopped by its own
+limit is never reported as allowance or credit exhaustion.
 
 Start with [product integration](product-integration.md) for organization keys,
 tenant-to-workspace mapping, and explicit external-member onboarding. Typed
 SDK details live in the [SDK reference](../packages/sdk/README.md); the
 allowance schemas live in `packages/contracts/src/usage-allowances.ts`.
-Storage/counter lifecycle: `packages/db/src/usage-allowances.ts` and
-`packages/db/drizzle/0552_usage_allowances.sql`; HTTP authority:
+Storage/counter lifecycle: `packages/db/src/usage-allowances.ts`; HTTP authority:
 `apps/api/src/routes/usage-allowances.ts`.
 
 Accounting reads frozen, content-free attribution receipts for accepted turns,
@@ -21,18 +25,19 @@ access and do not rewrite existing session/usage visibility policies.
 
 ## Rollout and activation
 
-`OPENGENI_USAGE_ALLOWANCES_ENABLED` defaults to `false`. It gates creation
-and changes of allowance configuration, grants, and non-null member rules,
-not reading or enforcing policies already persisted.
-While disabled, those producer writes return HTTP 409. Authorized
-exact-version clear and `rule: null` recovery writes remain available; neither
-operation bypasses its normal authority or version checks.
+`OPENGENI_USAGE_ALLOWANCES_ENABLED` defaults to `true`. It gates creation
+and changes of allowance configuration, grants, non-null member rules and the
+per-person Personal workspace limit, not reading or enforcing policies already
+persisted. Setting it to `false` is an operator opt-out: those producer writes
+then return HTTP 409. Authorized exact-version clear and `rule: null` recovery
+writes remain available; neither operation bypasses its normal authority or
+version checks.
 
-1. Apply migrations 0552–0554 together and provision the matching database roles.
-2. Upgrade **every API, control-worker, and turn-worker consumer** to the
-   allowance-aware release before allowing producers to write new policies.
-3. Enable `OPENGENI_USAGE_ALLOWANCES_ENABLED` for the API producers, then
-   configure plans through organization-authorized backend/admin flows.
+It started as a rollout gate (apply migrations 0552–0554, upgrade every API,
+control worker and turn worker, then enable producers). That precondition now
+always holds: a release only runs on a database that has applied the whole
+0000–0977 migration baseline, which includes 0552–0554, so no
+pre-allowance consumer can still be running beside it.
 
 The flag is not a budget-enforcement kill switch. Setting it back to false
 must not make persisted policies invisible or let older consumers execute
@@ -72,6 +77,8 @@ database for each test file.
 
 Every amount named `includedCredits`, `credits`, `limit`, `used`, `remaining`,
 or `grantsRemaining` is an integer USD micro: **1 USD = 1,000,000 micros**.
+Usage responses say so in `unit: "usd_micros"` (absent from older servers,
+same unit).
 Use nonnegative safe integers for configured amounts; a grant must be positive.
 Never pass floating-point dollars or reinterpret a credit as one token. Shares
 and threshold fractions are ordinary dimensionless numbers.
@@ -90,9 +97,10 @@ Allowances are ceilings, not reservations or a second prepaid wallet:
   there is no aggregate overshoot bound of one call. Already incurred cost is
   not reversed. The next admission is refused once the applicable ceiling is
   exhausted.
-- Externally funded work, including connected subscriptions and BYOK calls
-  without an OpenGeni credit debit, does not consume this allowance. Zero
-  OpenGeni credit charge does not imply zero upstream expense.
+- By default, externally funded work, including connected subscriptions and
+  BYOK calls without an Opengeni credit debit, does not consume this
+  allowance. Zero Opengeni credit charge does not imply zero upstream expense.
+  Set `unbilledUsage: "list_price"` to count that work too (see below).
 - Exhaustion does not revoke membership or read access. Preserve conversation
   history and other authorized read/export paths.
 
@@ -103,7 +111,7 @@ from a progress bar, token count, or a provider-price comparison.
 
 ```ts
 const allowance = await og.setWorkspaceAllowance(workspaceId, {
-  includedCredits: 100_000_000, // $100 of OpenGeni credit debits
+  includedCredits: 100_000_000, // $100 of Opengeni credit debits
   period: "monthly",
   anchorDay: 1,
   memberDefault: "equal_share",
@@ -121,6 +129,7 @@ The configuration is:
   anchorDay?: number; // integer 1..31, UTC
   memberDefault?: "none" | "equal_share" | { share: number } | { credits: number };
   thresholds?: { workspace?: number[]; member?: number[] };
+  unbilledUsage?: "ignore" | "list_price";
 }
 ```
 
@@ -138,13 +147,75 @@ Omitted workspace/member threshold lists default to `[0.8, 1]`; configured
 thresholds must be greater than zero and at most one, with at most 16 values
 per list.
 
+### A limit per person for Personal workspaces
+
+A Personal workspace belongs to one person, so the organization limits it
+per person rather than per workspace: one organization setting caps what each
+person spends from the organization's credits in their own Personal workspace
+each calendar month (UTC). Null, the default, means no limit.
+
+```ts
+await og.updateOrganizationPrivacySettings(organizationId, {
+  personalWorkspaceMonthlyCredits: 50_000_000, // $50 a person a month; null removes it
+});
+```
+
+It sits with the organization's other Personal workspace choices, so the same
+owners, admins and administration-capable organization keys change it; agents
+never do, even with full access.
+Like a workspace budget, a deployment that sets
+`OPENGENI_USAGE_ALLOWANCES_ENABLED=false` refuses new limits; removing one
+always works.
+
+- It applies to a Personal workspace with no budget of its own, and acts as
+  that workspace's monthly budget: reads (`/usage`, `/usage/me`) report it as
+  the workspace limit with `resetsAt` at the next month, and admission refuses
+  with the usual `allowance_exhausted` (`scope: "workspace"`) once it is spent.
+- It meters the calendar-month counters every workspace keeps, so turning it
+  on mid-month counts what the month has already spent.
+- Work paid by the person's own model plans or keys spends no credits, so
+  it never counts and never stops.
+- It applies to the running month only. A past month reads without a limit:
+  the organization keeps no history of the setting.
+- There are no threshold notifications for it; the person sees it on their
+  Usage page and in the composer's near/at-limit notice.
+
+### Counting usage that spends no credits
+
+`unbilledUsage` decides how model calls that debit no Opengeni credits count:
+calls on a connected subscription, workspace- or organization-owned provider
+keys, and deployments that run without credit billing.
+
+- `"ignore"` (the default) keeps the allowance credit-only, as described above.
+- `"list_price"` counts each such call at its configured list-price estimate,
+  in the same USD micros, and admits those turns against the workspace and
+  member ceilings exactly like credit-funded turns. Use this when your product
+  sells usage to its own customers while the model calls run on your own
+  subscription or keys.
+
+A call without a configured list price for its model is not counted; check
+that every model your workspace can select has list pricing before relying on
+the ceiling. Credit-funded calls are always counted from their actual debit,
+so one call is never counted twice.
+
 | Operation | Required authority |
 | --- | --- |
-| Read workspace configuration | Workspace administration, verified human `account:admin`, or organization-key read authority |
+| Read workspace configuration | A person who can start chats in the workspace (a person's session holding `sessions:create`), workspace administration, verified human `account:admin`, or organization-key read authority |
 | Read the full usage/member page | Operational workspace access plus workspace administration, `account:admin`, or organization-key read authority |
 | Set or clear workspace configuration; add workspace grants | Full-access organization API key with literal `api_keys:manage`, or verified human `account:admin` |
 | Set an existing member's split | Verified human workspace administrator or full-access organization key; `account:admin` alone is insufficient |
 | Read `/usage/me` | The authenticated member; external products assert their verified user through `asUser` |
+
+Reading the configuration shows a member the budget and how members share
+it, never anyone else's usage. The person's own delegated apps acting for them
+can read it too. Agents, services and other session-bound tokens can't, even
+when they carry `sessions:create`. Neither can anyone using Opengeni through
+another product: a product's user (`external_user:`) in an embedded chat or
+Site, or anyone acting through an organization key (asUser), so the product's
+key gains no read it lacks. In a chat, app actions offer this read to members
+acting as themselves, and not to people in an embedded chat.
+Viewers (`workspace:read` only) still see just their own usage through
+`/usage/me`.
 
 A workspace administrator cannot raise the workspace budget, clear it, or add
 grants merely by being an administrator. A workspace-scoped key is not a
@@ -216,25 +287,24 @@ Setting an allowance never onboards or restores a member.
 
 | Rule | Meaning |
 | --- | --- |
-| `{ share: 0.25 }` | Member ceiling scales with the current workspace pool |
+| `{ share: 0.25 }` | Member ceiling scales with the period's workspace pool |
 | `{ credits: 20_000_000 }` | Fixed $20 member ceiling |
 | `null` | Remove the override and use `memberDefault` |
 | Default `"none"` | No separate member ceiling; the workspace ceiling still applies |
 | Default `"equal_share"` | Equal shares for eligible current human members |
 | Default `{ share }` or `{ credits }` | That rule for each member without an override |
 
-The share base is the **current pool: included credits plus remaining
-unexpired grants**. It is not a reserved allocation or the total amount ever
-granted. A grant can expand share-based ceilings; consumption and expiry can
-change them. A fixed-credit member ceiling does not grow automatically on
+The share base is the **period's pool, the workspace ceiling: included
+credits plus grants consumed in the selected period plus remaining unexpired
+grants**. Usage counts the whole period, so its ceiling does too: spending a
+grant credit keeps it in both the usage and the ceiling instead of shrinking
+every member's share. A share-based member ceiling is therefore
+`floor(workspace.limit * share)`, and an equal share is
+`floor(workspace.limit / eligible members)`. It stays steady through the
+period. A grant raises it, grant expiry lowers it, and a new period starts it
+again from what is left. It is not a reserved allocation or the total amount
+ever granted. A fixed-credit member ceiling does not grow automatically on
 top-up.
-
-The workspace meter reconstructs its ceiling as included credits plus grants
-consumed in the selected period plus remaining unexpired grants. Already
-consumed grant credits therefore stay counted in the workspace's usage/limit
-instead of shrinking both sides of the meter. The member share base excludes
-those consumed grants. These are intentionally different formulas; do not
-derive a member ceiling by multiplying `workspace.limit`.
 
 Shares above `1` and sums above `1` are valid. A share of `1.5` is a member
 ceiling, not permission to spend beyond the workspace ceiling. The workspace
@@ -250,9 +320,9 @@ model or grant Personal workspace access to an organization service key.
 
 ## Recipe: a per-seat plan with equal split
 
-Suppose a product includes $20 of OpenGeni credit usage per paid seat, with
+Suppose a product includes $20 of Opengeni credit usage per paid seat, with
 five seats in one customer workspace. The product owns the paid-seat count and
-billing; OpenGeni owns the settled usage:
+billing; Opengeni owns the settled usage:
 
 ```ts
 const usdMicrosPerSeat = 20_000_000;
@@ -270,9 +340,10 @@ const allowance = await og.setWorkspaceAllowance(workspaceId, {
 ```
 
 Five eligible members initially get equal ceilings against the $100 pool.
-If paid seats and the OpenGeni roster differ, the split follows the roster,
+If paid seats and the Opengeni roster differ, the split follows the roster,
 not the paid-seat count. Decide which users are admitted before applying the
-recipe; `asUser` and the proxy never create membership.
+recipe; an `asUser` request through a key with `members:manage` adds a missing
+member on first use (see [product integration](product-integration.md)).
 On a seat-plan change, update the included amount with the saved version.
 Do not treat a mid-period config update as a fresh usage period.
 
@@ -339,7 +410,8 @@ in earliest-expiry order (nonexpiring grants last). Only the portion actually
 covered by a grant reduces its balance; overshoot is still recorded as usage.
 Unused unexpired grants are not renewed or erased at a monthly reset.
 
-Only unconsumed, unexpired grant capacity contributes to the current pool.
+Unexpired grant capacity counts toward the period's pool, together with grant
+credits already consumed in the period. Expired capacity does not count.
 Share-based rules follow that pool; fixed-credit rules need a separate
 versioned adjustment if the product intends to raise them too.
 Show an updated usage read rather than adding the grant amount to a cached
@@ -382,6 +454,7 @@ returns:
 
 ```ts
 {
+  unit: "usd_micros",
   period: { start: string | null, end: string | null },
   workspace: {
     limit: number | null, used: number, remaining: number | null,
@@ -413,7 +486,10 @@ and `"exhausted"` even when no usage has been recorded.
 
 `period: "YYYY-MM"` selects a historical allowance window; use its returned
 `start`/`end`, particularly with a non-first-day anchor, rather than inventing
-calendar bounds. Reads do not execute model work.
+calendar bounds. `period` is the window the counters cover: without a
+configured budget, usage still counts per calendar month (UTC), so the current
+read returns that month. It is null for a nonrenewing budget's open end, and
+for a past month with no recorded history. Reads do not execute model work.
 Configuration/usage GETs and admission checks have no persisted read-side
 effects: they do not create snapshots, counters, notifications, or rollover
 jobs. The ordinary API dispatch maintenance loop owns that lifecycle.
@@ -443,11 +519,12 @@ do not promise complete allowance history from before the feature was enabled.
 ## Recipe: a fraction-only browser meter
 
 The packaged [session proxy](product-integration.md#default-integration-the-full-conversation)
-serves **only** `GET /v1/workspaces/:workspaceId/usage/me` for allowance reads.
+forwards `GET /v1/workspaces/:workspaceId/usage/me` like every workspace route.
 It resolves the authenticated product user on every request, pins the workspace,
 and forwards through `asUser`; there is no service-key fallback or subject
-selector. Only `period` is accepted as a usage query parameter. Full roster
-reads, configuration, grants, and member mutations are not proxied.
+selector. Full roster reads, configuration, grants, and member mutations need
+permissions an ordinary member does not hold; a product that never offers them
+can also close them with `refuse`.
 
 ```ts
 // Backend: the usual product-authenticated conversation proxy.
@@ -461,7 +538,7 @@ const handler = createSessionProxyHandler(og, {
   authorizeMutation: verifyCsrf,
 });
 
-// Browser: no OpenGeni key. Use the root SDK client against the proxy.
+// Browser: no Opengeni key. Use the root SDK client against the proxy.
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 const usage = await client.getMyUsage(workspaceId, { period: "current" });
 const own = usage.members[0];
@@ -511,12 +588,14 @@ the same reads and administration as free functions over `requestJson`
 `setWorkspaceAllowance`, `clearWorkspaceAllowance`, `grantWorkspaceCredits`,
 `setMemberAllowance`). They call the same routes as the root client's methods.
 
-The OpenGeni console shows budgets in dollars, the unit of the credit balance
+The Opengeni console shows budgets in dollars, the unit of the credit balance
 they draw on: owners set a shared workspace's monthly budget under
-Organization settings → Billing & usage (a budgets list and one page per
+Organization settings → Billing (a budgets list and one page per
 workspace), workspace admins set member limits under Workspace settings →
 Usage, everyone sees their own limit there and in the account menu, and the
-composer shows the near/at-limit notice. Personal workspaces have no budget.
+composer shows the near/at-limit notice. Personal workspaces have no budget of
+their own; owners and admins can set a monthly limit per person for them on
+the same Billing page.
 
 ## Attribution and background work
 
@@ -560,7 +639,7 @@ This applies to non-model debits too:
   cannot have an allowance reversal fabricated from usage totals.
 
 Native image/model credit charges use ordinary model accounting. Externally
-funded adapters without a negative OpenGeni ledger entry and transcription
+funded adapters without a negative Opengeni ledger entry and transcription
 without a ledger debit do not consume allowance.
 
 Keep schedule time zones separate from allowance UTC boundaries. See

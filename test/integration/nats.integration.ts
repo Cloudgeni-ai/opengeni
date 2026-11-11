@@ -1,12 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { bootstrapWorkspace, createDb, createSession, listSessionEvents } from "@opengeni/db";
 import { appendAndPublishEvents, createNatsEventBus, type EventBus } from "@opengeni/events";
-import {
-  expectContiguousSequences,
-  startTestServices,
-  waitFor,
-  type TestServices,
-} from "@opengeni/testing";
+import { expectContiguousSequences } from "@opengeni/testing/assertions";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { waitFor } from "@opengeni/testing/process";
 import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
 
 describe("NATS integration", () => {

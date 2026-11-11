@@ -53,9 +53,24 @@ async function read(
 ): Promise<OrganizationIntegrationPolicy> {
   const [row] = await rawRows<{ policy: unknown }>(
     tx,
-    sql`select jsonb_build_object('mode', mode, 'allowedIntegrationKeys', allowed_integration_keys, 'revision', revision) as policy from organization_integration_policies where account_id = ${scope.accountId}::uuid`,
+    sql`select jsonb_build_object('mode', mode, 'allowedIntegrationKeys', allowed_integration_keys, 'personalIntegrationSetup', personal_integration_setup, 'revision', revision) as policy from organization_integration_policies where account_id = ${scope.accountId}::uuid`,
   );
   return OrganizationIntegrationPolicy.parse(row?.policy ?? {});
+}
+
+/**
+ * The organization's current integration policy for a serving-time filter
+ * (what an acquisition in this organization would be allowed to add). A plain
+ * read under the organization's own RLS scope: it takes no policy fence and is
+ * NOT an acquisition guard. Acquisitions keep using
+ * `withOrganizationIntegrationPolicyFence`.
+ */
+export async function readOrganizationIntegrationPolicyForServing(
+  db: Database,
+  inputScope: OrganizationIntegrationPolicyScope,
+): Promise<OrganizationIntegrationPolicy> {
+  const scope = policyScope.parse(inputScope);
+  return withRlsContext(db, { ...scope, workspaceId: null }, (tx) => read(tx, scope));
 }
 
 /** Own only the subject setting this policy operation changes. The enclosing
@@ -136,7 +151,18 @@ export async function updateOrganizationIntegrationPolicy(
           tx,
           sql`select opengeni_private.update_organization_integration_policy(${scope.accountId}::uuid, ${actor.subjectId}, ${JSON.stringify(request)}::jsonb) as result`,
         );
-        return OrganizationIntegrationPolicy.parse(row?.result);
+        // The stored result names the personal setup choice only when the
+        // request did (older writers parse it strictly). Otherwise read the
+        // kept value under the same exclusive policy lock.
+        const result = row?.result as Record<string, unknown> | undefined;
+        if (result && !("personalIntegrationSetup" in result)) {
+          const current = await read(tx, scope);
+          return OrganizationIntegrationPolicy.parse({
+            ...result,
+            personalIntegrationSetup: current.personalIntegrationSetup,
+          });
+        }
+        return OrganizationIntegrationPolicy.parse(result);
       });
     },
     undefined,

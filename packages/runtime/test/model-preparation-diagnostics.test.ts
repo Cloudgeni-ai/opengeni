@@ -3,6 +3,7 @@ import { getOrCreateTrace, OpenAIChatCompletionsModel, OpenAIResponsesModel } fr
 import type { ModelRequest } from "@openai/agents";
 import { BadRequestError } from "openai";
 import {
+  markModelPreparationTransportStarted,
   markModelPreparationFirstSandboxOperation,
   recordModelPreparationMeasurement,
   recordModelTransportStarted,
@@ -129,6 +130,102 @@ describe("model preparation diagnostics", () => {
           phase === "mcp_tools_before_input_filter",
       ),
     ).toBe(false);
+  });
+
+  test("does not report a runner gap for an MCP snapshot taken after the first model request", () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () => {
+        markModelPreparationTransportStarted();
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+      },
+    );
+    expect(measurements.map(({ phase }) => phase)).toEqual(["mcp_tools_snapshot"]);
+  });
+
+  test("still reports the runner gap once when the snapshot precedes the first model request", () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () => {
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+        markModelPreparationTransportStarted();
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+      },
+    );
+    expect(measurements.filter(({ phase }) => phase === "runner_before_mcp_tools")).toHaveLength(1);
+  });
+
+  test("repository work a tool waits on after the first model request is not startup", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      async () => {
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+        markModelPreparationTransportStarted();
+        await Bun.sleep(5);
+        // A deferred index: the first tool call provisions the box, then reads
+        // repository skills on demand.
+        markModelPreparationFirstSandboxOperation(0.001);
+        recordModelPreparationMeasurement({
+          phase: "repository_skill_discovery",
+          outcome: "completed",
+          durationSeconds: 0.001,
+          count: 1,
+        });
+      },
+    );
+    expect(measurements.map(({ phase }) => phase)).toEqual([
+      "runner_before_mcp_tools",
+      "mcp_tools_snapshot",
+    ]);
+  });
+
+  test("a box first used by a tool after the first model request adds no startup gap", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      async () => {
+        markModelPreparationTransportStarted();
+        await Bun.sleep(5);
+        markModelPreparationFirstSandboxOperation(0.001);
+      },
+    );
+    expect(measurements).toEqual([]);
+  });
+
+  test("repository discovery that began before the first model request is still startup", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      async () => {
+        markModelPreparationTransportStarted();
+        recordModelPreparationMeasurement({
+          phase: "repository_skill_discovery",
+          outcome: "completed",
+          durationSeconds: 1,
+          count: 1,
+        });
+      },
+    );
+    expect(measurements.map(({ phase }) => phase)).toEqual(["repository_skill_discovery"]);
   });
 
   test("manifest inventory remains fail-open when iteration throws", () => {

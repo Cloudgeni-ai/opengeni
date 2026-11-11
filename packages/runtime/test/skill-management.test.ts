@@ -21,7 +21,7 @@ test("curated library descriptors come from the pinned SKILL.md, not handwritten
 
 test("management guidance is a readable text Skill without a sandbox", () => {
   const skill = loadSkillManagementSkill();
-  expect(skill.name).toBe("opengeni-skills");
+  expect(skill.name).toBe("skill-management");
   expect(skill.description).toContain("edit, and permanently remove Skills");
   const result = readSkillFiles(skill.files);
   expect(result.files).toHaveLength(1);
@@ -31,4 +31,10 @@ test("management guidance is a readable text Skill without a sandbox", () => {
   expect(result.files[0]!.content).toContain("Omitted files are preserved");
   expect(result.files[0]!.content).toContain("`listFiles: true`");
   expect(result.files[0]!.content).toContain("never file bodies");
+  // Pending approval is explained the same way as in the Skill write tools.
+  const text = result.files[0]!.content.replace(/\s+/g, " ");
+  expect(text).toContain(
+    "A save, publish, or install pending approval has no effect until someone who can manage it approves it, in Knowledge > Review or from its card in the chat where one is shown; an edited Skill keeps its current version until then. Say so in your reply",
+  );
+  expect(text).not.toContain("Needs review");
 });

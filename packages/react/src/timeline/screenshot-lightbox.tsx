@@ -1,4 +1,4 @@
-import { DownloadIcon, XIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, DownloadIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   createContext,
@@ -6,12 +6,25 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { Dialog } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
+import {
+  useZoomPan,
+  useZoomPanShortcuts,
+  ZoomControls,
+  ZoomPanSurface,
+} from "../components/zoom-pan-image";
 import { cn } from "../lib/cn";
+import { isTextEntryTarget } from "../lib/keyboard-targets";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { useOpenGeniText } from "../messages/runtime";
+
+const DialogContainedPortal = containedPortal(Dialog.Portal);
 
 /* ----------------------------------------------------------------------------
    Screenshot lightbox
@@ -41,9 +54,102 @@ type LightboxController = {
 export type LightboxControlLabels = {
   download?: string | undefined;
   close?: string | undefined;
+  previous?: string | undefined;
+  next?: string | undefined;
+  zoomIn?: string | undefined;
+  zoomOut?: string | undefined;
+  fit?: string | undefined;
 };
 
 const LightboxContext = createContext<LightboxController | null>(null);
+
+/** One image the open lightbox can page to, resolved only when it is shown. */
+export type LightboxGalleryImage = {
+  src: string;
+  caption?: string | undefined;
+  label?: string | undefined;
+  /** Releases a source owned by this load, such as an object URL. */
+  release?: (() => void) | undefined;
+};
+
+export type LightboxGalleryEntry = {
+  /** Whether this entry currently resolves to an image; defaults to yes. */
+  isImage?: (() => Promise<boolean>) | undefined;
+  load: () => Promise<LightboxGalleryImage | null>;
+};
+
+type RegisteredGalleryEntry = {
+  element: HTMLElement;
+  entry: { current: LightboxGalleryEntry };
+};
+
+type LightboxGalleryRegistry = {
+  register: (item: RegisteredGalleryEntry) => () => void;
+};
+
+const LightboxGalleryContext = createContext<LightboxGalleryRegistry | null>(null);
+
+/** Images in one timeline page together; elsewhere the whole document does. */
+const GALLERY_ROOT_SELECTOR = "[data-og-timeline-scroller]";
+
+/**
+ * Parts of an open lightbox a click acts on instead of closing it: its buttons
+ * and links, the zoom controls, and the zoom surface, which closes on its own
+ * when a click misses the image.
+ */
+const LIGHTBOX_INTERACTIVE_SELECTOR = "a, button, [data-zoom-controls], [data-zoom-pan-surface]";
+
+/** True for a press on the lightbox's empty space or caption: anything but its controls and image. */
+function isLightboxBackdrop(target: EventTarget | null, content: Element): boolean {
+  return (
+    target instanceof Element &&
+    content.contains(target) &&
+    !target.closest(LIGHTBOX_INTERACTIVE_SELECTOR)
+  );
+}
+
+/**
+ * The open lightbox covers the whole window, so in a desktop shell (Electron)
+ * no part of it may move the window. Painting over a drag area does not cancel
+ * it; only an explicit no-drag does. Without it, draggable title bars underneath,
+ * such as the session header, keep capturing presses through the lightbox, which
+ * swallowed the lower half of the close button and the backdrop beside it.
+ * Browsers ignore this property.
+ */
+const NO_WINDOW_DRAG = "[-webkit-app-region:no-drag] [app-region:no-drag]";
+
+/** The lightbox's round buttons: visible hover and press feedback over the dark backdrop. */
+const ROUND_BUTTON = cn(
+  "inline-flex items-center justify-center rounded-full",
+  "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
+  "transition-colors hover:border-white/30 hover:bg-white/15 hover:text-white",
+  "active:border-white/40 active:bg-white/25 active:text-white",
+  "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50",
+);
+
+/**
+ * Adds the element's image to the lightbox gallery so an open lightbox can page
+ * to it with the arrow controls, in document order. The entry is resolved only
+ * when it is shown, so deferred images that never scrolled into view still page.
+ * A lightbox opened from inside the element starts at this entry.
+ */
+export function useLightboxGalleryItem(
+  ref: RefObject<HTMLElement | null>,
+  entry: LightboxGalleryEntry | null,
+): void {
+  const registry = useContext(LightboxGalleryContext);
+  const latest = useRef(entry);
+  latest.current = entry;
+  const enabled = entry !== null;
+  useEffect(() => {
+    const element = ref.current;
+    if (!registry || !element || !enabled) return;
+    return registry.register({
+      element,
+      entry: latest as { current: LightboxGalleryEntry },
+    });
+  }, [registry, ref, enabled]);
+}
 
 /** Open the app-level screenshot lightbox. No-op outside a `LightboxProvider`. */
 export function useLightbox(): LightboxController {
@@ -97,6 +203,7 @@ export function LightboxProvider({ children }: { children: ReactNode }) {
 }
 
 function LightboxRoot({ children }: { children: ReactNode }) {
+  const t = useOpenGeniText();
   const [state, setState] = useState<{
     src: string;
     caption?: string;
@@ -107,25 +214,83 @@ function LightboxRoot({ children }: { children: ReactNode }) {
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
   const sourceOwner = useMemo(() => createLightboxSourceOwner(), []);
   const portalStyle = usePortalTokenStyle(tokenSource);
+  const entries = useRef(new Set<RegisteredGalleryEntry>());
+  const [gallery, setGallery] = useState<{
+    items: RegisteredGalleryEntry[];
+    index: number;
+  } | null>(null);
+  // Fences stale gallery discovery and navigation after a newer open or step.
+  const generation = useRef(0);
+  // Whether the press that ends in a click began on the backdrop, so a drag that
+  // starts on the image or a control and is released beside it never closes.
+  const pressedBackdrop = useRef(false);
+  // Each image opens fitted; paging to the next one starts fitted again.
+  const zoom = useZoomPan(state?.src ?? "");
+  useZoomPanShortcuts(zoom, state !== null);
+
+  const registry = useMemo<LightboxGalleryRegistry>(
+    () => ({
+      register(item) {
+        entries.current.add(item);
+        return () => {
+          entries.current.delete(item);
+        };
+      },
+    }),
+    [],
+  );
 
   const releaseCurrentSource = useCallback(() => {
     sourceOwner.release();
   }, [sourceOwner]);
 
-  useEffect(() => releaseCurrentSource, [releaseCurrentSource]);
+  // Unmount also fences in-flight discovery and paging, so a load that settles
+  // afterwards releases its own source instead of handing it to a dead owner.
+  useEffect(
+    () => () => {
+      generation.current++;
+      releaseCurrentSource();
+    },
+    [releaseCurrentSource],
+  );
+
+  const discoverGallery = useCallback((source: HTMLElement, token: number) => {
+    const root = source.closest(GALLERY_ROOT_SELECTOR) ?? source.ownerDocument.body;
+    const candidates = [...entries.current]
+      .filter((item) => item.element.isConnected && root.contains(item.element))
+      .sort((a, b) =>
+        a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
+      );
+    // The innermost entry holding the clicked image comes last in document order.
+    const current = candidates.filter((item) => item.element.contains(source)).pop();
+    if (!current) return;
+    void Promise.all(
+      candidates.map((item) =>
+        item === current
+          ? Promise.resolve(true)
+          : (item.entry.current.isImage?.() ?? Promise.resolve(true)).catch(() => false),
+      ),
+    ).then((images) => {
+      if (generation.current !== token) return;
+      const items = candidates.filter((_, index) => images[index]);
+      if (items.length > 1) setGallery({ items, index: items.indexOf(current) });
+    });
+  }, []);
 
   const open = useCallback(
     (
       src: string,
       caption?: string,
       source?: HTMLElement | null,
-      label = "Screenshot",
+      label = t("timeline.screenshotLightbox.screenshot"),
       downloadFilename?: string,
       controlLabels?: LightboxControlLabels,
       releaseSource?: () => void,
     ) => {
+      const token = ++generation.current;
       sourceOwner.replace(releaseSource);
       setTokenSource(source ?? null);
+      setGallery(null);
       setState({
         src,
         label,
@@ -133,38 +298,95 @@ function LightboxRoot({ children }: { children: ReactNode }) {
         ...(downloadFilename ? { downloadFilename } : {}),
         ...(controlLabels ? { controlLabels } : {}),
       });
+      if (source) discoverGallery(source, token);
     },
-    [sourceOwner],
+    [sourceOwner, discoverGallery, t],
   );
 
   const close = useCallback(() => {
+    generation.current++;
     releaseCurrentSource();
     setState(null);
     setTokenSource(null);
+    setGallery(null);
   }, [releaseCurrentSource]);
+
+  const step = useCallback(
+    (delta: 1 | -1) => {
+      if (!gallery) return;
+      const token = ++generation.current;
+      const count = gallery.items.length;
+      void (async () => {
+        // Skip entries that no longer resolve, but never loop past the start.
+        for (let offset = 1; offset < count; offset++) {
+          const index = (((gallery.index + delta * offset) % count) + count) % count;
+          const image = await gallery.items[index]!.entry.current.load().catch(() => null);
+          if (generation.current !== token) {
+            image?.release?.();
+            return;
+          }
+          if (!image) continue;
+          sourceOwner.replace(image.release);
+          setGallery({ items: gallery.items, index });
+          setState((previous) =>
+            previous
+              ? {
+                  src: image.src,
+                  label: image.label ?? previous.label,
+                  ...(image.caption ? { caption: image.caption } : {}),
+                  ...(previous.controlLabels ? { controlLabels: previous.controlLabels } : {}),
+                }
+              : previous,
+          );
+          return;
+        }
+      })();
+    },
+    [gallery, sourceOwner],
+  );
+
+  const galleryOpen = state !== null && gallery !== null;
+  useEffect(() => {
+    if (!galleryOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+      // Arrow keys typed into a field move its caret; they never page images.
+      if (isTextEntryTarget(event.target)) return;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        step(event.key === "ArrowLeft" ? -1 : 1);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [galleryOpen, step]);
 
   const controller = useMemo<LightboxController>(() => ({ open }), [open]);
 
   return (
     <LightboxContext.Provider value={controller}>
-      {children}
+      <LightboxGalleryContext.Provider value={registry}>{children}</LightboxGalleryContext.Provider>
       <Dialog.Root open={state !== null} onOpenChange={(next) => !next && close()}>
         <AnimatePresence>
           {state !== null ? (
-            <Dialog.Portal forceMount>
+            <DialogContainedPortal forceMount>
               <Dialog.Overlay asChild forceMount>
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.15 }}
-                  className="og-root fixed inset-0 z-50 bg-black/90 backdrop-blur-md"
+                  className={cn(
+                    "og-root fixed inset-0 z-50 bg-black/90 backdrop-blur-md",
+                    NO_WINDOW_DRAG,
+                  )}
                   style={portalStyle}
                 />
               </Dialog.Overlay>
               <Dialog.Content
                 asChild
                 forceMount
+                data-window-layer
                 aria-label={state.label}
                 onOpenAutoFocus={(event) => event.preventDefault()}
               >
@@ -176,57 +398,149 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                   // Content is a full-inset centering wrapper layered above the
                   // Overlay, so Radix's own click-outside (which fires on the
                   // Overlay) can never see a backdrop click — every click lands on
-                  // Content. We make Content's own backdrop dismiss: a click whose
-                  // target is the wrapper itself (not the figure) closes it, so the
-                  // figcaption's "click outside to close" affordance is real.
+                  // Content. So Content dismisses itself: a press that begins and
+                  // ends on its empty space or caption (the padding, the figure's
+                  // gutters, the gaps around the zoom controls) closes it. The image
+                  // area closes on its own when a click misses the image.
+                  onPointerDown={(event) => {
+                    pressedBackdrop.current = isLightboxBackdrop(event.target, event.currentTarget);
+                  }}
                   onClick={(event) => {
-                    if (event.target === event.currentTarget) {
+                    const pressed = pressedBackdrop.current;
+                    pressedBackdrop.current = false;
+                    // Selecting caption text is a drag across the backdrop; keep it open.
+                    const selection = event.currentTarget.ownerDocument.getSelection();
+                    if (
+                      pressed &&
+                      (!selection || selection.isCollapsed) &&
+                      isLightboxBackdrop(event.target, event.currentTarget)
+                    ) {
                       close();
                     }
                   }}
-                  className="og-root fixed inset-0 z-50 flex items-center justify-center p-6 sm:p-12"
+                  className={cn(
+                    "og-root fixed inset-0 z-50 flex items-center justify-center p-6 sm:p-12",
+                    NO_WINDOW_DRAG,
+                  )}
                   style={portalStyle}
                 >
                   <Dialog.Title className="sr-only">{state.label}</Dialog.Title>
                   <Dialog.Description className="sr-only">
-                    {state.caption ?? `Expanded ${state.label.toLowerCase()}`}
+                    {state.caption ??
+                      t("timeline.screenshotLightbox.expandedLowercase", {
+                        lowerCase: state.label.toLowerCase(),
+                      })}
                   </Dialog.Description>
-                  {/* The figure is one self-contained object: image, caption, and
-                      its own close control. The close button anchors to a wrapper
-                      sized to the IMAGE (w-fit), so it hugs the real top-right
-                      corner regardless of aspect ratio — never floating into the
-                      empty space of a wide figure column. */}
-                  <figure className="m-0 flex max-h-full max-w-5xl flex-col items-center gap-3">
-                    <div className="relative flex min-h-0 w-fit max-w-full">
+                  {gallery ? (
+                    <LightboxStepButton
+                      direction="previous"
+                      label={
+                        state.controlLabels?.previous ??
+                        t("timeline.screenshotLightbox.previousImage")
+                      }
+                      onClick={() => step(-1)}
+                    />
+                  ) : null}
+                  {/* The image fills the window and zooms and pans in place;
+                      its caption, zoom controls and position sit below it. */}
+                  <figure
+                    className={cn(
+                      "m-0 flex size-full min-h-0 flex-col items-center gap-3",
+                      gallery && "px-12 sm:px-16",
+                    )}
+                  >
+                    <div className="relative min-h-0 w-full flex-1">
                       {/* A plain <img>: this SDK is framework-agnostic, with no host Image component. */}
-                      <img
+                      <ZoomPanSurface
+                        controller={zoom}
                         src={state.src}
                         alt={state.caption ?? state.label}
-                        className="min-h-0 max-h-[82vh] w-auto max-w-full rounded-og-md border border-white/10 object-contain shadow-og-lg"
-                      />
-                      <ScreenshotLightboxControls
-                        src={state.src}
-                        downloadFilename={state.downloadFilename}
-                        controlLabels={state.controlLabels}
+                        onBackdropClick={close}
+                        imageClassName="rounded-og-md border border-white/10 shadow-og-lg"
                       />
                     </div>
-                    {state.caption ? (
+                    <ZoomControls
+                      controller={zoom}
+                      labels={{
+                        zoomIn:
+                          state.controlLabels?.zoomIn ?? t("timeline.screenshotLightbox.zoomIn"),
+                        zoomOut:
+                          state.controlLabels?.zoomOut ?? t("timeline.screenshotLightbox.zoomOut"),
+                        fit: state.controlLabels?.fit ?? t("timeline.screenshotLightbox.fit"),
+                      }}
+                      className="rounded-full border border-white/15 bg-black/60 px-1 text-white/70 backdrop-blur"
+                      buttonClassName="rounded-full text-white/70 hover:bg-white/10 hover:text-white disabled:text-white/30"
+                    />
+                    {gallery ? (
+                      <figcaption className="flex max-w-2xl flex-col items-center gap-1 text-center font-og-mono text-og-xs">
+                        {state.caption ? (
+                          <span className="text-white/55">{state.caption}</span>
+                        ) : null}
+                        <span className="tabular-nums text-white/35" aria-live="polite">
+                          {gallery.index + 1}{" "}
+                          {t("timeline.screenshotLightbox.ofLength", {
+                            length: gallery.items.length,
+                          })}
+                        </span>
+                      </figcaption>
+                    ) : state.caption ? (
                       <figcaption className="max-w-2xl text-center font-og-mono text-og-xs text-white/55">
                         {state.caption}
                       </figcaption>
                     ) : (
                       <figcaption className="font-og-mono text-og-xs uppercase tracking-[0.1em] text-white/35">
-                        Esc or click outside to close
+                        {t("timeline.screenshotLightbox.escOrClickOutsideTo")}
                       </figcaption>
                     )}
                   </figure>
+                  <ScreenshotLightboxControls
+                    src={state.src}
+                    downloadFilename={state.downloadFilename}
+                    controlLabels={state.controlLabels}
+                  />
+                  {gallery ? (
+                    <LightboxStepButton
+                      direction="next"
+                      label={
+                        state.controlLabels?.next ?? t("timeline.screenshotLightbox.nextImage")
+                      }
+                      onClick={() => step(1)}
+                    />
+                  ) : null}
                 </motion.div>
               </Dialog.Content>
-            </Dialog.Portal>
+            </DialogContainedPortal>
           ) : null}
         </AnimatePresence>
       </Dialog.Root>
     </LightboxContext.Provider>
+  );
+}
+
+/** Pages the open lightbox to the neighboring gallery image, wrapping around. */
+function LightboxStepButton({
+  direction,
+  label,
+  onClick,
+}: {
+  direction: "previous" | "next";
+  label: string;
+  onClick: () => void;
+}) {
+  const Icon = direction === "previous" ? ChevronLeftIcon : ChevronRightIcon;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className={cn(
+        ROUND_BUTTON,
+        "absolute top-1/2 z-10 size-11 -translate-y-1/2",
+        direction === "previous" ? "left-3 sm:left-6" : "right-3 sm:right-6",
+      )}
+    >
+      <Icon className="size-5" />
+    </button>
   );
 }
 
@@ -240,29 +554,28 @@ export function ScreenshotLightboxControls({
   downloadFilename?: string | undefined;
   controlLabels?: LightboxControlLabels | undefined;
 }) {
+  const t = useOpenGeniText();
   return (
-    <div className="absolute -right-3 -top-3 flex items-center gap-2">
+    <div
+      data-lightbox-controls
+      className="absolute right-3 top-3 z-10 flex items-center gap-2 sm:right-6 sm:top-6"
+    >
       {downloadFilename ? (
         <a
           href={src}
           download={downloadFilename}
-          className={cn(
-            "inline-flex size-9 items-center justify-center rounded-full",
-            "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-            "transition-colors hover:border-white/30 hover:text-white",
-          )}
-          aria-label={controlLabels?.download ?? `Download ${downloadFilename}`}
+          className={cn(ROUND_BUTTON, "size-9")}
+          aria-label={
+            controlLabels?.download ??
+            t("timeline.screenshotLightbox.downloadDownloadfilename", { downloadFilename })
+          }
         >
           <DownloadIcon className="size-4" />
         </a>
       ) : null}
       <Dialog.Close
-        className={cn(
-          "inline-flex size-9 items-center justify-center rounded-full",
-          "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-          "transition-colors hover:border-white/30 hover:text-white",
-        )}
-        aria-label={controlLabels?.close ?? "Close"}
+        className={cn(ROUND_BUTTON, "size-9")}
+        aria-label={controlLabels?.close ?? t("timeline.screenshotLightbox.close")}
       >
         <XIcon className="size-4" />
       </Dialog.Close>

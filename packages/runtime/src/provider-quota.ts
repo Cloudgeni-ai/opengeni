@@ -1,4 +1,5 @@
 import { APIError } from "openai";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 
 /**
  * Provider quota exhaustion versus ordinary rate limiting.
@@ -53,11 +54,18 @@ const MAX_FIELDS = 64;
 // matched exactly; wording is matched as a phrase. OpenAI's
 // `billing_hard_limit_reached` is the organization's own spending cap.
 const CREDIT_CODES = new Set([
+  "credit_balance_exhausted",
   "insufficient_credits",
   "insufficient_balance",
   "billing_hard_limit_reached",
 ]);
 const QUOTA_CODES = new Set(["insufficient_quota"]);
+const MONTHLY_CODES = new Set([
+  "organization_spend_limit_exceeded",
+  "project_spend_limit_exceeded",
+  "organization_usage_limit_exceeded",
+  "enforced_spend_limit_reached",
+]);
 const CREDIT_TEXT =
   /\binsufficient[ _](?:credits?|balance|funds)\b|\bcredit balance is too low\b|\brequires more credits\b|\bout of credits\b|\bused all (?:of )?(?:your |the )?(?:available )?credits\b|\bspending limit\b|\bbilling[ _]hard[ _]limit\b|\breached your specified api usage limits?\b/;
 
@@ -149,7 +157,7 @@ export function providerMessageRetryHintMs(text: string): number | null {
 /**
  * Decide whether a provider refusal is an exhausted quota. Returns null for an
  * ordinary short rate limit and for anything that is not provider quota
- * evidence at all (a sandbox "disk quota exceeded", an OpenGeni credit
+ * evidence at all (a sandbox "disk quota exceeded", a platform credit
  * refusal, a 5xx), so those keep their existing classification.
  */
 export function classifyProviderQuotaExhaustion(
@@ -160,7 +168,9 @@ export function classifyProviderQuotaExhaustion(
     .filter((value): value is string => typeof value === "string" && value.length > 0)
     .map((value) => value.slice(0, MAX_FIELD_CHARS).toLowerCase());
   const text = fields.join("\n");
-  if (text.includes("opengeni credits")) return null;
+  // Platform credit refusals say "workspace credits" (older history says
+  // "opengeni credits"); they are not provider quota evidence.
+  if (text.includes("workspace credits") || text.includes("opengeni credits")) return null;
 
   const explicitStatus =
     evidence.status !== null && Number.isInteger(evidence.status) ? evidence.status : null;
@@ -172,19 +182,30 @@ export function classifyProviderQuotaExhaustion(
   // Only a rate-limit or payment refusal can be quota exhaustion. Every other
   // status keeps its existing classification (a 5xx is transient, other 4xx
   // are already terminal request faults).
-  if (status !== null && status !== 429 && status !== 402) return null;
-
   const hasCode = (codes: ReadonlySet<string>) => fields.some((value) => codes.has(value.trim()));
+  // Native Claude marks a general billing/payment refusal separately. A 402
+  // does not prove that this account has exhausted its credit allowance.
+  if (fields.some((value) => value.trim() === "anthropic_billing_error")) return null;
+  // Claude's configured spend cap is a documented HTTP 400 exception. Only
+  // the adapter's explicit spend marker admits it; ordinary validation stays
+  // terminal request failure even if its text mentions quota or rate limits.
+  const claudeSpendCap = fields.some((value) => value.trim() === "enforced_spend_limit_reached");
+  if (status !== null && status !== 429 && status !== 402 && !(status === 400 && claudeSpendCap)) {
+    return null;
+  }
   const creditCode = hasCode(CREDIT_CODES);
   const quotaCode = hasCode(QUOTA_CODES);
+  const monthlyCode = hasCode(MONTHLY_CODES);
   const rateShaped = status === 429 || RATE_TEXT.test(text);
   // A statusless error must still look like a provider refusal; free text such
   // as a sandbox "Disk quota exceeded" is not model-provider evidence.
-  if (status === null && !rateShaped && !creditCode && !quotaCode) return null;
+  if (status === null && !rateShaped && !creditCode && !quotaCode && !monthlyCode) return null;
 
   // Payment Required and account credit/billing exhaustion never clear by
   // waiting, whatever retry hint accompanies them.
-  if (status === 402 || creditCode || CREDIT_TEXT.test(text)) return { scope: "credits" };
+  if (status === 402 || creditCode) return { scope: "credits" };
+  if (monthlyCode) return { scope: "monthly" };
+  if (CREDIT_TEXT.test(text)) return { scope: "credits" };
   if (quotaCode) return { scope: "quota" };
 
   const hint = evidence.retryAfterMs ?? providerMessageRetryHintMs(text);
@@ -224,17 +245,37 @@ export function providerQuotaExhaustedMessage(scope: ProviderQuotaScope): string
 
 const MAX_RESPONSE_BODY_BYTES = 64 * 1024;
 
-/** Read at most `maxBytes` of a cloned body; the original stays unread. */
-async function boundedCloneText(response: Response, maxBytes: number): Promise<string | null> {
+/**
+ * Read at most `maxBytes` of a cloned body; the original stays unread. With a
+ * deadline, a body that stalls past it yields null instead of waiting forever.
+ */
+async function boundedCloneText(
+  response: Response,
+  maxBytes: number,
+  deadlineMs?: number,
+): Promise<string | null> {
   const body = response.clone().body;
   if (!body) return "";
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let text = "";
   let bytes = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut =
+    deadlineMs === undefined
+      ? null
+      : new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), deadlineMs);
+        });
   try {
     for (;;) {
-      const chunk = await reader.read();
+      const read = reader.read();
+      const chunk = timedOut ? await Promise.race([read, timedOut]) : await read;
+      if (chunk === "timeout") {
+        // The pending read settles once the cancel below lands.
+        read.catch(() => undefined);
+        return null;
+      }
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > maxBytes) return null;
@@ -242,7 +283,10 @@ async function boundedCloneText(response: Response, maxBytes: number): Promise<s
     }
     return text + decoder.decode();
   } finally {
-    await reader.cancel().catch(() => undefined);
+    if (timer !== undefined) clearTimeout(timer);
+    // A cancelled clone branch settles only once the caller's branch is also
+    // done, so never wait for it here.
+    void reader.cancel().catch(() => undefined);
   }
 }
 
@@ -409,4 +453,114 @@ export function withoutQuotaExhaustedRetries(inner: typeof fetch): typeof fetch 
     if (response.url) Object.defineProperty(vetoed, "url", { value: response.url });
     return vetoed;
   }) as typeof fetch;
+}
+
+// OpenRouter's refusal when an account restricted to its own provider keys
+// (BYOK) has no key eligible for the request. OpenRouter sends no structured
+// code beyond the numeric 404, so its own wording is the only evidence; both
+// phrases are specific to that account restriction. Other "No endpoints found"
+// 404s (model retired, no endpoint supports the requested parameters or tools,
+// data-policy filters) are not matched.
+const BYOK_CAPACITY_RESTRICTED_TEXT =
+  /\bno endpoints found that can be served by your own provider keys\b|\brestricted to byok capacity\b/;
+// Vercel AI Gateway's structured type for an account that must add a payment
+// method before it can be served.
+const CUSTOMER_VERIFICATION_REQUIRED_TYPE = "customer_verification_required";
+// OpenRouter's refusal when the customer's own API key has reached the credit
+// or budget limit the customer set on it (HTTP 403, for example "Key limit
+// exceeded (total limit)" or "Budget limit exceeded (monthly limit)").
+const KEY_LIMIT_EXCEEDED_TEXT = /\b(?:key|budget) limit exceeded\b/;
+
+/** How long attribution waits for a refused response body before counting the call unclassified. */
+export const PROVIDER_ACCOUNT_REFUSAL_READ_DEADLINE_MS = 5_000;
+
+/**
+ * Decide whether a provider refusal comes from the customer's own provider
+ * account rather than from our request. Only exact provider evidence counts:
+ * the HTTP status together with a structured type, or a phrase specific to
+ * the account restriction where the provider sends no structured signal.
+ * Operational attribution only; it never changes retries or copy.
+ */
+export function classifyProviderAccountRefusal(evidence: {
+  status: number | null;
+  texts: readonly string[];
+}): ProviderAccountRefusal | null {
+  const fields = evidence.texts
+    .slice(0, MAX_FIELDS)
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .map((value) => value.slice(0, MAX_FIELD_CHARS).toLowerCase());
+  const explicitStatus =
+    evidence.status !== null && Number.isInteger(evidence.status) ? evidence.status : null;
+  // SDK wrappers sometimes keep only the "404 ..." message prefix.
+  const prefixedStatus = fields
+    .map((value) => /^\s*(4\d\d)\b/.exec(value)?.[1])
+    .find((value) => value !== undefined);
+  const status = explicitStatus ?? (prefixedStatus ? Number(prefixedStatus) : null);
+  if (status === 404 && fields.some((value) => BYOK_CAPACITY_RESTRICTED_TEXT.test(value))) {
+    return "byok_capacity_restricted";
+  }
+  if (
+    status === 403 &&
+    fields.some((value) => value.trim() === CUSTOMER_VERIFICATION_REQUIRED_TYPE)
+  ) {
+    return "customer_verification_required";
+  }
+  if (status === 403 && fields.some((value) => KEY_LIMIT_EXCEEDED_TEXT.test(value))) {
+    return "key_limit_exceeded";
+  }
+  return null;
+}
+
+/** Provider-authored strings on a thrown error, plus a captured compaction provider message. */
+function accountRefusalTexts(error: unknown): string[] {
+  const texts: string[] = [];
+  errorTexts(error, texts, new WeakSet());
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const providerMessage = (current as { providerMessage?: unknown }).providerMessage;
+    if (typeof providerMessage === "string" && providerMessage.length > 0) {
+      texts.push(providerMessage);
+    }
+    current = (current as Record<string, unknown>).cause;
+  }
+  return texts;
+}
+
+/** Classify a thrown provider error (an SDK `APIError` or any wrapper whose cause chain reaches one). */
+export function classifyProviderAccountRefusalError(error: unknown): ProviderAccountRefusal | null {
+  try {
+    return classifyProviderAccountRefusal({
+      status: errorHttpStatus(error),
+      texts: accountRefusalTexts(error),
+    });
+  } catch {
+    // A hostile getter is not provider evidence.
+    return null;
+  }
+}
+
+/**
+ * Classify a raw provider HTTP response from a bounded clone; the original
+ * body stays unread. Only 403 and 404 can carry an account refusal.
+ */
+export async function classifyProviderAccountRefusalResponse(
+  response: Response,
+  deadlineMs: number = PROVIDER_ACCOUNT_REFUSAL_READ_DEADLINE_MS,
+): Promise<ProviderAccountRefusal | null> {
+  if (response.status !== 403 && response.status !== 404) return null;
+  const text = await boundedCloneText(response, MAX_RESPONSE_BODY_BYTES, deadlineMs);
+  if (text === null) return null;
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = undefined;
+  }
+  const sdkError = APIError.generate(
+    response.status,
+    json as object | undefined,
+    json ? undefined : text,
+    response.headers,
+  );
+  return classifyProviderAccountRefusalError(sdkError);
 }

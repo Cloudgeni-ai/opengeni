@@ -1,0 +1,291 @@
+import { describe, expect, test } from "bun:test";
+import { formatErrorMessage as coreFormatErrorMessage } from "../src/core";
+import { formatErrorMessage as browserFormatErrorMessage } from "../src/browser";
+
+import {
+  formatErrorMessage,
+  OpenGeniAllowanceExhaustedError,
+  OpenGeniApiContractMismatchError,
+  OpenGeniApiError,
+  OpenGeniSecureContextRequiredError,
+  OpenGeniSetupError,
+  OpenGeniStreamError,
+} from "../src/errors";
+
+test("neutral formatter is available through the core and browser entry points", () => {
+  expect(coreFormatErrorMessage).toBe(browserFormatErrorMessage);
+  expect(coreFormatErrorMessage(new TypeError("Opengeni diagnostic"))).toBe(
+    "The request could not be completed.",
+  );
+});
+
+describe("brand-neutral error presentation", () => {
+  test("API subscription refusals explain model selection rather than permission or purchase", () => {
+    const error = new OpenGeniApiError(
+      403,
+      JSON.stringify({
+        error: {
+          code: "forbidden",
+          message: "Connected subscriptions are unavailable through the API.",
+          details: { code: "subscription_api_unavailable" },
+        },
+      }),
+    );
+    expect(formatErrorMessage(error)).toBe(
+      "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.",
+    );
+    expect(error.details?.action).toBeUndefined();
+  });
+  test("seat refusals preserve only the bounded upgrade action and do not suggest buying credits", () => {
+    for (const action of [
+      { type: "upgrade", href: "/billing", extra: { ignored: true } },
+      { type: "upgrade", href: "https://untrusted.example/billing" },
+      { type: "other", href: "/billing" },
+    ]) {
+      const error = new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Organization seat limit reached. Upgrade your plan to add people.",
+            retryable: false,
+            requestId: "seat-refusal",
+            details: { action, unrelated: { nested: "ignored" } },
+          },
+        }),
+        { mutation: true },
+      );
+      expect(error.code).toBe("seat_limit_reached");
+      expect(error.details?.action).toEqual(
+        action.type === "upgrade" && action.href === "/billing"
+          ? { type: "upgrade", href: "/billing" }
+          : undefined,
+      );
+      expect(error.details?.unrelated).toBeUndefined();
+      expect(error.retryable).toBe(false);
+      expect(error.outcomeUnknown).toBe(false);
+      expect(formatErrorMessage(error)).toBe(
+        "Your organization has reached its seat limit. Upgrade the plan to add people.",
+      );
+    }
+  });
+
+  test("credit refusals keep their one public action and name the fix", () => {
+    for (const [code, action, text] of [
+      [
+        "api_credits_required",
+        { type: "add_credits", href: "/billing" },
+        "API usage uses credits, not your plan credit. Add credits to continue.",
+      ],
+      [
+        "byok_paid_credit_required",
+        { type: "add_credits", href: "/billing" },
+        "Add credits to use your own key.",
+      ],
+      [
+        "byok_paid_credit_required",
+        { type: "upgrade_plan", href: "/billing" },
+        "Upgrade to Pro to use your own key.",
+      ],
+      [
+        "subscription_plan_required",
+        { type: "upgrade_plan", href: "/billing" },
+        "Upgrade to Pro to use your own subscription.",
+      ],
+    ] as const) {
+      const error = new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "insufficient_credits",
+            message: "diagnostic",
+            requestId: "credit-refusal",
+            details: { code, action },
+          },
+        }),
+        { mutation: true },
+      );
+      expect(error.details?.action).toEqual(action);
+      expect(formatErrorMessage(error)).toBe(text);
+    }
+  });
+
+  test("seat refusals name the one plan that adds the seat when the server sends it", () => {
+    const refusal = (details: Record<string, unknown>) =>
+      formatErrorMessage(
+        new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: {
+              status: 402,
+              code: "seat_limit_reached",
+              message: "Upgrade to Pro to add more people.",
+              retryable: false,
+              requestId: "seat-refusal",
+              details: { ...details, action: { type: "upgrade", href: "/billing" } },
+            },
+          }),
+          { mutation: true },
+        ),
+      );
+    expect(refusal({ upgradePlan: "pro", upgradePlanLabel: "Pro" })).toBe(
+      "Upgrade to Pro to add more people.",
+    );
+    expect(refusal({ upgradePlan: "max", upgradePlanLabel: "Max" })).toBe(
+      "Upgrade to Max to add more people.",
+    );
+    expect(refusal({ upgradePlan: "enterprise", upgradePlanLabel: "Enterprise" })).toBe(
+      "Talk to us about Enterprise to add more people.",
+    );
+    expect(refusal({ upgradePlanLabel: " " })).toBe(
+      "Your organization has reached its seat limit. Upgrade the plan to add people.",
+    );
+    // An invitee can't upgrade someone else's organization.
+    expect(refusal({ askOwner: true })).toBe(
+      "This organization is full. Ask an organization owner to upgrade.",
+    );
+    // An admin who can invite but not manage billing is told which plan to ask for.
+    expect(refusal({ askOwner: true, upgradePlan: "max", upgradePlanLabel: "Max" })).toBe(
+      "Ask an organization owner to upgrade to Max.",
+    );
+  });
+
+  test("Site refusals are friendly before a conversation exists too", () => {
+    for (const [code, status, text] of [
+      ["not_available_for_viewer", 403, "not available for this viewer"],
+      ["site_budget_exhausted", 429, "usage limit for now"],
+      ["site_budget_busy", 429, "busy. Try again"],
+      ["site_platform_brake_engaged", 503, "paused for visitors"],
+    ] as const) {
+      const error = new OpenGeniApiError(
+        status,
+        JSON.stringify({ error: { code: "forbidden", message: "diagnostic", details: { code } } }),
+        { mutation: false },
+      );
+      expect(formatErrorMessage(error)).toContain(text);
+      expect(error.details?.code).toBe(code);
+    }
+  });
+  test("keeps API diagnostics and the reference without displaying either for a refusal", () => {
+    const body = JSON.stringify({
+      error: {
+        code: "permission_denied",
+        message: "Opengeni rejected this operation.",
+        requestId: "acme-denied-403",
+        details: { missingPermission: "sessions:control" },
+      },
+    });
+    const error = new OpenGeniApiError(403, body, { mutation: true });
+    expect(formatErrorMessage(error)).toBe("You don’t have permission to do that.");
+    expect(error.message).toContain("Opengeni rejected this operation.");
+    expect(error.correlationId).toBe("acme-denied-403");
+    expect(error.body).toBe(body);
+    expect(error.details).toEqual({ missingPermission: "sessions:control" });
+    expect(error.code).toBe("permission_denied");
+    expect(error.retryable).toBe(false);
+    expect(error.outcomeUnknown).toBe(false);
+  });
+
+  test("setup and allowance guidance remain actionable without developer-only names", () => {
+    const setup = new OpenGeniSetupError(
+      new OpenGeniApiError(409, "", { correlationId: "setup-1" }),
+    );
+    expect(formatErrorMessage(setup)).toBe(
+      "Private conversations are unavailable. Ask an administrator to enable them.",
+    );
+    expect(setup.message).toContain("@opengeni/sdk");
+    expect(setup.code).toBe("OPENGENI_SETUP_REQUIRED");
+    expect(setup.retryable).toBe(false);
+    const allowance = new OpenGeniAllowanceExhaustedError(
+      429,
+      JSON.stringify({
+        error: {
+          code: "allowance_exhausted",
+          message: "Opengeni allowance reached",
+          details: { scope: "member", resetsAt: "2026-10-03T00:00:00Z", subjectId: "host-user-1" },
+        },
+      }),
+    );
+    expect(formatErrorMessage(allowance)).toContain("Usage limit reached");
+    expect(formatErrorMessage(allowance)).not.toMatch(/opengeni/i);
+    expect(allowance).toMatchObject({
+      scope: "member",
+      resetsAt: "2026-10-03T00:00:00Z",
+      subjectId: "host-user-1",
+      retryable: false,
+      outcomeUnknown: false,
+    });
+  });
+
+  test("an unexpected failure keeps its reference for support", () => {
+    const error = new OpenGeniApiError(
+      500,
+      JSON.stringify({ error: { message: "database unavailable", requestId: "server-500" } }),
+      { mutation: false },
+    );
+    expect(formatErrorMessage(error)).toBe(
+      "The service is temporarily unavailable. Try again later. Reference: server-500.",
+    );
+  });
+
+  test("unknown outcomes require reconciliation rather than a blind retry", () => {
+    const error = new OpenGeniApiError(0, "", {
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+      correlationId: "transport-1",
+      displayMessage: "Opengeni could not confirm delivery",
+    });
+    expect(formatErrorMessage(error)).toBe(
+      "The request could not be confirmed. Check its status before retrying. Reference: transport-1.",
+    );
+    expect(error).toMatchObject({ code: "network_error", retryable: true, outcomeUnknown: true });
+    expect(error.message).toContain("Opengeni could not confirm delivery");
+  });
+
+  test("retryable and operator-action failures stay distinct", () => {
+    const transient = new OpenGeniApiError(
+      503,
+      JSON.stringify({ error: { message: "Opengeni is down", retryable: true } }),
+      { mutation: false },
+    );
+    const setup = new OpenGeniApiError(
+      503,
+      JSON.stringify({
+        error: {
+          message: "An operator must configure OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON",
+          retryable: false,
+          details: { oauthReason: "operator_oauth_app_missing" },
+        },
+      }),
+      { mutation: false },
+    );
+    expect(formatErrorMessage(transient)).toBe(
+      "The service is temporarily unavailable. Try again later.",
+    );
+    expect(formatErrorMessage(setup)).toBe(
+      "The service is unavailable. Ask an administrator for help.",
+    );
+    expect(setup.message).toContain("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON");
+    expect(setup.details?.oauthReason).toBe("operator_oauth_app_missing");
+  });
+
+  test("browser, contract, stream and untyped transport errors have neutral defaults", () => {
+    for (const error of [
+      new OpenGeniSecureContextRequiredError("insecure_context"),
+      new OpenGeniSecureContextRequiredError("web_crypto_unavailable"),
+      new OpenGeniApiContractMismatchError("old", "new"),
+      new OpenGeniStreamError("Opengeni stream failed"),
+      new TypeError("Opengeni transport failed"),
+      "Opengeni proxy failed",
+    ]) {
+      expect(formatErrorMessage(error)).not.toMatch(/opengeni/i);
+      expect(formatErrorMessage(error)).not.toBe("");
+    }
+    expect(
+      formatErrorMessage(new Error("private diagnostic"), "ACME could not load this conversation."),
+    ).toBe("ACME could not load this conversation.");
+  });
+});

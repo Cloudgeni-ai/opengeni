@@ -1,4 +1,4 @@
-# OpenGeni artifact kernel — WebAssembly adapter
+# Opengeni artifact kernel — WebAssembly adapter
 
 This crate exposes the shared artifact-kernel protocol to browsers and Web
 Workers. It is deliberately thin: every data-bearing operation accepts and

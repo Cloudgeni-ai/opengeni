@@ -1,3 +1,4 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
@@ -12,8 +13,8 @@ import {
   creditsModelForCheckout,
   includedDefaultModel,
   preferredConnectedModelId,
-} from "./model-access-onboarding";
-import { isPaymentRequiredError } from "./model-access";
+} from "@opengeni/react/app/lib/model-access-onboarding";
+import { isPaymentRequiredError } from "@opengeni/react/app/lib/model-access";
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id">,
@@ -80,7 +81,7 @@ describe("preferredConnectedModelId", () => {
       ]),
     ).toBe("free");
   });
-  test("prefers a selectable connected subscription over OpenGeni credits", () => {
+  test("prefers a selectable connected subscription over Opengeni credits", () => {
     expect(
       preferredConnectedModelId([
         catalogModel({
@@ -175,6 +176,15 @@ const OPENROUTER = catalogModel({
   billing: { upstreamPayer: "workspace", metering: "external" },
 });
 
+const OPPER = catalogModel({
+  id: "workspace-opper/aws/claude-sonnet-4-6-eu",
+  provider: "workspace-opper",
+  providerLabel: "Your Opper",
+  source: undefined,
+  cost: "workspace",
+  billing: { upstreamPayer: "workspace", metering: "external" },
+});
+
 describe("preferredConnectedModelId after a specific connect", () => {
   const catalog = [
     FREE_DEFAULT,
@@ -184,6 +194,7 @@ describe("preferredConnectedModelId after a specific connect", () => {
     SUPERGROK,
     GATEWAY,
     OPENROUTER,
+    OPPER,
   ];
 
   test("the generic order puts any connected service ahead of the free default", () => {
@@ -207,6 +218,9 @@ describe("preferredConnectedModelId after a specific connect", () => {
     expect(preferredConnectedModelId(catalog, "supergrok")).toBe("supergrok/model");
     expect(preferredConnectedModelId(catalog, "vercel_gateway")).toBe("gateway/model");
     expect(preferredConnectedModelId(catalog, "openrouter")).toBe("openrouter-byok/model");
+    expect(preferredConnectedModelId(catalog, "opper")).toBe(
+      "workspace-opper/aws/claude-sonnet-4-6-eu",
+    );
   });
 
   test("a credit purchase prefers the first operator-ordered credits model", () => {
@@ -345,7 +359,8 @@ describe("credit checkout return", () => {
 });
 
 describe("resolved default in the composer and after a credit purchase", () => {
-  const rows = (models: WorkspaceModelCatalogModel[]) => sortPickerRows(projectPickerRows(models));
+  const rows = (models: WorkspaceModelCatalogModel[]) =>
+    sortPickerRows(projectPickerRows(t, models));
 
   test("the composer fallback takes the server-resolved default first", () => {
     const models = [FREE_DEFAULT, CREDITS_FIRST, CREDITS_SECOND];
@@ -401,6 +416,52 @@ describe("resolved default in the composer and after a credit purchase", () => {
 });
 
 describe("applyConnectedModelToNewSessionDraft", () => {
+  test("redemption saves the funded server default instead of the first uncovered model", async () => {
+    const saveNewSessionDraft = mock(async () => undefined);
+    const client = {
+      getWorkspaceModelCatalog: async () => ({
+        models: [
+          catalogModel({ id: "uncovered", creditFunding: "unavailable" }),
+          catalogModel({ id: "covered", creditFunding: "promotional" }),
+        ],
+        defaultSelection: { model: "covered", reasoningEffort: "high", source: "credits" },
+      }),
+      getNewSessionDraft: async () => ({
+        revision: 1,
+        text: "My draft",
+        resources: [],
+        tools: [],
+        options: {},
+      }),
+      saveNewSessionDraft,
+    };
+    expect(
+      await applyConnectedModelToNewSessionDraft(
+        client as never,
+        "workspace",
+        "credits",
+        "uncovered",
+      ),
+    ).toEqual({ id: "covered", label: "covered" });
+    expect(saveNewSessionDraft).toHaveBeenCalledWith(
+      "workspace",
+      expect.objectContaining({ model: "covered", reasoningEffort: "high", text: "My draft" }),
+    );
+  });
+
+  test("redemption does not save an unfunded model when no eligible model remains", async () => {
+    const getNewSessionDraft = mock();
+    const client = {
+      getWorkspaceModelCatalog: async () => ({
+        models: [catalogModel({ id: "uncovered", creditFunding: "unavailable" })],
+      }),
+      getNewSessionDraft,
+    };
+    expect(
+      await applyConnectedModelToNewSessionDraft(client as never, "workspace", "credits"),
+    ).toBeNull();
+    expect(getNewSessionDraft).not.toHaveBeenCalled();
+  });
   test("selects the connected model in the private draft while preserving existing content", async () => {
     const saveNewSessionDraft = mock(async () => undefined);
     const draft = {
@@ -452,6 +513,47 @@ describe("applyConnectedModelToNewSessionDraft", () => {
       expectedRevision: 7,
     });
   });
+});
+
+test("onboarding selects the newly saved provider instead of an unrelated existing subscription", async () => {
+  const saveNewSessionDraft = mock(async () => undefined);
+  const id = "workspace-openai-00000000-0000-4000-8000-000000000001/1/gpt-6-sol";
+  const client = {
+    getWorkspaceModelCatalog: async () => ({
+      models: [
+        catalogModel({
+          id: "codex/existing",
+          provider: "codex",
+          cost: "subscription",
+          source: "codex",
+        }),
+        catalogModel({
+          id,
+          provider: id.split("/")[0]!,
+          source: undefined,
+          cost: "workspace",
+          billing: { upstreamPayer: "workspace", metering: "external" },
+        }),
+      ],
+    }),
+    getNewSessionDraft: async () => ({
+      revision: 1,
+      text: "draft",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      options: {},
+      latencyMode: "standard",
+    }),
+    saveNewSessionDraft,
+  };
+  expect(
+    await applyConnectedModelToNewSessionDraft(client as never, "workspace", "openai", id),
+  ).toEqual({ id, label: id });
+  expect(saveNewSessionDraft).toHaveBeenCalledWith(
+    "workspace",
+    expect.objectContaining({ model: id, text: "draft" }),
+  );
 });
 
 describe("onboarding draft authority", () => {
@@ -516,13 +618,13 @@ describe("isPaymentRequiredError", () => {
             error: {
               status: 402,
               code: "payment_required",
-              message: "insufficient OpenGeni credits",
+              message: "insufficient Opengeni credits",
               retryable: false,
             },
           }),
         ),
       ),
     ).toBe(true);
-    expect(isPaymentRequiredError(new Error("insufficient OpenGeni credits"))).toBe(false);
+    expect(isPaymentRequiredError(new Error("insufficient Opengeni credits"))).toBe(false);
   });
 });

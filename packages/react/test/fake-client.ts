@@ -1,15 +1,47 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
-import type { ComposerDraft, SessionGoal, SessionTurn } from "@opengeni/sdk";
+import type {
+  ComposerDraft,
+  SaveComposerDraftRequest,
+  SessionGoal,
+  SessionTurn,
+} from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/client";
 
 export const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 export const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 /**
+ * The policy a fake server stores for a draft save: the request's pick, or
+ * the current draft's settings when the save carries none (as the API does
+ * for a draft that follows the chat's settings).
+ */
+export function savedComposerPolicy(
+  current: Pick<ComposerDraft, "model" | "reasoningEffort" | "latencyMode">,
+  request: Pick<SaveComposerDraftRequest, "model" | "reasoningEffort" | "latencyMode">,
+): Pick<ComposerDraft, "model" | "reasoningEffort" | "latencyMode"> {
+  return {
+    model: request.model ?? current.model,
+    reasoningEffort: request.reasoningEffort ?? current.reasoningEffort,
+    latencyMode: request.latencyMode ?? current.latencyMode,
+  };
+}
+
+/**
  * Structural fake for `SessionClientLike`: implement only the methods the
  * hook under test calls; everything else throws with a clear message.
  */
-export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLike {
+const OPTIONAL_METHODS = new Set([
+  "findGoal",
+  "updateSessionAttention",
+  "listEventPage",
+  "getToolActionReview",
+  "getToolReviewDetails",
+]);
+
+export function fakeClient(
+  partial: Partial<SessionClientLike<ChatClient>>,
+): SessionClientLike<ChatClient> {
   const emptyDraft: ComposerDraft = {
     revision: 0,
     text: "",
@@ -77,7 +109,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
       };
     },
     ...partial,
-  } as SessionClientLike;
+  } as SessionClientLike<ChatClient>;
   if (!partial.fsListBatch) {
     target.fsListBatch = async (workspaceId, sessionId, request, options) => ({
       results: await Promise.all(
@@ -105,6 +137,8 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     get(clientTarget, property) {
       const value = (clientTarget as Record<PropertyKey, unknown>)[property];
       if (value === undefined && typeof property === "string") {
+        // Optional client capabilities stay absent so hooks take their fallback.
+        if (OPTIONAL_METHODS.has(property)) return undefined;
         return () => {
           throw new Error(`fake client: ${property} is not implemented in this test`);
         };

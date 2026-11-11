@@ -1,7 +1,9 @@
 import { describe, expect, jest, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import "./app-host";
 import {
   AuthApiError,
+  checkDeploymentRevision,
   apiErrorFromResponseBody,
   authHeadersForAccessKey,
   configureManagedActorEpoch,
@@ -25,10 +27,84 @@ import {
   shouldBoundBrowserSseForProtocol,
   subscribeManagedActorInvalidation,
   subscribeManagedActorMutationBusy,
+  subscribeSignInLost,
 } from "./api";
 import { resetSignupAttributionForTests, retainSignupAttribution } from "./lib/signup-attribution";
 
 describe("web API auth helpers", () => {
+  test("deployment checks wait for a foreground read response body before settling", async () => {
+    const originalFetch = globalThis.fetch;
+    let foregroundBody!: ReadableStreamDefaultController<Uint8Array>;
+    let configReads = 0;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith("/v1/config/client")) {
+        configReads++;
+        return Response.json({
+          apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+          deploymentRevision: "",
+        });
+      }
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            foregroundBody = controller;
+          },
+        }),
+      );
+    }) as typeof fetch;
+    const controller = new AbortController();
+    try {
+      configureManagedActorEpoch(null);
+      const foreground = await managedActorFetch("https://api.example.test/v1/resource", {
+        method: "GET",
+      });
+      let settled = false;
+      const check = checkDeploymentRevision(controller.signal).then(() => {
+        settled = true;
+      });
+      await Bun.sleep(0);
+      expect(configReads).toBe(1);
+      expect(settled).toBe(false);
+      foregroundBody.close();
+      await foreground.text();
+      await check;
+      expect(settled).toBe(true);
+    } finally {
+      controller.abort();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("cleanup cancels a deployment check waiting for foreground work", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith("/v1/config/client"))
+        return Response.json({
+          apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+          deploymentRevision: "",
+        });
+      return new Response(new ReadableStream());
+    }) as typeof fetch;
+    const controller = new AbortController();
+    let foreground: Response | undefined;
+    try {
+      configureManagedActorEpoch(null);
+      foreground = await managedActorFetch("https://api.example.test/v1/resource", {
+        method: "GET",
+      });
+      const check = checkDeploymentRevision(controller.signal);
+      await Bun.sleep(0);
+      controller.abort(new DOMException("The check was canceled", "AbortError"));
+      await expect(check).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      controller.abort();
+      await foreground?.body?.cancel();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test.each(["text", "json"] as const)(
     "managed actor %s preserves decoding and single body consumption",
     async (method) => {
@@ -145,6 +221,51 @@ describe("web API auth helpers", () => {
       expect(managedActorMutationBusySnapshot()).toBe(false);
     } finally {
       configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("a 401 that says the sign-in is gone tells the app, other refusals do not", async () => {
+    const originalFetch = globalThis.fetch;
+    const refusal = (status: number, code: string, reason?: string) =>
+      new Response(
+        JSON.stringify({
+          error: {
+            status,
+            code,
+            message: "refused",
+            retryable: false,
+            ...(reason ? { details: { code: reason } } : {}),
+          },
+        }),
+        { status, headers: { "content-type": "application/json" } },
+      );
+    const heard = jest.fn();
+    const unsubscribe = subscribeSignInLost(heard);
+    const cases = [
+      [refusal(401, "unauthenticated", "session_missing"), 1],
+      [refusal(401, "unauthenticated", "session_expired"), 1],
+      [refusal(401, "unauthenticated", "credential_invalid"), 0],
+      [refusal(401, "unauthenticated"), 0],
+      [refusal(403, "forbidden", "missing_permission"), 0],
+    ] as const;
+    try {
+      for (const [response, expected] of cases) {
+        heard.mockClear();
+        globalThis.fetch = (async () => response) as unknown as typeof fetch;
+        await expect(createOpenGeniClient().getAccessContext()).rejects.toThrow();
+        await Bun.sleep(0);
+        expect(heard).toHaveBeenCalledTimes(expected);
+      }
+      unsubscribe();
+      heard.mockClear();
+      globalThis.fetch = (async () =>
+        refusal(401, "unauthenticated", "session_expired")) as unknown as typeof fetch;
+      await expect(createOpenGeniClient().getAccessContext()).rejects.toThrow();
+      await Bun.sleep(0);
+      expect(heard).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
       globalThis.fetch = originalFetch;
     }
   });
@@ -1023,6 +1144,41 @@ describe("web API auth helpers", () => {
     }
   });
 
+  test("reconnects an HTTP/1 batch that carried events sooner than an empty one", async () => {
+    jest.useFakeTimers();
+    try {
+      const settles = async (body: string, advanceMs: number) => {
+        const response = managedActorTrackedResponse(
+          new Response(body),
+          new AbortController().signal,
+          () => {},
+          undefined,
+          4_000,
+        );
+        const reader = response.body!.getReader();
+        if (body.length > 0) expect((await reader.read()).done).toBe(false);
+        let done = false;
+        const terminal = reader.read().then((result) => {
+          done = result.done;
+        });
+        for (let microtask = 0; microtask < 5; microtask += 1) await Promise.resolve();
+        jest.advanceTimersByTime(advanceMs);
+        for (let microtask = 0; microtask < 5; microtask += 1) await Promise.resolve();
+        const settled = done;
+        jest.advanceTimersByTime(4_000);
+        await terminal;
+        return settled;
+      };
+      // A streaming answer keeps arriving: the next poll follows at once.
+      expect(await settles('id: 7\ndata: {"sequence":7}\n\n', 250)).toBe(true);
+      // Nothing new: keep the idle grace so queued reads win the slot.
+      expect(await settles("", 250)).toBe(false);
+      expect(await settles("", 4_000)).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test("does not buffer an SSE response whose claimed length exceeds the batch bound", async () => {
     const originalFetch = globalThis.fetch;
     let source!: ReadableStream<Uint8Array>;
@@ -1406,6 +1562,47 @@ describe("web API auth helpers", () => {
     expect(assigned).toEqual(["https://accounts.google.com/o/oauth2/v2/auth?state=s"]);
   });
 
+  test("signing in from the agent sign-in page returns there, keeping the pending sign-in", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const authorize = "/oauth/authorize?client_id=c&state=s";
+    const page = new URL(
+      `https://app.example.test/connect-agent?authorize=${encodeURIComponent(authorize)}`,
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: Object.assign(page, { assign: () => undefined }),
+        history: { state: null, replaceState: () => undefined },
+      },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ url: "https://github.com/login/oauth/authorize?state=s" });
+    }) as unknown as typeof fetch;
+    try {
+      resetSignupAttributionForTests();
+      await signUpEmail({ name: "Human", email: "human@example.test", password: "secret-123" });
+      await startManagedSocialSignIn("github");
+    } finally {
+      resetSignupAttributionForTests();
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+    for (const value of [
+      bodies[0]!.callbackURL,
+      bodies[1]!.callbackURL,
+      bodies[1]!.errorCallbackURL,
+      bodies[1]!.newUserCallbackURL,
+    ]) {
+      const url = new URL(String(value), "https://app.example.test");
+      expect(url.pathname).toBe("/connect-agent");
+      expect(url.searchParams.get("authorize")).toBe(authorize);
+    }
+  });
+
   test("sends the exact API contract revision on product-owned auth mutations", async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{
@@ -1434,6 +1631,39 @@ describe("web API auth helpers", () => {
     expect(new Headers(requests[0]!.init?.headers).get("x-opengeni-api-contract")).toBe(
       OPENGENI_API_CONTRACT_REVISION,
     );
+  });
+
+  test("preserves signup verification codes and messages from API admission envelopes", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      for (const [status, code, message] of [
+        [403, "SIGNUP_CHALLENGE_REQUIRED", "Complete the signup verification."],
+        [503, "SIGNUP_CHALLENGE_UNAVAILABLE", "Verification is unavailable. Please try again."],
+      ] as const) {
+        globalThis.fetch = (async () =>
+          Response.json(
+            {
+              error: {
+                status,
+                code: status === 503 ? "upstream_unavailable" : "forbidden",
+                message,
+                retryable: status === 503,
+                details: { managedAuthCode: code },
+              },
+            },
+            { status },
+          )) as unknown as typeof fetch;
+        await expect(
+          signUpEmail({
+            name: "Human",
+            email: "human@example.test",
+            password: "long-password-123",
+          }),
+        ).rejects.toMatchObject({ status, code, message, field: null });
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("parses Better Auth failures into structured errors without raw JSON prefixes", async () => {

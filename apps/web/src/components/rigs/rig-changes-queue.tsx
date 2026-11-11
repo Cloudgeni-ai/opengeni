@@ -8,24 +8,25 @@ import { toast } from "sonner";
 
 import { SetupScript } from "@/components/rigs/rig-versions-timeline";
 import { VerificationLog } from "@/components/rigs/verification-log";
-import { Button } from "@/components/ui/button";
-import { DetailInline, DetailSection } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailInline, DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import {
   changeIsPromotable,
   rigActorLabel,
   rigChangeKindLabel,
   rigChangeStatusView,
 } from "@/lib/rig-status";
-import type { RigChange } from "@/types";
+import type { RigChange } from "@opengeni/react/app/types";
 
 export function RigChangesQueue({
   changes,
   versionLabel,
+  personName,
   canManage,
   mutating,
   onVerify,
@@ -34,6 +35,8 @@ export function RigChangesQueue({
   changes: RigChange[];
   /** Map a version id to its human "v{n}" label (or null if unknown). */
   versionLabel: (versionId: string | null) => string | null;
+  /** Names a person's subject ("you" for the viewer); null when unknown. */
+  personName?: (subjectId: string) => string | null;
   canManage: boolean;
   mutating: boolean;
   onVerify: (changeId: string) => Promise<RigChange | null>;
@@ -74,7 +77,7 @@ export function RigChangesQueue({
               </MetaChip>
             }
             meta={[
-              `Proposed by ${rigActorLabel(change.proposedBy)}`,
+              `Proposed by ${rigActorLabel(change.proposedBy, personName, { inSentence: true })}`,
               <RelativeTime key="time" date={change.createdAt} />,
             ]}
             indicator="expand"
@@ -214,7 +217,6 @@ function ChangePayload({
   if (Array.isArray(payload.checks)) {
     touched.push(`checks (${payload.checks.length})`);
   }
-  if (Array.isArray(payload.defaultVariableSetIds)) touched.push("default variable sets");
   const setupScript = typeof payload.setupScript === "string" ? payload.setupScript : null;
   const changelog = typeof payload.changelog === "string" ? payload.changelog : "";
   return (

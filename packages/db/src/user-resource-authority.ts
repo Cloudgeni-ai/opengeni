@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
-import { nestedPostgresSqlState } from "./persistence-errors";
+import { ClassifiedDatabaseRefusal, nestedPostgresSqlState } from "./persistence-errors";
 
 export type UserResourceAuthorityGrant = {
   grantId: string;
@@ -38,10 +38,10 @@ export type AcceptedTurnPersonalResourceAttachment = {
   replay: boolean;
 };
 
-export class PersonalResourceAttachmentAcceptanceError extends Error {
+export class PersonalResourceAttachmentAcceptanceError extends ClassifiedDatabaseRefusal {
   readonly name = "PersonalResourceAttachmentAcceptanceError";
   constructor(
-    readonly kind: "invalid" | "forbidden" | "conflict",
+    readonly kind: "invalid" | "forbidden" | "conflict" | "stale",
     options?: ErrorOptions,
   ) {
     super(
@@ -49,7 +49,9 @@ export class PersonalResourceAttachmentAcceptanceError extends Error {
         ? "The personal-resource attachment request is invalid"
         : kind === "forbidden"
           ? "The personal-resource attachment is not authorized"
-          : "The personal-resource attachment conflicts with accepted work",
+          : kind === "stale"
+            ? "This chat's access changed just before the message was sent. Check the attached resources and send it again."
+            : "The personal-resource attachment conflicts with accepted work",
       options,
     );
   }
@@ -74,6 +76,24 @@ export async function acceptTurnPersonalResourceAttachmentInTransaction(
   },
 ): Promise<AcceptedTurnPersonalResourceAttachment> {
   await setSubjectRlsContext(db, input.subjectId);
+  // The caller already holds this session's row lock, so this plain read is
+  // the epoch the database function will compare. Answering a stale epoch
+  // here gives the client a retryable conflict instead of the function's
+  // generic refusal, which it shares with a wrong initiator. The function
+  // stays the authority for every other check.
+  const [current] = await rawRows<{ authorityEpoch: number }>(
+    db,
+    sql`
+      select authority_epoch::int as "authorityEpoch"
+      from sessions
+      where id = ${input.sessionId}::uuid
+        and account_id = ${input.accountId}::uuid
+        and workspace_id = ${input.workspaceId}::uuid
+    `,
+  );
+  if (current && current.authorityEpoch !== input.intent.expectedAuthorityEpoch) {
+    throw new PersonalResourceAttachmentAcceptanceError("stale");
+  }
   let row:
     | {
         grantMode: "once" | "session" | "always";
@@ -170,10 +190,25 @@ export async function listSelfUserResourceAuthorities(
     limit: number;
   },
 ): Promise<{ authorities: UserResourceAuthoritySummary[]; nextCursor: string | null }> {
-  return await withOwnerContext(db, input, async (scopedDb) => {
-    const rows = await rawRows<AuthorityRow>(
-      scopedDb,
-      sql`
+  return await withOwnerContext(db, input, async (scopedDb) =>
+    listSelfUserResourceAuthoritiesInOwnerScope(scopedDb, input),
+  );
+}
+
+/** `listSelfUserResourceAuthorities` on a handle already in its owner scope. */
+async function listSelfUserResourceAuthoritiesInOwnerScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    resourceKind: UserResourceKind;
+    cursor?: string | undefined;
+    limit: number;
+  },
+): Promise<{ authorities: UserResourceAuthoritySummary[]; nextCursor: string | null }> {
+  const rows = await rawRows<AuthorityRow>(
+    scopedDb,
+    sql`
       select authority_id as "authorityId", organization_id as "organizationId",
         resource_kind as "resourceKind", resource_id as "resourceId",
         origin_workspace_id as "originWorkspaceId",
@@ -189,55 +224,124 @@ export async function listSelfUserResourceAuthorities(
         ${input.cursor ?? null}::uuid, ${input.limit + 1}
       )
     `,
-    );
-    const grouped = new Map<string, UserResourceAuthoritySummary>();
-    for (const row of rows) {
-      const authority = grouped.get(row.authorityId) ?? {
-        authorityId: row.authorityId,
-        resourceKind: row.resourceKind,
-        resourceId: row.resourceId,
-        originWorkspaceId: row.originWorkspaceId,
-        generation: row.authorityGeneration,
-        status: row.authorityStatus,
-        grants: [],
-      };
-      if (row.grantId && row.targetWorkspaceId) {
-        authority.grants.push({
+  );
+  const grouped = new Map<string, UserResourceAuthoritySummary>();
+  for (const row of rows) {
+    const authority = grouped.get(row.authorityId) ?? {
+      authorityId: row.authorityId,
+      resourceKind: row.resourceKind,
+      resourceId: row.resourceId,
+      originWorkspaceId: row.originWorkspaceId,
+      generation: row.authorityGeneration,
+      status: row.authorityStatus,
+      grants: [],
+    };
+    if (row.grantId && row.targetWorkspaceId) {
+      authority.grants.push({
+        grantId: row.grantId,
+        targetWorkspaceId: row.targetWorkspaceId,
+        targetSessionId: row.targetSessionId,
+        action: row.action,
+        mode: row.mode,
+        context: row.context,
+        authorityEpoch: row.authorityEpoch,
+        generation: row.generation,
+        status: row.status,
+        expiresAt: rfc3339(row.expiresAt),
+        delegation: {
+          authorityId: row.authorityId,
           grantId: row.grantId,
-          targetWorkspaceId: row.targetWorkspaceId,
-          targetSessionId: row.targetSessionId,
+          organizationId: row.organizationId,
+          workspaceId: row.targetWorkspaceId,
+          sessionId: row.targetSessionId,
           action: row.action,
           mode: row.mode,
           context: row.context,
           authorityEpoch: row.authorityEpoch,
-          generation: row.generation,
-          status: row.status,
-          expiresAt: rfc3339(row.expiresAt),
-          delegation: {
-            authorityId: row.authorityId,
-            grantId: row.grantId,
-            organizationId: row.organizationId,
-            workspaceId: row.targetWorkspaceId,
-            sessionId: row.targetSessionId,
-            action: row.action,
-            mode: row.mode,
-            context: row.context,
-            authorityEpoch: row.authorityEpoch,
-            authorityGeneration: row.authorityGeneration,
-            grantGeneration: row.generation,
-          },
-        });
-      }
-      grouped.set(row.authorityId, authority);
+          authorityGeneration: row.authorityGeneration,
+          grantGeneration: row.generation,
+        },
+      });
     }
-    const values = [...grouped.values()];
-    const hasMore = values.length > input.limit;
-    const authorities = hasMore ? values.slice(0, input.limit) : values;
-    return {
-      authorities,
-      nextCursor: hasMore ? (authorities.at(-1)?.authorityId ?? null) : null,
-    };
-  });
+    grouped.set(row.authorityId, authority);
+  }
+  const values = [...grouped.values()];
+  const hasMore = values.length > input.limit;
+  const authorities = hasMore ? values.slice(0, input.limit) : values;
+  return {
+    authorities,
+    nextCursor: hasMore ? (authorities.at(-1)?.authorityId ?? null) : null,
+  };
+}
+
+/**
+ * Where a person turned their own logins on (D-54): for each of their personal
+ * connections that is turned on in `workspaceId`, the standing grant that does
+ * it. A turned-on login has an active `always` `connection.use` grant for this
+ * workspace. Their Personal workspace needs none; callers decide that.
+ */
+export async function listOwnLoginsTurnedOn(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<Map<string, string>> {
+  return await collectOwnLoginsTurnedOn(input, (cursor) =>
+    listSelfUserResourceAuthorities(db, {
+      ...input,
+      resourceKind: "connection",
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    }),
+  );
+}
+
+/**
+ * `listOwnLoginsTurnedOn` on a handle already in the owner's scope (its
+ * account, workspace and subject): the same pages and the same answer,
+ * without a scope per page.
+ */
+export async function listOwnLoginsTurnedOnInOwnerScope(
+  scopedDb: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<Map<string, string>> {
+  return await collectOwnLoginsTurnedOn(input, (cursor) =>
+    listSelfUserResourceAuthoritiesInOwnerScope(scopedDb, {
+      ...input,
+      resourceKind: "connection",
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    }),
+  );
+}
+
+async function collectOwnLoginsTurnedOn(
+  input: { workspaceId: string },
+  readPage: (
+    cursor: string | undefined,
+  ) => Promise<{ authorities: UserResourceAuthoritySummary[]; nextCursor: string | null }>,
+): Promise<Map<string, string>> {
+  const turnedOn = new Map<string, string>();
+  let cursor: string | undefined;
+  // Bounded: a person has few logins, and a broken cursor must not loop.
+  for (let page = 0; page < 50; page += 1) {
+    const listed = await readPage(cursor);
+    const now = Date.now();
+    for (const authority of listed.authorities) {
+      if (authority.status !== "active") continue;
+      const grant = authority.grants.find(
+        (each) =>
+          each.targetWorkspaceId === input.workspaceId &&
+          each.action === "connection.use" &&
+          each.mode === "always" &&
+          each.context === "workspace_shared" &&
+          each.status === "active" &&
+          (each.expiresAt === null || Date.parse(each.expiresAt) > now),
+      );
+      if (grant) turnedOn.set(authority.resourceId, grant.grantId);
+    }
+    if (!listed.nextCursor) break;
+    cursor = listed.nextCursor;
+  }
+  return turnedOn;
 }
 
 export async function issueSelfUserResourceGrant(

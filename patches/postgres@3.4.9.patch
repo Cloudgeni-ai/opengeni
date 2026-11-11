@@ -1,0 +1,596 @@
+diff --git a/src/connection.js b/src/connection.js
+--- a/src/connection.js
++++ b/src/connection.js
+@@ -106,6 +106,7 @@
+     , nonce = null
+     , query = null
+     , final = null
++    , login = null
+ 
+   const connection = {
+     queue: queues.closed,
+@@ -157,6 +158,13 @@
+     if (terminated)
+       return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    // A transaction callback can outlive the physical connection. Reject its
++    // late query before build/write (and the catch path's Sync write).
++    if (!socket) {
++      queryError(q, Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
++
+     if (stream)
+       return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
+ 
+@@ -252,10 +260,16 @@
+   }
+ 
+   function nextWrite(fn) {
+-    const x = socket.write(chunk, fn)
++    const buffer = chunk
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+-    return x
++    if (!socket) {
++      const err = Errors.connection('CONNECTION_CLOSED', options)
++      error(err)
++      fn && fn(err)
++      return false
++    }
++    return buffer ? socket.write(buffer, fn) : true
+   }
+ 
+   function connectTimedOut() {
+@@ -287,6 +301,11 @@
+ 
+     socket.removeAllListeners()
+     socket = tls.connect(options)
++    // Bun's native TLS upgrade still pushes wire bytes to the original TCP
++    // readable stream. No consumer remains after removeAllListeners(), so its
++    // queue otherwise retains every encrypted query result for the connection
++    // lifetime. Drain that duplicate stream only after TLS owns the transport.
++    if (typeof Bun !== 'undefined') options.socket.on('data', noop)
+     socket.on('secureConnect', connected)
+     socket.on('error', error)
+     socket.on('close', closed)
+@@ -364,6 +383,10 @@
+ 
+   function connected() {
+     try {
++      // One identity per login attempt: the password function receives it,
++      // and an error raised while it logs in carries it, so a caller can
++      // tell which password a refused login used.
++      login = {}
+       statements = {}
+       needsTypes = options.fetch_types
+       statementId = Math.random().toString(36).slice(2)
+@@ -438,6 +461,7 @@
+     remaining = 0
+     incomings = null
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     socket.removeListener('data', data)
+     socket.removeListener('connect', connected)
+     idleTimer.cancel()
+@@ -447,10 +471,20 @@
+     socket.removeAllListeners()
+     socket = null
+ 
+-    if (initial)
++    // Only reconnect transparently before any startup query was dispatched.
++    if (initial && !query)
+       return reconnect()
+ 
+-    !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // A socket error rejects only the queries it sees. A caller can still queue
++    // one (a failed transaction's rollback) before close; it never reached a
++    // backend, so reject it instead of replaying it on the next connection.
++    if (query || sent.length) error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // The rejected query cannot receive ReadyForQuery from a dead backend.
++    // Release its drain obligation without replaying any bytes.
++    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
++    query = results = errorResponse = null
++    result = new Result()
++    ended && (ended(), ending = ended = null)
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -548,6 +582,8 @@
+     }
+ 
+     query = results = errorResponse = null
++    // Logged in: later errors no longer belong to the login attempt.
++    login = null
+     result = new Result()
+     connectTimer.cancel()
+ 
+@@ -561,7 +597,12 @@
+ 
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Startup discovery has no application promise to observe rejection.
++        // Never apply its late failure to a replacement physical connection.
++        const startupSocket = socket
++        return fetchArrayTypes().catch(err => {
++          if (socket === startupSocket) error(err)
++        })
+       }
+ 
+       initial && !initial.reserve && execute(initial)
+@@ -748,7 +789,7 @@
+ 
+   function Pass() {
+     return Promise.resolve(typeof options.pass === 'function'
+-      ? options.pass()
++      ? options.pass(login)
+       : options.pass
+     )
+   }
+@@ -814,7 +855,9 @@
+       (query.cursorFn || query.describeFirst) && write(Sync)
+       errorResponse = Errors.postgres(parseError(x))
+     } else {
+-      errored(Errors.postgres(parseError(x)))
++      const err = Errors.postgres(parseError(x))
++      login && Object.defineProperty(err, Symbol.for('postgres.login'), { value: login })
++      errored(err)
+     }
+   }
+ 
+diff --git a/cjs/src/connection.js b/cjs/src/connection.js
+--- a/cjs/src/connection.js
++++ b/cjs/src/connection.js
+@@ -106,6 +106,7 @@
+     , nonce = null
+     , query = null
+     , final = null
++    , login = null
+ 
+   const connection = {
+     queue: queues.closed,
+@@ -157,6 +158,13 @@
+     if (terminated)
+       return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    // A transaction callback can outlive the physical connection. Reject its
++    // late query before build/write (and the catch path's Sync write).
++    if (!socket) {
++      queryError(q, Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
++
+     if (stream)
+       return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
+ 
+@@ -252,10 +260,16 @@
+   }
+ 
+   function nextWrite(fn) {
+-    const x = socket.write(chunk, fn)
++    const buffer = chunk
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+-    return x
++    if (!socket) {
++      const err = Errors.connection('CONNECTION_CLOSED', options)
++      error(err)
++      fn && fn(err)
++      return false
++    }
++    return buffer ? socket.write(buffer, fn) : true
+   }
+ 
+   function connectTimedOut() {
+@@ -287,6 +301,11 @@
+ 
+     socket.removeAllListeners()
+     socket = tls.connect(options)
++    // Bun's native TLS upgrade still pushes wire bytes to the original TCP
++    // readable stream. No consumer remains after removeAllListeners(), so its
++    // queue otherwise retains every encrypted query result for the connection
++    // lifetime. Drain that duplicate stream only after TLS owns the transport.
++    if (typeof Bun !== 'undefined') options.socket.on('data', noop)
+     socket.on('secureConnect', connected)
+     socket.on('error', error)
+     socket.on('close', closed)
+@@ -364,6 +383,10 @@
+ 
+   function connected() {
+     try {
++      // One identity per login attempt: the password function receives it,
++      // and an error raised while it logs in carries it, so a caller can
++      // tell which password a refused login used.
++      login = {}
+       statements = {}
+       needsTypes = options.fetch_types
+       statementId = Math.random().toString(36).slice(2)
+@@ -438,6 +461,7 @@
+     remaining = 0
+     incomings = null
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     socket.removeListener('data', data)
+     socket.removeListener('connect', connected)
+     idleTimer.cancel()
+@@ -447,10 +471,20 @@
+     socket.removeAllListeners()
+     socket = null
+ 
+-    if (initial)
++    // Only reconnect transparently before any startup query was dispatched.
++    if (initial && !query)
+       return reconnect()
+ 
+-    !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // A socket error rejects only the queries it sees. A caller can still queue
++    // one (a failed transaction's rollback) before close; it never reached a
++    // backend, so reject it instead of replaying it on the next connection.
++    if (query || sent.length) error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // The rejected query cannot receive ReadyForQuery from a dead backend.
++    // Release its drain obligation without replaying any bytes.
++    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
++    query = results = errorResponse = null
++    result = new Result()
++    ended && (ended(), ending = ended = null)
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -548,6 +582,8 @@
+     }
+ 
+     query = results = errorResponse = null
++    // Logged in: later errors no longer belong to the login attempt.
++    login = null
+     result = new Result()
+     connectTimer.cancel()
+ 
+@@ -561,7 +597,12 @@
+ 
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Startup discovery has no application promise to observe rejection.
++        // Never apply its late failure to a replacement physical connection.
++        const startupSocket = socket
++        return fetchArrayTypes().catch(err => {
++          if (socket === startupSocket) error(err)
++        })
+       }
+ 
+       initial && !initial.reserve && execute(initial)
+@@ -748,7 +789,7 @@
+ 
+   function Pass() {
+     return Promise.resolve(typeof options.pass === 'function'
+-      ? options.pass()
++      ? options.pass(login)
+       : options.pass
+     )
+   }
+@@ -814,7 +855,9 @@
+       (query.cursorFn || query.describeFirst) && write(Sync)
+       errorResponse = Errors.postgres(parseError(x))
+     } else {
+-      errored(Errors.postgres(parseError(x)))
++      const err = Errors.postgres(parseError(x))
++      login && Object.defineProperty(err, Symbol.for('postgres.login'), { value: login })
++      errored(err)
+     }
+   }
+ 
+diff --git a/src/index.js b/src/index.js
+--- a/src/index.js
++++ b/src/index.js
+@@ -202,14 +202,17 @@
+ 
+   async function reserve() {
+     const queue = Queue()
++    // Most recently idle first: see handler().
+     const c = open.length
+-      ? open.shift()
++      ? open.pop()
+       : await new Promise((resolve, reject) => {
+         const query = { reserve: resolve, reject }
+         queries.push(query)
+         closed.length && connect(closed.shift(), query)
+       })
+ 
++    let closedError = null
++    c.onclose = err => closedError = err
+     move(c, reserved)
+     c.reserved = () => queue.length
+       ? c.execute(queue.shift())
+@@ -218,6 +221,8 @@
+ 
+     const sql = Sql(handler)
+     sql.release = () => {
++      if (closedError) return
++      c.onclose = null
+       c.reserved = null
+       onopen(c)
+     }
+@@ -225,6 +230,7 @@
+     return sql
+ 
+     function handler(q) {
++      if (closedError) return q.reject(closedError)
+       c.queue === full
+         ? queue.push(q)
+         : c.execute(q) || move(c, full)
+@@ -236,13 +242,17 @@
+     const queries = Queue()
+     let savepoints = 0
+       , connection
++      , connectionError = null
+       , prepare = null
+ 
+     try {
+       await sql.unsafe('begin ' + options.replace(/[^a-z ]/ig, ''), [], { onexecute }).execute()
+       return await Promise.race([
+         scope(connection, fn),
+-        new Promise((_, reject) => connection.onclose = reject)
++        new Promise((_, reject) => connection.onclose = err => {
++          connectionError = err
++          reject(err)
++        })
+       ])
+     } catch (error) {
+       throw error
+@@ -289,6 +299,9 @@
+       }
+ 
+       function handler(q) {
++        // A failed transaction callback may finish after this physical
++        // connection has been reused. Never send its rollback/commit there.
++        if (connectionError) return q.reject(connectionError)
+         q.catch(e => uncaughtError || (uncaughtError = e))
+         c.queue === full
+           ? queries.push(q)
+@@ -330,8 +343,14 @@
+     if (ending)
+       return query.reject(Errors.connection('CONNECTION_ENDED', options, options))
+ 
++    // Reuse the most recently idle connection first. Taking the longest idle one
++    // rotates work across every slot, so no connection ever reaches idle_timeout
++    // and the pool stays at max even when one or two queries are in flight; each
++    // backend then pays its own catalog and plan-cache warmup for every
++    // statement. Most-recent-first keeps a small warm set busy and lets the
++    // surplus close after idle_timeout.
+     if (open.length)
+-      return go(open.shift(), query)
++      return go(open.pop(), query)
+ 
+     if (closed.length)
+       return connect(closed.shift(), query)
+diff --git a/cjs/src/index.js b/cjs/src/index.js
+--- a/cjs/src/index.js
++++ b/cjs/src/index.js
+@@ -202,14 +202,17 @@
+ 
+   async function reserve() {
+     const queue = Queue()
++    // Most recently idle first: see handler().
+     const c = open.length
+-      ? open.shift()
++      ? open.pop()
+       : await new Promise((resolve, reject) => {
+         const query = { reserve: resolve, reject }
+         queries.push(query)
+         closed.length && connect(closed.shift(), query)
+       })
+ 
++    let closedError = null
++    c.onclose = err => closedError = err
+     move(c, reserved)
+     c.reserved = () => queue.length
+       ? c.execute(queue.shift())
+@@ -218,6 +221,8 @@
+ 
+     const sql = Sql(handler)
+     sql.release = () => {
++      if (closedError) return
++      c.onclose = null
+       c.reserved = null
+       onopen(c)
+     }
+@@ -225,6 +230,7 @@
+     return sql
+ 
+     function handler(q) {
++      if (closedError) return q.reject(closedError)
+       c.queue === full
+         ? queue.push(q)
+         : c.execute(q) || move(c, full)
+@@ -236,13 +242,17 @@
+     const queries = Queue()
+     let savepoints = 0
+       , connection
++      , connectionError = null
+       , prepare = null
+ 
+     try {
+       await sql.unsafe('begin ' + options.replace(/[^a-z ]/ig, ''), [], { onexecute }).execute()
+       return await Promise.race([
+         scope(connection, fn),
+-        new Promise((_, reject) => connection.onclose = reject)
++        new Promise((_, reject) => connection.onclose = err => {
++          connectionError = err
++          reject(err)
++        })
+       ])
+     } catch (error) {
+       throw error
+@@ -289,6 +299,9 @@
+       }
+ 
+       function handler(q) {
++        // A failed transaction callback may finish after this physical
++        // connection has been reused. Never send its rollback/commit there.
++        if (connectionError) return q.reject(connectionError)
+         q.catch(e => uncaughtError || (uncaughtError = e))
+         c.queue === full
+           ? queries.push(q)
+@@ -330,8 +343,14 @@
+     if (ending)
+       return query.reject(Errors.connection('CONNECTION_ENDED', options, options))
+ 
++    // Reuse the most recently idle connection first. Taking the longest idle one
++    // rotates work across every slot, so no connection ever reaches idle_timeout
++    // and the pool stays at max even when one or two queries are in flight; each
++    // backend then pays its own catalog and plan-cache warmup for every
++    // statement. Most-recent-first keeps a small warm set busy and lets the
++    // surplus close after idle_timeout.
+     if (open.length)
+-      return go(open.shift(), query)
++      return go(open.pop(), query)
+ 
+     if (closed.length)
+       return connect(closed.shift(), query)
+diff --git a/src/queue.js b/src/queue.js
+--- a/src/queue.js
++++ b/src/queue.js
+@@ -15,6 +15,18 @@
+         : (xs.splice(index, 1), x)
+     },
+     push: (x) => (xs.push(x), x),
++    pop: () => {
++      if (xs.length - index === 0)
++        return undefined
++
++      const out = xs.pop()
++      if (index >= xs.length) {
++        index = 0
++        xs = []
++      }
++
++      return out
++    },
+     shift: () => {
+       const out = xs[index++]
+ 
+diff --git a/src/query.js b/src/query.js
+--- a/src/query.js
++++ b/src/query.js
+@@ -23,8 +23,8 @@
+     this.state = null
+     this.statement = null
+
+-    this.resolve = x => (this.active = false, resolve(x))
+-    this.reject = x => (this.active = false, reject(x))
++    this.resolve = x => (this.settled = true, this.active = false, resolve(x))
++    this.reject = x => (this.settled = true, this.active = false, reject(x))
+
+     this.active = false
+     this.cancelled = null
+@@ -50,7 +50,11 @@
+   }
+
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    if (this.cancelPromise) return this.cancelPromise
++    if (this.settled || !this.canceller) return Promise.resolve()
++    const canceller = this.canceller
++    this.canceller = null
++    return this.cancelPromise = canceller(this)
+   }
+
+   simple() {
+@@ -97,8 +101,8 @@
+               return new Promise(r => prev = r)
+             }
+-            this.resolve = () => (this.active = false, resolve({ done: true }))
+-            this.reject = x => (this.active = false, reject(x))
++            this.resolve = () => (this.settled = true, this.active = false, resolve({ done: true }))
++            this.reject = x => (this.settled = true, this.active = false, reject(x))
+           })
+           this.execute()
+           return promise
+         },
+diff --git a/cjs/src/query.js b/cjs/src/query.js
+--- a/cjs/src/query.js
++++ b/cjs/src/query.js
+@@ -23,8 +23,8 @@
+     this.state = null
+     this.statement = null
+
+-    this.resolve = x => (this.active = false, resolve(x))
+-    this.reject = x => (this.active = false, reject(x))
++    this.resolve = x => (this.settled = true, this.active = false, resolve(x))
++    this.reject = x => (this.settled = true, this.active = false, reject(x))
+
+     this.active = false
+     this.cancelled = null
+@@ -50,7 +50,11 @@
+   }
+
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    if (this.cancelPromise) return this.cancelPromise
++    if (this.settled || !this.canceller) return Promise.resolve()
++    const canceller = this.canceller
++    this.canceller = null
++    return this.cancelPromise = canceller(this)
+   }
+
+   simple() {
+@@ -97,8 +101,8 @@
+               return new Promise(r => prev = r)
+             }
+-            this.resolve = () => (this.active = false, resolve({ done: true }))
+-            this.reject = x => (this.active = false, reject(x))
++            this.resolve = () => (this.settled = true, this.active = false, resolve({ done: true }))
++            this.reject = x => (this.settled = true, this.active = false, reject(x))
+           })
+           this.execute()
+           return promise
+         },
+diff --git a/types/index.d.ts b/types/index.d.ts
+--- a/types/index.d.ts
++++ b/types/index.d.ts
+@@ -354,9 +354,12 @@
+     pass?: Options<T>['password'] | undefined;
+     /**
+      * Password of database user
++     * A function is asked once per login attempt and receives that attempt's
++     * identity, which an error raised during that login carries under
++     * `Symbol.for('postgres.login')`.
+      * @default process.env['PGPASSWORD']
+      */
+-    password?: string | (() => string | Promise<string>) | undefined;
++    password?: string | ((login: object) => string | Promise<string>) | undefined;
+     /** Name of database to connect to (an alias for `database`) */
+     db?: Options<T>['database'] | undefined;
+     /** Username of database user (an alias for `user`) */
+@@ -605,7 +608,7 @@
+     writable(): Promise<Writable>;
+ 
+     execute(): this;
+-    cancel(): void;
++    cancel(): Promise<void>;
+ 
+     /**
+      * @deprecated `.stream` has been renamed to `.forEach`
+diff --git a/cjs/src/queue.js b/cjs/src/queue.js
+--- a/cjs/src/queue.js
++++ b/cjs/src/queue.js
+@@ -15,6 +15,18 @@
+         : (xs.splice(index, 1), x)
+     },
+     push: (x) => (xs.push(x), x),
++    pop: () => {
++      if (xs.length - index === 0)
++        return undefined
++
++      const out = xs.pop()
++      if (index >= xs.length) {
++        index = 0
++        xs = []
++      }
++
++      return out
++    },
+     shift: () => {
+       const out = xs[index++]
+ 

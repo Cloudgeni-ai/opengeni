@@ -80,7 +80,7 @@ test("explicit save, labeled custom choices, and deny-all are distinct from filt
   expect(host.textContent).toContain("Custom MCP");
   expect(host.textContent).toContain("Custom OpenAPI");
   expect(host.textContent).toContain("Custom GraphQL");
-  const toggle = host.querySelector('[role="switch"]') as HTMLButtonElement;
+  const toggle = host.querySelector('[role="switch"][aria-label^="Allow "]') as HTMLButtonElement;
   expect(toggle.getAttribute("aria-label")).toBe("Allow Slack");
   // Stable keys stay out of the rows.
   expect(host.textContent).not.toContain("custom:mcp");
@@ -101,7 +101,7 @@ test("uncertain saves lock edits and retry the exact operation and request", asy
     if (++attempts === 1) throw new Error("offline");
     return { mode: "restricted", allowedIntegrationKeys: ["slack"], revision: 2 };
   });
-  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"][aria-label^="Allow "]')!);
   await click(button("Save changes"));
   expect(host.textContent).toContain("1 selected");
   expect(button("All integrations").disabled).toBe(true);
@@ -115,7 +115,7 @@ test("uncertain saves lock edits and retry the exact operation and request", asy
 test("switching from unrestricted to no selections explicitly saves deny-all", async () => {
   const { calls } = await mount(undefined, "unrestricted");
   // Everything is allowed, so there is nothing to pick.
-  expect(host.querySelector('[role="switch"]')).toBeNull();
+  expect(host.querySelector('[role="switch"][aria-label^="Allow "]')).toBeNull();
   await click(button("Only selected"));
   expect(host.textContent).toContain("Saving will block all new integration connections");
   await click(button("Save changes"));
@@ -130,7 +130,7 @@ test("revision conflict preserves draft and requires explicit refresh", async ()
   await mount(async () => {
     throw { status: 409 };
   });
-  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"][aria-label^="Allow "]')!);
   await click(button("Save changes"));
   expect(host.textContent).toContain("1 selected");
   expect(button("Save changes").disabled).toBe(true);
@@ -142,7 +142,7 @@ test("a definite permission refusal is not presented as an uncertain save", asyn
   const { calls } = await mount(async () => {
     throw { status: 403 };
   });
-  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"][aria-label^="Allow "]')!);
   await click(button("Save changes"));
   expect(host.textContent).toContain("no longer have permission");
   expect(host.textContent).not.toContain("Retry same save");
@@ -158,7 +158,7 @@ test("actor change ignores late save callbacks and non-admin sessions cannot rea
         resolve = done;
       }),
   );
-  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"][aria-label^="Allow "]')!);
   await click(button("Save changes"));
   await render({ identity: { ...identity, subjectId: "other", principalGeneration: 2 } });
   await act(async () =>
@@ -200,7 +200,7 @@ test("StrictMode replay cannot let a stale initial read overwrite the current dr
       </StrictMode>,
     ),
   );
-  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"][aria-label^="Allow "]')!);
   await act(async () =>
     resolveFirst({ mode: "unrestricted", allowedIntegrationKeys: [], revision: 1 }),
   );

@@ -9,19 +9,28 @@ import {
   selectCodexCredentialId,
   type CodexAuthHeaders,
   type CodexFetch,
+  type CodexRealtimeDiagnostics,
   type CodexRealtimeInitialItem,
   type CodexRealtimeCallInput,
+  type CodexRealtimeProviderConfig,
 } from "@opengeni/codex";
 import {
-  buildCodexTokenResolver,
+  acquireSubscriptionCoreCodexOperationLease,
+  buildSubscriptionCoreCodexConnectionTokenResolver,
+  buildSubscriptionCoreCodexOperationFetch,
+  listSubscriptionCoreCodexOperationCandidates,
+  readSubscriptionCoreSessionOwner,
+  releaseSubscriptionCoreCodexOperationLease,
+  renewSubscriptionCoreCodexOperationLease,
+  subscriptionCoreCodexPlanHasVoice,
+  type SubscriptionCoreCodexOperationLeaseRef,
+  type SubscriptionCoreCodexOperationScope,
   getActiveSessionHistoryItems,
-  getCodexCredentialStatus,
   getSessionRealtimeContinuityEntries,
-  getSessionCodexState,
-  listCodexAccountStatuses,
   type Database,
 } from "@opengeni/db";
 import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
+import { createRealtimeProviderConfigCache } from "./realtime-provider-config-cache";
 
 export type CodexRealtimeBrokerFailureReason =
   | "subscription_disabled"
@@ -42,6 +51,12 @@ export class CodexRealtimeBrokerError extends Error {
     readonly reason: CodexRealtimeBrokerFailureReason,
     message: string,
     readonly providerStatus: number | null = null,
+    /**
+     * Server-only cause of a provider failure: the adapter's own message and
+     * its closed-grammar diagnostics. Logged for operators, never returned to
+     * the client, whose message stays the safe one above.
+     */
+    readonly providerCause?: { message: string; diagnostics: CodexRealtimeDiagnostics },
   ) {
     super(message);
     this.name = "CodexRealtimeBrokerError";
@@ -59,13 +74,27 @@ export type CodexRealtimeBrokerDependencies = {
     pinnedCredentialId: string | null;
     activeCredentialId: string | null;
     connectedCredentialIds: ReadonlySet<string>;
+    /**
+     * Connected credentials on a ChatGPT plan without voice (Free): the
+     * provider answers their realtime calls with 404.
+     */
+    voicelessCredentialIds?: ReadonlySet<string>;
+    /** Connected credentials open to new allocations whose plan has voice, in pool order. */
+    voiceCredentialIds?: readonly string[];
   }>;
   loadInitialItems(): Promise<CodexRealtimeInitialItem[]>;
   tokenResolver(credentialId: string): CodexTokenResolver;
+  loadProviderConfig?(
+    auth: CodexAuthHeaders,
+    options: { signal?: AbortSignal | undefined },
+  ): Promise<CodexRealtimeProviderConfig>;
   createCall(
     auth: CodexAuthHeaders,
     input: CodexRealtimeCallInput,
-    options: { signal?: AbortSignal | undefined },
+    options: {
+      signal?: AbortSignal | undefined;
+      providerConfig?: CodexRealtimeProviderConfig | undefined;
+    },
   ): Promise<CodexRealtimeProviderAnswer>;
 };
 
@@ -104,31 +133,47 @@ The initial conversation items are authoritative context from the current sessio
 
 Live context wrapped in <session_user_message> is an authoritative user message already routed to the current session. A status of queued_for_execution means it is waiting behind existing work; accepted_for_execution means it is next with no existing work ahead; accepted_for_steering means it was given priority as a change of direction, while any prior work may still be yielding. Incorporate it immediately as conversation context, but never delegate it again or treat the wrapper metadata as user-authored text.
 
-Live context wrapped in <session_human_input_request> means current work is paused for the user's answer. Preserve the exact question meaning and options. Ask one question at a time when useful. The user may answer in the visible form or answer conversationally. If the user answers conversationally, create exactly one delegation containing the relevant question and the user's answer so the session agent can continue with complete context. If the user changes direction instead, delegate the new direction normally. Do not claim work resumed until session context confirms it.
+Live context wrapped in <session_human_input_request> means current work is paused for the user's answer. Preserve the exact question meaning and options. Ask one question at a time when useful. The user may answer in the visible form or answer conversationally. If the user answers conversationally, create exactly one delegation containing the relevant question and the user's answer so the session agent can continue with complete context. If the user changes direction instead, delegate the new direction normally. Do not claim work resumed until session context confirms it. A secret question (a password, key or code) is answered only in the app: say "answer it in the app", never ask for the secret aloud, and never delegate a spoken secret.
 
 Live context wrapped in <session_human_input_response> is the authoritative outcome of that pending question. An answered or skipped response came through the structured session UI and is already routed; incorporate it, never delegate it again, and acknowledge briefly only if useful. An expired or cancelled response means the question is no longer active.
 
 Live session updates may describe work that started before this realtime conversation, work sent directly by the user, or work delegated during an earlier realtime connection. Treat those updates as part of this same session even when they have no current delegation identity.
 
+For requests about another session, use the backend to find, select, inspect or act on it while staying in this conversation. Selecting a session alone does not authorize changing its work.
+
 ## Backend use
+
+The backend is a more capable agent. It has the session's tools, files, skills, and instructions, and it decides how work gets done. Your job is to relay between the user and the backend: pass on what the user wants, and help the user quickly understand what the backend did and found.
 
 For actions or tasks, always use the backend. If it is unclear whether backend use would help, use it.
 
-Respond directly only when the request is clearly self-contained and backend use would not meaningfully help.
+You can only get things done through the backend. When the user gives an instruction or asks for something to be done, including a change to how ongoing work is being done, pass it to the backend. Never answer it with a promise such as "I'll do that" or "I'll stop that" without passing it on.
+
+Respond directly when the request is clearly self-contained and backend use would not meaningfully help, or when the answer is already in the session context or this conversation, such as a question about a result the backend has already reported.
 
 Do not claim that you cannot perform an action or lack access to tools, session state, workspace state, files, code, terminals, deployments, connected services, or other execution capabilities. Pass the request to the backend and let it determine what is available.
 
-Ask a clarifying question only when needed to avoid a materially harmful mistake or when essential information cannot reasonably be inferred. Otherwise, make a reasonable assumption and use the backend.
+Ask a clarifying question only when needed to avoid a materially harmful mistake or when essential information cannot reasonably be inferred. Otherwise, use the backend and leave the remaining choices to it.
 
-Give the backend a complete standalone task containing the user's requested outcome, constraints, and all relevant context already established in the conversation. Do not make the user repeat information you already have.
+## Relaying requests faithfully
+
+The backend treats what you send as the user's own request. Send the user's request in their own words and in the language they spoke, keeping their meaning, wording, and level of detail.
+
+Add only what the backend needs to understand the request from this conversation, such as what "it" or "that" refers to, or which question the user is answering. Do not add tools, commands, methods, steps, scope, examples, output formats, or assumptions the user did not state, and do not expand a short request into a detailed specification. The backend already has the session history and the conversation since your previous delegation, so do not restate them. Do not make the user repeat information either.
+
+When the user corrects, criticizes, or redirects work, relay what they said as they said it, without guessing the fix.
 
 Create only one delegation for one execution request. Do not submit duplicates while waiting. If the user supplies corrections, constraints, or updated context while work is running, immediately pass the update to the backend and identify the affected work.
 
 ## Progress and completion
 
-Backend messages may be intermediate progress or final output. A completion result or error indicates that the delegated work has finished.
+Backend messages may be intermediate progress or final output. Progress, such as text wrapped in <execution_progress>, is the backend's working notes while it runs: plans, guesses, and partial observations, not conclusions. A completion result or error, such as text wrapped in <execution_result>, is the backend's answer and indicates that the delegated work has finished.
 
 Do not claim success, completion, or a changed state until authoritative backend output confirms it. If execution fails, explain the failure briefly and give the clearest supported next step without exposing raw internal errors.
+
+Only report what the backend actually sent. Never state a result, status, change, name, number, time, or identifier the backend has not reported. While work is running, say that it is still running or repeat what the backend last reported; if the user asks for something the backend has not reported, say you don't have it yet and pass the question on if useful.
+
+Facts about the user's workspace, code, systems, files, accounts, or the backend's findings come only from this conversation, the session context, or a backend result. While a delegation is running you do not know its answer, even if you think you can guess it. Never answer a delegated question yourself from general knowledge, the session history, or progress notes, and never present a plan or guess from progress as a finding. Say you are checking, and give the answer when its result arrives.
 
 Use at most one short spoken acknowledgement before work that may take noticeable time. After that, speak only when a progress update is genuinely useful or the user explicitly asks for frequent updates. Do not fill waiting time with repeated reassurance.
 
@@ -189,11 +234,17 @@ export async function brokerSessionCodexRealtime(
     );
   }
   const selection = await deps.loadSelection();
-  const credentialId = selectCodexCredentialId({
+  const selected = selectCodexCredentialId({
     sessionPinnedCredentialId: selection.pinnedCredentialId,
     activeCredentialId: selection.activeCredentialId,
     connectedIds: selection.connectedCredentialIds,
   });
+  // A turn may run on a plan without voice; a call then takes another
+  // connected subscription that has it, when there is one.
+  const credentialId =
+    selected && selection.voicelessCredentialIds?.has(selected)
+      ? (selection.voiceCredentialIds?.[0] ?? selected)
+      : selected;
   if (!credentialId) {
     throw new CodexRealtimeBrokerError(
       "credential_unavailable",
@@ -204,15 +255,37 @@ export async function brokerSessionCodexRealtime(
   // This comes from active session_history_items after lifecycle owner proof;
   // it is not accepted from the browser request and is replayed identically on
   // the one authentication-only retry below.
-  const initialItems = await deps.loadInitialItems();
-
   const resolver = deps.tokenResolver(credentialId);
-  let token: Omit<CodexAuthHeaders, "clientVersion">;
-  try {
-    token = await resolver.getToken();
-  } catch (error) {
-    throw credentialError(error);
-  }
+  // History and credential/configuration reads are independent after owner
+  // admission. Await both so failures cannot leave an unobserved rejection.
+  const [historyResult, preparationResult] = await Promise.allSettled([
+    deps.loadInitialItems(),
+    resolver
+      .getToken()
+      .catch((error) => {
+        throw credentialError(error);
+      })
+      .then(async (token) => {
+        const auth = { ...token, clientVersion: CODEX_CLIENT_VERSION };
+        try {
+          return {
+            token,
+            providerConfig: await deps.loadProviderConfig?.(auth, { signal: input.signal }),
+          };
+        } catch (error) {
+          // Preserve the authentication-only retry below, including config 401s.
+          if (error instanceof CodexRealtimeError && error.code === "authentication")
+            return { token, authenticationError: error, providerConfig: undefined };
+          throw brokerProviderError(error);
+        }
+      }),
+  ]);
+  // Keep the operation lease until both branches settle, even when one fails.
+  if (historyResult.status === "rejected") throw historyResult.reason;
+  if (preparationResult.status === "rejected") throw preparationResult.reason;
+  const initialItems = historyResult.value;
+  const prepared = preparationResult.value;
+  let token = prepared.token;
   const callInput: CodexRealtimeCallInput = {
     ...input.request,
     sessionId: input.sessionId,
@@ -220,8 +293,10 @@ export async function brokerSessionCodexRealtime(
     instructions: openGeniRealtimeInstructions(input.request.instructions),
   };
   try {
+    if (prepared.authenticationError) throw prepared.authenticationError;
     return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {
       signal: input.signal,
+      providerConfig: prepared.providerConfig,
     });
   } catch (error) {
     if (!(error instanceof CodexRealtimeError) || error.code !== "authentication") {
@@ -238,8 +313,11 @@ export async function brokerSessionCodexRealtime(
     throw credentialError(error);
   }
   try {
-    return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {
+    const auth = { ...token, clientVersion: CODEX_CLIENT_VERSION };
+    const providerConfig = await deps.loadProviderConfig?.(auth, { signal: input.signal });
+    return await deps.createCall(auth, callInput, {
       signal: input.signal,
+      providerConfig,
     });
   } catch (error) {
     if (error instanceof CodexRealtimeError && error.code === "authentication") {
@@ -247,65 +325,268 @@ export async function brokerSessionCodexRealtime(
         "reconnect_required",
         "Codex subscription must be reconnected for realtime",
         error.providerStatus,
+        { message: error.message, diagnostics: error.diagnostics },
       );
     }
     throw brokerProviderError(error);
   }
 }
 
-/** Bind the pure broker to OpenGeni's encrypted DB credential lifecycle. */
+async function loadRealtimeInitialItems(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<CodexRealtimeInitialItem[]> {
+  const [history, continuity] = await Promise.all([
+    getActiveSessionHistoryItems(db, workspaceId, sessionId),
+    getSessionRealtimeContinuityEntries(db, workspaceId, sessionId),
+  ]);
+  return projectSessionRealtimeInitialItems(history, continuity);
+}
+
+// Separate injected transports (including tests) and never cache a credential.
+const providerConfigCaches = new WeakMap<
+  CodexFetch,
+  ReturnType<typeof createRealtimeProviderConfigCache>
+>();
+
+export type RealtimeSetupPhase =
+  | "owner"
+  | "candidates"
+  | "lease"
+  | "history"
+  | "token"
+  | "config"
+  | "fence"
+  | "provider_call"
+  | "release";
+
+function setupTimer(options: CodexRealtimeBrokerOptions) {
+  return async <T>(phase: RealtimeSetupPhase, work: () => Promise<T>): Promise<T> => {
+    const start = performance.now();
+    try {
+      return await work();
+    } finally {
+      try {
+        options.onTiming?.(phase, performance.now() - start);
+      } catch {
+        /* Telemetry cannot change call outcomes. */
+      }
+    }
+  };
+}
+
+/**
+ * Codex realtime on the shared subscription core (M3 PR 2c, EP-N05..N07):
+ * each call resolves the session's recorded owner, places one shared
+ * organization- or workspace-scoped connection (the session's explicit
+ * choice first, then the effective primary, preferring a plan with voice),
+ * and holds its own `realtime` operation lease (session-bound, no turn)
+ * through negotiation, with refresh under the per-connection lock. The chat
+ * binding is never written; the client protocol and HTTP error translation
+ * are the legacy broker's.
+ *
+ * A recorded plan can be out of date (a cancelled plan keeps its last
+ * recorded type until the credential next reports one), so when the
+ * provider refuses realtime for one connection's account, the call moves on
+ * to the next candidate; every other failure is final.
+ */
+export async function brokerSessionCoreCodexRealtime(
+  db: Database,
+  settings: Settings,
+  context: { accountId: string; workspaceId: string; sessionId: string },
+  input: Omit<CodexRealtimeBrokerInput, "sessionId">,
+  fetchImpl: CodexFetch = fetch,
+  brokerOptions: CodexRealtimeBrokerOptions = {},
+): Promise<CodexRealtimeProviderAnswer> {
+  if (!settings.codexSubscriptionEnabled) {
+    throw new CodexRealtimeBrokerError(
+      "subscription_disabled",
+      "Connected Codex subscription realtime is disabled",
+    );
+  }
+  const timed = setupTimer(brokerOptions);
+  const owner = await timed("owner", () => readSubscriptionCoreSessionOwner(db, context));
+  if (!owner) {
+    throw new CodexRealtimeBrokerError(
+      "credential_unavailable",
+      "Session is unavailable for Codex realtime",
+    );
+  }
+  const scope: SubscriptionCoreCodexOperationScope = {
+    kind: "session",
+    ...context,
+    sessionOwnerSubjectId: owner.ownerSubjectId,
+  };
+  const candidates = await timed("candidates", () =>
+    listSubscriptionCoreCodexOperationCandidates(db, scope),
+  );
+  // A turn may run on a plan without voice; a call takes a connection that
+  // has it whenever one exists (legacy parity).
+  const ordered = [
+    ...candidates.filter((candidate) => subscriptionCoreCodexPlanHasVoice(candidate.planType)),
+    ...candidates.filter((candidate) => !subscriptionCoreCodexPlanHasVoice(candidate.planType)),
+  ];
+  const operationId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
+  let refused: CodexRealtimeBrokerError | null = null;
+  for (const candidate of ordered) {
+    const ref: SubscriptionCoreCodexOperationLeaseRef = {
+      operationId,
+      attemptId,
+      operationKind: "realtime",
+      connectionId: candidate.connectionId,
+      holderId: `realtime:${context.sessionId}`,
+      generation: 1,
+    };
+    const lease = await timed("lease", () =>
+      acquireSubscriptionCoreCodexOperationLease(db, scope, ref),
+    );
+    if (lease.kind !== "acquired") continue;
+    try {
+      const resolver = buildSubscriptionCoreCodexConnectionTokenResolver(
+        db,
+        settings,
+        scope,
+        candidate.connectionId,
+        ref,
+      );
+      // Configuration and call creation are separate physical requests, as
+      // are both requests of the single authentication-only retry.
+      const requestFetch = buildSubscriptionCoreCodexOperationFetch(
+        db,
+        scope,
+        ref,
+        candidate.connectionId,
+        fetchImpl,
+      );
+      let cache = providerConfigCaches.get(fetchImpl);
+      if (!cache) {
+        cache = createRealtimeProviderConfigCache();
+        providerConfigCaches.set(fetchImpl, cache);
+      }
+      let configKey = "";
+      return await brokerSessionCodexRealtime(
+        {
+          enabled: true,
+          loadSelection: async () => ({
+            pinnedCredentialId: null,
+            activeCredentialId: candidate.connectionId,
+            connectedCredentialIds: new Set([candidate.connectionId]),
+          }),
+          loadInitialItems: () =>
+            timed("history", () =>
+              loadRealtimeInitialItems(db, context.workspaceId, context.sessionId),
+            ),
+          tokenResolver: () => ({
+            getToken: () => timed("token", () => resolver.getToken()),
+            refresh: () => timed("token", () => resolver.refresh()),
+          }),
+          loadProviderConfig: (auth, options) => {
+            configKey = JSON.stringify([
+              context.accountId,
+              candidate.connectionId,
+              auth.chatgptAccountId,
+              auth.clientVersion,
+              auth.isFedramp,
+            ]);
+            return timed("config", () =>
+              cache.get(configKey, () =>
+                fetchCodexRealtimeProviderConfig(auth, requestFetch, options),
+              ),
+            );
+          },
+          createCall: async (auth, callInput, options) => {
+            // Pre-dispatch fence on the exact operation lease.
+            if (
+              !(await timed("fence", () =>
+                renewSubscriptionCoreCodexOperationLease(db, scope, ref),
+              ))
+            ) {
+              throw new CodexRealtimeBrokerError(
+                "credential_unavailable",
+                "Codex subscription credential is unavailable",
+              );
+            }
+            try {
+              return await timed("provider_call", () =>
+                createCodexRealtimeCall(auth, callInput, requestFetch, options),
+              );
+            } catch (error) {
+              // A rejected/stale configuration must not poison the next call.
+              // Never replay a call on an ambiguous provider outcome.
+              cache.invalidate(configKey);
+              throw error;
+            }
+          },
+        },
+        { ...input, sessionId: context.sessionId },
+      );
+    } catch (error) {
+      if (!codexRealtimeRefusedForConnection(error)) throw error;
+      refused = error;
+      try {
+        brokerOptions.onConnectionRefused?.(error);
+      } catch {
+        // An observer must never change the call's outcome.
+      }
+    } finally {
+      await timed("release", () =>
+        releaseSubscriptionCoreCodexOperationLease(db, scope, ref),
+      ).catch(() => false);
+    }
+  }
+  if (refused) throw refused;
+  throw new CodexRealtimeBrokerError(
+    "credential_unavailable",
+    "No connected Codex subscription is available for this session",
+  );
+}
+
+export type CodexRealtimeBrokerOptions = {
+  onTiming?: (phase: RealtimeSetupPhase, durationMs: number) => void;
+  /**
+   * Called when the provider refused realtime for one connection and the
+   * call moves on to the next candidate (for operator logs).
+   */
+  onConnectionRefused?: (error: CodexRealtimeBrokerError) => void;
+};
+
+/**
+ * The provider refused realtime for this connection's account, not for the
+ * request: a plan without voice answers call creation with 404, an account
+ * without the entitlement with 403. Nothing was created, so another
+ * connected subscription may serve the same request.
+ */
+export function codexRealtimeRefusedForConnection(
+  error: unknown,
+): error is CodexRealtimeBrokerError {
+  return (
+    error instanceof CodexRealtimeBrokerError &&
+    (error.reason === "entitlement_denied" ||
+      (error.reason === "incompatible" && error.providerStatus === 404))
+  );
+}
+
+/** Bind the pure broker to Opengeni's encrypted DB credential lifecycle. */
 export function buildSessionCodexRealtimeBroker(
   db: Database,
   settings: Settings,
-  workspaceId: string,
-  sessionId: string,
+  context: { accountId: string; workspaceId: string; sessionId: string },
   fetchImpl: CodexFetch = fetch,
+  options: CodexRealtimeBrokerOptions = {},
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
-  return async (input) =>
-    await brokerSessionCodexRealtime(
-      {
-        enabled: settings.codexSubscriptionEnabled,
-        loadSelection: async () => {
-          const [sessionState, status, accounts] = await Promise.all([
-            getSessionCodexState(db, workspaceId, sessionId),
-            getCodexCredentialStatus(db, workspaceId),
-            listCodexAccountStatuses(db, workspaceId),
-          ]);
-          if (!sessionState) {
-            throw new CodexRealtimeBrokerError(
-              "credential_unavailable",
-              "Session is unavailable for Codex realtime",
-            );
-          }
-          return {
-            pinnedCredentialId: sessionState.pinnedCredentialId,
-            activeCredentialId: status?.credentialId ?? null,
-            connectedCredentialIds: new Set(
-              accounts
-                .filter((account) => account.status === "active")
-                .map((account) => account.id),
-            ),
-          };
-        },
-        loadInitialItems: async () => {
-          const [history, continuity] = await Promise.all([
-            getActiveSessionHistoryItems(db, workspaceId, sessionId),
-            getSessionRealtimeContinuityEntries(db, workspaceId, sessionId),
-          ]);
-          return projectSessionRealtimeInitialItems(history, continuity);
-        },
-        tokenResolver: (credentialId) =>
-          buildCodexTokenResolver(db, settings, workspaceId, credentialId),
-        createCall: async (auth, callInput, options) => {
-          const providerConfig = await fetchCodexRealtimeProviderConfig(auth, fetchImpl, options);
-          return await createCodexRealtimeCall(auth, callInput, fetchImpl, {
-            ...options,
-            providerConfig,
-          });
-        },
-      },
-      { ...input, sessionId },
+  const { accountId, workspaceId, sessionId } = context;
+  return async (input) => {
+    return await brokerSessionCoreCodexRealtime(
+      db,
+      settings,
+      { accountId, workspaceId, sessionId },
+      input,
+      fetchImpl,
+      options,
     );
+  };
 }
 
 function credentialError(error: unknown): CodexRealtimeBrokerError {
@@ -322,6 +603,8 @@ function credentialError(error: unknown): CodexRealtimeBrokerError {
 }
 
 function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
+  // A core pre-dispatch fence refusal is already typed (legacy calls never raise one).
+  if (error instanceof CodexRealtimeBrokerError) return error;
   if (!(error instanceof CodexRealtimeError)) {
     return new CodexRealtimeBrokerError("network_error", "Codex realtime provider request failed");
   }
@@ -345,7 +628,10 @@ function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
                     : error.code === "network"
                       ? "network_error"
                       : "provider_error";
-  return new CodexRealtimeBrokerError(reason, safeBrokerMessage(reason), error.providerStatus);
+  return new CodexRealtimeBrokerError(reason, safeBrokerMessage(reason), error.providerStatus, {
+    message: error.message,
+    diagnostics: error.diagnostics,
+  });
 }
 
 function safeBrokerMessage(reason: CodexRealtimeBrokerFailureReason): string {
@@ -374,4 +660,36 @@ function safeBrokerMessage(reason: CodexRealtimeBrokerFailureReason): string {
     case "credential_unavailable":
       return "No connected Codex subscription is available for this session";
   }
+}
+
+/**
+ * One operator log line for a refused realtime negotiation: the broker
+ * reason, the provider status, and, for provider failures, the adapter's own
+ * message and diagnostics (stage, provider error identifiers, the call
+ * parameters and where they came from). The observability boundary admits
+ * each field only under its reviewed name and grammar.
+ */
+export function codexRealtimeFailureLogAttributes(
+  error: CodexRealtimeBrokerError,
+): Record<string, string | number> {
+  const cause = error.providerCause;
+  const diagnostics = cause?.diagnostics;
+  const attributes: Record<string, string | number | undefined> = {
+    reason: error.reason,
+    providerStatus: error.providerStatus ?? undefined,
+    realtimeFailureMessage: cause?.message ?? error.message,
+    realtimeStage: diagnostics?.stage,
+    providerErrorCode: diagnostics?.providerErrorCode,
+    providerErrorType: diagnostics?.providerErrorType,
+    providerErrorParam: diagnostics?.providerErrorParam,
+    realtimeConfigSource: diagnostics?.configSource,
+    realtimeAdvertisedVersion: diagnostics?.advertisedVersion,
+    realtimeProviderModel: diagnostics?.providerModel,
+    realtimeProviderArchitecture: diagnostics?.providerArchitecture,
+  };
+  return Object.fromEntries(
+    Object.entries(attributes).filter((entry): entry is [string, string | number] => {
+      return entry[1] !== undefined;
+    }),
+  );
 }

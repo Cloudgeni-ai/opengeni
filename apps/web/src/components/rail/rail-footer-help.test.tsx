@@ -14,7 +14,7 @@ beforeEach(() => {
 const docs = "https://docs.example.test/";
 
 describe("rail footer account menu", () => {
-  test("is identity, Appearance, Help & feedback, then the account action", async () => {
+  test("is identity, Appearance, Help & feedback, Desktop app, Excel add-in, then the account action", async () => {
     const unmount = await renderOpenAccountMenu({
       managed: false,
       analytics: true,
@@ -23,12 +23,14 @@ describe("rail footer account menu", () => {
     try {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
-      expect(sequence).toHaveLength(6);
+      expect(sequence).toHaveLength(8);
       expect(sequence[1]).toBe("|");
       expect(sequence[2]).toContain("Appearance");
       expect(sequence[3]).toContain("Help & feedback");
-      expect(sequence[4]).toBe("|");
-      expect(sequence[5]).toContain("access");
+      expect(sequence[4]).toContain("Desktop app");
+      expect(sequence[5]).toContain("Excel add-in");
+      expect(sequence[6]).toBe("|");
+      expect(sequence[7]).toContain("access");
     } finally {
       await unmount();
     }
@@ -51,7 +53,7 @@ describe("rail footer account menu", () => {
     }
   });
 
-  test("lists Invitations, with its own separator, only while some are pending", async () => {
+  test("lists Invitations only while some are pending, with My things in the account group", async () => {
     const pendingUnmount = await renderOpenAccountMenu({
       managed: true,
       analytics: false,
@@ -62,7 +64,8 @@ describe("rail footer account menu", () => {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
       expect(sequence[2]).toBe("Invitations2");
-      expect(sequence[3]).toBe("|");
+      expect(sequence[3]).toBe("My things");
+      expect(sequence[4]).toBe("|");
     } finally {
       await pendingUnmount();
     }
@@ -76,7 +79,9 @@ describe("rail footer account menu", () => {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
       expect(sequence.join("|")).not.toContain("Invitations");
-      expect(sequence[2]).toContain("Appearance");
+      expect(sequence[2]).toBe("My things");
+      expect(sequence[3]).toBe("|");
+      expect(sequence[4]).toContain("Appearance");
     } finally {
       await idleUnmount();
     }
@@ -112,6 +117,67 @@ describe("rail footer account menu", () => {
       expect(link?.rel).toBe("noopener noreferrer");
     } finally {
       await unmount();
+    }
+  });
+
+  test("Desktop app offers this computer's downloads, the install command and every platform", async () => {
+    const unmount = await renderOpenAccountMenu({
+      managed: false,
+      analytics: false,
+      documentationUrl: docs,
+    });
+    try {
+      const rows = await openSubmenu("Desktop app");
+      // The test browser reports Linux, which gets every package format.
+      expect(rows).toEqual([
+        "Download .deb",
+        "Download .rpm",
+        "Download AppImage",
+        "Copy install command",
+        expect.stringContaining("All downloads"),
+      ]);
+      const deb = Array.from(document.body.querySelectorAll<HTMLAnchorElement>("a")).find(
+        (link) => link.textContent === "Download .deb",
+      );
+      expect(deb?.href).toEndWith("/desktop/latest/Opengeni-linux-amd64.deb");
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("Help & feedback offers Contact support as an email link when configured", async () => {
+    const unmount = await renderOpenAccountMenu({
+      managed: true,
+      analytics: false,
+      documentationUrl: docs,
+      supportEmail: "support@example.test",
+      canSendFeedback: true,
+    });
+    try {
+      const rows = await openSubmenu("Help & feedback");
+      expect(rows).toHaveLength(3);
+      expect(rows[0]).toContain("Documentation");
+      expect(rows[1]).toBe("Contact support");
+      expect(rows[2]).toBe("Send feedback");
+      const link = document.body.querySelector<HTMLAnchorElement>(
+        'a[href="mailto:support@example.test"]',
+      );
+      expect(link?.textContent).toBe("Contact support");
+      expect(link?.target).toBe("");
+    } finally {
+      await unmount();
+    }
+    document.body.replaceChildren();
+    const supportOnly = await renderOpenAccountMenu({
+      managed: false,
+      analytics: false,
+      documentationUrl: null,
+      supportEmail: "support@example.test",
+    });
+    try {
+      expect(await openSubmenu("Help & feedback")).toEqual(["Contact support"]);
+    } finally {
+      await supportOnly();
     }
   });
 

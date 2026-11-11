@@ -1,4 +1,4 @@
-import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
 import {
   dbSearchPath,
   getSettings,
@@ -13,26 +13,40 @@ import type {
   ScheduledTask,
   ScheduledTaskOverlapPolicy,
   ScheduledTaskScheduleSpec,
+  SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import {
-  assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  databasePasswordFileOptions,
+  databasePoolOptions,
+  observeDatabaseCredentialEvents,
+  defaultDatabasePreparedStatements,
+  eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
+  reportRuntimeDatabaseDegraded,
   runtimeDatabaseReadyCheck,
   type Database,
+  type EventOccurrenceToStart,
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
   createObservability,
+  installCpuSamplingSignal,
   logStartupDependencyRetry,
+  traceClientCalls,
+  traceFetch,
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import {
+  installComputeAgentPlane,
   resolveCatalogSettings,
-  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+  SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
 } from "@opengeni/core";
 import {
   Connection,
@@ -42,15 +56,33 @@ import {
   WorkflowExecutionAlreadyStartedError,
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
-import { createAppComposition, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import {
+  createAppComposition,
+  type AppDependencies,
+  type DocumentIndexClient,
+  type SessionWorkflowClient,
+} from "./app";
+import { startBrowserHoldRenewalPump } from "./browser-hold-renewal";
+import { startBillingCreditNotificationDelivery } from "./billing-credit-notifications";
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
+import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
+import { startTeamsBotPump } from "./integrations/teams-bot";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startSlackAgentUpdatePump } from "./integrations/slack-agent-updates";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { closeNativeExternalVaultProviders } from "./integrations/external-vault-providers";
+import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
+import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
+import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
-import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
+import {
+  startEventIntakePrunePump,
+  startEventTriggerDispatchPump,
+  startEventSubscriptionPump,
+} from "./event-trigger-dispatch";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
@@ -58,15 +90,31 @@ import {
 import { editableArtifactSourceSessionAuthorizer } from "./editable-artifact-source-session";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
+import { OfficeWorkbookWebSocketTransport } from "./office-workbooks";
+import { officeWorkbookRelayFor } from "./routes/office-workbooks";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
+import {
+  API_SERVER_IDLE_TIMEOUT_SECONDS,
+  apiRequestBindingsForIdleTimeout,
+} from "./http/request-idle-timeout";
 import { startApiMetricsListener } from "./http/metrics-listener";
+import {
+  apiHttpDrainDeadlineMs,
+  apiRequestBindingsForServerDrain,
+  createHttpServerDrain,
+} from "./http/server-drain";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
+import {
+  startComputeAgentGateway,
+  type ComputeGatewayHandle,
+} from "./sandbox/compute-gateway-boot";
 import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
 } from "./editable-artifact-production";
 import { installApiFatalProcessBoundary } from "./fatal-process-boundary";
+import { installApiShutdownHandlers } from "./shutdown";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -99,6 +147,7 @@ export async function createTemporalWorkflowClient(
 ): Promise<{
   client: SessionWorkflowClient;
   documentIndexer: DocumentIndexClient;
+  startScheduledTaskEventRun: (occurrence: EventOccurrenceToStart) => Promise<void>;
   close: () => Promise<void>;
 }> {
   const connection = await Connection.connect(temporalConnectionOptions(settings));
@@ -106,20 +155,29 @@ export async function createTemporalWorkflowClient(
     connection,
     namespace: settings.temporalNamespace,
   });
-  const client: SessionWorkflowClient = {
-    triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
+  const scheduledTasks = createTemporalScheduleSynchronizer({
+    db,
+    withDeadline: (deadline, work) => temporal.withDeadline(deadline, work),
+    upsert: async (task) => {
+      const options = temporalScheduleOptions(task, settings.temporalTaskQueue);
       try {
-        await temporal.workflow.start("automationRunWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: `automation-run:${runId}`,
-          workflowIdReusePolicy: "REJECT_DUPLICATE",
-          args: [{ accountId, workspaceId, runId }],
-        });
+        await temporal.schedule
+          .getHandle(task.temporalScheduleId)
+          .update(() => temporalScheduleUpdateOptions(options));
       } catch (error) {
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
+        if (!shouldCreateScheduleAfterUpdateError(error)) throw error;
+        await temporal.schedule.create(options);
       }
     },
+    remove: async (temporalScheduleId) => {
+      try {
+        await temporal.schedule.getHandle(temporalScheduleId).delete();
+      } catch (error) {
+        if (!(error instanceof ScheduleNotFoundError)) throw error;
+      }
+    },
+  });
+  const client: SessionWorkflowClient = {
     signalUserMessage: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("userMessage", eventId);
     },
@@ -149,9 +207,13 @@ export async function createTemporalWorkflowClient(
       });
     },
     requestSessionWorkflowWakeDispatch: async () => {
-      await temporal.schedule
-        .getHandle(SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID)
-        .trigger(ScheduleOverlapPolicy.BUFFER_ONE);
+      await temporal.workflow.signalWithStart(SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE, {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId: SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [],
+        signal: SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
+      });
     },
     signalCodexCapacity: async ({
       accountId,
@@ -201,41 +263,15 @@ export async function createTemporalWorkflowClient(
         wakeRevision: workflowWakeRevision,
       });
     },
-    syncScheduledTask: async ({ task }) => {
-      const schedule = temporal.schedule.getHandle(task.temporalScheduleId);
-      if (task.schedule.type === "manual") {
-        try {
-          await schedule.delete();
-        } catch (error) {
-          if (!(error instanceof ScheduleNotFoundError)) throw error;
-        }
-        return;
-      }
-      const options = temporalScheduleOptions(task, settings.temporalTaskQueue);
-      try {
-        await schedule.update(() => temporalScheduleUpdateOptions(options));
-      } catch (error) {
-        if (!shouldCreateScheduleAfterUpdateError(error)) {
-          throw error;
-        }
-        await temporal.schedule.create(options);
-      }
-    },
-    deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
-      try {
-        await temporal.withDeadline(Date.now() + 5_000, async () => {
-          await temporal.schedule.getHandle(temporalScheduleId).delete();
-        });
-      } catch (error) {
-        if (error instanceof ScheduleNotFoundError) return;
-        throw error;
-      }
-    },
+    syncScheduledTask: async ({ task, onFailure }) => scheduledTasks.sync(task, onFailure),
+    deleteScheduledTaskSchedule: async ({ temporalScheduleId }) =>
+      scheduledTasks.remove(temporalScheduleId),
     triggerScheduledTask: async ({
       task,
       agentRunUsageIdempotencyKey,
       triggerWorkflowId,
       initiator,
+      credentialRestriction,
       triggerType = "manual",
     }) => {
       // Deterministic workflowId (derived from the trigger token by the
@@ -256,6 +292,7 @@ export async function createTemporalWorkflowClient(
               triggerType,
               agentRunUsageIdempotencyKey,
               initiator,
+              ...(credentialRestriction ? { credentialRestriction } : {}),
             },
           ],
         });
@@ -293,6 +330,122 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startRecordingWorkflow: async (work) => {
+      const transcript = work.kind === "transcript" && work.versionId !== null;
+      try {
+        await temporal.workflow.start(
+          transcript ? "recordingTranscriptWorkflow" : "recordingDeletionWorkflow",
+          {
+            taskQueue: settings.temporalTaskQueue,
+            workflowId: transcript
+              ? `recording-transcript:${work.versionId}`
+              : `recording-deletion:${work.recordingId}`,
+            workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+            args: [
+              {
+                accountId: work.accountId,
+                workspaceId: work.workspaceId,
+                recordingId: work.recordingId,
+                ownerSubjectId: work.ownerSubjectId,
+                ...(transcript ? { versionId: work.versionId } : {}),
+              },
+            ],
+          },
+        );
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    startRecordingSpeakerScan: async (input) => {
+      try {
+        await temporal.workflow.start("recordingSpeakerScanWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `recording-speaker-scan:${input.recordingId}`,
+          // One that ended (a long pause) starts again when audio does.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    startBrowserRecordingVideo: async (input) => {
+      try {
+        await temporal.workflow.start("browserRecordingVideoWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `recording-browser-video:${input.recordingId}`,
+          // A rerun after a finished one finds the recording made and stops,
+          // and one after its deletion makes it again from the bundle.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleSessionArchive: async (input) => {
+      try {
+        await temporal.workflow.start("sessionArchiveRequestWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One Archive, one run: an undone and repeated Archive has a new time.
+          workflowId: `session-archive-request-${input.workspaceId}-${input.sessionId}-${Date.parse(input.archivedAt)}`,
+          startDelay: Math.max(0, input.runAt.getTime() - Date.now()),
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              subjectId: input.subjectId,
+              archivedAt: input.archivedAt,
+            },
+          ],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleSessionArchiveRestore: async (input) => {
+      try {
+        await temporal.workflow.start("sessionArchiveRestoreWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One restore request, one run; a repeated request has a new time.
+          workflowId: `session-archive-restore-${input.workspaceId}-${input.sessionId}-${Date.parse(input.requestedAt)}`,
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              subjectId: input.subjectId,
+            },
+          ],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
+    scheduleTransientObjectDeletion: async ({ workspaceId, objectKeys, deleteAfter }) => {
+      const keys = [...new Set(objectKeys)].sort();
+      if (keys.length === 0) return;
+      const digest = createHash("sha256").update(JSON.stringify(keys)).digest("hex");
+      try {
+        await temporal.workflow.start("transientObjectDeletionWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // Keys already waiting keep their first deadline; once that run has
+          // finished, the same keys can be scheduled again.
+          workflowId: `transient-object-deletion-${workspaceId}-${digest}`,
+          startDelay: Math.max(0, deleteAfter.getTime() - Date.now()),
+          args: [{ workspaceId, objectKeys: keys }],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
     },
@@ -311,18 +464,59 @@ export async function createTemporalWorkflowClient(
   return {
     client,
     documentIndexer,
+    // An event occurrence's run. The workflow id is the occurrence's producer
+    // key, so a retried start collides instead of starting a second run.
+    startScheduledTaskEventRun: async (occurrence: EventOccurrenceToStart) => {
+      try {
+        await temporal.workflow.start("scheduledTaskFireWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: eventOccurrenceProducerKey(occurrence.id),
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              accountId: occurrence.accountId,
+              workspaceId: occurrence.workspaceId,
+              taskId: occurrence.taskId,
+              triggerType: "event",
+            },
+          ],
+        });
+      } catch (error) {
+        if (!isWorkflowAlreadyStarted(error)) throw error;
+      }
+    },
     close: async () => {
       await connection.close();
     },
   };
 }
 
-export async function startApi(
-  options: {
-    settings?: ReturnType<typeof getSettings>;
-    observability?: Observability;
-  } = {},
-) {
+export type StartApiOptions = {
+  settings?: ReturnType<typeof getSettings>;
+  observability?: Observability;
+  /**
+   * Embedding-host session ACL (`AppDependencies.sessionAuthorization`) for a
+   * host that runs this entry instead of mounting `createApp(deps)`. Once bound,
+   * every session-addressed surface fails closed on an unavailable or invalid
+   * host decision, exactly as through `createApp`.
+   */
+  sessionAuthorization?: SessionAuthorizationPort | null;
+};
+
+/**
+ * The composition override contributed by `StartApiOptions.sessionAuthorization`.
+ * Unset forwards nothing, so a standalone start keeps its dependencies exactly;
+ * `null` and a port are forwarded as given.
+ */
+export function startApiSessionAuthorizationOverride(
+  options: Pick<StartApiOptions, "sessionAuthorization">,
+): Pick<AppDependencies, "sessionAuthorization"> {
+  return options.sessionAuthorization === undefined
+    ? {}
+    : { sessionAuthorization: options.sessionAuthorization };
+}
+
+export async function startApi(options: StartApiOptions = {}) {
   const settings = options.settings ?? getSettings();
   const observability =
     options.observability ?? createObservability(settings, { component: "api" });
@@ -331,9 +525,19 @@ export async function startApi(
   // strategy.
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
-    max: 32,
+    max: settings.apiDatabasePoolMax,
+    ...(settings.databaseNotificationUrl
+      ? { notificationDatabaseUrl: settings.databaseNotificationUrl }
+      : settings.databasePreparedStatements !== false &&
+          defaultDatabasePreparedStatements(settings.databaseUrl)
+        ? { notificationDatabaseUrl: settings.databaseUrl }
+        : {}),
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...databasePoolOptions(settings),
+    // Runtime login only: the files rotate this URL's password in place.
+    ...databasePasswordFileOptions(settings),
+    onCredentialEvent: observeDatabaseCredentialEvents("api", observability),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
@@ -344,9 +548,9 @@ export async function startApi(
     rlsStrategy: settings.rlsStrategy,
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
-    organizationTenancyCanonicalActivationEnabled:
-      settings.organizationTenancyCanonicalActivationEnabled,
   } as const;
+  // One reporter for startup and readiness, so a degraded posture logs once.
+  const reportDegradedPosture = reportRuntimeDatabaseDegraded(observability, "api");
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
   // request exact generation-fenced agent RPC subjects. Null in local dev
@@ -367,7 +571,7 @@ export async function startApi(
     );
     await retryStartupDependency(
       "PostgreSQL runtime posture",
-      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      () => assertRuntimeDatabaseReadiness(dbClient.db, databasePosture, reportDegradedPosture),
       { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     const resolvedCatalog = await retryStartupDependency(
@@ -375,7 +579,7 @@ export async function startApi(
       () => resolveCatalogSettings(dbClient.db, settings),
       { ...retryOptions, onRetry },
     );
-    observability.info("OpenGeni model catalog resolved", {
+    observability.info("Opengeni model catalog resolved", {
       catalogSource: resolvedCatalog.source,
       catalogVersion: resolvedCatalog.version,
     });
@@ -408,9 +612,15 @@ export async function startApi(
   }
   if (!bus || !workflowClient) {
     await dbClient.close();
-    throw new Error("OpenGeni API startup dependencies were not initialized");
+    throw new Error("Opengeni API startup dependencies were not initialized");
   }
-  const objectStorage = createObjectStorage(settings);
+  // Compute sandboxes reach their agent over this process's bus and database.
+  installComputeAgentPlane({ db: dbClient.db, bus, settings });
+  // Calls made while serving a request become child spans of its request span.
+  const createdObjectStorage = createObjectStorage(settings);
+  const objectStorage = createdObjectStorage
+    ? traceClientCalls(createdObjectStorage, "object_storage")
+    : null;
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
   if (objectStorage && isArtifactRuntimeConfigured()) {
     try {
@@ -424,26 +634,30 @@ export async function startApi(
       throw error;
     }
   }
-  const { app, routeDeps } = createAppComposition({
-    settings,
-    db: dbClient.db,
-    bus,
-    workflowClient: workflowClient.client,
-    documentIndexer: workflowClient.documentIndexer,
-    objectStorage,
-    ...(editableArtifactComposition
-      ? {
-          editableArtifacts: editableArtifactComposition.application,
-          editableArtifactExports: editableArtifactComposition.durableExports,
-          editableArtifactAgent: editableArtifactComposition.agent,
-          editableArtifactOfficeImports: editableArtifactComposition.officeImports,
-        }
-      : {}),
-    observability,
-    readinessChecks: {
-      db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
+  const { app, routeDeps, renewBrowserHolds, stopBillingAutoTopUps } = createAppComposition(
+    {
+      ...startApiSessionAuthorizationOverride(options),
+      settings,
+      db: dbClient.db,
+      bus,
+      workflowClient: traceClientCalls(workflowClient.client, "temporal"),
+      documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
+      objectStorage,
+      ...(editableArtifactComposition
+        ? {
+            editableArtifacts: editableArtifactComposition.application,
+            editableArtifactExports: editableArtifactComposition.durableExports,
+            editableArtifactAgent: editableArtifactComposition.agent,
+            editableArtifactOfficeImports: editableArtifactComposition.officeImports,
+          }
+        : {}),
+      observability,
+      readinessChecks: {
+        db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture, reportDegradedPosture),
+      },
     },
-  });
+    { startBillingAutoTopUps: true },
+  );
   if (!routeDeps.editableArtifacts) {
     observability.warn("editable artifact engine is not composed", {
       subsystem: "editable_artifacts",
@@ -463,12 +677,41 @@ export async function startApi(
   const localBrowserBoundary = createLocalBrowserBoundary(settings, {
     warn: (message, attributes) => observability.warn(message, attributes),
   });
-  const webSocketUpgrades = [interactionFrameProxies, artifactWebSockets];
+  // The compute agent gateway: hosts of Opengeni compute link here to carry
+  // their sandboxes' agents (sandbox/compute-gateway.ts). Off unless configured.
+  let computeGateway: ComputeGatewayHandle | undefined;
+  try {
+    computeGateway = await startComputeAgentGateway({
+      db: dbClient.db,
+      settings,
+      natsAuth: controlPlaneAuth
+        ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+        : undefined,
+      maxWebSocketMessageBytes: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
+      observability,
+    });
+  } catch {
+    // Other planes keep working; compute sandboxes stay unreachable until it is up.
+    observability.error("Opengeni compute agent gateway failed to start", {
+      errorClass: "ComputeAgentGatewayError",
+      errorCode: "compute_gateway_start_failed",
+      origin: "api",
+    });
+  }
+  const webSocketUpgrades = [
+    interactionFrameProxies,
+    artifactWebSockets,
+    new OfficeWorkbookWebSocketTransport(officeWorkbookRelayFor(routeDeps)),
+    ...(computeGateway ? [computeGateway.gateway] : []),
+  ];
+  // One drain for both listeners: from SIGTERM their responses close their
+  // connections, live streams end and WebSockets go away (http/server-drain.ts).
+  const httpDrain = createHttpServerDrain();
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
-    idleTimeout: 255,
-    fetch: (request, bunServer) => {
+    idleTimeout: API_SERVER_IDLE_TIMEOUT_SECONDS,
+    fetch: httpDrain.fetch((request, bunServer: Bun.Server<ApiWebSocketConnection>) => {
       const upgrade = dispatchApiWebSocketUpgrade(
         request,
         bunServer,
@@ -476,37 +719,77 @@ export async function startApi(
         localBrowserBoundary,
       );
       if (upgrade.handled) return upgrade.response;
-      return app.fetch(
-        request,
-        apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
-      );
-    },
-    websocket: {
+      return app.fetch(request, {
+        ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+        ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
+        ...apiRequestBindingsForServerDrain(httpDrain.signal),
+      });
+    }),
+    websocket: httpDrain.websocket<ApiWebSocketConnection>({
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
       backpressureLimit: 16 * 1024 * 1024,
       closeOnBackpressureLimit: true,
       open: (socket) => socket.data.attach(socket),
       message: (socket, message) => socket.data.receive(message),
       close: (socket) => socket.data.transportClosed(),
-    },
+      ping: (socket) => socket.data.heard?.(),
+      pong: (socket) => socket.data.heard?.(),
+    }),
   });
-  const metricsServer = startApiMetricsListener(settings, observability);
+  const metricsServer = startApiMetricsListener(settings, observability, httpDrain);
+  const billingAppUrl = settings.webBaseUrl ?? settings.publicBaseUrl;
+  const stopBillingCreditNotificationDelivery =
+    routeDeps.managedAuth && billingAppUrl
+      ? startBillingCreditNotificationDelivery(
+          dbClient.db,
+          routeDeps.managedEmailTransport,
+          billingAppUrl,
+        )
+      : undefined;
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopSlackAgentUpdatePump = settings.slackSigningSecret
+    ? startSlackAgentUpdatePump(routeDeps)
+    : undefined;
+  const stopTeamsBotPump = startTeamsBotPump(routeDeps);
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopWorkspaceWebhookDispatchPump = startWorkspaceWebhookDispatchPump({
     db: dbClient.db,
     settings,
     observability,
   });
+  const stopNativePushDispatchPump = startNativePushDispatchPump({
+    db: dbClient.db,
+    settings,
+    observability,
+  });
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
-    cleanupConnectorAuthorization: async (claim) =>
-      await cleanupScheduledTaskConnectorAuthorization(routeDeps, claim),
     deleteSchedule: async (temporalScheduleId) => {
       await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
     },
+    observability,
+  });
+  const stopScheduledTaskLifecyclePump = startScheduledTaskLifecyclePump({
+    db: dbClient.db,
+    sync: (task) => workflowClient.client.syncScheduledTask({ task }),
+    bus,
+    observability,
+  });
+  const stopEventTriggerDispatchPump = startEventTriggerDispatchPump({
+    db: dbClient.db,
+    settings,
+    bus,
+    startRun: (occurrence) => workflowClient.startScheduledTaskEventRun(occurrence),
+    observability,
+  });
+  const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
+  const stopBrowserHoldRenewalPump = startBrowserHoldRenewalPump(renewBrowserHolds, observability);
+  const stopEventSubscriptionPump = startEventSubscriptionPump({
+    db: dbClient.db,
+    settings,
+    bus,
     observability,
   });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
@@ -523,19 +806,29 @@ export async function startApi(
   // cannot connect — graceful). It runs on its OWN connection (the callout auth
   // user), separate from the privileged control-plane bus.
   let authCalloutResponder: ResponderConnection | undefined;
-  if (settings.sandboxSelfhostedEnabled) {
+  // Compute sandboxes run the same agent, so their heartbeats and Hellos are
+  // ingested whenever the compute gateway serves them.
+  if (settings.sandboxSelfhostedEnabled || computeGateway) {
     stopMetricsIngestion = startMetricsIngestion({
       db: dbClient.db,
       bus,
       observability,
+      wakeSessionWorkflow: workflowClient.client.wakeSessionWorkflow,
+      agentUpdates: createAutomaticAgentUpdater({
+        db: dbClient.db,
+        bus,
+        settings,
+        observability,
+      }),
     });
     stopHelloIngestion = startHelloIngestion({
       db: dbClient.db,
       bus,
       observability,
     });
-    observability.info("OpenGeni machine-metrics + hello ingestion consumers started", {});
-
+    observability.info("Opengeni machine-metrics + hello ingestion consumers started", {});
+  }
+  if (settings.sandboxSelfhostedEnabled) {
     const callout = resolveNatsCalloutConfig(settings);
     if (callout) {
       try {
@@ -543,10 +836,11 @@ export async function startApi(
           { db: dbClient.db, settings, callout, observability },
           settings.natsUrl,
         );
-      } catch {
+      } catch (error) {
         // A responder start failure must not crash the API (other planes work); log
         // loudly — selfhosted agents will fail to connect until it is up.
-        observability.error("OpenGeni NATS auth-callout responder failed to start", {
+        observability.error("Opengeni NATS auth-callout responder failed to start", {
+          error,
           errorClass: "NatsAuthCalloutOperationError",
           errorCode: "nats_auth_callout_start_failed",
           origin: "api",
@@ -554,12 +848,12 @@ export async function startApi(
       }
     } else {
       observability.warn(
-        "OpenGeni selfhosted enabled but the NATS auth-callout plane is not configured; selfhosted agents cannot connect",
+        "Opengeni selfhosted enabled but the NATS auth-callout plane is not configured; selfhosted agents cannot connect",
         {},
       );
     }
   }
-  observability.info("OpenGeni API listening", {
+  observability.info("Opengeni API listening", {
     host: settings.apiHost,
     port: settings.apiPort,
     ...(metricsServer ? { metricsPort: settings.apiMetricsPort } : {}),
@@ -567,17 +861,46 @@ export async function startApi(
   return {
     server,
     close: async () => {
-      server.stop(true);
-      metricsServer?.stop(true);
+      // Prevent another charge/recovery pass while other shutdown pumps drain.
+      const billingAutoTopUpsStopped = stopBillingAutoTopUps();
+      // Drain HTTP rather than resetting sockets: a keep-alive client still
+      // sending on a pooled socket must get the response its request produced.
+      // Requests keep the database, bus and workflow client until they finish,
+      // so those close only after the drain.
+      const httpDrainDeadline = apiHttpDrainDeadlineMs(settings.apiShutdownGraceMs);
+      const httpDrained = Promise.allSettled([
+        httpDrain.stop(server, httpDrainDeadline),
+        ...(metricsServer ? [httpDrain.stop(metricsServer, httpDrainDeadline)] : []),
+      ]);
+      // Start private CLI session cleanup even if another service's drain stalls.
+      const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
+      await stopBillingCreditNotificationDelivery?.();
       stopSlackInteractionPump?.();
+      await stopSlackAgentUpdatePump?.();
+      stopTeamsBotPump();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
+      await stopScheduledTaskLifecyclePump();
+      await stopEventTriggerDispatchPump();
+      await stopEventIntakePrunePump();
+      await stopBrowserHoldRenewalPump();
+      await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
+      await stopNativePushDispatchPump();
+      await billingAutoTopUpsStopped;
+      await httpDrained;
+      // Write queued presence before the database pool closes.
+      await routeDeps.userPresence?.close().catch(() => undefined);
+      await routeDeps.decisions?.flushUsage().catch(() => {
+        observability.error("Decision usage receipts remain pending at shutdown");
+      });
       await Promise.allSettled([
+        vaultProvidersClosed,
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),
+        computeGateway?.close(),
         bus.close(),
         workflowClient.close(),
         dbClient.close(),
@@ -589,10 +912,26 @@ export async function startApi(
 if (import.meta.main) {
   const fatalBoundary = installApiFatalProcessBoundary();
   try {
+    // Standalone process only: an embedding host owns its own global fetch.
+    // Outbound HTTP made while serving a request becomes a child span of it.
+    globalThis.fetch = traceFetch(globalThis.fetch);
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);
-    await startApi({ settings, observability });
+    // `kill -USR2 <pid>` samples the API for 30 s and logs where the event loop was busy.
+    installCpuSamplingSignal({
+      log: (message, attributes) => observability.info(message, attributes),
+    });
+    const api = await startApi({ settings, observability });
+    installApiShutdownHandlers({
+      close: api.close,
+      // The time the pod gives the process after SIGTERM.
+      timeoutMs: settings.apiShutdownGraceMs,
+      onFailure: () =>
+        observability.warn("Opengeni API shutdown did not finish cleanly", {
+          errorCode: "api_shutdown_failed",
+        }),
+    });
     fatalBoundary.markRunning();
   } catch (error) {
     await fatalBoundary.reportStartupFailure(error);
@@ -606,6 +945,8 @@ export function temporalOverlapPolicy(policy: ScheduledTaskOverlapPolicy): Sched
   if (policy === "buffer_one") {
     return ScheduleOverlapPolicy.BUFFER_ONE;
   }
+  // Steer is decided in the chat at the running turn's next model step, so
+  // every fire must reach the chat.
   return ScheduleOverlapPolicy.ALLOW_ALL;
 }
 
@@ -664,7 +1005,7 @@ function temporalIntervalSpec(
   // Temporal interval schedules match Epoch + (n * every) + offset. Its
   // top-level startAt only filters matching times before that boundary, so it
   // does not itself anchor the cadence. Derive the phase from startAt to make
-  // the stored OpenGeni timestamp the first interval boundary rather than the
+  // the stored Opengeni timestamp the first interval boundary rather than the
   // next epoch-aligned match.
   const everyMilliseconds = BigInt(schedule.everySeconds) * 1_000n;
   const startMilliseconds = BigInt(new Date(schedule.startAt).getTime());
@@ -716,12 +1057,7 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
 }
 
 function scheduledTaskEffectivelyPaused(task: ScheduledTask): boolean {
-  if (task.status === "paused") return true;
-  if (!scheduledTaskKnowledgeSource(task)) return false;
-  const control = task.metadata.knowledgeSourceSync;
-  if (!control || typeof control !== "object") return false;
-  const record = control as Record<string, unknown>;
-  return record.sourceEnabled === false || record.connectionPaused === true;
+  return task.status === "paused";
 }
 
 function temporalScheduleUpdateOptions(options: ScheduleOptions): ScheduleUpdateOptions {

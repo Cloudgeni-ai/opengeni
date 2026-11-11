@@ -9,7 +9,12 @@ import {
   buildPortableSkillArtifact,
   readSkillLibraryArtifact,
 } from "./skill-library";
-import { SkillFileError, listSkillPaths, readSkillFiles } from "./skill-files";
+import {
+  SkillFileError,
+  listSkillPaths,
+  readSkillFilesReportingMissing,
+  type SkillFilesRead,
+} from "./skill-files";
 import type { SkillCatalogDescriptor } from "./skill-catalog";
 
 export type RuntimeSkillArtifactFile = Readonly<{
@@ -50,6 +55,9 @@ export type NativeToolSkillSet = Readonly<{
   defaults?: boolean;
   editableArtifacts: boolean;
   sites?: boolean;
+  schedules?: boolean;
+  /** Secret references and the `secret_*` tools (capability `secrets`). */
+  secrets?: boolean;
   videoGeneration: boolean;
 }>;
 
@@ -121,15 +129,17 @@ export function loadNativeToolSkillArtifacts(
 ): readonly RuntimeSkillArtifact[] {
   const directories: string[] = nativeTools.defaults === false ? [] : ["bundled_default_skills"];
   if (nativeTools.projects) directories.push("bundled_project_skills");
+  if (nativeTools.schedules) directories.push("bundled_schedule_skills");
   if (nativeTools.editableArtifacts) directories.push("bundled_artifact_skills");
   if (nativeTools.sites) directories.push("bundled_site_skills");
+  if (nativeTools.secrets) directories.push("bundled_secret_skills");
   if (nativeTools.videoGeneration) directories.push("bundled_video_skills");
   return directories.flatMap((directory) => {
     const root = packagedSkillDirectory(directory);
     return skillDirNames(root).map((name) => {
       const artifact = readSkillLibraryArtifact(join(root, name));
       const files = [...artifact.files];
-      if (name === "opengeni-sites") {
+      if (name === "sites") {
         const generatedPath = "package-versions.json";
         const existing = files.findIndex((entry) => entry.path === generatedPath);
         if (existing !== -1) files.splice(existing, 1);
@@ -241,7 +251,7 @@ export function skillCatalogFromComposition(
 export function readRuntimeSkill(
   composition: RuntimeSkillComposition,
   request: RuntimeSkillReadRequest,
-): { skillId: string; files?: ReturnType<typeof readSkillFiles>["files"]; paths?: string[] } {
+): { skillId: string; paths?: string[] } & Partial<SkillFilesRead> {
   const skill = request.skill.trim();
   if (!skill)
     throw new SkillFileError("invalid_request", "skill_read requires a Skill identifier.");
@@ -270,7 +280,7 @@ export function readRuntimeSkill(
   }
   return {
     skillId: artifact.id,
-    files: readSkillFiles(artifact.files, request.paths).files,
+    ...readSkillFilesReportingMissing(artifact.files, request.paths),
   };
 }
 
@@ -389,6 +399,18 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
     sources.push({
       names: skillDirNames(packagedSkillDirectory("bundled_site_skills")),
       reason: "bundled Site authoring skill",
+    });
+  }
+  if (nativeTools.schedules) {
+    sources.push({
+      names: skillDirNames(packagedSkillDirectory("bundled_schedule_skills")),
+      reason: "native scheduled-task tool surface",
+    });
+  }
+  if (nativeTools.secrets) {
+    sources.push({
+      names: skillDirNames(packagedSkillDirectory("bundled_secret_skills")),
+      reason: "native secrets tool surface",
     });
   }
   if (nativeTools.videoGeneration) {

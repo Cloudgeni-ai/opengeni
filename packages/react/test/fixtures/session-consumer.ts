@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   type ActivityItem,
   type AgentMessageItem,
@@ -113,7 +114,7 @@ export const sessionClient = {
   pauseSession: unused,
   resumeSession: unused,
   sendApprovalDecision: unused,
-} satisfies SessionClientLike;
+} satisfies SessionClientLike<ChatClient>;
 
 export const constructedSessionClient = createEmbeddedSessionClient(sessionClient, {
   overrides: {
@@ -188,7 +189,7 @@ export type SessionTypeSurface = [
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
-  ClientOverride,
+  ClientOverride<ChatClient>,
   ComposerSendExtras,
   ComposerState,
   FileAttachment,

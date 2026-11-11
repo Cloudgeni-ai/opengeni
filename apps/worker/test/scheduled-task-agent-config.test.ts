@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  SCHEDULED_SLACK_BOT_POSTING_TOOLS,
+} from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   bootstrapWorkspace,
@@ -14,12 +17,9 @@ import {
   type DbClient,
   type ScheduledTaskCreatorPolicy,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
 
@@ -172,14 +172,82 @@ async function queuedAgentRun(
 // it through to the generated session and freezes it in the accepted execution.
 
 describe("scheduled-task agent configuration (real PostgreSQL)", () => {
-  test("a task without agent keeps the exact legacy generated session", async () => {
+  test("a task without agent resolves all to the ordinary deployment defaults", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null);
-    const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id);
-    expect(session.agent).toBeNull();
-    expect(accepted?.resolvedAgentConfig).toBeUndefined();
-    expect(session.firstPartyMcpTools).toEqual(resolveFirstPartyMcpToolPolicy(settings).default);
+    const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id, {
+      mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }],
+    });
+    expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
+    expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
+    const defaults = resolveFirstPartyMcpToolPolicy(settings).default;
+    // Scheduled work keeps the same capabilities as interactive work,
+    // including the ordinary bot posting tools.
+    expect(session.firstPartyMcpTools).toEqual(defaults);
+    expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+    expect(session.tools.find((tool) => tool.id === "opengeni")?.eager).toEqual([
+      "knowledge_search",
+    ]);
+    expect(accepted?.resolvedTools).toEqual(session.tools);
+    for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS) {
+      expect(session.firstPartyMcpTools).toContain(tool);
+    }
+  }, 60_000);
+
+  test.each([
+    ["posting allowed", ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS], true],
+    ["posting disallowed", ["goal_set"], false],
+  ] as const)(
+    "explicit defaults stay under the deployment ceiling: %s",
+    async (_label, allowed, postingAllowed) => {
+      if (!available) return;
+      const grant = await workspaceGrant();
+      const task = await generatedTask(grant, null);
+      const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
+        defaultFirstPartyMcpTools: ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS],
+        allowedFirstPartyMcpTools: [...allowed],
+      });
+      expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
+      expect(session.firstPartyMcpTools).toEqual(
+        postingAllowed ? ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS] : ["goal_set"],
+      );
+      expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+      expect(accepted?.resolvedAgentConfig).toEqual(session.agent);
+    },
+    60_000,
+  );
+
+  test("queued all recovery cannot expand the frozen selection when defaults grow", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await generatedTask(grant, null);
+    const { accepted } = await dispatchGeneratedSession(grant, task.id, {
+      defaultFirstPartyMcpTools: ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS],
+    });
+    expect(accepted?.resolvedFirstPartyMcpTools).toEqual([
+      "goal_set",
+      ...SCHEDULED_SLACK_BOT_POSTING_TOOLS,
+    ]);
+    const { producerKey } = await queuedAgentRun(grant, accepted!);
+    const { activities: scheduled } = activities({
+      defaultFirstPartyMcpTools: [
+        "goal_set",
+        "knowledge_search",
+        ...SCHEDULED_SLACK_BOT_POSTING_TOOLS,
+      ],
+    });
+    const recovered = await scheduled.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    expect(recovered.action).toBe("start");
+    if (recovered.action !== "start") throw new Error("queued recovery did not start");
+    const stored = await getSession(client.db, grant.workspaceId, recovered.sessionId);
+    expect(stored?.firstPartyMcpTools).toEqual(accepted!.resolvedFirstPartyMcpTools);
+    expect(stored?.agent).toEqual(accepted!.resolvedAgentConfig);
   }, 60_000);
 
   test("a task agent resolves at dispatch, narrows the scheduled baseline and is frozen", async () => {
@@ -189,9 +257,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       capabilities: { from: "none", goals: true },
       identity: "Nightly reporter",
     });
-    const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
-      agentConfigAdmissionEnabled: true,
-    });
+    const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
     expect(session.agent).toMatchObject({
       from: "none",
       identity: "Nightly reporter",
@@ -200,6 +266,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
     expect([...session.firstPartyMcpTools].sort()).toEqual(
       [
+        "call_user",
         "command_read",
         "command_wait",
         "goal_complete",
@@ -208,11 +275,27 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
         "goal_resume",
         "goal_set",
         "goal_update",
+        "inbox_tidy",
+        "notification_withdraw",
+        "notify_user",
         "set_session_title",
         "wait_for_input",
       ].filter((tool) => DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool as never)),
     );
     expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+  }, 60_000);
+
+  test("a schedule's vault narrowing lives on the run session, so later turns and children inherit it", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await generatedTask(grant, null);
+    const policy = { mode: "selected", vaultIds: [crypto.randomUUID()] };
+    await shared!.admin`
+      update scheduled_tasks set vault_policy = ${shared!.admin.json(policy)} where id = ${task.id}`;
+    const { session } = await dispatchGeneratedSession(grant, task.id);
+    const [row] = await shared!.admin<Array<{ vault_policy: unknown }>>`
+      select vault_policy from sessions where id = ${session.id}`;
+    expect(row!.vault_policy).toEqual(policy);
   }, 60_000);
 
   test("configured dispatch canonicalizes creation metadata and replays its frozen instructions", async () => {
@@ -230,8 +313,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       { purpose: "nightly", [identityKey]: { spoof: true } },
     );
     const producerKey = `scheduled-agent-${crypto.randomUUID()}`;
-    const overrides = { agentConfigAdmissionEnabled: true };
-    const first = await dispatchGeneratedSession(grant, task.id, overrides, producerKey);
+    const first = await dispatchGeneratedSession(grant, task.id, {}, producerKey);
     const { source: _source, ...identity } = first.session.agent!;
     expect(first.session.metadata[identityKey]).toEqual(identity);
     expect(first.session.metadata.purpose).toBe("nightly");
@@ -242,31 +324,14 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     await shared!.admin`update scheduled_tasks
       set agent_config = jsonb_set(agent_config, '{agent,identity}', '"Updated reporter"'::jsonb)
       where id = ${task.id}`;
-    const replay = await dispatchGeneratedSession(grant, task.id, overrides, producerKey);
+    const replay = await dispatchGeneratedSession(grant, task.id, {}, producerKey);
     expect(replay.session.id).toBe(first.session.id);
     expect(replay.session.agent).toEqual(first.session.agent);
     expect(replay.session.instructions).toBe(first.session.instructions);
     expect(replay.accepted).toEqual(first.accepted);
   }, 60_000);
 
-  test("a stored task agent with admission off is refused, never silently dropped", async () => {
-    if (!available) return;
-    const grant = await workspaceGrant();
-    const task = await generatedTask(grant, null, { capabilities: "none" });
-    const { activities: scheduled } = activities();
-    const result = await scheduled.dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: `scheduled-agent-${crypto.randomUUID()}`,
-    });
-    expect(result.action).not.toBe("start");
-    const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
-    expect(run?.status).toBe("skipped");
-    expect(run?.sessionId ?? null).toBeNull();
-  }, 60_000);
-
-  test("queued recovery preserves the complete agent and instructions without re-admission", async () => {
+  test("queued recovery preserves the complete agent and instructions", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null, {
@@ -274,9 +339,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       identity: "Scheduled report writer",
       instructions: "Return the synthetic fixture report.",
     });
-    const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
-      agentConfigAdmissionEnabled: true,
-    });
+    const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
     expect(session.instructions).toBe("Return the synthetic fixture report.");
     expect(accepted?.resolvedAgentInstructions).toBe(session.instructions);
     const { producerKey } = await queuedAgentRun(grant, accepted!);
@@ -311,9 +374,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       capabilities: "none",
       identity: "Accepted report writer",
     });
-    const { accepted } = await dispatchGeneratedSession(grant, task.id, {
-      agentConfigAdmissionEnabled: true,
-    });
+    const { accepted } = await dispatchGeneratedSession(grant, task.id);
     const { run, producerKey, snapshot } = await queuedAgentRun(grant, accepted!);
     const binding = snapshot.generatedSessionBinding;
     const session = await createSession(client.db, {
@@ -322,6 +383,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       initialMessage: task.agentConfig.prompt,
       resources: task.agentConfig.resources,
       tools: snapshot.resolvedTools,
+      toolPolicy: binding.toolPolicy ?? { mode: "explicit", inheritedFromSessionId: null },
       firstPartyMcpTools: snapshot.resolvedFirstPartyMcpTools,
       firstPartyMcpPermissions: snapshot.resolvedFirstPartyMcpPermissions,
       agentConfig: snapshot.resolvedAgentConfig,
@@ -386,5 +448,110 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       select execution_digest from scheduled_tasks where id = ${task.id}`;
     expect(before?.execution_digest).toBeTruthy();
     expect(after?.execution_digest).not.toBe(before?.execution_digest);
+  }, 60_000);
+
+  test("a generated chat gets the task's servers, skills, memory and agent access, through the fence", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const skills = [
+      {
+        name: "triage",
+        description: "Triage findings",
+        files: [
+          {
+            path: "SKILL.md",
+            content: "---\nname: triage\ndescription: Triage findings\n---\nRead the findings.",
+          },
+        ],
+      },
+    ];
+    const task = await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      name: "Generated chat settings",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-chat-settings-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Review the new findings",
+        resources: [],
+        tools: [],
+        metadata: {},
+        mcpServers: [{ id: "product", url: "https://product.example/mcp" }],
+        skills,
+        memoryScope: "off",
+        agentAccess: "session",
+      } as never,
+      metadata: {},
+      creatorPolicy: null,
+    });
+    const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
+    const [row] = await shared!.admin<
+      Array<{ memory_scope: string; agent_access: string; skills: unknown }>
+    >`select memory_scope, agent_access, skills from sessions where id = ${session.id}`;
+    expect(row).toMatchObject({ memory_scope: "off", agent_access: "session", skills });
+    const servers = await shared!.admin<Array<{ server_id: string; url: string }>>`
+      select server_id, url from session_mcp_servers where session_id = ${session.id}`;
+    expect([...servers]).toEqual([{ server_id: "product", url: "https://product.example/mcp" }]);
+
+    // Queued recovery and its replay accept the chat they made with these settings.
+    const { producerKey } = await queuedAgentRun(grant, accepted!);
+    const { activities: scheduled } = activities();
+    const input = {
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled" as const,
+      producerKey,
+    };
+    const recovered = await scheduled.dispatchScheduledTaskRun(input);
+    expect(recovered.action).toBe("start");
+    if (recovered.action !== "start") throw new Error("queued recovery did not start");
+    expect(await scheduled.dispatchScheduledTaskRun(input)).toMatchObject({
+      action: "start",
+      sessionId: recovered.sessionId,
+    });
+  }, 60_000);
+
+  test("skip on a new chat per run skips while the previous run's chat still works", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      name: "Skip while working",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-skip-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Check", resources: [], tools: [], metadata: {} } as never,
+      metadata: {},
+      creatorPolicy: null,
+    });
+    const { session } = await dispatchGeneratedSession(grant, task.id);
+    const { activities: scheduled } = activities();
+    // The first run's chat has not finished: the next occurrence is skipped.
+    const skipped = await scheduled.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `scheduled-skip-${crypto.randomUUID()}`,
+    });
+    expect(skipped.action).toBe("blocked");
+    const [latest] = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+    expect(latest).toMatchObject({ status: "skipped", error: "scheduled_session_not_idle" });
+
+    // Once it is idle the next occurrence starts a new chat.
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update sessions set status = 'idle', active_turn_id = null
+        where id = ${session.id}`;
+    });
+    const next = await dispatchGeneratedSession(grant, task.id);
+    expect(next.session.id).not.toBe(session.id);
   }, 60_000);
 });

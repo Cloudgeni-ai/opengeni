@@ -1,37 +1,42 @@
 /**
- * Small pieces the Schedules list and the schedule page share: permissions,
- * links, the tile, the Next run / Last run values, the owner and the row menu.
+ * Small pieces the Automations list and the automation page share:
+ * permissions, links, the tile, the Next run / Last run values, the owner and
+ * the row menu.
  */
 import type { ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BotIcon,
   CalendarClockIcon,
   CopyIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
-  RefreshCwIcon,
   Trash2Icon,
+  ZapIcon,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { useAppContext } from "@/context";
-import { creatorInitials } from "@/lib/creator-initials";
-import { hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/ui/dropdown-menu";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { creatorInitials, creatorType } from "@opengeni/react/app/lib/creator-initials";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { scheduledTaskStateLabel } from "@/lib/scheduled-tasks";
-import { cn } from "@/lib/utils";
-import type { ScheduledTask, ScheduledTaskRun } from "@/types";
+import { scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
+import { PausedChatRunBadge } from "./schedule-blocker-notice";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { ScheduledTask, ScheduledTaskRun } from "@opengeni/react/app/types";
 
 import {
-  isKnowledgeSync,
+  hasEventTriggers,
+  isFinishedOnce,
   nextRunOf,
   ownerName,
   ownsSchedule,
@@ -71,14 +76,12 @@ export function useScheduleAccess(workspaceId: string): ScheduleAccess {
 /** What this viewer can do with one schedule. */
 export function schedulePermissions(task: ScheduledTask, access: ScheduleAccess) {
   const own = ownsSchedule(task, access.viewerSubjectId);
-  const knowledge = isKnowledgeSync(task);
   return {
     own,
     canEdit: own && access.canManage,
     canRun: own && access.canRun,
     canPauseOrDelete: own && access.canManage,
-    /** Knowledge syncs belong to their source; they aren't copied. */
-    canDuplicate: access.canManage && !knowledge,
+    canDuplicate: access.canManage,
   };
 }
 
@@ -87,11 +90,24 @@ export function schedulePermissions(task: ScheduledTask, access: ScheduleAccess)
    -------------------------------------------------------------------------- */
 
 export function schedulesPath(workspaceId: string): string {
-  return `/workspaces/${encodeURIComponent(workspaceId)}/schedules`;
+  return `/workspaces/${encodeURIComponent(workspaceId)}/automations`;
 }
 
 export function schedulePath(workspaceId: string, scheduleId: string): string {
   return `${schedulesPath(workspaceId)}/${encodeURIComponent(scheduleId)}`;
+}
+
+export function eventSourcePath(workspaceId: string, sourceId: string): string {
+  return `${schedulesPath(workspaceId)}/sources/${encodeURIComponent(sourceId)}`;
+}
+
+export function newEventSourcePath(workspaceId: string, kind?: string): string {
+  const path = `${schedulesPath(workspaceId)}/sources/new`;
+  return kind ? `${path}?kind=${encodeURIComponent(kind)}` : path;
+}
+
+export function newAutomationPath(workspaceId: string, template: string): string {
+  return `${schedulesPath(workspaceId)}/new?template=${encodeURIComponent(template)}`;
 }
 
 export type ScheduleNavigation = ReturnType<typeof useScheduleNavigation>;
@@ -101,26 +117,50 @@ export function useScheduleNavigation(workspaceId: string) {
   return {
     list: () =>
       void navigate({
-        to: "/workspaces/$workspaceId/schedules",
+        to: "/workspaces/$workspaceId/automations",
         params: { workspaceId },
         search: {},
       }),
     detail: (scheduleId: string, options: { replace?: boolean } = {}) =>
       void navigate({
-        to: "/workspaces/$workspaceId/schedules/$scheduleId",
-        params: { workspaceId, scheduleId },
+        to: "/workspaces/$workspaceId/automations/$automationId",
+        params: { workspaceId, automationId: scheduleId },
         replace: options.replace,
       }),
     edit: (scheduleId: string) =>
       void navigate({
-        to: "/workspaces/$workspaceId/schedules/$scheduleId/edit",
-        params: { workspaceId, scheduleId },
+        to: "/workspaces/$workspaceId/automations/$automationId/edit",
+        params: { workspaceId, automationId: scheduleId },
       }),
-    create: (search: { template?: string; from?: string; sourceSessionId?: string } = {}) =>
+    create: (
+      search: { template?: string; from?: string; sourceSessionId?: string; source?: string } = {},
+    ) =>
       void navigate({
-        to: "/workspaces/$workspaceId/schedules/new",
+        to: "/workspaces/$workspaceId/automations/new",
         params: { workspaceId },
         search,
+      }),
+    sources: () =>
+      void navigate({
+        to: "/workspaces/$workspaceId/automations/sources",
+        params: { workspaceId },
+      }),
+    templates: () =>
+      void navigate({
+        to: "/workspaces/$workspaceId/automations/templates",
+        params: { workspaceId },
+      }),
+    source: (sourceId: string, options: { replace?: boolean } = {}) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/automations/sources/$sourceId",
+        params: { workspaceId, sourceId },
+        replace: options.replace,
+      }),
+    newSource: (kind?: string) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/automations/sources/new",
+        params: { workspaceId },
+        search: kind ? { kind } : {},
       }),
     session: (sessionId: string) =>
       void navigate({
@@ -130,31 +170,61 @@ export function useScheduleNavigation(workspaceId: string) {
   };
 }
 
-export { inAppClick } from "@/lib/in-app-click";
+export { inAppClick } from "@opengeni/react/ui/in-app-click";
 
 /* ----------------------------------------------------------------------------
    Values.
    -------------------------------------------------------------------------- */
 
+/**
+ * What kind of schedule it is. Never its state: a pause glyph here read as a
+ * button. Paused shows in Next run, the switch and the page's status chip.
+ */
 export function ScheduleTile({ task }: { task: ScheduledTask }) {
-  const active = scheduledTaskStateLabel(task).active;
   return (
     <LogoTile
       name={task.name}
-      icon={
-        active ? isKnowledgeSync(task) ? <RefreshCwIcon /> : <CalendarClockIcon /> : <PauseIcon />
-      }
+      icon={hasEventTriggers(task) ? <ZapIcon /> : <CalendarClockIcon />}
     />
   );
 }
 
+/** Whether the list row shows the on/off switch: the viewer can pause it. */
+export function canSwitchSchedule(task: ScheduledTask, access: ScheduleAccess): boolean {
+  return schedulePermissions(task, access).canPauseOrDelete;
+}
+
+/**
+ * The switch reads On only while it can run. A run-once automation that
+ * already ran reads Off; turning it on listens again.
+ */
+export function scheduleSwitchedOn(task: ScheduledTask): boolean {
+  return task.status !== "paused" && !isFinishedOnce(task);
+}
+
+/**
+ * The Next run column: the next scheduled time, or what starts it instead
+ * (events, a person) and why nothing will (paused, finished, no runs left).
+ */
 export function NextRunValue({ task, now }: { task: ScheduledTask; now: Date }) {
   const state = scheduledTaskStateLabel(task);
   if (!state.active) return <span className="text-fg-subtle">{state.label}</span>;
-  if (task.schedule.type === "manual") return <span className="text-fg-subtle">On demand</span>;
+  if (isFinishedOnce(task)) return <span className="text-fg-subtle">Finished</span>;
   const next = nextRunOf(task, now);
-  if (!next) return <span className="text-fg-subtle">No runs left</span>;
-  return <RelativeTime date={next} format="absolute" />;
+  if (next) return <RelativeTime date={next} format="absolute" />;
+  if (runsOnEventsOnly(task, now)) return <span className="text-fg-subtle">On events</span>;
+  if (task.schedule.type === "manual") return <span className="text-fg-subtle">On demand</span>;
+  return <span className="text-fg-subtle">No runs left</span>;
+}
+
+/** Whether only events start it next: it is on, listening, and has no scheduled run. */
+export function runsOnEventsOnly(task: ScheduledTask, now: Date): boolean {
+  return (
+    scheduledTaskStateLabel(task).active &&
+    !isFinishedOnce(task) &&
+    !nextRunOf(task, now) &&
+    hasEventTriggers(task)
+  );
 }
 
 const RUN_BADGE: Record<
@@ -169,6 +239,7 @@ const RUN_BADGE: Record<
 };
 
 export function RunStatusBadge({ run }: { run: ScheduledTaskRun }) {
+  if (scheduledRunSkippedForPausedChat(run)) return <PausedChatRunBadge />;
   const badge = RUN_BADGE[run.status] ?? { status: "queued" as const, label: run.status };
   return (
     <StatusBadge
@@ -210,11 +281,16 @@ export function OwnerValue({
     <span className="inline-flex max-w-full min-w-0 items-center gap-1.5 align-middle">
       <Avatar className={size === "md" ? "size-6" : "size-5"}>
         <AvatarFallback className="bg-surface-3 text-2xs font-semibold text-fg-muted">
-          {creatorInitials({
-            kind: "subject",
-            subjectId: task.ownerSubjectId ?? "",
-            label: name,
-          }) ?? "?"}
+          {creatorType({ kind: "subject", subjectId: task.ownerSubjectId ?? "" }) === "api_key" ? (
+            // An API key is not a person: no initials, the same bot icon as the sidebar.
+            <BotIcon aria-hidden="true" data-owner-api-key className="size-3" />
+          ) : (
+            (creatorInitials({
+              kind: "subject",
+              subjectId: task.ownerSubjectId ?? "",
+              label: name,
+            }) ?? "?")
+          )}
         </AvatarFallback>
       </Avatar>
       <span className="min-w-0 truncate">{name}</span>
@@ -236,10 +312,13 @@ export function ScheduleMenuItems({
   onEdit,
   onDuplicate,
   onDelete,
+  pauseItem = true,
 }: {
   task: ScheduledTask;
   access: ScheduleAccess;
   busy: boolean;
+  /** False where the row's switch already pauses and resumes. */
+  pauseItem?: boolean;
   onRunNow: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -248,14 +327,16 @@ export function ScheduleMenuItems({
   onDelete: () => void;
 }) {
   const perms = schedulePermissions(task, access);
-  const paused = task.status === "paused";
-  const active = scheduledTaskStateLabel(task).active;
+  // A run-once automation that already ran is as good as paused: Resume re-arms it.
+  const paused = !scheduleSwitchedOn(task);
+  const state = scheduledTaskStateLabel(task);
+  const active = state.active;
   return (
     <>
       {perms.own ? null : (
         <>
           <DropdownMenuLabel className="max-w-64 px-2 py-1.5 text-xs leading-4.5 font-normal text-fg-muted">
-            {ownerName(task)} owns this schedule. It runs with their connected accounts, so only
+            {ownerName(task)} owns this automation. It runs with their connected accounts, so only
             they can change or run it.
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
@@ -267,7 +348,7 @@ export function ScheduleMenuItems({
           Run now
         </DropdownMenuItem>
       ) : null}
-      {perms.canPauseOrDelete ? (
+      {pauseItem && perms.canPauseOrDelete ? (
         <DropdownMenuItem disabled={busy} onSelect={paused ? onResume : onPause}>
           {paused ? <PlayIcon /> : <PauseIcon />}
           {paused ? "Resume" : "Pause"}

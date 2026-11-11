@@ -4,6 +4,17 @@ const argument = process.argv[2];
 const HASH = `sha256:${"1".repeat(64)}`;
 
 if (argument === "--opengeni-materializer-identity-v1") {
+  // Test hook: stall the first N identity probes (counted in a marker file)
+  // so callers can exercise a slow start on a loaded host.
+  const stallFile = process.env.FIXTURE_IDENTITY_STALL_FILE;
+  if (stallFile) {
+    const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
+    const stalled = existsSync(stallFile) ? Number(readFileSync(stallFile, "utf8")) : 0;
+    if (stalled < Number(process.env.FIXTURE_IDENTITY_STALL_COUNT ?? 1)) {
+      writeFileSync(stallFile, String(stalled + 1));
+      await new Promise(() => {});
+    }
+  }
   process.stdout.write(
     JSON.stringify({
       protocol: "OGAMC001",

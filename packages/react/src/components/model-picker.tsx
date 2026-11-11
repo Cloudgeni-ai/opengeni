@@ -1,8 +1,14 @@
 import type { ClientModel } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { ChevronDownIcon } from "lucide-react";
 import { useId, useMemo } from "react";
-import { groupPickerRowsByBillingClass, type PickerModelRow } from "../model-policy";
+import {
+  groupPickerRowsByBillingClass,
+  projectClientModelRows,
+  type PickerModelRow,
+} from "../model-policy";
 import { cn } from "../lib/cn";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ModelPickerProps = {
   /** Legacy host config models grouped by provider. */
@@ -31,14 +37,18 @@ function isCodexPickerRow(row: PickerModelRow): boolean {
   return row.id.startsWith("codex/") || row.catalog.source === "codex";
 }
 
-function applyCodexOnlyRows(rows: PickerModelRow[], codexOnly: boolean): PickerModelRow[] {
+function applyCodexOnlyRows(
+  t: OpenGeniText,
+  rows: PickerModelRow[],
+  codexOnly: boolean,
+): PickerModelRow[] {
   if (!codexOnly) return rows;
   return rows.map((row) => {
     if (isCodexPickerRow(row)) return row;
     return {
       ...row,
       selectable: false,
-      unavailableReason: row.unavailableReason ?? "Codex-only session",
+      unavailableReason: row.unavailableReason ?? t("modelPicker.codexOnlySession"),
     };
   });
 }
@@ -76,20 +86,29 @@ export function ModelPicker({
   onChange,
   disabled,
   className,
-  label = "Model",
+  label: labelProp,
   codexOnly = false,
 }: ModelPickerProps) {
+  const t = useOpenGeniText();
+  const label = labelProp === undefined ? t("modelPicker.model") : labelProp;
   const selectId = useId();
   const effectiveRows = useMemo(
-    () => (rows && rows.length > 0 ? applyCodexOnlyRows(rows, codexOnly) : []),
-    [rows, codexOnly],
+    () => (rows && rows.length > 0 ? applyCodexOnlyRows(t, rows, codexOnly) : []),
+    [rows, codexOnly, t],
   );
   const billingGroups = useMemo(
     () =>
-      effectiveRows.length > 0 ? groupPickerRowsByBillingClass(effectiveRows, { codexOnly }) : [],
-    [effectiveRows, codexOnly],
+      effectiveRows.length > 0
+        ? groupPickerRowsByBillingClass(t, effectiveRows, { codexOnly, selectedId: value })
+        : [],
+    [effectiveRows, codexOnly, value, t],
   );
   const providerGroupList = useMemo(() => providerGroups(models, codexOnly), [models, codexOnly]);
+  // Same-named models say what differs, as in every other picker.
+  const modelLabels = useMemo(
+    () => new Map(projectClientModelRows(t, models).map((row) => [row.id, row.label])),
+    [models, t],
+  );
   const useBillingGroups = Boolean(effectiveRows.length);
 
   if (models.length === 0 && effectiveRows.length === 0) {
@@ -129,7 +148,7 @@ export function ModelPicker({
               <optgroup key={group.label} label={group.label}>
                 {group.models.map((model) => (
                   <option key={model.id} value={model.id} disabled={model.optionDisabled}>
-                    {model.label}
+                    {modelLabels.get(model.id) ?? modelDisplayName(model)}
                   </option>
                 ))}
               </optgroup>

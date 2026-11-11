@@ -1,27 +1,29 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   type AccessGrant,
+  type Permission,
   type SessionToolPolicy,
   type ToolRef,
   type UpdateSessionToolPolicyRequest,
 } from "@opengeni/contracts";
-import {
-  MemoryEventBus,
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   createSession,
+  createSessionGoal,
   getSession,
   SessionToolPolicyVersionConflictError,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import { updateSessionToolPolicy } from "../src/domain/sessions";
+import { resolveSessionFirstPartyMcpTools } from "@opengeni/config";
 
 const OPENGENI: ToolRef = { kind: "mcp", id: "opengeni" };
 const DOCS: ToolRef = { kind: "mcp", id: "docs" };
@@ -88,6 +90,7 @@ async function session(
     tools: ToolRef[];
     toolPolicy?: SessionToolPolicy;
     parentSessionId?: string;
+    firstPartyMcpPermissions?: Permission[];
   },
 ) {
   return await createSession(db, {
@@ -103,6 +106,9 @@ async function session(
     latencyMode: "standard",
     sandboxBackend: "none",
     ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+    ...(input.firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: input.firstPartyMcpPermissions }
+      : {}),
   });
 }
 
@@ -348,6 +354,7 @@ describe("durable session tool-policy updates", () => {
     expect(updated.toolPolicy).toEqual({
       mode: "workspace_default",
       inheritedFromSessionId: null,
+      firstPartyMode: "workspace_default",
     });
     expect(updated.toolPolicyVersion).toBe(2);
     expect(bus.published[0]![0]).toMatchObject({
@@ -359,6 +366,123 @@ describe("durable session tool-policy updates", () => {
         effectiveFrom: "next_attempt",
       },
     });
+  }, 180_000);
+
+  test("a default reset follows new built-ins but connector edits and explicit pins retain their intent", async () => {
+    if (!available) return;
+    const owner = await workspace("first-party-follow-defaults");
+    const created = await session(firstDb, { ...owner, tools: [OPENGENI] });
+    const initialSettings = testSettings({
+      ...settings,
+      defaultFirstPartyMcpTools: ["session_get"],
+      allowedFirstPartyMcpTools: ["session_get", "custom_mcp_setup_request"],
+    });
+    const bus = new MemoryEventBus();
+    const reset = await updateSessionToolPolicy(
+      deps(firstDb, bus, initialSettings),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { mode: "workspace_default", expectedVersion: 1 },
+    );
+    const newerSettings = {
+      ...initialSettings,
+      defaultFirstPartyMcpTools: ["session_get", "custom_mcp_setup_request"] as const,
+    };
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, reset, {})).toEqual([
+      "session_get",
+      "custom_mcp_setup_request",
+    ]);
+    const excluded = await updateSessionToolPolicy(
+      deps(firstDb, bus, initialSettings),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { mode: "workspace_default", excludedMcpServerIds: ["docs"], expectedVersion: 2 },
+    );
+    expect(excluded.firstPartyMcpTools).toEqual(["session_get"]);
+    expect(excluded.toolPolicy.firstPartyMode).toBe("workspace_default");
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, excluded, {})).toHaveLength(2);
+    const pinned = await updateSessionToolPolicy(
+      deps(firstDb, bus, initialSettings),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { mode: "explicit", tools: [OPENGENI], firstPartyMcpTools: [], expectedVersion: 3 },
+    );
+    expect(pinned.toolPolicy.firstPartyMode).toBeUndefined();
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, pinned, {})).toEqual([]);
+  }, 180_000);
+
+  test("guaranteed built-in additions survive an explicit pin and return on reset", async () => {
+    if (!available) return;
+    const owner = await workspace("first-party-additions");
+    const additionSettings = testSettings({
+      ...settings,
+      defaultFirstPartyMcpTools: ["session_get"],
+      allowedFirstPartyMcpTools: ["session_get", "custom_mcp_setup_request", "session_pause"],
+    });
+    const followsWithAdditions: SessionToolPolicy = {
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+      firstPartyMode: "workspace_default",
+      firstPartyAdditions: ["session_pause"],
+    };
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      toolPolicy: followsWithAdditions,
+    });
+    const bus = new MemoryEventBus();
+    const newerSettings = {
+      ...additionSettings,
+      defaultFirstPartyMcpTools: ["session_get", "custom_mcp_setup_request"] as const,
+    };
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, created, {})).toEqual([
+      "session_get",
+      "custom_mcp_setup_request",
+      "session_pause",
+    ]);
+
+    const pinned = await updateSessionToolPolicy(
+      deps(firstDb, bus, additionSettings),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { mode: "explicit", tools: [OPENGENI], firstPartyMcpTools: [], expectedVersion: 1 },
+    );
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, pinned, {})).toEqual([]);
+    expect(pinned.toolPolicy.firstPartyAdditions).toEqual(["session_pause"]);
+
+    const reset = await updateSessionToolPolicy(
+      deps(firstDb, bus, additionSettings),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { mode: "workspace_default", expectedVersion: 2 },
+    );
+    expect(reset.firstPartyMcpTools).toEqual(["session_get", "session_pause"]);
+    expect(reset.toolPolicy).toMatchObject(followsWithAdditions);
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, reset, {})).toEqual([
+      "session_get",
+      "custom_mcp_setup_request",
+      "session_pause",
+    ]);
+
+    const child = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      parentSessionId: created.id,
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: created.id },
+    });
+    const adopted = await updateSessionToolPolicy(
+      deps(firstDb, bus, additionSettings),
+      grant(owner.workspaceId, owner.accountId),
+      child.id,
+      { mode: "workspace_default", expectedVersion: 1 },
+    );
+    expect(adopted.toolPolicy).toEqual({
+      mode: "workspace_default",
+      inheritedFromSessionId: created.id,
+      firstPartyMode: "workspace_default",
+      firstPartyAdditions: ["session_pause"],
+    });
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, adopted, {})).toContain("session_pause");
   }, 180_000);
 
   test("allows default adoption only through a workspace-default parent ceiling", async () => {
@@ -617,6 +741,42 @@ describe("durable session tool-policy updates", () => {
     );
   }, 180_000);
 
+  test("rejects newly added disabled first-party tools, naming each and the allowed set", async () => {
+    if (!available) return;
+    const owner = await workspace("disabled-first-party-addition");
+    const created = await session(firstDb, { ...owner, tools: [OPENGENI] });
+    const added = FIRST_PARTY_MCP_TOOL_NAMES.filter(
+      (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
+    ).slice(0, 2);
+    expect(added).toHaveLength(2);
+    const restricted = testSettings({
+      mcpServers: settings.mcpServers,
+      allowedFirstPartyMcpTools: ["session_get", "session_create"],
+      defaultFirstPartyMcpTools: ["session_get"],
+    });
+
+    const failure = await updateSessionToolPolicy(
+      deps(firstDb, new MemoryEventBus(), restricted),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      {
+        mode: "explicit",
+        tools: [OPENGENI],
+        firstPartyMcpTools: ["session_get", ...added],
+        expectedVersion: 1,
+      },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      status: 422,
+      message: `first-party MCP tools are disabled by deployment policy: ${added.join(", ")}. Allowed tools: session_get, session_create.`,
+    });
+    expect((await getSession(firstDb, owner.workspaceId, created.id))?.toolPolicyVersion).toBe(1);
+  }, 180_000);
+
   test("does not expose a session from another workspace through the update path", async () => {
     if (!available) return;
     const firstOwner = await workspace("tenant-a");
@@ -634,5 +794,175 @@ describe("durable session tool-policy updates", () => {
         explicitTools([OPENGENI, DOCS], 1),
       ),
     ).rejects.toThrow(`Session not found: ${foreign.id}`);
+  }, 180_000);
+});
+
+describe("first-party permissions on a tool-policy update", () => {
+  const WITH_FILES: Permission[] = [
+    ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+    "files:read",
+    "files:upload",
+  ];
+  const NARROW: Permission[] = ["sessions:read", "sessions:control"];
+  function holder(workspaceId: string, accountId: string, permissions: Permission[]): AccessGrant {
+    return {
+      accountId,
+      workspaceId,
+      subjectId: "user:session-tool-policy-test",
+      permissions: [...new Set<Permission>(["sessions:control", ...permissions])],
+    };
+  }
+
+  test("an existing session gains a tool and the permissions it needs in one version", async () => {
+    if (!available) return;
+    const owner = await workspace("perm-widen");
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      firstPartyMcpPermissions: NARROW,
+    });
+    const bus = new MemoryEventBus();
+
+    const updated = await updateSessionToolPolicy(
+      deps(firstDb, bus),
+      holder(owner.workspaceId, owner.accountId, WITH_FILES),
+      created.id,
+      { ...explicitTools([OPENGENI, DOCS], 1), firstPartyMcpPermissions: WITH_FILES },
+    );
+
+    expect(updated.toolPolicyVersion).toBe(2);
+    expect([...(updated.firstPartyMcpPermissions ?? [])].sort()).toEqual(
+      [...new Set(WITH_FILES)].sort(),
+    );
+    const event = bus.published.flat().find((item) => item.type === "session.tool_policy.updated");
+    expect(event?.payload).toMatchObject({
+      before: { firstPartyMcpPermissions: [...NARROW].sort() },
+      after: { firstPartyMcpPermissions: [...new Set(WITH_FILES)].sort() },
+    });
+
+    // Restating the same set in another order changes nothing.
+    const repeat = await updateSessionToolPolicy(
+      deps(firstDb, bus),
+      holder(owner.workspaceId, owner.accountId, WITH_FILES),
+      created.id,
+      {
+        ...explicitTools([OPENGENI, DOCS], 2),
+        firstPartyMcpPermissions: [...WITH_FILES].reverse(),
+      },
+    );
+    expect(repeat.toolPolicyVersion).toBe(2);
+  }, 180_000);
+
+  test("a permission-only change with the same tools still advances the version", async () => {
+    if (!available) return;
+    const owner = await workspace("perm-only");
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      firstPartyMcpPermissions: NARROW,
+    });
+    const request = explicitTools([OPENGENI], 1);
+    const first = await updateSessionToolPolicy(
+      deps(firstDb, new MemoryEventBus()),
+      holder(owner.workspaceId, owner.accountId, WITH_FILES),
+      created.id,
+      request,
+    );
+    const updated = await updateSessionToolPolicy(
+      deps(firstDb, new MemoryEventBus()),
+      holder(owner.workspaceId, owner.accountId, WITH_FILES),
+      created.id,
+      {
+        ...request,
+        expectedVersion: first.toolPolicyVersion!,
+        firstPartyMcpPermissions: [...NARROW, "files:read"],
+      },
+    );
+    expect(updated.toolPolicyVersion).toBe(first.toolPolicyVersion! + 1);
+    expect([...(updated.firstPartyMcpPermissions ?? [])].sort()).toEqual(
+      [...NARROW, "files:read"].sort(),
+    );
+  }, 180_000);
+
+  test("the caller cannot grant a permission it does not hold", async () => {
+    if (!available) return;
+    const owner = await workspace("perm-beyond-caller");
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      firstPartyMcpPermissions: NARROW,
+    });
+    await expect(
+      updateSessionToolPolicy(
+        deps(firstDb, new MemoryEventBus()),
+        holder(owner.workspaceId, owner.accountId, ["sessions:read"]),
+        created.id,
+        { ...explicitTools([OPENGENI], 1), firstPartyMcpPermissions: [...NARROW, "files:read"] },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+    const after = await getSession(firstDb, owner.workspaceId, created.id);
+    expect(after?.toolPolicyVersion).toBe(1);
+    expect([...(after?.firstPartyMcpPermissions ?? [])].sort()).toEqual([...NARROW].sort());
+  }, 180_000);
+
+  test("a child stays within its parent's permissions", async () => {
+    if (!available) return;
+    const owner = await workspace("perm-child");
+    const parent = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      firstPartyMcpPermissions: NARROW,
+    });
+    const child = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      parentSessionId: parent.id,
+      firstPartyMcpPermissions: ["sessions:read"],
+    });
+    const childTools: UpdateSessionToolPolicyRequest = {
+      mode: "explicit",
+      tools: [OPENGENI],
+      firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+      expectedVersion: 1,
+    };
+    await expect(
+      updateSessionToolPolicy(
+        deps(firstDb, new MemoryEventBus()),
+        holder(owner.workspaceId, owner.accountId, WITH_FILES),
+        child.id,
+        { ...childTools, firstPartyMcpPermissions: [...NARROW, "files:read"] },
+      ),
+    ).rejects.toMatchObject({
+      status: 403,
+      message:
+        "child first-party MCP permissions may only narrow the parent session grant: files:read",
+    });
+    const narrowed = await updateSessionToolPolicy(
+      deps(firstDb, new MemoryEventBus()),
+      holder(owner.workspaceId, owner.accountId, WITH_FILES),
+      child.id,
+      { ...childTools, firstPartyMcpPermissions: NARROW },
+    );
+    expect([...(narrowed.firstPartyMcpPermissions ?? [])].sort()).toEqual([...NARROW].sort());
+  }, 180_000);
+
+  test("a session with an open goal keeps goals:manage", async () => {
+    if (!available) return;
+    const owner = await workspace("perm-goal");
+    const created = await session(firstDb, { ...owner, tools: [OPENGENI] });
+    await createSessionGoal(firstDb, {
+      ...owner,
+      sessionId: created.id,
+      text: "finish the task",
+      createdBy: "api",
+    });
+    await expect(
+      updateSessionToolPolicy(
+        deps(firstDb, new MemoryEventBus()),
+        holder(owner.workspaceId, owner.accountId, WITH_FILES),
+        created.id,
+        { ...explicitTools([OPENGENI], 1), firstPartyMcpPermissions: NARROW },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
   }, 180_000);
 });

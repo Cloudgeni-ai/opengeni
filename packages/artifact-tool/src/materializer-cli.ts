@@ -6,6 +6,9 @@ import { once } from "node:events";
 import {
   SPREADSHEET_ARTIFACT_PROJECTION_MAX_BYTES,
   SPREADSHEET_ARTIFACT_VIEWPORT_MAX_CELLS,
+  SPREADSHEET_DEFAULT_ROW_HEIGHT,
+  SPREADSHEET_DEFAULT_COLUMN_WIDTH,
+  SPREADSHEET_MAX_DIMENSION_PIXELS,
   decodeSpreadsheetMetadataKernelProjection,
   decodeSpreadsheetViewportKernelProjection,
   encodeSpreadsheetMetadataKernelQuery,
@@ -40,7 +43,7 @@ const MAX_PROJECTED_RECTANGLE_CELLS = 1_000_000;
 const VIEWPORT_EDGE = 128;
 const XLSX_CODEC_ID = "opengeni.xlsx";
 const EMPTY_FONT_REGISTRY_HASH = sha256(bytes("opengeni:no-font-registry:v1"));
-const POLICY_HASH = sha256(bytes("opengeni:materializer:xlsx-native-projection:v1"));
+const POLICY_HASH = sha256(bytes("opengeni:materializer:xlsx-native-projection:v2:dimensions"));
 
 export type EditableArtifactNativeMaterializerCapabilities = Readonly<{
   protocol: "OGAMC001";
@@ -87,9 +90,17 @@ type SemanticCell = Readonly<{
   value: SpreadsheetArtifactProjectedCellValue;
 }>;
 
+type SemanticSheet = Readonly<{
+  name: string;
+  cells: readonly SemanticCell[];
+  /** Omitted together when empty, preserving dimension-free semantic hashes. */
+  rowHeights?: readonly (readonly [number, number])[];
+  columnWidths?: readonly (readonly [number, number])[];
+}>;
+
 type SemanticWorkbook = Readonly<{
   version: 1;
-  sheets: readonly Readonly<{ name: string; cells: readonly SemanticCell[] }>[];
+  sheets: readonly SemanticSheet[];
 }>;
 
 type ProjectedWorkbook = Readonly<{
@@ -243,6 +254,8 @@ async function verifyMaterialization(
   );
 }
 
+const EMPTY_WORKBOOK_SHEET_NAME = "Sheet1";
+
 function projectSpreadsheet(
   runtime: ArtifactKernelRuntime,
   source: Uint8Array,
@@ -272,15 +285,11 @@ function projectSpreadsheet(
         maxBytes: metadataLimit,
       },
     );
-    if (
-      metadata.modeledFeatures.dimensions !== false ||
-      metadata.modeledFeatures.hidden !== false ||
-      metadata.modeledFeatures.merges !== false
-    ) {
+    if (metadata.modeledFeatures.hidden !== false || metadata.modeledFeatures.merges !== false) {
       throw unsupported();
     }
     let projectedRectangleCells = 0;
-    const semanticSheets: Array<{ name: string; cells: SemanticCell[] }> = [];
+    const semanticSheets: SemanticSheet[] = [];
     for (const sheet of metadata.sheets) {
       const cells: SemanticCell[] = [];
       if (sheet.usedBounds) {
@@ -330,7 +339,23 @@ function projectSpreadsheet(
         }
       }
       cells.sort((left, right) => left.row - right.row || left.column - right.column);
-      semanticSheets.push({ name: sheet.name, cells });
+      semanticSheets.push({
+        name: sheet.name,
+        cells,
+        ...semanticDimensions(sheet.rowHeights ?? [], sheet.columnWidths ?? []),
+      });
+    }
+    // OOXML requires at least one <sheet>, and Excel rejects a sheetless
+    // workbook as corrupt. A never-edited spreadsheet has no sheets yet, so it
+    // exports as the single blank sheet a new workbook opens with. The
+    // semantic hash then treats "no sheets" and "one blank Sheet1" alike,
+    // which is safe because only this process and its verifier compare it.
+    if (semanticSheets.length === 0) {
+      semanticSheets.push({
+        name: EMPTY_WORKBOOK_SHEET_NAME,
+        cells: [],
+        ...semanticDimensions([], []),
+      });
     }
     const semantic: SemanticWorkbook = Object.freeze({ version: 1, sheets: semanticSheets });
     const workbook = Workbook.fromJSON(toSerializedWorkbook(semantic));
@@ -360,8 +385,14 @@ function toSerializedWorkbook(semantic: SemanticWorkbook): SerializedWorkbook {
         format: {},
       })),
       merges: [],
-      columnWidths: [],
-      rowHeights: [],
+      columnWidths: (sheet.columnWidths ?? []).map(([dimensionIndex, pixels]) => [
+        dimensionIndex,
+        pixels,
+      ]),
+      rowHeights: (sheet.rowHeights ?? []).map(([dimensionIndex, pixels]) => [
+        dimensionIndex,
+        pixels,
+      ]),
       tables: [],
       charts: [],
       sparklines: [],
@@ -386,9 +417,46 @@ function semanticHashForWorkbook(workbook: Workbook): string {
       });
     }
     cells.sort((left, right) => left.row - right.row || left.column - right.column);
-    return { name: sheet.name, cells };
+    return {
+      name: sheet.name,
+      cells,
+      ...semanticDimensions([...sheet.rowHeightEntries()], [...sheet.columnWidthEntries()]),
+    };
   });
   return sha256(canonicalBytes({ version: 1, sheets } satisfies SemanticWorkbook));
+}
+
+function semanticDimensions(
+  rows: readonly (readonly [number, number])[],
+  columns: readonly (readonly [number, number])[],
+): Pick<SemanticSheet, "rowHeights" | "columnWidths"> {
+  const canonical = (
+    entries: readonly (readonly [number, number])[],
+    defaultPixels: number,
+    maximumIndex: number,
+  ): readonly (readonly [number, number])[] => {
+    const sorted = [...entries].sort(([left], [right]) => left - right);
+    let previous = -1;
+    const result: (readonly [number, number])[] = [];
+    for (const [index, pixels] of sorted) {
+      if (
+        !Number.isInteger(index) ||
+        index <= previous ||
+        index > maximumIndex ||
+        !Number.isInteger(pixels) ||
+        pixels < 1 ||
+        pixels > SPREADSHEET_MAX_DIMENSION_PIXELS
+      )
+        throw unsupported();
+      previous = index;
+      if (pixels !== defaultPixels) result.push([index, pixels]);
+    }
+    return result;
+  };
+  const rowHeights = canonical(rows, SPREADSHEET_DEFAULT_ROW_HEIGHT, 1_048_575);
+  const columnWidths = canonical(columns, SPREADSHEET_DEFAULT_COLUMN_WIDTH, 16_383);
+  if (columnWidths.some(([, pixels]) => pixels < 6)) throw unsupported();
+  return rowHeights.length === 0 && columnWidths.length === 0 ? {} : { rowHeights, columnWidths };
 }
 
 function semanticValue(value: unknown, formula: boolean): SpreadsheetArtifactProjectedCellValue {
@@ -530,7 +598,8 @@ function decodeManifest(value: Uint8Array): MaterializationManifest {
   if (
     record.protocol !== "OGAMJ001" ||
     !positiveInteger(record.sourceByteSize) ||
-    !positiveInteger(record.targetHeadSequence) ||
+    // A never-edited artifact is pinned at head sequence 0, so zero is valid.
+    !nonNegativeInteger(record.targetHeadSequence) ||
     !isHash(record.sourceContentHash) ||
     !isHash(record.stateHash) ||
     !isHash(record.optionsHash) ||
@@ -698,6 +767,10 @@ function plainRecord(value: unknown): value is Record<string, unknown> {
 
 function positiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function nonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isHash(value: unknown): value is string {

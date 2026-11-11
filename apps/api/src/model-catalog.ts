@@ -1,14 +1,22 @@
 import {
   OPENROUTER_PROVIDER_ID,
+  OPPER_PROVIDER_ID,
   WORKSPACE_OPENROUTER_PROVIDER_ID,
+  WORKSPACE_OPPER_PROVIDER_ID,
   type ConfiguredModel,
 } from "@opengeni/config";
 import {
   ClientModel,
+  isDirectModelProviderId,
+  isEuResidency,
+  projectClientModelResidency,
+  REGION_RESTRICTED,
+  UNKNOWN_MODEL_RESIDENCY,
   WorkspaceModelCatalogResponse,
   type DefaultModelSelection,
   type WorkspaceModelCatalogResponse as WorkspaceModelCatalogResponseType,
 } from "@opengeni/contracts";
+import { isClaudeSubscriptionProviderId } from "@opengeni/contracts/claude-subscription-model-ids";
 import {
   resolveWorkspaceModelSelection,
   type WorkspaceModelSelection,
@@ -25,17 +33,21 @@ export {
 export function projectClientModel(model: ConfiguredModel): ClientModel {
   const anonymousProvider =
     model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none";
+  const directProvider = isDirectModelProviderId(model.providerId);
   const organizationProvider = model.credentialSource.kind === "organization_connection";
   // Keep the established closed `source` enum compatible for older same-major
   // clients. OpenRouter remains truthfully identified by its public provider
   // id/label and billing metadata; omitting this optional legacy grouping field
   // lets tolerant older contracts parse the additive provider.
   const source =
+    directProvider ||
     organizationProvider ||
     model.providerId === "workspace-anthropic" ||
-    model.providerId === "workspace-claude-subscription" ||
+    isClaudeSubscriptionProviderId(model.providerId) ||
     model.providerId === OPENROUTER_PROVIDER_ID ||
-    model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
+    model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID ||
+    model.providerId === OPPER_PROVIDER_ID ||
+    model.providerId === WORKSPACE_OPPER_PROVIDER_ID
       ? undefined
       : model.credentialSource.kind === "connected_subscription"
         ? model.credentialSource.provider === "xai"
@@ -47,26 +59,32 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
             ? undefined
             : "opengeni";
   const publicProvider =
+    directProvider ||
     anonymousProvider ||
     organizationProvider ||
     model.providerId === "workspace-anthropic" ||
-    model.providerId === "workspace-claude-subscription"
+    isClaudeSubscriptionProviderId(model.providerId)
       ? { provider: model.providerId, providerLabel: model.providerLabel }
       : model.providerId === OPENROUTER_PROVIDER_ID
         ? { provider: "openrouter", providerLabel: "OpenRouter" }
         : model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
           ? { provider: "workspace-openrouter", providerLabel: "Your OpenRouter" }
-          : source === "codex"
-            ? { provider: "codex", providerLabel: "Codex" }
-            : source === "supergrok"
-              ? { provider: "supergrok", providerLabel: "SuperGrok" }
-              : source === "workspace_gateway"
-                ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-                : { provider: "opengeni", providerLabel: "OpenGeni" };
+          : model.providerId === OPPER_PROVIDER_ID
+            ? { provider: "opper", providerLabel: "Opper" }
+            : model.providerId === WORKSPACE_OPPER_PROVIDER_ID
+              ? { provider: "workspace-opper", providerLabel: "Your Opper" }
+              : source === "codex"
+                ? { provider: "codex", providerLabel: "Codex" }
+                : source === "supergrok"
+                  ? { provider: "supergrok", providerLabel: "SuperGrok" }
+                  : source === "workspace_gateway"
+                    ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+                    : { provider: "opengeni", providerLabel: "Opengeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,
     ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+    ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
     ...publicProvider,
     ...(source === undefined ? {} : { source }),
     api: model.api,
@@ -81,6 +99,8 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     capabilities: model.capabilities,
     ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
     definitionVersion: model.definitionVersion,
+    // Test doubles may pass partial models; a missing record is unknown, never EU.
+    residency: projectClientModelResidency(model.residency ?? UNKNOWN_MODEL_RESIDENCY),
   });
 }
 
@@ -105,12 +125,52 @@ export type WorkspaceModelCatalogDefaults = {
   creditsSelection: DefaultModelSelection | null;
 };
 
+/** The picker offers only speeds some account serving the workspace offers. */
+function withoutUnavailableLatencyModes(selection: WorkspaceModelSelection): ConfiguredModel {
+  const unavailable = selection.unavailableLatencyModes;
+  if (!unavailable?.length) return selection.model;
+  return {
+    ...selection.model,
+    capabilities: {
+      ...selection.model.capabilities,
+      latencyModes: selection.model.capabilities.latencyModes.map((mode) =>
+        unavailable.includes(mode.id) ? { ...mode, runnable: false } : mode,
+      ),
+    },
+  };
+}
+
+/**
+ * EU-only inference: in an EU-only workspace a model whose route is not EU by
+ * its residency record is listed as unavailable with `region_restricted`
+ * (clients show "Not supported in EU"). Availability stays a hint; the
+ * worker refuses such a model before any request.
+ */
+export function withRegionAvailability<
+  Selection extends Pick<WorkspaceModelSelection, "model" | "availability">,
+>(selections: readonly Selection[], requiredModelGeography: "eu" | undefined): Selection[] {
+  if (requiredModelGeography !== "eu") return [...selections];
+  return selections.map((selection) =>
+    isEuResidency(selection.model.residency)
+      ? selection
+      : {
+          ...selection,
+          availability: {
+            status: "unavailable" as const,
+            selectable: false,
+            reason: REGION_RESTRICTED,
+            checkedAt: selection.availability.checkedAt,
+          },
+        },
+  );
+}
+
 export function projectWorkspaceModelCatalog(
   selections: readonly WorkspaceModelSelection[],
   defaults?: WorkspaceModelCatalogDefaults,
 ): WorkspaceModelCatalogResponseType {
   const models = selections.map((selection) => ({
-    ...projectClientModel(selection.model),
+    ...projectClientModel(withoutUnavailableLatencyModes(selection)),
     credentialReadiness: selection.credentialReadiness,
     policyAllowed: selection.policyAllowed,
     availability: selection.availability,

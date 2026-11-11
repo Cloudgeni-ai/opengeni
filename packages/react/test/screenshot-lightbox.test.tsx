@@ -94,3 +94,22 @@ describe("LightboxProvider source ownership", () => {
     expect(released).toEqual(["first", "second", "third"]);
   });
 });
+
+// Radix caches DOM availability on import, so the open-dialog gallery runs in a
+// separate process with the DOM registered first.
+describe("LightboxProvider gallery", () => {
+  test("pages chat images and keeps lone images plain", async () => {
+    const child = Bun.spawn({
+      cmd: [process.execPath, "test", "./screenshot-lightbox-gallery.dom-fixture.tsx"],
+      cwd: import.meta.dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+  }, 15_000);
+});

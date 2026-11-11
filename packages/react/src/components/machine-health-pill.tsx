@@ -7,6 +7,7 @@ import { cn } from "../lib/cn";
 import type { MachineState, MetricSample } from "../types/machines";
 import { deriveHealth, HEALTH_TOKEN, healthPulses } from "./machines/health";
 import { MACHINE_STATE_BADGE_META } from "./machine-status-pill";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type MachineHealthPillProps = {
   state: MachineState;
@@ -23,9 +24,10 @@ export function MachineHealthPill({
   size = "sm",
   className,
 }: MachineHealthPillProps) {
-  const health = deriveHealth(state, metrics, now ?? Date.now());
+  const t = useOpenGeniText();
+  const health = deriveHealth(t, state, metrics, now ?? Date.now());
   const tone = HEALTH_TOKEN[health.level];
-  const badge = MACHINE_STATE_BADGE_META[state];
+  const badge = MACHINE_STATE_BADGE_META(t)[state];
   const pad = size === "md" ? "px-2.5 py-1 text-og-sm" : "px-2 py-0.5 text-og-xs";
 
   return (

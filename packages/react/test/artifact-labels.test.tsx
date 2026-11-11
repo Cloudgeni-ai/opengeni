@@ -10,6 +10,9 @@ import {
   DEFAULT_ARTIFACT_LABELS,
 } from "../src/components/artifacts/artifact-chrome";
 import { ArtifactSandbox } from "../src/components/artifacts/artifact-sandbox";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const translated = {
   close: "Lukk",
@@ -21,7 +24,7 @@ const translated = {
   toolCount: (count: number) => `${count} verktøy`,
   tryAgain: "Prøv igjen",
   siteErrors: {
-    ...DEFAULT_ARTIFACT_LABELS.siteErrors,
+    ...DEFAULT_ARTIFACT_LABELS(englishText).siteErrors,
     transient: { title: "Kunne ikke laste", message: "Midlertidig feil." },
   },
   reference: (id: string) => `Referanse: ${id}`,
@@ -35,9 +38,10 @@ describe("artifact labels", () => {
         <ArtifactSandbox html="<p>x</p>" title="Dashboard" connectedToolCount={2} />
         <ArtifactProblem
           view={artifactLoadErrorView(
+            englishText,
             new OpenGeniApiError(503, "", { correlationId: "req-1" }),
             "site",
-            { ...DEFAULT_ARTIFACT_LABELS, ...translated },
+            { ...DEFAULT_ARTIFACT_LABELS(englishText), ...translated },
           )}
           onRetry={() => {}}
         />

@@ -28,6 +28,7 @@ import {
 } from "./skill-source-release";
 import { classifySkillSourceRelease } from "./skill-source-release-impact";
 import {
+  IntegrationChangeRequiresAdminError,
   removeIntegrationFacetBindingOwner,
   removeIntegrationFacetBindingOwnersForOwner,
 } from "./integration-bindings";
@@ -57,6 +58,8 @@ export type InstalledPluginPackage = {
   installationVersion: number;
   manifest: Record<string, unknown>;
   status: string;
+  /** Who added (or last updated) this installation; see {@link uninstallPluginPackage}. */
+  installedBySubjectId: string;
 };
 
 export type InstalledPluginPackageSummary = {
@@ -74,6 +77,8 @@ export type InstalledPluginPackageSummary = {
   status: "active" | "needs_attention";
   installedAt: string;
   updatedAt: string;
+  /** Who added (or last updated) it: a member removes only what they added. */
+  installedBySubjectId: string;
 };
 
 export type PreparedPluginPackage = InstalledPluginPackage & {
@@ -117,6 +122,7 @@ export async function getInstalledPluginPackage(
         installationVersion: schema.capabilityPluginInstallations.version,
         manifest: schema.capabilityPluginVersions.manifest,
         status: schema.capabilityPluginInstallations.status,
+        installedBySubjectId: schema.capabilityPluginInstallations.installedBySubjectId,
       })
       .from(schema.capabilityPluginInstallations)
       .innerJoin(
@@ -160,6 +166,7 @@ export async function listInstalledPluginPackages(
         status: schema.capabilityPluginInstallations.status,
         installedAt: schema.capabilityPluginInstallations.installedAt,
         updatedAt: schema.capabilityPluginInstallations.updatedAt,
+        installedBySubjectId: schema.capabilityPluginInstallations.installedBySubjectId,
       })
       .from(schema.capabilityPluginInstallations)
       .innerJoin(
@@ -209,6 +216,7 @@ export async function listInstalledPluginPackages(
         status: row.status,
         installedAt: row.installedAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
+        installedBySubjectId: row.installedBySubjectId,
       };
     });
   });
@@ -231,6 +239,12 @@ export async function preparePluginPackageInstall(
     idempotencyKey: string;
     requestDigest: string;
     expectedInstallationVersion?: number;
+    /**
+     * A member's install: adding a plugin that is not installed (or was
+     * removed) and retrying or resuming the same request are allowed;
+     * updating an installed plugin throws {@link IntegrationChangeRequiresAdminError}.
+     */
+    memberCreate?: boolean;
   },
 ): Promise<PreparedPluginPackage> {
   return await withRlsContext(
@@ -377,6 +391,10 @@ export async function preparePluginPackageInstall(
           )
           .for("update")
           .limit(1);
+        if (input.memberCreate && installation && !resuming && installation.status !== "disabled")
+          throw new IntegrationChangeRequiresAdminError(
+            "This plugin is already installed. Only an admin can update it.",
+          );
         if (
           installation &&
           !resuming &&
@@ -428,6 +446,7 @@ export async function preparePluginPackageInstall(
           installationVersion: installation.version,
           manifest: input.manifest,
           status: installation.status,
+          installedBySubjectId: installation.installedBySubjectId,
           operationId: operation.id,
           replayResult: operation.result ?? null,
         };
@@ -652,6 +671,11 @@ export async function installPluginMcpReference(
     connectionRef?: Record<string, unknown>;
     authKind: CapabilityCatalogAuthKind;
     digest: string;
+    /**
+     * A member's install (no integration management): a configured server that
+     * is already set up, or turned off, is never rewritten or turned back on.
+     */
+    memberCreate?: boolean;
   },
 ): Promise<{ capabilityId: string; facetInstallationId: string }> {
   const snapshot = structuredClone(input);
@@ -675,6 +699,26 @@ async function installPluginMcpReferenceInScope(
         const tx = txRaw as unknown as Database;
         const now = new Date();
         await lockCapabilityComponentIdentity(tx, input.workspaceId, pluginKey);
+        if (input.memberCreate) {
+          const [current] = await tx
+            .select({ metadata: schema.capabilityInstallations.metadata })
+            .from(schema.capabilityInstallations)
+            .where(
+              and(
+                eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
+                eq(schema.capabilityInstallations.capabilityId, capabilityId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          // Only this same plugin installation resuming its own install may continue.
+          if (
+            current &&
+            (current.metadata as Record<string, unknown> | null)?.pluginOwnerInstallationId !==
+              input.ownerPluginInstallationId
+          )
+            throw new IntegrationChangeRequiresAdminError();
+        }
         let [plugin] = await tx
           .select()
           .from(schema.capabilityPlugins)
@@ -965,6 +1009,11 @@ export async function uninstallPluginPackage(
     expectedPreviewToken?: string;
     idempotencyKey: string;
     skillActor?: SkillActor;
+    /**
+     * A member's removal: only a plugin this subject added. Anything an admin
+     * or another person added throws {@link IntegrationChangeRequiresAdminError}.
+     */
+    memberRemoval?: boolean;
   },
 ): Promise<{
   status: "not_installed" | "uninstalled";
@@ -1031,6 +1080,10 @@ export async function uninstallPluginPackage(
           });
           return { status: "not_installed", retainedComponents: [] };
         }
+        if (input.memberRemoval && plugin.installedBySubjectId !== input.subjectId)
+          throw new IntegrationChangeRequiresAdminError(
+            "Only an admin can remove a plugin someone else added.",
+          );
         if (plugin.installationVersion !== input.expectedInstallationVersion) {
           throw new PluginInstallationVersionConflictError("Plugin installation changed");
         }
@@ -1176,6 +1229,7 @@ async function pluginPackageInScope(
       installationVersion: schema.capabilityPluginInstallations.version,
       manifest: schema.capabilityPluginVersions.manifest,
       status: schema.capabilityPluginInstallations.status,
+      installedBySubjectId: schema.capabilityPluginInstallations.installedBySubjectId,
     })
     .from(schema.capabilityPluginInstallations)
     .innerJoin(

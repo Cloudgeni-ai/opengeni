@@ -1,75 +1,82 @@
 import type {
   HumanInputAnswer,
   HumanInputQuestion,
+  HumanInputSecretAnswer,
+  HumanInputSecretSaveTo,
+  HumanInputSecretSpec,
   SkillRecord,
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { CheckIcon, ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
+import {
+  answersFromDrafts,
+  choiceOffersOther,
+  defaultHumanInputFormMessages,
+  humanInputAgentMayDecide,
+  mergeHumanInputFormMessages,
+  emptyDraft,
+  initialDrafts,
+  secretAnswerFromReading,
+  type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
+} from "../human-input-model";
+import {
+  forgetHumanInputDraft,
+  readHumanInputDraft,
+  writeHumanInputDraft,
+  type HumanInputDraftScope,
+} from "../human-input-draft-store";
+import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
+import {
+  DecisionActions,
+  DecisionButton,
+  DecisionMark,
+  decisionCardClass,
+  decisionCardPad,
+} from "./decision-card";
+import { InlineMarkdown } from "./markdown";
+import { useOpenGeniText } from "../messages/runtime";
 
-export type HumanInputAnswerDraft = {
-  values: string[];
-  other: string;
-  otherSelected: boolean;
+export {
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+  type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
 };
 
-export type HumanInputFormMessages = {
-  title: string;
-  description: string;
-  submit: string;
-  skip: string;
-  submitting: string;
-  other: string;
-  deadlineLabel: string;
-  formatDeadline: (value: string) => string;
-  required: string;
-  otherRequired: string;
-  minSelections: (count: number) => string;
-  maxSelections: (count: number) => string;
-  optional: string;
-  /** Shown when the question list overflows the card and more content is below. */
-  moreBelow: string;
-  questionCount: (count: number) => string;
-  collapse: string;
-  expand: string;
-  selectionHint: (min: number | null | undefined, max: number | null | undefined) => string | null;
-};
-
-export const defaultHumanInputFormMessages: HumanInputFormMessages = {
-  title: "Input required",
-  /** Multi-question chrome has no default subtitle; hosts may still override. */
-  description: "",
-  submit: "Send answers",
-  skip: "Skip",
-  submitting: "Submitting…",
-  other: "Other",
-  deadlineLabel: "Expires",
-  formatDeadline,
-  required: "This question is required.",
-  otherRequired: "Enter a value for Other.",
-  minSelections: (count) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,
-  maxSelections: (count) => `Choose no more than ${count} option${count === 1 ? "" : "s"}.`,
-  optional: "Optional",
-  moreBelow: "More below",
-  questionCount: (count) => `${count} questions`,
-  collapse: "Collapse",
-  expand: "Expand",
-  selectionHint: (min, max) => {
-    if (min != null && max != null) return `Choose ${min}–${max}.`;
-    if (min != null) return `Choose at least ${min}.`;
-    if (max != null) return `Choose up to ${max}.`;
-    return null;
-  },
-};
+class SkillReviewVerificationError extends Error {}
 
 export type HumanInputFormProps = {
   /** Scoped immutable revision reader. Saving a Skill fails closed without its full preview. */
   loadSkillReview?:
     | ((reference: NonNullable<HumanInputQuestion["skillReview"]>) => Promise<SkillRecord>)
     | undefined;
-  request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt">;
+  /**
+   * With `workspaceId` and `sessionId` (as on a full pending request), unsent
+   * non-secret answers are kept per browser tab and restored when the card
+   * mounts again, e.g. after visiting Settings and coming back.
+   */
+  request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt"> &
+    Partial<Pick<SessionHumanInputRequest, "workspaceId" | "sessionId" | "status" | "origin">>;
+  /**
+   * Resolve only once the response was accepted: the form then forgets the
+   * unsent draft and clears secret fields. Reject when sending failed so the
+   * card keeps what was typed for a retry.
+   */
   onSubmit: (response: SubmitHumanInputResponseRequest) => void | Promise<void>;
   submitting?: boolean | undefined;
   error?: string | null | undefined;
@@ -79,10 +86,33 @@ export type HumanInputFormProps = {
   progressLabel?: ReactNode;
   submitLabel?: string | undefined;
   skipLabel?: string | undefined;
+  /**
+   * "Let the agent decide", offered on every ordinary question (never on a
+   * secret, a Skill review or a secret approval) in place of Skip. By default
+   * it settles the request with `{ outcome: "skipped", agentDecides: true }`,
+   * so the asking agent makes its own best choice. A host can hand the
+   * question to another agent instead (a sub-session's parent); resolve once
+   * that was sent. `false` hides the action.
+   */
+  onLetAgentDecide?: (() => void | Promise<void>) | false | undefined;
+  /** An agent was asked to decide: the action is replaced by a note; answering still works. */
+  agentDeciding?: boolean | undefined;
   messages?: Partial<HumanInputFormMessages> | undefined;
   autoFocus?: boolean | undefined;
   /** Start collapsed to a compact bar (drafts still retained). */
   defaultCollapsed?: boolean | undefined;
+  /**
+   * Answer a yes/no decision (one required choice between an accept and a
+   * decline option, without Other) with two buttons instead of a radio list.
+   * Off by default; embedded conversations turn it on.
+   */
+  decisionButtons?: boolean | undefined;
+  /**
+   * Where this person may save an answer to a secret question. A request for
+   * a target outside this list falls back to the most private allowed one,
+   * with a note. Defaults to Only me, This task and This workspace.
+   */
+  allowedSaveTo?: readonly HumanInputSecretSaveTo[] | undefined;
   className?: string | undefined;
 };
 
@@ -111,42 +141,119 @@ function HumanInputRequestForm({
   progressLabel,
   submitLabel,
   skipLabel,
+  onLetAgentDecide,
+  agentDeciding = false,
   messages: messageOverrides,
   autoFocus = true,
   defaultCollapsed = false,
+  decisionButtons = false,
+  allowedSaveTo,
   className,
 }: HumanInputFormProps) {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
+  const t = useOpenGeniText();
+  const formatError = useErrorMessage();
+  const messages = mergeHumanInputFormMessages(defaultHumanInputFormMessages(t), messageOverrides);
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
+  // Several questions are asked one at a time; every step stays mounted (hidden)
+  // so typed secrets and drafts survive moving back and forth.
+  const multi = request.questions.length > 1;
+  const lastStep = request.questions.length - 1;
+  const [step, setStep] = useState(0);
+  const stepQuestion = request.questions[Math.min(step, Math.max(0, lastStep))] ?? null;
+  const headerQuestion = singleQuestion ?? (multi ? stepQuestion : null);
+  const decision = binaryDecision(request.questions, { inferFromLabels: decisionButtons });
+  const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
+  // Agent-written question text renders as inline Markdown; host-provided
+  // titles and messages render as given.
+  const questionTitle =
+    title === undefined && headerQuestion ? (headerQuestion.label ?? headerQuestion.prompt) : null;
+  const questionDescription =
+    description === undefined && headerQuestion && questionTitle !== null
+      ? headerQuestion.label
+        ? headerQuestion.prompt
+        : (headerQuestion.helpText ?? null)
+      : null;
+  /** The heading asks the current question; the body holds only its answer. */
+  const headerCarriesQuestion = questionTitle !== null;
   const resolvedTitle =
-    title === undefined
-      ? singleQuestion
-        ? (singleQuestion.label ?? singleQuestion.prompt)
-        : messages.title
-      : title;
-  const resolvedDescription =
-    description === undefined
-      ? singleQuestion
-        ? singleQuestion.label
-          ? singleQuestion.prompt
-          : (singleQuestion.helpText ?? null)
-        : messages.description || null
-      : description;
-  const resolvedSubmitLabel = submitLabel ?? messages.submit;
+    questionTitle !== null ? (
+      <InlineMarkdown>{questionTitle}</InlineMarkdown>
+    ) : title === undefined ? (
+      messages.title
+    ) : (
+      title
+    );
+  const resolvedDescription = questionDescription ? (
+    <InlineMarkdown>{questionDescription}</InlineMarkdown>
+  ) : description === undefined ? (
+    headerCarriesQuestion ? null : (
+      messages.description || null
+    )
+  ) : (
+    description
+  );
+  const resolvedSubmitLabel =
+    submitLabel ?? (multi ? messages.submit : (messages.submitOne ?? messages.submit));
   const resolvedSkipLabel = skipLabel ?? messages.skip;
   const formId = useId();
   const titleId = useId();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [drafts, setDrafts] = useState<Record<string, HumanInputAnswerDraft>>(() =>
-    initialDrafts(request.questions),
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const draftScope = useMemo<HumanInputDraftScope | null>(
+    () =>
+      request.workspaceId && request.sessionId
+        ? { workspaceId: request.workspaceId, sessionId: request.sessionId, requestId: request.id }
+        : null,
+    [request.id, request.sessionId, request.workspaceId],
   );
+  const requestSettled = request.status !== undefined && request.status !== "pending";
+  const [drafts, setDrafts] = useState<Record<string, HumanInputAnswerDraft>>(() => ({
+    ...initialDrafts(request.questions),
+    ...(draftScope && !requestSettled ? readHumanInputDraft(draftScope, request) : null),
+  }));
+  // Once a response is accepted, nothing typed afterwards becomes a draft again.
+  const draftClosed = useRef(false);
+  // Mounting (or StrictMode's second mount) is not an edit: rewriting the
+  // restored draft would refresh its age and let it outlive a pending-list
+  // read that already settled it.
+  const mountedDrafts = useRef(drafts);
+  const questionsRef = useRef(request.questions);
+  questionsRef.current = request.questions;
+  useEffect(() => {
+    if (!draftScope) return;
+    if (requestSettled) {
+      draftClosed.current = true;
+      forgetHumanInputDraft(draftScope);
+      return;
+    }
+    if (draftClosed.current || drafts === mountedDrafts.current) return;
+    writeHumanInputDraft(draftScope, questionsRef.current, drafts);
+  }, [draftScope, drafts, requestSettled]);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [submittingInternally, setSubmittingInternally] = useState(false);
-  const [overflowBelow, setOverflowBelow] = useState(false);
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const submissionInFlight = useRef(false);
   const submissionGeneration = useRef(0);
+  // Secret answers stay in their uncontrolled inputs until submit.
+  const secretHandles = useRef(new Map<string, SecretFieldHandle>());
+  const secretRegistrars = useMemo(
+    () => new Map<string, (handle: SecretFieldHandle | null) => void>(),
+    [],
+  );
+  const registerSecret = useCallback(
+    (questionId: string) => {
+      let registrar = secretRegistrars.get(questionId);
+      if (!registrar) {
+        registrar = (handle) => {
+          if (handle) secretHandles.current.set(questionId, handle);
+          else secretHandles.current.delete(questionId);
+        };
+        secretRegistrars.set(questionId, registrar);
+      }
+      return registrar;
+    },
+    [secretRegistrars],
+  );
   const busy = submitting || submittingInternally;
   const reviewIdentity = JSON.stringify(
     request.questions
@@ -182,10 +289,7 @@ function HumanInputRequestForm({
     setReviews(null);
     void Promise.all(
       questions.map(async (question) => {
-        if (!loadSkillReview)
-          throw new Error(
-            "This client cannot preview Skill files. Open this request in Opengeni to review it.",
-          );
+        if (!loadSkillReview) throw new Error(t("humanInputForm.thisClientCannotPreviewSkill"));
         const reference = question.reference;
         const record = await loadSkillReview(reference);
         if (
@@ -194,7 +298,9 @@ function HumanInputRequestForm({
           (record.removalOperationId ?? undefined) !== reference.removalOperationId ||
           !record.files.some((file) => file.path === "SKILL.md")
         ) {
-          throw new Error("The requested Skill revision could not be verified.");
+          throw new SkillReviewVerificationError(
+            t("humanInputForm.theRequestedSkillRevisionCould"),
+          );
         }
         return [question.id, record] as const;
       }),
@@ -214,13 +320,20 @@ function HumanInputRequestForm({
             loader: loadSkillReview,
             identity: reviewIdentity,
             records: {},
-            error: cause instanceof Error ? cause.message : "Could not load the Skill files.",
+            error: formatError(
+              cause,
+              cause instanceof SkillReviewVerificationError
+                ? cause.message
+                : !loadSkillReview
+                  ? t("humanInputForm.thisClientCannotPreviewSkill")
+                  : undefined,
+            ),
           });
       });
     return () => {
       current = false;
     };
-  }, [loadSkillReview, reviewIdentity, reviewReload]);
+  }, [loadSkillReview, reviewIdentity, reviewReload, formatError, t]);
   const visibleReviews =
     reviews?.loader === loadSkillReview && reviews?.identity === reviewIdentity ? reviews : null;
   const preview = (question: HumanInputQuestion) => {
@@ -231,12 +344,16 @@ function HumanInputRequestForm({
         {record ? (
           <>
             <p className="text-og-sm">
-              {record.title ?? "Skill"} · {record.scope} · {record.files.length} files
+              {record.title ?? t("humanInputForm.skill")}{" "}
+              {t("humanInputForm.scopeLengthFiles", {
+                scope: record.scope,
+                length: record.files.length,
+              })}
             </p>
             <p className="text-og-xs text-og-fg-muted">
               {question.skillReview.removalOperationId
-                ? "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged."
-                : "Saving activates these exact files. No additional review is required."}
+                ? t("humanInputForm.permanentlyDeletesThisSkillAnd")
+                : t("humanInputForm.savingActivatesTheseExactFiles")}
             </p>
             {record.files.map((file) => (
               <details key={file.path} open={file.path === "SKILL.md"}>
@@ -253,45 +370,17 @@ function HumanInputRequestForm({
               {visibleReviews.error}
             </p>
             <button type="button" onClick={() => setReviewReload((value) => value + 1)}>
-              Retry preview
+              {t("humanInputForm.retryPreview")}
             </button>
           </>
         ) : (
           <p role="status" className="text-og-sm">
-            Loading the exact Skill files…
+            {t("humanInputForm.loadingTheExactSkillFiles")}
           </p>
         )}
       </div>
     );
   };
-
-  useEffect(() => {
-    if (collapsed) {
-      setOverflowBelow(false);
-      return;
-    }
-    const node = scrollRef.current;
-    if (!node) return;
-    const sync = () => {
-      const { scrollTop, scrollHeight, clientHeight } = node;
-      setOverflowBelow(
-        scrollHeight > clientHeight + 2 && scrollTop + clientHeight < scrollHeight - 4,
-      );
-    };
-    // Layout after paint: first sync can run before the max-height flex
-    // constraint resolves, which falsely reports no overflow.
-    const frame = requestAnimationFrame(sync);
-    node.addEventListener("scroll", sync, { passive: true });
-    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null;
-    observer?.observe(node);
-    const content = node.firstElementChild;
-    if (content) observer?.observe(content);
-    return () => {
-      cancelAnimationFrame(frame);
-      node.removeEventListener("scroll", sync);
-      observer?.disconnect();
-    };
-  }, [request.id, request.questions, collapsed]);
 
   const update = (
     questionId: string,
@@ -309,18 +398,33 @@ function HumanInputRequestForm({
     });
   };
 
-  const submitResponse = async (response: SubmitHumanInputResponseRequest): Promise<void> => {
-    if (busy || submissionInFlight.current) return;
+  const clearValidationError = (questionId: string): void =>
+    setValidationErrors((current) => {
+      if (!(questionId in current)) return current;
+      const next = { ...current };
+      delete next[questionId];
+      return next;
+    });
+
+  /** Resolves true when the host accepted the response. */
+  const submitResponse = async (response: SubmitHumanInputResponseRequest): Promise<boolean> => {
+    if (busy || submissionInFlight.current) return false;
     const generation = submissionGeneration.current;
     submissionInFlight.current = true;
     setSubmissionError(null);
     setSubmittingInternally(true);
     try {
       await onSubmit(response);
+      if (draftScope) {
+        draftClosed.current = true;
+        forgetHumanInputDraft(draftScope);
+      }
+      return true;
     } catch (cause) {
       if (generation === submissionGeneration.current) {
-        setSubmissionError(cause instanceof Error ? cause.message : String(cause));
+        setSubmissionError(formatError(cause));
       }
+      return false;
     } finally {
       if (generation === submissionGeneration.current) {
         submissionInFlight.current = false;
@@ -330,7 +434,7 @@ function HumanInputRequestForm({
   };
 
   const focusQuestion = (questionId: string): void => {
-    const root = scrollRef.current;
+    const root = bodyRef.current;
     if (!root) return;
     const block = Array.from(
       root.querySelectorAll<HTMLElement>("[data-human-input-question]"),
@@ -342,13 +446,64 @@ function HumanInputRequestForm({
     focusable?.focus({ preventScroll: true });
   };
 
+  /** The validation error for one question's current answer, if any. */
+  const questionError = (question: HumanInputQuestion): string | null => {
+    if (question.kind === "secret") {
+      const handle = secretHandles.current.get(question.id);
+      if (!handle) return null;
+      const secret = secretAnswerFromReading(t, question, handle.read(), messages);
+      return secret && "error" in secret ? secret.error : null;
+    }
+    return answersFromDrafts(t, [question], drafts, messages).errors[question.id] ?? null;
+  };
+
+  const goToStep = (next: number): void => {
+    const target = request.questions[next];
+    if (!target) return;
+    setStep(next);
+    // After paint, once the step is visible.
+    requestAnimationFrame(() => focusQuestion(target.id));
+  };
+
+  const nextStep = (): void => {
+    if (!stepQuestion) return;
+    const stepProblem = questionError(stepQuestion);
+    if (stepProblem) {
+      setValidationErrors((current) => ({ ...current, [stepQuestion.id]: stepProblem }));
+      requestAnimationFrame(() => focusQuestion(stepQuestion.id));
+      return;
+    }
+    goToStep(step + 1);
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const result = answersFromDrafts(request.questions, drafts, messages);
+    // Enter (or the primary button) on an earlier step moves on instead of sending.
+    if (multi && step < lastStep) {
+      nextStep();
+      return;
+    }
+    const result = answersFromDrafts(t, request.questions, drafts, messages);
+    const secretAnswers: HumanInputSecretAnswer[] = [];
+    const secretPublicAnswers = new Map<string, HumanInputAnswer>();
+    for (const question of request.questions) {
+      if (question.kind !== "secret") continue;
+      const handle = secretHandles.current.get(question.id);
+      if (!handle) continue;
+      const secret = secretAnswerFromReading(t, question, handle.read(), messages);
+      if (!secret) continue;
+      if ("error" in secret) {
+        result.errors[question.id] = secret.error;
+        continue;
+      }
+      secretAnswers.push(secret.secretAnswer);
+      secretPublicAnswers.set(question.id, secret.answer);
+    }
     if (Object.keys(result.errors).length > 0) {
       setValidationErrors(result.errors);
       const firstInvalid = request.questions.find((question) => question.id in result.errors);
       if (firstInvalid) {
+        setStep(request.questions.indexOf(firstInvalid));
         // After paint so aria-invalid / error text exist under the question.
         requestAnimationFrame(() => focusQuestion(firstInvalid.id));
       }
@@ -363,28 +518,106 @@ function HumanInputRequestForm({
         ),
     );
     if (unreviewedSave) {
+      setStep(request.questions.indexOf(unreviewedSave));
       setValidationErrors({
         [unreviewedSave.id]: unreviewedSave.skillReview?.removalOperationId
-          ? "Load the exact Skill proposal before approving permanent deletion."
-          : "Load the exact Skill files before saving.",
+          ? t("humanInputForm.loadTheExactSkillProposal")
+          : t("humanInputForm.loadTheExactSkillFiles"),
       });
       return;
     }
-    await submitResponse({ outcome: "answered", answers: result.answers });
+    // Keep the request's question order across drafted and secret answers.
+    const drafted = new Map(result.answers.map((answer) => [answer.questionId, answer]));
+    const answers = request.questions.flatMap((question) => {
+      const answer = drafted.get(question.id) ?? secretPublicAnswers.get(question.id);
+      return answer ? [answer] : [];
+    });
+    const accepted = await submitResponse({
+      outcome: "answered",
+      answers,
+      ...(secretAnswers.length > 0 ? { secretAnswers } : {}),
+    });
+    if (accepted) for (const handle of secretHandles.current.values()) handle.clear();
   };
 
+  const stepLabel = multi
+    ? t("humanInputForm.questionOfTotal", { current: step + 1, total: request.questions.length })
+    : null;
   const metaBits = [
     progressLabel,
-    !singleQuestion ? messages.questionCount(request.questions.length) : null,
+    stepLabel,
     request.expiresAt ? (
       <>
         {messages.deadlineLabel}{" "}
-        <time dateTime={request.expiresAt} title={new Date(request.expiresAt).toLocaleString()}>
+        <time
+          dateTime={request.expiresAt}
+          title={new Date(request.expiresAt).toLocaleString(t.locale)}
+        >
           {messages.formatDeadline(request.expiresAt)}
         </time>
       </>
     ) : null,
   ].filter(Boolean);
+  const meta =
+    metaBits.length > 0
+      ? metaBits.map((bit, index) => (
+          // Positional facts of one line; a deadline is markup, not text.
+          // oxlint-disable-next-line react/no-array-index-key -- fixed positions
+          <Fragment key={index}>
+            {index > 0 ? " · " : null}
+            {bit}
+          </Fragment>
+        ))
+      : null;
+  const errorText = error ?? submissionError;
+  const agentMayDecide = onLetAgentDecide !== false && humanInputAgentMayDecide(request);
+  const [delegating, setDelegating] = useState(false);
+  const letAgentDecide = async (): Promise<void> => {
+    if (busy || delegating) return;
+    if (typeof onLetAgentDecide !== "function") {
+      await submitResponse({ outcome: "skipped", agentDecides: true });
+      return;
+    }
+    setSubmissionError(null);
+    setDelegating(true);
+    try {
+      await onLetAgentDecide();
+    } catch (cause) {
+      setSubmissionError(formatError(cause));
+    } finally {
+      setDelegating(false);
+    }
+  };
+  const skipButton = agentMayDecide ? (
+    agentDeciding ? (
+      <p
+        role="status"
+        className="m-0 inline-flex min-h-9 items-center gap-1.5 text-og-sm text-og-fg-muted"
+        data-human-input-agent-deciding=""
+      >
+        <span aria-hidden="true" className="size-1.5 rounded-full bg-og-status-waiting" />
+        {messages.agentDeciding ?? t("humanInputModel.yourAgentIsDeciding")}
+      </p>
+    ) : (
+      <DecisionButton
+        kind="quiet"
+        disabled={busy || delegating}
+        busy={delegating}
+        data-human-input-let-agent-decide=""
+        onClick={() => void letAgentDecide()}
+      >
+        {messages.letAgentDecide ?? t("humanInputModel.letTheAgentDecide")}
+      </DecisionButton>
+    )
+  ) : request.allowSkip ? (
+    <DecisionButton
+      kind="quiet"
+      disabled={busy}
+      onClick={() => void submitResponse({ outcome: "skipped" })}
+    >
+      {resolvedSkipLabel}
+    </DecisionButton>
+  ) : null;
 
   if (collapsed) {
     return (
@@ -392,30 +625,29 @@ function HumanInputRequestForm({
         data-human-input-request={request.id}
         data-human-input-collapsed=""
         aria-labelledby={titleId}
-        className={cn(
-          "og-root flex w-full items-center gap-3 rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 px-3 py-2.5 shadow-og-sm",
-          className,
-        )}
+        className={cn(decisionCardClass, "flex items-center gap-3 px-3 py-2.5", className)}
       >
-        <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
-          <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
-        </span>
+        <DecisionMark>
+          <MessageCircleQuestionIcon />
+        </DecisionMark>
         <div className="min-w-0 flex-1">
-          <h2 id={titleId} className="truncate text-og-sm font-semibold text-og-fg">
-            {resolvedTitle}
+          <h2 id={titleId} className="m-0 truncate text-og-sm font-semibold text-og-fg">
+            {questionTitle !== null ? (
+              <InlineMarkdown singleLine>{questionTitle}</InlineMarkdown>
+            ) : (
+              resolvedTitle
+            )}
           </h2>
-          {metaBits.length > 0 ? (
-            <p className="mt-0.5 truncate text-og-xs text-og-fg-subtle">{metaBits.join(" · ")}</p>
-          ) : null}
+          {meta ? <p className="m-0 mt-0.5 truncate text-og-xs text-og-fg-subtle">{meta}</p> : null}
         </div>
-        <button
-          type="button"
+        <DecisionButton
+          kind="secondary"
           onClick={() => setCollapsed(false)}
-          className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-og-md border border-og-border px-2.5 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg"
+          className="w-auto shrink-0 px-3 @md/decision:min-h-8"
         >
           {messages.expand}
           <ChevronDownIcon aria-hidden="true" className="size-3.5" />
-        </button>
+        </DecisionButton>
       </div>
     );
   }
@@ -423,175 +655,242 @@ function HumanInputRequestForm({
   return (
     <form
       data-human-input-request={request.id}
+      data-human-input-step={multi ? step + 1 : undefined}
       onSubmit={(event) => void submit(event)}
       aria-labelledby={titleId}
-      className={cn(
-        // Multi-question: pin height at the cap so the flex body gets a real
-        // box and overflow-y engages. max-height alone + percentage/`h-full`
-        // children often sizes to content and clips with no scroll.
-        "og-root flex min-h-0 w-full flex-col overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm",
-        singleQuestion
-          ? "max-h-[min(28rem,50dvh)]"
-          : "h-[min(28rem,50dvh)] max-h-[min(28rem,50dvh)]",
-        className,
-      )}
+      className={cn(decisionCardClass, "flex flex-col", className)}
     >
-      <header className="shrink-0 border-b border-og-status-waiting/20 px-4 py-3">
-        <div className="flex items-start gap-3">
-          <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
-            <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <h2 id={titleId} className="text-og-md font-semibold text-og-fg">
-                {resolvedTitle}
-                {singleQuestion?.required && !request.allowSkip ? (
-                  <span aria-hidden className="ml-1 text-og-status-failed">
-                    *
-                  </span>
-                ) : null}
-              </h2>
-              {progressLabel ? (
-                <span className="text-og-xs font-medium text-og-status-waiting">
-                  {progressLabel}
-                </span>
-              ) : null}
-              {!singleQuestion ? (
-                <span className="text-og-xs font-medium text-og-fg-subtle">
-                  {messages.questionCount(request.questions.length)}
-                </span>
-              ) : null}
-            </div>
-            {resolvedDescription ? (
-              <div className="mt-0.5 text-og-sm text-og-fg-muted">{resolvedDescription}</div>
-            ) : null}
-            {request.expiresAt ? (
-              <p className="mt-1 text-og-xs text-og-fg-subtle">
-                {messages.deadlineLabel}{" "}
-                <time
-                  dateTime={request.expiresAt}
-                  title={new Date(request.expiresAt).toLocaleString()}
-                >
-                  {messages.formatDeadline(request.expiresAt)}
-                </time>
-              </p>
-            ) : null}
-            {request.allowSkip && singleQuestion ? (
-              <p className="mt-1 text-og-xs text-og-fg-subtle">Or skip and let the agent decide.</p>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            onClick={() => setCollapsed(true)}
-            aria-label={messages.collapse}
-            title={messages.collapse}
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg"
+      <header className={cn("flex items-start gap-3 pt-4", decisionCardPad)}>
+        <DecisionMark>
+          <MessageCircleQuestionIcon />
+        </DecisionMark>
+        <div className="min-w-0 flex-1 pt-px">
+          <h2
+            id={titleId}
+            className="m-0 text-og-md font-semibold leading-snug text-balance text-og-fg [overflow-wrap:anywhere]"
           >
-            <ChevronUpIcon aria-hidden="true" className="size-4" />
-          </button>
+            {resolvedTitle}
+          </h2>
+          {resolvedDescription ? (
+            <div className="mt-1 text-og-sm leading-relaxed text-og-fg-muted [overflow-wrap:anywhere]">
+              {resolvedDescription}
+            </div>
+          ) : null}
+          {meta ? <p className="m-0 mt-1.5 text-og-xs text-og-fg-subtle">{meta}</p> : null}
         </div>
+        <button
+          type="button"
+          onClick={() => setCollapsed(true)}
+          aria-label={messages.collapse}
+          title={messages.collapse}
+          className="-mr-1.5 -mt-1 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md text-og-fg-subtle transition-colors hover:bg-og-hover hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:size-11"
+        >
+          <ChevronUpIcon aria-hidden="true" className="size-4" />
+        </button>
       </header>
 
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div
-          ref={scrollRef}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
-        >
-          <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
-            {request.questions.map((question, index) => {
-              if (singleQuestion) {
-                // Title already carries the question; only render the control + help extras.
+      {decision ? (
+        <>
+          {decision.question.helpText ||
+          decision.accept.description ||
+          decision.decline.description ? (
+            <div
+              className={cn(
+                "space-y-1 pt-3 text-og-sm leading-relaxed text-og-fg-muted [overflow-wrap:anywhere]",
+                decisionCardPad,
+              )}
+            >
+              {decision.question.label && decision.question.helpText ? (
+                <p className="m-0">
+                  <InlineMarkdown>{decision.question.helpText}</InlineMarkdown>
+                </p>
+              ) : null}
+              {[decision.accept, decision.decline].map((option) =>
+                option.description ? (
+                  <p key={option.id} className="m-0">
+                    <span className="font-medium text-og-fg">{option.label}</span>
+                    {" · "}
+                    <InlineMarkdown>{option.description}</InlineMarkdown>
+                  </p>
+                ) : null,
+              )}
+            </div>
+          ) : null}
+          {errorText ? (
+            <p
+              role="alert"
+              className={cn("m-0 pt-3 text-og-sm text-og-status-failed", decisionCardPad)}
+            >
+              {errorText}
+            </p>
+          ) : null}
+          <footer className={cn("pb-4 pt-4", decisionCardPad)} data-human-input-decision="">
+            <DecisionActions lead={skipButton}>
+              {[decision.decline, decision.accept].map((option) => {
+                const primary = option === decision.accept;
+                const chosen = busy && decisionChoice === option.id;
                 return (
-                  <div key={question.id} data-human-input-question={question.id}>
-                    {preview(question)}
-                    <QuestionControls
-                      question={question}
-                      questionNumber={null}
-                      labelledBy={titleId}
-                      draft={drafts[question.id] ?? emptyDraft()}
-                      fieldId={`${formId}-${index}`}
-                      error={validationErrors[question.id]}
-                      messages={messages}
-                      autoFocus={autoFocus}
-                      firstOption
-                      showPromptChrome={false}
-                      allowSkip={request.allowSkip}
-                      busy={busy}
-                      onUpdate={(apply) => update(question.id, apply)}
-                    />
-                  </div>
+                  <DecisionButton
+                    key={option.id}
+                    kind={primary ? "primary" : "secondary"}
+                    disabled={busy}
+                    busy={chosen}
+                    ref={
+                      !primary && autoFocus
+                        ? (node: HTMLButtonElement | null) => {
+                            if (node && !node.dataset.ogFocused) {
+                              node.dataset.ogFocused = "";
+                              node.focus({ preventScroll: true });
+                            }
+                          }
+                        : undefined
+                    }
+                    data-human-input-choice={option.id}
+                    onClick={() => {
+                      setDecisionChoice(option.id);
+                      void submitResponse({
+                        outcome: "answered",
+                        answers: [{ questionId: decision.question.id, values: [option.id] }],
+                      });
+                    }}
+                  >
+                    {chosen ? messages.submitting : option.label}
+                  </DecisionButton>
                 );
-              }
-              return (
+              })}
+            </DecisionActions>
+          </footer>
+        </>
+      ) : (
+        <>
+          <div ref={bodyRef} className={cn("min-w-0 pt-3", decisionCardPad)}>
+            <fieldset disabled={busy} className="m-0 min-w-0 border-0 p-0">
+              {request.questions.map((question, index) => (
                 <div
                   key={question.id}
                   data-human-input-question={question.id}
-                  className="flex flex-col gap-1.5"
+                  hidden={multi && index !== step}
+                  className="flex flex-col gap-2"
                 >
                   {preview(question)}
                   <QuestionControls
                     question={question}
-                    questionNumber={index + 1}
-                    labelledBy={undefined}
+                    questionNumber={!headerCarriesQuestion && multi ? index + 1 : null}
+                    labelledBy={headerCarriesQuestion ? titleId : undefined}
                     draft={drafts[question.id] ?? emptyDraft()}
                     fieldId={`${formId}-${index}`}
                     error={validationErrors[question.id]}
                     messages={messages}
                     autoFocus={autoFocus && index === 0}
                     firstOption={index === 0}
-                    showPromptChrome
+                    showPromptChrome={!headerCarriesQuestion}
                     allowSkip={request.allowSkip}
                     busy={busy}
+                    allowedSaveTo={allowedSaveTo}
+                    registerSecret={registerSecret(question.id)}
+                    onSecretEdited={() => clearValidationError(question.id)}
                     onUpdate={(apply) => update(question.id, apply)}
                   />
                 </div>
-              );
-            })}
-          </fieldset>
-        </div>
-        {overflowBelow ? (
-          <div
-            className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex flex-col items-center"
-            aria-hidden="true"
-          >
-            <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/85 to-transparent" />
-            <span className="-mt-5 mb-1 rounded-og-full bg-og-surface-1 px-2.5 py-0.5 text-og-xs font-medium text-og-fg-muted shadow-og-sm ring-1 ring-og-border/60">
-              {messages.moreBelow}
-            </span>
+              ))}
+            </fieldset>
           </div>
-        ) : null}
-      </div>
 
-      {(error ?? submissionError) ? (
-        <p
-          role="alert"
-          className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
-        >
-          {error ?? submissionError}
-        </p>
-      ) : null}
+          {errorText ? (
+            <p
+              role="alert"
+              className={cn("m-0 pt-3 text-og-sm text-og-status-failed", decisionCardPad)}
+            >
+              {errorText}
+            </p>
+          ) : null}
 
-      <footer className="relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
-        {request.allowSkip ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void submitResponse({ outcome: "skipped" })}
-            className="inline-flex min-h-9 items-center rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg disabled:opacity-50"
-          >
-            {resolvedSkipLabel}
-          </button>
-        ) : null}
-        <button
-          type="submit"
-          disabled={busy}
-          className="inline-flex min-h-9 items-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
-        >
-          {busy ? messages.submitting : resolvedSubmitLabel}
-        </button>
-      </footer>
+          <footer className={cn("pb-4 pt-4", decisionCardPad)}>
+            <DecisionActions lead={skipButton}>
+              {multi && step > 0 ? (
+                <DecisionButton kind="secondary" disabled={busy} onClick={() => goToStep(step - 1)}>
+                  {t("humanInputForm.back")}
+                </DecisionButton>
+              ) : null}
+              <DecisionButton type="submit" kind="primary" disabled={busy} busy={busy}>
+                {busy
+                  ? messages.submitting
+                  : multi && step < lastStep
+                    ? t("humanInputForm.next")
+                    : resolvedSubmitLabel}
+              </DecisionButton>
+            </DecisionActions>
+          </footer>
+        </>
+      )}
     </form>
   );
+}
+
+// Unambiguous approve/decline verbs only: "Continue with A" vs "Keep B" is a
+// real choice between two options, not a yes/no decision.
+const ACCEPT_WORDS = new Set(["approve", "approved", "yes", "confirm", "allow", "accept"]);
+const DECLINE_WORDS = new Set(["cancel", "decline", "reject", "deny", "no", "don't", "dont"]);
+
+function firstWord(label: string): string {
+  return (
+    label
+      .trim()
+      .toLowerCase()
+      .replace(/[’]/g, "'")
+      .split(/[\s,.:;!?()]+/)[0] ?? ""
+  );
+}
+
+/**
+ * A yes/no decision (an approval asked as a question): one required
+ * single-choice question with exactly an accept and a decline option. It is
+ * answered with two buttons; an "Other" free-text answer has no meaning for it,
+ * and the composer still accepts a different instruction.
+ */
+export function binaryDecision(
+  questions: readonly HumanInputQuestion[],
+  { inferFromLabels = true }: { inferFromLabels?: boolean | undefined } = {},
+): {
+  question: HumanInputQuestion;
+  accept: HumanInputQuestion["options"][number];
+  decline: HumanInputQuestion["options"][number];
+} | null {
+  if (questions.length !== 1) return null;
+  const question = questions[0]!;
+  // The agent asked for a yes/no decision in its own words: the action first,
+  // the way out second.
+  if (
+    question.confirm === true &&
+    question.kind === "single_select" &&
+    !question.skillReview &&
+    question.options.length === 2
+  ) {
+    return { question, accept: question.options[0]!, decline: question.options[1]! };
+  }
+  if (!inferFromLabels) return null;
+  if (
+    question.kind !== "single_select" ||
+    question.skillReview ||
+    // The runtime marks every choice question `allowOther`, so it is not a
+    // signal here; a different answer goes through the composer instead.
+    !question.required ||
+    question.options.length !== 2
+  )
+    return null;
+  const [first, second] = question.options as [
+    HumanInputQuestion["options"][number],
+    HumanInputQuestion["options"][number],
+  ];
+  const kind = (option: HumanInputQuestion["options"][number]) => {
+    const word = firstWord(option.label);
+    return ACCEPT_WORDS.has(word) ? "accept" : DECLINE_WORDS.has(word) ? "decline" : null;
+  };
+  const a = kind(first);
+  const b = kind(second);
+  if (a === "accept" && b === "decline") return { question, accept: first, decline: second };
+  if (a === "decline" && b === "accept") return { question, accept: second, decline: first };
+  return null;
 }
 
 function QuestionControls({
@@ -607,6 +906,9 @@ function QuestionControls({
   showPromptChrome,
   allowSkip,
   busy,
+  allowedSaveTo,
+  registerSecret,
+  onSecretEdited,
   onUpdate,
 }: {
   question: HumanInputQuestion;
@@ -621,8 +923,12 @@ function QuestionControls({
   showPromptChrome: boolean;
   allowSkip: boolean;
   busy: boolean;
+  allowedSaveTo: readonly HumanInputSecretSaveTo[] | undefined;
+  registerSecret: (handle: SecretFieldHandle | null) => void;
+  onSecretEdited: () => void;
   onUpdate: (apply: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
 }) {
+  const t = useOpenGeniText();
   const errorId = `${fieldId}-error`;
   const helpId = `${fieldId}-help`;
   const labelId = `${fieldId}-label`;
@@ -661,13 +967,13 @@ function QuestionControls({
             <label
               id={labelId}
               htmlFor={question.kind === "text" ? fieldId : undefined}
-              className="text-og-sm font-medium text-og-fg"
+              className="min-w-0 text-og-sm font-medium text-og-fg [overflow-wrap:anywhere]"
             >
               {questionNumber === null ? null : (
                 <span className="mr-1.5 tabular-nums text-og-fg-muted">{questionNumber}.</span>
               )}
               {questionNumber === null ? null : " "}
-              {visibleLabel}
+              <InlineMarkdown>{visibleLabel}</InlineMarkdown>
               {question.required && !allowSkip ? (
                 <span aria-hidden className="ml-1 text-og-status-failed">
                   *
@@ -680,13 +986,13 @@ function QuestionControls({
             </label>
           </div>
           {question.label ? (
-            <p id={promptId} className="text-og-sm text-og-fg-muted">
-              {question.prompt}
+            <p id={promptId} className="text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
+              <InlineMarkdown>{question.prompt}</InlineMarkdown>
             </p>
           ) : null}
           {question.helpText ? (
-            <p id={helpId} className="text-og-xs text-og-fg-subtle">
-              {question.helpText}
+            <p id={helpId} className="text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
+              <InlineMarkdown>{question.helpText}</InlineMarkdown>
             </p>
           ) : null}
           {hint ? (
@@ -701,8 +1007,8 @@ function QuestionControls({
             <p className="text-og-xs text-og-fg-subtle">{messages.optional}</p>
           ) : null}
           {question.helpText && question.label ? (
-            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle">
-              {question.helpText}
+            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
+              <InlineMarkdown>{question.helpText}</InlineMarkdown>
             </p>
           ) : null}
           {hint ? (
@@ -713,7 +1019,30 @@ function QuestionControls({
         </>
       )}
 
-      {question.kind === "text" ? (
+      {question.kind === "secret" ? (
+        question.secret ? (
+          <SecretQuestionField
+            question={question as HumanInputQuestion & { secret: HumanInputSecretSpec }}
+            fieldId={fieldId}
+            messages={messages}
+            autoFocus={autoFocus}
+            allowedSaveTo={allowedSaveTo}
+            error={error}
+            describedBy={
+              [
+                question.label && showPromptChrome ? promptId : null,
+                question.helpText && showPromptChrome ? helpId : null,
+              ]
+                .filter(Boolean)
+                .join(" ") || undefined
+            }
+            register={registerSecret}
+            onEdited={onSecretEdited}
+          />
+        ) : (
+          <p className="text-og-sm text-og-fg-muted">{t("humanInputForm.thisQuestionCanTBe")}</p>
+        )
+      ) : question.kind === "text" ? (
         <textarea
           id={fieldId}
           value={draft.values[0] ?? ""}
@@ -727,28 +1056,21 @@ function QuestionControls({
           aria-labelledby={controlLabelId}
           aria-describedby={describedBy}
           autoFocus={autoFocus}
-          rows={2}
-          className="min-h-14 w-full resize-y rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm text-og-fg outline-hidden placeholder:text-og-fg-subtle focus:border-og-accent"
+          rows={3}
+          placeholder={t("humanInputForm.typeYourAnswer")}
+          className="min-h-20 w-full resize-y rounded-og-md border border-og-border bg-og-surface-1 px-3.5 py-2.5 text-og-sm leading-relaxed text-og-fg outline-hidden transition-[border-color,box-shadow] placeholder:text-og-fg-subtle focus:border-og-fg/50 focus:ring-2 focus:ring-og-accent/25 aria-[invalid=true]:border-og-status-failed/60 pointer-coarse:text-[16px]"
         />
       ) : (
         <div
           role={question.kind === "single_select" ? "radiogroup" : "group"}
           aria-labelledby={controlLabelId}
           aria-describedby={describedBy}
-          className="flex flex-col gap-0.5"
+          className="flex flex-col gap-2"
         >
           {question.options.map((option, optionIndex) => {
             const checked = draft.values.includes(option.id);
             return (
-              <label
-                key={option.id}
-                className={cn(
-                  "flex cursor-pointer items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
-                  checked
-                    ? "bg-og-status-waiting/12 text-og-fg"
-                    : "text-og-fg hover:bg-og-surface-1/80",
-                )}
-              >
+              <label key={option.id} className={choiceRowClass(checked, true)}>
                 <input
                   type={question.kind === "single_select" ? "radio" : "checkbox"}
                   name={question.kind === "single_select" ? fieldId : undefined}
@@ -770,28 +1092,40 @@ function QuestionControls({
                         : {}),
                     }))
                   }
-                  className="mt-0.5 accent-og-accent"
+                  className="sr-only"
                 />
-                <span className="min-w-0">
-                  <span className="block text-og-sm font-medium">{option.label}</span>
+                <ChoiceIndicator multiple={question.kind !== "single_select"} checked={checked} />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-og-sm font-medium leading-5 [overflow-wrap:anywhere]">
+                    {option.label}
+                    {option.recommended ? (
+                      <span
+                        data-human-input-recommended=""
+                        className="ml-2 inline-flex -translate-y-px items-center rounded-full bg-og-accent/12 px-2 align-middle text-og-xs font-medium leading-[1.125rem] text-og-accent"
+                      >
+                        {t("humanInputForm.recommended")}
+                      </span>
+                    ) : null}
+                  </span>
                   {option.description ? (
-                    <span className="mt-0.5 block text-og-xs text-og-fg-muted">
-                      {option.description}
+                    <span className="mt-0.5 block text-og-xs leading-[1.125rem] text-og-fg-muted [overflow-wrap:anywhere]">
+                      <InlineMarkdown>{option.description}</InlineMarkdown>
+                    </span>
+                  ) : null}
+                  {option.preview ? (
+                    <span
+                      data-human-input-preview=""
+                      className="mt-2 block max-h-40 overflow-auto whitespace-pre-wrap rounded-og-md bg-og-fg/[0.04] px-2.5 py-2 font-og-mono text-og-xs leading-[1.125rem] text-og-fg [overflow-wrap:anywhere]"
+                    >
+                      {option.preview}
                     </span>
                   ) : null}
                 </span>
               </label>
             );
           })}
-          {!question.skillReview ? (
-            <div
-              className={cn(
-                "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
-                draft.otherSelected
-                  ? "bg-og-status-waiting/12 text-og-fg"
-                  : "text-og-fg hover:bg-og-surface-1/80",
-              )}
-            >
+          {choiceOffersOther(question) ? (
+            <div className={choiceRowClass(draft.otherSelected, false)}>
               <input
                 id={otherChoiceId}
                 type={question.kind === "single_select" ? "radio" : "checkbox"}
@@ -808,25 +1142,30 @@ function QuestionControls({
                       : {}),
                   }))
                 }
-                className="mt-2 accent-og-accent"
+                className="sr-only"
               />
-              <span className="min-w-0 flex-1">
-                <label
-                  id={otherLabelId}
-                  htmlFor={otherChoiceId}
-                  className="block text-og-sm font-medium"
-                >
+              <label htmlFor={otherChoiceId} className="cursor-pointer">
+                <ChoiceIndicator
+                  multiple={question.kind !== "single_select"}
+                  checked={draft.otherSelected}
+                />
+                <span id={otherLabelId} className="sr-only">
                   {messages.other}
-                </label>
+                </span>
+              </label>
+              <span className="min-w-0 flex-1">
                 <label htmlFor={otherTextId} className="sr-only">
-                  {messages.other} answer for {visibleLabel}
+                  {t("humanInputForm.otherAnswerForVisiblelabel", {
+                    other: messages.other,
+                    visibleLabel,
+                  })}
                 </label>
                 <input
                   id={otherTextId}
                   type="text"
                   value={draft.other}
                   disabled={busy}
-                  placeholder="Type a value…"
+                  placeholder={t("humanInputForm.somethingElse")}
                   onClick={() => onUpdate(selectOtherDraft)}
                   onFocus={() => onUpdate(selectOtherDraft)}
                   onChange={(event) => {
@@ -836,14 +1175,15 @@ function QuestionControls({
                       other,
                     }));
                   }}
-                  className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
+                  className="block w-full min-w-0 bg-transparent p-0 text-og-sm font-medium leading-5 text-og-fg outline-hidden placeholder:font-normal placeholder:text-og-fg-subtle disabled:opacity-50 pointer-coarse:text-[16px]"
                 />
               </span>
             </div>
           ) : null}
         </div>
       )}
-      {error ? (
+      {/* A secret field shows its error under the input, above Save to. */}
+      {error && !(question.kind === "secret" && question.secret) ? (
         <p id={errorId} role="alert" className="text-og-xs text-og-status-failed">
           {error}
         </p>
@@ -852,72 +1192,35 @@ function QuestionControls({
   );
 }
 
-export function answersFromDrafts(
-  questions: HumanInputQuestion[],
-  drafts: Record<string, HumanInputAnswerDraft>,
-  messageOverrides: Partial<HumanInputFormMessages> = {},
-): { answers: HumanInputAnswer[]; errors: Record<string, string> } {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
-  const answers: HumanInputAnswer[] = [];
-  const errors: Record<string, string> = {};
-  for (const question of questions) {
-    const draft = drafts[question.id] ?? emptyDraft();
-    const values = question.kind === "text" ? draft.values.filter(Boolean) : draft.values;
-    const other = draft.otherSelected ? draft.other : "";
-    const hasOther = Boolean(other.trim());
-    const supplied = values.length + (hasOther ? 1 : 0);
-
-    // Other-selected-but-empty must win over generic "required" — otherwise the
-    // user sees the wrong diagnosis next to a clearly selected control.
-    if (question.kind !== "text" && draft.otherSelected && !hasOther) {
-      errors[question.id] = messages.otherRequired;
-      continue;
-    }
-
-    if (question.required && supplied === 0) {
-      errors[question.id] = messages.required;
-      continue;
-    }
-    if (question.kind !== "text") {
-      const min = question.validation?.minSelections;
-      const max = question.kind === "single_select" ? 1 : question.validation?.maxSelections;
-      if (min != null && supplied < min) {
-        errors[question.id] = messages.minSelections(min);
-        continue;
-      }
-      if (max != null && supplied > max) {
-        errors[question.id] = messages.maxSelections(max);
-        continue;
-      }
-    }
-    if (supplied > 0) {
-      answers.push({
-        questionId: question.id,
-        values,
-        ...(hasOther ? { other } : {}),
-      });
-    }
-  }
-  return { answers, errors };
+/** One answer row: the whole row is the target, the selected row is outlined. */
+function choiceRowClass(checked: boolean, clickable: boolean): string {
+  return cn(
+    "flex min-w-0 items-start gap-3 rounded-og-md border px-3.5 py-3 text-og-fg transition-[border-color,background-color,box-shadow] duration-150",
+    "has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-og-accent/40",
+    clickable && "cursor-pointer",
+    checked
+      ? "border-og-fg/70 bg-og-fg/[0.035] shadow-[inset_0_0_0_1px_var(--color-og-fg)]"
+      : "border-og-border hover:border-og-border-strong hover:bg-og-hover",
+  );
 }
 
-function initialDrafts(questions: HumanInputQuestion[]): Record<string, HumanInputAnswerDraft> {
-  return Object.fromEntries(questions.map((question) => [question.id, emptyDraft()]));
-}
-
-function emptyDraft(): HumanInputAnswerDraft {
-  return { values: [], other: "", otherSelected: false };
-}
-
-function formatDeadline(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const ms = date.getTime() - Date.now();
-  if (ms <= 0) return "deadline passed";
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "in under a minute";
-  if (minutes < 60) return `in ${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `in ${hours}h`;
-  return date.toLocaleString();
+function ChoiceIndicator({ multiple, checked }: { multiple: boolean; checked: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "mt-px grid size-[18px] shrink-0 place-items-center border transition-colors duration-150",
+        multiple ? "rounded-[5px]" : "rounded-full",
+        checked ? "border-og-fg bg-og-fg text-og-bg" : "border-og-border-strong bg-og-surface-1",
+      )}
+    >
+      {checked ? (
+        multiple ? (
+          <CheckIcon className="size-3" strokeWidth={3} />
+        ) : (
+          <span className="size-1.5 rounded-full bg-og-bg" />
+        )
+      ) : null}
+    </span>
+  );
 }

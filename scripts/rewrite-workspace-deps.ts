@@ -23,12 +23,17 @@
  * advertise dev-only private/workspace dependencies.
  *
  * Translation rules (matching pnpm/bun behavior):
- *   workspace:*        -> ^<version>   (caret, the common case)
+ *   workspace:*        -> <version>    (exact pin, the common case)
  *   workspace:^        -> ^<version>
  *   workspace:~        -> ~<version>
  *   workspace:^1.2.3   -> ^1.2.3       (explicit range kept as-is, prefix stripped)
  *   workspace:~1.2.3   -> ~1.2.3
  *   workspace:1.2.3    -> 1.2.3        (exact pin)
+ *
+ * Every published @opengeni package releases in lockstep at one shared
+ * version, so `workspace:*` pins siblings exactly. An exact pin also keeps
+ * range resolvers away from retired pre-reset 1.x versions (for example an old
+ * `@opengeni/contracts@1.0.1`) that a caret range would admit.
  *
  * The depended version is read from the live workspace package.json, so this
  * MUST run AFTER `changeset version` has bumped versions (in CI) for the ranges
@@ -64,7 +69,7 @@ import {
 export function resolveWorkspaceSpec(
   depName: string,
   spec: string,
-  versionByPackage: Map<string, string>,
+  versionByPackage: ReadonlyMap<string, string>,
 ): string {
   if (!spec.startsWith("workspace:")) {
     return spec;
@@ -76,7 +81,10 @@ export function resolveWorkspaceSpec(
       `Cannot rewrite "${depName}": "${spec}" — no workspace package named "${depName}" with a version was found.`,
     );
   }
-  if (rest === "*" || rest === "^") {
+  if (rest === "*") {
+    return version;
+  }
+  if (rest === "^") {
     return `^${version}`;
   }
   if (rest === "~") {
@@ -96,7 +104,7 @@ export type WorkspaceDependencyRewrite = Readonly<{
 
 export function rewriteWorkspaceDependenciesToConcrete(
   pkg: PackageJson,
-  versions: Map<string, string>,
+  versions: ReadonlyMap<string, string>,
 ): WorkspaceDependencyRewrite[] {
   const rewrites: WorkspaceDependencyRewrite[] = [];
   for (const field of PUBLISHED_DEP_FIELDS) {

@@ -1,4 +1,4 @@
-# OpenGeni chart workload configuration hooks
+# Opengeni chart workload configuration hooks
 
 ## Release identity
 
@@ -10,12 +10,36 @@ no explicit entry. Other provider credentials and configuration keep their
 existing precedence. Canary renderers must preserve an already-correct entry's
 position so saved values reproduce the same pod template on later upgrades.
 
+## Hook release settings
+
+Migration and catalog-import Jobs read job-scoped settings snapshots rendered
+from the incoming release, not the live workload ConfigMap. Each snapshot uses
+the Job's hook events and a weight one lower than the Job, so a pre-upgrade
+migration sees new config before Helm updates ordinary resources. The canonical
+ConfigMap rendering supplies all generated settings as well as `config` values.
+
+When `secret.create=true`, the chart also snapshots the incoming runtime Secret
+for each Job. Externally managed runtime and migration Secrets remain external
+references: provision their desired contents before invoking Helm. The order
+stays config, runtime Secret, then the separate migration Secret; explicit
+generated environment entries retain their existing precedence. Catalog import
+still takes its owner database URL from the migration Secret.
+
+Snapshots are replaced before the next hook run and deleted after a successful
+hook event. They remain available throughout Job execution; Helm performs
+successful-hook cleanup only after the event's hooks finish. Custom hook events
+and weights follow the corresponding Job. With hooks disabled, snapshots are
+ordinary release resources. Disabling a Job disables its snapshots too.
+
+This does not make externally managed Secret updates atomic with rolling pods;
+operators must still coordinate changes incompatible with old running pods.
+
 ## Service links
 
-Every OpenGeni pod sets `enableServiceLinks: false`. Kubernetes otherwise
+Every Opengeni pod sets `enableServiceLinks: false`. Kubernetes otherwise
 injects `<SERVICE>_PORT=tcp://<ip>:<port>` variables for each Service in the
 namespace. For a Service such as `opengeni-api-metrics` that yields
-`OPENGENI_API_METRICS_PORT`, which collides with an OpenGeni setting and fails
+`OPENGENI_API_METRICS_PORT`, which collides with an Opengeni setting and fails
 settings parsing at startup in any pod that does not set it explicitly. Pods
 reach services through DNS.
 
@@ -42,6 +66,36 @@ not literal values. Values are YAML, not evaluated as templates. Malformed or
 duplicate entries, release-identity/role/listener overrides and overrides of
 active chart-generated service settings fail rendering. Other workload-specific
 variables follow Kubernetes' normal explicit-env precedence over `envFrom`.
+
+## Additional trust beside compute-control TLS
+
+When `computeControl.enabled` and `computeControl.apiTls.secretName` are set,
+API and both worker roles use the compute authority through `NODE_EXTRA_CA_CERTS`.
+Do not override that variable through `extraEnv` or expect a shared ConfigMap
+value to replace the chart-owned environment entry. To retain another private
+service authority, explicitly name its public PEM bundle:
+
+```yaml
+computeControl:
+  apiTls:
+    additionalCaConfigMaps:
+      - name: telemetry-ca
+        key: ca.crt
+```
+
+The chart composes these same-namespace ConfigMap keys with the existing compute
+`ca.crt` once, before application startup. An init container uses the exact API
+or worker image already selected, no network or runtime credentials, read-only
+source mounts, and a bounded writable `emptyDir`. Missing, empty, malformed,
+non-CA or oversized inputs prevent startup. The completed bundle is read-only in
+the application container; the original compute CA mount is retained. No
+collector authentication or TLS verification is disabled.
+
+The empty default preserves the existing compute-only path without an init
+container. With compute disabled or no API TLS Secret, this optional list is
+inactive; other workload trust configuration remains authoritative. Public CA
+bundle updates require an ordinary pod rollout: Bun reads `NODE_EXTRA_CA_CERTS`
+at process startup, so projected-volume changes alone do not reload trust.
 
 ## Volumes
 
@@ -101,3 +155,68 @@ artifacts` job, where Helm is installed. Rendering proves manifest
 structure, not a live TLS handshake or operational telemetry export. See
 [`docs/deployment.md`](../../../docs/deployment.md) for release and deployment
 guidance.
+
+## Web assets across rollouts
+
+`web.previousAssets` carries the hashed assets of up to `maxImages` (default 2)
+previous web images into each web pod: one init container per image copies
+them into an emptyDir that the server reads when an asset is missing locally.
+`helm upgrade` finds the images with a `lookup` of the live web Deployment and
+its `opengeni.ai/previous-web-images` annotation. Offline renders carry only an
+explicit `web.previousAssets.images` list. `ingress.webAssetsIngress` adds an
+ingress-nginx Ingress for the hashed asset paths that retries a 404 on another
+web pod during the rollout (best effort). Carried images must stay in the
+registry for as long as the Deployment carries them, and `helm rollback`
+restores the earlier revision's chain. Test both with
+`bun test ./deploy/helm/opengeni/test/web-asset-skew.test.ts`. See
+[`docs/deployment.md`](../../../docs/deployment.md#web-assets-across-rollouts).
+
+## Replicas and autoscaling
+
+When a workload's `autoscaling.enabled` is true (API, web, relay, control
+worker, turn worker), its HPA owns the replica count. The Deployment then keeps
+its live replica count on `helm upgrade` (via `lookup`) and omits `replicas`
+when rendered offline (fresh install, `helm template`, GitOps), so an upgrade
+never scales a Deployment back to `replicaCount` and kills pods with in-flight
+turns. `replicaCount` applies only when autoscaling is off.
+
+Turn pods drain in-flight turns before they exit. The chart surges one
+replacement turn pod before removing an old one, and renders
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS` / `_FORCE_MS` from
+`worker.turns.shutdown.graceSeconds` / `forceSeconds`. Unset, they derive from
+`worker.turns.terminationGracePeriodSeconds` (default
+`worker.terminationGracePeriodSeconds`, 120): 90 seconds of natural completion,
+then the recoverable `WORKER_SHUTDOWN` checkpoint and an SDK force stop at 105
+seconds, with process exit by 115. Rendering fails for explicit values that do
+not fit. See
+[`worker-autoscaling.md`](../../../docs/worker-autoscaling.md#deletion-and-shutdown-limitations).
+
+`worker.turns.autoscaling.queueDemand` is an explicit, default-off schema-v1
+source contract, not a production acceptance flag. It adds Namespace demand,
+queue-only and busy-pod metrics to CPU, memory and agent-only inflight. The
+initial policy disables downscale. See
+[`worker-autoscaling.md`](../../../docs/worker-autoscaling.md) for prerequisites,
+exact semantics, adapter freshness fencing and recovery gates. Its dedicated
+`worker-scaler-prometheusrule.yaml` does not alter the accepted legacy alerts.
+All Object metrics bind namespace/release/environment/Temporal namespace/queue;
+the adapter example must be rebound to that exact rendered source identity.
+Atomic completion evidence rejects empty-but-failed classification stages;
+queue producer observations expire at 45 seconds, other raw/activity TTLs at 60.
+Identity is declared per recording rule, tested with Prometheus 2.55.1 and 3.5.0.
+The adapter pairs each value with its same-evaluation expiry on all labels
+except the metric name before MAX aggregation, including HA cohorts.
+
+Run real Helm/schema and Prometheus rule fixtures with:
+
+```sh
+bun test ./deploy/helm/opengeni/test/queue-demand.test.ts
+# All chart tests isolated, all example values linted, upgrade contracts:
+bun scripts/check-worker-queue-demand.ts
+```
+
+The focused suite requires real binaries: `OPENGENI_HELM` and
+`OPENGENI_PROMTOOL` (or `PATH`) override the test tools. On Linux x64 it downloads
+official Helm 3.19.0 and Prometheus 3.5.0 into a temporary cache, verifies their
+official archive checksums and checks cached binary hashes. It fails rather
+than silently skipping when tooling is unavailable. Application dependencies
+and the lockfile are untouched.

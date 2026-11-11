@@ -29,6 +29,7 @@ let queryRateMicros = 0;
 let failNextRetrieval = false;
 let failSettlement = false;
 let allowanceRefusal: Record<string, unknown> | null = null;
+let creditPolicy: { allowCreditModels: boolean } | null = null;
 const allowanceChecks = mock(async (_db: unknown, _input: unknown) => allowanceRefusal);
 const debits = mock(async (_db: unknown, input: { amountMicros: number }) => {
   if (failSettlement) throw new Error("settlement unavailable");
@@ -40,7 +41,7 @@ const usage = mock(
 );
 mock.module("@opengeni/db", () => ({
   listKnowledgeEntries: list,
-  getBillingBalance: async () => ({ balanceMicros: balance }),
+  getSpendableCreditBalance: async () => ({ balanceMicros: balance }),
   applyCreditDebitAfterUse: debits,
   checkWorkspaceAllowance: allowanceChecks,
   creditDebitAttributionForTurn: async (_db: unknown, input: { turnId: string }) => ({
@@ -56,6 +57,25 @@ mock.module("@opengeni/db", () => ({
     fn: (db: unknown) => Promise<unknown>,
   ) => fn(_db),
   isCodexBilledTurn: async () => false,
+  // Knowledge queries run in the app unless an outer scope says otherwise.
+  chargeBillingOrigin: (origin?: "app" | "api" | null) => origin ?? "app",
+  SUBSCRIPTION_CORE_XAI_PROVIDER: "xai",
+  // Knowledge queries and document indexing carry no inference model, so the
+  // imported billing helper must never consult subscription-route funding.
+  readSubscriptionCoreFunding: async () => {
+    throw new Error("Unexpected subscription-route funding lookup in knowledge fixture");
+  },
+  // Knowledge queries make no own-key model call, so the imported billing
+  // helpers must never read the own-key fee balance.
+  getByokFeeSpendableBalance: async () => {
+    throw new Error("Unexpected own-key fee balance read in knowledge fixture");
+  },
+  // Nor does it run on the person's own subscription, so the plan that
+  // subscriptions need is never read either.
+  getOrganizationPlanStanding: async () => {
+    throw new Error("Unexpected own-subscription plan read in knowledge fixture");
+  },
+  getWorkspaceModelPolicy: async () => creditPolicy,
   sumUsageQuantity: async (_db: unknown, input: { eventType: string }) =>
     input.eventType === "document.query_embedding_bytes"
       ? queryRateBytes
@@ -66,6 +86,9 @@ mock.module("@opengeni/db", () => ({
   countWorkspacesForAccount: async () => 0,
   countActiveApiKeysForWorkspace: async () => 0,
   countActiveOrganizationApiKeysForAccount: async () => 0,
+  // These workspaces are not EU-only; the EU paths are covered in
+  // packages/core/test/side-feature-region.test.ts.
+  isWorkspaceEuOnly: async () => false,
 }));
 const { searchKnowledgeEntries } = await import("./knowledge-search");
 const { checkLimit } = await import("../billing/limits");
@@ -80,6 +103,7 @@ test("hybrid fallback keeps lexical recall and passes the exact scope and cursor
     {
       query: "Acme renewal renew contract expiration renewal date",
       scope: "workspace",
+      createdSince: "2026-10-01T00:00:00Z",
       cursor: "page-2",
     },
     unavailable,
@@ -90,8 +114,25 @@ test("hybrid fallback keeps lexical recall and passes the exact scope and cursor
     query: '"Acme" OR "renewal" OR "renew" OR "contract" OR "expiration" OR "date"',
     mode: "keyword",
     scope: "workspace",
+    createdSince: "2026-10-01T00:00:00Z",
     cursor: "page-2",
   });
+});
+test("a host without an embedder keeps the hybrid keyword fallback and refuses vector mode", async () => {
+  // Gateways built without an embedder resolve none; that sends nothing and
+  // answers like any unavailable provider, outside EU as before.
+  const none = () => undefined as never;
+  const result = await searchKnowledgeEntries(
+    {} as never,
+    serviceContext,
+    { query: "Acme renewal" },
+    none,
+  );
+  expect(result.searchMode).toBe("keyword");
+  expect(result.fallbackReason).toBe("provider_unavailable");
+  await expect(
+    searchKnowledgeEntries({} as never, serviceContext, { query: "Acme", mode: "vector" }, none),
+  ).rejects.toThrow("Knowledge query embedder is unavailable");
 });
 test("keyword and explicit search syntax remain unchanged", async () => {
   for (const query of ['"Acme renewal"', "Acme -expired", "Acme OR renewal"]) {
@@ -169,6 +210,92 @@ test("paid vector queries check funding, debit post-use, and preserve hybrid key
   );
   expect(embedded).toBe(1);
   expect(usage.mock.calls.length).toBe(priorUsage);
+});
+
+test("credits turned off falls back to keyword search and refuses vector before the provider", async () => {
+  const settings = {
+    documentEmbeddingProvider: "openai",
+    documentEmbeddingBillingMode: "credits",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
+  } as Settings;
+  let embedded = 0;
+  const provider = () =>
+    ({
+      model: "test",
+      dimensions: 3,
+      embedQuery: async () => {
+        embedded++;
+        return [1, 0, 0];
+      },
+    }) as never;
+  balance = 1_000_000;
+  creditPolicy = { allowCreditModels: false };
+  const priorDebits = debits.mock.calls.length;
+  const priorUsage = usage.mock.calls.length;
+  try {
+    const hybrid = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "paid" },
+      provider,
+      settings,
+    );
+    expect(hybrid.searchMode).toBe("keyword");
+    expect(hybrid.fallbackReason).toBe("credits_disabled");
+    await expect(
+      searchKnowledgeEntries(
+        {} as never,
+        serviceContext,
+        { query: "paid", mode: "vector" },
+        provider,
+        settings,
+      ),
+    ).rejects.toMatchObject({ code: "knowledge_vector_credits_disabled" });
+    // Keyword pagination keeps working instead of the paid-cursor rejection.
+    const nextPage = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "paid", cursor: "keyword-cursor" },
+      provider,
+      settings,
+    );
+    expect(nextPage.fallbackReason).toBe("credits_disabled");
+    expect(embedded).toBe(0);
+    expect(debits.mock.calls.length).toBe(priorDebits);
+    expect(usage.mock.calls.length).toBe(priorUsage);
+    creditPolicy = { allowCreditModels: true };
+    const paid = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "paid", mode: "vector" },
+      provider,
+      settings,
+    );
+    expect(paid.searchMode).toBe("vector");
+    expect(embedded).toBe(1);
+    expect(debits.mock.calls.length).toBe(priorDebits + 1);
+  } finally {
+    creditPolicy = null;
+  }
+});
+
+test("credits turned off leaves unpriced query embeddings untouched", async () => {
+  creditPolicy = { allowCreditModels: false };
+  try {
+    const result = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "free", mode: "vector" },
+      () => ({ model: "test", dimensions: 3, embedQuery: async () => [1, 0, 0] }) as never,
+      {
+        documentEmbeddingProvider: "deterministic",
+        documentEmbeddingBillingMode: "credits",
+      } as Settings,
+    );
+    expect(result.searchMode).toBe("vector");
+  } finally {
+    creditPolicy = null;
+  }
 });
 
 test("shadow query usage meters bytes without checking or consuming credits", async () => {

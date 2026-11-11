@@ -20,6 +20,7 @@ import {
   EditableSpreadsheetArtifactSurface,
   type EditableSpreadsheetArtifactSurfaceProps,
 } from "./editable-spreadsheet";
+import { useOpenGeniText } from "../../messages/runtime";
 
 export type EditableArtifactWorkbenchProps = Readonly<{
   session: EditableArtifactSession;
@@ -75,13 +76,14 @@ export function EditableArtifactWorkbench({
   spreadsheet,
   presentation,
 }: EditableArtifactWorkbenchProps) {
+  const t = useOpenGeniText();
   switch (session.modality) {
     case "document":
       return (
         <EditableDocumentArtifactSurface
           {...document}
           session={session}
-          title={document?.title ?? "Document"}
+          title={document?.title ?? t("artifacts.editableArtifactWorkbench.document")}
         />
       );
     case "spreadsheet":

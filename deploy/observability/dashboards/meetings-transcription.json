@@ -1,0 +1,1300 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "What meetings and transcription cost the deployment: per-stage CPU, memory and time, provider spend and stored audio, priced per audio hour, with quality signals next to cost.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cost per audio hour (selected range)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "title": "Audio transcribed",
+      "description": "Hours of meeting and dictation audio transcribed in the range.",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range])) / 3600",
+          "legendFormat": "Audio transcribed",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Provider cost per meeting hour",
+      "description": "Transcription provider spend at list price per hour of meeting audio. Where a workspace's own key or subscription pays, this is what it spends, not the deployment.",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_recording_provider_cost_usd_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"meeting\"}[$__range])) / clamp_min((sum(increase(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"meeting\"}[$__range])) / 3600), 0.001)",
+          "legendFormat": "Provider cost per meeting hour",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Our compute cost per meeting hour",
+      "description": "CPU and memory of the programs that process a meeting (ffmpeg and our speaker models), priced at the cloud rates in the variables above. Memory is each program's peak held for its whole run, an upper bound.",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 9,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "((sum(increase(opengeni_recording_stage_cpu_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"meeting\"}[$__range])) / 3600 * $cpu_hour_usd) + (sum(increase(opengeni_recording_stage_memory_byte_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"meeting\"}[$__range])) / 3600 / 1073741824 * $memory_gb_hour_usd)) / clamp_min((sum(increase(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"meeting\"}[$__range])) / 3600), 0.001)",
+          "legendFormat": "Our compute cost per meeting hour",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Storage per meeting hour per month",
+      "description": "Audio the deployment stores for an hour of meeting (uploaded chunks plus the prepared file), priced per month it is kept.",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 14,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_recording_stored_bytes_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range])) / 1073741824 * $storage_gb_month_usd / clamp_min((sum(increase(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range])) / 3600), 0.001)",
+          "legendFormat": "Storage per meeting hour per month",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Cost per dictation minute",
+      "description": "Provider list price plus our compute for one minute of dictation.",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 19,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 5
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(increase(opengeni_recording_provider_cost_usd_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"dictation\"}[$__range])) + (sum(increase(opengeni_recording_stage_cpu_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"dictation\"}[$__range])) / 3600 * $cpu_hour_usd) + (sum(increase(opengeni_recording_stage_memory_byte_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"dictation\"}[$__range])) / 3600 / 1073741824 * $memory_gb_hour_usd)) / clamp_min(sum(increase(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",purpose=\"dictation\"}[$__range])) / 60, 0.001)",
+          "legendFormat": "Cost per dictation minute",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "CPU seconds per audio hour by stage",
+      "description": "How much CPU each stage spends per hour of audio it processes. Diarization is our speaker models; prepare and convert are ffmpeg.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (purpose, stage) (rate(opengeni_recording_stage_cpu_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])) / ignoring(stage) group_left sum by (purpose) (rate(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])) * 3600",
+          "legendFormat": "{{purpose}} {{stage}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Wall seconds per audio hour by stage",
+      "description": "Time each stage takes per hour of audio. Transcribe is waiting on the provider; diarize runs alongside it, so the slower of the two sets the pace.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (purpose, stage) (rate(opengeni_recording_stage_wall_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])) / ignoring(stage) group_left sum by (purpose) (rate(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])) * 3600",
+          "legendFormat": "{{purpose}} {{stage}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Cost per audio hour by path",
+      "description": "Provider list price and our compute per audio hour, by provider, model and who pays (deployment, workspace key, workspace subscription).",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (purpose, provider, model, funding) (increase(opengeni_recording_provider_cost_usd_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h])) / sum by (purpose, provider, model, funding) (increase(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h])) * 3600",
+          "legendFormat": "provider {{purpose}} {{provider}}/{{model}} ({{funding}})",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "(sum by (purpose, provider, model, funding) (increase(opengeni_recording_stage_cpu_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h])) / 3600 * $cpu_hour_usd + sum by (purpose, provider, model, funding) (increase(opengeni_recording_stage_memory_byte_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h])) / 3600 / 1073741824 * $memory_gb_hour_usd) / sum by (purpose, provider, model, funding) (increase(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h])) * 3600",
+          "legendFormat": "compute {{purpose}} {{provider}}/{{model}} ({{funding}})",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Load on the servers",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "title": "CPU: meetings next to everything else",
+      "description": "Cores used by the programs meetings run, next to the Opengeni processes themselves by workload. The worker's own share of meetings work (moving audio bytes, building transcripts) is inside its process line.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(opengeni_recording_stage_cpu_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval]))",
+          "legendFormat": "meetings programs",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (opengeni_workload_component) (rate(opengeni_process_cpu_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval]))",
+          "legendFormat": "{{opengeni_workload_component}} processes",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Memory: meetings next to everything else",
+      "description": "Average memory held by meetings programs (peak times run time, over time), next to the resident memory of the Opengeni processes.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(opengeni_recording_stage_memory_byte_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval]))",
+          "legendFormat": "meetings programs",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (opengeni_workload_component) (opengeni_process_resident_memory_bytes{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "{{opengeni_workload_component}} processes",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Peak memory per version by stage",
+      "description": "The most memory a stage's programs held at once while processing one version (p50 and max). Long meetings set the spikes.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, stage) (rate(opengeni_recording_stage_peak_memory_bytes_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{stage}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(opengeni_recording_stage_peak_memory_bytes_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{stage}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Queue and processing time",
+      "description": "Time from asking for a transcript to work starting on it, and how long one attempt takes (p95).",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, purpose) (rate(opengeni_recording_queue_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "queue p95 {{purpose}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, purpose, provider) (rate(opengeni_recording_processing_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "processing p95 {{purpose}} {{provider}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Audio transcribed",
+      "description": "Audio hours transcribed per hour, by purpose, provider and who pays.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (purpose, provider, funding) (rate(opengeni_recording_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval]))",
+          "legendFormat": "{{purpose}} {{provider}} ({{funding}})",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Recording length",
+      "description": "How long transcribed recordings are (p50 and p99), the shape of the load.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, purpose) (rate(opengeni_recording_audio_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{purpose}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, purpose) (rate(opengeni_recording_audio_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{purpose}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Quality next to cost",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 18,
+      "title": "Transcripts by outcome",
+      "description": "Versions completed, failed or retried, by provider. A cheaper path that fails more shows here.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (purpose, provider, outcome) (increase(opengeni_recording_transcripts_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h]))",
+          "legendFormat": "{{purpose}} {{provider}} {{outcome}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "Failures by error code",
+      "description": "Failed and retried attempts by their closed error code.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, outcome, error_code) (increase(opengeni_recording_transcripts_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=~\"failed|retry\"}[1h]))",
+          "legendFormat": "{{provider}} {{outcome}} {{error_code}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Re-runs per completed transcript",
+      "description": "How often people ask for a transcript again, by model: the clearest sign one wasn't good enough.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, model) (increase(opengeni_recording_transcript_reruns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1d])) / clamp_min(sum by (provider, model) (increase(opengeni_recording_transcripts_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"complete\"}[1d])), 1)",
+          "legendFormat": "{{provider}}/{{model}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "How speakers were told apart",
+      "description": "Completed meetings by diarization source; fallbacks are tracks where our speaker models failed and the model's speakers were used.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, diarization) (increase(opengeni_recording_diarization_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h]))",
+          "legendFormat": "{{provider}} {{diarization}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (provider) (increase(opengeni_recording_diarizer_fallbacks_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h]))",
+          "legendFormat": "fallback {{provider}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Speakers per meeting",
+      "description": "Speakers found per completed meeting (p50 and p90).",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, provider) (rate(opengeni_recording_speakers_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h])))",
+          "legendFormat": "p50 {{provider}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_recording_speakers_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h])))",
+          "legendFormat": "p90 {{provider}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Live transcript and storage",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 24,
+      "title": "Live transcript audio and cost",
+      "description": "Audio streamed to live models (hours per hour) and its list-price spend per hour. The client streams to the provider directly, so this costs the servers almost nothing.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 65
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, model, funding) (rate(opengeni_recording_live_audio_seconds_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval]))",
+          "legendFormat": "audio {{provider}}/{{model}} ({{funding}})",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (provider, model, funding) (increase(opengeni_recording_live_cost_usd_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h]))",
+          "legendFormat": "USD/h {{provider}}/{{model}} ({{funding}})",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "title": "Live sessions by outcome",
+      "description": "Live transcript sessions asked for, by outcome.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 65
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, outcome) (increase(opengeni_recording_live_sessions_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h]))",
+          "legendFormat": "{{provider}} {{outcome}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "title": "Audio written to storage",
+      "description": "Bytes per hour of uploaded chunks and prepared files.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 65
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (increase(opengeni_recording_stored_bytes_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[1h]))",
+          "legendFormat": "{{kind}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["opengeni", "observability", "meetings"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_recording_transcripts_total, namespace)",
+          "refId": "namespace"
+        },
+        "definition": "label_values(opengeni_recording_transcripts_total, namespace)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "environment",
+        "label": "Environment",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_recording_transcripts_total{namespace=\"$namespace\"}, environment)",
+          "refId": "environment"
+        },
+        "definition": "label_values(opengeni_recording_transcripts_total{namespace=\"$namespace\"}, environment)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "release",
+        "label": "Release",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_recording_transcripts_total{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+          "refId": "release"
+        },
+        "definition": "label_values(opengeni_recording_transcripts_total{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "cpu_hour_usd",
+        "label": "USD per vCPU-hour",
+        "description": "On-demand price of one vCPU for an hour on the cloud this runs on (default: a general-purpose custom VM's per-vCPU rate).",
+        "type": "textbox",
+        "query": "0.0316",
+        "current": {
+          "text": "0.0316",
+          "value": "0.0316"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "0.0316",
+            "value": "0.0316"
+          }
+        ],
+        "hide": 0
+      },
+      {
+        "name": "memory_gb_hour_usd",
+        "label": "USD per GB-hour",
+        "description": "On-demand price of one GB of memory for an hour (default: the same VM's per-GB rate).",
+        "type": "textbox",
+        "query": "0.0042",
+        "current": {
+          "text": "0.0042",
+          "value": "0.0042"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "0.0042",
+            "value": "0.0042"
+          }
+        ],
+        "hide": 0
+      },
+      {
+        "name": "storage_gb_month_usd",
+        "label": "USD per GB-month",
+        "description": "Object storage price per GB kept for a month.",
+        "type": "textbox",
+        "query": "0.02",
+        "current": {
+          "text": "0.02",
+          "value": "0.02"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "0.02",
+            "value": "0.02"
+          }
+        ],
+        "hide": 0
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Opengeni · Meetings & Transcription",
+  "uid": "opengeni-meetings-transcription",
+  "version": 1
+}

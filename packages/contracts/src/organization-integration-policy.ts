@@ -1,36 +1,56 @@
+import * as primitives from "./primitives";
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Catalog identities, never endpoint/domain matching. Custom transports are explicit categories. */
-export const OrganizationIntegrationKey = z
-  .string()
-  .min(1)
-  .max(200)
-  .regex(/^[a-z0-9][a-z0-9._:-]*$/);
-const keys = z
-  .array(OrganizationIntegrationKey)
-  .max(10000)
-  .refine((values) => new Set(values).size === values.length, "Duplicate integration identities");
-export const OrganizationIntegrationPolicy = z
-  .object({
-    mode: z.enum(["unrestricted", "restricted"]).default("unrestricted"),
-    allowedIntegrationKeys: keys.default([]),
-    revision: z.number().int().nonnegative().safe().default(0),
-  })
-  .strict();
+export const OrganizationIntegrationKey = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(200)
+    .regex(/^[a-z0-9][a-z0-9._:-]*$/),
+);
+const keys = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(OrganizationIntegrationKey)
+    .max(10000)
+    .refine((values) => new Set(values).size === values.length, "Duplicate integration identities"),
+);
+/**
+ * Who may turn on integrations: members (turning on a reviewed OAuth
+ * integration for personal accounts with the personal setup permission, and
+ * adding any integration with `connections:write`), or only integration
+ * admins. Admins are unaffected.
+ */
+export const PersonalIntegrationSetupPolicy = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["members", "admins"]),
+);
+export type PersonalIntegrationSetupPolicy = z.infer<typeof PersonalIntegrationSetupPolicy>;
+
+export const OrganizationIntegrationPolicy = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      mode: z.enum(["unrestricted", "restricted"]).default("unrestricted"),
+      allowedIntegrationKeys: keys.default([]),
+      personalIntegrationSetup: PersonalIntegrationSetupPolicy.default("members"),
+      revision: primitives.nonnegativeInteger.safe().default(0),
+    })
+    .strict(),
+);
 export type OrganizationIntegrationPolicy = z.infer<typeof OrganizationIntegrationPolicy>;
 
-export const UpdateOrganizationIntegrationPolicyRequest = z
-  .object({
-    mode: z.enum(["unrestricted", "restricted"]),
-    allowedIntegrationKeys: keys,
-    expectedRevision: z
-      .number()
-      .int()
-      .nonnegative()
-      .max(Number.MAX_SAFE_INTEGER - 1),
-    operationId: z.string().uuid(),
-  })
-  .strict();
+export const UpdateOrganizationIntegrationPolicyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      mode: z.enum(["unrestricted", "restricted"]),
+      allowedIntegrationKeys: keys,
+      /** Omitted keeps the current setting. */
+      personalIntegrationSetup: PersonalIntegrationSetupPolicy.optional(),
+      expectedRevision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER - 1),
+      operationId: primitives.uuid,
+    })
+    .strict(),
+);
 export type UpdateOrganizationIntegrationPolicyRequest = z.infer<
   typeof UpdateOrganizationIntegrationPolicyRequest
 >;

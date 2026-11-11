@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { AttachedBrowserBridge, AttachedBrowserDevice } from "@opengeni/sdk/interaction";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EmbeddedBrowserInteractionClientLike } from "../client";
@@ -7,7 +8,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseAttachedBrowsersOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseAttachedBrowsersOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   includeDisconnected?: boolean | undefined;
   pollIntervalMs?: number | undefined;
@@ -24,7 +25,7 @@ export type UseAttachedBrowsersResult = {
 };
 
 /** Workspace-wide inventory of Chrome profiles currently connected through an
- * enrolled OpenGeni machine. BrowserSessions remain the execution authority. */
+ * enrolled Opengeni machine. BrowserSessions remain the execution authority. */
 export function useAttachedBrowsers(
   options: UseAttachedBrowsersOptions = {},
 ): UseAttachedBrowsersResult {
@@ -155,4 +156,4 @@ function timestamp(value: string): number {
 }
 
 /** Exported for narrow proxy implementations and tests. */
-export type AttachedBrowsersClient = EmbeddedBrowserInteractionClientLike;
+export type AttachedBrowsersClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

@@ -1,12 +1,39 @@
 import { describe, expect, test } from "bun:test";
 import { openGeniConsolePath, parseOpenGeniLink, isReservedOpenGeniLink } from "../src/index";
+import { parseRetainedFileReference } from "../src/message-links";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 const EDITABLE = "0123456789ABCDEF0123456789abcdef";
 const UUID = "22222222-2222-4222-8222-222222222222";
 
 describe("parseOpenGeniLink", () => {
-  test("classifies every agent-authored OpenGeni object link", () => {
+  test("an editable artifact reference uses the current workspace, not the file resolver", () => {
+    for (const href of [`artifact:${EDITABLE}`, `ARTIFACT:${EDITABLE.toUpperCase()}`]) {
+      const target = parseOpenGeniLink(href);
+      expect(target).toEqual({
+        kind: "editable-artifact",
+        artifactId: EDITABLE.toLowerCase(),
+        workspaceId: null,
+      });
+      expect(openGeniConsolePath(target!, WS)).toBe(
+        `/workspaces/${WS}/artifacts/editable/${EDITABLE.toLowerCase()}`,
+      );
+      expect(parseRetainedFileReference(href)).toBeNull();
+    }
+    for (const id of [
+      EDITABLE.slice(1),
+      EDITABLE + "0",
+      "g" + EDITABLE.slice(1),
+      EDITABLE + "/",
+      EDITABLE + "?version=2",
+      EDITABLE + "#top",
+    ]) {
+      expect(parseOpenGeniLink(`artifact:${id}`)).toBeNull();
+      expect(isReservedOpenGeniLink(`artifact:${id}`)).toBe(true);
+    }
+  });
+
+  test("classifies every agent-authored Opengeni object link", () => {
     expect(parseOpenGeniLink(`artifact:${UUID}`)).toEqual({
       kind: "file",
       fileId: UUID,
@@ -90,5 +117,28 @@ describe("parseOpenGeniLink", () => {
     expect(isReservedOpenGeniLink(`/workspaces/${WS}/artifacts/%65ditable/not-hex`)).toBe(true);
     expect(isReservedOpenGeniLink(`https://external.test${path}`)).toBe(false);
     expect(isReservedOpenGeniLink(`/workspaces/${WS}/settings`)).toBe(false);
+  });
+
+  test("a session reference names another chat in the same workspace", () => {
+    const upper = UUID.toUpperCase();
+    expect(parseOpenGeniLink(`session:${upper}`)).toEqual({
+      kind: "session",
+      sessionId: UUID,
+      workspaceId: null,
+    });
+    expect(parseOpenGeniLink(`SESSION:${UUID}`)).toEqual(parseOpenGeniLink(`session:${UUID}`));
+    expect(openGeniConsolePath(parseOpenGeniLink(`session:${UUID}`)!, WS)).toBe(
+      `/workspaces/${WS}/sessions/${UUID}`,
+    );
+    for (const href of [
+      "session:",
+      "session:not-an-id",
+      `session:${UUID}/events`,
+      `session:${UUID}x`,
+    ]) {
+      expect(parseOpenGeniLink(href)).toBeNull();
+      // A malformed reference is still reserved: it never navigates on the host origin.
+      expect(isReservedOpenGeniLink(href)).toBe(true);
+    }
   });
 });

@@ -1,0 +1,603 @@
+// Pure session-list presentation shared by the web app (rail and recent
+// sessions) and native renderers: relative-time labels, recency bucketing
+// (Today / Yesterday / Previous 7 days / Older), the running-first ordering
+// rule, status tones and the compact row metadata. No DOM, no React.
+import {
+  deriveAutomaticSessionTitlePreview,
+  deriveSessionDisplayTitle,
+  sessionTitleIsPending,
+  type ClientModel,
+  type ChatSession as Session,
+  type SessionListEntry,
+  type ChatSessionLineageResponse as SessionLineageResponse,
+  type SessionStatus,
+} from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
+import { findPickerRow, type PickerModelRow } from "./model-policy";
+import { sessionDisplayStatus, type SessionDisplayStatus } from "./session-status-model";
+import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
+
+// Title ranking shared with the web command menu, so chat search on every
+// surface orders matches the same way.
+export { foldForSearch, LOOSE_MATCH_BELOW, rankLabel } from "./app/lib/actions/rank";
+
+/** A list row may be a compact page entry or a complete session response. */
+export type SessionListRow = Session | SessionListEntry;
+
+/**
+ * The title shown for a session: durable agent/user metadata once available,
+ * otherwise a bounded opening-prompt preview while automatic naming is still
+ * pending. Every list, header and row reads identically.
+ */
+export function sessionDisplayTitle(session: SessionListRow): string {
+  return "displayTitle" in session ? session.displayTitle : deriveSessionDisplayTitle(session);
+}
+
+/** The maximum length a session title may be renamed to. */
+export const SESSION_TITLE_MAX_LENGTH = 200;
+
+/**
+ * The value a rename editor seeds from. A safe provisional prompt preview is
+ * editable because it is also what the user sees; the UUID-derived reference
+ * remains an empty draft rather than becoming an accidental rename.
+ */
+export function sessionRenameSeed(session: SessionListRow): string {
+  if ("renameSeed" in session) return session.renameSeed;
+  if (!sessionTitleIsPending(session)) {
+    return session.title?.trim() || "";
+  }
+  return deriveAutomaticSessionTitlePreview(session.initialMessage) ?? "";
+}
+
+/**
+ * Resolve a submitted draft against the current display title. Returns the
+ * trimmed title to persist, or `null` when the edit is a no-op (empty,
+ * unchanged from what is already shown, or still equal to the value that
+ * seeded this edit) and should simply cancel.
+ */
+export function resolveRenameSubmission(
+  draft: string,
+  display: string,
+  editSeed?: string,
+): string | null {
+  const next = draft.trim();
+  if (!next || next === display || (editSeed !== undefined && next === editSeed.trim())) {
+    return null;
+  }
+  return next;
+}
+
+export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
+
+export const SESSION_GROUP_LABELS = (t: OpenGeniText): Record<SessionRecencyGroup, string> => ({
+  today: t("sessionListModel.today"),
+  yesterday: t("sessionListModel.yesterday"),
+  previous7: t("sessionListModel.previous7Days"),
+  older: t("sessionListModel.older"),
+});
+
+/** The render order of recency groups, top → bottom. */
+export const SESSION_GROUP_ORDER: SessionRecencyGroup[] = [
+  "today",
+  "yesterday",
+  "previous7",
+  "older",
+];
+
+/** Live states that earn the pinned-to-top, breathing-dot treatment. */
+const RUNNING_STATUSES = new Set<SessionStatus>([
+  "running",
+  "queued",
+  "waiting_capacity",
+  "recovering",
+  "requires_action",
+]);
+
+export function isRunningStatus(status: SessionStatus): boolean {
+  return RUNNING_STATUSES.has(status);
+}
+
+/** An idle session waiting on its own timer, while its control is active. */
+export function sessionInputWait(
+  session: Pick<SessionListRow, "status" | "effectiveControl" | "inputWait">,
+) {
+  return session.status === "idle" && session.effectiveControl?.state === "active"
+    ? (session.inputWait ?? null)
+    : null;
+}
+
+/**
+ * A schedule targeting this session can still start a run. Paused schedules
+ * and one-time schedules whose time has passed are not upcoming. Servers
+ * without the field keep the earlier any-schedule meaning.
+ */
+export function sessionHasUpcomingSchedule(
+  session: Pick<SessionListRow, "hasSchedules" | "hasUpcomingSchedules">,
+): boolean {
+  return session.hasUpcomingSchedules ?? session.hasSchedules === true;
+}
+
+/**
+ * What an automation posting into this chat is waiting for: an event that can
+ * still arrive, or the schedule's next run. An event wins when both apply,
+ * because it can start a run at any moment; null when nothing will.
+ */
+export type SessionAutomationWait = "event" | "schedule";
+
+export function sessionAutomationWait(
+  session: Pick<SessionListRow, "hasSchedules" | "hasUpcomingSchedules" | "waitingForEvents">,
+): SessionAutomationWait | null {
+  if (session.waitingForEvents === true) return "event";
+  return sessionHasUpcomingSchedule(session) ? "schedule" : null;
+}
+
+/**
+ * The session with the automation facts of its lineage read, when that read
+ * carries them. The facts come from one read, so a newer lineage never pairs
+ * with an older session read (an older server sends no upcoming flag).
+ */
+export function withLineageAutomationFacts<S extends SessionListRow>(
+  session: S,
+  lineage:
+    | Pick<
+        SessionLineageResponse,
+        | "sessionHasSchedules"
+        | "sessionHasUpcomingSchedules"
+        | "sessionWaitingForEvents"
+        | "sessionAutomationWait"
+      >
+    | null
+    | undefined,
+): S {
+  const schedules = lineage?.sessionHasSchedules;
+  if (schedules === undefined) return session;
+  return {
+    ...session,
+    hasSchedules: schedules,
+    hasUpcomingSchedules: lineage?.sessionHasUpcomingSchedules ?? schedules,
+    waitingForEvents: lineage?.sessionWaitingForEvents ?? false,
+    automationWait: lineage?.sessionAutomationWait,
+  };
+}
+
+/**
+ * Something will wake this session on its own: the agent's timed wait, or
+ * an automation (a schedule's next run, or an event) that can still start a
+ * run. The composer keeps Pause available while one is pending.
+ */
+export function sessionHasPendingWake(
+  session: Pick<
+    SessionListRow,
+    | "status"
+    | "effectiveControl"
+    | "inputWait"
+    | "hasSchedules"
+    | "hasUpcomingSchedules"
+    | "waitingForEvents"
+  >,
+): boolean {
+  return sessionInputWait(session) !== null || sessionAutomationWait(session) !== null;
+}
+
+/** How a chat's automation wait reads in a tooltip, hover card or announcement. */
+export function sessionAutomationWaitLabel(t: OpenGeniText, wait: SessionAutomationWait): string {
+  return wait === "event" ? t("automations.wait.event") : t("automations.wait.schedule");
+}
+
+const english = createOpenGeniText();
+
+/** @deprecated English only. Use `sessionAutomationWaitLabel(t, wait)`, which follows the host's text. */
+export const SESSION_AUTOMATION_WAIT_LABEL: Record<SessionAutomationWait, string> = {
+  event: sessionAutomationWaitLabel(english, "event"),
+  schedule: sessionAutomationWaitLabel(english, "schedule"),
+};
+
+export function hasActiveEffectiveControl(session: SessionListRow): boolean {
+  return (session.effectiveControl?.state ?? "active") === "active";
+}
+
+export function isEffectivelyRunning(session: SessionListRow): boolean {
+  // Background commands have their own chat indicator, not agent working status.
+  return (
+    hasActiveEffectiveControl(session) &&
+    (isRunningStatus(session.status) || Boolean(sessionInputWait(session)))
+  );
+}
+
+/** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
+export function sessionActivityTime(session: SessionListRow): number {
+  const updated = Date.parse(session.updatedAt);
+  if (!Number.isNaN(updated)) {
+    return updated;
+  }
+  const created = Date.parse(session.createdAt);
+  return Number.isNaN(created) ? 0 : created;
+}
+
+/** Deterministic newest-first ordering for every flat or forest session list. */
+export function compareSessionActivity(left: SessionListRow, right: SessionListRow): number {
+  return sessionActivityTime(right) - sessionActivityTime(left) || right.id.localeCompare(left.id);
+}
+
+/** Deterministic personal-pin order: newest pin first, then descending id. */
+export function compareSessionPins(left: SessionListRow, right: SessionListRow): number {
+  const leftPinnedAt = Date.parse(left.pinnedAt ?? "");
+  const rightPinnedAt = Date.parse(right.pinnedAt ?? "");
+  const leftTime = Number.isNaN(leftPinnedAt) ? 0 : leftPinnedAt;
+  const rightTime = Number.isNaN(rightPinnedAt) ? 0 : rightPinnedAt;
+  return rightTime - leftTime || right.id.localeCompare(left.id);
+}
+
+/** Split explicit personal pins from ordinary rows without changing the input. */
+export function partitionPinnedSessions<T extends SessionListRow>(
+  sessions: T[],
+): {
+  pinned: T[];
+  ordinary: T[];
+} {
+  const pinned: T[] = [];
+  const ordinary: T[] = [];
+  for (const session of sessions) {
+    (session.pinned ? pinned : ordinary).push(session);
+  }
+  return { pinned: pinned.sort(compareSessionPins), ordinary };
+}
+
+/** A pin-aware list as the session page returns it: the person's pins, then ordinary rows. */
+export type PinnedSessionLists<T extends SessionListRow> = {
+  pinned: T[];
+  sessions: T[];
+};
+
+/** The personal pin fields a pin change or a newer read carries. */
+export type SessionPinProjection = Pick<Session, "id"> &
+  Partial<Pick<Session, "pinned" | "pinnedAt" | "pinVersion">>;
+
+/**
+ * Apply one session's pin state to a pin-aware list: the row moves between the
+ * pinned section (newest pin first) and the ordinary rows (newest activity
+ * first). Pin revisions are monotonic, so a projection older than the row
+ * already shown (a slow response after a newer change) leaves the lists as
+ * they are, unless it is `authoritative` (a fresh read after a failed change,
+ * which replaces an optimistic revision). A session in neither list is left out.
+ */
+export function applySessionPinToLists<T extends SessionListRow>(
+  lists: PinnedSessionLists<T>,
+  projection: SessionPinProjection,
+  options: { authoritative?: boolean } = {},
+): PinnedSessionLists<T> {
+  const current =
+    lists.pinned.find((row) => row.id === projection.id) ??
+    lists.sessions.find((row) => row.id === projection.id);
+  if (!current) return lists;
+  const pinVersion = projection.pinVersion ?? current.pinVersion ?? 0;
+  if (!options.authoritative && pinVersion < (current.pinVersion ?? 0)) return lists;
+  const pinned = Boolean(projection.pinned);
+  const next = {
+    ...current,
+    pinned,
+    pinnedAt: pinned ? (projection.pinnedAt ?? current.pinnedAt ?? null) : null,
+    pinVersion,
+  } as T;
+  const others = (rows: T[]) => rows.filter((row) => row.id !== projection.id);
+  return pinned
+    ? {
+        pinned: [...others(lists.pinned), next].sort(compareSessionPins),
+        sessions: others(lists.sessions),
+      }
+    : {
+        pinned: others(lists.pinned),
+        sessions: [...others(lists.sessions), next].sort(compareSessionActivity),
+      };
+}
+
+/**
+ * Which recency bucket a timestamp falls into, relative to `now`. "Today" and
+ * "Yesterday" are calendar-local; "Previous 7 days" is the rest of the trailing
+ * week; everything earlier is "Older".
+ */
+export function recencyGroupFor(timestampMs: number, now: Date = new Date()): SessionRecencyGroup {
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
+  const startOfWeekWindow = startOfToday - 7 * 24 * 60 * 60 * 1000;
+  if (timestampMs >= startOfToday) {
+    return "today";
+  }
+  if (timestampMs >= startOfYesterday) {
+    return "yesterday";
+  }
+  if (timestampMs >= startOfWeekWindow) {
+    return "previous7";
+  }
+  return "older";
+}
+
+export type SessionRecencyBucket<T extends SessionListRow = SessionListRow> = {
+  group: SessionRecencyGroup;
+  label: string;
+  sessions: T[];
+};
+
+export type GroupedSessions<T extends SessionListRow = SessionListRow> = {
+  /** Running sessions, pinned above every recency group, most-recent first. */
+  running: T[];
+  /** Non-running sessions bucketed by recency (empty buckets dropped). */
+  grouped: SessionRecencyBucket<T>[];
+};
+
+/**
+ * Order + bucket the sessions for the rail. Running sessions are lifted into a
+ * synthetic, always-first position regardless of recency (rendered with a
+ * "running" marker); the remainder are bucketed by recency, most-recent first
+ * within each bucket. Empty groups are dropped.
+ */
+export function groupSessionsForRail<T extends SessionListRow>(
+  t: OpenGeniText,
+  sessions: T[],
+  now: Date = new Date(),
+): GroupedSessions<T> {
+  const running = sessions.filter(isEffectivelyRunning).sort(compareSessionActivity);
+  const rest = sessions
+    .filter((session) => !isEffectivelyRunning(session))
+    .sort(compareSessionActivity);
+
+  const buckets = new Map<SessionRecencyGroup, T[]>();
+  for (const session of rest) {
+    const group = recencyGroupFor(sessionActivityTime(session), now);
+    const list = buckets.get(group) ?? [];
+    list.push(session);
+    buckets.set(group, list);
+  }
+
+  const grouped: SessionRecencyBucket<T>[] = [];
+  for (const group of SESSION_GROUP_ORDER) {
+    const list = buckets.get(group);
+    if (list && list.length > 0) {
+      grouped.push({
+        group,
+        label: SESSION_GROUP_LABELS(t)[group],
+        sessions: list,
+      });
+    }
+  }
+  return { running, grouped };
+}
+
+export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = new Date()): string {
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) {
+    return "";
+  }
+  const diffSeconds = Math.max(0, Math.floor((now.getTime() - timestamp) / 1000));
+  if (diffSeconds < 45) {
+    return "now";
+  }
+  // 45 to 59 seconds reads as a minute, never "0m".
+  const minutes = Math.max(1, Math.floor(diffSeconds / 60));
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h`;
+  }
+  // Past a day, count calendar days in the viewer's time zone, like the long
+  // form ("4 days ago"), so both read the same for the same chat.
+  const days = Math.max(1, localCalendarDaysBetween(new Date(timestamp), now));
+  if (days < 7) {
+    return `${days}d`;
+  }
+  return new Date(timestamp).toLocaleDateString(t.locale, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function localCalendarDaysBetween(from: Date, to: Date): number {
+  const start = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const end = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.round((end - start) / 86_400_000);
+}
+
+/** Codex subscription product ids are prefixed `codex/`. */
+export function isCodexProductModel(modelId: string): boolean {
+  return modelId.startsWith("codex/");
+}
+
+export type SessionStatusTone = "queued" | "running" | "waiting" | "idle" | "failed" | "cancelled";
+
+export const SESSION_STATUS_TONE: Record<SessionDisplayStatus, SessionStatusTone> = {
+  queued: "queued",
+  running: "running",
+  recovering: "running",
+  waiting_capacity: "waiting",
+  requires_action: "waiting",
+  blocked: "failed",
+  idle: "idle",
+  failed: "failed",
+  cancelled: "cancelled",
+  archived: "cancelled",
+};
+
+/** The status dot of a recent-session row: a background command reads as running. */
+export function recentSessionStatus(
+  session: Pick<
+    SessionListRow,
+    "status" | "backgroundCommandActivity" | "admissionBlock" | "archived" | "retention"
+  >,
+): { tone: SessionStatusTone; pulse: boolean } {
+  const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;
+  return {
+    tone: hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[sessionDisplayStatus(session)],
+    pulse: hasBackgroundCommand || session.status === "running",
+  };
+}
+
+/** A short `owner/repo` label from the session's first repository resource. */
+export function sessionRepoLabel(session: Pick<Session, "resources">): string | null {
+  const repo = session.resources.find((resource) => resource.kind === "repository");
+  if (!repo || repo.kind !== "repository") {
+    return null;
+  }
+  const parts = repo.uri
+    .replace(/\.git$/, "")
+    .split("/")
+    .filter(Boolean);
+  return parts.length >= 2 ? parts.slice(-2).join("/") : (parts.at(-1) ?? null);
+}
+
+export function recentSessionModelPresentation<TCatalog extends ClientModel>(
+  modelId: string,
+  catalogRows: readonly PickerModelRow<TCatalog>[],
+): {
+  label: string;
+  billingClass: PickerModelRow["billingClass"];
+  logoUrl?: string | undefined;
+} {
+  const row = findPickerRow([...catalogRows], modelId);
+  return {
+    label: row?.label ?? modelDisplayName(modelId),
+    logoUrl: row?.catalog.logoUrl,
+    billingClass:
+      row?.billingClass ??
+      (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
+  };
+}
+
+/**
+ * The home screen's recent sessions: server pins first, then running, then
+ * recency buckets, capped. `sessions` keeps the all-visible-row contract, so
+ * its pins are removed before recombining the explicit pinned section.
+ */
+export function recentSessionsForHome<T extends SessionListRow>(
+  t: OpenGeniText,
+  sessions: T[],
+  pinned: T[],
+  limit = 6,
+  now: Date = new Date(),
+): T[] {
+  // Sub-agent sessions are reached from their parent. In a workspace that runs
+  // many sub-agents they would otherwise take every slot (they run often) and
+  // push the person's own conversations out of the list. A pinned one stays:
+  // pinning says the person works with it as an agent of its own.
+  const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
+  const { running, grouped } = groupSessionsForRail(t, ordinary, now);
+  return [...pinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, limit);
+}
+
+/** A chat the person opened in this app, as the app remembers it across reloads. */
+export type OpenedChat = Readonly<{ id: string; title: string; openedAt: number }>;
+
+/** One row of the home screen's recent sessions: a listed session, or a chat known only as opened. */
+export type RecentHomeEntry<T> =
+  | Readonly<{ kind: "session"; session: T }>
+  | Readonly<{ kind: "opened"; chat: OpenedChat }>;
+
+/**
+ * The home screen's recent sessions, led by the chats the person opened here
+ * most recently (newest first), then `recentSessionsForHome`'s pins, running
+ * and recency rows. In a busy workspace, other running sessions would
+ * otherwise fill every slot and hide the chat they just left. An opened chat
+ * the list also holds shows as that row, with its live status.
+ */
+export function recentSessionsWithOpened<T extends SessionListRow>(
+  t: OpenGeniText,
+  sessions: T[],
+  pinned: T[],
+  opened: readonly OpenedChat[],
+  limit = 6,
+  now: Date = new Date(),
+): RecentHomeEntry<T>[] {
+  const listed = new Map<string, T>();
+  for (const session of [...sessions, ...pinned]) listed.set(session.id, session);
+  const entries: RecentHomeEntry<T>[] = [];
+  const seen = new Set<string>();
+  for (const chat of opened) {
+    if (entries.length >= limit) break;
+    if (seen.has(chat.id)) continue;
+    seen.add(chat.id);
+    const session = listed.get(chat.id);
+    entries.push(session ? { kind: "session", session } : { kind: "opened", chat });
+  }
+  for (const session of recentSessionsForHome(t, sessions, pinned, limit, now)) {
+    if (entries.length >= limit) break;
+    if (seen.has(session.id)) continue;
+    seen.add(session.id);
+    entries.push({ kind: "session", session });
+  }
+  return entries;
+}
+
+/**
+ * The phone home screen's chats in two sections: every pinned conversation,
+ * then the most recently used others (running first, then by recency), so
+ * pins never push recent work off the screen. Sub-agent sessions are reached
+ * from their parent and are left out of the recent ones; a pinned sub-agent
+ * session is pinned like any other.
+ */
+export function homeSessionSections<T extends SessionListRow>(
+  t: OpenGeniText,
+  sessions: T[],
+  pinned: T[],
+  recentLimit = 15,
+  now: Date = new Date(),
+): { pinned: T[]; recent: T[] } {
+  const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
+  const { running, grouped } = groupSessionsForRail(t, ordinary, now);
+  return {
+    pinned,
+    recent: [...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, recentLimit),
+  };
+}
+
+/** One project (workspace channel) and its sessions, as the web rail groups them. */
+export type SessionProjectSection<T extends SessionListRow = SessionListRow> = {
+  /** The channel id, or "default" for unfiled sessions. */
+  key: string;
+  channelId: string | null;
+  name: string;
+  sessions: T[];
+};
+
+/**
+ * Group top-level sessions by project in the server's project order (pinned
+ * projects first), then "Default" for unfiled ones and those whose project no
+ * longer exists. Running sessions lead each project, then the most recent.
+ * Sub-agent sessions are reached from their parent, so they are left out.
+ * Projects without sessions are kept only when `keepEmpty` is set.
+ */
+export function groupSessionsByProject<T extends SessionListRow & { channelId?: string | null }>(
+  sessions: readonly T[],
+  projects: readonly { id: string; name: string }[],
+  options: { keepEmpty?: boolean } = {},
+): SessionProjectSection<T>[] {
+  const known = new Set(projects.map((project) => project.id));
+  const byProject = new Map<string | null, T[]>();
+  for (const session of sessions) {
+    if ("parentSessionId" in session && session.parentSessionId) continue;
+    const channelId = session.channelId ?? null;
+    const key = channelId !== null && known.has(channelId) ? channelId : null;
+    byProject.set(key, [...(byProject.get(key) ?? []), session]);
+  }
+  const order = (list: T[]) =>
+    [...list].sort(
+      (left, right) =>
+        Number(isEffectivelyRunning(right)) - Number(isEffectivelyRunning(left)) ||
+        compareSessionActivity(left, right),
+    );
+  const sections: SessionProjectSection<T>[] = projects
+    .map((project) => ({
+      key: project.id,
+      channelId: project.id,
+      name: project.name,
+      sessions: order(byProject.get(project.id) ?? []),
+    }))
+    .filter((section) => options.keepEmpty || section.sessions.length > 0);
+  const unfiled = byProject.get(null) ?? [];
+  if (unfiled.length > 0) {
+    sections.push({ key: "default", channelId: null, name: "Default", sessions: order(unfiled) });
+  }
+  return sections;
+}
+
+export { findPickerRow };

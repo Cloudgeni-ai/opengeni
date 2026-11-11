@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDirectory =
@@ -76,10 +77,10 @@ describe("public React demo mobile product acceptance", () => {
       const page = await context.newPage();
       const failures = observePageFailures(page);
       await page.goto(baseUrl, { waitUntil: "networkidle" });
-      await page.getByRole("heading", { name: "OpenGeni React demo" }).waitFor();
+      await page.getByRole("heading", { name: "Opengeni React demo" }).waitFor();
       await page.getByRole("heading", { name: "Staging operations" }).waitFor();
 
-      expect(await page.title()).toBe("OpenGeni React demo — durable agent sessions");
+      expect(await page.title()).toBe("Opengeni React demo — durable agent sessions");
       expect(await page.locator('meta[name="viewport"]').getAttribute("content")).toContain(
         "viewport-fit=cover",
       );
@@ -98,8 +99,8 @@ describe("public React demo mobile product acceptance", () => {
         await page.getByRole("heading", { name: "Fleet", exact: true }).waitFor();
         expect(new URL(page.url()).hash).toBe("#fleet");
 
-        await navigation.getByRole("button", { name: "Schedules", exact: true }).click();
-        await page.getByRole("heading", { name: "Scheduled tasks" }).waitFor();
+        await navigation.getByRole("button", { name: "Automations", exact: true }).click();
+        await page.getByRole("heading", { name: "Automations" }).waitFor();
         expect(new URL(page.url()).hash).toBe("#schedules");
 
         await navigation.getByRole("button", { name: "Workspace", exact: true }).click();
@@ -107,12 +108,12 @@ describe("public React demo mobile product acceptance", () => {
         expect(
           await page.getByRole("tab", { name: "Files", exact: true }).getAttribute("aria-selected"),
         ).toBe("true");
-        await page.getByRole("button", { name: "Close workspace" }).click();
+        await page.getByRole("button", { name: "Hide workspace" }).click();
         await visibleWorkspaceDialog(page).waitFor({ state: "hidden" });
       } else {
         expect(await page.getByRole("navigation", { name: "Demo views" }).count()).toBe(0);
         expect(await page.getByRole("heading", { name: "Fleet", exact: true }).count()).toBe(1);
-        expect(await page.getByRole("heading", { name: "Scheduled tasks" }).count()).toBe(1);
+        expect(await page.getByRole("heading", { name: "Automations" }).count()).toBe(1);
         expect(await page.locator("[data-workspace-surface]").count()).toBeGreaterThan(0);
       }
 
@@ -179,7 +180,8 @@ describe("public React demo mobile product acceptance", () => {
     const workspace = visibleWorkspaceDialog(page);
     await workspace.waitFor();
     expect(await page.evaluate(() => document.activeElement?.getAttribute("role"))).toBe("tab");
-    await page.keyboard.press("ArrowRight");
+    // The workspace panel tabs are a vertical tablist.
+    await page.keyboard.press("ArrowDown");
     expect(
       await page.getByRole("tab", { name: "Terminal", exact: true }).getAttribute("aria-selected"),
     ).toBe("true");
@@ -224,8 +226,8 @@ describe("public React demo mobile product acceptance", () => {
     expect(await page.evaluate(() => navigator.onLine)).toBe(false);
     await navigation.getByRole("button", { name: "Fleet", exact: true }).click();
     await page.getByRole("heading", { name: "Fleet", exact: true }).waitFor();
-    await navigation.getByRole("button", { name: "Schedules", exact: true }).click();
-    await page.getByRole("heading", { name: "Scheduled tasks" }).waitFor();
+    await navigation.getByRole("button", { name: "Automations", exact: true }).click();
+    await page.getByRole("heading", { name: "Automations" }).waitFor();
     await navigation.getByRole("button", { name: "Session", exact: true }).click();
     await page.getByRole("heading", { name: "Staging operations" }).waitFor();
     await textbox.fill("Keep the loaded scripted demo usable offline.");
@@ -237,6 +239,68 @@ describe("public React demo mobile product acceptance", () => {
     expect(failures).toEqual([]);
     await context.close();
   }, 90_000);
+
+  test("desktop composition commits text once with either final input event order", async () => {
+    for (const inputBeforeEnd of [false, true]) {
+      const page = await browser.newPage();
+      try {
+        await page.goto(`${baseUrl}/computer.html?mode=mock`);
+        const keyboard = page.getByRole("textbox", { name: "Desktop keyboard input" });
+        await page.waitForFunction(
+          () =>
+            document.querySelector<HTMLTextAreaElement>(
+              "textarea[aria-label='Desktop keyboard input']",
+            )?.disabled === false,
+        );
+        await keyboard.focus();
+        await page.evaluate(async () => {
+          const modulePath = "/mock.ts";
+          const { MockOpenGeniClient } = (await import(modulePath)) as {
+            MockOpenGeniClient: {
+              prototype: { actInComputer: (...args: unknown[]) => Promise<unknown> };
+            };
+          };
+          const state = window as typeof window & { desktopImeActions: unknown[] };
+          state.desktopImeActions = [];
+          const dispatch = MockOpenGeniClient.prototype.actInComputer;
+          MockOpenGeniClient.prototype.actInComputer = async function (
+            this: unknown,
+            ...args: unknown[]
+          ) {
+            state.desktopImeActions.push((args[2] as { action: unknown }).action);
+            return await Reflect.apply(dispatch, this, args);
+          };
+        });
+        await keyboard.evaluate((node: HTMLTextAreaElement) => {
+          node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+          node.value = "ni";
+          node.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+          node.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" }));
+        });
+        await page.waitForTimeout(40);
+        const actions = () =>
+          page.evaluate(
+            () => (window as typeof window & { desktopImeActions: unknown[] }).desktopImeActions,
+          );
+        expect(await actions()).toEqual([]);
+        await keyboard.evaluate((node: HTMLTextAreaElement, beforeEnd) => {
+          node.value = "你";
+          const finalInput = new InputEvent("input", { bubbles: true, data: "你" });
+          if (beforeEnd) node.dispatchEvent(finalInput);
+          node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "你" }));
+          if (!beforeEnd) node.dispatchEvent(finalInput);
+        }, inputBeforeEnd);
+        await page.waitForFunction(
+          () =>
+            (window as typeof window & { desktopImeActions: unknown[] }).desktopImeActions.length >
+            0,
+        );
+        expect(await actions()).toEqual([{ type: "keyboard", action: "type", value: "你" }]);
+      } finally {
+        await page.close();
+      }
+    }
+  }, 30_000);
 
   test("withheld script delivery shows a stable, accessible boot state before hydration", async () => {
     const context = await browser.newContext({
@@ -250,11 +314,11 @@ describe("public React demo mobile product acceptance", () => {
     const bootOnlyHtml = html.replace('<script type="module" src="/main.tsx"></script>', "");
     expect(bootOnlyHtml).not.toBe(html);
     await page.setContent(bootOnlyHtml, { waitUntil: "domcontentloaded" });
-    await page.getByRole("main", { name: "Loading OpenGeni React demo" }).waitFor();
+    await page.getByRole("main", { name: "Loading Opengeni React demo" }).waitFor();
     expect(await page.getByText("Loading the scripted manager session…").count()).toBe(1);
     expect(
       await page
-        .getByRole("main", { name: "Loading OpenGeni React demo" })
+        .getByRole("main", { name: "Loading Opengeni React demo" })
         .getAttribute("aria-busy"),
     ).toBe("true");
     await expectNoHorizontalOverflow(page);
@@ -263,7 +327,7 @@ describe("public React demo mobile product acceptance", () => {
 
     await page.goto(baseUrl, { waitUntil: "networkidle" });
     await page.getByRole("heading", { name: "Staging operations" }).waitFor();
-    expect(await page.getByRole("main", { name: "Loading OpenGeni React demo" }).count()).toBe(0);
+    expect(await page.getByRole("main", { name: "Loading Opengeni React demo" }).count()).toBe(0);
     await expectNoHorizontalOverflow(page);
     await context.close();
   }, 45_000);

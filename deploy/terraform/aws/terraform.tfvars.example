@@ -13,6 +13,11 @@ postgres = {
   deletion_protection = false
   skip_final_snapshot = true
   # existing_host = "postgres.example.com"
+
+  # Managed RDS admits the created VPC CIDR, or the EKS cluster security group
+  # when network.create_vpc = false. Add other clients explicitly:
+  # allowed_client_cidrs       = ["10.20.0.0/16"]
+  # allowed_security_group_ids = ["sg-0123456789abcdef0"]
 }
 
 temporal = {

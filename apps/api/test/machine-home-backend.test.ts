@@ -22,18 +22,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import postgres from "postgres";
-import {
-  testSettings,
-  MemoryEventBus,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   createDb,
   createEnrollment,
   createSandbox,
   claimEnrollmentConnection,
+  discardUninitializedSessionShell,
+  setWorkspaceMemberExecutionDefault,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -46,6 +45,7 @@ import {
 } from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { withChannelA } from "../src/sandbox/channel-a";
+import { resolveSessionAgentConfigForCreate } from "../../../packages/core/src/domain/agent-config-resolution";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -92,7 +92,7 @@ function busWithAgent(opts: {
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+                ping: { nonce: op.ping.nonce, agentMonotonicMs: "0", controlReplayTokens: [] },
               },
             }
           : op?.$case === "exec"
@@ -263,6 +263,325 @@ afterAll(async () => {
 }, 180_000);
 
 describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
+  test("new root sessions follow the workspace machine; explicit placement and keyed replay stay pinned", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: sandboxId },
+    })} where id = ${workspaceId}`;
+    const idempotencyKey = crypto.randomUUID();
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "use the workspace machine", idempotencyKey },
+    );
+    expect(session.activeSandboxId).toBe(sandboxId);
+    expect(session.sandboxBackend).toBe("selfhosted");
+    const explicit = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "explicitly use managed compute", sandboxBackend: "modal" },
+    );
+    expect(explicit.sandboxBackend).toBe("modal");
+    expect(explicit.activeSandboxId).toBeNull();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "managed" },
+    })} where id = ${workspaceId}`;
+    const replay = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "use the workspace machine", idempotencyKey },
+    );
+    expect(replay.id).toBe(session.id);
+    expect(replay.activeSandboxId).toBe(sandboxId);
+    const next = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "use the changed default" },
+    );
+    expect(next.sandboxBackend).toBe("modal");
+    expect(next.activeSandboxId).toBeNull();
+  }, 60_000);
+
+  test("an unavailable workspace default never falls back to another machine or persists a chat", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: crypto.randomUUID() },
+    })} where id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "must not run elsewhere",
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("default machine is unavailable"),
+    });
+    const [count] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+    expect(count?.count).toBe(0);
+  }, 60_000);
+
+  test("a Personal workspace's default can be its owner's own machine; a shared one's cannot", async () => {
+    if (!available) return;
+    const { accountId, workspaceId: personalWorkspaceId } = await freshWorkspace();
+    const [team] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${accountId}, 'team') returning id`;
+    const sharedWorkspaceId = team!.id;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${sharedWorkspaceId}, ${accountId})`;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${accountId}, 'subject', 'active', ${personalWorkspaceId}, 1)`;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${accountId}, ${personalWorkspaceId}, 'subject'),
+        (${accountId}, ${sharedWorkspaceId}, 'subject')`;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${personalWorkspaceId}, true),
+        set_config('opengeni.subject_id', 'subject', true),
+        set_config('opengeni.initiating_human_subject_id', 'subject', true)`;
+      const [row] = await tx<{ enrollmentId: string; sandboxId: string }[]>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${accountId}::uuid, ${personalWorkspaceId}::uuid, 'user',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'my laptop', false
+        )`;
+      return row!;
+    });
+    const connection = await claimEnrollmentConnection(db, {
+      workspaceId: personalWorkspaceId,
+      enrollmentId: machine.enrollmentId,
+      credentialGeneration: 1,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      leaseMs: 60_000,
+    });
+    expect(connection.claimed).toBe(true);
+    await admin`
+      update enrollments set last_seen_at = now(), workspace_root = '/srv/project'
+      where id = ${machine.enrollmentId}`;
+    const bus = busWithAgent({ workspaceId: personalWorkspaceId, agentId: machine.enrollmentId });
+    const defaultTarget = admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: machine.sandboxId },
+    });
+    await admin`
+      update workspaces set settings = settings || ${defaultTarget}
+      where id in (${personalWorkspaceId}, ${sharedWorkspaceId})`;
+
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, personalWorkspaceId),
+      personalWorkspaceId,
+      { initialMessage: "start on my own machine" },
+    );
+    expect(session.activeSandboxId).toBe(machine.sandboxId);
+    expect(session.sandboxBackend).toBe("selfhosted");
+
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, sharedWorkspaceId), sharedWorkspaceId, {
+        initialMessage: "a shared workspace never defaults to a personal machine",
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("default machine is unavailable"),
+    });
+  }, 60_000);
+
+  test("a person's own default places the chats they start in a shared workspace", async () => {
+    if (!available) return;
+    const { accountId, workspaceId: personalWorkspaceId } = await freshWorkspace();
+    const [team] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${accountId}, 'team') returning id`;
+    const sharedWorkspaceId = team!.id;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${sharedWorkspaceId}, ${accountId})`;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${accountId}, 'subject', 'active', ${personalWorkspaceId}, 1)`;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${accountId}, ${personalWorkspaceId}, 'subject'),
+        (${accountId}, ${sharedWorkspaceId}, 'subject')`;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${personalWorkspaceId}, true),
+        set_config('opengeni.subject_id', 'subject', true),
+        set_config('opengeni.initiating_human_subject_id', 'subject', true)`;
+      const [row] = await tx<{ enrollmentId: string; sandboxId: string }[]>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${accountId}::uuid, ${personalWorkspaceId}::uuid, 'user',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'my laptop', false
+        )`;
+      return row!;
+    });
+    const connection = await claimEnrollmentConnection(db, {
+      workspaceId: personalWorkspaceId,
+      enrollmentId: machine.enrollmentId,
+      credentialGeneration: 1,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      leaseMs: 60_000,
+    });
+    expect(connection.claimed).toBe(true);
+    await admin`
+      update enrollments set last_seen_at = now(), workspace_root = '/srv/project'
+      where id = ${machine.enrollmentId}`;
+    const bus = busWithAgent({ workspaceId: personalWorkspaceId, agentId: machine.enrollmentId });
+    const person: AccessGrant = {
+      ...grant(accountId, sharedWorkspaceId),
+      principalKind: "human_session",
+    };
+
+    // An unusable own default falls back to the workspace default.
+    await setWorkspaceMemberExecutionDefault(db, {
+      accountId,
+      workspaceId: sharedWorkspaceId,
+      subjectId: "subject",
+      target: { kind: "machine", targetSandboxId: crypto.randomUUID() },
+    });
+    const fallback = await createSessionForRequest(deps(bus), person, sharedWorkspaceId, {
+      initialMessage: "my default machine is gone",
+    });
+    expect(fallback.activeSandboxId).not.toBe(machine.sandboxId);
+
+    await setWorkspaceMemberExecutionDefault(db, {
+      accountId,
+      workspaceId: sharedWorkspaceId,
+      subjectId: "subject",
+      target: { kind: "machine", targetSandboxId: machine.sandboxId },
+    });
+    const own = await createSessionForRequest(deps(bus), person, sharedWorkspaceId, {
+      initialMessage: "start on my own machine in the team workspace",
+    });
+    expect(own.activeSandboxId).toBe(machine.sandboxId);
+    expect(own.sandboxBackend).toBe("selfhosted");
+
+    // Callers that are not the person in the app (API keys, automations) keep
+    // following the workspace default.
+    const api = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, sharedWorkspaceId),
+      sharedWorkspaceId,
+      { initialMessage: "an API caller follows the workspace default" },
+    );
+    expect(api.activeSandboxId).not.toBe(machine.sandboxId);
+  }, 60_000);
+
+  test("a saved workspace machine default fails when Connected Machine execution is disabled", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: sandboxId },
+    })} where id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(
+        deps(bus, testSettings({ ...settings, sandboxOwnershipEnabled: false })),
+        grant(accountId, workspaceId),
+        workspaceId,
+        { initialMessage: "must not silently run in a managed sandbox" },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+    const [count] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+    expect(count?.count).toBe(0);
+  }, 60_000);
+
+  test("workspace defaults cannot select another tenant's otherwise healthy machine", async () => {
+    if (!available) return;
+    const own = await seedMachine();
+    const foreign = await seedMachine();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: foreign.sandboxId },
+    })} where id = ${own.workspaceId}`;
+    await expect(
+      createSessionForRequest(
+        deps(own.bus),
+        grant(own.accountId, own.workspaceId),
+        own.workspaceId,
+        { initialMessage: "do not use foreign compute" },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
+
+  test.each([true, false])(
+    "pending keyed roots retain placement when the workspace default changes (machine=%s)",
+    async (onMachine) => {
+      if (!available) return;
+      const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+      const key = crypto.randomUUID();
+      await expect(
+        createAndStartSessionWithOutcome({
+          db,
+          bus,
+          workflowClient: stubWorkflowClient(),
+          accountId,
+          workspaceId,
+          initialMessage: "repair the original placement",
+          resources: [],
+          tools: [],
+          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+          model: settings.openaiModel,
+          reasoningEffort: settings.openaiReasoningEffort,
+          turnExecutionPolicy: resolveTurnExecutionPolicyV1(settings, {
+            modelId: settings.openaiModel,
+            requestedModelId: null,
+            modelSource: "deployment",
+            reasoningEffort: settings.openaiReasoningEffort,
+            reasoningSource: "deployment",
+          }),
+          sandboxBackend: onMachine ? "selfhosted" : "modal",
+          agentConfig: resolveSessionAgentConfigForCreate({
+            settings,
+            creator: "api",
+            request: undefined,
+            instructions: undefined,
+            workspaceSettings: {},
+            parent: null,
+            goal: false,
+          }).config,
+          metadata: {},
+          firstPartyMcpTools: [],
+          createIdempotencyKey: key,
+          ...(onMachine
+            ? { seedTargetSandbox: { sandboxId, workingDir: "original-folder", settings } }
+            : {}),
+          captureInitialTurnAuthority: async () => {
+            throw new Error("fixture stops after shell commit");
+          },
+        }),
+      ).rejects.toThrow("fixture stops after shell commit");
+      await admin`update workspaces set settings = settings || ${admin.json({
+        defaultExecutionTarget: onMachine
+          ? { kind: "managed" }
+          : { kind: "machine", targetSandboxId: sandboxId },
+      })} where id = ${workspaceId}`;
+      const repaired = await createSessionForRequest(
+        deps(bus),
+        grant(accountId, workspaceId),
+        workspaceId,
+        { initialMessage: "repair the original placement", idempotencyKey: key },
+      );
+      expect(repaired.sandboxBackend).toBe(onMachine ? "selfhosted" : "modal");
+      expect(repaired.activeSandboxId).toBe(onMachine ? sandboxId : null);
+      expect(repaired.workingDir).toBe(onMachine ? "/srv/project/original-folder" : null);
+      expect(repaired.initialTurnId).toBeTruthy();
+    },
+    60_000,
+  );
+
   test("a machine-targeted top-level create ⇒ home + first turn 'selfhosted'", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
@@ -404,6 +723,83 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(capturedInitialTurns).toHaveLength(1);
   }, 60_000);
 
+  test("an unkeyed start that fails before its first turn leaves no queued session behind", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const createInput = (options: { key?: string; failStart: boolean }) => ({
+      db,
+      bus,
+      workflowClient: stubWorkflowClient(),
+      accountId,
+      workspaceId,
+      initialMessage: "start me",
+      resources: [],
+      tools: [],
+      toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+      model: settings.openaiModel,
+      reasoningEffort: settings.openaiReasoningEffort,
+      turnExecutionPolicy: resolveTurnExecutionPolicyV1(settings, {
+        modelId: settings.openaiModel,
+        requestedModelId: null,
+        modelSource: "deployment",
+        reasoningEffort: settings.openaiReasoningEffort,
+        reasoningSource: "deployment",
+      }),
+      sandboxBackend: "modal" as const,
+      metadata: {},
+      firstPartyMcpTools: [],
+      ...(options.key ? { createIdempotencyKey: options.key } : {}),
+      captureInitialTurnAuthority: async () => {
+        if (options.failStart) {
+          throw Object.assign(new Error("permission denied for initial turn authority"), {
+            code: "42501",
+          });
+        }
+      },
+    });
+    const sessionCount = async () => {
+      const [row] = await admin<{ count: number }[]>`
+        select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+      return row?.count ?? -1;
+    };
+
+    await expect(
+      createAndStartSessionWithOutcome(createInput({ failStart: true })),
+    ).rejects.toThrow("permission denied for initial turn authority");
+    expect(await sessionCount()).toBe(0);
+
+    // An initialized session is never discarded.
+    const started = await createAndStartSessionWithOutcome(createInput({ failStart: false }));
+    expect(
+      await discardUninitializedSessionShell(db, {
+        accountId,
+        workspaceId,
+        sessionId: started.session.id,
+      }),
+    ).toBe("initialized");
+    expect(await sessionCount()).toBe(1);
+
+    // A keyed shell stays durable, and a retry with the same key repairs it.
+    const key = crypto.randomUUID();
+    await expect(
+      createAndStartSessionWithOutcome(createInput({ key, failStart: true })),
+    ).rejects.toThrow("permission denied for initial turn authority");
+    expect(await sessionCount()).toBe(2);
+    const retried = await createAndStartSessionWithOutcome(createInput({ key, failStart: false }));
+    expect(retried.outcome).toBe("repaired");
+    expect(retried.session.initialTurnId).toBeTruthy();
+    expect(await sessionCount()).toBe(2);
+    expect(
+      await discardUninitializedSessionShell(db, {
+        accountId,
+        workspaceId,
+        sessionId: retried.session.id,
+      }),
+    ).toBe("keyed");
+    expect(await sessionCount()).toBe(2);
+  }, 60_000);
+
   test("a direct terminal command without op-stream fails closed without a phantom lease", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
@@ -437,6 +833,60 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
         },
       ),
     ).rejects.toThrow(/streaming command protocol required for exec/iu);
+    const [leaseCount] = await admin<{ count: string }[]>`
+      select count(*)::text as count
+      from sandbox_leases
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${session.sandboxGroupId}`;
+    expect(leaseCount?.count).toBe("0");
+  }, 60_000);
+
+  test("a session without a home sandbox routes direct operations to its attached machine", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "use the machine I attach",
+        sandboxBackend: "none",
+      },
+    );
+    expect(session.sandboxBackend).toBe("none");
+    const direct = async () =>
+      await withChannelA(
+        { db, settings, bus },
+        { accountId, workspaceId, session, subjectId: "subject" },
+        async ({ service, lease }) => {
+          expect(lease).toBeNull();
+          return await service.terminalExec({
+            command: "echo machine-home-ok",
+            cwd: "",
+            timeoutMs: 1_000,
+            emitStream: false,
+          });
+        },
+      );
+    // Nothing attached: there is no machine and no home sandbox to use.
+    await expect(direct()).rejects.toThrow("sandbox not available");
+
+    const attached = await swapActiveSandbox(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        sessionBackend: session.sandboxBackend,
+        sessionGroupId: session.sandboxGroupId,
+        subjectId: "subject",
+      },
+      sandboxId,
+    );
+    expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandboxId });
+    // Attached: the operation reaches the machine (this fixture has no
+    // op-stream, so exec fails there) and never creates a cloud lease.
+    await expect(direct()).rejects.toThrow(/streaming command protocol required for exec/iu);
     const [leaseCount] = await admin<{ count: string }[]>`
       select count(*)::text as count
       from sandbox_leases
@@ -657,6 +1107,44 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     });
   }, 60_000);
 
+  test("a child naming its creator's own group inherits the creator's machine route", async () => {
+    if (!available) return;
+    const selfhostedOnly = testSettings({
+      ...settings,
+      sandboxBackend: "selfhosted",
+    });
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine("linux");
+    const parent = await createSessionForRequest(
+      deps(bus, selfhostedOnly),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the connected machine",
+        targetSandboxId: sandboxId,
+        workingDir: "workers/parent",
+      },
+    );
+    expect(parent.activeSandboxId).toBe(sandboxId);
+
+    const child = await createSessionForRequest(
+      deps(bus, selfhostedOnly),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "share my box by naming its group",
+        sandbox: { groupId: parent.sandboxGroupId },
+      },
+    );
+
+    expect(child).toMatchObject({
+      parentSessionId: parent.id,
+      sandboxBackend: "selfhosted",
+      sandboxGroupId: parent.sandboxGroupId,
+      activeSandboxId: sandboxId,
+      workingDir: parent.workingDir,
+    });
+  }, 60_000);
+
   test("an omitted child placement inherits a backend:'none' parent's active machine route", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
@@ -797,5 +1285,209 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       message:
         "targetSandboxId requires an own sandbox (omit sandbox or pass 'new'); it cannot join a shared group",
     });
+  }, 60_000);
+});
+
+describe("create-time sandbox backend gate", () => {
+  async function sessionCount(workspaceId: string): Promise<number> {
+    const [row] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+    return row?.count ?? 0;
+  }
+
+  test("a cloud deployment refuses host and unconfigured backends before persisting anything", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the cloud box",
+      },
+    );
+    const before = await sessionCount(workspaceId);
+    for (const sandboxBackend of ["local", "docker", "compute", "daytona"] as const) {
+      // Top-level create.
+      await expect(
+        createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+          initialMessage: "run on the host",
+          sandboxBackend,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining(
+          `sandboxBackend "${sandboxBackend}" is not available in this deployment.`,
+        ),
+      });
+      // An agent-spawned child asking for its own box, with or without 'new'.
+      for (const sandbox of [undefined, "new"] as const) {
+        await expect(
+          createSessionForRequest(
+            deps(bus),
+            grant(accountId, workspaceId, parent.id),
+            workspaceId,
+            {
+              initialMessage: "run the worker on the host",
+              sandboxBackend,
+              ...(sandbox ? { sandbox } : {}),
+            },
+          ),
+        ).rejects.toMatchObject({ status: 422 });
+      }
+    }
+    expect(await sessionCount(workspaceId)).toBe(before);
+  }, 60_000);
+
+  test("served backends, shared children, 'new' children and machine targets are unchanged", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the cloud box",
+        sandboxBackend: "modal",
+      },
+    );
+    expect(parent.sandboxBackend).toBe("modal");
+    const boxless = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "no box needed",
+        sandboxBackend: "none",
+      },
+    );
+    expect(boxless.sandboxBackend).toBe("none");
+    const sharedChild = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "share the parent's box" },
+    );
+    expect(sharedChild.sandboxGroupId).toBe(parent.sandboxGroupId);
+    expect(sharedChild.sandboxBackend).toBe("modal");
+    const own = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "isolated worker", sandbox: "new" },
+    );
+    expect(own.sandboxGroupId).toBe(own.id);
+    expect(own.sandboxBackend).toBe("modal");
+    const machine = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "worker on the machine", targetSandboxId: sandboxId },
+    );
+    expect(machine.sandboxBackend).toBe("selfhosted");
+    expect(machine.activeSandboxId).toBe(sandboxId);
+  }, 60_000);
+
+  test("a provider with configured credentials is served beside the default", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const withCompute = testSettings({
+      ...settings,
+      computeApiUrl: "https://compute.example",
+      computeApiKey: "test-compute-key",
+    });
+    const session = await createSessionForRequest(
+      deps(bus, withCompute),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "use compute", sandboxBackend: "compute" },
+    );
+    expect(session.sandboxBackend).toBe("compute");
+    await expect(
+      createSessionForRequest(deps(bus, withCompute), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "still not the host",
+        sandboxBackend: "local",
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
+
+  test("a keyed retry of an initialized create replays even after its backend stops being served", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const withCompute = testSettings({
+      ...settings,
+      computeApiUrl: "https://compute.example",
+      computeApiKey: "test-compute-key",
+    });
+    const request = {
+      initialMessage: "use compute",
+      sandboxBackend: "compute" as const,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const created = await createSessionForRequest(
+      deps(bus, withCompute),
+      grant(accountId, workspaceId),
+      workspaceId,
+      request,
+    );
+    const replay = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      request,
+    );
+    expect(replay.id).toBe(created.id);
+    expect(replay.sandboxBackend).toBe("compute");
+    // A fresh key is a new create and is refused.
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        ...request,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
+
+  test("a keyed retry that finishes its pending shell keeps the backend that row passed with", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const withCompute = testSettings({
+      ...settings,
+      computeApiUrl: "https://compute.example",
+      computeApiKey: "test-compute-key",
+    });
+    const request = {
+      initialMessage: "use compute",
+      sandboxBackend: "compute" as const,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const created = await createSessionForRequest(
+      deps(bus, withCompute),
+      grant(accountId, workspaceId),
+      workspaceId,
+      request,
+    );
+    // Model a create that inserted its keyed shell but crashed before the
+    // session.created event: the retry finds a pending shell, not a session.
+    await admin`
+      delete from session_events
+      where workspace_id = ${workspaceId} and session_id = ${created.id}`;
+    const before = await sessionCount(workspaceId);
+    const retried = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      request,
+    );
+    expect(retried.id).toBe(created.id);
+    expect(retried.sandboxBackend).toBe("compute");
+    expect(await sessionCount(workspaceId)).toBe(before);
+    // A fresh create naming an unserved backend is still refused.
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        ...request,
+        idempotencyKey: crypto.randomUUID(),
+        sandboxBackend: "local",
+      }),
+    ).rejects.toMatchObject({ status: 422 });
   }, 60_000);
 });

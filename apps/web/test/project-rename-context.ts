@@ -1,7 +1,8 @@
-import { SessionChannelProjectionAuthority } from "../src/lib/session-pins";
-import type { AppContextValue } from "../src/context";
+import { SessionChannelProjectionAuthority } from "@opengeni/react/app/lib/session-pins";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 import type { OpenGeniClient } from "@opengeni/sdk";
-import type { Session } from "../src/types";
+import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
+import type { Session } from "@opengeni/react/app/types";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 let project = {
@@ -24,6 +25,7 @@ function session(channelId: string | null, number: number, title: string): Sessi
     id: `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`,
     workspaceId,
     title,
+    metadata: {},
     channelId,
     parentSessionId: null,
     createdAt: new Date(Date.now() - number * 60_000).toISOString(),
@@ -106,13 +108,27 @@ export const client = {
     return { ...project };
   },
 } as unknown as OpenGeniClient;
+client.listSessionSummaryPage = async (workspace, options) => {
+  const page = await client.listSessionPage(workspace, options);
+  return {
+    ...page,
+    projection: "summary",
+    sessions: page.sessions.map(sessionListEntry),
+    pinned: page.pinned.map(sessionListEntry),
+  };
+};
 const context = {
   client,
   session: null,
-  accessContext: { subjectId: "rename-qa" },
+  // Rows read the viewer's workspace grants to label their archive action.
+  accessContext: { subjectId: "rename-qa", accountGrants: [], workspaceGrants: [] },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
+  clientConfig: {},
   setSession: () => {},
   resetSessionView: () => {},
 } as unknown as AppContextValue;
 export const useAppContext = () => context;
+export const useOptionalAppContext = () => context;
 export const useRail = () => ({ workspaceId, setDrawerOpen: () => {} });
+// The settings shell reads the rail where it may be absent; it has no sidebar state here.
+export const useOptionalRail = () => null;

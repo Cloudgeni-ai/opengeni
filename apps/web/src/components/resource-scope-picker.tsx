@@ -1,6 +1,6 @@
 import { Building2Icon, UserRoundIcon, UsersRoundIcon } from "lucide-react";
 
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 export type ResourceScope = "organization" | "workspace" | "user";
 

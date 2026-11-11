@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, firefox, webkit, type Browser } from "playwright";
 
 const engine = process.env.OPENGENI_ACCOUNT_BROWSER_ENGINE ?? "chromium";

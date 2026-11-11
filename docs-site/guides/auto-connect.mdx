@@ -1,0 +1,124 @@
+---
+title: "Auto-connect"
+description: "Connect everyone's AI apps to Opengeni, and Opengeni to your organization's MCP apps, with no sign-in screens."
+icon: "plug"
+---
+
+Auto-connect skips the sign-in and consent screen when someone connects an AI
+app. An identity issuer your organization already trusts vouches for the
+person with a short-lived signed assertion (an ID-JAG), and the app on the
+other side trusts that issuer. It follows the MCP
+[Enterprise-Managed Authorization](https://modelcontextprotocol.io/extensions/auth/enterprise-managed-authorization)
+extension and works in both directions:
+
+- **Into Opengeni:** people in your Claude Team or Enterprise organization, or
+  people who sign in through your identity provider, have their agent
+  connected to Opengeni the first time they use it.
+- **Out of Opengeni:** an organization connector set to connect everyone
+  automatically gives each member their own account in an outside MCP app,
+  with no sign-in, the first time they use it.
+
+Owners and admins set it up. Members don't need to do anything.
+
+## Connect Claude to Opengeni
+
+You need to be an owner or admin in Opengeni and an Owner or Primary Owner in
+Claude. If your Claude organization signs in through Okta, Claude-issued
+auto-connect isn't available there: follow
+[Connect through your identity provider](#connect-through-your-identity-provider)
+and choose **IdP-managed** in Claude.
+
+<Steps>
+  <Step title="Start in Opengeni">
+    Open **Organization settings → Connected agents**, choose **Set up auto-connect**, then
+    **Claude**. Keep this page open: it shows the **Server URL** and **Tenant ID** to copy.
+  </Step>
+  <Step title="Add Opengeni to Claude">
+    In Claude's organization settings, add a custom connector with the **Server URL**. Open the
+    connector, click **Set up** on its **Managed authorization** row, choose **Claude-issued**, and
+    enter the **Tenant ID**.
+  </Step>
+  <Step title="Trust Claude's issuer">
+    Claude then shows an **Issuer URL**, unique to your Claude organization. Paste it into **Issuer
+    URL** in Opengeni. Opengeni checks it right away and shows how many signing keys it found.
+  </Step>
+  <Step title="Choose access and turn it on">
+    Choose what each person's agent can do and in which workspaces, then **Turn on auto-connect**.
+    Back in Claude, click **Run test** under **Connection status**.
+  </Step>
+</Steps>
+
+From then on, the first time someone in your Claude organization uses
+Opengeni there, Claude connects them as themselves. Opengeni matches them by
+their verified email to an active member of your organization, so they need
+an Opengeni account in it first; auto-connect never creates accounts or adds
+members. Each connection appears in **Connected agents** as
+**Auto-connected**.
+
+<Note>
+  Claude-issued auto-connect is in beta at Anthropic, on Claude Team and Enterprise plans.
+</Note>
+
+## Connect through your identity provider
+
+Choose **Okta** or **Other** instead of Claude. Copy the **Server URL**,
+**Tenant ID** and **Audience** into your identity provider's setup for
+Opengeni (in Okta, Cross App Access with the Server URL as the resource), and
+paste the provider's issuer URL into Opengeni exactly as it publishes it.
+
+Under **Advanced** you can:
+
+- allow only some apps, by their client IDs, one per line;
+- give a key set URL, when the issuer's keys can't be found from its issuer
+  URL.
+
+## Manage an issuer
+
+Open an issuer from **Connected agents** to:
+
+- change what agents connected through it can do, and where. The change
+  applies to everyone it already connected;
+- see **Recent attempts**: each app and person that connected, or the reason
+  one was refused, such as an email with no matching member;
+- turn it off or remove it, which disconnects everyone it connected.
+
+Disconnecting one auto-connected agent works like any other, but the app
+connects it again the next time the person uses it. To stop that, turn off
+the issuer or remove the person from the organization.
+
+## Connect everyone to an outside app
+
+Some MCP apps accept assertions from issuers they trust. For those, an
+organization connector can connect every member automatically:
+
+<Steps>
+  <Step title="Add the connector">
+    Open **Organization settings → Integrations**, add a connector and choose **Connect everyone
+    automatically**. Opengeni checks that the app supports it first.
+  </Step>
+  <Step title="Trust Opengeni in the app">
+    The connector's page shows your organization's **Issuer URL** and Opengeni's **Client ID**.
+    Enter them in the app's settings for trusted (ID-JAG) issuers. If the app gave you its own
+    client ID for Opengeni, choose **Change** under **Client ID** and enter it.
+  </Step>
+  <Step title="Test it">
+    Choose **Test as you**. Opengeni connects you without saving anything and shows the app's answer
+    when it refuses.
+  </Step>
+</Steps>
+
+Each member then gets their own account the first time an agent uses the app,
+or when they choose **Connect**. If the app refuses someone, they see the
+usual sign-in instead.
+
+## How it stays safe
+
+- An assertion is accepted only when it is signed by an issuer your
+  organization turned on, names Opengeni as its audience and your
+  organization as its tenant, and matches the app that sends it. Each
+  assertion is short-lived and works once.
+- People are matched by verified email to existing members only.
+- There are no refresh tokens: access ends when the issuer stops vouching,
+  the issuer is turned off, or the person leaves the organization.
+- Opengeni's own issuer has a separate signing key per organization, kept
+  encrypted, and signs only for members with a verified email.

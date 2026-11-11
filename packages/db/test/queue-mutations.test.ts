@@ -2,8 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ReasoningEffort, ResourceRef, ToolRef } from "@opengeni/contracts";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
+  addSessionSystemUpdate,
   applySessionTurnSettlement,
   appendSessionEvents,
   bootstrapWorkspace,
@@ -14,12 +15,15 @@ import {
   editQueuedTurnInTransaction,
   enqueueSessionTurn,
   evaluateSessionControl,
+  getComposerDraftInTransaction,
   getScheduledTargetSessionExecution,
   getSessionTurn,
   getSession,
   listSessions,
   listFloorSessions,
   getSessionQueueSnapshot,
+  getSessionQueueMonitoringSummary,
+  hasPendingSteerForTurn,
   listSessionTurns,
   markSessionAttemptQuiesced,
   moveQueuedTurnInTransaction,
@@ -33,11 +37,15 @@ import {
   settleSessionAttemptInterruptions,
   steerQueuedTurnInTransaction,
   submitHumanPromptInTransaction,
+  withEffectiveComposerDraftPolicy,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
-import { withEffectiveSessionPolicy } from "../src/session-execution-policy";
+import {
+  withEffectiveSessionPolicy,
+  withSessionListModelPolicy,
+} from "../src/session-execution-policy";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -53,6 +61,23 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 60_000);
+
+// Exercise both readers across the existing edit/delete/Steer/interruption cases.
+async function readQueueWithMonitoringParity(...args: Parameters<typeof getSessionQueueSnapshot>) {
+  const full = await getSessionQueueSnapshot(...args);
+  const summary = await getSessionQueueMonitoringSummary(...args);
+  expect(summary).toEqual(
+    full
+      ? {
+          effectiveControl: full.effectiveControl,
+          queuedTurns: full.items.length,
+          pendingInputs: full.pendingInputs.length,
+          stoppingPreviousAttempt: full.stoppingPreviousAttempt,
+        }
+      : null,
+  );
+  return full;
+}
 
 async function fixture(count = 3) {
   const suffix = crypto.randomUUID();
@@ -144,6 +169,347 @@ async function storedEvents(workspaceId: string, eventIds: string[]) {
 }
 
 describe("latest started session policy", () => {
+  test("a child-result wake uses the submitted composer's model and reasoning", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const scope = {
+      accountId: value.grant.accountId,
+      workspaceId,
+      sessionId: value.session.id,
+      subjectId: value.grant.subjectId,
+    };
+    const desired = {
+      model: "chosen-model",
+      reasoningEffort: "high" as const,
+      latencyMode: "standard" as const,
+    };
+    await withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, async (db) => {
+      const draft = await saveComposerDraftInTransaction(db, {
+        ...scope,
+        expectedRevision: 0,
+        text: "use this model from now on",
+        resources: [],
+        ...desired,
+      });
+      await submitHumanPromptInTransaction(db, {
+        ...scope,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        expectedDraftRevision: draft.revision,
+        text: draft.text,
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+        ...desired,
+      });
+    });
+    const claim = () =>
+      claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId: value.session.id,
+        workflowId: `session-${value.session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+    const first = await claim();
+    if (first.action !== "claimed") throw new Error("composer turn was not claimed");
+    expect(first.turn).toMatchObject(desired);
+    await applySessionTurnSettlement(client.db, workspaceId, {
+      sessionId: value.session.id,
+      turnId: first.turn.id,
+      triggerEventId: first.turn.triggerEventId,
+      attemptId: first.turn.activeAttemptId!,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const childSessionId = crypto.randomUUID();
+    await addSessionSystemUpdate(client.db, {
+      ...scope,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: childSessionId,
+      dedupeKey: `child:${childSessionId}`,
+      summary: "Child completed",
+      payload: { type: "child_terminal_result", childSessionId, status: "idle" },
+      lineage: {
+        parentSessionId: value.session.id,
+        parentTurnId: first.turn.id,
+        childSessionId,
+      },
+    });
+    const automatic = await claim();
+    expect(automatic).toMatchObject({ action: "claimed", turn: { ...desired, source: "system" } });
+  });
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`composer ${delivery} atomically saves future defaults without rewriting accepted work`, async () => {
+      const value = await fixture(0);
+      const workspaceId = value.grant.workspaceId!;
+      const scope = {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        subjectId: value.grant.subjectId,
+      };
+      const submit = (override = {}) =>
+        withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+          submitHumanPromptInTransaction(db, {
+            ...scope,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "follow up",
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+            ...override,
+          }),
+        );
+      const storedPolicy = async () =>
+        (
+          await shared.admin`select model, reasoning_effort as "reasoningEffort",
+          latency_mode as "latencyMode" from sessions where id = ${value.session.id}`
+        )[0];
+      const original = {
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+      };
+      const old = await submit({ model: "old-model", reasoningEffort: "low" });
+      expect(await storedPolicy()).toEqual(original);
+      const desired = {
+        model: "new-model",
+        reasoningEffort: "high" as const,
+        latencyMode: "priority" as const,
+      };
+      const draft = await withWorkspaceSubjectRls(
+        client.db,
+        workspaceId,
+        value.grant.subjectId,
+        (db) =>
+          saveComposerDraftInTransaction(db, {
+            ...scope,
+            expectedRevision: 0,
+            text: "follow up",
+            resources: [],
+            ...desired,
+          }),
+      );
+      // Merely choosing a model (autosaving) does not change the chat.
+      expect(await storedPolicy()).toEqual(original);
+      const request = {
+        ...desired,
+        delivery,
+        operationKey: crypto.randomUUID(),
+        expectedDraftRevision: draft.revision,
+      };
+      expect(await storedPolicy()).toEqual(original);
+
+      const accepted = await submit(request);
+      expect(accepted.draft).toMatchObject({ ...desired, text: "" });
+      expect(await storedPolicy()).toEqual(desired);
+      expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+      expect(await storedEvents(workspaceId, accepted.eventIds)).toContainEqual(
+        expect.objectContaining({
+          type: "session.model_settings.updated",
+          payload: expect.objectContaining({ ...desired, receiptId: accepted.receipt.id }),
+        }),
+      );
+      // An older queued turn can start after the new choice, but cannot undo it.
+      await appendSessionEvents(client.db, workspaceId, value.session.id, [
+        { type: "turn.started", turnId: old.turnId, payload: {} },
+      ]);
+      expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+      expect(await getSessionTurn(client.db, workspaceId, old.turnId)).toMatchObject({
+        model: "old-model",
+        reasoningEffort: "low",
+      });
+      expect(
+        await getScheduledTargetSessionExecution(client.db, workspaceId, value.session.id),
+      ).toMatchObject(desired);
+      const inherited = await submit();
+      expect(await getSessionTurn(client.db, workspaceId, inherited.turnId)).toMatchObject(desired);
+
+      const later = { model: "later-choice", reasoningEffort: "low" as const };
+      await withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        setSessionModelInTransaction(db, {
+          ...scope,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          ...later,
+        }),
+      );
+      expect(await submit(request)).toMatchObject({ replay: true, turnId: accepted.turnId });
+      expect(await storedPolicy()).toMatchObject(later);
+      expect(await getSessionTurn(client.db, workspaceId, accepted.turnId)).toMatchObject(desired);
+    });
+  }
+
+  test("a Send that names no settings leaves the chat's defaults alone, whatever the saved draft holds", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const scope = {
+      accountId: value.grant.accountId,
+      workspaceId,
+      sessionId: value.session.id,
+      subjectId: value.grant.subjectId,
+    };
+    const storedPolicy = async () =>
+      (
+        await shared.admin`select model, reasoning_effort as "reasoningEffort",
+        latency_mode as "latencyMode" from sessions where id = ${value.session.id}`
+      )[0];
+    const original = await storedPolicy();
+    // Another device pinned a model in the draft; this one sends without one.
+    const draft = await withWorkspaceSubjectRls(
+      client.db,
+      workspaceId,
+      value.grant.subjectId,
+      (db) =>
+        saveComposerDraftInTransaction(db, {
+          ...scope,
+          expectedRevision: 0,
+          text: "follow up",
+          resources: [],
+          model: "pinned-elsewhere",
+          reasoningEffort: "high",
+          latencyMode: "priority",
+        }),
+    );
+    const accepted = await withWorkspaceSubjectRls(
+      client.db,
+      workspaceId,
+      value.grant.subjectId,
+      (db) =>
+        submitHumanPromptInTransaction(db, {
+          ...scope,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "follow up",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+          expectedDraftRevision: draft.revision,
+        }),
+    );
+    expect(accepted.draft).toMatchObject({ text: "" });
+    expect(await storedPolicy()).toEqual(original);
+    expect(await storedEvents(workspaceId, accepted.eventIds)).not.toContainEqual(
+      expect.objectContaining({ type: "session.model_settings.updated" }),
+    );
+  });
+
+  test("a draft without a pick follows the chat, so an agent's model switch survives the next Send", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const scope = {
+      accountId: value.grant.accountId,
+      workspaceId,
+      sessionId: value.session.id,
+      subjectId: value.grant.subjectId,
+    };
+    const save = (expectedRevision: number, text: string, pick = {}) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        saveComposerDraftInTransaction(db, {
+          ...scope,
+          expectedRevision,
+          text,
+          resources: [],
+          ...pick,
+        }),
+      );
+    const submit = (expectedDraftRevision: number, text: string, pick = {}) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        submitHumanPromptInTransaction(db, {
+          ...scope,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          expectedDraftRevision,
+          text,
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+          ...pick,
+        }),
+      );
+    const read = () =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, async (db) =>
+        withEffectiveComposerDraftPolicy(db, await getComposerDraftInTransaction(db, scope)),
+      );
+    const storedModel = async () =>
+      (await shared.admin`select model from sessions where id = ${value.session.id}`)[0]?.model;
+
+    const typed = await save(0, "first");
+    expect(typed).toMatchObject({ policyFollowsSession: true, model: "scripted-model" });
+    const first = await submit(typed.revision, "first");
+    expect(first.draft).toMatchObject({ policyFollowsSession: true, text: "" });
+    // A Send that made no choice leaves the chat's settings alone.
+    expect(
+      (await storedEvents(workspaceId, first.eventIds)).map((event) => event.type),
+    ).not.toContain("session.model_settings.updated");
+
+    // The agent switches the chat's model while the person's draft is open.
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: "free-model",
+        reasoningEffort: "medium",
+      }),
+    );
+    expect(await read()).toMatchObject({ policyFollowsSession: true, model: "free-model" });
+    const next = await save(first.draft!.revision, "second");
+    expect(next).toMatchObject({ policyFollowsSession: true, model: "free-model" });
+    // A Send that names a model runs that message on it, but a draft that made
+    // no pick does not change the chat's settings, so the agent's switch stays.
+    const named = await submit(next.revision, "second", { model: "scripted-model" });
+    expect(await getSessionTurn(client.db, workspaceId, named.turnId)).toMatchObject({
+      model: "scripted-model",
+    });
+    expect(await storedModel()).toBe("free-model");
+    const second = await submit(named.draft!.revision, "second");
+    expect(await getSessionTurn(client.db, workspaceId, second.turnId)).toMatchObject({
+      model: "free-model",
+    });
+    expect(await storedModel()).toBe("free-model");
+
+    // A person's pick still wins: it is saved as a pick and becomes the chat's model.
+    const picked = await save(second.draft!.revision, "third", {
+      model: "picked-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
+    expect(picked).toMatchObject({ policyFollowsSession: false, model: "picked-model" });
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: "free-model-2",
+        reasoningEffort: "medium",
+      }),
+    );
+    expect(await read()).toMatchObject({ policyFollowsSession: false, model: "picked-model" });
+    const third = await submit(picked.revision, "third", {
+      model: "picked-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
+    expect(await storedModel()).toBe("picked-model");
+    expect(third.draft).toMatchObject({ policyFollowsSession: true, model: "picked-model" });
+  });
+
   test("an explicit settings boundary survives older accepted turns starting later", async () => {
     const value = await fixture(0);
     const workspaceId = value.grant.workspaceId!;
@@ -329,6 +695,307 @@ describe("latest started session policy", () => {
   });
 });
 
+describe("compact list model policy", () => {
+  test("names the latest started turn's model unless a settings write is newer", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const listPolicy = async () => {
+      const [projected] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+        withSessionListModelPolicy(db, workspaceId, [value.session]),
+      );
+      return { model: projected!.model, reasoningEffort: projected!.reasoningEffort };
+    };
+    const startTurn = async (model: string, reasoningEffort: ReasoningEffort) => {
+      const accepted = await withWorkspaceSubjectRls(
+        client.db,
+        workspaceId,
+        value.grant.subjectId,
+        (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId: value.grant.accountId,
+            workspaceId,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "follow up",
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+            model,
+            reasoningEffort,
+          }),
+      );
+      await appendSessionEvents(client.db, workspaceId, value.session.id, [
+        { type: "turn.started", turnId: accepted.turnId, payload: {} },
+      ]);
+    };
+
+    // Nothing has run yet: the stored creation defaults.
+    expect(await listPolicy()).toEqual({ model: "scripted-model", reasoningEffort: "medium" });
+
+    await startTurn("composer-model", "max");
+    expect(await listPolicy()).toEqual({ model: "composer-model", reasoningEffort: "max" });
+
+    // An explicit settings change after that turn is the current model.
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: "settings-model",
+        reasoningEffort: "low",
+      }),
+    );
+    expect(await listPolicy()).toEqual({ model: "settings-model", reasoningEffort: "low" });
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject({
+      model: "settings-model",
+      reasoningEffort: "low",
+    });
+
+    await startTurn("next-model", "high");
+    expect(await listPolicy()).toEqual({ model: "next-model", reasoningEffort: "high" });
+    // Detail reads agree for ordinary human turns.
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject({
+      model: "next-model",
+      reasoningEffort: "high",
+    });
+
+    // Imported history carries start events without turn rows. The projection
+    // probes only the latest start, so it falls back to the stored defaults
+    // instead of scanning back for an older start that has a turn row.
+    await appendSessionEvents(
+      client.db,
+      workspaceId,
+      value.session.id,
+      Array.from({ length: 50 }, () => ({
+        type: "turn.started",
+        turnId: crypto.randomUUID(),
+        payload: {},
+      })),
+    );
+    expect(await listPolicy()).toEqual({ model: "settings-model", reasoningEffort: "low" });
+  });
+});
+
+describe("steer_or_send: the server chooses Steer or Send with the turn state", () => {
+  type Fixture = Awaited<ReturnType<typeof fixture>>;
+  const submit = async (
+    value: Fixture,
+    delivery: "send" | "steer" | "steer_or_send",
+    text: string,
+    operationKey: string = crypto.randomUUID(),
+    /** The request fingerprint the API derives from the request, delivery included. */
+    boundaryRequestHash?: string,
+  ) =>
+    await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey,
+            ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
+            delivery,
+            text,
+            resources: [],
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+  const claimNext = async (value: Fixture) => {
+    const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      workflowId: `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`nothing claimed: ${claimed.reason}`);
+    return claimed.turn;
+  };
+  const acceptedPayload = async (value: Fixture, result: Awaited<ReturnType<typeof submit>>) =>
+    (await storedEvents(value.grant.workspaceId!, [result.acceptedEventId]))[0]?.payload;
+  const storedTurn = async (value: Fixture, turnId: string) =>
+    (
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        db.select().from(schema.sessionTurns).where(eq(schema.sessionTurns.id, turnId)),
+      )
+    )[0]!;
+  const pendingSteerFor = async (value: Fixture, turnId: string) =>
+    await hasPendingSteerForTurn(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.session.id,
+      turnId,
+    });
+  /** A chat whose first message is accepted and claimed: its turn runs. */
+  const runningChat = async () => {
+    const value = await fixture(0);
+    const first = await submit(value, "steer_or_send", "first message");
+    expect(first.routing).toBe("accepted_for_execution");
+    expect(await acceptedPayload(value, first)).toMatchObject({
+      delivery: "send",
+      routing: "accepted_for_execution",
+    });
+    const running = await claimNext(value);
+    expect(running.id).toBe(first.turnId);
+    return { value, running };
+  };
+
+  test("a follow-up sent while the turn runs reaches it, even from a sender that saw the chat idle", async () => {
+    // The race: the turn started seconds ago, but the sender's copy of the
+    // session still shows it idle. A client that chose from that copy sent a
+    // plain Send, which waits behind the running turn and runs on its own.
+    const stale = await runningChat();
+    const staleSend = await submit(stale.value, "send", "short follow-up");
+    expect(staleSend.routing).toBe("queued_for_execution");
+    expect(await pendingSteerFor(stale.value, stale.running.id)).toBe(false);
+
+    // With `steer_or_send` the server decides, under the turn's own locks.
+    const { value, running } = await runningChat();
+    const followUp = await submit(value, "steer_or_send", "short follow-up");
+    expect(followUp.routing).toBe("accepted_for_steering");
+    expect(await acceptedPayload(value, followUp)).toMatchObject({
+      delivery: "steer",
+      routing: "accepted_for_steering",
+    });
+    expect((await storedTurn(value, followUp.turnId)).metadata).toMatchObject({
+      delivery: "steer",
+      replacedTurnId: running.id,
+      deferredUntilModelStep: true,
+      interruptionCount: 0,
+    });
+    // The running turn keeps going and hands over at its next model step.
+    expect(await pendingSteerFor(value, running.id)).toBe(true);
+    const session = await getSession(client.db, value.grant.workspaceId!, value.session.id);
+    expect(session).toMatchObject({ activeTurnId: running.id, status: "running" });
+  });
+
+  test("a follow-up to a turn that is just starting steers it once it starts", async () => {
+    const value = await fixture(0);
+    const first = await submit(value, "steer_or_send", "first message");
+    expect(first.routing).toBe("accepted_for_execution");
+    // Accepted, not yet claimed: no turn is current, but one is about to start.
+    const followUp = await submit(value, "steer_or_send", "and also this");
+    expect(followUp.routing).toBe("accepted_for_steering");
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([first.turnId, followUp.turnId]);
+    const another = await submit(value, "steer_or_send", "one more");
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([first.turnId, followUp.turnId, another.turnId]);
+    // The first message starts first and, finding the Steers pending, hands
+    // over before its first model request; they are then read together.
+    const started = await claimNext(value);
+    expect(started.id).toBe(first.turnId);
+    expect(await pendingSteerFor(value, started.id)).toBe(true);
+  });
+
+  test("with nothing running it starts a turn, including just after a turn finished", async () => {
+    const { value, running } = await runningChat();
+    await applySessionTurnSettlement(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      turnId: running.id,
+      triggerEventId: running.triggerEventId,
+      attemptId: running.activeAttemptId!,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const next = await submit(value, "steer_or_send", "next question");
+    expect(next.routing).toBe("accepted_for_execution");
+    expect(await acceptedPayload(value, next)).toMatchObject({ delivery: "send" });
+    expect((await storedTurn(value, next.turnId)).metadata).not.toHaveProperty("delivery");
+  });
+
+  test("a paused chat keeps it waiting, as a Send, and is not resumed", async () => {
+    const value = await fixture(0);
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId!,
+          sessionId: value.session.id,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    const waiting = await submit(value, "steer_or_send", "for later");
+    expect(waiting.routing).toBe("queued_for_execution");
+    expect(waiting.workspaceControlEventId).toBeNull();
+    expect(await acceptedPayload(value, waiting)).toMatchObject({ delivery: "send" });
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, value.grant.workspaceId!, value.session.id),
+      ),
+    ).toMatchObject({ state: "paused" });
+  });
+
+  test("an exact retry replays the server's first decision, and another delivery is refused", async () => {
+    const { value, running } = await runningChat();
+    const operationKey = crypto.randomUUID();
+    const fingerprint = (delivery: string) => `prompt-boundary-test:${delivery}:follow-up`;
+    const steered = await submit(
+      value,
+      "steer_or_send",
+      "follow-up",
+      operationKey,
+      fingerprint("steer_or_send"),
+    );
+    expect(steered).toMatchObject({ routing: "accepted_for_steering", replay: false });
+    // The turn finishes before the uncertain client retries: the retry still
+    // returns the original Steer instead of deciding again.
+    await applySessionTurnSettlement(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      turnId: running.id,
+      triggerEventId: running.triggerEventId,
+      attemptId: running.activeAttemptId!,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const retried = await submit(
+      value,
+      "steer_or_send",
+      "follow-up",
+      operationKey,
+      fingerprint("steer_or_send"),
+    );
+    expect(retried).toMatchObject({
+      routing: "accepted_for_steering",
+      replay: true,
+      turnId: steered.turnId,
+      acceptedEventId: steered.acceptedEventId,
+    });
+    await expect(
+      submit(value, "steer", "follow-up", operationKey, fingerprint("steer")),
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
+    await expect(
+      submit(value, "send", "follow-up", operationKey, fingerprint("send")),
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
+  });
+});
+
 describe("canonical queue commands", () => {
   test("projects only prompts admitted to wait behind work into the visible queue", async () => {
     const value = await fixture(0);
@@ -369,14 +1036,15 @@ describe("canonical queue commands", () => {
       ),
     ).toEqual([{ promptRouting: "accepted_for_execution" }]);
     expect(
-      (await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id))?.items,
+      (await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id))
+        ?.items,
     ).toEqual([]);
 
     const waiting = await submit("run second", "send");
     expect(waiting.routing).toBe("queued_for_execution");
     expect(
       (
-        await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id)
+        await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id)
       )?.items.map((turn) => turn.id),
     ).toEqual([waiting.turnId]);
 
@@ -384,7 +1052,7 @@ describe("canonical queue commands", () => {
     expect(steer.routing).toBe("accepted_for_steering");
     expect(
       (
-        await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id)
+        await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id)
       )?.items.map((turn) => turn.id),
     ).toEqual([waiting.turnId]);
   });
@@ -660,7 +1328,7 @@ describe("canonical queue commands", () => {
     expect(publicTurns.find((turn) => turn.id === submitted.turnId)).not.toHaveProperty(
       "modelContext",
     );
-    const queue = await getSessionQueueSnapshot(
+    const queue = await readQueueWithMonitoringParity(
       client.db,
       value.grant.workspaceId!,
       value.session.id,
@@ -880,24 +1548,61 @@ describe("canonical queue commands", () => {
     });
 
     const target = value.turns[2]!;
-    const steered = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
-      db.transaction((tx) =>
-        steerQueuedTurnInTransaction(tx as unknown as typeof db, {
-          accountId: value.grant.accountId,
-          workspaceId: value.grant.workspaceId!,
-          sessionId: value.session.id,
-          turnId: target.id,
-          expectedTurnVersion: target.version,
-          actor: value.actor,
-          operationKey: crypto.randomUUID(),
-        }),
-      ),
+    const steerRow = async (expectedTurnVersion: number, interrupt: boolean) =>
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: target.id,
+            expectedTurnVersion,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            ...(interrupt ? { interrupt: true } : {}),
+          }),
+        ),
+      );
+    // An ordinary Steer waits for the live owner's next model step: no
+    // interruption, the attempt keeps running, and the queue reports it.
+    const waiting = await steerRow(target.version, false);
+    expect(waiting.interruptionCount).toBe(0);
+    expect(waiting.items.map((row) => row.id)).toEqual([
+      target.id,
+      value.turns[0]!.id,
+      value.turns[1]!.id,
+    ]);
+    expect(waiting.items[0]).toMatchObject({
+      id: target.id,
+      version: target.version + 1,
+      metadata: {
+        delivery: "steer",
+        replacedTurnId: runningTurn.id,
+        replacedAttemptId: attemptId,
+        interruptionCount: 0,
+        deferredUntilModelStep: true,
+      },
+    });
+    expect(
+      await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({
+      stoppingPreviousAttempt: false,
+    });
+    const [noInterruption] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .select()
+        .from(schema.sessionAttemptInterruptions)
+        .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId)),
     );
+    expect(noInterruption).toBeUndefined();
+
+    // "Send now" interrupts the live owner for the waiting Steer.
+    const steered = await steerRow(target.version + 1, true);
     expect(steered.items[0]).toMatchObject({
       id: target.id,
       triggerEventId: target.triggerEventId,
       prompt: target.prompt,
-      version: target.version + 1,
+      version: target.version + 2,
       metadata: {
         delivery: "steer",
         replacedTurnId: runningTurn.id,
@@ -905,6 +1610,7 @@ describe("canonical queue commands", () => {
         interruptionCount: 1,
       },
     });
+    expect(steered.items[0]!.metadata).not.toHaveProperty("deferredUntilModelStep");
     expect(steered.interruptionCount).toBe(1);
     expect(steered.eventIds.length).toBeGreaterThan(0);
     const validSteerMetadata = steered.items[0]!.metadata;
@@ -921,14 +1627,14 @@ describe("canonical queue commands", () => {
       replacedAttemptId: crypto.randomUUID(),
     });
     expect(
-      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+      await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id),
     ).toMatchObject({ stoppingPreviousAttempt: true });
     await setTargetMetadata({
       ...validSteerMetadata,
       interruptionCount: 0,
     });
     expect(
-      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+      await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id),
     ).toMatchObject({ stoppingPreviousAttempt: true });
     await setTargetMetadata(validSteerMetadata);
     const [superseded, interruption, session] = await withWorkspaceRls(
@@ -1022,7 +1728,7 @@ describe("canonical queue commands", () => {
         .where(eq(schema.sessionTurns.id, target.id));
     });
     expect(
-      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+      await readQueueWithMonitoringParity(client.db, value.grant.workspaceId!, value.session.id),
     ).toMatchObject({ stoppingPreviousAttempt: true });
     const claimAfterReplacementRemoval = await claimSessionWorkForAttempt(
       client.db,
@@ -1167,6 +1873,8 @@ describe("canonical queue commands", () => {
           tools: [],
           model: "scripted-model",
           reasoningEffort: "low",
+          // The person picked this policy, so the draft holds it instead of following the chat.
+          policyFollowsSession: false,
         }),
     );
     const operationKey = crypto.randomUUID();
@@ -1401,7 +2109,7 @@ describe("canonical queue commands", () => {
     }
   });
 
-  test("Send keeps custom file mounts distinct and rejects genuinely changed drafts", async () => {
+  test("Send keeps custom file mounts distinct and sends changed content as typed", async () => {
     const value = await fixture(1);
     const fileId = crypto.randomUUID();
     const customResource = {
@@ -1451,19 +2159,18 @@ describe("canonical queue commands", () => {
         ),
       );
 
+    // What is in the box is what is sent, even when it differs from the draft.
     for (const changed of [
       {
         resources: [{ kind: "file" as const, fileId, mountPath: `files/${fileId}` }],
       },
       { text: "inspect different content" },
     ]) {
-      try {
-        await submit(changed);
-        throw new Error("changed draft unexpectedly admitted");
-      } catch (error) {
-        expect(error).toBeInstanceOf(QueueCommandConflictError);
-        expect((error as QueueCommandConflictError).code).toBe("DRAFT_CHANGED");
-      }
+      const sent = await submit(changed);
+      expect(sent.replay).toBe(false);
+      const turn = await getSessionTurn(client.db, value.grant.workspaceId!, sent.turnId);
+      expect(turn?.prompt).toBe("text" in changed ? changed.text : draft.text);
+      if ("resources" in changed) expect(turn?.resources).toEqual(changed.resources);
     }
   });
 

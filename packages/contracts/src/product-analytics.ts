@@ -1,18 +1,19 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 // Content-free product-analytics dimensions carried on durable facts and the
-// optional host export. Every value comes from a fixed list or from OpenGeni's
+// optional host export. Every value comes from a fixed list or from Opengeni's
 // own code-defined names. None of them is an authorization input, and none
 // may carry prompt text, tool arguments, customer names, tenant domains, or
 // operator-configured identifiers.
 
 /**
- * The product surface through which a turn's request entered OpenGeni.
+ * The product surface through which a turn's request entered Opengeni.
  *
- * - `web`: the OpenGeni web app (managed cookie or the local browser context).
+ * - `web`: the Opengeni web app (managed cookie or the local browser context).
  * - `slack`: a Slack mention, command, DM, shortcut, thread reply, or reaction.
  * - `api_key`: an API key or configured key, including the SDK and scripts.
- * - `embedded`: a host that embeds OpenGeni through signed delegation or an
+ * - `embedded`: a host that embeds Opengeni through signed delegation or an
  *   organization key acting for an external user.
  * - `scheduled`: a scheduled-task occurrence.
  * - `agent`: another agent (a child session, an agent message, or Agent Steer).
@@ -20,7 +21,7 @@ import { z } from "zod";
  * - `site`: a published workspace Site.
  * - `automation`: an event-triggered automation run.
  * - `mcp`: an external MCP client connected through workspace MCP OAuth.
- * - `system`: OpenGeni's own maintenance work with no human entry.
+ * - `system`: Opengeni's own maintenance work with no human entry.
  *
  * Turns that no new request entered (goal continuations, child results,
  * command results, wait timeouts, compaction) inherit the surface of the
@@ -41,8 +42,21 @@ export const SESSION_TURN_SURFACES = [
   "mcp",
   "system",
 ] as const;
-export const SessionTurnSurface = z.enum(SESSION_TURN_SURFACES);
+export const SessionTurnSurface = /* @__PURE__ */ defineSchema(() => z.enum(SESSION_TURN_SURFACES));
 export type SessionTurnSurface = z.infer<typeof SessionTurnSurface>;
+
+/**
+ * Request header the first-party web console sends while its tab is visible
+ * and the person interacted with it in the last few minutes. The API records
+ * server-side presence (`opengeni_active_users`, `user.active`) only for
+ * canonical managed browser sessions carrying this exact value, so an idle open
+ * tab, background polling and stream re-authorization never count as activity.
+ * Analytics only: it never grants or narrows access.
+ */
+export const OPENGENI_USER_ACTIVITY_HEADER = "x-opengeni-user-activity";
+export const OPENGENI_USER_ACTIVITY_ACTIVE = "active";
+/** Interaction recency, in milliseconds, behind the activity header. */
+export const OPENGENI_USER_ACTIVITY_WINDOW_MS = 5 * 60_000;
 
 /** Parse a stored value; anything outside the fixed list is treated as absent. */
 export function sessionTurnSurfaceOrNull(value: unknown): SessionTurnSurface | null {
@@ -51,7 +65,7 @@ export function sessionTurnSurfaceOrNull(value: unknown): SessionTurnSurface | n
 }
 
 /**
- * Model provider families exported for analytics. Reserved OpenGeni provider
+ * Model provider families exported for analytics. Reserved Opengeni provider
  * ids pass through unchanged; every operator-configured registry provider is
  * reported as `registry` so a deployment's own naming never leaves it.
  * `opengeni_private.analytics_model_provider` (migration 0533) mirrors this.
@@ -67,9 +81,16 @@ export const ANALYTICS_MODEL_PROVIDERS = [
   "openrouter",
   "workspace-openrouter",
   "organization-openrouter",
+  "opper",
+  "workspace-opper",
+  "organization-opper",
+  "organization-openai",
+  "organization-azure-openai",
   "registry",
 ] as const;
-export const AnalyticsModelProvider = z.enum(ANALYTICS_MODEL_PROVIDERS);
+export const AnalyticsModelProvider = /* @__PURE__ */ defineSchema(() =>
+  z.enum(ANALYTICS_MODEL_PROVIDERS),
+);
 export type AnalyticsModelProvider = z.infer<typeof AnalyticsModelProvider>;
 
 const RESERVED_ANALYTICS_MODEL_PROVIDERS: ReadonlySet<string> = new Set(
@@ -89,22 +110,24 @@ export function analyticsModelProvider(
 }
 
 /**
- * Tool family on a tool-call fact: an OpenGeni first-party tool name,
+ * Tool family on a tool-call fact: an Opengeni first-party tool name,
  * `integration:<catalog domain>` for a reviewed catalog integration, or
  * `custom` for any other MCP server (a workspace's own server, a self-hosted
  * provider, or an unreviewed catalog entry). The domain part is limited to
  * {@link TOOL_FAMILY_INTEGRATION_DOMAINS}, so a tenant's own host name is
  * never exported.
  */
-export const ToolFamily = z
-  .string()
-  .max(160)
-  .regex(/^(?:custom|integration:[a-z0-9](?:[a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$/u);
+export const ToolFamily = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .max(160)
+    .regex(/^(?:custom|integration:[a-z0-9](?:[a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$/u),
+);
 export type ToolFamily = z.infer<typeof ToolFamily>;
 
 /**
  * Reviewed integration domains that may appear as `integration:<domain>`:
- * OpenGeni's native provider domains plus the MCP host of every curated
+ * Opengeni's native provider domains plus the MCP host of every curated
  * catalog entry (`data/catalog/curated.json`). A test keeps the curated part
  * in sync. Any other domain is reported as `custom`.
  */
@@ -122,6 +145,8 @@ export const TOOL_FAMILY_INTEGRATION_DOMAINS = [
   "googleapis.com",
   // Curated catalog MCP hosts.
   "gmailmcp.googleapis.com",
+  "drivemcp.googleapis.com",
+  "calendarmcp.googleapis.com",
   "mcp.slack.com",
   "api.mobbin.com",
   "mcp.linear.app",
@@ -196,6 +221,7 @@ export const FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES = [
   "repository_skill_read",
   "request_human_input",
   "list_models",
+  "privacy_facts",
   "code_search",
   "tool_search",
   "tool_list",
@@ -226,13 +252,11 @@ export const FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES = [
   "skill_save",
   "skill_search",
   "operation_read",
-  "knowledge_source_fetch",
-  "knowledge_source_read",
   "files_get_download_url",
 ] as const;
 
 /**
- * OpenGeni's in-process integration tools that are not registry MCP servers,
+ * Opengeni's in-process integration tools that are not registry MCP servers,
  * keyed by their catalog server id, with the provider domain they act on.
  */
 export const IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS: Readonly<Record<string, string>> = {

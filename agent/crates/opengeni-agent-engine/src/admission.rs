@@ -337,6 +337,13 @@ impl AdmissionState {
         }
     }
 
+    /// Accounts a job that is already running because a predecessor process
+    /// admitted it. It bypasses breakers and queues: refusing it could not stop
+    /// the work, only hide it from the running count.
+    pub fn adopt_running(&mut self, class: JobClass) {
+        *self.running_mut(class) += 1;
+    }
+
     /// Currently-queued count for a class.
     #[must_use]
     pub fn queued(&self, class: JobClass) -> usize {
@@ -405,7 +412,7 @@ mod tests {
         assert_eq!(a.running(JobClass::Heavy), 10_000);
         assert_eq!(a.queued(JobClass::Heavy), 0);
         // And with no wait breaker configured, expire() can never reject.
-        assert!(a.expire(u64::MAX).is_empty());
+        assert_eq!(a.expire(u64::MAX), Vec::<(OpId, RefusalReason)>::new());
     }
 
     #[test]

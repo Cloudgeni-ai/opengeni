@@ -10,6 +10,9 @@ import {
 } from "../src/timeline";
 import { KnowledgeActivityProvider } from "../src/timeline/knowledge-receipt";
 import { registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 registerDom();
 const entryId = crypto.randomUUID();
 const fileId = crypto.randomUUID();
@@ -42,7 +45,7 @@ async function expand(container: HTMLElement) {
 
 describe("nonblocking Knowledge receipts", () => {
   test("pending source is an ordinary activity with a working link to the exact entry", async () => {
-    const items = buildTimeline([event]);
+    const items = buildTimeline(englishText, [event]);
     expect(items[0]).toMatchObject({
       kind: "knowledge",
       status: "complete",
@@ -78,7 +81,7 @@ describe("nonblocking Knowledge receipts", () => {
     }
   });
   test("a failed preparation exposes a retry without claiming that text was retained", async () => {
-    const items = buildTimeline([
+    const items = buildTimeline(englishText, [
       {
         ...event,
         type: "knowledge.source.failed",

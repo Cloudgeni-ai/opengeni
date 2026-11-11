@@ -11,6 +11,7 @@ import {
   agentErrorToControlError,
 } from "../src/sandbox/selfhosted/control-rpc";
 import { OpStreamUnavailableError } from "../src/sandbox/selfhosted/op-transport";
+import { ProviderCommandObservationUnavailableError } from "../src/sandbox/provider-command-session";
 
 const commandId = "6cfa95ae-29cc-48cb-9ab1-2613d15f1dde";
 const receipt = (terminal = false, chunks: unknown[] = []): AttemptToolResult => ({
@@ -19,6 +20,13 @@ const receipt = (terminal = false, chunks: unknown[] = []): AttemptToolResult =>
 
 const snapshot = (result: AttemptToolResult) =>
   JSON.parse((result.content[0] as { text: string }).text);
+
+const observationUnavailable = (readRetryAllowed: boolean) =>
+  new ProviderCommandObservationUnavailableError(
+    { kind: "modal-router-v1" } as never,
+    new Error("Modal command read access budget exhausted"),
+    readRetryAllowed,
+  );
 
 test("temporary live transport failure preserves retained output after API reauthorization", async () => {
   for (const error of [
@@ -44,9 +52,10 @@ test("temporary live transport failure preserves retained output after API reaut
       draining: true,
     }),
     Object.assign(new Error("connection reset"), { code: "ECONNRESET" }),
+    observationUnavailable(true),
   ]) {
     const calls: string[] = [];
-    const args = { commandId, cursor: "unchanged", maxOutputBytes: 64, waitSeconds: 45 };
+    const args = { commandId, cursor: "unchanged", maxOutputBytes: 64, waitSeconds: 0 };
     const result = await executeCommandReadWithRefresh({
       toolName: "command_wait",
       args,
@@ -116,9 +125,108 @@ test("terminal API result after refresh failure stays authoritative without stal
   expect(snapshot(result).freshness).toBeUndefined();
 });
 
+test("a provider read that missed its window returns the durable receipt, never a tool error", async () => {
+  const calls: string[] = [];
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_read",
+    args: { commandId, waitSeconds: 0 },
+    call: async (readArgs) => {
+      calls.push(`api:${readArgs.waitSeconds}`);
+      return receipt(false);
+    },
+    refresh: async () => {
+      calls.push("refresh");
+      throw observationUnavailable(true);
+    },
+  });
+  expect(calls).toEqual(["api:0", "refresh", "api:0"]);
+  expect(result.isError).toBeUndefined();
+  expect(snapshot(result)).toMatchObject({
+    terminal: false,
+    chunks: [],
+    freshness: { status: "refresh_unavailable", retryable: true },
+  });
+  expect(JSON.stringify(result)).not.toContain("observation unavailable");
+  expect(JSON.stringify(result)).not.toContain("budget exhausted");
+});
+
+test("command_wait keeps its requested wait through a failed refresh", async () => {
+  const calls: string[] = [];
+  let refreshes = 0;
+  let terminal = false;
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandId, waitSeconds: 5 },
+    call: async (readArgs) => {
+      calls.push(`api:${readArgs.waitSeconds}`);
+      return receipt(terminal, terminal ? ["tail"] : []);
+    },
+    refresh: async () => {
+      calls.push("refresh");
+      if (++refreshes === 1) throw observationUnavailable(true);
+      terminal = true;
+      return true;
+    },
+  });
+  expect(calls).toEqual(["api:0", "refresh", "api:1", "refresh", "api:1"]);
+  expect(snapshot(result)).toMatchObject({ terminal: true, chunks: ["tail"] });
+  expect(snapshot(result).freshness).toBeUndefined();
+});
+
+test("command_wait reports refresh_unavailable only when no refresh succeeds before its deadline", async () => {
+  let refreshes = 0;
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandId, waitSeconds: 2 },
+    call: async (readArgs) => {
+      if (readArgs.waitSeconds === 1) await Bun.sleep(400);
+      return receipt(false);
+    },
+    refresh: async () => {
+      refreshes++;
+      throw observationUnavailable(true);
+    },
+  });
+  expect(refreshes).toBeGreaterThan(1);
+  expect(snapshot(result)).toMatchObject({
+    terminal: false,
+    freshness: { status: "refresh_unavailable", retryable: true },
+    timedOut: true,
+  });
+});
+
+test("the last read under a second before the deadline ends the wait without a burst", async () => {
+  const waits: unknown[] = [];
+  let refreshes = 0;
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_read",
+    args: { commandId, waitSeconds: 2 },
+    call: async (readArgs) => {
+      waits.push(readArgs.waitSeconds);
+      // A one-second API wait that never sees the finish.
+      if (readArgs.waitSeconds === 1) await Bun.sleep(1_000);
+      return receipt(false);
+    },
+    refresh: async () => {
+      refreshes++;
+      return true;
+    },
+  });
+  // The first one-second read leaves about a second, the next leaves none:
+  // no run of zero-second reads follows.
+  expect(waits.filter((wait) => wait === 0)).toHaveLength(1);
+  expect(waits.length).toBeLessThanOrEqual(3);
+  expect(refreshes).toBeLessThanOrEqual(2);
+  expect(snapshot(result)).toMatchObject({ terminal: false, timedOut: true });
+});
+
 test("integrity, consent, fencing, unsupported and unknown refresh errors still fail closed", async () => {
   for (const error of [
     new Error("provider temporarily offline"),
+    // The provider discarded the invocation's observation state, or a mixed
+    // fault graph carries no proof that another read is safe.
+    observationUnavailable(false),
+    new Error("wrapped", { cause: observationUnavailable(true) }),
     new OpStreamUnavailableError("unsupported", "runner"),
     new SelfhostedControlError({
       message: "bad digest",
@@ -349,7 +457,7 @@ test("command_wait refreshes throughout the bounded API wait", async () => {
     },
   });
   expect(refreshes).toBe(3);
-  expect(waits).toEqual([0, 0, 1, 0, 1, 0]);
+  expect(waits).toEqual([0, 1, 1, 1]);
 });
 
 test("API rejection and malformed receipts cannot trigger provider reads", async () => {
@@ -385,4 +493,119 @@ test("non-owning runtime preserves API-only waiting", async () => {
     refresh: async () => false,
   });
   expect(waits).toEqual([0, 8]);
+});
+
+test("command_read waits by default; new output alone does not end an owned wait", async () => {
+  const waits: unknown[] = [];
+  let refreshes = 0;
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_read",
+    args: { commandId },
+    call: async (args) => {
+      waits.push(args.waitSeconds);
+      return receipt(refreshes >= 3, [{ stream: "stdout", chunk: `output ${refreshes}` }]);
+    },
+    refresh: async () => {
+      refreshes++;
+      return true;
+    },
+  });
+  expect(refreshes).toBe(3);
+  expect(waits).toEqual([0, 1, 1, 1]);
+  expect(snapshot(result)).toMatchObject({ terminal: true, timedOut: false });
+});
+
+test("an API yield ends an owned wait at once", async () => {
+  const waits: unknown[] = [];
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandId, waitSeconds: 20 },
+    call: async (args) => {
+      waits.push(args.waitSeconds);
+      const value = JSON.parse((receipt(false).content[0] as { text: string }).text);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(args.waitSeconds === 1 ? { ...value, yielded: true } : value),
+          },
+        ],
+      };
+    },
+    refresh: async () => true,
+  });
+  expect(waits).toEqual([0, 1]);
+  expect(snapshot(result)).toMatchObject({ yielded: true, timedOut: false });
+});
+
+test("command_wait with several commands refreshes each running one until all settle", async () => {
+  const other = "0c1f4f0e-5d7a-4c2b-9a51-3f0f6b1e2d4c";
+  const terminal = new Set<string>();
+  const refreshed: string[] = [];
+  const many = () => ({
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          commands: [commandId, other].map((id) => ({
+            commandId: id,
+            terminal: terminal.has(id),
+            chunks: [],
+          })),
+          waitFor: "all",
+          waitedMs: 0,
+          timedOut: false,
+        }),
+      },
+    ],
+  });
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandIds: [commandId, other], waitSeconds: 10 },
+    call: async () => many(),
+    refresh: async (id) => {
+      refreshed.push(id);
+      // The first command finishes on its first refresh, the other on its second.
+      if (id === commandId || refreshed.filter((value) => value === other).length >= 2)
+        terminal.add(id);
+      return true;
+    },
+  });
+  expect(refreshed).toEqual([commandId, other, other]);
+  const value = snapshot(result);
+  expect(value.commands.map((command: { terminal: boolean }) => command.terminal)).toEqual([
+    true,
+    true,
+  ]);
+  expect(value.timedOut).toBe(false);
+});
+
+test('waitFor "any" returns once one of several owned commands settles', async () => {
+  const other = "0c1f4f0e-5d7a-4c2b-9a51-3f0f6b1e2d4c";
+  const terminal = new Set<string>();
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandIds: [commandId, other], waitFor: "any", waitSeconds: 10 },
+    call: async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            commands: [commandId, other].map((id) => ({
+              commandId: id,
+              terminal: terminal.has(id),
+              chunks: [],
+            })),
+          }),
+        },
+      ],
+    }),
+    refresh: async (id) => {
+      if (id === other) terminal.add(id);
+      return true;
+    },
+  });
+  expect(
+    snapshot(result).commands.map((command: { terminal: boolean }) => command.terminal),
+  ).toEqual([false, true]);
 });

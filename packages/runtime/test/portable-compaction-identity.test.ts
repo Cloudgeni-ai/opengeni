@@ -1,12 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { hostedSearchFixture } from "./fixtures/hosted-search";
+import {
+  isHostedSearchEvidenceRecord,
+  projectHostedSearchEvidence,
+} from "../src/hosted-search-evidence";
+import { AnthropicMessagesModel } from "../src/anthropic-messages";
+import { anthropicCompactionRequest } from "../src/anthropic-compaction";
 import { configuredProviders } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { compactionHistoryFixture as longHistory } from "../../../scripts/operator/compaction-history";
 import {
   CompactionProviderResponseError,
   compactionProviderFailureDiagnostics,
   compactionProviderRejection,
   EmptyCompactionSummaryError,
+  buildCompactionPromptInput,
   buildCompactionReplacementHistory,
   estimateTokens,
   prepareCompactionPromptInput,
@@ -56,6 +64,103 @@ function assertProviderDependencies(input: Item[]) {
 }
 
 describe("portable compaction provider identity", () => {
+  test("a search record is never treated as a person's message when the oldest units are dropped", () => {
+    const raw: Item[] = [
+      { type: "message", role: "user", content: "First question" },
+      { type: "message", role: "assistant", content: "Long answer. ".repeat(400) },
+      hostedSearchFixture(),
+      { type: "message", role: "assistant", content: "Search follow-up" },
+      { type: "message", role: "user", content: "Second question" },
+      { type: "message", role: "assistant", content: "Second answer" },
+    ];
+    // History as the compaction projector hands it over in the runtime form.
+    const history = raw.map((item) => projectHostedSearchEvidence(item, { form: "runtime" }));
+    expect(isHostedSearchEvidenceRecord(history[2])).toBe(true);
+    // Enough room to keep everything from the search record onward.
+    const budget = estimateTokens(buildCompactionPromptInput(history.slice(2)));
+    const prepared = prepareCompactionPromptInput(history, budget);
+    expect(prepared.droppedHistoryItems).toBe(4);
+    expect(isHostedSearchEvidenceRecord(prepared.input[0])).toBe(false);
+    expect(prepared.input[0]).toMatchObject({ role: "user", content: "Second question" });
+  });
+  test("budgets projected search facts before compaction and passes them to detached Responses checkpoints", async () => {
+    const search = hostedSearchFixture();
+    const raw = [{ type: "message", role: "user", content: "Find docs" }, search];
+    const before = structuredClone(raw);
+    const projected = [raw[0]!, projectHostedSearchEvidence(search)];
+    const prepared = prepareCompactionPromptInput(raw, 10_000);
+    expect(prepared.estimatedInputTokens).toBe(
+      prepareCompactionPromptInput(projected, 10_000).estimatedInputTokens,
+    );
+    expect(prepared.input).toEqual(prepareCompactionPromptInput(projected, 10_000).input);
+    for (const input of [raw, prepared.input]) {
+      await summarizeForCompaction(settings, input, {
+        client: provider(async (request) => {
+          const wire = JSON.stringify(request.input);
+          expect(wire).toContain("exactly seven colors");
+          expect(wire).not.toContain("ws_fixture");
+          expect((request.input as Item[]).some((item) => item.type === "web_search_call")).toBe(
+            false,
+          );
+          return response("The widget supports seven colors.");
+        }),
+      });
+    }
+    expect(raw).toEqual(before);
+  });
+
+  test("direct unprepared Chat and Anthropic checkpoints receive only bounded curated search evidence", async () => {
+    const search = hostedSearchFixture();
+    search.providerData.results[0]!.snippet += "界".repeat(50_000);
+    Object.assign(search.providerData, { extra: "opaque-provider-metadata" });
+    const raw = [search];
+    const before = structuredClone(raw);
+    const assertEvidence = (wire: string) => {
+      expect(wire).toContain("exactly seven colors");
+      expect(wire).toContain("[truncated]");
+      expect(wire).not.toContain("ws_fixture");
+      expect(wire).not.toContain("opaque-provider-metadata");
+      expect(Buffer.byteLength(wire)).toBeLessThan(35_000);
+    };
+    await summarizeForCompaction(settings, raw, {
+      api: "chat",
+      client: {
+        chat: {
+          completions: {
+            create: async (request: Item) => {
+              assertEvidence(JSON.stringify(request));
+              return { choices: [{ finish_reason: "stop", message: { content: "Checkpoint" } }] };
+            },
+          },
+        },
+      } as unknown as NonNullable<Options["client"]>,
+    });
+    const anthropic = new AnthropicMessagesModel(
+      {
+        id: "fixture",
+        label: "Fixture",
+        kind: "api-key",
+        api: "anthropic-messages",
+        builtin: false,
+        apiKey: "fixture",
+        baseUrl: "https://example.test",
+      },
+      "fixture",
+      (async (_url, init) => {
+        assertEvidence(String(init?.body));
+        return Response.json({
+          id: "msg_fixture",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: "Checkpoint" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 20 },
+        });
+      }) as typeof fetch,
+    );
+    await anthropic.getResponse(anthropicCompactionRequest(raw, { maxOutputTokens: 100 }));
+    expect(raw).toEqual(before);
+  });
   for (const prepared of [false, true]) {
     test(`uses the resolved provider for store policy (prepared=${prepared})`, async () => {
       const openaiSettings = testSettings({ openaiProvider: "openai" });
@@ -104,7 +209,8 @@ describe("portable compaction provider identity", () => {
         }),
         ...(prepared ? { preparedRequest } : {}),
       });
-      expect(azureRequests[0]!.store).toBeUndefined();
+      // Azure accepts store:false; a prepared request's own value never wins.
+      expect(azureRequests[0]!.store).toBe(false);
       expect(openaiRequests[0]!.store).toBe(false);
     });
   }

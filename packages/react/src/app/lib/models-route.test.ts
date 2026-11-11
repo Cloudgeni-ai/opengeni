@@ -1,0 +1,172 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  organizationModelsSearch,
+  accountKey,
+  accountKeyOf,
+  connectStepOf,
+  parseModelsAccount,
+  parseModelsView,
+  workspaceModelsRedirect,
+} from "./models-route";
+
+describe("Models URLs", () => {
+  test("workspace compaction preferences keep a reloadable settings URL", () => {
+    expect(parseModelsView("compaction")).toBe("compaction");
+    expect(
+      workspaceModelsRedirect({ workspaceId: "ws-1", account: undefined, view: "compaction" }),
+    ).toEqual({ section: "models", workspace: "ws-1", view: "compaction" });
+  });
+  test("organization accounts and connect steps have their own keys", () => {
+    expect(parseModelsAccount("org:codex:acct-1")).toBe("org:codex:acct-1");
+    expect(parseModelsAccount("org:gateway:openrouter")).toBe("org:gateway:openrouter");
+    expect(parseModelsAccount("gateway:opper")).toBe("gateway:opper");
+    expect(accountKeyOf("org:gateway:opper")).toEqual({
+      provider: "gateway",
+      id: "opper",
+      organization: true,
+    });
+    expect(parseModelsView("connect:opper")).toBe("connect:opper");
+    expect(parseModelsView("connect-org:opper")).toBe("connect-org:opper");
+    expect(parseModelsAccount("org:org:codex:acct-1")).toBeUndefined();
+    expect(accountKeyOf("org:supergrok:x")).toEqual({
+      provider: "supergrok",
+      id: "x",
+      organization: true,
+    });
+    expect(accountKeyOf("gateway:vercel")).toEqual({
+      provider: "gateway",
+      id: "vercel",
+      organization: false,
+    });
+    expect(accountKey("codex", "acct-1", true)).toBe("org:codex:acct-1");
+    expect(parseModelsView("connect-org:codex")).toBe("connect-org:codex");
+    expect(parseModelsView("connect-workspace")).toBe("connect-workspace");
+    expect(parseModelsView("connect-org:nope")).toBeUndefined();
+    expect(connectStepOf("connect-org:openrouter")).toEqual({
+      provider: "openrouter",
+      organization: true,
+    });
+    expect(connectStepOf("connect:codex")).toEqual({ provider: "codex", organization: false });
+    expect(connectStepOf("connect-org:opper")).toEqual({ provider: "opper", organization: true });
+    expect(connectStepOf("connect")).toBeNull();
+  });
+
+  test("Claude Code (API key) is the Anthropic API-key step, marked", () => {
+    expect(parseModelsView("connect:claude_code_api")).toBe("connect:claude_code_api");
+    expect(parseModelsView("connect-org:claude_code_api")).toBe("connect-org:claude_code_api");
+    expect(connectStepOf("connect-org:claude_code_api")).toEqual({
+      provider: "anthropic",
+      organization: true,
+      claudeCodeApi: true,
+    });
+    expect(connectStepOf("connect:claude_code_api")).toEqual({
+      provider: "anthropic",
+      organization: false,
+      claudeCodeApi: true,
+    });
+    // An organization's page keeps the entry it was opened from.
+    expect(
+      organizationModelsSearch({
+        workspace: undefined,
+        account: undefined,
+        view: "connect:claude_code_api",
+      }).view,
+    ).toBe("connect-org:claude_code_api");
+  });
+
+  test("an Azure OpenAI account page is the organization's; both connect steps exist", () => {
+    // A workspace's own Azure key is a row in its list, not a Models account page.
+    expect(parseModelsAccount("org:gateway:azure_openai")).toBe("org:gateway:azure_openai");
+    expect(parseModelsAccount("gateway:azure_openai")).toBeUndefined();
+    expect(accountKeyOf("org:gateway:azure_openai")).toEqual({
+      provider: "gateway",
+      id: "azure_openai",
+      organization: true,
+    });
+    expect(accountKeyOf("gateway:azure_openai")).toBeNull();
+    expect(parseModelsView("connect-org:azure_openai")).toBe("connect-org:azure_openai");
+    // Its connect step is the same page for a workspace's own key.
+    expect(parseModelsView("connect:azure_openai")).toBe("connect:azure_openai");
+    expect(connectStepOf("connect:azure_openai")).toEqual({
+      provider: "azure_openai",
+      organization: false,
+    });
+    expect(connectStepOf("connect-org:azure_openai")).toEqual({
+      provider: "azure_openai",
+      organization: true,
+    });
+  });
+
+  test("compatible endpoints are organization accounts addressed by endpoint id", () => {
+    const id = "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
+    expect(parseModelsAccount(`org:compatible:${id}`)).toBe(`org:compatible:${id}`);
+    expect(accountKeyOf(`org:compatible:${id}`)).toEqual({
+      provider: "compatible",
+      id,
+      organization: true,
+    });
+    expect(parseModelsAccount(`compatible:${id}`)).toBeUndefined();
+    expect(parseModelsAccount("org:compatible:not-a-uuid")).toBeUndefined();
+    expect(parseModelsView("connect-org:openai_compatible")).toBe("connect-org:openai_compatible");
+    // A workspace's admins connect one for that workspace with the same step.
+    expect(parseModelsView("connect:openai_compatible")).toBe("connect:openai_compatible");
+    expect(parseModelsView("connect:openai")).toBe("connect:openai");
+    expect(connectStepOf("connect-org:openai_compatible")).toEqual({
+      provider: "openai_compatible",
+      organization: true,
+    });
+  });
+
+  test("a workspace's old Models URL opens its page in Organization settings > Models", () => {
+    expect(
+      workspaceModelsRedirect({ workspaceId: "ws-1", account: undefined, view: undefined }),
+    ).toEqual({ section: "models", workspace: "ws-1" });
+    expect(
+      workspaceModelsRedirect({ workspaceId: "ws-1", account: "codex:acct-1", view: undefined }),
+    ).toEqual({ section: "models", workspace: "ws-1", account: "codex:acct-1" });
+    expect(
+      workspaceModelsRedirect({
+        workspaceId: "ws-1",
+        account: "org:gateway:vercel",
+        view: "model-access",
+      }),
+    ).toEqual({
+      section: "models",
+      workspace: "ws-1",
+      account: "org:gateway:vercel",
+      view: "model-access",
+    });
+    expect(
+      workspaceModelsRedirect({
+        workspaceId: "ws-1",
+        account: undefined,
+        view: "connect-workspace",
+      }),
+    ).toEqual({ section: "models", workspace: "ws-1", view: "connect" });
+  });
+
+  test("old organization Models links open the organization's accounts and connect steps", () => {
+    expect(
+      organizationModelsSearch({ workspace: undefined, account: "codex:acct-1", view: undefined }),
+    ).toEqual({ account: "org:codex:acct-1", view: undefined });
+    expect(
+      organizationModelsSearch({ workspace: undefined, account: undefined, view: "connect:codex" }),
+    ).toEqual({ account: undefined, view: "connect-org:codex" });
+    expect(
+      organizationModelsSearch({
+        workspace: undefined,
+        account: "gateway:openrouter",
+        view: "model-access",
+      }),
+    ).toEqual({ account: "org:gateway:openrouter", view: "model-access" });
+    // A workspace's page keeps its own accounts and steps.
+    expect(
+      organizationModelsSearch({
+        workspace: "ws-1",
+        account: "codex:acct-1",
+        view: "connect:codex",
+      }),
+    ).toEqual({ account: "codex:acct-1", view: "connect:codex" });
+  });
+});

@@ -18,18 +18,20 @@
 // `{"typ":"JWT","alg":"ed25519-nkey"}`, base64url JSON claims whose `jti` is the
 // base32(SHA-512/256(claims-with-blank-jti)), and an ed25519 nkey signature over
 // `header.payload`. nkeys (re-exported by the `nats` package we already depend on)
-// gives us the ed25519 sign primitive; Node `crypto` gives SHA-512/256. So we own
+// validates the seed and derives its public identity once; native Node `crypto`
+// supplies Ed25519 signing and SHA-512/256. So we own
 // the encoding in a few well-tested functions rather than pull an alpha
 // `@nats-io/jwt` (0.0.x) whose nkeys-version compat is uncertain. No `xkey`
 // encryption is used (the bearer is already an authenticated identity claim and
 // the wire is TLS — encryption is an optional ADR-26 hardening, off here).
 //
 // SECURITY: the account SIGNING SEED never leaves this process and is NEVER logged.
-// Callers pass it as a `string` seed; we `fromSeed` it once per sign. The bearer
+// Callers pass it as a `string` seed; the current seed's imported native key is
+// reused until the configured seed changes. The bearer
 // the responder validates is HMAC-verified elsewhere (verifyEnrollmentBearer); this
 // module only mints the scoped NATS credential once identity is proven.
 
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, sign, type KeyObject } from "node:crypto";
 import { nkeys } from "nats";
 
 /** The NATS JWT v2 header — constant for every token we mint (ADR-26 / nats-io/jwt:
@@ -55,15 +57,8 @@ export interface NatsPermissions {
   sub: NatsPermission;
 }
 
-/**
- * The minimal nkey keypair surface this module needs — exactly what
- * `nkeys.fromSeed(seed)` returns. Declared structurally so the module does not
- * leak the `nats` nkeys type through its public signature.
- */
-interface NkeyPair {
-  getPublicKey(): string;
-  sign(input: Uint8Array): Uint8Array;
-}
+type AccountSigner = { seed: string; publicKey: string; privateKey: KeyObject };
+let currentAccountSigner: AccountSigner | undefined;
 
 /** base64url (RawURLEncoding — no padding), matching nats-io/jwt's `serialize`. */
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -73,6 +68,43 @@ function base64UrlEncode(bytes: Uint8Array): string {
 /** RFC 4648 base32 (standard alphabet, NO padding) — the encoding nats-io/jwt
  *  uses for the `jti` hash. Node has no built-in base32, so a tiny encoder. */
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function accountSigner(seed: string): AccountSigner {
+  if (currentAccountSigner?.seed === seed) return currentAccountSigner;
+  // Keep nkeys' checksum, prefix and seed-length validation. Public identity
+  // derivation happens only on import, not twice for every authorization.
+  const account = nkeys.fromSeed(Buffer.from(seed));
+  const publicKey = account.getPublicKey();
+  if (publicKey.startsWith("X")) {
+    // X25519 curve seeds cannot sign; preserve nkeys' existing rejection.
+    throw new nkeys.NKeysError(nkeys.NKeysErrorCode.InvalidCurveOperation);
+  }
+  // The already-validated NKey is base32(two prefix bytes + 32 seed bytes +
+  // two CRC bytes). Decode the seed without depending on nkeys' private APIs.
+  const decoded = Buffer.alloc(Math.floor((seed.length * 5) / 8));
+  let bits = 0,
+    value = 0,
+    offset = 0;
+  for (const char of seed) {
+    value = (value << 5) | BASE32_ALPHABET.indexOf(char);
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      decoded[offset++] = (value >>> bits) & 255;
+    }
+  }
+  // RFC 8410 PKCS#8 Ed25519 PrivateKeyInfo: algorithm OID 1.3.101.112 and
+  // a nested OCTET STRING holding the 32-byte seed (no algorithm parameters).
+  const privateKey = createPrivateKey({
+    key: Buffer.concat([
+      Buffer.from("302e020100300506032b657004220420", "hex"),
+      decoded.subarray(2, 34),
+    ]),
+    format: "der",
+    type: "pkcs8",
+  });
+  return (currentAccountSigner = { seed, publicKey, privateKey });
+}
 function base32NoPadding(bytes: Uint8Array): string {
   let bits = 0;
   let value = 0;
@@ -109,7 +141,7 @@ function computeJti(claimsWithBlankJti: object): string {
  * canonical hash), serializes `header.payload`, signs that with `signingKey`, and
  * appends the base64url signature. Returns the compact `header.payload.signature`.
  */
-function encodeJwt(claims: Record<string, unknown>, signingKey: NkeyPair): string {
+function encodeJwt(claims: Record<string, unknown>, signingKey: AccountSigner): string {
   // jti is the hash of the claims with jti blanked — set it blank, hash, then set.
   const withBlankJti = { ...claims, jti: "" };
   const jti = computeJti(withBlankJti);
@@ -118,7 +150,7 @@ function encodeJwt(claims: Record<string, unknown>, signingKey: NkeyPair): strin
   const header = base64UrlEncode(Buffer.from(JSON.stringify(JWT_HEADER), "utf8"));
   const payload = base64UrlEncode(Buffer.from(JSON.stringify(finalClaims), "utf8"));
   const signingInput = `${header}.${payload}`;
-  const signature = signingKey.sign(Buffer.from(signingInput, "utf8"));
+  const signature = sign(null, Buffer.from(signingInput, "utf8"), signingKey.privateKey);
   return `${signingInput}.${base64UrlEncode(signature)}`;
 }
 
@@ -152,8 +184,8 @@ export interface MintUserJwtInput {
  * authorization response.
  */
 export function mintUserJwt(input: MintUserJwtInput): string {
-  const accountKey = nkeys.fromSeed(Buffer.from(input.accountSeed)) as unknown as NkeyPair;
-  const accountPublicKey = accountKey.getPublicKey();
+  const accountKey = accountSigner(input.accountSeed);
+  const accountPublicKey = accountKey.publicKey;
   const nowSeconds = Math.floor(Date.now() / 1000);
 
   const natsBlock: Record<string, unknown> = {
@@ -214,8 +246,8 @@ export interface MintAuthResponseInput {
  * public key is `iss`); `sub` is the user_nkey, `aud` is the server id.
  */
 export function mintAuthResponse(input: MintAuthResponseInput): string {
-  const accountKey = nkeys.fromSeed(Buffer.from(input.accountSeed)) as unknown as NkeyPair;
-  const accountPublicKey = accountKey.getPublicKey();
+  const accountKey = accountSigner(input.accountSeed);
+  const accountPublicKey = accountKey.publicKey;
   const nowSeconds = Math.floor(Date.now() / 1000);
 
   const natsBlock: Record<string, unknown> = {
@@ -263,7 +295,7 @@ export interface DecodedAuthRequest {
   authToken: string | undefined;
   /** The connect username, if any (unused today; present for completeness). */
   user: string | undefined;
-  /** Client-reported process identity. OpenGeni agents use a strict
+  /** Client-reported process identity. Opengeni agents use a strict
    *  `opengeni-agent/connection/<uuid>` shape; auth-callout rejects anything
    *  else before granting machine subjects. */
   name: string | undefined;

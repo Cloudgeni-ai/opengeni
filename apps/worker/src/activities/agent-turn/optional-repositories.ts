@@ -1,7 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import { resourceMountPath, type ResourceRef } from "@opengeni/contracts";
-import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
-import { areGitHubRepositoriesAllowedForWorkspace, type Database } from "@opengeni/db";
+import { listAllowedGitHubRepositoryIdsForWorkspace, type Database } from "@opengeni/db";
 import {
   findInaccessibleGitHubAppInstallationRepositories,
   githubAppMissingSettings,
@@ -12,8 +11,8 @@ import { gitHubTokenAuthorizationSelections } from "../environment";
  * Turn-time access check for automatically attached (`optional: true`) GitHub
  * App repositories.
  *
- * A Slack-started session attaches the caller's recently used repositories as
- * optional resources. The per-turn workspace-allowlist recheck and the
+ * A Slack-started session attaches the repositories in the caller's new-chat
+ * form as optional resources. The per-turn workspace-allowlist recheck and the
  * installation-token mint both cover every GitHub repository of the session in
  * one request, so one optional repository that loses access after the session
  * started (an admin removes it from the allowlist, or it is deleted or removed
@@ -38,6 +37,7 @@ export type OptionalRepositoryDropReason = "not_allowlisted" | "inaccessible" | 
 
 export type DropUnavailableOptionalRepositoriesInput = {
   db: Database;
+  signal?: AbortSignal;
   settings: Settings;
   workspaceId: string;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -61,7 +61,9 @@ export type DropUnavailableOptionalRepositoriesInput = {
   ) => Promise<void>;
   /** Operational log line; counts only, never repository names. */
   warn: (message: string, fields: Record<string, string>) => void;
-  /** Test seam; defaults to the workspace allowlist under RLS. */
+  /** Batched decisions under the same audited workspace authority. */
+  allowedRepositoryIds?: (installationId: number, repositoryIds: number[]) => Promise<number[]>;
+  /** Compatibility test seam for individual authority outcomes. */
   isAllowlisted?: (installationId: number, repositoryId: number) => Promise<boolean>;
   /** Test seam; defaults to a live GitHub App token-mint probe. */
   findInaccessible?: (installationId: number, repositoryIds: number[]) => Promise<number[]>;
@@ -81,9 +83,6 @@ function optionalGitHubAppRepositoryCandidate(
   }
   const [selection] = selections;
   if (!selection || selections.length !== 1 || selection.repositoryIds.length !== 1) return null;
-  // PR-review bindings are authorized by their own registration, not the
-  // workspace allowlist; they are never automatically attached.
-  if (prReviewRegistrationIdFromCredentialBinding(selection.credentialBindingId)) return null;
   return {
     resource,
     installationId: selection.installationId,
@@ -121,32 +120,62 @@ export async function dropUnavailableOptionalRepositories(
   );
   if (candidates.length === 0) return passthrough;
 
-  const isAllowlisted =
-    input.isAllowlisted ??
-    ((installationId: number, repositoryId: number) =>
-      areGitHubRepositoriesAllowedForWorkspace(input.db, input.workspaceId, installationId, [
-        repositoryId,
-      ]));
+  input.signal?.throwIfAborted();
   const dropped = new Map<OptionalRepositoryCandidate, OptionalRepositoryDropReason>();
-  const allowlisted: OptionalRepositoryCandidate[] = [];
-  const admitted = await Promise.all(
-    candidates.map(async (candidate) => {
-      try {
-        return (await isAllowlisted(candidate.installationId, candidate.repositoryId))
-          ? ("allowlisted" as const)
-          : ("not_allowlisted" as const);
-      } catch {
-        // The check itself failed: an optional repository must not fail the
-        // turn, so it sits this turn out like an unverifiable GitHub answer.
-        return "unverified" as const;
+  const byInstallation = new Map<number, OptionalRepositoryCandidate[]>();
+  for (const candidate of candidates) {
+    const group = byInstallation.get(candidate.installationId) ?? [];
+    group.push(candidate);
+    byInstallation.set(candidate.installationId, group);
+  }
+  await visitOptionalRepositories(
+    [...byInstallation],
+    input.signal,
+    async ([installationId, group]) => {
+      const ids = [...new Set(group.map((candidate) => candidate.repositoryId))];
+      if (input.isAllowlisted) {
+        // Preserve the individual failure seam used by embedded callers/tests.
+        const outcomes = new Map<number, OptionalRepositoryDropReason>();
+        await visitOptionalRepositories(ids, input.signal, async (id) => {
+          try {
+            if (!(await input.isAllowlisted!(installationId, id)))
+              outcomes.set(id, "not_allowlisted");
+          } catch {
+            input.signal?.throwIfAborted();
+            outcomes.set(id, "unverified");
+          }
+        });
+        for (const candidate of group) {
+          const reason = outcomes.get(candidate.repositoryId);
+          if (reason) dropped.set(candidate, reason);
+        }
+        return;
       }
-    }),
+      try {
+        const allowed = new Set(
+          await (
+            input.allowedRepositoryIds ??
+            ((targetInstallationId, requestedIds) =>
+              listAllowedGitHubRepositoryIdsForWorkspace(
+                input.db,
+                input.workspaceId,
+                targetInstallationId,
+                requestedIds,
+              ))
+          )(installationId, ids),
+        );
+        input.signal?.throwIfAborted();
+        for (const candidate of group) {
+          if (!allowed.has(candidate.repositoryId)) dropped.set(candidate, "not_allowlisted");
+        }
+      } catch {
+        input.signal?.throwIfAborted();
+        for (const candidate of group) dropped.set(candidate, "unverified");
+      }
+    },
   );
-  candidates.forEach((candidate, index) => {
-    const outcome = admitted[index]!;
-    if (outcome === "allowlisted") allowlisted.push(candidate);
-    else dropped.set(candidate, outcome);
-  });
+  input.signal?.throwIfAborted();
+  const allowlisted = candidates.filter((candidate) => !dropped.has(candidate));
 
   const findInaccessible =
     input.findInaccessible ??
@@ -155,36 +184,41 @@ export async function dropUnavailableOptionalRepositories(
           findInaccessibleGitHubAppInstallationRepositories(input.settings, {
             installationId,
             repositoryIds,
+            ...(input.signal ? { signal: input.signal } : {}),
           })
       : null);
   if (findInaccessible && allowlisted.length > 0) {
-    const byInstallation = new Map<number, OptionalRepositoryCandidate[]>();
+    const allowlistedByInstallation = new Map<number, OptionalRepositoryCandidate[]>();
     for (const candidate of allowlisted) {
-      const group = byInstallation.get(candidate.installationId) ?? [];
+      const group = allowlistedByInstallation.get(candidate.installationId) ?? [];
       group.push(candidate);
-      byInstallation.set(candidate.installationId, group);
+      allowlistedByInstallation.set(candidate.installationId, group);
     }
-    await Promise.all(
-      [...byInstallation].map(async ([installationId, group]) => {
+    await visitOptionalRepositories(
+      [...allowlistedByInstallation],
+      input.signal,
+      async ([installationId, group]) => {
         try {
           const inaccessible = new Set(
-            await findInaccessible(
-              installationId,
-              group.map((candidate) => candidate.repositoryId),
-            ),
+            await findInaccessible(installationId, [
+              ...new Set(group.map((candidate) => candidate.repositoryId)),
+            ]),
           );
+          input.signal?.throwIfAborted();
           for (const candidate of group) {
             if (inaccessible.has(candidate.repositoryId)) dropped.set(candidate, "inaccessible");
           }
         } catch {
+          input.signal?.throwIfAborted();
           // GitHub could not answer. An optional repository must never fail
           // the turn, and keeping it would put it into a mint GitHub may then
           // refuse, so it sits this turn out and is checked again next turn.
           for (const candidate of group) dropped.set(candidate, "unverified");
         }
-      }),
+      },
     );
   }
+  input.signal?.throwIfAborted();
   if (dropped.size === 0) return passthrough;
 
   const droppedIdentities = new Set(
@@ -221,4 +255,32 @@ export async function dropUnavailableOptionalRepositories(
     runtimeResources: input.runtimeResources.filter(keep),
     retainsResource: keep,
   };
+}
+
+/** Bound queued provider/database work and join admitted siblings on failure. */
+async function visitOptionalRepositories<T>(
+  values: readonly T[],
+  signal: AbortSignal | undefined,
+  visit: (value: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  let failed = false;
+  const settled = await Promise.allSettled(
+    Array.from({ length: Math.min(8, values.length) }, async () => {
+      while (!failed && next < values.length) {
+        try {
+          signal?.throwIfAborted();
+          await visit(values[next++]!);
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    }),
+  );
+  const failure = settled.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
+  signal?.throwIfAborted();
 }

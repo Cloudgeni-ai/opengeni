@@ -1,0 +1,125 @@
+// The session UI's toasts. On a page that owns its document (the web app)
+// they go to the page's one toaster, like any other sonner toast. Inside an
+// embed they go only to the embed's own toaster, so the host page's sonner
+// toasts and ours never show in each other's stack.
+import * as Sonner from "sonner";
+
+import { splitErrorText } from "../../ui/error-reference";
+
+export const OPENGENI_TOASTER_ID = "opengeni";
+
+// Embedded toasters in mount order. The first one shows every embed's
+// toasts, so two embeds on one page share one stack instead of doubling it.
+let embeddedToasters: readonly symbol[] = [];
+const listeners = new Set<() => void>();
+
+/** Held by an embed's toaster while it is mounted. */
+export function retainEmbeddedToaster(owner: symbol): () => void {
+  embeddedToasters = [...embeddedToasters, owner];
+  listeners.forEach((listener) => listener());
+  return () => {
+    embeddedToasters = embeddedToasters.filter((candidate) => candidate !== owner);
+    listeners.forEach((listener) => listener());
+  };
+}
+
+export function subscribeEmbeddedToasters(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Whether `owner` is the embedded toaster that shows the stack. */
+export function showsEmbeddedToasts(owner: symbol): boolean {
+  return embeddedToasters[0] === owner;
+}
+
+type Toast = typeof Sonner.toast;
+type Routed = "success" | "error" | "info" | "warning" | "loading" | "custom";
+
+function withToaster<A extends unknown[]>(args: A): A {
+  if (embeddedToasters.length === 0) return args;
+  const [first, data] = args as unknown as [unknown, Sonner.ExternalToast | undefined];
+  return [first, { ...data, toasterId: OPENGENI_TOASTER_ID }] as unknown as A;
+}
+
+/**
+ * Every toast says what happened in product words. An "API 409:" prefix never
+ * shows, an expected refusal loses its request reference, and an unexpected
+ * failure's reference moves from the text into one quiet "Copy details".
+ */
+function withErrorDetails<A extends unknown[]>(args: A): A {
+  const [message, data] = args as unknown as [unknown, Sonner.ExternalToast | undefined];
+  const title = typeof message === "string" ? splitErrorText(message) : null;
+  const description =
+    typeof data?.description === "string" ? splitErrorText(data.description) : null;
+  const reference = description?.reference ?? title?.reference;
+  const titleChanged = !!title && title.text !== message;
+  const descriptionChanged = !!description && description.text !== data?.description;
+  if (!titleChanged && !descriptionChanged && !reference) return args;
+  let shownTitle = title ? title.text : message;
+  const next: Sonner.ExternalToast = { ...data };
+  if (description) next.description = description.text || undefined;
+  if (reference) {
+    const details = [
+      typeof shownTitle === "string" ? shownTitle : "",
+      description?.text ?? "",
+      `Reference: ${reference}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const copy = { label: "Copy details", onClick: () => copyDetails(details) };
+    const slot = !next.action ? "action" : !next.cancel ? "cancel" : null;
+    if (slot) {
+      next[slot] = copy;
+      next.classNames = {
+        ...next.classNames,
+        [slot === "action" ? "actionButton" : "cancelButton"]: "og-toast-details",
+      };
+    } else if (description?.reference) {
+      // Both buttons are the caller's: keep the reference in the text.
+      next.description = `${description.text} Reference: ${reference}.`.trim();
+    } else if (title) {
+      shownTitle = `${title.text} Reference: ${reference}.`.trim();
+    }
+  }
+  return [shownTitle, next, ...args.slice(2)] as unknown as A;
+}
+
+function copyDetails(details: string) {
+  const clipboard = globalThis.navigator?.clipboard;
+  const copied = clipboard
+    ? clipboard.writeText(details)
+    : Promise.reject(new Error("no clipboard"));
+  void copied.then(
+    () => toast.success("Details copied."),
+    // Shown as text to select by hand, so not through withErrorDetails.
+    () =>
+      Sonner.toast.error(
+        ...withToaster<[string, Sonner.ExternalToast]>([
+          "Couldn't copy the details.",
+          { description: details },
+        ]),
+      ),
+  );
+}
+
+function routed<K extends Routed>(method: K): Toast[K] {
+  // Read the method at call time, so a test's mock of "sonner" applies.
+  return ((...args: Parameters<Toast[K]>) =>
+    (Sonner.toast[method] as (...a: unknown[]) => unknown)(
+      ...withToaster(withErrorDetails(args)),
+    )) as Toast[K];
+}
+
+export const toast = Object.assign(
+  (...args: Parameters<Toast>) => Sonner.toast(...withToaster(withErrorDetails(args))),
+  {
+    success: routed("success"),
+    error: routed("error"),
+    info: routed("info"),
+    warning: routed("warning"),
+    loading: routed("loading"),
+    custom: routed("custom"),
+    dismiss: (...args: Parameters<Toast["dismiss"]>) => Sonner.toast.dismiss(...args),
+  },
+);

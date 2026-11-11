@@ -8,7 +8,12 @@ import {
   type BrowserDownloadSaveResponse as BrowserDownloadSaveResponseValue,
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
-import { type Database, withRlsContext, withWorkspaceRls } from "./database";
+import {
+  type Database,
+  withoutSessionRlsActor,
+  withRlsContext,
+  withWorkspaceRls,
+} from "./database";
 import {
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
@@ -82,6 +87,10 @@ export async function prepareBrowserDownloadSave(
     bucket: string;
     objectKey: string;
     uploadExpiresAt: Date;
+    /** The download was retained as this workspace file before its browser's
+     * controller went away: the save reuses it instead of a new upload, and
+     * does not need the browser to be running. */
+    retained?: { fileId: string; uploadId: string };
   },
 ): Promise<BrowserDownloadSavePreparation> {
   const input = parseIdentity(inputValue);
@@ -157,9 +166,13 @@ export async function prepareBrowserDownloadSave(
           )
           .limit(1);
         if (!session) throw new InteractionResourceNotFoundError("BrowserSession not found");
+        const retained = inputValue.retained
+          ? await requireRetainedDownload(tx, input, inputValue.retained, download)
+          : null;
         if (
-          session.lifecycle !== "active" ||
-          session.controllerGeneration !== download.controllerGeneration
+          !retained &&
+          (session.lifecycle !== "active" ||
+            session.controllerGeneration !== download.controllerGeneration)
         ) {
           throw new InteractionResourceStateError(
             "Browser download controller is no longer active",
@@ -183,29 +196,32 @@ export async function prepareBrowserDownloadSave(
           );
         }
 
-        await tx.insert(schema.files).values({
-          id: fileId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          status: "pending_upload",
-          filename: download.filename,
-          safeFilename,
-          contentType,
-          sizeBytes: download.receivedBytes,
-          sha256: download.sha256,
-          bucket,
-          objectKey,
-        });
-        const [upload] = await tx
-          .insert(schema.fileUploads)
-          .values({
+        let upload: { id: string } | undefined = retained ? { id: retained.uploadId } : undefined;
+        if (!retained) {
+          await tx.insert(schema.files).values({
+            id: fileId,
             accountId: input.accountId,
             workspaceId: input.workspaceId,
-            fileId,
-            status: "pending",
-            expiresAt: inputValue.uploadExpiresAt,
-          })
-          .returning({ id: schema.fileUploads.id });
+            status: "pending_upload",
+            filename: download.filename,
+            safeFilename,
+            contentType,
+            sizeBytes: download.receivedBytes,
+            sha256: download.sha256,
+            bucket,
+            objectKey,
+          });
+          [upload] = await tx
+            .insert(schema.fileUploads)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              fileId,
+              status: "pending",
+              expiresAt: inputValue.uploadExpiresAt,
+            })
+            .returning({ id: schema.fileUploads.id });
+        }
         if (!upload) throw new Error("Browser download upload insert returned no row");
         const metadata: SaveMetadata = {
           browserSessionId: input.browserSessionId,
@@ -239,6 +255,202 @@ export async function prepareBrowserDownloadSave(
         return { ...preparation(operation, input, false), dispatchedNow: false };
       }),
   );
+}
+
+/** A completed download kept as a workspace file after its browser's
+ * working directory went away (suspension removes it). */
+export type RetainedBrowserDownload = {
+  download: BrowserDownloadValue;
+  fileId: string;
+  uploadId: string;
+  objectKey: string;
+  safeFilename: string;
+  contentType: string;
+};
+
+type RetainedScope = { accountId: string; workspaceId: string; browserSessionId: string };
+
+/** The browser's chat lost its creation binding, or its private chat has no owner. */
+export class BrowserDownloadOwnerUnavailableError extends Error {}
+
+/**
+ * Whose private files a browser's kept downloads are: the owner of the chat
+ * that created the browser when that chat is private, else null (workspace
+ * files). Read with system authority, because the request saving the browser
+ * (a capacity save) may not see another person's private chat; the read is
+ * bound to the browser's own creating chat and only decides file ownership.
+ */
+export async function getBrowserDownloadPrivateOwner(
+  db: Database,
+  input: RetainedScope & { sourceSessionId: string },
+): Promise<string | null> {
+  const [row] = await withoutSessionRlsActor(
+    async () =>
+      await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await scopedDb
+            .select({
+              visibility: schema.sessions.visibility,
+              ownerSubjectId: schema.sessions.ownerSubjectId,
+            })
+            .from(schema.browserSessionAssociations)
+            .innerJoin(
+              schema.sessions,
+              and(
+                eq(schema.sessions.workspaceId, schema.browserSessionAssociations.workspaceId),
+                eq(schema.sessions.id, schema.browserSessionAssociations.sessionId),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.browserSessionAssociations.workspaceId, input.workspaceId),
+                eq(schema.browserSessionAssociations.browserSessionId, input.browserSessionId),
+                eq(schema.browserSessionAssociations.sessionId, input.sourceSessionId),
+                eq(schema.browserSessionAssociations.relationship, "created"),
+              ),
+            )
+            .limit(1),
+      ),
+  );
+  if (!row) throw new BrowserDownloadOwnerUnavailableError("the browser's chat is unavailable");
+  if (row.visibility !== "user_private") return null;
+  if (!row.ownerSubjectId?.trim()) {
+    throw new BrowserDownloadOwnerUnavailableError("the browser's private chat has no owner");
+  }
+  return row.ownerSubjectId;
+}
+
+/** Record that a completed download is retained as a ready workspace file.
+ * Idempotent per download: the first retained file wins. */
+export async function recordRetainedBrowserDownload(
+  db: Database,
+  input: RetainedScope & { download: BrowserDownloadValue; fileId: string; uploadId: string },
+): Promise<RetainedBrowserDownload> {
+  const download = BrowserDownload.parse(input.download);
+  if (
+    download.browserSessionId !== input.browserSessionId ||
+    download.status !== "completed" ||
+    !download.sha256
+  ) {
+    throw new InteractionResourceStateError("Only a completed download can be retained");
+  }
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await tx
+          .insert(schema.browserSessionRetainedDownloads)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            browserSessionId: input.browserSessionId,
+            downloadId: download.id,
+            download,
+            fileId: requireUuid(input.fileId, "fileId"),
+            uploadId: requireUuid(input.uploadId, "uploadId"),
+          })
+          .onConflictDoNothing();
+        const retained = await readRetainedDownloads(tx, input, download.id);
+        if (!retained[0]) throw new Error("Retained browser download insert returned no row");
+        return retained[0];
+      }),
+  );
+}
+
+/** Every download of a browser kept as a ready workspace file, oldest first. */
+export async function listRetainedBrowserDownloads(
+  db: Database,
+  input: RetainedScope,
+): Promise<RetainedBrowserDownload[]> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) => await readRetainedDownloads(scopedDb, input, null),
+  );
+}
+
+export async function getRetainedBrowserDownload(
+  db: Database,
+  input: RetainedScope & { downloadId: string },
+): Promise<RetainedBrowserDownload | null> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      (
+        await readRetainedDownloads(scopedDb, input, requireUuid(input.downloadId, "downloadId"))
+      )[0] ?? null,
+  );
+}
+
+async function readRetainedDownloads(
+  tx: Pick<Database, "select">,
+  input: RetainedScope,
+  downloadId: string | null,
+): Promise<RetainedBrowserDownload[]> {
+  const rows = await tx
+    .select({
+      download: schema.browserSessionRetainedDownloads.download,
+      fileId: schema.browserSessionRetainedDownloads.fileId,
+      uploadId: schema.browserSessionRetainedDownloads.uploadId,
+      objectKey: schema.files.objectKey,
+      safeFilename: schema.files.safeFilename,
+      contentType: schema.files.contentType,
+      fileStatus: schema.files.status,
+    })
+    .from(schema.browserSessionRetainedDownloads)
+    .innerJoin(
+      schema.files,
+      and(
+        eq(schema.files.accountId, schema.browserSessionRetainedDownloads.accountId),
+        eq(schema.files.workspaceId, schema.browserSessionRetainedDownloads.workspaceId),
+        eq(schema.files.id, schema.browserSessionRetainedDownloads.fileId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.browserSessionRetainedDownloads.accountId, input.accountId),
+        eq(schema.browserSessionRetainedDownloads.workspaceId, input.workspaceId),
+        eq(schema.browserSessionRetainedDownloads.browserSessionId, input.browserSessionId),
+        ...(downloadId ? [eq(schema.browserSessionRetainedDownloads.downloadId, downloadId)] : []),
+      ),
+    )
+    .orderBy(
+      schema.browserSessionRetainedDownloads.createdAt,
+      schema.browserSessionRetainedDownloads.downloadId,
+    );
+  return rows
+    .filter((row) => row.fileStatus === "ready")
+    .map((row) => ({
+      download: BrowserDownload.parse(row.download),
+      fileId: row.fileId,
+      uploadId: row.uploadId,
+      objectKey: row.objectKey,
+      safeFilename: row.safeFilename,
+      contentType: row.contentType,
+    }));
+}
+
+async function requireRetainedDownload(
+  tx: Pick<Database, "select">,
+  input: SaveIdentity,
+  retained: { fileId: string; uploadId: string },
+  download: BrowserDownloadValue,
+): Promise<RetainedBrowserDownload> {
+  const [current] = await readRetainedDownloads(tx, input, input.downloadId);
+  if (
+    !current ||
+    current.fileId !== retained.fileId ||
+    current.uploadId !== retained.uploadId ||
+    current.download.sha256 !== download.sha256 ||
+    current.download.receivedBytes !== download.receivedBytes
+  ) {
+    throw new InteractionResourceStateError("Browser download is no longer retained");
+  }
+  return current;
 }
 
 export async function dispatchBrowserDownloadSave(

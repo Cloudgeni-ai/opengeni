@@ -9,6 +9,9 @@ export const blaxelProvider: ProviderRegistration = {
   instanceIdFields: ["sandboxIdentity"],
   workspaceCapturePolicy: () => REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.blaxel,
+  // The SDK session offers stdin once it has a sandbox URL and API key, which
+  // every configured Blaxel box has.
+  sessionSupportsPty: true,
   validateCredentials(settings) {
     if (!settings.blaxelApiKey) {
       throw new SandboxConfigError("blaxel", "OPENGENI_BLAXEL_API_KEY is required");
@@ -24,7 +27,7 @@ export const blaxelProvider: ProviderRegistration = {
       env: environment,
       // persistWorkspace() creates a remote tarball. Bound that provider-native
       // operation by the same immutable deadline as the durable capture claim;
-      // OpenGeni's outer timeout still protects every provider uniformly.
+      // Opengeni's outer timeout still protects every provider uniformly.
       timeouts: { workspaceTarTimeoutMs: settings.sandboxSnapshotTimeoutMs },
     };
     if (settings.blaxelImage) options.image = settings.blaxelImage;

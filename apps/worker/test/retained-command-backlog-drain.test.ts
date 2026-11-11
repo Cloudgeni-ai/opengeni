@@ -61,9 +61,6 @@ function retainedCommand(
   let recorded = "";
   session.bindProviderCommand!(7, stored, {
     load: async () => stored,
-    acknowledge: async () => {
-      throw new Error("byte-offset output never uses the legacy acknowledgement");
-    },
     reserveInput: async () => 0,
     captureRouterPage: async (page) => {
       recorded += page.stdout;

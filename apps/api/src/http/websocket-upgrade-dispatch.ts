@@ -2,12 +2,14 @@ import { localBrowserBoundaryResponse, type LocalBrowserBoundary } from "./local
 
 export type ApiWebSocketUpgradeRoute<Server> = {
   handles(request: Request): boolean;
-  upgrade(request: Request, server: Server): Response | undefined;
+  /** May finish asynchronously (for example after verifying a token); the
+   * server upgrades after the await. */
+  upgrade(request: Request, server: Server): Response | undefined | Promise<Response | undefined>;
 };
 
 export type ApiWebSocketUpgradeDispatch =
   | { handled: false }
-  | { handled: true; response: Response | undefined };
+  | { handled: true; response: Response | undefined | Promise<Response | undefined> };
 
 /**
  * WebSocket upgrades bypass the Hono app, so the local-mode browser boundary

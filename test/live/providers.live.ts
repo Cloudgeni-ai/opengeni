@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { getSettings } from "@opengeni/config";
 import { buildOpenGeniAgent, configureOpenAI, runAgentStream } from "@opengeni/runtime";
 import { listGitHubAppRepositories } from "@opengeni/github";
-import { functionCall, ScriptedModel } from "@opengeni/testing";
+import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 
 describe("live provider smoke tests", () => {
   const live = process.env.OPENGENI_ENABLE_LIVE_TESTS === "true";

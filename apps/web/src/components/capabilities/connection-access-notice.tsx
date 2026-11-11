@@ -1,4 +1,4 @@
-import { Notice } from "@/components/ui/notice";
+import { Notice } from "@opengeni/react/ui/notice";
 
 /** Shown when connection discovery is unavailable to the current workspace grant. */
 export function ConnectionAccessNotice() {

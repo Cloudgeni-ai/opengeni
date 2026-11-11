@@ -2,15 +2,24 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import postgres from "postgres";
 import type { Permission } from "@opengeni/contracts";
-import { createDb, createOrganizationApiKey, createWorkspace, type DbClient } from "@opengeni/db";
 import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+  appendSessionEvents,
+  createDb,
+  createOrganizationApiKey,
+  createSession,
+  createWorkspace,
+  type DbClient,
+} from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../../../apps/api/src/app";
-import { artifactViewerCapability, createSessionProxyHandler, OpenGeniClient } from "../src/index";
+import {
+  artifactViewerCapability,
+  createSessionProxyHandler,
+  OpenGeniClient,
+  type ClientConfig,
+} from "../src/index";
 import { getSessionProxyWorkspaceGrant } from "../src/session-proxy";
 
 // Explicit native opt-in runs the same full-migration/FORCE-RLS fixture as CI.
@@ -22,6 +31,12 @@ const postgresTests =
     ? describe
     : describe.skip;
 const SOURCE = "proxy-postgres:host";
+
+/** The artifact-viewer capability a proxy with `artifacts` enabled reports. */
+function viewerCapability(config: ClientConfig) {
+  if (!config.artifacts) throw new Error("artifacts capability missing");
+  return config.artifacts;
+}
 const PRODUCT = "https://product.example.test/api/opengeni";
 const API = "http://127.0.0.1:8000";
 const VIEWER_PERMISSIONS: Permission[] = [
@@ -93,7 +108,6 @@ describe("session proxy real PostgreSQL", () => {
       const actor = service.asUser(user, { source: SOURCE });
       const handler = createSessionProxyHandler(service, {
         resolve: () => ({ workspaceId: workspace.id, user, source: SOURCE }),
-        artifacts: true,
       });
       const browser = new OpenGeniClient({
         baseUrl: PRODUCT,
@@ -164,7 +178,7 @@ describe("session proxy real PostgreSQL", () => {
 
     test("the same proxy refreshes permission epochs and refuses a revoked workspace grant", async () => {
       const f = await fixture();
-      const initial = (await f.browser.getClientConfig()).artifacts!;
+      const initial = viewerCapability(await f.browser.getClientConfig());
       expect((await f.browser.getClientConfig()).artifacts).toEqual(initial);
       const reducedPermissions = VIEWER_PERMISSIONS.filter(
         (permission) => permission !== "artifacts:publish",
@@ -176,7 +190,7 @@ describe("session proxy real PostgreSQL", () => {
         { permissions: reducedPermissions, operationId: crypto.randomUUID() },
       );
       expect(update).toMatchObject({ narrowed: true, replay: false });
-      const refreshed = (await f.browser.getClientConfig()).artifacts!;
+      const refreshed = viewerCapability(await f.browser.getClientConfig());
       expect(refreshed.cachePartition.principalId).toBe(initial.cachePartition.principalId);
       expect(refreshed.cachePartition.authorizationEpoch).not.toBe(
         initial.cachePartition.authorizationEpoch,
@@ -210,7 +224,7 @@ describe("session proxy real PostgreSQL", () => {
 
     test("live organization-key ceiling changes and revocation invalidate a warmed proxy", async () => {
       const f = await fixture();
-      const initial = (await f.browser.getClientConfig()).artifacts!;
+      const initial = viewerCapability(await f.browser.getClientConfig());
       // Key administration is fixture-only SQL; every asserted read still
       // authenticates the real hashed key and resolves the external membership.
       await shared.admin`
@@ -221,7 +235,7 @@ describe("session proxy real PostgreSQL", () => {
         ])}::jsonb where id = ${f.key.id}`;
       const reducedGrant = await getSessionProxyWorkspaceGrant(f.actor, f.workspace.id);
       expect(reducedGrant.permissions).not.toContain("artifacts:publish");
-      const reduced = (await f.browser.getClientConfig()).artifacts!;
+      const reduced = viewerCapability(await f.browser.getClientConfig());
       expect(reduced.cachePartition.authorizationEpoch).not.toBe(
         initial.cachePartition.authorizationEpoch,
       );
@@ -234,6 +248,81 @@ describe("session proxy real PostgreSQL", () => {
           source: SOURCE,
         }),
       ).rejects.toMatchObject({ status: 401 });
+    }, 180_000);
+
+    test("an external user's inbox reaches them through the relay, pinned to its workspace", async () => {
+      const f = await fixture();
+      const other = await createWorkspace(db.db, {
+        accountId: f.accountId,
+        name: "Other customer",
+      });
+      await f.service.addExternalWorkspaceMember(other.id, {
+        identity: { externalId: f.identity.externalId, source: SOURCE },
+        permissions: VIEWER_PERMISSIONS,
+        operationId: crypto.randomUUID(),
+      });
+      /** A chat the user started whose agent sent them a notification. */
+      const notified = async (workspaceId: string, title: string) => {
+        const session = await createSession(db.db, {
+          accountId: f.accountId,
+          workspaceId,
+          initialMessage: title,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium" as const,
+          latencyMode: "standard" as const,
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: f.identity.subjectId, label: "Product user" },
+          createdByContext: {},
+        });
+        await appendSessionEvents(db.db, workspaceId, session.id, [
+          {
+            type: "session.notification.posted",
+            payload: { key: "report", title, body: "", urgency: "normal" },
+          },
+        ]);
+        return session.id;
+      };
+      const here = await notified(f.workspace.id, "Report ready");
+      const elsewhere = await notified(other.id, "Other report ready");
+
+      // As the user, the inbox holds both workspaces' items.
+      const own = await f.actor.listInbox();
+      expect(own.items.map((item) => item.sessionId).sort()).toEqual([here, elsewhere].sort());
+      // The organization key's own authority has no inbox.
+      await expect(f.service.listInbox()).rejects.toMatchObject({ status: 403 });
+
+      // Through the relay, only the resolved workspace's items.
+      const relayed = await f.browser.listInbox();
+      expect(relayed.items).toHaveLength(1);
+      expect(relayed.items[0]).toMatchObject({
+        sessionId: here,
+        kind: "notification",
+        title: "Report ready",
+        unread: true,
+      });
+      expect(relayed.unreadCount).toBe(1);
+      const otherItem = own.items.find((item) => item.sessionId === elsewhere)!;
+      await expect(f.browser.updateInboxItem(otherItem.id, { seen: true })).rejects.toMatchObject({
+        status: 404,
+      });
+      await f.browser.updateInboxItem(relayed.items[0]!.id, { seen: true });
+      expect((await f.browser.listInbox()).items[0]).toMatchObject({ unread: false });
+      expect(
+        (await f.actor.listInbox()).items.find((item) => item.id === otherItem.id),
+      ).toMatchObject({ unread: true });
+      expect(await f.browser.getInboxSettings()).toMatchObject({ tidyPolicy: "own_sessions" });
+      // Every relayed list and item update named the resolved workspace.
+      const scoped = f.requests
+        .map((request) => new URL(request.url))
+        .filter(
+          (url) => url.pathname.startsWith("/v1/inbox") && url.searchParams.has("workspaceId"),
+        );
+      expect(scoped).toHaveLength(4);
+      expect(new Set(scoped.map((url) => url.searchParams.get("workspaceId")))).toEqual(
+        new Set([f.workspace.id]),
+      );
     }, 180_000);
   });
 });

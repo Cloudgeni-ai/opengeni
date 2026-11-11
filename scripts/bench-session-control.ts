@@ -13,7 +13,7 @@ import {
   withSessionActivitySavepoint,
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
-import { startTestServices } from "@opengeni/testing";
+import { startTestServices } from "@opengeni/testing/compose";
 
 const sessionCount = integerArgument("--sessions", 10_000);
 if (sessionCount < 1_000 || sessionCount > 50_000) {

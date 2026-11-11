@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app";
 import type { AppDependencies } from "../src/app";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Settings } from "@opengeni/config";
 
 // The get.<domain> install-serving routes. These only read
@@ -28,7 +28,14 @@ function appFor(settings: Settings) {
 // (mac/windows/un-built arches) so they are deterministic regardless of any local
 // build artifacts; the baked-path tests stage a throwaway file and clean it up.
 const BAKED_DIR = fileURLToPath(new URL("../../../agent/install/baked/", import.meta.url));
-const BAKED_FIXTURE = "opengeni-agent-x86_64-unknown-linux-musl-test-fixture";
+const BAKED_TARGET = "x86_64-unknown-linux-musl-test-fixture";
+const BAKED_ASSETS = ["opengeni-agent", "opengeni-browserd", "opengeni-computer-native"].map(
+  (name) => `${name}-${BAKED_TARGET}`,
+);
+const BAKED_FIXTURE = BAKED_ASSETS[0]!;
+const BAKED_FILES = BAKED_ASSETS.flatMap((asset) =>
+  ["", ".sha256", ".minisig"].map((suffix) => `${asset}${suffix}`),
+);
 
 describe("get.<domain> install routes", () => {
   test("GET /install.sh serves the committed POSIX script as a shell content type", async () => {
@@ -56,7 +63,7 @@ describe("get.<domain> install routes", () => {
     const body = await res.text();
     expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://cp.example.com"');
     expect(body).toContain('OPENGENI_API_DEFAULT_URL="https://cp.example.com"');
-    expect(body).not.toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    expect(body).not.toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"');
     expect(body).not.toContain('OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"');
     // The user-facing override var name is untouched (operator can still repoint).
     expect(body).toContain("OPENGENI_INSTALL_BASE_URL");
@@ -68,18 +75,24 @@ describe("get.<domain> install routes", () => {
     const body = await res.text();
     expect(body).toContain("$OpengeniInstallDefaultBaseUrl = 'https://cp.example.com'");
     expect(body).toContain("$OpengeniApiDefaultUrl = 'https://cp.example.com'");
-    expect(body).not.toContain("$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'");
+    expect(body).not.toContain("$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'");
     expect(body).not.toContain("$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'");
   });
 
-  test("GET /install.sh keeps the public-archive default when no public base URL is configured", async () => {
+  test("standalone installers use the managed application for scripts, assets and enrollment", async () => {
     const settings = testSettings({ publicBaseUrl: undefined });
     const res = await appFor(settings).request("/install.sh");
     const body = await res.text();
-    expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"');
+    expect(body).toContain("curl -fsSL https://app.opengeni.ai/install.sh | sh");
     expect(body).toContain('OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"');
     const windows = await appFor(settings).request("/install.ps1");
-    expect(await windows.text()).toContain("$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'");
+    const windowsBody = await windows.text();
+    expect(windowsBody).toContain("$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'");
+    expect(windowsBody).toContain("$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'");
+    expect(windowsBody).toContain("irm https://app.opengeni.ai/install.ps1 | iex");
+    expect(body).not.toContain("get.opengeni.ai");
+    expect(windowsBody).not.toContain("get.opengeni.ai");
   });
 
   test("GET /install.ps1 serves the Windows installer", async () => {
@@ -87,9 +100,10 @@ describe("get.<domain> install routes", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body.length).toBeGreaterThan(0);
-    expect(body).toContain("connect --token $enrollToken --non-interactive");
+    expect(body).toContain("'connect', '--token', $enrollToken, '--non-interactive'");
     expect(body).toContain("OPENGENI_ALLOW_DOWNGRADE");
     expect(body).toContain("Test-KeepNewerAgent");
+    expect(body).toContain("$candidateVersion = Assert-AgentStarts $staged");
     expect(body).toContain("--api-url '$quotedApiUrl' connect");
   });
 
@@ -151,6 +165,62 @@ describe("get.<domain> install routes", () => {
     expect(res.headers.get("location")).toBe(
       "https://mirror.example.com/rel/download/agent-v1.4.2/opengeni-agent-universal-apple-darwin",
     );
+  });
+
+  test("without a configured stable version, latest and the stable channel follow this build's published agent release", async () => {
+    const cargo = Bun.TOML.parse(
+      await readFile(new URL("../../../agent/Cargo.toml", import.meta.url), "utf8"),
+    ) as { workspace: { package: { version: string } } };
+    const version = cargo.workspace.package.version;
+    const [major, minor, patch] = version.split(".");
+    const older = `${major}.${minor}.${Number(patch) - 1}`;
+    const published = new Set<string>([older]);
+    const asked: string[] = [];
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+      input: string | URL | Request,
+    ) => {
+      const url = String(input);
+      asked.push(url);
+      const release = /agent-v([^/]+)\/manifest\.json$/u.exec(url)?.[1] ?? "";
+      return new Response(null, { status: published.has(release) ? 200 : 404 });
+    }) as typeof fetch);
+    try {
+      // Main raised the agent version before its release was published: the
+      // routes name the newest published release instead.
+      const before = appFor(testSettings({ agentStableVersion: undefined }));
+      const latestBefore = await before.request(
+        "/agent/latest/opengeni-agent-x86_64-pc-windows-msvc.exe",
+      );
+      expect(latestBefore.status).toBe(302);
+      expect(latestBefore.headers.get("location")).toBe(
+        `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${older}/opengeni-agent-x86_64-pc-windows-msvc.exe`,
+      );
+      const manifestBefore = await before.request("/agent/stable/manifest.json");
+      expect(manifestBefore.headers.get("location")).toEndWith(`/agent-v${older}/manifest.json`);
+      expect(asked[0]).toBe(
+        `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${version}/manifest.json`,
+      );
+
+      published.add(version);
+      const app = appFor(testSettings({ agentStableVersion: undefined }));
+      const latest = await app.request("/agent/latest/opengeni-agent-x86_64-pc-windows-msvc.exe");
+      expect(latest.status).toBe(302);
+      expect(latest.headers.get("location")).toBe(
+        `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${version}/opengeni-agent-x86_64-pc-windows-msvc.exe`,
+      );
+      const manifest = await app.request("/agent/stable/manifest.json");
+      expect(manifest.headers.get("location")).toEndWith(`/agent-v${version}/manifest.json`);
+
+      // A release host that cannot be asked leaves this build's release named.
+      fetchSpy.mockImplementation((async () => {
+        throw new TypeError("network down");
+      }) as typeof fetch);
+      const offline = appFor(testSettings({ agentStableVersion: undefined }));
+      const offlineManifest = await offline.request("/agent/stable/manifest.json");
+      expect(offlineManifest.headers.get("location")).toEndWith(`/agent-v${version}/manifest.json`);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   test("stable self-update manifest redirects to the configured immutable release", async () => {
@@ -219,15 +289,78 @@ describe("get.<domain> install routes", () => {
 describe("get.<domain> install routes — baked binary serving", () => {
   beforeEach(async () => {
     await mkdir(BAKED_DIR, { recursive: true });
-    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}`, "BAKED-BINARY-BYTES");
-    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}.sha256`, "deadbeef  baked\n");
-    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}.minisig`, "untrusted comment: x\nSIG\n");
+    for (const asset of BAKED_ASSETS) {
+      await writeFile(`${BAKED_DIR}${asset}`, "BAKED-BINARY-BYTES");
+      await writeFile(`${BAKED_DIR}${asset}.sha256`, "deadbeef  baked\n");
+      await writeFile(`${BAKED_DIR}${asset}.minisig`, "untrusted comment: fixture\nSIG\n");
+    }
   });
 
   afterEach(async () => {
-    await rm(`${BAKED_DIR}${BAKED_FIXTURE}`, { force: true });
-    await rm(`${BAKED_DIR}${BAKED_FIXTURE}.sha256`, { force: true });
-    await rm(`${BAKED_DIR}${BAKED_FIXTURE}.minisig`, { force: true });
+    for (const file of BAKED_FILES)
+      await rm(`${BAKED_DIR}${file}`, { recursive: true, force: true });
+  });
+
+  test("serves every member of one complete baked runtime cohort", async () => {
+    const app = appFor(testSettings());
+    for (const file of BAKED_FILES) {
+      const res = await app.request(`/agent/latest/${file}`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-opengeni-agent-source")).toBe("baked");
+      expect(res.headers.get("location")).toBeNull();
+    }
+  });
+
+  test.each([BAKED_ASSETS[1]!, `${BAKED_FIXTURE}.sha256`, `${BAKED_ASSETS[2]}.minisig`])(
+    "refuses the whole cohort when %s is missing instead of mixing baked and archive assets",
+    async (missing) => {
+      await rm(`${BAKED_DIR}${missing}`);
+      const app = appFor(testSettings());
+      for (const file of BAKED_FILES) {
+        const res = await app.request(`/agent/latest/${file}`);
+        expect(res.status).toBe(503);
+        expect(res.headers.get("location")).toBeNull();
+        expect(res.headers.get("x-opengeni-agent-source")).toBeNull();
+      }
+    },
+  );
+
+  test("an orphan helper also prevents the absent agent from falling back", async () => {
+    for (const file of BAKED_FILES.filter(
+      (name) => name.startsWith(`${BAKED_FIXTURE}.`) || name === BAKED_FIXTURE,
+    )) {
+      await rm(`${BAKED_DIR}${file}`);
+    }
+    const app = appFor(testSettings());
+    for (const asset of [BAKED_FIXTURE, BAKED_ASSETS[1]!]) {
+      const res = await app.request(`/agent/latest/${asset}`);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("location")).toBeNull();
+    }
+  });
+
+  test.each(["empty", "directory"] as const)(
+    "refuses a cohort with an %s signature",
+    async (kind) => {
+      const path = `${BAKED_DIR}${BAKED_FIXTURE}.minisig`;
+      await rm(path);
+      if (kind === "empty") await writeFile(path, "");
+      else await mkdir(path);
+      const res = await appFor(testSettings()).request(`/agent/latest/${BAKED_FIXTURE}`);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("location")).toBeNull();
+    },
+  );
+
+  test("an entirely absent target redirects the whole runtime to one immutable release", async () => {
+    for (const file of BAKED_FILES) await rm(`${BAKED_DIR}${file}`);
+    const app = appFor(testSettings({ agentStableVersion: "9.9.9" }));
+    for (const file of BAKED_FILES) {
+      const res = await app.request(`/agent/latest/${file}`);
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toEndWith(`/download/agent-v9.9.9/${file}`);
+      expect(res.headers.get("x-opengeni-agent-source")).toBeNull();
+    }
   });
 
   test("GET /agent/latest/<baked-asset> serves the baked binary as octet-stream (no redirect)", async () => {

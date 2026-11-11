@@ -2,8 +2,9 @@ import {
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   selectCanonicalPersonalSlackConnection,
 } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/react/app/types";
 import type { ConnectAttempt } from "@opengeni/connect";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
@@ -14,7 +15,7 @@ const PERSONAL_SLACK_PROVIDER_DOMAIN = "slack.com";
 export async function enableNewSlackAccountTools(
   client: {
     enableCapability(
-      ...args: Parameters<OpenGeniBrowserClient["enableCapability"]>
+      ...args: Parameters<ChatClient<OpenGeniBrowserClient>["enableCapability"]>
     ): Promise<{ status: string }>;
   },
   workspaceId: string,

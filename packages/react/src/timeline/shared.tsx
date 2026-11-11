@@ -1,11 +1,28 @@
-import { CameraIcon, CameraOffIcon, ChevronRightIcon } from "lucide-react";
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { CameraIcon, CameraOffIcon, CheckIcon, ChevronRightIcon, CopyIcon } from "lucide-react";
+import { useToolDetails } from "./tool-details";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { stringifyPayload } from "../lib/format";
+import { redactPayload } from "./credential-redaction";
+import { SecretRefText } from "../components/secret-ref-chip";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
-import type { ToolCallTruncation } from "./types";
+import type { ToolCallTruncation, ToolOutputPreview } from "./types";
+import { useOpenGeniText } from "../messages/runtime";
+import { ShimmerText } from "./shimmer-text";
 
 /* ----------------------------------------------------------------------------
    Shared timeline primitives
@@ -28,6 +45,25 @@ import type { ToolCallTruncation } from "./types";
      bad      a settled failure      red dot + red text ("exit 6") — the one hue
      muted    quiet metadata         subtle text ("session 3")
    -------------------------------------------------------------------------- */
+
+const ToolOutputPreviewContext = createContext<ToolOutputPreview | null>(null);
+
+/**
+ * Marks a tool row whose output is a bounded preview. The row's disclosure
+ * reads the exact output when it opens and shows it once it lands; until then
+ * the body says it is loading, and a failed read says it is a preview.
+ */
+export function ToolOutputPreviewProvider({
+  value,
+  children,
+}: {
+  value: ToolOutputPreview | null;
+  children: ReactNode;
+}) {
+  return (
+    <ToolOutputPreviewContext.Provider value={value}>{children}</ToolOutputPreviewContext.Provider>
+  );
+}
 
 /**
  * A subtle settle signal — see the CHIP DOCTRINE above. The closed tone set.
@@ -137,6 +173,7 @@ export function ActivityDisclosure({
   defaultOpen,
   children,
 }: ActivityDisclosureProps) {
+  const t = useOpenGeniText();
   // `failed` takes precedence over `cancelled` when both are set (shouldn't happen, but be safe).
   // When `failed` is set the icon goes red and a "failed" chip appears in the
   // gutter — unless the caller already supplied an explicit chip (their chip wins,
@@ -147,9 +184,9 @@ export function ActivityDisclosure({
   const chip =
     chipProp ??
     (failed
-      ? ({ tone: "bad", text: "failed" } satisfies DisclosureChip)
+      ? ({ tone: "bad", text: t("timeline.chip.failed") } satisfies DisclosureChip)
       : cancelled
-        ? ({ tone: "interrupted", text: "interrupted" } satisfies DisclosureChip)
+        ? ({ tone: "interrupted", text: t("timeline.chip.interrupted") } satisfies DisclosureChip)
         : undefined);
   // An ancestor may seed the initial open state (screenshot instrumentation);
   // absent in normal app usage, where the row starts collapsed.
@@ -159,23 +196,48 @@ export function ActivityDisclosure({
   useEffect(() => {
     if (searchReveal) setOpen(true);
   }, [searchReveal]);
-  const truncation = useContext(ToolCallTruncationContext);
+  // A truncation notice is about raw output, which plain tool details never show.
+  const plain = useToolDetails() === "plain";
+  const truncationContext = useContext(ToolCallTruncationContext);
+  const truncation = plain ? null : truncationContext;
   const compact = useContext(CompactActivityContext);
+  // A previewed output reads its exact output when the row opens (once: a
+  // failed read waits for Retry).
+  const outputPreview = useContext(ToolOutputPreviewContext);
+  const loadOutput = outputPreview?.load;
+  const outputPending = outputPreview?.state === "preview";
+  useEffect(() => {
+    if (open && outputPending && !compact) loadOutput?.();
+  }, [open, outputPending, loadOutput, compact]);
+  const titleRef = useRef<HTMLSpanElement>(null);
+  const previewRef = useRef<HTMLSpanElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const childBody = expandable && (children != null || truncation != null);
+  // A step with nothing behind it still opens when its one line is cut off,
+  // so its whole title and note can be read (and copied).
+  const clipped = useClippedLine(
+    titleRef,
+    previewRef,
+    !compact && !childBody && !media,
+    open,
+    `${typeof title === "string" ? title : ""}\u0000${typeof preview === "string" ? preview : ""}`,
+  );
   if (compact)
     return (
       <span className="og-rolling-label">
         <span className={cn("shrink-0", ICON_TONE[iconTone])}>{icon}</span>
-        <span className="og-command-reel">
+        <ShimmerText active="ancestor" tone="reel" className="og-command-reel">
           <span className="og-reel-title">{title}</span>
           {(compactPreview === undefined ? preview : compactPreview) ? (
             <span className="og-reel-preview text-og-fg-subtle">
               {compactPreview === undefined ? preview : compactPreview}
             </span>
           ) : null}
-        </span>
+        </ShimmerText>
       </span>
     );
-  const hasBody = expandable && (children != null || truncation != null);
+  const hasBody = childBody || clipped;
+  const expanded = open && hasBody;
 
   // The preview is detail-on-demand: it is suppressed once the row is open so a
   // path/stat shown in the body never also sits in the collapsed row.
@@ -214,24 +276,37 @@ export function ActivityDisclosure({
         <span className="size-3.5 shrink-0" />
       )}
       <span className={cn("shrink-0", ICON_TONE[iconTone])}>{icon}</span>
-      <span className={cn("og-command-reel", running && "og-command-reel-running")}>
+      <ShimmerText
+        active={Boolean(running)}
+        tone="reel"
+        className={cn("og-command-reel", running && "og-command-reel-running")}
+      >
         <span
+          ref={titleRef}
           className={cn(
-            "min-w-0 shrink truncate text-og-base font-medium",
+            "min-w-0 shrink text-og-base font-medium",
+            // Open, the whole title shows; closed, it keeps to one line.
+            expanded ? "whitespace-normal [overflow-wrap:anywhere]" : "truncate",
             titleMono && "font-og-mono text-og-sm font-normal",
           )}
         >
           {title}
         </span>
         {previewVisible && !media ? (
-          <span className="min-w-0 flex-1 truncate text-og-sm text-og-fg-subtle">{preview}</span>
+          <span ref={previewRef} className="min-w-0 flex-1 truncate text-og-sm text-og-fg-subtle">
+            {preview}
+          </span>
         ) : (
           <span className="flex-1" />
         )}
-      </span>
+      </ShimmerText>
       {/* The right gutter carries at most ONE signal: the media thumbnail, else a
-          terse settle chip (hidden once expanded — the body owns the detail). */}
-      {media && !open ? (
+          terse settle chip (hidden once expanded — the body owns the detail);
+          an open step keeps it for Copy, which sits beside the row (a button
+          inside the row's own button role would be hidden from AT). */}
+      {expanded ? (
+        <span aria-hidden="true" className="ml-auto size-6 shrink-0 pointer-coarse:size-11" />
+      ) : media && !open ? (
         <span className="ml-auto flex shrink-0 items-center gap-2 pl-2">{media}</span>
       ) : chip && !open ? (
         <span className="ml-auto shrink-0 pl-2">
@@ -245,43 +320,85 @@ export function ActivityDisclosure({
   // settled state regardless of whether the chip slot is occupied by media.
   const dataStatus = cancelled ? "cancelled" : failed ? "failed" : undefined;
 
-  if (!hasBody) {
-    return (
-      <div className={cn(rowClass, "cursor-default")} data-status={dataStatus}>
-        {inner}
-      </div>
-    );
-  }
-
   // Native disclosure (not radix-ui Collapsible): importing `radix-ui` from the
   // timeline registry pulls Popper into the session share-graph and crashes
   // lazy workspace settings (`createPopperScope is not a function`).
+  //
+  // One DOM shape whether or not the row opens, so a row that becomes
+  // expandable (its line got cut off) keeps the same title and note nodes,
+  // which the clipping measurement goes on observing.
   return (
-    <div>
+    <div className="relative">
       <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
-        data-state={open ? "open" : "closed"}
-        onClick={() => setOpen((prev) => !prev)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setOpen((prev) => !prev);
-          }
-        }}
+        {...(hasBody
+          ? {
+              role: "button",
+              tabIndex: 0,
+              "aria-expanded": open,
+              "data-state": open ? "open" : "closed",
+              onClick: (event: MouseEvent<HTMLDivElement>) => {
+                // Selecting the row's text to copy it leaves the row as it is.
+                if (hasTextSelectionIn(event.currentTarget)) return;
+                setOpen((prev) => !prev);
+              },
+              onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setOpen((prev) => !prev);
+                }
+              },
+            }
+          : {})}
         data-status={dataStatus}
         className={cn(
           rowClass,
-          "cursor-pointer outline-hidden hover:bg-og-surface-1 hover:text-og-fg",
-          "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
+          hasBody
+            ? [
+                "cursor-pointer outline-hidden hover:bg-og-surface-1 hover:text-og-fg",
+                "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
+              ]
+            : "cursor-default",
         )}
       >
         {inner}
       </div>
-      {open ? (
-        <div className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand">
-          {children}
+      {expanded ? (
+        <span className="absolute right-1.5 top-1.5 pointer-coarse:top-2.5">
+          <StepCopyButton titleRef={titleRef} bodyRef={bodyRef} />
+        </span>
+      ) : null}
+      {expanded ? (
+        <div
+          ref={bodyRef}
+          className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand empty:hidden"
+        >
+          {!childBody ? (
+            // A step without details: its note, in full.
+            preview != null && !media ? (
+              <div className="whitespace-pre-wrap text-og-sm leading-5 text-og-fg-subtle [overflow-wrap:anywhere]">
+                {preview}
+              </div>
+            ) : null
+          ) : outputPreview && loadOutput && outputPreview.state !== "error" ? (
+            // Never show a preview's body as if it were the whole output.
+            <div
+              data-og-tool-output-loading=""
+              role="status"
+              className="text-og-sm leading-5 text-og-fg-subtle"
+            >
+              {t("timeline.shared.loadingFullOutput")}
+            </div>
+          ) : outputPreview ? (
+            <>
+              <ToolOutputPreviewNotice preview={outputPreview} />
+              <ToolOutputPreviewContext.Provider value={null}>
+                {children}
+              </ToolOutputPreviewContext.Provider>
+            </>
+          ) : (
+            children
+          )}
           {truncation ? <ToolCallTruncationNotice truncation={truncation} /> : null}
         </div>
       ) : null}
@@ -289,19 +406,159 @@ export function ActivityDisclosure({
   );
 }
 
+/**
+ * Whether a closed row's one line (its title or note) is cut off. Measured
+ * only while `enabled` and kept while the row is open (when the line wraps),
+ * so opening a clipped row never takes its body away.
+ */
+function useClippedLine(
+  titleRef: RefObject<HTMLElement | null>,
+  previewRef: RefObject<HTMLElement | null>,
+  enabled: boolean,
+  open: boolean,
+  contentKey: string,
+): boolean {
+  const [clipped, setClipped] = useState(false);
+  const holding = open && clipped;
+  useIsomorphicLayoutEffect(() => {
+    if (!enabled || holding) return;
+    const measure = () => {
+      const cut = [titleRef.current, previewRef.current].some(
+        (element) => element != null && element.scrollWidth > element.clientWidth + 1,
+      );
+      setClipped((current) => (current === cut ? current : cut));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    for (const element of [titleRef.current, previewRef.current]) {
+      if (element) observer.observe(element);
+    }
+    return () => observer.disconnect();
+  }, [enabled, holding, open, contentKey, titleRef, previewRef]);
+  return enabled && clipped;
+}
+
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+/** A drag-selection inside the row, which a click must not turn into a toggle. */
+function hasTextSelectionIn(element: HTMLElement): boolean {
+  const selection = typeof window === "undefined" ? null : window.getSelection();
+  if (!selection || selection.isCollapsed || selection.toString().trim() === "") return false;
+  return element.contains(selection.anchorNode) || element.contains(selection.focusNode);
+}
+
+function readableText(element: HTMLElement | null): string {
+  if (!element) return "";
+  // innerText keeps line breaks between blocks where the DOM supports it.
+  const text = typeof element.innerText === "string" ? element.innerText : element.textContent;
+  return (text ?? "").trim();
+}
+
+/** The step's whole text as shown: its title, then what opened below it. */
+export function activityStepText(title: HTMLElement | null, body: HTMLElement | null): string {
+  return [readableText(title), readableText(body)].filter(Boolean).join("\n\n");
+}
+
+const STEP_COPIED_MS = 1600;
+
+/**
+ * Copy for an open step, in the gutter its chip leaves. A plain icon button
+ * (no tooltip layer: the timeline registry stays free of Popper).
+ */
+function StepCopyButton({
+  titleRef,
+  bodyRef,
+}: {
+  titleRef: RefObject<HTMLElement | null>;
+  bodyRef: RefObject<HTMLElement | null>;
+}) {
+  const t = useOpenGeniText();
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    },
+    [],
+  );
+  const label = copied ? t("copyButton.copied") : t("timeline.shared.copyStep");
+  return (
+    <button
+      type="button"
+      data-og-copy-step=""
+      data-state={copied ? "copied" : "idle"}
+      aria-label={label}
+      title={label}
+      onClick={(event) => {
+        event.stopPropagation();
+        void copyTextToClipboard(activityStepText(titleRef.current, bodyRef.current)).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          if (timer.current !== null) clearTimeout(timer.current);
+          timer.current = setTimeout(() => {
+            timer.current = null;
+            setCopied(false);
+          }, STEP_COPIED_MS);
+        });
+      }}
+      className={cn(
+        "inline-flex size-6 items-center justify-center rounded-og-sm text-og-fg-subtle pointer-coarse:size-11",
+        "transition-colors duration-150 hover:bg-og-surface-2/80 hover:text-og-fg",
+        "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40",
+        copied && "text-og-accent",
+      )}
+    >
+      {copied ? (
+        <CheckIcon className="size-3.5" aria-hidden />
+      ) : (
+        <CopyIcon className="size-3.5" aria-hidden />
+      )}
+    </button>
+  );
+}
+
+/** Says the body below is a preview, with Retry when the exact read failed. */
+function ToolOutputPreviewNotice({ preview }: { preview: ToolOutputPreview }) {
+  const t = useOpenGeniText();
+  const retry = preview.load;
+  return (
+    <div
+      data-og-tool-output-preview=""
+      role="status"
+      className="flex flex-wrap items-center gap-x-2 text-og-sm leading-5 text-og-fg-subtle"
+    >
+      <span>
+        {retry ? t("timeline.shared.outputPreviewFailed") : t("timeline.shared.outputPreviewOnly")}
+      </span>
+      {retry ? (
+        <button
+          type="button"
+          onClick={retry}
+          className="rounded-og-sm font-medium text-og-fg-muted underline-offset-2 hover:text-og-fg hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+        >
+          {t("timeline.shared.retryFullOutput")}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function ToolCallTruncationNotice({ truncation }: { truncation: ToolCallTruncation }) {
+  const t = useOpenGeniText();
   const fullEvidence = truncation.fullEvidence.available
     ? "retained"
     : (truncation.fullEvidence.reason ?? "unavailable");
   return (
     <div data-og-tool-output-truncation="" className="text-og-sm leading-5 text-og-fg-subtle">
-      Output bounded at <code className="font-og-mono">{truncation.surface}</code>
+      {t("timeline.shared.outputBoundedAt")}{" "}
+      <code className="font-og-mono">{truncation.surface}</code>
       {truncation.omittedBytes != null && truncation.omittedBytes > 0
-        ? ` · ${truncation.omittedBytes.toLocaleString()} bytes omitted`
+        ? ` · ${t("timeline.shared.bytesOmitted", { count: truncation.omittedBytes, bytes: truncation.omittedBytes.toLocaleString(t.locale) })}`
         : null}
-      {" · reason "}
+      {` · ${t("timeline.shared.truncationReason")} `}
       <code className="font-og-mono">{truncation.reason}</code>
-      {" · full evidence "}
+      {` · ${t("timeline.shared.fullEvidence")} `}
       <code className="font-og-mono">{fullEvidence}</code>
     </div>
   );
@@ -336,7 +593,14 @@ function Chip({ chip }: { chip: DisclosureChip }) {
 
 /* --- terminal output block (exec / write_stdin) ---------------------------- */
 
-export function TermBlock({
+type TermBlockProps = Parameters<typeof TermBlockView>[0];
+
+/** Terminal output under a tool row; plain tool details never show it. */
+export function TermBlock(props: TermBlockProps) {
+  return useToolDetails() === "plain" ? null : <TermBlockView {...props} />;
+}
+
+function TermBlockView({
   command,
   workdir,
   output,
@@ -345,10 +609,10 @@ export function TermBlock({
   failed,
 }: {
   /**
-   * The command shown in the prompt header. Pass `null` when the row title
-   * already carries it (e.g. an exec row titled `$ cmd`): the header then drops
-   * the command — and the whole prompt line if there is no workdir either — so
-   * the command never reads twice, stacked, above the output.
+   * The command shown in full above the output (a command row's title says
+   * what it did in plain words, so this is where the command itself reads).
+   * Pass `null` when the row title already carries it: the header then drops
+   * the command, and the whole prompt line if there is no workdir either.
    */
   command: string | null;
   workdir?: string | null | undefined;
@@ -364,6 +628,7 @@ export function TermBlock({
    */
   tailLines?: number | undefined;
 }) {
+  const t = useOpenGeniText();
   const [full, setFull] = useState(false);
   const empty = output.trim() === "";
   const lines = output.split("\n");
@@ -388,11 +653,11 @@ export function TermBlock({
       )}
     >
       {showHeader ? (
-        <div className="flex items-center gap-2 pb-1">
+        <div className="flex items-start gap-2 pb-1">
           <span className="select-none text-og-status-idle">$</span>
           {command != null ? (
-            <span className="min-w-0 flex-1 truncate font-og-mono text-og-sm text-og-fg-muted">
-              {command}
+            <span className="max-h-64 min-w-0 flex-1 overflow-auto whitespace-pre-wrap wrap-anywhere font-og-mono text-og-sm text-og-fg-muted">
+              <SecretRefText text={command} />
             </span>
           ) : (
             <span className="flex-1" />
@@ -403,9 +668,11 @@ export function TermBlock({
         </div>
       ) : null}
       {empty ? (
-        <p className="font-og-mono text-og-xs italic text-og-fg-subtle">(no output)</p>
+        <p className="font-og-mono text-og-xs italic text-og-fg-subtle">
+          {t("timeline.shared.noOutput")}
+        </p>
       ) : (
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5 text-og-fg-muted">
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap wrap-anywhere font-og-mono text-og-xs leading-5 text-og-fg-muted">
           {shown}
           {live ? (
             <span className="ml-px inline-block h-[1em] w-[2px] translate-y-[2px] animate-og-blink bg-og-accent align-middle" />
@@ -418,7 +685,7 @@ export function TermBlock({
           onClick={() => setFull(true)}
           className="mt-1 text-left text-og-xs text-og-fg-subtle transition-colors hover:text-og-fg"
         >
-          show full output ({lines.length} lines)
+          {t("timeline.shared.showFullOutputLengthLines", { length: lines.length })}
         </button>
       ) : null}
     </div>
@@ -436,8 +703,12 @@ export function PayloadBlock({
   value: unknown;
   failed?: boolean | undefined;
 }) {
-  const text = typeof value === "string" ? value : stringifyPayload(value);
-  if (!text || text.trim() === "") {
+  const plain = useToolDetails() === "plain";
+  // Signed links never show their signature.
+  const shown = redactPayload(value);
+  const text = typeof shown === "string" ? shown : stringifyPayload(shown);
+  // Raw arguments and output are developer detail: plain tool details never show them.
+  if (plain || !text || text.trim() === "") {
     return null;
   }
   // Flush on the page, no frame — a labelled monospace run marked only by a 2px
@@ -455,11 +726,11 @@ export function PayloadBlock({
       </p>
       <pre
         className={cn(
-          "max-h-64 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5",
+          "max-h-64 overflow-auto whitespace-pre-wrap wrap-anywhere font-og-mono text-og-xs leading-5",
           failed ? "text-og-status-failed" : "text-og-fg-muted",
         )}
       >
-        {text}
+        <SecretRefText text={text} />
       </pre>
     </div>
   );
@@ -533,8 +804,8 @@ export function Thumbnail({
   src,
   caption,
   alt = "screenshot",
-  expandLabel = "Expand screenshot",
-  lightboxLabel = "Screenshot",
+  expandLabel: expandLabelProp,
+  lightboxLabel: lightboxLabelProp,
   downloadFilename,
 }: {
   src: string;
@@ -544,6 +815,11 @@ export function Thumbnail({
   lightboxLabel?: string | undefined;
   downloadFilename?: string | undefined;
 }) {
+  const t = useOpenGeniText();
+  const expandLabel =
+    expandLabelProp === undefined ? t("timeline.shared.expandScreenshot") : expandLabelProp;
+  const lightboxLabel =
+    lightboxLabelProp === undefined ? t("timeline.shared.screenshot") : lightboxLabelProp;
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
   if (failed) {
@@ -598,18 +874,26 @@ export function Thumbnail({
 export function ScreenshotFigure({
   src,
   caption,
+  showCaption = true,
   alt = "screenshot",
-  expandLabel = "Expand screenshot",
-  lightboxLabel = "Screenshot",
+  expandLabel: expandLabelProp,
+  lightboxLabel: lightboxLabelProp,
   downloadFilename,
 }: {
   src: string;
   caption?: string | undefined;
+  /** Off when the row above already says the same; the lightbox keeps it. */
+  showCaption?: boolean | undefined;
   alt?: string;
   expandLabel?: string | undefined;
   lightboxLabel?: string | undefined;
   downloadFilename?: string | undefined;
 }) {
+  const t = useOpenGeniText();
+  const expandLabel =
+    expandLabelProp === undefined ? t("timeline.shared.expandScreenshot") : expandLabelProp;
+  const lightboxLabel =
+    lightboxLabelProp === undefined ? t("timeline.shared.screenshot") : lightboxLabelProp;
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
   const surface = "block w-full overflow-hidden rounded-og-md border border-og-border bg-og-bg";
@@ -627,7 +911,7 @@ export function ScreenshotFigure({
     <figure className="m-0 min-w-0">
       {failed ? (
         <div className="rounded-og-md border border-og-border bg-og-bg px-3 py-6 text-center font-og-mono text-og-xs text-og-fg-subtle">
-          image unavailable
+          {t("timeline.shared.imageUnavailable")}
         </div>
       ) : lightbox ? (
         <button
@@ -643,7 +927,7 @@ export function ScreenshotFigure({
       ) : (
         <div className={surface}>{img}</div>
       )}
-      {caption ? (
+      {caption && showCaption ? (
         <figcaption className="mt-1.5 font-og-mono text-og-xs text-og-fg-subtle">
           {caption}
         </figcaption>

@@ -298,7 +298,7 @@ function packageJson(
   const result: Record<string, unknown> = {
     name: manifest.packageName,
     version: manifest.packageVersion,
-    description: `Exact OpenGeni artifact kernel binding for ${manifest.target}.`,
+    description: `Exact Opengeni artifact kernel binding for ${manifest.target}.`,
     license: "Apache-2.0",
     repository: {
       type: "git",
@@ -406,7 +406,7 @@ function packageReadme(
     `# \`${manifest.packageName}\``,
     "",
     `Exact ${manifest.kind} runtime package for \`${manifest.target}\` (Rust target \`${definition.rustTarget}\`).`,
-    "It is selected only by a manifest-pinned OpenGeni host bootstrap; it performs no downloads or fallback resolution.",
+    "It is selected only by a manifest-pinned Opengeni host bootstrap; it performs no downloads or fallback resolution.",
     "",
   ].join("\n");
 }

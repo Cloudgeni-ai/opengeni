@@ -3,7 +3,11 @@ import {
   CreateWorkspaceGatewayCustomModelRequest,
   CreateWorkspaceOpenRouterCustomModelRequest,
 } from "../src";
-import { compareModelPickerOrder, modelPickerBillingClassFor } from "../src/model-picker-order";
+import {
+  compareModelPickerOrder,
+  modelLabelDistinctions,
+  modelPickerBillingClassFor,
+} from "../src/model-picker-order";
 
 describe("model picker shared ordering", () => {
   test("groups deployment models together independently of upstream settlement", () => {
@@ -114,5 +118,76 @@ describe("workspace Gateway upstream slug", () => {
         upstreamModelId: "anthropic|claude",
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("model label distinctions", () => {
+  const eu = { geography: "eu" };
+  const unknown = { geography: "unknown" };
+
+  test("models with unique names get nothing", () => {
+    expect(
+      modelLabelDistinctions([
+        { id: "a/sol", label: "GPT-6.1 Sol", residency: eu },
+        { id: "a/terra", label: "GPT-6.1 Terra", residency: unknown },
+      ]).size,
+    ).toBe(0);
+  });
+
+  test("twins that differ by a known geography name it, and the other keeps its name", () => {
+    expect([
+      ...modelLabelDistinctions([
+        {
+          id: "azure-sol/gpt-6.1-sol",
+          label: "GPT-6.1 Sol",
+          providerLabel: "P",
+          residency: unknown,
+        },
+        { id: "azure-eu/gpt-6.1-sol", label: "GPT-6.1 Sol", providerLabel: "P", residency: eu },
+        {
+          id: "us/gpt-6.1-sol",
+          label: "gpt-6.1 sol ",
+          providerLabel: "P",
+          residency: { geography: "us" },
+        },
+      ]),
+    ]).toEqual([
+      ["azure-eu/gpt-6.1-sol", { geography: "eu" }],
+      ["us/gpt-6.1-sol", { geography: "us" }],
+    ]);
+  });
+
+  test("twins in the same place fall back to the provider, and names alone never claim a place", () => {
+    expect([
+      ...modelLabelDistinctions([
+        { id: "x/m", label: "M", providerLabel: "X", residency: unknown },
+        { id: "y/m", label: "M", providerLabel: "Y" },
+        { id: "eu-1/m", label: "M (EU)", providerLabel: "X", residency: unknown },
+      ]),
+    ]).toEqual([
+      ["x/m", { providerLabel: "X" }],
+      ["y/m", { providerLabel: "Y" }],
+    ]);
+    expect([
+      ...modelLabelDistinctions([
+        { id: "a/m", label: "M", providerLabel: "A", residency: eu },
+        { id: "b/m", label: "M", providerLabel: "B", residency: eu },
+        { id: "c/m", label: "M", providerLabel: "A" },
+      ]),
+    ]).toEqual([
+      ["a/m", { geography: "eu", providerLabel: "A" }],
+      ["b/m", { geography: "eu", providerLabel: "B" }],
+    ]);
+  });
+
+  test("identical twins and models in different groups get nothing", () => {
+    expect(
+      modelLabelDistinctions([
+        { id: "a/m", label: "M", providerLabel: "P" },
+        { id: "b/m", label: "M", providerLabel: "P" },
+        { id: "c/m", label: "N", group: "credits", residency: eu },
+        { id: "d/m", label: "N", group: "keys", residency: unknown },
+      ]).size,
+    ).toBe(0);
   });
 });

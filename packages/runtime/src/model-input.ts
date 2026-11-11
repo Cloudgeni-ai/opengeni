@@ -1,13 +1,21 @@
 import type { Settings } from "@opengeni/config";
-import { boundModelToolOutputItem } from "@opengeni/codex";
+import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import type { Agent, AgentInputItem, CallModelInputFilter } from "@openai/agents";
+import { isAnthropicWebSearchItem } from "./anthropic-web-search";
+import {
+  projectHostedSearchEvidence,
+  withSearchRecordForm,
+  type SearchRecordForm,
+} from "./hosted-search-evidence";
 
 import {
   CompactionNeededError,
   compactionThresholdTokens,
+  countModelInputImages,
   estimateCompleteModelInputTokens,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
+  type HistoryFootprintCompactionSignal,
   type ProviderContextTokenSignal,
 } from "./context-compaction";
 import {
@@ -16,6 +24,7 @@ import {
   repairHistoryProtocolItems,
 } from "./history-sanitizer";
 import {
+  expandInteractionFamilyDisclosures,
   restoreGenericDispatchHistoryItem,
   restoreGenericDispatchHistoryItems,
 } from "./lazy-tool-transport";
@@ -23,7 +32,19 @@ import {
 export type ContextRobustnessFilterOptions = {
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
+  /**
+   * Compaction triggers independent of provider tokens. Both are checked
+   * before every model request, through the same compaction signal.
+   */
+  historyFootprintCompaction?: HistoryFootprintCompactionOptions;
   throwOnCompactionNeeded?: boolean;
+};
+
+export type HistoryFootprintCompactionOptions = {
+  /** Stored active-history size at or over its compaction threshold, or null. */
+  storedFootprint?: () => HistoryFootprintCompactionSignal | null | undefined;
+  /** Compact before a request would carry this many images. */
+  imageThreshold?: number | null;
 };
 
 /**
@@ -33,10 +54,11 @@ export type ContextRobustnessFilterOptions = {
  * responses, and that store is not durable enough to anchor long runs on: a
  * response that streamed successfully can be missing from the store on the
  * very next call, which then fails with 400 "Item with id ... not found"
- * (observed live on Azure OpenAI mid-turn). All item content — including the
- * encrypted reasoning payload carried in providerData when
- * `openaiReasoningEncryptedContent` is on — is sent inline, so the ids add
- * fragility without adding information. Pairing fields (`call_id`/`callId`)
+ * (observed live on Azure OpenAI mid-turn). Inline encrypted reasoning can
+ * survive this detachment. Hosted search is different: the base model-input
+ * filter projects included evidence into portable text before stripping ids;
+ * the provider otherwise hides those results behind its stored id.
+ * Pairing fields (`call_id`/`callId`)
  * are separate properties and stay untouched; items are cloned, never mutated.
  */
 export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => {
@@ -87,14 +109,18 @@ export const restoreLazyToolProviderHistoryFilter: CallModelInputFilter = ({ mod
 };
 
 /**
- * Canonical Codex-style tool-result bound at the final model-input seam. The
- * identical pure normalizer also runs before conversation rows are persisted,
- * so this is a live-turn defense rather than a request-only alternate history.
+ * Canonical history form at the final model-input seam: output-only fields
+ * such as `status` removed and tool results bounded. It is the same pure
+ * normalizer that runs before conversation rows are persisted, so an item is
+ * sent byte for byte the same in the step that produced it and in every later
+ * request that replays it from stored history. Without it, a call and its
+ * result went out with `"status":"completed"` within their own turn and
+ * without it from the next turn on.
  */
 export function boundModelToolOutputsFilterForSettings(settings: Settings): CallModelInputFilter {
   return memoizedInputItemProjectionFilter(
     (item) =>
-      boundModelToolOutputItem(
+      canonicalizePersistedHistoryItem(
         item as unknown as Record<string, unknown>,
         settings.modelToolOutputTruncationTokens,
       ) as unknown as AgentInputItem,
@@ -134,6 +160,23 @@ export function contextRobustnessFilterForSettings(
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter {
   const thresholdTokens = compactionThresholdTokens(settings);
+  const imageThreshold = options.historyFootprintCompaction?.imageThreshold;
+  // Items keep their identity across the SDK's per-call input rebuilds, so
+  // only items new to this request are walked.
+  const imageCounts = new WeakMap<object, number>();
+  const requestImageCount = (input: readonly unknown[]): number => {
+    let count = 0;
+    for (const item of input) {
+      if (!item || typeof item !== "object") continue;
+      let itemCount = imageCounts.get(item);
+      if (itemCount === undefined) {
+        itemCount = countModelInputImages(item);
+        imageCounts.set(item, itemCount);
+      }
+      count += itemCount;
+    }
+    return count;
+  };
   let previousRequest: {
     revision: number;
     instructionsTokens: number;
@@ -191,9 +234,28 @@ export function contextRobustnessFilterForSettings(
           signalSource: "provider",
         });
       }
+      const historyFootprint =
+        options.historyFootprintCompaction?.storedFootprint?.() ??
+        imageFootprint(requestImageCount(input), imageThreshold);
+      if (historyFootprint) {
+        throw new CompactionNeededError({
+          signalTokens,
+          thresholdTokens,
+          signalSource: "history_footprint",
+          historyFootprint,
+        });
+      }
     }
     return modelData.input === input ? modelData : { ...modelData, input };
   };
+}
+
+function imageFootprint(
+  images: number,
+  threshold: number | null | undefined,
+): HistoryFootprintCompactionSignal | null {
+  if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 1) return null;
+  return images >= threshold ? { dimension: "images", actual: images, threshold } : null;
 }
 
 /**
@@ -486,24 +548,42 @@ export function incrementalModelInputProjectionFilter(
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
-  options: ContextRobustnessFilterOptions = {},
+  options: ContextRobustnessFilterOptions & { searchRecordForm?: SearchRecordForm } = {},
 ): CallModelInputFilter | undefined {
   return composeCallModelInputFilters([
-    baseModelInputFilterForSettings(settings),
+    baseModelInputFilterForSettings(settings, { searchRecordForm: options.searchRecordForm }),
     boundModelToolOutputsFilterForSettings(settings),
     contextRobustnessFilterForSettings(settings, options),
   ]);
 }
 
-/** Rules that normalize history but do not impose final bounds/accounting. */
-export function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
+/**
+ * Rules that normalize history but do not impose final bounds/accounting.
+ * `searchRecordForm` is the session's {@link SearchRecordForm}; callers that
+ * know no session get the original `assistant` form.
+ */
+export function baseModelInputFilterForSettings(
+  settings: Settings,
+  options: { searchRecordForm?: SearchRecordForm | undefined } = {},
+): CallModelInputFilter {
   const stripProviderIds = settings.openaiProviderItemIds === "strip";
-  return memoizedInputItemProjectionFilter(
+  const form = options.searchRecordForm ?? "assistant";
+  const projectItems = memoizedInputItemProjectionFilter(
     (source) => {
       let item = restoreGenericDispatchHistoryItem(source);
       item = normalizeComputerCallAction(
         item as unknown as Record<string, unknown>,
       ) as unknown as AgentInputItem;
+      // Claude's own searches stay native here: every model transport then
+      // calls projectHistoryForProvider, which replays them verbatim to Claude
+      // and projects their readable facts for any other provider, in the
+      // session's form marked on them here.
+      item = projectHostedSearchEvidence(item as unknown as Record<string, unknown>, {
+        preserveAnthropicNative: true,
+        form,
+      }) as AgentInputItem;
+      if (isAnthropicWebSearchItem(item as unknown as Record<string, unknown>))
+        item = withSearchRecordForm(item, form);
       return stripProviderIds ? stripProviderItemId(item) : item;
     },
     // The SDK's externally-owned run history is immutable and append-only.
@@ -511,4 +591,14 @@ export function baseModelInputFilterForSettings(settings: Settings): CallModelIn
     // latest model/tool step instead of walking a six-figure history again.
     { appendOnlyInput: true },
   );
+  return composeCallModelInputFilters([interactionFamilyDisclosureFilter, projectItems]);
 }
+
+/**
+ * Declare an entry-tool call's frozen family after its step's results. Runs
+ * before the item projection, which removes the marker from the call.
+ */
+const interactionFamilyDisclosureFilter: CallModelInputFilter = ({ modelData }) => {
+  const input = expandInteractionFamilyDisclosures(modelData.input);
+  return input === modelData.input ? modelData : { ...modelData, input };
+};

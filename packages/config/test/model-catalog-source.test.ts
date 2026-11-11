@@ -23,6 +23,63 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
 }
 
 describe("deployment model catalog source", () => {
+  test("validates promotional coverage after resolving a database catalog", () => {
+    for (const modelId of ["missing-model", "gpt-5.6-luna"]) {
+      const settings = applyModelCatalogDocument(
+        withEnv({ OPENGENI_MODEL_CATALOG_SOURCE: "database" }, () => getSettings()),
+        { schemaVersion: 1, builtInModels: ["gpt-5.6-luna"] },
+      );
+      settings.creditPromotionPolicy = { defaultModelIds: [modelId], offers: {} };
+      if (modelId === "gpt-5.6-luna")
+        settings.modelCostPolicyJson = JSON.stringify({ [modelId]: "free" });
+      expect(() => validateModelCatalogSettings(settings)).toThrow(
+        "must be a canonical credits-billed model",
+      );
+    }
+  });
+
+  test("database logo updates preserve execution identity and reject unsafe URLs", () => {
+    const provider = {
+      id: "example-provider",
+      baseUrl: "https://api.example.test/v1",
+      models: [{ id: "example/model" }],
+    };
+    withEnv(
+      {
+        OPENGENI_MODEL_CATALOG_SOURCE: "database",
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          { ...provider, apiKey: "example-test-key" },
+        ]),
+      },
+      () => {
+        const resolve = (logoUrl: string) =>
+          configuredModels(
+            applyModelCatalogDocument(
+              getSettings(),
+              parseModelCatalogDocument({
+                schemaVersion: 1,
+                builtInModels: ["gpt-6-luna"],
+                registryProviders: [{ ...provider, models: [{ id: "example/model", logoUrl }] }],
+              }),
+            ),
+          ).find((model) => model.id === "example/model")!;
+        const first = resolve("https://cdn.example.test/first.svg");
+        const second = resolve("https://cdn.example.test/second.svg");
+        expect(first.logoUrl).toBe("https://cdn.example.test/first.svg");
+        expect(second.logoUrl).toBe("https://cdn.example.test/second.svg");
+        expect(first.definitionVersion).toBe(second.definitionVersion);
+        for (const unsafe of [
+          "http://cdn.example.test/logo.svg",
+          "javascript:alert(1)",
+          "https://user:password@cdn.example.test/logo.svg",
+          " https://cdn.example.test/logo.svg",
+          "https://cdn.example.test/" + "a".repeat(2048),
+        ]) {
+          expect(() => resolve(unsafe)).toThrow();
+        }
+      },
+    );
+  });
   test("injects the validated managed OpenRouter starter only when its key exists", () => {
     const absent = withEnv({}, () => getSettings());
     expect(configuredModels(absent).some((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID)).toBe(
@@ -46,7 +103,7 @@ describe("deployment model catalog source", () => {
       baseUrl: OPENROUTER_BASE_URL,
       billing: { upstreamPayer: "deployment", metering: "external" },
     });
-    expect(provider?.defaultHeaders).toMatchObject({ "x-title": "OpenGeni" });
+    expect(provider?.defaultHeaders).toMatchObject({ "x-title": "Opengeni" });
     expect(model).toMatchObject({
       cost: "free",
       contextWindowTokens: 262_144,
@@ -307,7 +364,7 @@ describe("deployment model catalog source", () => {
             },
           ],
         }),
-      ).toThrow("reserved for a reviewed OpenGeni provider");
+      ).toThrow("reserved for a reviewed Opengeni provider");
     }
     expect(() =>
       parseModelCatalogDocument({

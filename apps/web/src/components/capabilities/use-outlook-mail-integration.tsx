@@ -1,12 +1,15 @@
+import outlookLogo from "@/assets/integration-logos/outlook-mail.svg";
 import {
   useIntegrationDefinitionRow,
   type IntegrationAdapter,
 } from "@/components/capabilities/use-api-integration-accounts";
-import type { ApiIntegrationInstallationSummary, IntegrationDefinitionSummary } from "@/types";
+import type {
+  ApiIntegrationInstallationSummary,
+  IntegrationDefinitionSummary,
+} from "@opengeni/react/app/types";
 
 export const OUTLOOK_MAIL_DEFINITION_ID = "microsoft-outlook-mail";
-export const OUTLOOK_LOGO_URL =
-  "https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/outlook_48x1.svg";
+export const OUTLOOK_LOGO_URL = outlookLogo;
 
 /** Maps the Outlook Mail curated ApiIntegration onto the shared integration view-model. */
 export function useOutlookMailIntegration({

@@ -8,7 +8,7 @@
 // address, where nothing listens. This forwarder listens on exactly one
 // address, the gateway of this worktree's Compose network (which every local
 // Docker sandbox joins), and relays only the routes a sandbox calls:
-// Codemode, first-party MCP, and the personal HTTPS Git broker. It refuses
+// Codemode, first-party MCP, the personal HTTPS Git broker and GitHub gateway. It refuses
 // peers outside that network's subnet, so neither other devices nor unrelated
 // containers on the default bridge can reach the API through it.
 //
@@ -18,6 +18,7 @@
 //     reads OPENGENI_SANDBOX_BRIDGE_{HOST,PORT,SUBNET,API_ORIGIN}
 
 import { execFileSync } from "node:child_process";
+import { networkInterfaces } from "node:os";
 import { createServer, request as upstreamRequest, type Server } from "node:http";
 import { createServer as createNetServer, isIPv4 } from "node:net";
 import { localSandboxApiRouteAllowed } from "@opengeni/config";
@@ -83,12 +84,24 @@ export function dockerBridgeRouteCandidates(ipamConfig: unknown): DockerBridgeRo
 }
 
 /**
- * Whether this process can listen on an address, which holds exactly when the
- * address belongs to this host. Linux Docker Engine assigns the gateway to the
+ * Whether an address belongs to this host and this process can listen on it.
+ * Linux Docker Engine assigns the gateway to the
  * host's bridge interface (even before a container brings it up); Docker
  * Desktop and rootless Docker keep it in a VM or network namespace.
  */
-export async function canListenOn(address: string): Promise<boolean> {
+export async function canListenOn(
+  address: string,
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): Promise<boolean> {
+  if (!isIPv4(address)) return false;
+  // A successful bind is not proof of interface ownership: Linux hosts with
+  // ip_nonlocal_bind enabled also accept addresses in other network namespaces.
+  if (
+    !Object.values(interfaces).some((entries) =>
+      entries?.some((entry) => entry.address === address),
+    )
+  )
+    return false;
   const server = createNetServer();
   try {
     await new Promise<void>((resolve, reject) => {
@@ -147,11 +160,6 @@ function writeJson(
 export function createSandboxBridgeServer(options: { subnet: string; apiOrigin: string }): Server {
   const api = new URL(options.apiOrigin);
   const server = createServer((incoming, outgoing) => {
-    const peer = normalizePeerAddress(incoming.socket.remoteAddress);
-    if (!peer || !ipv4InSubnet(peer, options.subnet)) {
-      writeJson(outgoing, 403, { error: "peer is outside this stack's Docker network" });
-      return;
-    }
     let url: URL;
     try {
       // URL parsing resolves dot segments, so the allowlist sees, and the API
@@ -161,13 +169,24 @@ export function createSandboxBridgeServer(options: { subnet: string; apiOrigin: 
       writeJson(outgoing, 400, { error: "invalid request target" });
       return;
     }
+    // The health answer carries no data or authority and only proves the
+    // listener is up, so it precedes the peer filter: hosts that source-NAT
+    // their own loopback-routed traffic (for example k3s or Tailscale) make the
+    // launcher's probe arrive from a LAN address outside the Docker subnet even
+    // though sandboxes on that subnet reach the bridge normally.
     if (url.pathname === SANDBOX_BRIDGE_HEALTH_PATH) {
       writeJson(outgoing, 200, { ok: true });
       return;
     }
+    const peer = normalizePeerAddress(incoming.socket.remoteAddress);
+    if (!peer || !ipv4InSubnet(peer, options.subnet)) {
+      writeJson(outgoing, 403, { error: "peer is outside this stack's Docker network" });
+      return;
+    }
     if (!sandboxBridgeRouteAllowed(url.pathname)) {
       writeJson(outgoing, 404, {
-        error: "the Docker sandbox route serves only Codemode, first-party MCP, and the Git broker",
+        error:
+          "the Docker sandbox route serves only Codemode, first-party MCP, the Git broker and the GitHub gateway",
       });
       return;
     }
@@ -228,7 +247,7 @@ async function serve(): Promise<void> {
     server.listen({ host, port, exclusive: true }, resolve);
   });
   console.log(
-    `OpenGeni Docker sandbox route listening on ${host}:${port} for ${subnet} (Codemode, MCP, Git broker)`,
+    `Opengeni Docker sandbox route listening on ${host}:${port} for ${subnet} (Codemode, MCP, Git broker, GitHub gateway)`,
   );
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => server.close(() => process.exit(0)));

@@ -25,11 +25,30 @@ import {
   parseRestrictedYaml,
   type WorkflowExecutionGraphManifest,
 } from "./workflow-execution-graph";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const root = resolve(import.meta.dir, "..");
 const workflowPath = ".github/workflows/fixture.yml";
 const actionPath = ".github/actions/probe/action.yml";
 const discoveryActionPath = ".github/actions/probe/action.yaml";
+
+test("PR CI plan has no five-hour priority timeout exemption", () => {
+  const source = (timeout: number) =>
+    `name: PR CI\non: pull_request\njobs:\n  plan:\n    timeout-minutes: ${timeout}\n    steps:\n      - name: Priority fixture\n        run: bun scripts/ci/github-pr-ci.ts priority pr\n`;
+  expect(
+    inspectWorkflowExecutionSources({
+      ".github/workflows/pr-ci.yml": source(320),
+    }).violations.join("\n"),
+  ).toContain("job timeout-minutes must be a static integer in 1..120");
+  expect(
+    inspectWorkflowExecutionSources({ ".github/workflows/pr-ci.yml": source(15) }).violations,
+  ).toEqual([]);
+  // Version validation keeps its single bounded admission yield.
+  const version = `name: CI\non: workflow_dispatch\njobs:\n  automation-admission:\n    timeout-minutes: 320\n    steps:\n      - name: Yield fixture\n        run: bun scripts/ci/github-pr-ci.ts priority pr\n`;
+  expect(
+    inspectWorkflowExecutionSources({ ".github/workflows/ci.yml": version }).violations,
+  ).toEqual([]);
+});
 
 const minimalWorkflow = [
   "name: Fixture",
@@ -209,10 +228,18 @@ describe("workflow execution graph manifest", () => {
 
     expect(inspection.violations).toEqual([]);
     expect(compareWorkflowExecutionManifest(committed, inspection.manifest)).toEqual([]);
-    expect(inspection.manifest.workflows).toHaveLength(25);
-    expect(inspection.manifest.actions).toHaveLength(2);
-    expect(inspection.manifest.uncappedRuns).toHaveLength(212);
-    expect(inspection.manifest.generatedLocalTargets).toHaveLength(3);
+    // Complete manifest comparison covers the inventory; aggregate totals are not invariants.
+    const workflows = new Set(inspection.manifest.workflows.map((record) => record.path));
+    const runIdentities = inspection.manifest.uncappedRuns.map((record) =>
+      canonicalJson([record.workflow, record.job, record.step]),
+    );
+    expect(new Set(runIdentities).size).toBe(runIdentities.length);
+    for (const record of [
+      ...inspection.manifest.uncappedRuns,
+      ...inspection.manifest.generatedLocalTargets,
+    ]) {
+      expect(workflows.has(record.workflow)).toBe(true);
+    }
     for (const record of [
       ...inspection.manifest.workflows,
       ...inspection.manifest.actions,
@@ -815,7 +842,7 @@ describe("workflow execution graph manifest", () => {
           error = caught;
         }
         expect(error).toBeInstanceOf(Error);
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorMessage(error);
         expect(message).toBe(`${workflowPath} contains invalid UTF-8`);
         expect(message).not.toContain(String(malformedByte));
         errors.push(message);
@@ -1381,7 +1408,30 @@ describe("workflow execution graph manifest", () => {
     ).not.toEqual([]);
   });
 
-  test("removing any one of the 32 approved caps invalidates the committed graph", async () => {
+  test("browserd gives headless and headed suites independent bounded steps", async () => {
+    const sources = await loadWorkflowExecutionSources(root);
+    const workflow = Bun.YAML.parse(sources[".github/workflows/ci.yml"]!) as {
+      jobs: Record<
+        string,
+        { "timeout-minutes": number; steps: Array<{ run?: string; "timeout-minutes"?: number }> }
+      >;
+    };
+    const job = workflow.jobs["browserd-real-e2e"]!;
+    const headless = job.steps.find((step) =>
+      step.run?.includes("bun run --cwd packages/browserd test:e2e"),
+    )!;
+    const headed = job.steps.find((step) => step.run?.includes("OPENGENI_BROWSERD_HEADED_E2E=1"))!;
+    expect(headless).toBeDefined();
+    expect(headed).toBeDefined();
+    expect(headed).not.toBe(headless);
+    expect(headless["timeout-minutes"]).toBe(13);
+    expect(headed["timeout-minutes"]).toBe(5);
+    expect(headed.run).toContain("streams a mobile headed tab continuously");
+    const stepBudget = job.steps.reduce((sum, step) => sum + (step["timeout-minutes"] ?? 0), 0);
+    expect(job["timeout-minutes"]).toBeGreaterThanOrEqual(stepBudget + 3);
+  });
+
+  test("removing any one of the 55 approved caps invalidates the committed graph", async () => {
     type MutableStep = { "timeout-minutes"?: unknown; run?: unknown; uses?: unknown };
     type MutableWorkflow = { jobs?: Record<string, { steps?: MutableStep[] }> };
     const sources = await loadWorkflowExecutionSources(root);
@@ -1398,7 +1448,7 @@ describe("workflow execution graph manifest", () => {
         }
       }
     }
-    expect(capped).toHaveLength(32);
+    expect(capped).toHaveLength(55);
 
     for (const [path, jobIndex, stepIndex] of capped) {
       const mutatedSources = { ...sources };

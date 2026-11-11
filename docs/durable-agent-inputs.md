@@ -40,6 +40,42 @@ The database links every delivered input to one
 Agent Steer is guaranteed admission to the bounded batch and is serialized last
 so an older goal or lifecycle notice cannot override the replacement direction.
 
+An explicit operator retirement of historical interrupted work is not fresh
+execution intent. Its failed child outcome is a `system.update.settled` timeline
+receipt marked `notificationOnly` with reason `operator_retirement`, not a
+`session_system_updates` row. The parent sees the receipt when the chat is opened;
+it is not injected into model history on the next turn and does not wake a held
+wait, create a turn or block tenancy/schedule quiescence. The agent can inspect
+the timeline explicitly during later authorized work. Retirement supersedes that
+child's obsolete pending progress/action/pause/capacity notices, preserving prior
+terminal answers and unrelated senders. Normal child results still follow the
+canonical input and wake lifecycle above.
+
+Execution ownership is selected before batching. Ordinary same-human agent
+messages and child results use the receiving chat's last started user/API request
+context, including its accepted accounts and provider choices. Sender snapshots
+remain immutable evidence; differences in selected tools/accounts do not split
+these informational inputs. A queued human request or a resumed turn uses its
+own exact context. Different humans, service-only and genuinely restricted
+origins retain their explicit lane, as do Steer and captured schedules. Goal and
+command inputs retain their causal receipt checks. The limits remain 100 members
+and 256 KiB of canonical input per batch; later arrivals remain pending.
+
+`sessions.execution_context_turn_id` advances on durable first `turn.started`,
+not claim or queue admission. Recovery and refused startup cannot replace it.
+A context-created turn stores its immutable source reference; SQL validates the
+complete delivery and copies existing personal receipts without refreshing
+connection or membership generations. Credential resolution still checks live
+revocation. Migration 0608 requires drained writers; after activation run only
+context-aware images. It backfills only started user/API turns proved by events
+and attempts within the current execution-authority epoch. Unprovable legacy
+sessions keep the explicit-source behavior until a new request actually starts.
+
+When known selections differ, durable model memory may include a factual note
+addressing the agent as “you.” It has no permission effect and is absent from the
+normal timeline. No content classification, file-read inference or receipt
+semantics are involved.
+
 Pending machine input also wakes a session-level `wait_for_input` declaration.
 The wait belongs to the session, not its goal: it persists the exact declaring
 turn, reason, set time, and absolute PostgreSQL deadline. An `immediate` update
@@ -76,7 +112,7 @@ wakes the agent once more; the deadline bounds that cost.
 `sessionInputWaitDecidingTurnSql` in `packages/db/src/index.ts` is the single
 predicate for this rule. Worker peek and settlement, wake and claim admission,
 public `inputWait`, and waiting-descendant counts all read it.
-The operational instructions still tell the agent to answer and then call
+The `wait_for_input` tool description still tells the agent to answer and then call
 `wait_for_input` again while the awaited work is still in flight, reusing the
 earlier reason and only the time left before the earlier deadline, because
 each turn's wait sets a fresh deadline from its timeout.
@@ -94,10 +130,28 @@ update pulls it to now and its producer still signals after commit; without
 that signal the input would wait for the periodic dispatcher tick. The extra
 signal is a hint only: one claim consumes the whole pending batch, and the
 acknowledgement rules above keep the revision open until it does. Terminal
-background-command settlement registers the same wake but does not signal from
-its settlement callers, so the dispatcher delivers it. Claim, supersession, and
+background-command settlement registers the same wake and returns it, and each
+settlement caller (pushed Connected Machine completion, in-turn, API and reaper
+retained-process settlement, the selfhosted reaper, lost or contained boxes)
+signals it after commit, bounded to 5 seconds; the dispatcher delivers any wake
+a caller could not signal. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
-without ongoing intent do not create new work.
+for completed/paused goals without a held wait do not create new work.
+"Eligible" includes the compaction-failure hold: when the newest finished turn
+failed with `context_compaction_failed`, only an input whose pending event is
+newer than that failure (or an Agent Steer) is eligible, so held-only input is
+acknowledged instead of re-signalling a workflow that has nothing to claim,
+and a new input after the failure wakes the session and carries the held
+backlog. See [`context-compaction.md`](context-compaction.md).
+
+The workflow-wake reaper also inventories authentic pending child terminal
+results for idle parents with no goal and a fully acknowledged old wake. A
+bounded keyset scan returns identities only; scoped repair rechecks effective
+control, the child-parent producer ledger, ownership and both writer gates,
+then reserves the pending batch and registers one wake atomically. A result
+held by a compaction failure is not repaired until newer input arrives. It never
+replays child/provider work or fabricates output. Completed/paused goals remain
+settled; paused or busy candidates cannot starve later inventory pages.
 
 Public session reads expose `inputWait` only for an idle, active-control session
 whose newest finished turn that can decide the wait is the declaring turn.
@@ -120,6 +174,19 @@ delivers them coalesced, `session_wait` reports them without ending the wait
 (`ownPendingImmediateUpdates` vs `ownPendingDeferredUpdateKinds`), and they
 never resume a goal by themselves.
 
+`secret_use_approval_decided` (immediate) is the person's answer to Opengeni's
+own approval card for a blocked secret use (see
+[Approval for each use](secrets.md#approval-for-each-use)). The answer
+transaction marks the card answered, records the grant or denial, and inserts
+this update (dedupe `secret-use-approval-decided:<request>`, `action_required`
+when allowed, `info` when denied). Its summary tells the agent to retry the
+blocked call, or not to; its payload names the decision, the item and field
+names, surface, tool and destination, never values or subject ids. A worker
+from before this kind marks such a row `failed` with
+`system.update.cancelled{reason: "unrecognized_kind"}`, so during a rollout an
+answer claimed by an old worker still records the grant but does not tell the
+agent.
+
 A child session reports its lifecycle to its parent through typed notices, each
 produced inside the child's own lifecycle transaction as one dedupe-keyed
 `session_system_update_outbox` row (the worker delivers it; the reaper retries a
@@ -131,10 +198,10 @@ rows:
 | Kind | Class | Produced by | Dedupe |
 | --- | --- | --- | --- |
 | `child_terminal_result` | immediate | idle/failed/cancelled terminal boundary; an idle result carries the child's `finalAnswer` | `child-completion:<child>:...` |
-| `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
+| `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews and compact answerable questions (ids, kinds, prompts, option ids and labels; no secret specs) plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
 | `child_requires_action_resolved` | deferred | human/API/agent answer or skip, expiry, approval decision, terminal cancellation of a pending request | `child-requires-action-resolved:<child>:<turn>:<generation>:<request or approval>` |
 | `child_paused` | deferred | a direct `pause` of the child (not a recursive ancestor pause, not when the parent's own attempt issued it); `action_required` for a human/API pause, `info` for an agent pause | `child-paused:<child>:<receipt>` |
-| `child_waiting_capacity` | deferred | a Codex or xAI capacity waiter armed on the child | `child-waiting-capacity:<child>:<waiter>` |
+| `child_waiting_capacity` | immediate | a long subscription capacity wait armed on the child (reset at least 15 minutes away, unknown, or needing a person); carries `resetsAt` and tells the parent that `session_set_model` moves the waiting turn to a model with capacity | `child-waiting-capacity:<child>:<waiter>` |
 | `child_progress` | deferred | the child's agent `goal_progress`; a newer note supersedes an older still-pending one | `child-progress:<child>:<receipt>` |
 
 Delivery into the parent happens through `addSessionSystemUpdateWithSourceMutation`:
@@ -148,8 +215,22 @@ and the parent's claim order both follow delivery order, so the reaper claims a
 backlog oldest first (`created_at`, `id`) and delivers it in exactly that order;
 the claim returns its rows sorted instead of in heap order (migration 0528). Like
 child results, an immediate child notice may autonomously wake a parent with either
-an active goal or a current session-level wait. Without either durable
-obligation, child lifecycle notices remain pending until new intent arrives.
+an active goal or a current session-level wait. Like `child_terminal_result`, a
+`child_requires_action` also wakes an idle parent that has no goal at all or a
+completed goal (without reopening it), so the parent can answer the child's
+question while the person sees the same card; a parent whose goal is paused is
+not woken by it. Without such an obligation, other child lifecycle notices
+remain pending until new intent arrives.
+
+A `child_requires_action` goes to the child's parent unless the parent cannot
+act on it: it is failed or cancelled, or its frozen agent configuration has
+`subagents` off, so it has no `session_human_input_respond`. Then the notice
+goes to the nearest ancestor that can act, and only to that one
+(`childRequiresActionRouteTx`). Its authority is that ancestor's own turn that
+started the branch, its lineage names `escalatedFromSessionId`, and its summary
+says the parent can't act. The question's `child_requires_action_resolved`
+follows it to the same session, so it supersedes the notice there. With no
+such ancestor, the notice stays with the parent.
 
 A failed or cancelled child reports from its settlement transaction. An idle
 child reports at its workflow's terminal-for-now idle boundary: after goal
@@ -186,10 +267,10 @@ terminal state changes commit; the already-checkpointed provider proof remains
 eligible for a settlement-only retry and provider execution is never replayed.
 
 The five new kinds are produced only while
-`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default off): a worker from
-before these kinds existed throws on an unknown kind, so enable the flag only
-once the whole fleet runs an image that understands them. Delivery and
-consumption of an already committed notice never read the flag.
+`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default on): a worker from
+before these kinds existed (before August 2026) throws on an unknown kind, so
+a fleet still running such an image sets the flag to false until it is gone.
+Delivery and consumption of an already committed notice never read the flag.
 
 Rollout and rollback rule: once the flag has produced rows, a pre-notice image
 must never restart while any new-kind row is still pending in
@@ -202,6 +283,30 @@ unparseable row (`status = failed`, bounded `last_error`) and keeps delivering
 the rest, and the claim path marks a pending row whose kind or payload it
 cannot parse `failed` with a visible `system.update.cancelled{reason:
 "unrecognized_kind"}` instead of throwing.
+
+Those hardened images drop, rather than defer, a row they cannot parse, so a
+release that changes what a gated notice looks like still enables the flag
+only after its whole fleet runs the candidate. A release may instead boot the
+candidate with the flag already on when the notice protocol is unchanged:
+`packages/contracts/src/child-lifecycle-notice-protocol.gen.json` (rendered by
+`bun scripts/generate-child-lifecycle-notice-protocol.ts`, checked by the
+contracts test) describes every kind name, the classifications, the gated
+kinds and their wake classes, the paused-notice classification rule, every
+exported `CHILD_*` limit, and the input JSON Schema of each gated payload with
+the full definition of every check (limits, patterns with flags, formats, URL
+restrictions, value rewrites). A refinement is accepted only from a helper that
+records its limit as data (`UTF8_BYTE_LIMIT_CHECKS`); any other or conditional
+refinement, pipe, transform or preprocessing step fails the generator. Release
+tooling compares that file at the live and the candidate revision and keeps
+the second rollout unless both are byte-identical.
+
+The rendering cannot see what a field means or what the producers in
+`packages/db` write outside the payload schema: the `sourceId` older consumers
+use to supersede pending notices, the dedupe keys (pinned by
+`packages/db/test/child-lifecycle-notice-protocol-pin.test.ts`), the
+classification chosen per kind, `summary` and `lineage`, and how a consumer
+supersedes, wakes on or renders a notice. Changing any of them must bump
+`CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION`.
 
 An idle `child_terminal_result` is result-bearing. The idle settlement that
 commits its outbox row also freezes the child's newest result-bearing
@@ -340,6 +445,29 @@ does not color every ancestor forever. The fence is monotone: a human who has
 already read further, or a racing claim that observed a later sequence, is
 never regressed.
 
+A failure the parent agent took is that agent's to follow up, so it never asks
+a person through an ancestor. A failed session is `failureHandled` when it is
+bound to the failure episode the parent saw: the newest `child_terminal_result`
+outbox row the child wrote for its parent (committed with the failure) is a
+failure, the parent's copy of that same notice (same dedupe key) is
+`delivered`, meaning claimed into a parent turn (if that turn later fails, the
+parent's own failure surfaces instead), and the child has finished no other
+turn since. Such a session is left out of every ancestor's
+`unreadFailedDescendants` and `unreadDescendants`, project and Site totals, and
+the flat child list in Needs you, even when it logs a late event such as a
+workspace capture after the acknowledgment. Its own row, when expanded, shows
+as unread rather than failed. The rule is viewer-independent: it holds for
+members whose personal state the claim never acknowledged. The one exception
+fails safe: a viewer who can see the child but not its parent cannot read the
+notices between them, so the failure stays unhandled for that viewer.
+
+Everything else stays unhandled and keeps its red marker: a root session; a
+failure whose notice has not been delivered yet, is still pending (its parent
+paused or not yet run), was dropped because the parent was cancelled or
+archived, or was settled without the parent seeing it (`superseded`,
+`cancelled` or `failed`); and a child that ran another turn afterwards, such as
+a retried child that fails again, until its parent takes that failure too.
+
 Monotonicity has one consequence worth stating plainly: an explicit mark-unread
 is **not** sticky against a later consumption. Marking a child unread, then
 letting that child work and report again, leaves it acknowledged after the
@@ -414,6 +542,12 @@ requirement and a prompt-cache cost requirement: deleting the batch on the next
 call would shift the prefix and force the provider to ingest the conversation
 again.
 
+The same invariant covers the system prompt and tools: anything that can change
+between turns of one session (workspace governance, the Skill catalog) is a
+durable history item rather than system-prompt text. Per-call diagnostics in
+`model_call_facts.prompt_cache_diagnostics` classify every warm-cache miss; see
+`docs/context-compaction.md`, "Prompt-cache stability".
+
 Migration `0135_durable_machine_input_batches.sql` performs the one-way cutover.
 It reconstructs model history for delivered legacy rows, returns old deferred
 rows to canonical pending state, collapses duplicate pending Agent Steers to the
@@ -442,6 +576,30 @@ timeline, including when they arrive alongside other updates. A delivered input
 does not necessarily start a new turn. Command-result summaries include the
 bounded command preview; an unavailable exit result is described as unavailable
 rather than asserting that execution failed.
+
+An automation occurrence (`scheduled_occurrence`) keeps its instructions as
+the update's summary, which only the agent reads. Its pending and delivered
+session events instead carry the automation's current name as their summary,
+and the delivered member carries `automation: {name, eventSummaries,
+eventCount}` (at most three event summaries of 200 bytes each). The chat draws
+the run as one line: the name and what the first event says. Events written
+before Opengeni recorded the name carry no `automation` and read "Automation
+run". Each new occurrence also tells the agent to answer
+exactly `NO_REPLY` when it leaves nothing for the person; the timeline then
+omits the run's line, work and answer, unless the run asked the person
+something or holds another item that waits on them.
+
+Since migration 1289 an agent message whose text is the no-reply token, and a
+`turn.completed` whose `output` is (without a recorded `reply`), is not
+attention: the event cursor trigger leaves `last_meaningful_sequence` where it
+was, so a quiet turn sets no unread mark. Its turn opens no inbox reply item
+and sends no `reply_ready` push. The `reply_ready` push of any other finished
+turn carries the turn's answer (its newest non-commentary agent message, up to
+1000 characters) instead of "The agent replied."; a turn with no answer sends
+none. `opengeni_private.no_reply_text_v1` and `noReplyTextSql`
+(`packages/db/src/session-meaningful-events.ts`) apply the same normalization
+as `isNoReplyText`. The partial attention index keeps its 0774 predicate;
+attention queries add the exclusion as a filter on top of it.
 
 The Goal segment keeps pause/resume and clear visible beside its label. The
 Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation

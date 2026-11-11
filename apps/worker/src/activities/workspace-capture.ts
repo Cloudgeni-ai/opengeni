@@ -60,6 +60,7 @@ import type {
   WorkspaceCaptureRepo,
   WorkspaceCaptureStats,
 } from "@opengeni/contracts";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // ─── Guards & constants for pathological cases; configurable ─────
 // Production Modal captures of the acceptance workspace normally take ~30s:
@@ -172,7 +173,7 @@ export class BoxExitingError extends Error {
  *  bogus revision. */
 function classifyCaptureEntryError(error: unknown): BoxExitingError | null {
   if (isBoxExitingError(error)) {
-    return new BoxExitingError(error instanceof Error ? error.message : String(error));
+    return new BoxExitingError(errorMessage(error));
   }
   return null;
 }
@@ -330,7 +331,13 @@ export async function readCaptureRepository(
       )
       .then((value) => value)
       .catch(() => null);
-    const [diff, branchDiff] = await Promise.all([workingRequest, branchRequest]);
+    // Both reads own provider commands and retained output. A failed working
+    // tree must not release capture ownership while its branch sibling is
+    // still collecting output or cleaning its private spool.
+    const [workingResult, branchResult] = await Promise.allSettled([workingRequest, branchRequest]);
+    if (workingResult.status === "rejected") throw workingResult.reason;
+    const diff = workingResult.value;
+    const branchDiff = branchResult.status === "fulfilled" ? branchResult.value : null;
     return {
       complete: true,
       status,
@@ -516,7 +523,7 @@ export async function captureWorkspaceRevision(
       {
         "opengeni.session_id": input.sessionId,
         "opengeni.turn_id": input.turnId ?? "",
-        "error.message": error instanceof Error ? error.message : String(error),
+        "error.message": errorMessage(error),
         "workspace_capture.duration_ms": Date.now() - startedAt,
         "workspace_capture.stage": stage.value,
       },
@@ -549,7 +556,11 @@ async function runCapture(
   const readSession = input.openReadSession ? await input.openReadSession() : input.session;
   throwIfCaptureAborted(signal);
   // Reads only — no emitter (we publish the announce ourselves after commit).
-  const svc = new SandboxChannelAService({ session: readSession, leaseEpoch: input.leaseEpoch });
+  const svc = new SandboxChannelAService({
+    session: readSession,
+    leaseEpoch: input.leaseEpoch,
+    signal,
+  });
 
   // Resolve the previous revision before discovery so even a failed discovery
   // can commit a monotonic, explicit degraded marker. That marker becomes the
@@ -942,18 +953,29 @@ async function runCapture(
     // GC is storage hygiene — a failure never affects the just-committed capture.
     observability.warn("workspace capture GC failed — capture unaffected", {
       "opengeni.session_id": input.sessionId,
-      "error.message": gcError instanceof Error ? gcError.message : String(gcError),
+      "error.message": errorMessage(gcError),
     });
   }
 
   // ── 10. observe completion ────────────────────────────────────────────────
-  const durationMs = Date.now() - startedAt;
+  recordWorkspaceCaptureCompleted(observability, Date.now() - startedAt);
+}
+
+/** Count one committed logical capture and observe its end-to-end duration. */
+export function recordWorkspaceCaptureCompleted(
+  observability: Pick<Observability, "incrementCounter" | "observeHistogram">,
+  durationMs: number,
+): void {
   observability.incrementCounter({
     name: "opengeni_workspace_capture_total",
     labels: { result: "ok" },
   });
+  // Distinct from the physical `opengeni_workspace_capture_duration_seconds`
+  // {backend,outcome} histogram the runtime hook records in this same
+  // registry: one name cannot carry two label sets.
   observability.observeHistogram({
-    name: "opengeni_workspace_capture_duration_seconds",
+    name: "opengeni_workspace_capture_revision_duration_seconds",
+    help: "Turn-end logical workspace revision capture duration for committed revisions.",
     value: durationMs / 1000,
   });
 }
@@ -1144,7 +1166,7 @@ async function safeDelete(
     await storage.deleteObject(key).catch((error) => {
       observability.warn("workspace capture blob delete failed (orphan left; capture unaffected)", {
         "storage.key": key,
-        "error.message": error instanceof Error ? error.message : String(error),
+        "error.message": errorMessage(error),
       });
     });
   }
@@ -1181,7 +1203,7 @@ async function buildTreeIndex(
     throwIfCaptureAborted(signal);
   } catch (error) {
     if (isBoxExitingError(error)) {
-      throw new BoxExitingError(error instanceof Error ? error.message : String(error));
+      throw new BoxExitingError(errorMessage(error));
     }
     throw error;
   }

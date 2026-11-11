@@ -1,0 +1,194 @@
+import { expect, mock, test } from "bun:test";
+
+let permissions: string[] = [];
+let grantShape: Record<string, unknown> = {};
+let contextShape: Record<string, unknown> = {};
+let clientConfigShape: Record<string, unknown> | undefined;
+let machineEnabled: boolean | undefined;
+let rigsEnabled: boolean | undefined;
+const action = mock(async () => null);
+const refresh = mock(async () => {});
+const attach = mock(async () => true);
+let fleetMachines: Array<{ sandboxId: string; enrollmentId?: string; scope?: string }> = [
+  { sandboxId: "machine" },
+];
+const machine = fleetMachines[0]!;
+mock.module("../app-context", () => ({
+  useAppContext: () => ({
+    accessContext: {
+      mode: "managed",
+      subjectId: "user:kari",
+      workspaceGrants: [{ workspaceId: "workspace", permissions, ...grantShape }],
+      ...contextShape,
+    },
+    clientConfig: clientConfigShape,
+  }),
+}));
+mock.module("../../session-context", () => ({
+  useOpenGeni: () => ({ workspaceId: "workspace" }),
+}));
+mock.module("../../hooks/use-rigs", () => ({
+  useRigs: (options: { enabled?: boolean | undefined }) => {
+    rigsEnabled = options.enabled;
+    return { rigs: [{ id: "rig" }], loading: false, error: null, refresh };
+  },
+}));
+mock.module("../../machines", () => ({
+  useMachines: (options: { enabled?: boolean | undefined }) => {
+    machineEnabled = options.enabled;
+    return {
+      machines: fleetMachines,
+      activeSandboxId: "machine",
+      loading: false,
+      error: null,
+      refresh,
+      canRemove: true,
+      canUpdateAgent: true,
+      canUpdateOperationPolicy: true,
+      canAttach: true,
+      remove: action,
+      updateAgent: action,
+      updateOperationPolicy: action,
+      attach,
+      fetchSeries: action,
+      mutationError: null,
+    };
+  },
+}));
+const { useWorkspaceMachines } = await import("./use-workspace-machines");
+const { useWorkspaceRigs } = await import("./use-workspace-rigs");
+
+test("denied resource reads and manual retries remain request-free, including after revocation", async () => {
+  permissions = ["workspace:admin"];
+  expect(useWorkspaceMachines().machines.map((item) => item.sandboxId)).toEqual([
+    machine.sandboxId,
+  ]);
+  expect(useWorkspaceRigs().rigs).toHaveLength(1);
+  permissions = [];
+  const machines = useWorkspaceMachines();
+  const rigs = useWorkspaceRigs();
+  expect(useWorkspaceMachines().fetchSeries).toBe(machines.fetchSeries);
+  expect(useWorkspaceMachines().machines).toBe(machines.machines);
+  expect(useWorkspaceMachines().refresh).toBe(machines.refresh);
+  expect(useWorkspaceRigs().rigs).toBe(rigs.rigs);
+  expect(useWorkspaceRigs().refresh).toBe(rigs.refresh);
+  expect(machineEnabled).toBe(false);
+  expect(rigsEnabled).toBe(false);
+  expect(machines.machines).toEqual([]);
+  expect(rigs.rigs).toEqual([]);
+  await machines.refresh();
+  await rigs.refresh();
+  expect(refresh).not.toHaveBeenCalled();
+  expect(await machines.attach("machine")).toBe(false);
+  expect(attach).not.toHaveBeenCalled();
+});
+
+test("machine readers cannot manage machines; controls recover with exact grants", async () => {
+  permissions = ["enrollments:read"];
+  let machines = useWorkspaceMachines();
+  expect(machineEnabled).toBe(true);
+  expect(machines.machines.map((item) => item.sandboxId)).toEqual([machine.sandboxId]);
+  expect(machines.canManage).toBe(false);
+  expect(machines.canRemove).toBe(false);
+  expect(machines.canUpdateAgent).toBe(false);
+  expect(machines.canUpdateOperationPolicy).toBe(false);
+  expect(machines.canAttach).toBe(false);
+  await machines.remove("machine");
+  await machines.updateAgent("machine");
+  await machines.updateOperationPolicy("machine", {} as never);
+  expect(action).not.toHaveBeenCalled();
+  permissions = ["enrollments:read", "enrollments:manage", "sessions:control", "rigs:use"];
+  machines = useWorkspaceMachines();
+  expect(machines.canManage).toBe(true);
+  expect(machines.canRemove).toBe(true);
+  expect(machines.canAttach).toBe(true);
+  await machines.remove("machine");
+  await useWorkspaceRigs().refresh();
+  expect(action).toHaveBeenCalledTimes(1);
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(rigsEnabled).toBe(true);
+  useWorkspaceRigs({ enabled: false });
+  expect(rigsEnabled).toBe(false);
+});
+
+test("a signed-in Member connects and changes only their own Only me machines", async () => {
+  action.mockClear();
+  const own = { sandboxId: "own", enrollmentId: "own", scope: "user" };
+  const shared = { sandboxId: "shared", enrollmentId: "shared", scope: "workspace" };
+  fleetMachines = [own, shared];
+  permissions = ["enrollments:read", "sessions:read"];
+  grantShape = { subjectId: "user:kari", principalKind: "human_session" };
+  let machines = useWorkspaceMachines();
+  expect(machines.canManage).toBe(false);
+  expect(machines.canConnect).toBe(true);
+  expect(machines.canManageMachine(own as never)).toBe(true);
+  expect(machines.canManageMachine(shared as never)).toBe(false);
+  await machines.updateOperationPolicy("shared", {} as never);
+  await machines.remove("shared");
+  expect(action).not.toHaveBeenCalled();
+  await machines.updateOperationPolicy("own", {} as never);
+  await machines.remove("own");
+  expect(action).toHaveBeenCalledTimes(2);
+  contextShape = { mode: "local", subjectId: "dev" };
+  grantShape = { subjectId: "dev", principalKind: "human_session" };
+  expect(useWorkspaceMachines().canConnect).toBe(true);
+
+  const person = { subjectId: "user:kari", principalKind: "human_session" };
+  for (const shape of [
+    { grant: { ...person, metadata: { delegated: true } } },
+    { grant: { ...person, serviceInitiator: { kind: "service" } } },
+    { grant: { ...person, principalKind: "api_key" } },
+    { grant: person, context: { credential: { kind: "workspace_api_key" } } },
+    {
+      grant: { ...person, subjectId: "external_user:kari" },
+      context: { subjectId: "external_user:kari" },
+    },
+    { grant: { ...person, subjectId: "dev" }, context: { mode: "managed", subjectId: "dev" } },
+  ]) {
+    grantShape = shape.grant;
+    contextShape = shape.context ?? {};
+    machines = useWorkspaceMachines();
+    expect(machines.canConnect).toBe(false);
+    expect(machines.canManageMachine(own as never)).toBe(false);
+    await machines.remove("own");
+  }
+  expect(action).toHaveBeenCalledTimes(2);
+  grantShape = {};
+  contextShape = {};
+  fleetMachines = [machine];
+});
+
+test("organization machines change only for the organization's owner or an admin", () => {
+  const organization = { sandboxId: "org", enrollmentId: "org", scope: "organization" };
+  const shared = { sandboxId: "shared", enrollmentId: "shared", scope: "workspace" };
+  fleetMachines = [organization, shared];
+  permissions = ["enrollments:read", "enrollments:manage", "sessions:read"];
+  grantShape = { accountId: "acme", subjectId: "user:kari", principalKind: "human_session" };
+  clientConfigShape = { productAccessMode: "managed", auth: { mode: "managedSession" } };
+  const asRole = (role: string, accountId = "acme", grantPermissions: string[] = []) => {
+    contextShape = {
+      accountGrants: [{ accountId, subjectId: "user:kari", role, permissions: grantPermissions }],
+    };
+    return useWorkspaceMachines();
+  };
+  for (const role of ["owner", "admin"]) {
+    const machines = asRole(role);
+    expect(machines.canManageMachine(organization as never)).toBe(true);
+    expect(machines.canManageMachine(shared as never)).toBe(true);
+  }
+  // A member who manages the workspace's machines, and an admin of another
+  // organization, change workspace machines but not organization ones.
+  for (const machines of [asRole("member"), asRole("admin", "other")]) {
+    expect(machines.canManageMachine(organization as never)).toBe(false);
+    expect(machines.canManageMachine(shared as never)).toBe(true);
+  }
+  // Without a managed sign-in, only a literal account:admin grant counts.
+  clientConfigShape = undefined;
+  expect(asRole("admin").canManageMachine(organization as never)).toBe(false);
+  expect(asRole("member", "acme", ["account:admin"]).canManageMachine(organization as never)).toBe(
+    true,
+  );
+  grantShape = {};
+  contextShape = {};
+  fleetMachines = [machine];
+});

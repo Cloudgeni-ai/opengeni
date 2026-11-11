@@ -2,7 +2,7 @@
  * The schedule form: What (a composer-style field with chips) -> When (the
  * cadence sentence and next runs) -> an optional Name -> a closed Advanced
  * section. One component for create and edit, always a full page
- * (/schedules/new, /schedules/:id/edit) with a back link and a sticky footer.
+ * (/automations/new, /automations/:id/edit) with a back link and a sticky footer.
  */
 import { useId, useMemo, useState, type ReactNode } from "react";
 import {
@@ -15,34 +15,34 @@ import {
   XIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   CadencePicker,
   validateCadence,
   type CadenceFrequency,
-} from "@/components/ui/cadence-picker";
-import { Disclosure } from "@/components/ui/disclosure";
+} from "@opengeni/react/ui/cadence-picker";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import {
   Field,
   FieldStack,
   TextInput,
   useField,
   useFieldControlProps,
-} from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { Notice } from "@/components/ui/notice";
-import { SegmentedControl, type SegmentedControlProps } from "@/components/ui/segmented-control";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { SettingRow } from "@/components/ui/setting-row";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SegmentedControl, type SegmentedControlProps } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   KIT_NOW,
@@ -423,7 +423,7 @@ function AdvancedFields({
       description: "A fresh cloud sandbox for each run.",
       leading: <ServerIcon className="size-4 text-fg-subtle" />,
       disabled: !canRunSchedules,
-      disabledReason: "Not available on this OpenGeni server.",
+      disabledReason: "Not available on this Opengeni server.",
     },
     {
       value: "machine",
@@ -628,7 +628,7 @@ export function ScheduleForm({
             </Button>
           }
         >
-          This OpenGeni server doesn't run managed sandboxes, and no machine is connected to Design
+          This Opengeni server doesn't run managed sandboxes, and no machine is connected to Design
           preview yet.
         </Notice>
       )}

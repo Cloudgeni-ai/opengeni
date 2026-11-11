@@ -2,10 +2,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
-  MemoryEventBus,
-  testSettings,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import {
@@ -93,6 +93,7 @@ test("linked schedules and children retain exact revocable native authority in a
     });
     // Original key ID is deliberately audit-only: no such API key is inserted.
     const snapshot = ExternalLinkWorkSnapshot.parse({
+      permissionMode: "explicit",
       identity: { externalId: identity.externalId, source: identity.source },
       actor: {
         accountId: account!.id,
@@ -185,6 +186,7 @@ test("linked schedules and children retain exact revocable native authority in a
     if (claim.action !== "claimed") throw new Error(JSON.stringify(claim));
     expect(await getExternalLinkTurnSnapshot(client.db, scope, claim.turn.id)).toEqual(snapshot);
     expect(await getExternalLinkTurnAuthorization(client.db, scope, claim.turn.id)).toMatchObject({
+      permissionMode: "explicit",
       authorized: true,
     });
     const actor = {

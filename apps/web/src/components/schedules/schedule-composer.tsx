@@ -1,40 +1,46 @@
 /**
  * "What should the agent do?", shaped like the chat composer: what the runs
- * work with on top (repositories, variable set, environment, tools), the
- * instructions, then "+" for tools and the model with who pays for it. The
- * textarea takes the enclosing Field's label, hint and error.
+ * work with on top (repositories, environment), the instructions, then one
+ * Connectors control (logos and a count; its menu lists every connected app to
+ * turn on or off) and the model with who pays for it. The textarea takes the
+ * enclosing Field's label, hint and error.
  */
-import { useId, type ReactNode } from "react";
-import { useVariableSets } from "@opengeni/react";
+import { useId, useMemo, type ReactNode } from "react";
 import {
+  BookOpenIcon,
+  ChevronDownIcon,
   ContainerIcon,
+  FolderOpenIcon,
   GitBranchIcon,
   PlugIcon,
-  PlusIcon,
   RotateCcwIcon,
-  VariableIcon,
+  TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
 
-import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { payerShortLabel } from "@/components/models/models-ui";
-import { ModelPicker, type PickerModelRow } from "@/components/pickers";
+import { CapabilityLogo } from "@opengeni/react/app/components/capabilities/capability-logo";
+import { connectorLogoSources } from "@opengeni/react/app/lib/composer-connectors";
+import { modelPayerHint } from "@opengeni/react/app/lib/model-payer";
+import { ModelPicker, type PickerModelRow } from "@opengeni/react/app/components/pickers";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { useFieldControlProps } from "@/components/ui/field";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import { gitHubRepositoryResource, isRepositoryResourceForGitHubRepo } from "@/lib/session-tools";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
-import { cn } from "@/lib/utils";
-import type { ResourceRef } from "@/types";
+} from "@opengeni/react/ui/dropdown-menu";
+import { useFieldControlProps } from "@opengeni/react/ui/field";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  gitHubRepositoryResource,
+  isRepositoryResourceForGitHubRepo,
+} from "@opengeni/react/app/lib/session-tools";
+import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { ResourceRef } from "@opengeni/react/app/types";
 import type { DefaultModelSelection } from "@opengeni/sdk";
 
 import type { ScheduleDraft } from "./schedule-model";
@@ -60,12 +66,155 @@ const BUILT_IN_SERVER_COPY = {
   files: {
     name: "Uploaded files",
     needs: "Read files uploaded to the workspace. Needs Workspace files on.",
+    icon: <FolderOpenIcon />,
   },
   docs: {
     name: "Knowledge library",
     needs: "Search the workspace's documents. Needs Knowledge on.",
+    icon: <BookOpenIcon />,
   },
 } as const;
+
+function builtInCopy(id: string) {
+  return Object.hasOwn(BUILT_IN_SERVER_COPY, id)
+    ? BUILT_IN_SERVER_COPY[id as keyof typeof BUILT_IN_SERVER_COPY]
+    : undefined;
+}
+
+type ServerRow = {
+  id: string;
+  name: string;
+  detail?: string | undefined;
+  /** Chosen for the automation, but no longer one of the workspace's connected apps. */
+  unavailable?: true | undefined;
+};
+
+/** A connector's real logo, its built-in glyph, or a monogram. */
+function ServerLogo({
+  server,
+  logo,
+  className,
+}: {
+  server: ServerRow;
+  logo: string | null;
+  className?: string;
+}) {
+  return (
+    <CapabilityLogo
+      src={logo}
+      name={server.name}
+      size="sm"
+      fallback={builtInCopy(server.id)?.icon ?? (server.unavailable ? <PlugIcon /> : undefined)}
+      className={cn("size-4 rounded-[4px] [&_img]:p-px [&_svg]:size-3", className)}
+    />
+  );
+}
+
+const STACK_SIZE = 3;
+
+/**
+ * One control for the connected apps a run gets, like the chat composer's
+ * Connectors: up to three logos and a count, so a long list stays one line.
+ * Its menu lists every connected app to turn on or off, and keeps a chosen app
+ * that is no longer connected visible so it can be removed; the chip flags it.
+ */
+function ConnectorsMenu({
+  rows,
+  selected,
+  logos,
+  onToggle,
+  disabled,
+}: {
+  rows: ServerRow[];
+  selected: string[];
+  logos: ReadonlyMap<string, string>;
+  onToggle: (id: string, on: boolean) => void;
+  disabled?: boolean | undefined;
+}) {
+  const on = rows.filter((server) => selected.includes(server.id));
+  const unavailable = on.filter((server) => server.unavailable).length;
+  // Real logos first, so the stack doesn't open on monograms.
+  const stack = [...on]
+    .sort((a, b) => Number(logos.has(b.id)) - Number(logos.has(a.id)))
+    .slice(0, STACK_SIZE);
+  // Names are shown on hover; the menu lists them for everyone.
+  const names = on
+    .map((server) => (server.unavailable ? `${server.name} (unavailable)` : server.name))
+    .join(", ");
+  return (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={`Connectors: ${on.length ? `${on.length} on` : "none on"}${
+                unavailable ? `, ${unavailable} unavailable` : ""
+              }. Change`}
+              disabled={disabled}
+              className={cn(
+                "inline-flex h-7 max-w-full min-w-0 shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface pr-2 pl-1.5 text-xs text-fg transition-colors duration-[120ms] hover:border-border-strong data-[state=open]:border-border-strong disabled:pointer-events-none disabled:opacity-50 pointer-coarse:h-8",
+                on.length === 0 && "pl-2.5 text-fg-muted hover:text-fg",
+                TOUCH_TARGET,
+              )}
+            >
+              {stack.length ? (
+                <span aria-hidden="true" className="flex shrink-0 items-center">
+                  {stack.map((server, index) => (
+                    <span
+                      key={server.id}
+                      className={cn("flex rounded-[5px] ring-2 ring-surface", index > 0 && "-ml-1")}
+                    >
+                      <ServerLogo server={server} logo={logos.get(server.id) ?? null} />
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <PlugIcon aria-hidden="true" className="size-3.5 shrink-0" />
+              )}
+              <span>Connectors</span>
+              {on.length ? <span className="text-fg-muted tabular-nums">{on.length}</span> : null}
+              {unavailable ? (
+                <TriangleAlertIcon
+                  aria-hidden="true"
+                  className="size-3.5 shrink-0 text-status-waiting"
+                />
+              ) : null}
+              <ChevronDownIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
+            </button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        {on.length ? <TooltipContent className="max-w-72">{names}</TooltipContent> : null}
+      </Tooltip>
+      <DropdownMenuContent align="start" className="max-h-96 w-80">
+        <DropdownMenuLabel>Connected apps this automation can use</DropdownMenuLabel>
+        {rows.length === 0 ? (
+          <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
+            No apps are connected to this workspace yet.
+          </p>
+        ) : null}
+        {rows.map((server) => (
+          <DropdownMenuCheckboxItem
+            key={server.id}
+            checked={selected.includes(server.id)}
+            onCheckedChange={(checked) => onToggle(server.id, checked === true)}
+            onSelect={(event) => event.preventDefault()}
+          >
+            <ServerLogo server={server} logo={logos.get(server.id) ?? null} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate">{server.name}</span>
+              {server.detail ? (
+                <span className="block truncate text-xs leading-4.5 text-fg-muted">
+                  {server.detail}
+                </span>
+              ) : null}
+            </span>
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 function RemovableChip({
   icon,
@@ -159,9 +308,10 @@ export interface ComposerFieldProps {
   defaultModelSelection: DefaultModelSelection | null;
   modelsLoading: boolean;
   modelsError: string | null;
-  canAttachOpenGeniTool: boolean;
   /** The existing tools and attachments stay with the chat a run posts into. */
   existingChat: boolean;
+  /** A materialized reusable chat also owns its execution settings. */
+  inheritsChatSettings: boolean;
 }
 
 export function ComposerField({
@@ -173,8 +323,8 @@ export function ComposerField({
   defaultModelSelection,
   modelsLoading,
   modelsError,
-  canAttachOpenGeniTool,
   existingChat,
+  inheritsChatSettings,
 }: ComposerFieldProps) {
   const context = useAppContext();
   const fieldProps = useFieldControlProps();
@@ -182,11 +332,8 @@ export function ComposerField({
 
   const can = (permission: Parameters<typeof hasWorkspacePermission>[2]) =>
     hasWorkspacePermission(context.accessContext, workspaceId, permission);
-  const canAttachSets = can("variable-sets:attach") && can("variable-sets:use");
-  const canListSets = canAttachSets && can("variable-sets:list");
-  const variableSets = useVariableSets({ enabled: canListSets && !existingChat });
   const canUseRigs = can("rigs:use");
-  const rigs = useWorkspaceRigs({ enabled: canUseRigs && !existingChat });
+  const rigs = useWorkspaceRigs({ enabled: canUseRigs && !inheritsChatSettings });
 
   /* ----- repositories */
   const repositories = draft.resources.filter(
@@ -216,29 +363,6 @@ export function ComposerField({
   const removeRepository = (resource: RepositoryResource) =>
     update({ resources: draft.resources.filter((candidate) => candidate !== resource) });
 
-  /* ----- variable set */
-  const activeSets = variableSets.variableSets.filter((set) => set.status === "active");
-  const selectedSetKnown = activeSets.some((set) => set.id === draft.variableSetId);
-  const setOptions: SelectOption[] = [
-    ...activeSets.map((set) => ({
-      value: set.id,
-      label: set.name,
-      meta: `${set.variables.length} ${set.variables.length === 1 ? "variable" : "variables"}`,
-      description: set.description ?? undefined,
-      leading: <VariableIcon className="size-3.5 text-fg-subtle" />,
-    })),
-    ...(draft.variableSetId && !selectedSetKnown
-      ? [
-          {
-            value: draft.variableSetId,
-            label: variableSets.loading ? "Loading…" : "Attached variable set",
-            leading: <VariableIcon className="size-3.5 text-fg-subtle" />,
-          },
-        ]
-      : []),
-    ...(draft.variableSetId ? [{ value: NONE, label: "No variable set", group: " " }] : []),
-  ];
-
   /* ----- environment */
   const liveRigs = rigs.rigs.filter((rig) => rig.status === "active");
   const selectedRigKnown = liveRigs.some((rig) => rig.id === draft.rigId);
@@ -264,25 +388,17 @@ export function ComposerField({
   ];
 
   /* ----- tools */
-  // With agent settings, built-in tools follow "What the agent can do"; the
-  // menu then only picks connected apps.
-  const agentSettings = context.clientConfig.agentConfig?.enabled === true;
+  // Built-in tools follow "What the agent can do"; the menu only picks
+  // connected apps.
   // The built-in "files" and "docs" servers share names with the Workspace
   // files and Knowledge capabilities. Name them for what they attach, and say
   // which capability they also need.
   const servers = context.toolMcpServers
     .filter((server) => server.id !== "opengeni")
-    .map((server) =>
-      server.id in BUILT_IN_SERVER_COPY
-        ? {
-            ...server,
-            name: BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].name,
-            detail: agentSettings
-              ? BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].needs
-              : server.detail,
-          }
-        : server,
-    );
+    .map((server) => {
+      const copy = builtInCopy(server.id);
+      return copy ? { ...server, name: copy.name, detail: copy.needs } : server;
+    });
   const selectedTools = draft.mcpServerIds ?? [];
   const toggleTool = (id: string, on: boolean) =>
     update({
@@ -290,25 +406,48 @@ export function ComposerField({
         ? [...selectedTools.filter((tool) => tool !== id), id]
         : selectedTools.filter((tool) => tool !== id),
     });
-  const toolName = (id: string) => servers.find((server) => server.id === id)?.name;
-  const toolLogo = (id: string) => servers.find((server) => server.id === id)?.logoSrc ?? null;
+  // A chosen app that is no longer connected keeps its catalog name when the
+  // catalog still knows it, so it can be recognized and removed. It is called
+  // unavailable only once the workspace's connected apps have loaded.
+  const known = new Set(servers.map((server) => server.id));
+  const missing = [...new Set(selectedTools)].filter((id) => !known.has(id));
+  const confirmedMissing = context.workspaceMcpCatalogLoadedSuccessfully;
+  const rows: ServerRow[] = [
+    ...servers,
+    ...missing.map((id) => ({
+      id,
+      name:
+        context.workspaceCapabilityCatalog.find((item) => item.runtime?.mcpServerId === id)?.name ??
+        id,
+      ...(confirmedMissing ? { detail: "Unavailable", unavailable: true as const } : {}),
+    })),
+  ];
+  // The chat composer's logos: catalog entries the workspace shell already
+  // loaded, also for chosen apps that are no longer connected.
+  const missingKey = missing.join("\n");
+  const logos = useMemo(
+    () =>
+      connectorLogoSources(
+        [
+          ...context.toolMcpServers,
+          ...(missingKey ? missingKey.split("\n") : []).map((id) => ({ id, name: id })),
+        ],
+        context.workspaceCapabilityCatalog,
+        (path) => context.client.catalogAssetUrl(path),
+      ),
+    [context.client, context.toolMcpServers, context.workspaceCapabilityCatalog, missingKey],
+  );
 
   /* ----- model */
   const followed = draft.modelFollowsDefault ? defaultModelSelection : null;
   const selectedRow = modelRows.find((row) => row.id === (followed?.model ?? draft.model));
-  const payer = selectedRow ? payerShortLabel(selectedRow) : null;
+  const payer = selectedRow ? modelPayerHint(selectedRow) : null;
   const modelMeta = draft.modelFollowsDefault ? (payer ? `Default · ${payer}` : null) : payer;
 
-  const showSetChip = canAttachSets && (setOptions.length > 0 || variableSets.loading);
-  const showRigChip = canUseRigs && (rigOptions.length > 0 || rigs.loading);
+  const showRigChip =
+    !inheritsChatSettings && canUseRigs && (rigOptions.length > 0 || rigs.loading);
   const showContext =
-    !existingChat &&
-    (repositories.length > 0 ||
-      repositoryOptions.length > 0 ||
-      showSetChip ||
-      showRigChip ||
-      (draft.includeOpenGeniTool && !agentSettings) ||
-      selectedTools.length > 0);
+    !existingChat && (repositories.length > 0 || repositoryOptions.length > 0 || showRigChip);
   return (
     <div
       className={cn(
@@ -344,18 +483,6 @@ export function ComposerField({
               disabled={disabled}
             />
           ) : null}
-          {showSetChip ? (
-            <ChipSelect
-              label="Variable set"
-              placeholder="Variable set"
-              options={setOptions}
-              value={draft.variableSetId}
-              onChange={(value) => update({ variableSetId: value === NONE ? null : value })}
-              searchPlaceholder="Search variable sets"
-              disabled={disabled}
-              loading={variableSets.loading && activeSets.length === 0}
-            />
-          ) : null}
           {showRigChip ? (
             <ChipSelect
               label="Environment"
@@ -368,33 +495,6 @@ export function ComposerField({
               loading={rigs.loading && liveRigs.length === 0}
             />
           ) : null}
-          {draft.includeOpenGeniTool && !agentSettings ? (
-            <RemovableChip
-              icon={<PlugIcon />}
-              label="Workspace tools"
-              onRemove={() => update({ includeOpenGeniTool: false })}
-              disabled={disabled}
-            />
-          ) : null}
-          {selectedTools.map((id) => {
-            const name = toolName(id);
-            return (
-              <RemovableChip
-                key={id}
-                icon={
-                  name ? (
-                    <CapabilityLogo src={toolLogo(id)} name={name} size="sm" className="size-4" />
-                  ) : (
-                    <PlugIcon />
-                  )
-                }
-                label={name ?? id}
-                hint={name ? undefined : "Unavailable"}
-                onRemove={() => toggleTool(id, false)}
-                disabled={disabled}
-              />
-            );
-          })}
         </div>
       ) : null}
       <textarea
@@ -412,136 +512,76 @@ export function ComposerField({
         )}
       />
       <div className="flex min-w-0 items-center gap-2 px-3 pb-3">
-        {!existingChat ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label="Add tools"
-                disabled={disabled}
-                className={cn(
-                  "grid size-7 shrink-0 place-items-center rounded-full border border-border bg-surface text-fg-muted transition-colors duration-[120ms] hover:border-border-strong hover:text-fg data-[state=open]:border-border-strong data-[state=open]:text-fg pointer-coarse:size-8",
-                  TOUCH_TARGET,
-                  "pointer-coarse:after:-inset-x-1.5",
-                )}
-              >
-                <PlusIcon aria-hidden="true" className="size-4" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-72">
-              <DropdownMenuLabel>
-                {agentSettings
-                  ? "Connected apps this schedule can use"
-                  : "Tools this schedule can use"}
-              </DropdownMenuLabel>
-              {agentSettings && servers.length === 0 ? (
-                <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
-                  No apps are connected to this workspace yet.
-                </p>
-              ) : null}
-              {agentSettings ? null : (
-                <DropdownMenuCheckboxItem
-                  checked={draft.includeOpenGeniTool}
-                  disabled={!canAttachOpenGeniTool}
-                  onCheckedChange={(checked) => update({ includeOpenGeniTool: checked === true })}
-                  onSelect={(event) => event.preventDefault()}
-                >
-                  <PlugIcon />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate">Workspace tools</span>
-                    <span className="block text-xs leading-4.5 text-fg-muted">
-                      {canAttachOpenGeniTool
-                        ? "Chats, schedules and other work in this workspace."
-                        : "Not available on this Opengeni server."}
-                    </span>
-                  </span>
-                </DropdownMenuCheckboxItem>
-              )}
-              {servers.map((server) => (
-                <DropdownMenuCheckboxItem
-                  key={server.id}
-                  checked={selectedTools.includes(server.id)}
-                  onCheckedChange={(checked) => toggleTool(server.id, checked === true)}
-                  onSelect={(event) => event.preventDefault()}
-                >
-                  <CapabilityLogo
-                    src={server.logoSrc ?? null}
-                    name={server.name}
-                    size="sm"
-                    className="size-4 rounded-[4px]"
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate">{server.name}</span>
-                    {server.detail ? (
-                      <span className="block truncate text-xs leading-4.5 text-fg-muted">
-                        {server.detail}
-                      </span>
-                    ) : null}
-                  </span>
-                </DropdownMenuCheckboxItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+        {!inheritsChatSettings ? (
+          <ConnectorsMenu
+            rows={rows}
+            selected={selectedTools}
+            logos={logos}
+            onToggle={toggleTool}
+            disabled={disabled}
+          />
         ) : (
           <span className="text-xs leading-4.5 text-fg-muted">
-            Uses the chat's own tools and attachments.
+            Uses this chat's model, tools and machine.
           </span>
         )}
-        <div className="ml-auto flex min-w-0 items-center gap-1">
-          {!draft.modelFollowsDefault ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="Use the workspace default model"
-                  disabled={disabled}
-                  onClick={() =>
-                    update({
-                      modelFollowsDefault: true,
-                      ...(defaultModelSelection
-                        ? {
-                            model: defaultModelSelection.model,
-                            reasoningEffort: defaultModelSelection.reasoningEffort,
-                          }
-                        : {}),
-                    })
-                  }
-                  className={cn(
-                    "grid size-7 shrink-0 place-items-center rounded-full text-fg-subtle transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg",
-                    TOUCH_TARGET,
-                  )}
-                >
-                  <RotateCcwIcon aria-hidden="true" className="size-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Use the workspace default</TooltipContent>
-            </Tooltip>
-          ) : null}
-          <ModelPicker
-            rows={modelRows}
-            // Following a default the client can't resolve to a runnable model:
-            // name the policy instead of printing a raw model id.
-            model={draft.modelFollowsDefault && !selectedRow ? "Workspace default" : draft.model}
-            effort={draft.reasoningEffort}
-            latencyMode="standard"
-            allowLatencyMode={false}
-            disabled={disabled}
-            loading={modelsLoading}
-            error={modelsError}
-            messages={{ label: "Model and reasoning" }}
-            triggerStyle="field"
-            triggerMeta={modelMeta}
-            className={cn(
-              "inline-flex h-7 max-w-full min-w-0 shrink items-center gap-1.5 rounded-full border border-border bg-surface pr-2 pl-2.5 text-xs text-fg transition-colors duration-[120ms] hover:border-border-strong pointer-coarse:h-8",
-              TOUCH_TARGET,
-            )}
-            onModelChange={(model) => update({ model, modelFollowsDefault: false })}
-            onEffortChange={(reasoningEffort) =>
-              update({ reasoningEffort, modelFollowsDefault: false })
-            }
-            onLatencyModeChange={() => {}}
-          />
-        </div>
+        {!inheritsChatSettings ? (
+          <div className="ml-auto flex min-w-0 items-center gap-1">
+            {!draft.modelFollowsDefault ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="Use the workspace default model"
+                    disabled={disabled}
+                    onClick={() =>
+                      update({
+                        modelFollowsDefault: true,
+                        ...(defaultModelSelection
+                          ? {
+                              model: defaultModelSelection.model,
+                              reasoningEffort: defaultModelSelection.reasoningEffort,
+                            }
+                          : {}),
+                      })
+                    }
+                    className={cn(
+                      "grid size-7 shrink-0 place-items-center rounded-full text-fg-subtle transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg",
+                      TOUCH_TARGET,
+                    )}
+                  >
+                    <RotateCcwIcon aria-hidden="true" className="size-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Use the workspace default</TooltipContent>
+              </Tooltip>
+            ) : null}
+            <ModelPicker
+              rows={modelRows}
+              // Following a default the client can't resolve to a runnable model:
+              // name the policy instead of printing a raw model id.
+              model={draft.modelFollowsDefault && !selectedRow ? "Workspace default" : draft.model}
+              effort={draft.reasoningEffort}
+              latencyMode="standard"
+              allowLatencyMode={false}
+              disabled={disabled}
+              loading={modelsLoading}
+              error={modelsError}
+              messages={{ label: "Model and reasoning" }}
+              triggerStyle="field"
+              triggerMeta={modelMeta}
+              className={cn(
+                "inline-flex h-7 max-w-full min-w-0 shrink items-center gap-1.5 rounded-full border border-border bg-surface pr-2 pl-2.5 text-xs text-fg transition-colors duration-[120ms] hover:border-border-strong pointer-coarse:h-8",
+                TOUCH_TARGET,
+              )}
+              onModelChange={(model) => update({ model, modelFollowsDefault: false })}
+              onEffortChange={(reasoningEffort) =>
+                update({ reasoningEffort, modelFollowsDefault: false })
+              }
+              onLatencyModeChange={() => {}}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );

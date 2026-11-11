@@ -9,8 +9,16 @@ import {
   toolSearchTool,
   type Tool,
 } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
-import { bm25RankTools, searchToolPool, toolsNamedInQuery } from "../src/codex-tool-search";
+import { testSettings } from "@opengeni/testing/settings";
+import {
+  bm25RankTools,
+  rankToolPool,
+  searchToolPool,
+  toolsNamedInQuery,
+  shortNameAlternatives,
+  unresolvedToolNames,
+} from "../src/codex-tool-search";
+import { MCP_MAX_TOOL_DEFINITION_BYTES } from "../src/mcp-network";
 import {
   buildOpenGeniAgent,
   prepareRunInput,
@@ -122,8 +130,7 @@ describe("searchToolPool named tools", () => {
   const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
 
   test("puts a tool named by its short name first", () => {
-    // BM25 alone prefers goal_set: its short description repeats "goal" and "complete".
-    expect(names(bm25RankTools(GOALS, "goal_complete", 1))).toEqual(["opengeni__goal_set"]);
+    // Exact naming takes precedence independently of changes to lexical ranking.
     expect(names(searchToolPool(GOALS, { query: "goal_complete", limit: 1 }))).toEqual([
       "opengeni__goal_complete",
     ]);
@@ -156,6 +163,64 @@ describe("searchToolPool named tools", () => {
 });
 
 describe("searchToolPool disclosure bounds", () => {
+  const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
+  function interactionTool(name: string, description: string): Tool {
+    return { ...connectorTool(name, description), name: `interaction__${name}` } as Tool;
+  }
+  const INTERACTION_POOL: Tool[] = [
+    interactionTool("browser_open", "Open or reuse a browser session"),
+    interactionTool("browser_observe", "Read one tab's accessibility view"),
+    interactionTool("browser_act", "Perform one browser action"),
+    interactionTool("browser_screenshot", "Capture tab pixels"),
+    interactionTool("browser_tabs", "Manage browser tabs"),
+    interactionTool("browser_downloads", "List browser downloads"),
+    interactionTool("computer_open", "Open a desktop computer session"),
+    interactionTool("computer_act", "Act on the desktop"),
+    ...POOL,
+  ];
+
+  test("one browser result discloses the browser working set beyond the limit", () => {
+    expect(names(searchToolPool(INTERACTION_POOL, { query: "browser_open", limit: 1 }))).toEqual([
+      "interaction__browser_open",
+      "interaction__browser_observe",
+      "interaction__browser_act",
+      "interaction__browser_screenshot",
+      "interaction__browser_tabs",
+    ]);
+    expect(
+      names(searchToolPool(INTERACTION_POOL, { query: "", names: ["interaction__browser_act"] })),
+    ).toEqual([
+      "interaction__browser_act",
+      "interaction__browser_open",
+      "interaction__browser_observe",
+      "interaction__browser_screenshot",
+      "interaction__browser_tabs",
+    ]);
+  });
+
+  test("family companions come only from the authorized pool and leave other tools alone", () => {
+    const partial = INTERACTION_POOL.filter(
+      (tool) => (tool as { name: string }).name !== "interaction__browser_tabs",
+    );
+    expect(names(searchToolPool(partial, { query: "computer_open", limit: 1 }))).toEqual([
+      "interaction__computer_open",
+      "interaction__computer_act",
+    ]);
+    expect(names(searchToolPool(partial, { query: "gmail_send_email", limit: 1 }))).toEqual([
+      "codex_apps__gmail_send_email",
+    ]);
+  });
+
+  test("discloses a rich nested schema admitted by discovery", () => {
+    const rich = connectorTool("rich", "Read a record");
+    if (rich.type !== "function") throw new Error("expected a function tool");
+    rich.parameters = {
+      type: "object",
+      properties: {},
+      description: "x".repeat(300 * 1024),
+    } as never;
+    expect(searchToolPool([rich], { names: ["codex_apps__rich"], query: "" })).toEqual([rich]);
+  });
   test("keyword search backfills beyond the original rank cutoff", () => {
     const oversized = connectorTool("first", "Find records");
     const small = connectorTool("second", "Find records");
@@ -163,7 +228,7 @@ describe("searchToolPool disclosure bounds", () => {
     oversized.parameters = {
       type: "object",
       properties: {},
-      description: "x".repeat(130 * 1024),
+      description: "x".repeat(MCP_MAX_TOOL_DEFINITION_BYTES),
     } as never;
     expect(bm25RankTools([oversized, small], "Find records", 1)).toEqual([oversized]);
     expect(searchToolPool([oversized, small], { query: "Find records", limit: 1 })).toEqual([
@@ -183,8 +248,35 @@ describe("searchToolPool disclosure bounds", () => {
     expect(searchToolPool([unrelated], { query: "legal", names: ["not_authorized"] })).toEqual([]);
   });
 
+  test("an exact name without its server prefix loads the tool, and a full name stays exact", () => {
+    const wanted = connectorTool("sandboxes_list", "List the person's computers");
+    const other = connectorTool("sandbox_swap", "Move this chat to a computer");
+    const pool = [other, wanted];
+    expect(searchToolPool(pool, { query: "", names: ["sandboxes_list"] })).toEqual([wanted]);
+    expect(rankToolPool(pool, { query: "", names: ["sandboxes_list"] })).toEqual([wanted]);
+    // A prefixed name never falls back to another server's tool of that name.
+    expect(searchToolPool(pool, { query: "", names: ["other__sandboxes_list"] })).toEqual([]);
+    expect(unresolvedToolNames(pool, ["sandboxes_list", "missing_tool"])).toEqual(["missing_tool"]);
+  });
+
+  test("a short name several servers share loads one tool, Opengeni's own first", () => {
+    const named = (name: string) =>
+      ({ ...connectorTool("x", `Search ${name}`), name }) as unknown as Tool;
+    const docs = named("docs__search");
+    const own = named("opengeni__search");
+    const mail = named("mail__search");
+    const pool = [docs, own, mail];
+    expect(searchToolPool(pool, { query: "", names: ["search"] })).toEqual([own]);
+    expect(rankToolPool(pool, { query: "", names: ["search"] })).toEqual([own]);
+    expect(shortNameAlternatives(pool as never, "search")).toEqual([docs, mail]);
+    // Without a first-party match the first one loads; a full name stays exact.
+    expect(rankToolPool([docs, mail], { query: "", names: ["search"] })).toEqual([docs]);
+    expect(rankToolPool(pool, { query: "", names: ["mail__search"] })).toEqual([mail]);
+    expect(shortNameAlternatives(pool as never, "mail__search")).toEqual([]);
+  });
+
   test("backfills rank-limited results after rejecting an oversized definition", () => {
-    const oversized = connectorTool("oversized", "x".repeat(130 * 1024));
+    const oversized = connectorTool("oversized", "x".repeat(MCP_MAX_TOOL_DEFINITION_BYTES));
     const small = connectorTool("small", "Read an item");
     expect(
       searchToolPool([oversized, small], {
@@ -197,7 +289,7 @@ describe("searchToolPool disclosure bounds", () => {
 
   test("backfills smaller definitions after aggregate overflow without exceeding the budget", () => {
     const large = Array.from({ length: 3 }, (_, i) =>
-      connectorTool(`large_${i}`, "x".repeat(100 * 1024)),
+      connectorTool(`large_${i}`, "x".repeat(200 * 1024)),
     );
     const small = connectorTool("small", "Read an item");
     const pool = [...large, small];
@@ -501,7 +593,9 @@ describe("tool_search tool wiring", () => {
     });
 
     const tools = await agent.getAllTools(new RunContext());
-    const searchTool = tools.find((tool) => (tool as { name?: string }).name === "tool_search");
+    const searchTool = tools.find(
+      (tool) => tool.type === "hosted_tool" && tool.name === "tool_search",
+    );
     expect(searchTool).toBeDefined();
     const executor = getClientToolSearchExecutor(searchTool as never);
     const result = await executor!({
@@ -518,5 +612,47 @@ describe("tool_search tool wiring", () => {
     expect(matched.map((tool) => (tool as { name: string }).name)).toContain(
       "codex_apps__search_documents",
     );
+  });
+});
+
+describe("searchToolPool native CUA working set", () => {
+  function cuaTool(name: string): Tool {
+    return {
+      type: "function",
+      name: `interaction__cua_${name}`,
+      description: `Native CUA ${name}`,
+      isEnabled: async () => true,
+      parameters: { type: "object", properties: {} },
+    } as unknown as Tool;
+  }
+  const CUA_POOL = ["click", "type_text", "get_window_state", "run_steps", "zoom"].map(cuaTool);
+  const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
+
+  test("any CUA tool brings the window read and the batch tool", () => {
+    expect(
+      names(searchToolPool(CUA_POOL, { query: "", names: ["interaction__cua_click"] })),
+    ).toEqual([
+      "interaction__cua_click",
+      "interaction__cua_get_window_state",
+      "interaction__cua_run_steps",
+    ]);
+  });
+
+  test("other tools bring no CUA tools", () => {
+    const other = {
+      type: "function",
+      name: "interaction__computer_targets",
+      description: "List computer targets",
+      isEnabled: async () => true,
+      parameters: { type: "object", properties: {} },
+    } as unknown as Tool;
+    expect(
+      names(
+        searchToolPool([other, ...CUA_POOL], {
+          query: "",
+          names: ["interaction__computer_targets"],
+        }),
+      ),
+    ).toEqual(["interaction__computer_targets"]);
   });
 });

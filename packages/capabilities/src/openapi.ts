@@ -1,4 +1,5 @@
 import type { CallToolResultContent, MCPCallToolOptions, MCPServer } from "@openai/agents";
+import { ResponseBodyLimitError } from "@opengeni/network";
 import { load as parseYaml } from "js-yaml";
 
 import { applyCredentialPlacements } from "./auth";
@@ -12,6 +13,7 @@ import {
   readIntegrationResponse,
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
+import { displayTitleMeta } from "./operation-titles";
 import type {
   IntegrationCredentialResolver,
   IntegrationInvocationAuthority,
@@ -21,6 +23,7 @@ import type {
   JsonSchema,
 } from "./types";
 import { IntegrationInvocationError, IntegrationProtocolError } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 export type OpenApiHttpMethod =
   | "get"
@@ -38,6 +41,10 @@ export interface OpenApiParameterBinding {
   readonly required: boolean;
   readonly schema: JsonSchema;
   readonly description?: string;
+  readonly style?: string;
+  readonly explode?: boolean;
+  /** A path parameter expanded as a path: `/` is kept and each segment encoded. */
+  readonly allowReserved?: true;
 }
 
 export interface OpenApiOperationBinding {
@@ -51,6 +58,12 @@ export interface OpenApiOperationBinding {
     readonly schemas: Readonly<Record<string, JsonSchema>>;
   };
   readonly requiredScopeAlternatives?: readonly (readonly string[])[];
+  /**
+   * Reviewed Microsoft Search entity types this operation may request. When
+   * present, every request in the body must name only these entity types; any
+   * other request is rejected before credentials are resolved.
+   */
+  readonly searchEntityTypes?: readonly string[];
 }
 
 export type OpenApiRevision = IntegrationRevision<OpenApiOperationBinding, "openapi">;
@@ -61,6 +74,17 @@ export interface CompileOpenApiOptions {
   readonly baseUrl?: string;
   readonly provider?: string;
   readonly schemaMode?: "provider_validated_json";
+  /**
+   * Reviewed `"<method> <path>"` operations that only read despite a non-GET
+   * method (a POST search, for example), with any reviewed request-body rule.
+   * Supplied by reviewed definitions only.
+   */
+  readonly readOnlyOperations?: ReadonlyMap<string, OpenApiReadOnlyOperationRule>;
+}
+
+export interface OpenApiReadOnlyOperationRule {
+  /** Microsoft Search entity types the read may request; others are rejected. */
+  readonly searchEntityTypes?: readonly string[];
 }
 
 export interface OpenApiServerOptions {
@@ -157,10 +181,6 @@ export function compileOpenApiRevision(
   options: CompileOpenApiOptions,
 ): OpenApiRevision {
   const document = isRecord(source) ? source : parseOpenApiDocument(source);
-  const contentSha256 = sha256Hex(
-    canonicalJson(options.schemaMode ? { document, schemaMode: options.schemaMode } : document),
-  );
-  const revisionId = immutableRevisionId("openapi", contentSha256);
   const info = isRecord(document.info) ? document.info : {};
   const documentServers = readServers(document.servers, options.baseUrl, options.sourceUrl);
   const documentSecurity = readSecurity(document.security);
@@ -192,7 +212,8 @@ export function compileOpenApiRevision(
       );
       const requiredScopeAlternatives =
         operation.security === undefined ? documentSecurity : readSecurity(operation.security);
-      const safety = classifyHttpSafety(method, operation);
+      const readOnlyRule = options.readOnlyOperations?.get(`${method} ${pathTemplate}`);
+      const safety = readOnlyRule ? "read" : classifyHttpSafety(method, operation);
       const inputSchema = operationInputSchema(parameters, requestBody);
       const outputSchema = options.schemaMode
         ? undefined
@@ -216,6 +237,9 @@ export function compileOpenApiRevision(
         parameters,
         ...(requestBody ? { requestBody } : {}),
         ...(requiredScopeAlternatives.length > 0 ? { requiredScopeAlternatives } : {}),
+        ...(readOnlyRule?.searchEntityTypes
+          ? { searchEntityTypes: [...readOnlyRule.searchEntityTypes] }
+          : {}),
       };
       if (tools.length > MAX_INTEGRATION_TOOLS) {
         throw new IntegrationProtocolError(
@@ -228,8 +252,51 @@ export function compileOpenApiRevision(
   if (tools.length === 0) {
     throw new IntegrationProtocolError("openapi_empty", "OpenAPI document exposes no operations");
   }
+  // A document alone does not identify its executable revision: an explicit
+  // base URL or relative-server resolution can change destinations without
+  // changing any document bytes. Hash the normalized, effective operation
+  // URLs and the primary URL used by the installation manifest, not raw
+  // options (which may be equivalent or overridden).
+  // Match the manifest's binding enumeration: integer-like tool IDs enumerate
+  // numerically, independently of the tools' path traversal order.
+  const contentSha256 = sha256Hex(
+    canonicalJson({
+      document,
+      // Older compilers discarded serialization metadata. A refreshed catalog
+      // must not collide with their immutable stored bindings for the same spec.
+      ...(Object.values(bindings).some((binding) => binding.parameters.some(isNonExplodedFormQuery))
+        ? { queryArraySerializationVersion: 1 }
+        : {}),
+      // Older compilers ignored allowReserved, so the same document compiled
+      // to different bindings.
+      ...(Object.values(bindings).some((binding) =>
+        binding.parameters.some((parameter) => parameter.allowReserved),
+      )
+        ? { reservedPathExpansionVersion: 1 }
+        : {}),
+      ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
+      // Reviewed read-only overrides change tool safety, so they are part of the
+      // executable identity. Absent overrides keep existing digests unchanged.
+      ...(options.readOnlyOperations && options.readOnlyOperations.size > 0
+        ? {
+            readOnlyOperations: Object.fromEntries(
+              [...options.readOnlyOperations.entries()]
+                .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+                .map(([key, rule]) => [
+                  key,
+                  rule.searchEntityTypes ? { searchEntityTypes: [...rule.searchEntityTypes] } : {},
+                ]),
+            ),
+          }
+        : {}),
+      baseUrl: Object.values(bindings)[0]!.serverUrl,
+      serverUrls: Object.fromEntries(
+        Object.entries(bindings).map(([id, binding]) => [id, binding.serverUrl]),
+      ),
+    }),
+  );
   return {
-    id: revisionId,
+    id: immutableRevisionId("openapi", contentSha256),
     protocol: "openapi",
     definitionId: options.definitionId,
     contentSha256,
@@ -303,6 +370,10 @@ export class OpenApiMcpServer implements MCPServer {
           _meta: {
             "opengeni/approvalMode": tool.approvalMode,
             "opengeni/operationKey": tool.operationKey,
+            ...displayTitleMeta(tool.operationKey, {
+              method: this.options.revision.bindings[tool.id]?.method,
+              serverUrl: this.options.revision.bindings[tool.id]?.serverUrl,
+            }),
             "opengeni/revisionId": this.options.revision.id,
           },
         }) as LocalMcpTool,
@@ -352,12 +423,18 @@ export async function invokeOpenApiOperation(
       false,
     );
   }
+  assertSearchEntityTypes(binding, args);
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
+  let credential = firstCredential;
+  // Redirect hops share the deadline of the request that answered with them.
+  let startedAt = Date.now();
   let response = await sendOpenApiRequest(options, binding, args, firstCredential, signal);
   if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
     const refreshed = await resolveOpenApiCredential(options, binding, toolId, args, true);
     if (isReplaySafeMethod(binding.method) && refreshed) {
       await response.body?.cancel().catch(() => undefined);
+      credential = refreshed;
+      startedAt = Date.now();
       response = await sendOpenApiRequest(options, binding, args, refreshed, signal);
     } else {
       await response.body?.cancel().catch(() => undefined);
@@ -370,27 +447,43 @@ export async function invokeOpenApiOperation(
       );
     }
   }
-  if (response.status >= 300 && response.status < 400) {
-    await response.body?.cancel().catch(() => undefined);
+  const redirected = response.status >= 300 && response.status < 400;
+  if (redirected) {
+    response = await followCredentialFreeRedirects(
+      options,
+      binding,
+      buildOperationUrl(binding, args),
+      response,
+      credential,
+      startedAt,
+      signal,
+    );
+  }
+  let payload: Awaited<ReturnType<typeof readIntegrationResponse>>;
+  try {
+    payload = await readIntegrationResponse(
+      response,
+      options.maxResponseBytes ?? DEFAULT_INTEGRATION_RESPONSE_BYTES,
+    );
+  } catch (error) {
+    if (!(error instanceof ResponseBodyLimitError)) throw error;
     throw new IntegrationInvocationError(
-      "redirect_rejected",
-      "Integration attempted to redirect a credential-bearing request",
+      "response_too_large",
+      `The provider's response is larger than the ${error.maxBytes}-byte limit; ask for less, for example a smaller page or fewer fields`,
       binding.method === "get" || binding.method === "head" ? "failed" : "unknown",
       false,
       response.status,
     );
   }
-  const payload = await readIntegrationResponse(
-    response,
-    options.maxResponseBytes ?? DEFAULT_INTEGRATION_RESPONSE_BYTES,
-  );
   const result = {
     ok: response.ok,
     status: response.status,
     contentType: payload.contentType,
     data: payload.data,
   };
-  if (!response.ok && (response.status === 401 || response.status === 403)) {
+  // A redirect target (a pre-signed URL) answers for itself, not for the
+  // connected account, so its refusal is the provider's result.
+  if (!redirected && !response.ok && (response.status === 401 || response.status === 403)) {
     throw new IntegrationInvocationError(
       "authorization_rejected",
       "The connected account is no longer authorized for this operation",
@@ -400,6 +493,65 @@ export async function invokeOpenApiOperation(
     );
   }
   return result;
+}
+
+/**
+ * A reviewed read-only search may only ask for its reviewed entity types, so a
+ * connection's other granted scopes (mail, chats) cannot be searched without
+ * the approval their own tools require.
+ */
+function assertSearchEntityTypes(
+  binding: OpenApiOperationBinding,
+  args: Record<string, unknown>,
+): void {
+  const allowed = binding.searchEntityTypes;
+  if (!allowed) return;
+  const reject = (detail: string): never => {
+    throw new IntegrationInvocationError(
+      "parameter_invalid",
+      `${detail} Allowed entityTypes: ${allowed.join(", ")}.`,
+      "not_started",
+      false,
+    );
+  };
+  const body = args.body;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return reject('Send the search as a JSON object body: {"requests":[...]}.');
+  }
+  // The provider may read property names case-insensitively, so a second
+  // spelling must never smuggle in entity types the guard did not check.
+  const unexpected = Object.keys(body).filter((key) => key !== "requests");
+  if (unexpected.length > 0) {
+    return reject(`The search body may only contain requests, not ${unexpected.join(", ")}.`);
+  }
+  const requests = (body as Record<string, unknown>).requests;
+  if (!Array.isArray(requests) || requests.length === 0) {
+    return reject("The search body needs a non-empty requests array.");
+  }
+  for (const request of requests) {
+    if (typeof request !== "object" || request === null || Array.isArray(request)) {
+      return reject("Every search request must be an object.");
+    }
+    if (
+      Object.keys(request).some(
+        (key) => key !== "entityTypes" && key.toLowerCase() === "entitytypes",
+      )
+    ) {
+      return reject("Spell the search field exactly entityTypes.");
+    }
+    const entityTypes = (request as Record<string, unknown>).entityTypes;
+    if (!Array.isArray(entityTypes) || entityTypes.length === 0) {
+      return reject("Every search request needs a non-empty entityTypes array.");
+    }
+    for (const entityType of entityTypes) {
+      if (
+        typeof entityType !== "string" ||
+        !allowed.some((entry) => entry.toLowerCase() === entityType.toLowerCase())
+      ) {
+        return reject(`This search cannot request entityType ${JSON.stringify(entityType)}.`);
+      }
+    }
+  }
 }
 
 async function resolveOpenApiCredential(
@@ -432,6 +584,97 @@ async function resolveOpenApiCredential(
     );
   }
   return credential;
+}
+
+/** Redirect hops a safe read may follow, e.g. Graph `/content` to its download URL. */
+export const MAX_INTEGRATION_REDIRECTS = 3;
+const FOLLOWED_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Follow a safe read's redirects without its credentials. Providers commonly
+ * answer a download with a redirect to a pre-signed URL (Microsoft Graph
+ * `/content`, file exports, archives); the URL itself authorizes the read.
+ * Each hop goes through the same pinned transport and deadline, carries no
+ * Authorization or other credential header, cookie or credential query
+ * parameter, and never downgrades from https. A mutation's redirect is still
+ * rejected: its side effect may already have happened.
+ */
+async function followCredentialFreeRedirects(
+  options: OpenApiServerOptions,
+  binding: OpenApiOperationBinding,
+  requestUrl: URL,
+  first: Response,
+  credential: Awaited<ReturnType<IntegrationCredentialResolver["resolve"]>>,
+  startedAt: number,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const safe = binding.method === "get" || binding.method === "head";
+  const credentialQueryNames = (credential?.placements ?? [])
+    .filter((placement) => placement.carrier === "query")
+    .map((placement) => placement.name);
+  // The hops share the original request's deadline rather than each getting a new one.
+  const deadline = startedAt + (options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS);
+  let response = first;
+  let current = requestUrl;
+  for (let hop = 0; response.status >= 300 && response.status < 400; hop++) {
+    const location = response.headers.get("location");
+    await response.body?.cancel().catch(() => undefined);
+    const target = location && URL.canParse(location, current) ? new URL(location, current) : null;
+    const reason = !safe
+      ? "Integration attempted to redirect a credential-bearing request"
+      : !FOLLOWED_REDIRECT_STATUSES.has(response.status)
+        ? `Integration answered with HTTP ${response.status}, which is not a redirect it can follow`
+        : !target
+          ? "Integration answered with a redirect that has no usable Location"
+          : hop >= MAX_INTEGRATION_REDIRECTS
+            ? `Integration redirected more than ${MAX_INTEGRATION_REDIRECTS} times`
+            : (current.protocol === "https:" && target.protocol !== "https:") ||
+                target.username ||
+                target.password
+              ? "Integration redirected to an insecure destination"
+              : undefined;
+    if (reason || !target) {
+      throw new IntegrationInvocationError(
+        "redirect_rejected",
+        reason ?? "Integration answered with a redirect that has no usable Location",
+        safe ? "failed" : "unknown",
+        false,
+        response.status,
+      );
+    }
+    target.hash = "";
+    // Deleting re-serializes the whole query, which could break a signed
+    // URL, so only a query that names a credential parameter is touched.
+    for (const name of credentialQueryNames)
+      if (target.searchParams.has(name)) target.searchParams.delete(name);
+    try {
+      response = await fetchWithDeadline(
+        options.transport,
+        target,
+        {
+          method: binding.method.toUpperCase(),
+          headers: new Headers({ accept: "*/*" }),
+          ...(signal ? { signal } : {}),
+        },
+        Math.max(1, deadline - Date.now()),
+      );
+    } catch (error) {
+      if (!(error instanceof IntegrationInvocationError)) throw error;
+      const timedOut = error.code === "request_timeout";
+      throw new IntegrationInvocationError(
+        timedOut ? "request_timeout" : "redirect_failed",
+        timedOut
+          ? "Integration request timed out while following its redirect"
+          : "Following the integration's redirect failed; the destination may be unreachable or not allowed",
+        error.outcome,
+        // A destination the network policy refuses fails the same way again.
+        timedOut && error.retryable,
+        error.status,
+      );
+    }
+    current = target;
+  }
+  return response;
 }
 
 async function sendOpenApiRequest(
@@ -552,6 +795,19 @@ function readParameters(
         name: parameter.name,
         location,
         required: location === "path" || parameter.required === true,
+        // Retain the supported non-default encoding. Unchanged encodings keep
+        // their old binding shape as well as their old immutable revision ID.
+        ...(location === "query" &&
+        (parameter.style ?? "form") === "form" &&
+        parameter.explode === false
+          ? { style: "form", explode: false }
+          : {}),
+        // Reserved expansion (OpenAPI allowReserved, RFC 6570 `{+name}`), as
+        // reviewed definitions mark it. Other bindings keep their old shape
+        // and immutable revision ID.
+        ...(location === "path" && parameter.allowReserved === true
+          ? { allowReserved: true as const }
+          : {}),
         schema: dereferenceSchema(document, parameter.schema),
         ...(stringValue(parameter.description)
           ? { description: stringValue(parameter.description)! }
@@ -684,7 +940,9 @@ function toolDescription(
 ): string {
   const description = stringValue(operation.description) ?? stringValue(operation.summary);
   const approval =
-    safety === "read" ? "Read-only." : "Changes external state and requires approval.";
+    safety === "read"
+      ? "Read-only."
+      : "Changes external state. Your tool permissions determine whether review is needed.";
   return `${description ? `${description.trim()} ` : ""}${method.toUpperCase()} ${path}. ${approval}`.trim();
 }
 
@@ -702,6 +960,48 @@ function isReplaySafeMethod(method: OpenApiHttpMethod): boolean {
   return method === "get" || method === "head" || method === "options";
 }
 
+/**
+ * A path parameter's value as a path: each segment is encoded and `/` kept.
+ * Leading, trailing and repeated slashes are dropped, so `/sites/hr` and
+ * `sites/hr` mean the same. A segment that is already percent-encoded (a
+ * path copied from a browser) is decoded once first, so `R%26D%20Team` and
+ * `R&D Team` send the same bytes. A `.` or `..` segment, in either form,
+ * would be resolved away by URL parsing, so it is refused instead of
+ * silently reaching another path.
+ */
+function reservedPathValue(name: string, value: string): string {
+  return value
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => pathSegment(name, decodedOnce(segment)))
+    .join("/");
+}
+
+function decodedOnce(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/** One encoded path segment; `.` and `..` would move the request elsewhere. */
+function pathSegment(name: string, segment: string): string {
+  const invalid = (reason: string) =>
+    new IntegrationInvocationError(
+      "parameter_invalid",
+      `The path parameter ${JSON.stringify(name)} ${reason}`,
+      "not_started",
+      false,
+    );
+  if (segment === "." || segment === "..") throw invalid("cannot be or contain . or ..");
+  try {
+    return encodeURIComponent(segment);
+  } catch {
+    throw invalid("is not valid Unicode text");
+  }
+}
+
 function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string, unknown>): URL {
   const pathArgs = objectValue(args.path);
   const path = binding.pathTemplate.replace(/\{([^}]+)\}/g, (_match, name: string) => {
@@ -709,20 +1009,31 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
     if (value === undefined || value === null) {
       throw new IntegrationInvocationError(
         "path_parameter_missing",
-        "A required integration path parameter is missing",
+        `The required path parameter ${JSON.stringify(name)} is missing`,
         "not_started",
         false,
       );
     }
-    return encodeURIComponent(scalarString(value));
+    const parameter = binding.parameters.find(
+      (entry) => entry.location === "path" && entry.name === name,
+    );
+    return parameter?.allowReserved
+      ? reservedPathValue(name, scalarString(value))
+      : pathSegment(name, scalarString(value));
   });
   const base = new URL(binding.serverUrl);
+  // `./` keeps a first segment with a colon (`{drive-id}:/…`) from reading as a scheme.
   const url = new URL(
-    path.replace(/^\//, ""),
+    `./${path.replace(/^\//, "")}`,
     base.toString().endsWith("/") ? base : new URL(`${base}/`),
   );
   const query = objectValue(args.query);
-  for (const [name, value] of Object.entries(query)) appendQueryValue(url, name, value);
+  for (const [name, value] of Object.entries(query)) {
+    const parameter = binding.parameters.find(
+      (entry) => entry.location === "query" && entry.name === name,
+    );
+    appendQueryValue(url, name, value, parameter);
+  }
   return url;
 }
 
@@ -776,9 +1087,26 @@ function buildOperationBody(
   );
 }
 
-function appendQueryValue(url: URL, name: string, value: unknown): void {
+function isNonExplodedFormQuery(parameter: OpenApiParameterBinding | undefined): boolean {
+  return (
+    parameter?.location === "query" &&
+    (parameter.style ?? "form") === "form" &&
+    parameter.explode === false
+  );
+}
+
+function appendQueryValue(
+  url: URL,
+  name: string,
+  value: unknown,
+  parameter: OpenApiParameterBinding | undefined,
+): void {
   if (Array.isArray(value)) {
-    for (const entry of value) url.searchParams.append(name, scalarString(entry));
+    if (isNonExplodedFormQuery(parameter)) {
+      url.searchParams.append(name, value.map(scalarString).join(","));
+    } else {
+      for (const entry of value) url.searchParams.append(name, scalarString(entry));
+    }
   } else if (value !== undefined && value !== null) {
     url.searchParams.append(name, scalarString(value));
   }
@@ -883,8 +1211,4 @@ function normalizeMcpSchema(schema: JsonSchema): LocalMcpTool["inputSchema"] {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

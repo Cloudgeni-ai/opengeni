@@ -42,7 +42,7 @@ test("canonical included-overage headers and representative model caps retain ex
       }),
       now,
     ),
-  ).toBeNull();
+  ).toMatchObject({ requestStatus: { status: "rejected", representativeClaim: null } });
 });
 test("captured quota headers normalize the 5-hour and weekly windows independently", () => {
   const observation = parseClaudeUsageHeaders(
@@ -125,6 +125,72 @@ test("provider endpoint percentages use different units from headers and accept 
   for (const value of [null, [], {}, { five_hour: { utilization: NaN, resets_at: "invalid" } }])
     expect(parseClaudeUsageResponse(value, now)).toBeNull();
 });
+test("an explicit null records a limit the plan does not have; an omitted key does not", () => {
+  const ultra = parseClaudeUsageResponse(
+    { five_hour: null, seven_day: { utilization: 41, resets_at: "2026-10-04T00:00:00Z" } },
+    now,
+  )!;
+  expect(ultra.noLimitWindows).toEqual(["five_hour"]);
+  const partial = parseClaudeUsageResponse(
+    { seven_day: { utilization: 41, resets_at: "2026-10-04T00:00:00Z" } },
+    now,
+  )!;
+  expect(partial.noLimitWindows).toBeUndefined();
+});
+test("the weekly Fable limit reads from its own key or the scoped limits list", () => {
+  const reset = "2026-10-04T00:00:00.000Z";
+  const fable = (value: unknown) =>
+    parseClaudeUsageResponse(value, now)
+      ?.windows.filter((window) => window.id === "seven_day_fable")
+      .map((window) => [window.usedPercent, window.resetsAt]);
+  expect(fable({ seven_day_fable: { utilization: 64, resets_at: reset } })).toEqual([[64, reset]]);
+  // The publicly reported scoped shape (no captured body): percentages 0-100.
+  expect(
+    fable({
+      seven_day: { utilization: 10, resets_at: reset },
+      limits: [
+        { kind: "weekly_scoped", scope: { model: { display_name: "Opus" } }, percent: 5 },
+        {
+          kind: "weekly_scoped",
+          scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
+          percent: 72,
+          resets_at: reset,
+        },
+      ],
+    }),
+  ).toEqual([[72, reset]]);
+  expect(
+    fable({
+      seven_day: { utilization: 10, resets_at: reset },
+      limits: [
+        { kind: "weekly_scoped", scope: { model: { display_name: "fable" } }, utilization: 3 },
+      ],
+    }),
+  ).toEqual([[3, null]]);
+  // Unknown shapes are ignored; the rest of the reading still counts.
+  for (const limits of [
+    "weird",
+    [null, 3, { kind: "weekly_scoped" }, { kind: "weekly_scoped", scope: "fable" }],
+    [{ kind: "daily", scope: { model: { display_name: "Fable" } }, percent: 9 }],
+    { fable: 9 },
+  ]) {
+    const observation = parseClaudeUsageResponse(
+      { seven_day: { utilization: 10, resets_at: reset }, limits },
+      now,
+    )!;
+    expect(observation.windows.map((window) => window.id)).toEqual(["seven_day"]);
+  }
+  const hostile = { seven_day: { utilization: 10, resets_at: reset } } as Record<string, unknown>;
+  Object.defineProperty(hostile, "limits", {
+    enumerable: true,
+    get() {
+      throw new Error("bad body");
+    },
+  });
+  expect(parseClaudeUsageResponse(hostile, now)?.windows.map((window) => window.id)).toEqual([
+    "seven_day",
+  ]);
+});
 test("merging partial and out-of-order observations preserves each window's newest value", () => {
   const first = parseClaudeUsageHeaders(
     new Headers({
@@ -139,5 +205,39 @@ test("merging partial and out-of-order observations preserves each window's newe
   )!;
   const current = mergeClaudeUsage(mergeClaudeUsage(emptyClaudeUsage(1), first), later);
   expect(current.windows.map((window) => window.usedPercent)).toEqual([30, 50]);
+  expect(mergeClaudeUsage(current, first)).toEqual(current);
+});
+
+test("dispatch statuses merge atomically and a later quota snapshot clears paid-fallback authority", () => {
+  const first = parseClaudeUsageHeaders(
+    new Headers({
+      "anthropic-ratelimit-unified-status": "rejected",
+      "anthropic-ratelimit-unified-overage-status": "allowed",
+      "anthropic-ratelimit-unified-representative-claim": "five_hour",
+    }),
+    now,
+    "claude-opus-5-5",
+  )!;
+  const newer = new Date(now.getTime() + 1000);
+  const denied = parseClaudeUsageHeaders(
+    new Headers({
+      "anthropic-ratelimit-unified-status": "rejected",
+    }),
+    newer,
+    "claude-opus-5-5",
+  )!;
+  let current = mergeClaudeUsage(mergeClaudeUsage(emptyClaudeUsage(1), first), denied);
+  expect(current.requestStatus).toMatchObject({ status: "rejected", overageStatus: null });
+  expect(mergeClaudeUsage(current, first)).toEqual(current);
+  current = mergeClaudeUsage(
+    current,
+    parseClaudeUsageResponse(
+      {
+        five_hour: { utilization: 100, resets_at: "2026-10-01T00:00:00Z" },
+      },
+      new Date(now.getTime() + 2000),
+    )!,
+  );
+  expect(current.requestStatus).toBeNull();
   expect(mergeClaudeUsage(current, first)).toEqual(current);
 });

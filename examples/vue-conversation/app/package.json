@@ -1,0 +1,28 @@
+{
+  "name": "@opengeni/example-vue-conversation",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 3104",
+    "server": "bun --env-file=.env.local src/server.ts",
+    "onboard": "bun --env-file=.env.local src/onboard.ts",
+    "start": "bun --env-file=.env.local src/server.ts",
+    "typecheck": "tsrs --runExternalCode --noEmit",
+    "build": "bun run typecheck && vite build",
+    "test": "bun test src",
+    "preview:check": "bun src/visual-check.ts"
+  },
+  "dependencies": {
+    "@opengeni/sdk": "1.1.0",
+    "vue": "3.5.43"
+  },
+  "devDependencies": {
+    "@chatium/vue-ts-mapper-rs": "0.2.7",
+    "@types/bun": "1.4.3",
+    "@vitejs/plugin-vue": "6.0.9",
+    "playwright": "1.58.2",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
+    "vite": "8.3.2"
+  }
+}

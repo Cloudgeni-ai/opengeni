@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 
 import { registerDom } from "../../../../packages/react/test/render-hook";
 import { toast } from "sonner";
-import { ConnectionPill, CopyableMono } from "./common";
+import { ConnectionPill, CopyableMono } from "@opengeni/react/app/components/common";
 
 registerDom();
 

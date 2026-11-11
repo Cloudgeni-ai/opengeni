@@ -1,0 +1,97 @@
+import type { AppWebPaths } from "@opengeni/sdk/app-links";
+
+/** How a product configures the desktop kit. Everything product-specific lives here. */
+export interface DesktopAppConfig {
+  /** The product's name in menus, notifications and the first-run page. */
+  productName: string;
+  /**
+   * The packaged app's identifier (electron-builder's `appId`). Windows
+   * attributes notifications to the Start menu shortcut with this ID.
+   */
+  appId: string;
+  /** The custom URL scheme the app registers, e.g. "opengeni". */
+  scheme: string;
+  /**
+   * The server the first-run page suggests, e.g. https://app.opengeni.ai.
+   * An app installed by a server's install script suggests that server instead.
+   */
+  defaultServerUrl: string;
+  /**
+   * Whether the first-run page offers "Use another server". Default true.
+   * An app made for one server sets false: it then signs in to
+   * `defaultServerUrl` (or the server whose install script installed it) only.
+   */
+  allowOtherServers?: boolean;
+  /**
+   * Where the product's web app shows workspaces, sessions and the inbox:
+   * the app reads links with it, reopens the last page and opens
+   * notifications and menu commands there. Default: Opengeni's own web app
+   * (`OPENGENI_WEB_PATHS` from `@opengeni/sdk/app-links`).
+   */
+  webPaths?: AppWebPaths;
+  /** Absolute paths to the bundled preload scripts and the first-run page. */
+  preloadPath: string;
+  welcomePreloadPath: string;
+  welcomePagePath: string;
+  /**
+   * The menu bar or tray icon: a template image on macOS (black with alpha,
+   * `name@2x.png` next to it), a colored icon elsewhere.
+   */
+  trayIconPath: string;
+  /**
+   * The app icon as a PNG (512 px works well). Linux shows it for the window
+   * and in the AppImage's desktop entry; other platforms use the packaged icon.
+   */
+  appIconPath: string;
+  /** Window background before the web app paints, per appearance. */
+  background: { light: string; dark: string };
+  /** Let people connect this computer, running the connected-machine agent. */
+  thisComputer: boolean;
+  /**
+   * Where the app keeps the agent it runs. By default the place Opengeni's
+   * command-line installer uses, so there is one agent per person. An app
+   * that keeps its own agent apart passes its own path (and usually its own
+   * `agentConfigDir`).
+   */
+  agentPath?: string;
+  /** The agent's own config folder (its machine identity and connections). */
+  agentConfigDir?: string;
+  /**
+   * Reuse a separately installed agent through its existing service.
+   * Default: true unless `agentPath` or `agentConfigDir` is set.
+   */
+  adoptStandaloneAgent?: boolean;
+  /**
+   * IDs of the product's own Chrome extensions (its branded build of the
+   * Opengeni Browser extension) that may reach this computer's agent, so
+   * agents can work in the person's own Chrome through them. Each is Chrome's
+   * 32-letter extension ID. Opengeni Browser itself is always allowed.
+   */
+  browserExtensionIds?: readonly string[];
+  /**
+   * The minisign public key (the `RW…` line) that signs the agent's releases.
+   * The app downloads the agent from the server and runs it only with this
+   * key's signature.
+   */
+  agentSigningKey: string;
+  /** Where packaged builds look for app updates, or false for none. */
+  updates: DesktopUpdateFeed | false;
+  /**
+   * The bundled system audio helper (`opengeni-audio-capture` from the
+   * desktop app's sources). With it, meeting recordings in the app can include
+   * other apps' audio (the other participants) as their own track; without
+   * it, they record the microphone only.
+   */
+  systemAudioHelperPath?: string;
+}
+
+/** Where the app finds its update files (`latest-mac.yml` and the like). */
+export type DesktopUpdateFeed =
+  /** A fixed directory URL that always holds the newest update files. */
+  | { url: string }
+  /**
+   * The newest stable release of a public GitHub repository whose tag starts
+   * with `tagPrefix`, e.g. `desktop-v1.2.3`. Suits repositories whose
+   * releases are immutable, where no fixed feed release can be refreshed.
+   */
+  | { githubRepository: string; tagPrefix: string };

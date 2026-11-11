@@ -2,6 +2,13 @@ import type { SessionGoalStatus, SessionStatus } from "./session-topology-primit
 import type { WorkDiscoveryProjection } from "./work-claims";
 import type { Session, SessionQueueSnapshot } from "./index";
 
+/** Counts used by compact monitoring; full queue previews remain a separate read. */
+export type SessionMcpQueueSummary = {
+  queuedTurns: number;
+  pendingInputs: number;
+  stoppingPreviousAttempt: boolean;
+};
+
 /** MCP-only presentation choice. REST/SDK session shapes keep their own defaults. */
 export type SessionMcpDetail = "compact" | "full";
 
@@ -176,7 +183,7 @@ export type SessionMcpMonitoringSource = {
 export function compactSessionMcpDetail(
   session: Session,
   monitoring: SessionMcpMonitoringSource,
-  queue: SessionQueueSnapshot | null,
+  queue: SessionQueueSnapshot | SessionMcpQueueSummary | null,
 ) {
   const title = boundSessionMcpText(session.title, 200);
   const pause = compactSessionMcpPause(session.effectiveControl);
@@ -200,6 +207,11 @@ export function compactSessionMcpDetail(
     ? boundSessionMcpText(progress.text, 600, progress.originalChars)
     : null;
   const waitReason = monitoring.wait ? boundSessionMcpText(monitoring.wait.reason) : null;
+  // Archived the moment someone archives it (its content moves to long-term
+  // storage a little later): the same rule the app uses for its read-only view.
+  const archive =
+    session.retention?.archive ??
+    (session.archived ? { state: "archiving" as const, archivedAt: null } : null);
   return {
     id: session.id,
     ...(session.channelId ? { projectId: session.channelId } : {}),
@@ -209,6 +221,17 @@ export function compactSessionMcpDetail(
     ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
     ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
     lastSequence: session.lastSequence,
+    // Archived sessions keep a readable timeline but accept no new work.
+    ...(archive
+      ? {
+          archive: {
+            state: archive.state,
+            archivedAt: archive.archivedAt,
+            readOnly: true,
+          },
+        }
+      : {}),
+    ...(session.retention?.keepLive ? { keepLive: true } : {}),
     ...(goal
       ? {
           goal: {
@@ -244,8 +267,8 @@ export function compactSessionMcpDetail(
     ...(queue
       ? {
           queue: {
-            queuedTurns: queue.items.length,
-            pendingInputs: queue.pendingInputs.length,
+            queuedTurns: "items" in queue ? queue.items.length : queue.queuedTurns,
+            pendingInputs: "items" in queue ? queue.pendingInputs.length : queue.pendingInputs,
             ...(queue.stoppingPreviousAttempt ? { stoppingPreviousAttempt: true } : {}),
           },
         }

@@ -79,7 +79,7 @@ Opengeni has its own durable execution for every session, plus [background agent
 
 Model providers now run agents for you: Anthropic's Claude Managed Agents (public beta since April 2026) and OpenAI's Agents API (public beta since September 2026). They are the closest in shape to Opengeni. You configure an agent, and the provider runs sessions, tools, sandboxes, and per-user credential vaults.
 
-- **Models.** Each runs only its own provider's models. Opengeni works with OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, OpenAI-compatible endpoints, and ChatGPT/Codex or SuperGrok subscriptions, chosen per session.
+- **Models.** Each runs only its own provider's models. Opengeni works with OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, OpenAI-compatible endpoints, and ChatGPT/Codex, Claude or SuperGrok subscriptions, chosen per session.
 - **Where it runs.** Their control planes are hosted by the provider. Sandboxes can run on your infrastructure, but orchestration stays with the provider. Opengeni's control plane is Apache-2.0 and runs on Opengeni Cloud or entirely in your own cloud.
 - **The product layer.** Opengeni also includes the parts you would otherwise build on top: a workspace per customer, a tenant-scoped session proxy for your backend, and React conversation components you restyle.
 

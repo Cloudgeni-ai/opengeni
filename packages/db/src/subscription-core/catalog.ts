@@ -1,0 +1,242 @@
+/**
+ * Provider readiness for catalog, default-model and admission reads on the
+ * shared subscription core, for any provider.
+ *
+ * Connections that count, for one workspace and one acting subject:
+ *
+ * - active, allocatable shared connections that reach the workspace;
+ * - the acting person's own personal connections, only in their own Personal
+ *   workspace (generic workspace readers never represent a private session's
+ *   exact accepted context), only while the effective settings allow
+ *   personal connections and only when active and allocatable. They are read
+ *   through the owner-only reader, so another person's personal connection
+ *   is never seen. Fallback consent applies to private work outside the
+ *   owner's Personal workspace, which this catalog reader does not represent.
+ *
+ * A connection's model policy is what placement intersects: the connection
+ * allowlist and exclusions. Nothing here returns credential material.
+ *
+ * Every reader that decides whether a model is available here (catalog
+ * readiness, admission, placement funding) counts exactly these
+ * connections. Who manages a connection never decides which models exist
+ * (docs/design/subscription-model-ids-without-pools.md).
+ */
+import { providerSwitchesFor, withSubscriptionCoreModelIdForms } from "@opengeni/subscriptions";
+import { sql } from "drizzle-orm";
+import { rawRows, withRlsContext, type Database } from "../database";
+import { namedSubjectPersonalWorkspaceId } from "../slack-routing-personal-workspace";
+import {
+  decodeSubscriptionQuota,
+  listSubscriptionConnectionsForPlacement,
+  readSubscriptionEffectiveSettings,
+} from "../subscription-core-repository";
+import { listSubscriptionCorePersonalConnectionRowsInTransaction } from "./administration";
+import {
+  subscriptionCoreConnectionKind,
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./provider";
+
+export type SubscriptionCoreServingConnection = {
+  connectionId: string;
+  ownership: "shared" | "personal";
+  planType: string | null;
+  /** The connection's own model allowlist (null: every model). */
+  allowedModelIds: string[] | null;
+  /** Models the connection excludes. */
+  excludedModelIds: string[];
+  /**
+   * Product models with a live per-model cooldown on this connection (a
+   * proven plan refusal). Read for personal connections, whose live model
+   * list cannot be read outside an exact accepted turn.
+   */
+  cooledDownModelIds: string[];
+  /**
+   * The latest shared catalog observed under the connection's current
+   * credential generation. It may have expired: only `expiresAt > now`
+   * proves it fresh.
+   */
+  modelCatalog?: { slugs: string[]; observedAt: number; expiresAt: number } | null;
+};
+
+type ModelPolicy = Pick<SubscriptionCoreServingConnection, "allowedModelIds" | "excludedModelIds">;
+
+/**
+ * Placement's static model admission for one connection (allowlists and
+ * exclusions). Lists are read in every id form of their models
+ * (`withSubscriptionCoreModelIdForms`), so any form of a listed model matches.
+ */
+export function subscriptionCoreConnectionAllowsModel(
+  connection: ModelPolicy,
+  modelId: string,
+): boolean {
+  if (connection.excludedModelIds.includes(modelId)) return false;
+  return connection.allowedModelIds === null || connection.allowedModelIds.includes(modelId);
+}
+
+/**
+ * The connection's admitted models as one allowlist (null: every model), for
+ * the catalog's per-provider restriction union. Exclusions without an
+ * allowlist cannot be listed; placement still refuses those models.
+ */
+export function subscriptionCoreConnectionAllowlist(connection: ModelPolicy): string[] | null {
+  const allowed = connection.allowedModelIds;
+  return allowed === null
+    ? null
+    : allowed.filter((modelId) => subscriptionCoreConnectionAllowsModel(connection, modelId));
+}
+
+/**
+ * Live per-model cooldowns of one connection, sorted by model id. A cooldown
+ * ends at its stored time as a Date holds it (whole milliseconds).
+ */
+function liveModelCooldowns(quota: ReturnType<typeof decodeSubscriptionQuota>, now: Date) {
+  return Object.entries(quota?.modelCooldowns ?? {})
+    .filter(([, until]) => Number.isFinite(until) && new Date(until).getTime() > now.getTime())
+    .map(([modelId]) => modelId)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * The core connections of this provider that can serve new work of
+ * `subjectId` in this workspace (see the module comment). A null or
+ * non-human subject sees shared capacity only.
+ */
+export async function listSubscriptionCoreServingConnections(
+  db: Database,
+  provider: SubscriptionCoreProvider,
+  input: { accountId: string; workspaceId: string; subjectId: string | null },
+  now: Date = new Date(),
+): Promise<SubscriptionCoreServingConnection[]> {
+  const providerId = subscriptionCoreProviderId(provider);
+  const personalWorkspace =
+    input.subjectId?.startsWith("user:") === true &&
+    (await namedSubjectPersonalWorkspaceId(db, {
+      accountId: input.accountId,
+      subjectId: input.subjectId,
+    })) === input.workspaceId;
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const effective = await readSubscriptionEffectiveSettings(
+        tx,
+        input.accountId,
+        input.workspaceId,
+      );
+      if (!providerSwitchesFor(effective.values, providerId).enabled) return [];
+      const [workspace] = await rawRows<{ kind: string }>(
+        tx,
+        sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
+      );
+      const world = await listSubscriptionConnectionsForPlacement(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        provider: providerId,
+        kind: subscriptionCoreConnectionKind(provider),
+        now,
+        health: "effective",
+      });
+      const shared = world.filter((connection) => {
+        if (
+          connection.ownership.kind !== "shared" ||
+          connection.health !== "healthy" ||
+          !connection.allocatorEnabled
+        )
+          return false;
+        const scope = connection.ownership.scope;
+        return (
+          scope.kind === "organization" ||
+          (scope.kind === "workspaces" &&
+            (scope.workspaceIds.includes(input.workspaceId) ||
+              (workspace?.kind === "personal" && scope.allowPersonalWorkspaces)))
+        );
+      });
+      const sharedIds = shared.map((candidate) => candidate.id);
+      const exclusions =
+        sharedIds.length === 0
+          ? []
+          : await rawRows<{
+              id: string;
+              excluded_models: string[] | null;
+              plan_type: string | null;
+            }>(
+              tx,
+              sql`select connection.id::text as id, connection.excluded_models, connection.plan_type
+                from subscription_connections connection
+                where connection.account_id = ${input.accountId}::uuid
+                  and connection.id in (${sql.join(
+                    sharedIds.map((id) => sql`${id}::uuid`),
+                    sql`, `,
+                  )})`,
+            );
+      const excludedById = new Map(
+        exclusions.map((row) => [
+          row.id,
+          withSubscriptionCoreModelIdForms(provider.adapter, row.excluded_models ?? []),
+        ]),
+      );
+      const servingShared = shared.map((candidate) => ({
+        connectionId: candidate.id,
+        ownership: "shared" as const,
+        planType: exclusions.find((row) => row.id === candidate.id)?.plan_type ?? null,
+        allowedModelIds: candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
+        excludedModelIds: excludedById.get(candidate.id) ?? [],
+        cooledDownModelIds: [],
+        // The latest list under the current credential generation, fresh or
+        // expired; readers compare expiresAt themselves.
+        modelCatalog:
+          (candidate.lastObservedModelSlugs ?? candidate.observedModelSlugs) != null &&
+          candidate.modelCatalogObservedAt != null &&
+          candidate.modelCatalogExpiresAt != null
+            ? {
+                slugs: [...(candidate.lastObservedModelSlugs ?? candidate.observedModelSlugs)!],
+                observedAt: candidate.modelCatalogObservedAt,
+                expiresAt: candidate.modelCatalogExpiresAt,
+              }
+            : null,
+      }));
+      if (
+        !personalWorkspace ||
+        !providerSwitchesFor(effective.values, providerId).enabled ||
+        !effective.values.personalConnectionsAllowed
+      ) {
+        return servingShared;
+      }
+      // The owner-only reader returns only this person's own connections.
+      const personal = await listSubscriptionCorePersonalConnectionRowsInTransaction(tx, provider, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId!,
+      });
+      return [
+        ...servingShared,
+        ...personal
+          .filter((row) => row.status === "active" && row.allocator_enabled)
+          .map((row) => ({
+            connectionId: row.id,
+            ownership: "personal" as const,
+            planType: row.plan_type,
+            allowedModelIds:
+              row.allowed_model_ids == null
+                ? null
+                : withSubscriptionCoreModelIdForms(provider.adapter, row.allowed_model_ids),
+            excludedModelIds: [],
+            cooledDownModelIds: liveModelCooldowns(decodeSubscriptionQuota(row), now),
+          })),
+      ];
+    },
+  );
+}
+
+/**
+ * The provider's readiness on the core: at least one connection can serve
+ * new work of this subject here.
+ */
+export async function subscriptionCoreWorkspaceReady(
+  db: Database,
+  provider: SubscriptionCoreProvider,
+  input: { accountId: string; workspaceId: string; subjectId: string | null },
+): Promise<boolean> {
+  return (await listSubscriptionCoreServingConnections(db, provider, input)).length > 0;
+}

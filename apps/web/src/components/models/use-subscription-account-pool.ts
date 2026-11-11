@@ -1,0 +1,274 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
+import type { SubscriptionPoolSettings } from "@opengeni/sdk";
+import { ApiError } from "@/api";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
+import {
+  invalidateSharedQueries,
+  useSharedQuery,
+  type SharedQueryKey,
+} from "@opengeni/react/app/lib/shared-query";
+
+export type SubscriptionPoolAccount = {
+  id: string;
+  subject: string;
+  label?: string | null;
+  email?: string | null;
+  scope: "workspace" | "organization" | "user";
+  allocatorVersion: number;
+  /** The organization's list only: who the account reaches. */
+  reach?: import("@opengeni/sdk").SubscriptionAccountReach;
+  /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there.
+   */
+  ownerWorkspaceId?: string | null | undefined;
+};
+export type SubscriptionAccountPoolData<Account extends SubscriptionPoolAccount> = {
+  accounts: Account[];
+  activeAccountId: string | null;
+  settings: SubscriptionPoolSettings;
+  source?: "workspace" | "organization" | "user";
+  organizationId?: string;
+};
+export type SubscriptionAccountPoolOperations<Account extends SubscriptionPoolAccount> = {
+  load(): Promise<SubscriptionAccountPoolData<Account>>;
+  rotation(enabled: boolean): Promise<unknown>;
+  activate(account: Account): Promise<unknown>;
+  allocator(account: Account, enabled: boolean): Promise<unknown>;
+  rename(account: Account, label: string | null): Promise<unknown>;
+  disconnect(account: Account): Promise<unknown>;
+};
+export function subscriptionAccountName(account: SubscriptionPoolAccount) {
+  return account.label ?? account.email ?? account.subject;
+}
+
+/**
+ * Whether this pool's scope can change (and live-refresh) one listed account.
+ * A workspace list also carries the organization's shared accounts that serve
+ * it; only the organization manages those, and the workspace routes refuse
+ * them (409), so a workspace never treats them as its own.
+ */
+export function managesSubscriptionAccount(
+  pool: { canManageAccounts: boolean; organizationId?: string | null | undefined },
+  account: Pick<SubscriptionPoolAccount, "scope">,
+) {
+  return (
+    pool.canManageAccounts && (Boolean(pool.organizationId) || account.scope !== "organization")
+  );
+}
+
+/**
+ * A workspace pool's accounts, split by who they belong to. The pool's
+ * `source` names the pool new work prefers, not who owns each account: under
+ * the automatic source a workspace with an account of its own also lists the
+ * organization's shared accounts that serve it, each with scope
+ * `organization`. Those are the organization's, never this workspace's own.
+ */
+export function splitSubscriptionPool<T extends Pick<SubscriptionPoolAccount, "scope">>(pool: {
+  accounts: readonly T[];
+  inherited: boolean;
+}): { shared: T[]; own: T[] } {
+  if (pool.inherited) return { shared: [...pool.accounts], own: [] };
+  return {
+    shared: pool.accounts.filter((account) => account.scope === "organization"),
+    own: pool.accounts.filter((account) => account.scope !== "organization"),
+  };
+}
+
+/** Shared-cache key prefix for one provider's subscription pools (every scope). */
+export const subscriptionPoolQueryPrefix = (providerName: string) =>
+  ["subscription-pool", providerName] as SharedQueryKey;
+
+/**
+ * The same list, mutations and scope-epoch fencing for every subscription provider.
+ * The list is read through the client-scoped shared cache: revisiting a page
+ * renders fresh retained accounts without another read for five minutes, and
+ * every account change invalidates the provider's pools in every scope
+ * (organization changes can change what a workspace inherits).
+ */
+export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccount>(input: {
+  operations: SubscriptionAccountPoolOperations<Account>;
+  identity: string;
+  client: object;
+  providerName: string;
+  organizationId?: string | undefined;
+  workspaceId?: string | undefined;
+  canManage: boolean;
+  enabled?: boolean | undefined;
+  /** Providers whose listing follows a live status probe can refresh while visible. */
+  pollIntervalMs?: number | undefined;
+  /** Other shared-cache prefixes an account change makes wrong. */
+  relatedQueryPrefixes?: readonly SharedQueryKey[] | undefined;
+}) {
+  const enabled = input.enabled ?? true;
+  type Epoch = { identity: string; client: object; enabled: boolean; active: boolean };
+  const epoch = useRef<Epoch>({
+    identity: input.identity,
+    client: input.client,
+    enabled,
+    active: true,
+  });
+  if (
+    epoch.current.identity !== input.identity ||
+    epoch.current.client !== input.client ||
+    epoch.current.enabled !== enabled
+  ) {
+    epoch.current.active = false;
+    epoch.current = { identity: input.identity, client: input.client, enabled, active: true };
+  }
+  const current = epoch.current;
+  const query = useSharedQuery(
+    input.client,
+    [
+      ...subscriptionPoolQueryPrefix(input.providerName),
+      input.organizationId ? "organization" : "workspace",
+      input.organizationId ?? input.workspaceId ?? input.identity,
+    ],
+    () => input.operations.load(),
+    { enabled, staleTimeMs: 5 * 60_000, pollIntervalMs: input.pollIntervalMs },
+  );
+  const [mutation, setMutation] = useState<{ epoch: Epoch; working: string | null }>({
+    epoch: current,
+    working: null,
+  });
+  const pendingMutation = useRef<{ epoch: Epoch; token: object } | null>(null);
+  const relatedQueryPrefixes = input.relatedQueryPrefixes;
+  // Every account change re-reads this list and makes every other retained list
+  // of this provider re-read on its next mount. Bound to the client the change
+  // went through, and run whether or not this page is still mounted.
+  const invalidateLists = useCallback(
+    () =>
+      Promise.all(
+        [
+          subscriptionPoolQueryPrefix(input.providerName),
+          ["model-settings"],
+          ...(relatedQueryPrefixes ?? []),
+        ].map((prefix) => invalidateSharedQueries(current.client, prefix)),
+      ).then(() => undefined),
+    [current, input.providerName, relatedQueryPrefixes],
+  );
+  // Retry and sign-in completion from this page.
+  const refresh = useCallback(async () => {
+    if (!current.enabled || !current.active) return;
+    await invalidateLists();
+  }, [current, invalidateLists]);
+  useEffect(() => {
+    current.active = true;
+    return () => {
+      current.active = false;
+    };
+  }, [current]);
+  const mutate = useCallback(
+    async (key: string, operation: () => Promise<unknown>, success: string, propagate = false) => {
+      if (!current.active || !input.canManage) {
+        if (propagate) throw new Error("You can no longer manage this account.");
+        return;
+      }
+      if (pendingMutation.current?.epoch === current) {
+        if (propagate)
+          throw new Error("An account change is already in progress. Wait for it to finish.");
+        return;
+      }
+      const token = {};
+      pendingMutation.current = { epoch: current, token };
+      setMutation({ epoch: current, working: key });
+      try {
+        await operation();
+        // The change happened: no retained list may keep the old rows, even
+        // after this page has gone. Only the toast needs the page.
+        const invalidated = invalidateLists();
+        if (!current.active) return;
+        await invalidated;
+        if (current.active) toast.success(success);
+      } catch (error) {
+        if (!current.active) return;
+        if (propagate)
+          throw error instanceof Error
+            ? error
+            : new Error("Couldn't update the account.", { cause: error });
+        toast.error(`Couldn't update ${input.providerName}`, { description: userErrorText(error) });
+      } finally {
+        if (pendingMutation.current?.token === token) {
+          pendingMutation.current = null;
+          if (current.active) setMutation({ epoch: current, working: null });
+        }
+      }
+    },
+    [current, input.canManage, input.providerName, invalidateLists],
+  );
+  // A failed read shows its error, never the rows retained from before it.
+  const unavailable =
+    (query.error instanceof OpenGeniApiError || query.error instanceof ApiError) &&
+    query.error.status === 404;
+  const loadError = query.error && !unavailable ? apiErrorAdvice(query.error) : null;
+  const data = query.error ? null : (query.data as SubscriptionAccountPoolData<Account> | null);
+  const inherited = !input.organizationId && data?.source === "organization";
+  const canManageAccounts = input.canManage && !inherited;
+  const managesAccount = (account: Account) =>
+    managesSubscriptionAccount(
+      { canManageAccounts, organizationId: input.organizationId },
+      account,
+    );
+  return {
+    data,
+    accounts: data?.accounts ?? [],
+    inherited,
+    canManageAccounts,
+    activeAccountId: data?.activeAccountId ?? null,
+    rotationEnabled: data?.settings.rotationEnabled ?? false,
+    loading: query.loading,
+    loadError,
+    unavailable,
+    busy: mutation.epoch === current && mutation.working !== null,
+    working: mutation.epoch === current ? mutation.working : null,
+    refresh,
+    setRotation: (rotationEnabled: boolean) =>
+      canManageAccounts
+        ? mutate(
+            "rotation",
+            () => input.operations.rotation(rotationEnabled),
+            rotationEnabled
+              ? `New work is spread across ${input.providerName} accounts`
+              : `New work uses the primary ${input.providerName} account only`,
+          )
+        : Promise.resolve(),
+    activate: (account: Account) =>
+      managesAccount(account)
+        ? mutate(
+            `activate:${account.id}`,
+            () => input.operations.activate(account),
+            `${subscriptionAccountName(account)} is now the primary account`,
+          )
+        : Promise.resolve(),
+    setAllocator: (account: Account, allocatorEnabled: boolean) =>
+      managesAccount(account)
+        ? mutate(
+            `allocator:${account.id}`,
+            () => input.operations.allocator(account, allocatorEnabled),
+            allocatorEnabled
+              ? `${subscriptionAccountName(account)} enabled`
+              : `${subscriptionAccountName(account)} disabled`,
+          )
+        : Promise.resolve(),
+    rename: (account: Account, label: string) =>
+      managesAccount(account)
+        ? mutate(
+            `rename:${account.id}`,
+            () => input.operations.rename(account, label.trim() || null),
+            "Name saved",
+            true,
+          )
+        : Promise.reject(new Error("Manage this account in its owning scope.")),
+    disconnect: (account: Account) =>
+      managesAccount(account)
+        ? mutate(
+            `disconnect:${account.id}`,
+            () => input.operations.disconnect(account),
+            `Disconnected ${subscriptionAccountName(account)}`,
+            true,
+          )
+        : Promise.reject(new Error("Manage this account in its owning scope.")),
+  };
+}

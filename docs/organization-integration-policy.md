@@ -19,12 +19,54 @@ header-only credential rotation, and accepted host-delegation use are unchanged.
 Do not present this setting as a universal outbound-network or tool-execution
 allowlist.
 
+Organization connectors, which an owner or admin adds once for many
+workspaces, are acquisitions under this policy too: adding one, or saving one
+that stays on, checks `custom:mcp` like a workspace's own MCP setup, and an
+organization API integration checks its definition's key or
+`custom:openapi` / `custom:graphql` like a workspace's own API integration. See
+[Organization connectors](capabilities.md#organization-connectors).
+
+## Members turning integrations on
+
+`personalIntegrationSetup` decides whether members may turn integrations on:
+
+- `members` (the default): anyone holding `connections:personal`, which every
+  workspace Member has through `connections:write` and which embedded per-user
+  workspaces get by default, may turn on a reviewed catalog integration (built
+  in, deployment configured, or a verified registry entry) that signs each
+  person in with OAuth for personal accounts. Members holding
+  `connections:write` may also add anything else: custom MCP servers, API
+  integrations and plugins, with personal or shared connections. Both are
+  create-only and only within the rest of this policy: they never set tool
+  approval, update an integration, plugin or account that is already set up,
+  turn one back on that an admin turned off, or turn one off for everyone.
+- `admins`: only people who manage integrations (`capabilities:manage`) turn
+  integrations on, add MCP servers or API integrations, or install plugins.
+  Members can still connect their own accounts to integrations that are on,
+  configure their sources, and remove the ones they added.
+
+The workspace catalog (`GET /v1/workspaces/{workspaceId}/capabilities`)
+returns this setting as `memberIntegrationSetup`, so clients offer members only
+the setup the API will accept.
+Once on, the integration is visible to the workspace's other members as an
+optional integration that each of them must connect with their own account.
+Nobody gets access to anyone else's account. Workspace and organization admins
+are unaffected by this setting.
+
+The PUT request may omit `personalIntegrationSetup` to keep the stored value
+(older clients do); the response always reports the current value. Migration
+`0974_personal_integration_setup_policy.sql` adds the column and the optional
+request key.
+
 ## Server administration
 
 Use the full-access organization API key on the product backend, or a verified
-native organization-administrator session. Workspace keys, delegated users and
-agent identities cannot administer this policy. Browser writes also require the
-existing same-origin mutation checks.
+native organization-administrator session. Workspace keys, host-delegated
+users (`asUser()`) and an agent turn's own credentials cannot administer this
+policy. A person's agent acting as them (a connected agent, or a chat they gave
+full access) counts as that person when its access includes `account:admin`;
+the database still checks their live owner or admin role. Browser writes also
+require the existing same-origin mutation checks.
 
 The SDK subpath `@opengeni/sdk/organization-integration-policy` exports:
 
@@ -33,7 +75,8 @@ The SDK subpath `@opengeni/sdk/organization-integration-policy` exports:
 - `getOrganizationIntegrationPolicy(client, organizationId)` — read mode,
   selected keys and current revision.
 - `updateOrganizationIntegrationPolicy(client, organizationId, request)` — submit
-  `mode`, `allowedIntegrationKeys`, `expectedRevision`, and a fresh `operationId`.
+  `mode`, `allowedIntegrationKeys`, `expectedRevision`, and a fresh `operationId`,
+  plus `personalIntegrationSetup` (`members` or `admins`) to change it.
 
 The corresponding routes are GET and PUT
 `/v1/organizations/:organizationId/integration-policy`, and GET its `/catalog`
@@ -49,7 +92,7 @@ explicit decision, not silently overwriting another administrator's change.
 Dedicated provider adapters and curated API definitions use server-owned keys.
 Aliases for one service, such as Fiken's token and OAuth setup, share a policy
 key. The catalog labels distinguish personal Slack accounts from Slack bots and
-separate GitHub personal accounts, App installations and PR review.
+separate GitHub personal accounts and App installations.
 
 Custom MCP, OpenAPI and GraphQL have separate broad permissions:
 `custom:mcp`, `custom:openapi`, and `custom:graphql`. A manually entered URL,

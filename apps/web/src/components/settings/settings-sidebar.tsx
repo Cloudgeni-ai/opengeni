@@ -2,28 +2,54 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
 import {
   useEffect,
+  useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type KeyboardEvent,
   type ReactElement,
   type ReactNode,
 } from "react";
 
-import { BrandMark, Wordmark } from "@/components/brand-mark";
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { SectionVariantProvider } from "@/components/ui/section-variant";
-import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { SectionVariantProvider } from "@opengeni/react/ui/section-variant";
+import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
 import {
   Sheet,
   SheetContent,
   SheetDescription,
   SheetTitle,
   SheetTrigger,
-} from "@/components/ui/sheet";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/sheet";
+import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import {
+  RAIL_DEFAULT_WIDTH,
+  useOptionalRail,
+} from "@opengeni/react/app/components/rail/rail-context";
+import {
+  RAIL_BRAND_LINK_CLASS,
+  RailBrandMark,
+  RailBrandRow,
+  RailSurface,
+  ShellRail,
+} from "@opengeni/react/app/components/rail/rail-surface";
+import {
+  SIDEBAR_TOGGLE_IN_WINDOW_BAR,
+  SidebarToggleButton,
+  useWindowBarRow,
+  WindowBarControls,
+  WindowBarPageTitle,
+  windowBarRowActive,
+} from "@opengeni/react/app/components/window-bar";
+import { desktopPlatform } from "@opengeni/react/app/lib/desktop";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
+import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
 
 /**
  * The settings shell for workspace, organization and personal settings.
@@ -32,18 +58,30 @@ import { SettingsActionsSlotContext } from "./settings-header-actions";
  * (sessions) for the settings rail, and its back link leaves settings and
  * restores the main rail. The rail lists every settings page the person can
  * use in one place, in labeled sections: Workspace, Organization and Your
- * account, each naming the workspace or organization it configures. Below
- * 1024px the rail folds into a header with the back link, the current page
- * and a Menu button that opens the rail in a drawer.
+ * account, each naming the workspace or organization it configures. A search
+ * field above the sections finds any of those pages, and the settings inside
+ * them, by name. Below 1024px the rail folds into a header with the back
+ * link, the current page and a Menu button that opens the rail in a drawer.
  *
  * Pages inside the shell drop their header icon; the settings rail gives context.
+ *
+ * The rail is the same sidebar as the main rail: its column, surface (the rail
+ * glow; in the macOS app the window's sidebar glass), brand row and width come
+ * from the shared rail (`rail-surface`, the main rail's width), and the settings
+ * navigation draws no background of its own over it.
  */
 
-/** Rail 240px beside the content; one column with a header row below 1024px. */
+/**
+ * The rail beside the content, as wide as the main rail
+ * (`--og-settings-rail-width`, set by `SettingsShell`; the old fixed widths
+ * without it), so moving between sessions and settings keeps the page edge
+ * still; one column with a header row below 1024px. In the desktop app the
+ * rail stays down to 640px.
+ */
 export const SETTINGS_SHELL_CLASS =
-  "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1";
+  "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[var(--og-settings-rail-width,15rem)_minmax(0,1fr)] lg:grid-rows-1 desktop-wide:grid-cols-[var(--og-settings-rail-width,18rem)_minmax(0,1fr)] desktop-wide:grid-rows-1";
 
-const NARROW_QUERY = "(max-width: 1023px)";
+const NARROW_QUERY = desktopPlatform ? "(max-width: 639px)" : "(max-width: 1023px)";
 
 export interface SettingsRailItem {
   id: string;
@@ -101,12 +139,12 @@ export interface SettingsShellProps {
   currentScope?: string;
   /**
    * The page header of a settings page. `null` when the page brings its own: a
-   * sub-page (an account, a key, a form) or a full page (Agents, Variable sets).
+   * sub-page (an account, a key, a form) or a full page (Agents, Secrets).
    */
   page: SettingsShellPage | null;
   /**
    * `settings`: the shell draws the standard-width scroller around the page.
-   * `page`: the page brings its own `ContentPage` (Agents, Variable sets).
+   * `page`: the page brings its own `ContentPage` (Agents, Secrets).
    */
   layout?: "settings" | "page";
   /** Workspace-wide state above the page (the paused banner). */
@@ -142,6 +180,8 @@ function LinkShell({
   className?: string;
   children: ReactNode;
   "aria-label"?: string;
+  "aria-current"?: "page" | undefined;
+  "data-settings-search-result"?: string;
 }) {
   const linkProps = link.props as { className?: string };
   const Element = link.type as React.ElementType;
@@ -213,51 +253,189 @@ function SettingsRail({
   onNavigate?: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
+  const [query, setQuery] = useState("");
+  const entries = useMemo(() => settingsSearchEntries(sections), [sections]);
+  const results = useMemo(() => searchSettings(entries, query), [entries, query]);
+  const searching = query.trim().length > 0;
+  const resultsId = useId();
   // The rail is long (workspace and organization pages): keep the current page in view.
   useLayoutEffect(() => {
+    if (searching) return;
     ref.current
       ?.querySelector<HTMLElement>('[aria-current="page"]')
       ?.scrollIntoView?.({ block: "nearest" });
-  }, [activeId]);
-  return (
-    <SettingsNav
-      ref={ref}
-      variant="rail"
-      aria-label={label}
-      data-settings-rail
-      className={cn(
-        "og-rail-glow h-full w-full overflow-x-hidden overflow-y-auto overscroll-y-contain px-2",
-        className,
-      )}
-      onClick={(event) => {
-        if (event.target instanceof Element && event.target.closest("a[href]")) onNavigate?.();
-      }}
-      header={
-        <div className="flex min-w-0 flex-col gap-3">
-          <LinkShell
-            link={home}
-            aria-label="Opengeni home"
-            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
-          >
-            <BrandMark className="w-5" />
-            <Wordmark className="text-[18px]" />
-          </LinkShell>
-          <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
-            {back.link}
-          </NavItem>
-          {scope ? <div className="min-w-0">{scope}</div> : null}
-        </div>
+  }, [activeId, searching]);
+
+  const resultLinks = () =>
+    Array.from(
+      ref.current?.querySelectorAll<HTMLAnchorElement>("[data-settings-search-result]") ?? [],
+    );
+  // Down from the field moves into the results; Enter opens the best one.
+  const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      resultLinks()[0]?.focus();
+    } else if (event.key === "Enter") {
+      const first = resultLinks()[0];
+      if (first) {
+        event.preventDefault();
+        first.click();
       }
-    >
-      {sections.map((section, index) => (
-        <SettingsRailSectionView
-          key={section.id}
-          section={section}
-          activeId={activeId}
-          first={index === 0}
-        />
-      ))}
-    </SettingsNav>
+    }
+  };
+  // Up and down move between results; up from the first returns to the field.
+  const onResultsKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Escape") return;
+    const links = resultLinks();
+    const index = links.findIndex((link) => link === document.activeElement);
+    if (index < 0) return;
+    event.preventDefault();
+    const field = ref.current?.querySelector<HTMLInputElement>("[data-settings-search] input");
+    if (event.key === "Escape") {
+      setQuery("");
+      field?.focus();
+    } else if (event.key === "ArrowDown") {
+      links[Math.min(index + 1, links.length - 1)]?.focus();
+    } else if (index === 0) {
+      field?.focus();
+    } else {
+      links[index - 1]?.focus();
+    }
+  };
+
+  return (
+    <RailSurface className={className}>
+      <SettingsNav
+        ref={ref}
+        variant="rail"
+        aria-label={label}
+        data-settings-rail
+        // On the rail surface, in the shared column (which draws the hairline).
+        className="min-h-0 w-full flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain border-r-0 px-2"
+        onClick={(event) => {
+          if (event.target instanceof Element && event.target.closest("a[href]")) {
+            if (event.target.closest("[data-settings-search-result]")) setQuery("");
+            onNavigate?.();
+          }
+        }}
+        header={
+          <div className="flex min-w-0 flex-col gap-3">
+            {/* The nav's own 8px inset stands in for the row's. */}
+            <RailBrandRow className="px-0">
+              <LinkShell link={home} aria-label="Opengeni home" className={RAIL_BRAND_LINK_CLASS}>
+                <RailBrandMark />
+              </LinkShell>
+            </RailBrandRow>
+            <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
+              {back.link}
+            </NavItem>
+            {scope ? <div className="min-w-0">{scope}</div> : null}
+            <Toolbar data-settings-search>
+              <ToolbarSearch
+                value={query}
+                onValueChange={setQuery}
+                onKeyDown={onSearchKeyDown}
+                placeholder="Search settings"
+                aria-controls={searching ? resultsId : undefined}
+              />
+            </Toolbar>
+          </div>
+        }
+      >
+        {searching ? (
+          <SettingsSearchResults
+            id={resultsId}
+            query={query}
+            results={results}
+            activeId={activeId}
+            onKeyDown={onResultsKeyDown}
+            onClear={() => {
+              setQuery("");
+              ref.current?.querySelector<HTMLInputElement>("[data-settings-search] input")?.focus();
+            }}
+          />
+        ) : (
+          sections.map((section, index) => (
+            <SettingsRailSectionView
+              key={section.id}
+              section={section}
+              activeId={activeId}
+              first={index === 0}
+            />
+          ))
+        )}
+      </SettingsNav>
+    </RailSurface>
+  );
+}
+
+/** Search results in place of the rail's sections: the page or setting, and where it lives. */
+function SettingsSearchResults({
+  id,
+  query,
+  results,
+  activeId,
+  onKeyDown,
+  onClear,
+}: {
+  id: string;
+  query: string;
+  results: SettingsSearchEntry[];
+  activeId: string | null;
+  onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div id={id} role="group" aria-label="Search results" className="flex min-w-0 flex-col">
+      <p className="sr-only" role="status">
+        {results.length === 1 ? "1 result" : `${results.length} results`}
+      </p>
+      {results.length === 0 ? (
+        <div className="flex min-w-0 flex-col items-start gap-1 px-2.5 py-2 text-sm leading-5 text-fg-muted">
+          <p className="m-0 min-w-0 break-words">No settings match “{query.trim()}”.</p>
+          <button
+            type="button"
+            onClick={onClear}
+            className="cursor-pointer rounded-sm font-medium text-fg underline decoration-border-strong underline-offset-4 outline-none hover:decoration-fg focus-visible:ring-2 focus-visible:ring-brand/55"
+          >
+            Clear search
+          </button>
+        </div>
+      ) : (
+        <ul className="m-0 flex min-w-0 list-none flex-col gap-0.5 p-0" onKeyDown={onKeyDown}>
+          {results.map((result) => {
+            const Icon = result.icon;
+            const current = result.id === activeId;
+            return (
+              <li key={result.id} className="min-w-0">
+                <LinkShell
+                  link={result.link}
+                  data-settings-search-result=""
+                  aria-current={current ? "page" : undefined}
+                  className={cn(
+                    "flex min-w-0 items-start gap-2.5 rounded-[10px] px-2.5 py-1.5 text-sm text-fg-label outline-none transition-colors duration-[120ms] hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55 pointer-coarse:py-2.5",
+                    current && "bg-selection text-fg hover:bg-selection",
+                  )}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="flex h-5 w-4 shrink-0 items-center justify-center [&_svg]:size-4"
+                  >
+                    <Icon />
+                  </span>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate leading-5">{result.label}</span>
+                    <span className="truncate text-xs leading-4.5 text-fg-muted">
+                      {result.location}
+                    </span>
+                  </span>
+                </LinkShell>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -284,6 +462,19 @@ export function SettingsShell({
   useEffect(() => setMenuOpen(false), [activeId, currentPage]);
 
   const railProps = { label, back, home, scope, sections, activeId };
+  // In the macOS app the window bar is the same as on every other page: the
+  // sidebar toggle beside the traffic lights (it hides the settings rail, with
+  // the app's one sidebar state, or its own where settings has no app rail,
+  // as personal settings doesn't) and the page's title as the bar's row.
+  const rail = useOptionalRail();
+  const [ownCollapsed, setOwnCollapsed] = useState(false);
+  const collapsed = rail ? rail.collapsed : ownCollapsed;
+  const toggleCollapsed = rail ? rail.toggleCollapsed : () => setOwnCollapsed((value) => !value);
+  const toggleInWindowBar = SIDEBAR_TOGGLE_IN_WINDOW_BAR && !narrow;
+  const railHidden = toggleInWindowBar && collapsed;
+  const canvasRef = useRef<HTMLElement | null>(null);
+  const titleInWindowBar = windowBarRowActive({ platform: desktopPlatform, mobile: narrow });
+  const windowBarRow = useWindowBarRow(canvasRef, titleInWindowBar);
 
   const navigation = narrow ? (
     <header className="flex min-w-0 items-center gap-2 border-b border-border bg-bg px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">
@@ -321,15 +512,26 @@ export function SettingsShell({
         </SheetContent>
       </Sheet>
     </header>
-  ) : (
-    <div className="min-h-0 min-w-0 border-r border-border">
-      <SettingsRail {...railProps} className="border-r-0" />
-    </div>
+  ) : railHidden ? null : (
+    <ShellRail className="min-h-0 min-w-0">
+      <SettingsRail {...railProps} />
+    </ShellRail>
   );
 
+  // With the title in the window bar, a page with nothing else in its header
+  // starts with its content; actions a page sends to the header's slot still
+  // get a row.
+  const titleOnly = titleInWindowBar && page != null && !page.description && !page.actions;
   const body = (
     <>
-      {page ? (
+      {page && titleOnly ? (
+        <>
+          <h1 className="sr-only">{page.title}</h1>
+          <div className="mb-4 hidden flex-wrap items-center justify-end gap-2 has-[>span>*]:flex">
+            <span ref={setActionsSlot} className="contents" />
+          </div>
+        </>
+      ) : page ? (
         <PageHeader
           title={page.title}
           description={page.description}
@@ -341,43 +543,70 @@ export function SettingsShell({
           }
         />
       ) : null}
-      <div className={page ? "mt-8" : undefined}>{children}</div>
+      <div className={page && !titleOnly ? "mt-8" : undefined}>{children}</div>
     </>
   );
 
   return (
-    <div className={SETTINGS_SHELL_CLASS}>
+    <div
+      data-window-frame
+      data-rail-collapsed={railHidden ? "true" : undefined}
+      // As wide as the main rail, including a width the person dragged it to.
+      style={
+        { "--og-settings-rail-width": `${rail?.width ?? RAIL_DEFAULT_WIDTH}px` } as CSSProperties
+      }
+      className={cn(
+        SETTINGS_SHELL_CLASS,
+        railHidden && "lg:grid-cols-[minmax(0,1fr)] desktop-wide:grid-cols-[minmax(0,1fr)]",
+      )}
+    >
+      {toggleInWindowBar ? (
+        <WindowBarControls>
+          <TooltipProvider>
+            <SidebarToggleButton
+              collapsed={collapsed}
+              onToggle={toggleCollapsed}
+              inWindowBar
+              shortcut={rail != null}
+            />
+          </TooltipProvider>
+        </WindowBarControls>
+      ) : null}
       {navigation}
       {/* A labelled region: the app shell already provides the one <main>. */}
       <section
+        ref={canvasRef}
         aria-label={page?.title ?? currentPage}
         data-canvas
+        {...windowBarRow}
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
-        {notice}
-        <SettingsActionsSlotContext.Provider value={actionsSlot}>
-          <PageHeaderStyleProvider icon="hide">
-            {/* Settings sections are grouped cards: heading above, rows in one card. */}
-            <SectionVariantProvider variant="group">
-              {layout === "page" ? (
-                // A full page keeps its own scroller but starts its title at the
-                // same height as every other settings page.
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8">
-                  {children}
-                </div>
-              ) : (
-                <ContentPage
-                  width="standard"
-                  // Pages that bring their own ContentPage (a detail page) join this
-                  // scroller instead of nesting a second scroller and gutter.
-                  className="pb-16 lg:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
-                >
-                  {body}
-                </ContentPage>
-              )}
-            </SectionVariantProvider>
-          </PageHeaderStyleProvider>
-        </SettingsActionsSlotContext.Provider>
+        <WindowBarPageTitle enabled={titleInWindowBar} fallbackTitle={page?.title ?? currentPage}>
+          {notice}
+          <SettingsActionsSlotContext.Provider value={actionsSlot}>
+            <PageHeaderStyleProvider icon="hide">
+              {/* Settings sections are grouped cards: heading above, rows in one card. */}
+              <SectionVariantProvider variant="group">
+                {layout === "page" ? (
+                  // A full page keeps its own scroller but starts its title at the
+                  // same height as every other settings page.
+                  <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8 desktop-wide:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8">
+                    {children}
+                  </div>
+                ) : (
+                  <ContentPage
+                    width="standard"
+                    // Pages that bring their own ContentPage (a detail page) join this
+                    // scroller instead of nesting a second scroller and gutter.
+                    className="pb-16 lg:pt-8 desktop-wide:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
+                  >
+                    {body}
+                  </ContentPage>
+                )}
+              </SectionVariantProvider>
+            </PageHeaderStyleProvider>
+          </SettingsActionsSlotContext.Provider>
+        </WindowBarPageTitle>
       </section>
     </div>
   );

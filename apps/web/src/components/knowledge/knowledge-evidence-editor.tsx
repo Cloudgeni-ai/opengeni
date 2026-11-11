@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { KnowledgeEntryContent, KnowledgeEntryRecord } from "@opengeni/sdk";
-import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { Button } from "@opengeni/react/ui/button";
 
 type Evidence = KnowledgeEntryContent["evidence"][number];
 
@@ -65,7 +65,7 @@ function EvidenceRevision(props: {
       <p className="font-medium">{source?.revision.entry.title ?? "Source"}</p>
       {loading ? <p className="text-fg-muted">Checking cited revision…</p> : null}
       {error ? (
-        <p role="alert" className="text-status-error">
+        <p role="alert" className="text-danger">
           {error}
         </p>
       ) : null}

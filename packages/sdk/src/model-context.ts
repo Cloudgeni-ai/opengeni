@@ -14,7 +14,8 @@ export type ModelContextInstructionLayerId =
   | "sandbox_preamble"
   | "sandbox_filesystem"
   | "sent_system_instructions"
-  | "identity";
+  | "identity"
+  | "agent_instructions";
 
 /** Sections of a modular operational contract, in composition order. */
 export type AgentPromptModuleId =
@@ -27,12 +28,15 @@ export type AgentPromptModuleId =
   | "workspace_environment"
   | "rig"
   | "artifacts"
+  | "media"
   | "goals"
   | "subagents"
   | "knowledge"
   | "skills"
+  | "secrets"
   | "admin"
-  | "attachments";
+  | "attachments"
+  | "unattended";
 
 export type ModelContextInstructionModule = {
   id: AgentPromptModuleId;

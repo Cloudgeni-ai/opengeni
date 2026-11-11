@@ -31,12 +31,6 @@
       "output": "ignored chunk field\ndisk full"
     },
     {
-      "kind": "session-status",
-      "id": "00000000-0000-4000-8000-000000000712",
-      "occurredAt": "2026-01-02T16:00:12.000Z",
-      "status": "failed"
-    },
-    {
       "kind": "turn-end",
       "id": "00000000-0000-4000-8000-000000000713-turn-end",
       "turnId": null,
@@ -63,7 +57,7 @@
       "outcome": "failed",
       "startedAt": "2026-01-02T16:00:06.000Z",
       "endedAt": "2026-01-02T16:00:13.000Z",
-      "groupCount": 2,
+      "groupCount": 1,
       "groups": [
         {
           "kind": "activity",
@@ -73,6 +67,7 @@
             "sandbox": 1,
             "tool-call": 1
           },
+          "outcome": "failed",
           "items": [
             {
               "kind": "tool-call",
@@ -97,15 +92,6 @@
               "output": "ignored chunk field\ndisk full"
             }
           ]
-        },
-        {
-          "kind": "item",
-          "item": {
-            "kind": "session-status",
-            "id": "00000000-0000-4000-8000-000000000712",
-            "occurredAt": "2026-01-02T16:00:12.000Z",
-            "status": "failed"
-          }
         }
       ]
     }
@@ -113,14 +99,13 @@
   "facets": {
     "itemKinds": {
       "sandbox": 1,
-      "session-status": 1,
       "tool-call": 1,
       "turn-end": 1,
       "user-message": 1
     },
     "groupKinds": {
       "activity": 1,
-      "item": 2,
+      "item": 1,
       "turn": 1
     },
     "activityItemKinds": {

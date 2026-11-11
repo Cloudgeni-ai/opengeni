@@ -7,11 +7,21 @@
 
 # Non-RLS authority tables: can cross-organization denial move into the database?
 
+> **October 17, 2026 inventory addendum:** migration 0823 adds the dormant
+> `scoped_compute_capability_lock` policy on `workspace_memberships`. It is
+> `FOR UPDATE`, requires the current account and the existing owner-only
+> scoped-compute capability, and has `WITH CHECK (false)`. It permits the
+> definer's authorization row locks where RLS applies, not a new mutation lane.
+> It does not enable RLS or change this table's bootstrap exemption. The current
+> exact policy inventory and these bounds are asserted in
+> `packages/db/test/non-rls-authority-tables.test.ts`; the August record below
+> remains historical.
+
 Status: **three reasoned exemptions, one of them permanent by construction**
 
 ## The question
 
-Every content table in OpenGeni — sessions, documents, connections, knowledge,
+Every content table in Opengeni — sessions, documents, connections, knowledge,
 variable sets, rigs — is FORCE RLS and genuinely isolated: a query running under
 organization B's context cannot read organization A's row, full stop.
 
@@ -38,7 +48,7 @@ pins the exemption's exact shape so a future widening has to be deliberate.
 | --- | --- | --- |
 | `workspaces` | **No — self-referential.** The predicate's input is produced by a query against the table the predicate would guard. | Permanent exemption |
 | `workspace_memberships` | **No as an unconditional predicate.** The central authorization query derives the account from this table. A bootstrap escape hatch is possible but degenerates to today's posture, and three dormant policies make enabling RLS actively dangerous. | Exemption, revisit only with a redesigned context bootstrap |
-| `auth_identities` | **Malformed question.** Its `account_id` is not a tenant id, and its queries do not run on a connection that can carry an OpenGeni GUC. | Permanent exemption; also correct the table's description |
+| `auth_identities` | **Malformed question.** Its `account_id` is not a tenant id, and its queries do not run on a connection that can carry an Opengeni GUC. | Permanent exemption; also correct the table's description |
 
 ### `workspaces` — the circularity is one function
 
@@ -149,11 +159,11 @@ So `account_id = opengeni_private.current_account_id()` is a type error
 identity in any column.
 
 Even given a tenant column, the queries could not carry a context. Better Auth
-does not use OpenGeni's Drizzle handle: `apps/api/src/auth/managed-auth.ts`
+does not use Opengeni's Drizzle handle: `apps/api/src/auth/managed-auth.ts`
 constructs its own `new Pool({ connectionString })` and hands it to `betterAuth`.
 Every sign-up, sign-in, OAuth link, unlink, and token refresh runs on a
 connection that never executes `set_config('opengeni.*', …)` and has no code path
-by which it could. The one OpenGeni-side read,
+by which it could. The one Opengeni-side read,
 `synchronizeCanonicalHumanLoginBindings`, runs inside Better Auth's
 `session.create.before` hook — strictly before any `managed_accounts` row has
 been discovered for the request.
@@ -330,6 +340,84 @@ with `%L` (13 sites, including `0225`, `0254`, `0258`, `0262`, `0285`), or
 sites). Nothing breaks on a deployment whose owner is not named `postgres`. The
 finding should be recorded as already-correct rather than as a defect.
 
+### 2026-10-02 addendum: content-free Slack provider quotas
+
+`slack_api_rate_limits` is a deliberate non-RLS operational table. Slack applies
+its method limits across tokens sharing an app and Slack workspace, including
+tokens owned by different Opengeni organizations. An organization predicate
+would split the same provider quota and permit concurrent requests beyond it.
+
+The table stores only a SHA-256 hash of the configured Slack client id, verified
+Slack workspace id, and fixed API method, plus the next allowed request time. It
+stores no credential, user, connection, channel, message, or tenant attribution.
+Conditional UPSERT admissions serialize across replicas; provider `Retry-After`
+can extend a cooldown. These rows grant no authority: exact connection and live
+request authorization remain required before provider dispatch.
+
+Arbitrary runtime-role SQL could read or alter these opaque cooldowns, affecting
+availability, but cannot obtain a credential or authorize a Slack request from
+this table. Migration `0597_slack_api_rate_limits.sql` revokes public access;
+role provisioning grants the matching runtime role direct DML. This global
+operational exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
+`packages/db/test/non-rls-authority-tables.test.ts`, with shared atomic admission
+covered by `packages/db/test/slack-api-rate-limits.test.ts`.
+
+### 2026-10-24 addendum: event source ingress routes
+
+`event_ingress_routes` (migration `0929_event_triggers.sql`) generalizes the
+webhook routing exemption above to event sources. A delivery arrives with
+either a random route UUID (generic webhooks and MCP Events webhooks) or a
+GitHub App installation, and that key is what discovers the owning
+organization, workspace and FORCE-RLS `event_sources` row. Requiring an
+organization GUC first would be circular, as for
+`automation_webhook_endpoints`.
+
+Each row holds the route id, organization, workspace and source attribution,
+the source kind, an optional external key and its creation time. It stores no
+secret, credential, event payload, trigger configuration or provider identity;
+the FORCE-RLS source row and its encrypted secret still authenticate every
+delivery after the lookup.
+
+As first shipped, app routes keyed GitHub installations, Slack teams and Gmail
+mailboxes by their plain identity, so arbitrary runtime-role SQL could read
+mailbox addresses with their tenant attribution. Migration
+`0941_event_ingress_routes_without_identities.sql` removed those rows before
+runtime DML on this table was granted (migration `0937` withholds it):
+
+- A GitHub route's external key is an HMAC-SHA-256 of the installation under a
+  route secret derived from the deployment's encryption key, so equality
+  lookups still work and the table alone reveals no installation.
+- Slack and Gmail sources have no route. The Slack receiver's own installation
+  routing (`opengeni_private.resolve_slack_installation`) already names the
+  workspace, and Gmail is read rather than delivered. Their team id and
+  mailbox stay on the FORCE-RLS source row.
+
+The exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
+`packages/db/test/non-rls-authority-tables.test.ts`.
+
+### 2026-10-26 addendum: managed passkey credentials
+
+`auth_passkeys` (migration `0998_managed_auth_passkeys.sql`) is a credential
+store with the same shape as `auth_identities`: each row belongs to an auth
+user, not to an organization or workspace. A passkey sign-in looks the row up
+by its WebAuthn credential id before anyone is signed in, so no organization
+or workspace GUC exists yet and an RLS predicate would be circular, exactly as
+for the identity store.
+
+Each row holds the credential id, the public key, the signature counter and
+display metadata (transports, device type, backup flag, AAGUID, a name, the
+relying-party id and timestamps). No private key material is stored, and a
+public key alone cannot sign in. Adding and removing passkeys go through the
+`mutate_managed_passkey` SECURITY DEFINER routine behind the same authority as
+the other sign-in method changes.
+
+Runtime DML on the table and EXECUTE on the routine are withheld in the
+release that creates them (runtime-posture `RUNTIME_DEFERRED_FULL_DML_TABLES`
+and `DEFERRED_RUNTIME_TARGET_ROUTINES`), because the previous release's
+readiness check rejects them; a later migration grants them. The exemption is
+pinned in `NON_RLS_RUNTIME_TABLES` and
+`packages/db/test/non-rls-authority-tables.test.ts`.
+
 ## What would change the verdict
 
 The `workspaces` and `workspace_memberships` exemptions are consequences of one
@@ -344,5 +432,5 @@ tokens, and the OAuth callbacks, and it must be its own slice with its own
 rollout. It is not a policy change.
 
 `auth_identities` would not change even then, unless Better Auth were moved onto
-OpenGeni's pooled handle and the table gained a real tenant column — neither of
+Opengeni's pooled handle and the table gained a real tenant column — neither of
 which is desirable for a shared credential store keyed by provider identity.

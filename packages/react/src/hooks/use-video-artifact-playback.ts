@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useMemo } from "react";
 import type { VideoArtifactPlaybackLoader } from "../timeline";
 import { useOpenGeni, type ClientOverride } from "../session-context";
@@ -9,13 +10,13 @@ import { useOpenGeni, type ClientOverride } from "../session-context";
  * any video bytes through React.
  */
 export function useVideoArtifactPlaybackLoader(
-  options: ClientOverride = {},
+  options: ClientOverride<ChatClient> = {},
 ): VideoArtifactPlaybackLoader {
   const { client, workspaceId } = useOpenGeni(options);
   return useMemo(
     () => async (artifactId: string, signal?: AbortSignal) => {
       if (typeof client.createVideoArtifactPlaybackSource !== "function") {
-        throw new Error("This OpenGeni host does not expose retained-video playback.");
+        throw new Error("This Opengeni host does not expose retained-video playback.");
       }
       return await client.createVideoArtifactPlaybackSource(
         workspaceId,

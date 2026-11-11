@@ -1,4 +1,6 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 import type {
   CodexAccount,
   CodexConnectPoll,
@@ -9,8 +11,14 @@ import { pollDeviceAuthorization } from "@opengeni/connect";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { codexAccountName, planLabel } from "@/components/codex-connection";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { codexAccountName } from "@/components/codex-connection";
+import { showCodexConnected } from "@/lib/codex-connect-result";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
+import {
+  invalidateSharedQueries,
+  MODEL_SETTINGS_STALE_TIME_MS,
+  useSharedQuery,
+} from "@opengeni/react/app/lib/shared-query";
 
 // The organization's shared Codex (ChatGPT) accounts: the data and every
 // mutation. Organization settings > Models presents them with the same rows
@@ -18,19 +26,36 @@ import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 
 export type OrganizationCodexSubscriptions = ReturnType<typeof useOrganizationCodexSubscriptions>;
 
+/** Shared-cache key for an organization's own Codex accounts. */
+export const organizationCodexAccountsQueryKey = (organizationId: string) =>
+  ["codex-accounts", "organization", organizationId] as const;
+
 export function useOrganizationCodexSubscriptions({
   organizationId,
   client,
   enabled = true,
 }: {
   organizationId: string;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   /** False for people who can't read the organization's accounts: nothing is read. */
   enabled?: boolean;
 }) {
-  const [data, setData] = useState<OrganizationCodexAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(enabled);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // Shared, client-scoped: revisiting organization settings renders the
+  // retained accounts at once and re-reads in the background.
+  const query = useSharedQuery<OrganizationCodexAccountsResponse>(
+    client,
+    organizationCodexAccountsQueryKey(organizationId),
+    () =>
+      client.requestJson<OrganizationCodexAccountsResponse>(
+        "GET",
+        `/v1/organizations/${organizationId}/codex/accounts`,
+      ),
+    { enabled, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+  );
+  const data = query.error ? null : query.data;
+  const loading = query.loading;
+  // Shown under "Couldn't load ..." as what to do; never the raw API message.
+  const loadError = query.error ? apiErrorAdvice(query.error) : null;
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<string | null>(null);
   const [pending, setPending] = useState<{
@@ -40,37 +65,30 @@ export function useOrganizationCodexSubscriptions({
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
 
+  // Organization accounts feed every workspace that inherits them, so an
+  // account change invalidates every retained Codex list for this client.
   const refresh = useCallback(async () => {
     if (!enabled) return;
-    setLoadError(null);
-    try {
-      const result = await client.requestJson<OrganizationCodexAccountsResponse>(
-        "GET",
-        `/v1/organizations/${organizationId}/codex/accounts`,
-      );
-      if (!cancelled.current) setData(result);
-    } catch (error) {
-      if (cancelled.current) return;
-      setData(null);
-      // Shown under "Couldn't load ..." as what to do; never the raw API message.
-      setLoadError(apiErrorAdvice(error));
-    } finally {
-      if (!cancelled.current) setLoading(false);
-    }
-  }, [client, organizationId, enabled]);
+    await Promise.all([
+      invalidateSharedQueries(client, ["codex-accounts"]),
+      invalidateSharedQueries(client, ["model-settings"]),
+    ]);
+  }, [client, enabled]);
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(enabled);
-    void refresh();
     return () => {
       cancelled.current = true;
       pollAbort.current?.abort();
     };
-  }, [refresh, enabled]);
+  }, []);
+
+  // The console root owns model-connections-changed invalidation for every
+  // mounted organization/workspace reader; a per-hook listener repeats live checks.
 
   const connect = useCallback(
     async (options?: { onConnected?: (accountId: string | null) => void }) => {
+      const recordOutcome = beginModelConnectJourney("codex", "device_code");
       setBusy(true);
       try {
         const start = await client.requestJson<CodexConnectStart>(
@@ -97,17 +115,22 @@ export function useOrganizationCodexSubscriptions({
           signal: controller.signal,
         })
           .then(async (result) => {
-            if (!result || controller.signal.aborted || cancelled.current) return;
+            if (!result) return;
+            // Organization accounts feed every workspace that inherits them, so
+            // a confirmed sign-in invalidates every retained Codex list, also
+            // when the page was left as it was confirmed. (Leaving earlier
+            // stops polling: unmount aborts it and `result` is null.)
+            if (result.status === "connected") await refresh();
+            if (controller.signal.aborted || cancelled.current) return;
             setPending(null);
             if (result.status === "expired") {
+              recordOutcome("expired");
               toast.error("The code expired before it was used. Try again.");
               return;
             }
             if (result.status === "connected") {
-              toast.success(
-                `Codex connected for the organization${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
-              );
-              await refresh();
+              recordOutcome("connected");
+              showCodexConnected("Codex connected for the organization", result);
               options?.onConnected?.(
                 "accountId" in result && typeof result.accountId === "string"
                   ? result.accountId
@@ -116,6 +139,7 @@ export function useOrganizationCodexSubscriptions({
             }
           })
           .catch((error) => {
+            recordOutcome("outcome_unknown");
             if (controller.signal.aborted || cancelled.current) return;
             setPending(null);
             toast.error("Couldn't confirm the ChatGPT sign-in", {
@@ -123,6 +147,7 @@ export function useOrganizationCodexSubscriptions({
             });
           });
       } catch (error) {
+        recordOutcome("outcome_unknown");
         setPending(null);
         toast.error("Couldn't start the ChatGPT sign-in", { description: userErrorText(error) });
       } finally {
@@ -157,6 +182,44 @@ export function useOrganizationCodexSubscriptions({
           {},
         ),
       `${codexAccountName(account)} is now the primary account`,
+    );
+
+  const setAllocator = (account: CodexAccount, allocatorEnabled: boolean) =>
+    mutate(
+      `allocator:${account.id}`,
+      async () => {
+        try {
+          return await client.requestJson(
+            "PATCH",
+            `/v1/organizations/${organizationId}/codex/accounts/${account.id}/allocator`,
+            { enabled: allocatorEnabled, expectedVersion: account.allocatorVersion },
+          );
+        } catch (error) {
+          await refresh();
+          throw error;
+        }
+      },
+      allocatorEnabled
+        ? `${codexAccountName(account)} enabled`
+        : `${codexAccountName(account)} disabled`,
+    );
+
+  const setExtraCredits = (account: CodexAccount, extraCreditsEnabled: boolean) =>
+    mutate(
+      `extra-credits:${account.id}`,
+      async () => {
+        try {
+          return await client.requestJson(
+            "PATCH",
+            `/v1/organizations/${organizationId}/codex/accounts/${account.id}/extra-credits`,
+            { enabled: extraCreditsEnabled, expectedVersion: account.extraCreditsVersion ?? 1 },
+          );
+        } catch (error) {
+          await refresh();
+          throw error;
+        }
+      },
+      extraCreditsEnabled ? "Extra credit spending on" : "Extra credit spending off",
     );
 
   const setRotation = (rotationEnabled: boolean) =>
@@ -233,6 +296,8 @@ export function useOrganizationCodexSubscriptions({
     connect,
     activate,
     setRotation,
+    setAllocator,
+    setExtraCredits,
     rename,
     disconnect,
   };

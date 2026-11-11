@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
 import { Manifest } from "@openai/agents/sandbox";
-import type { SandboxProviderCommand } from "@opengeni/contracts";
+import type { ModalRouterProviderCommand, SandboxProviderCommand } from "@opengeni/contracts";
 import type { ChannelASession } from "../src/sandbox/channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../src/sandbox/exec-banner";
 import {
@@ -9,229 +9,87 @@ import {
   withProviderCommandHandle,
 } from "../src/sandbox/provider-command-session";
 import { installOpenGeniModalSnapshotPolicy } from "../src/sandbox/providers/modal";
-import { ModalCommandControl } from "../src/sandbox/providers/modal-legacy-command-control";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
-import {
-  type RoutingRetainedProcess,
-  RoutingSandboxSession,
-} from "../src/sandbox/routing/routing-session";
+import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
+
+const MARKER = "__OPENGENI_MATERIALIZED_PATH_VISIBLE__";
+
+function locator(): ModalRouterProviderCommand {
+  return {
+    kind: "modal-router-v1",
+    sandboxId: "sb-test",
+    taskId: "ta-test",
+    execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
+    streams: {
+      stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    },
+  };
+}
+
+/** A deterministic byte-offset control: the first read returns "start", the
+ * next read from an advanced cursor returns "tail" and exit code 7. */
+function page(command: ModalRouterProviderCommand, text: string, exitCode: number | null) {
+  const next = structuredClone(command);
+  const terminal = exitCode !== null;
+  next.streams.stdout = {
+    byteOffset: command.streams.stdout.byteOffset + Buffer.byteLength(text),
+    utf8Remainder: "",
+    eof: terminal,
+    exitCode,
+  };
+  next.streams.stderr = { ...command.streams.stderr, eof: terminal, exitCode };
+  return {
+    command: next,
+    expected: structuredClone(command),
+    chunks: [
+      { stream: "stdout" as const, chunkId: `stdout:${next.streams.stdout.byteOffset}`, text },
+    ],
+    exitCode,
+    streamFidelity: "separate" as const,
+  };
+}
 
 function fixture(verification = false) {
   let starts = 0;
-  let failRead = false;
-  let failStart = false;
   let stored: SandboxProviderCommand | null = null;
-  let inputIndex = 0;
-  const writes: number[] = [];
   const persistence: ProviderCommandPersistence = {
     load: async () => structuredClone(stored),
-    acknowledge: async (command) => {
-      stored = structuredClone(command);
-      return structuredClone(stored);
+    reserveInput: async () => 0,
+    captureRouterPage: async (captured) => {
+      stored = structuredClone(captured.command);
+      return { command: structuredClone(captured.command), captured: true };
     },
-    reserveInput: async () => ++inputIndex,
   };
-  const port = {
-    sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
-    containerExec: async () => {
+  const control = {
+    start: async () => {
       starts++;
-      if (failStart) throw new Error("start response unavailable");
-      return { execId: "tp-test" };
+      return locator();
     },
-    async *containerExecGetOutput(request: { lastBatchIndex: number; fileDescriptor: number }) {
-      if (failRead) throw new Error("output temporarily unavailable");
-      const final = request.lastBatchIndex > 0;
-      yield {
-        batchIndex: final ? 2 : 1,
-        ...(final ? { exitCode: verification ? 0 : 7 } : {}),
-        items: [
-          {
-            fileDescriptor: request.fileDescriptor,
-            messageBytes: Buffer.from(
-              verification
-                ? request.fileDescriptor === 1
-                  ? final
-                    ? "PATH_VISIBLE__"
-                    : "__OPENGENI_MATERIALIZED_"
-                  : ""
-                : request.fileDescriptor === 1
-                  ? final
-                    ? "tail"
-                    : "start"
-                  : final
-                    ? "error-tail"
-                    : "error-start",
-            ),
-          },
-        ],
-      };
-    },
-    containerExecPutInput: async (request: { input: { messageIndex: number } }) => {
-      writes.push(request.input.messageIndex);
-    },
+    read: async (command: ModalRouterProviderCommand) =>
+      command.streams.stdout.byteOffset > 0
+        ? page(command, "tail", 7)
+        : page(command, "start", null),
+    readProbe: async (command: ModalRouterProviderCommand) =>
+      page(command, verification ? MARKER : "", 0),
+    write: async () => {},
   };
   return {
     persistence,
-    writes,
     starts: () => starts,
     stored: () => stored,
     retain: (command: SandboxProviderCommand) => {
       stored = structuredClone(command);
     },
-    failRead: (value: boolean) => {
-      failRead = value;
-    },
-    failStart: () => {
-      failStart = true;
-    },
     session: (original: ChannelASession = {}) => {
       const session: ChannelASession = original;
-      installModalCommandSession(
-        session,
-        ModalCommandControl.forSandbox(
-          { cpClient: port, version: () => "0.9.0" } as never,
-          "sb-test",
-          "/workspace",
-        ),
-      );
+      installModalCommandSession(session, control as never);
       return session;
     },
   };
 }
 
-test("fresh adapters retain the original handle and replay pages until protected acknowledgment", async () => {
-  const f = fixture();
-  const owner = f.session();
-  const launch = await withProviderCommandHandle(73, () => owner.execCommand!({ cmd: "work" }));
-  expect(parseExecBannerSessionId(launch)).toBe(73);
-  expect(launch).toContain("start");
-  expect(launch).not.toContain("[object Object]");
-  const command = owner.getProviderCommand!(73)!;
-  expect(command.streams.stdout.batchIndex).toBe(0);
-  f.retain(command);
-  const reader = f.session();
-  reader.bindProviderCommand!(73, command, f.persistence);
-  const first = await reader.writeStdin!({ sessionId: 73 });
-  expect(reader.getProviderCommandOutput!(first)).toEqual(owner.getProviderCommandOutput!(launch));
-  await reader.acknowledgeCommandOutput!(first);
-  const next = f.session();
-  next.bindProviderCommand!(73, f.stored()!, f.persistence);
-  const terminal = await next.writeStdin!({ sessionId: 73 });
-  expect(parseExecBannerExitCode(terminal)).toBe(7);
-  expect(next.getProviderCommandOutput!(terminal)?.chunks.map((chunk) => chunk.text)).toEqual([
-    "tail",
-    "error-tail",
-  ]);
-  await next.acknowledgeCommandOutput!(terminal);
-  expect(f.stored()!.streams.stderr.exitCode).toBe(7);
-  expect(f.starts()).toBe(1);
-});
-
-test("successful start retains its locator even when the first output read fails", async () => {
-  const f = fixture();
-  f.failRead(true);
-  const session = f.session();
-  const launch = await withProviderCommandHandle(74, () => session.execCommand!({ cmd: "work" }));
-  expect(parseExecBannerSessionId(launch)).toBe(74);
-  expect(session.getProviderCommand!(74)?.execId).toBe("tp-test");
-  expect(session.getProviderCommandOutput!(launch)?.exitCode).toBeNull();
-  expect(f.starts()).toBe(1);
-});
-
-test("an ambiguous start never retries or claims an execution identity", async () => {
-  const f = fixture();
-  f.failStart();
-  const session = f.session();
-  await expect(
-    withProviderCommandHandle(75, () => session.execCommand!({ cmd: "work" })),
-  ).rejects.toMatchObject({
-    name: "CommandStartOutcomeUnknownError",
-    taskId: "ta-test",
-    execId: "",
-    cause: { message: "start response unavailable" },
-  });
-  expect(session.getProviderCommand!(75)).toBeNull();
-  expect(f.starts()).toBe(1);
-});
-
-test("cancellation aborts the exact pending control RPC without losing an earlier yielded command", async () => {
-  const f = fixture();
-  let entered!: () => void;
-  const startEntered = new Promise<void>((resolve) => {
-    entered = resolve;
-  });
-  let pendingSignal: AbortSignal | undefined;
-  let startCalls = 0;
-  const session: ChannelASession = {};
-  installModalCommandSession(
-    session,
-    ModalCommandControl.forSandbox(
-      {
-        version: () => "0.9.0",
-        cpClient: {
-          sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
-          containerExec: async (
-            _request: unknown,
-            options: { signal: AbortSignal; retries: number },
-          ) => {
-            startCalls++;
-            if (startCalls === 1) return { execId: "tp-first" };
-            pendingSignal = options.signal;
-            expect(options.retries).toBe(0);
-            entered();
-            return await new Promise((_resolve, reject) => {
-              options.signal.addEventListener("abort", () => reject(options.signal.reason), {
-                once: true,
-              });
-            });
-          },
-          async *containerExecGetOutput(request: {
-            lastBatchIndex: number;
-            fileDescriptor: number;
-          }) {
-            const terminal = request.lastBatchIndex > 0;
-            yield {
-              batchIndex: terminal ? 2 : 1,
-              ...(terminal ? { exitCode: 7 } : {}),
-              items: [
-                {
-                  fileDescriptor: request.fileDescriptor,
-                  messageBytes: Buffer.from(terminal ? "tail" : "start"),
-                },
-              ],
-            };
-          },
-        },
-      } as never,
-      "sb-test",
-      "/workspace",
-    ),
-  );
-  const launch = await withProviderCommandHandle(80, () => session.execCommand!({ cmd: "work" }));
-  f.retain(session.getProviderCommand!(80)!);
-  session.bindProviderCommand!(80, f.stored()!, f.persistence);
-  await session.acknowledgeCommandOutput!(launch);
-  const pending = withProviderCommandHandle(81, () => session.execCommand!({ cmd: "work" }));
-  const observed = pending.catch((error: Error) => error);
-  await startEntered;
-  await session.cancelPendingExecCommand!();
-  const error = await observed;
-  expect(error).toBeInstanceOf(Error);
-  expect(error).toMatchObject({ name: "CommandStartOutcomeUnknownError" });
-  expect(String(error)).toContain("do not replay");
-  expect(String(error.cause)).toContain("provider outcome is unknown");
-  expect(pendingSignal?.aborted).toBe(true);
-  expect(startCalls).toBe(2);
-  expect(session.getProviderCommand!(81)).toBeNull();
-  const terminal = await session.writeStdin!({ sessionId: 80 });
-  expect(parseExecBannerExitCode(terminal)).toBe(7);
-  expect(session.getProviderCommandOutput!(terminal)?.chunks.map((chunk) => chunk.text)).toEqual([
-    "tail",
-    "tail",
-  ]);
-});
-
-test("unbound legacy handles remain unknown, and output text cannot forge a receipt", async () => {
+test("unbound handles remain unknown, and output text cannot forge a receipt", async () => {
   const session = fixture().session();
   await expect(session.writeStdin!({ sessionId: 2 })).rejects.toThrow(
     "Do not replay the command or treat it as exited",
@@ -261,7 +119,7 @@ test("yielded SDK setup commands keep their own observer without colliding with 
   );
   f.retain(session.getProviderCommand!(1)!);
   session.bindProviderCommand!(1, f.stored()!, f.persistence);
-  await session.acknowledgeCommandOutput!(launch);
+  expect(await session.captureCommandOutput!(launch)).toBe(true);
   const retained = await session.writeStdin!({ sessionId: 1 });
   expect(parseExecBannerExitCode(retained)).toBe(7);
   expect(reads).toEqual([]);
@@ -430,141 +288,4 @@ test("a yielded setup command without an SDK reader fails observation", async ()
   await expect(
     session.writeStdin!({ sessionId: parseExecBannerSessionId(initial)! }),
   ).rejects.toThrow("observation unavailable");
-});
-
-test("cancelling initial observation preserves an accepted execution for retention and later reads", async () => {
-  const f = fixture();
-  let entered!: () => void;
-  const reading = new Promise<void>((resolve) => {
-    entered = resolve;
-  });
-  let starts = 0;
-  const port = {
-    sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
-    containerExec: async () => {
-      starts++;
-      return { execId: "tp-accepted" };
-    },
-    async *containerExecGetOutput(
-      request: { fileDescriptor: number },
-      options?: { signal?: AbortSignal },
-    ) {
-      if (options?.signal) {
-        entered();
-        await new Promise((_resolve, reject) => {
-          options.signal!.addEventListener("abort", () => reject(options.signal!.reason), {
-            once: true,
-          });
-        });
-      }
-      yield {
-        batchIndex: 1,
-        items: [
-          {
-            fileDescriptor: request.fileDescriptor,
-            messageBytes: Buffer.from("complete"),
-          },
-        ],
-        exitCode: 7,
-      };
-    },
-  };
-  const session: ChannelASession = {};
-  installModalCommandSession(
-    session,
-    ModalCommandControl.forSandbox(
-      { cpClient: port, version: () => "0.9.0" } as never,
-      "sb-test",
-      "/workspace",
-    ),
-  );
-  const launch = withProviderCommandHandle(82, () => session.execCommand!({ cmd: "work" }));
-  await reading;
-  await session.cancelPendingExecCommand!();
-  const result = await launch;
-  expect(parseExecBannerSessionId(result)).toBe(82);
-  expect(parseExecBannerExitCode(result)).toBeNull();
-  f.retain(session.getProviderCommand!(82)!);
-  session.bindProviderCommand!(82, f.stored()!, f.persistence);
-  const terminal = await session.writeStdin!({ sessionId: 82 });
-  expect(parseExecBannerExitCode(terminal)).toBe(7);
-  expect(terminal).toContain("complete");
-  expect(starts).toBe(1);
-});
-
-test("stdin uses protected increasing indices across reconstructed readers", async () => {
-  const f = fixture();
-  const owner = f.session();
-  await withProviderCommandHandle(76, () => owner.execCommand!({ cmd: "read value" }));
-  const command = owner.getProviderCommand!(76)!;
-  f.retain(command);
-  for (const chars of ["one\n", "two\n"]) {
-    const reader = f.session();
-    reader.bindProviderCommand!(76, command, f.persistence);
-    await reader.writeStdin!({ sessionId: 76, chars });
-  }
-  expect(f.writes).toEqual([1, 2]);
-});
-
-test("routing promotes initial locator, captures both streams, and adopts through the original route", async () => {
-  const f = fixture();
-  let process: RoutingRetainedProcess | undefined;
-  const captured = new Map<string, string>();
-  let failCapture = true;
-  const makeProxy = () => {
-    const backend = {
-      session: f.session(),
-      sandboxId: null,
-      kind: "modal",
-      leaseEpoch: 2,
-      providerInstanceId: "sb-test",
-      activeEpoch: 3,
-    } as const;
-    return new RoutingSandboxSession({
-      defaultResolved: backend,
-      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 3 }),
-      resolveActiveBackend: async () => backend,
-      beforeMutation: async () => 77,
-      providerCommandHandle: (value) => value as number,
-      providerCommandPersistence: () => f.persistence,
-      afterMutation: async ({ retainedProcess }) => {
-        process = retainedProcess;
-        f.retain(retainedProcess!.providerCommand!);
-      },
-      captureProcessOutput: async ({ stream, chunkId, chunk }) => {
-        if (chunk === "error-tail" && failCapture) {
-          failCapture = false;
-          throw new Error("capture unavailable");
-        }
-        captured.set(chunkId, `${stream}:${chunk}`);
-      },
-    });
-  };
-  const owner = makeProxy();
-  await owner.execCommand({ cmd: "work" });
-  expect(f.stored()!.streams.stdout.batchIndex).toBe(1);
-  const reader = makeProxy();
-  reader.adoptRetainedProcess({
-    process: { ...process!, providerCommand: f.stored()! },
-    backend: {
-      sandboxId: null,
-      leaseEpoch: 2,
-      providerInstanceId: "sb-test",
-      activeEpoch: 3,
-    },
-  });
-  await expect(reader.writeStdinForProcessRead({ sessionId: 77 })).rejects.toThrow(
-    "output could not be retained",
-  );
-  expect(f.stored()!.streams.stdout.batchIndex).toBe(1);
-  const terminal = await reader.writeStdinForProcessRead({ sessionId: 77 });
-  expect(parseExecBannerExitCode(terminal)).toBe(7);
-  expect(f.stored()!.streams.stdout.exitCode).toBe(7);
-  expect([...captured.values()]).toEqual([
-    "stdout:start",
-    "stderr:error-start",
-    "stdout:tail",
-    "stderr:error-tail",
-  ]);
-  expect(f.starts()).toBe(1);
 });

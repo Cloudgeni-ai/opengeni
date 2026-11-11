@@ -5,7 +5,7 @@ import {
   type CodexFleetDecisionInputV1,
   type CodexFleetReplayRecordV1,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { eq } from "drizzle-orm";
 import {
   appendSessionEventsForTurnAttempt,

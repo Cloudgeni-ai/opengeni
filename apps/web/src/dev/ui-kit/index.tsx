@@ -30,9 +30,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { BrandMark } from "@/components/brand-mark";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { BrandMark } from "@opengeni/react/app/components/brand-mark";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@opengeni/react/ui/tooltip";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { KitErrorBoundary, KitNote, KitPaneContext, KitSectionHeader, type KitPane } from "./kit";
 import {
   formatPicksForExport,
@@ -102,7 +107,7 @@ function KitShell({ view }: { view: KitView }) {
   useEffect(() => {
     mainRef.current?.scrollTo({ top: 0 });
     const title = view.section ? getSection(view.section).title : "Overview";
-    document.title = `${title} - OpenGeni UI kit`;
+    document.title = `${title} - Opengeni UI kit`;
   }, [view.section]);
 
   const goTo = useCallback(
@@ -193,7 +198,7 @@ function SidebarContent({
           <BrandMark className="size-4" />
         </span>
         <p className="min-w-0 flex-1 truncate text-sm font-semibold text-fg">
-          OpenGeni <span className="font-medium text-fg-muted">UI kit</span>
+          Opengeni <span className="font-medium text-fg-muted">UI kit</span>
         </p>
         {onClose ? (
           <button
@@ -621,7 +626,7 @@ function Overview({ goTo }: { goTo: (section: SectionKey | null) => void }) {
   return (
     <>
       <header className="border-b border-border pb-4">
-        <h1 className="text-xl font-semibold tracking-[-0.5px] text-fg">OpenGeni UI kit</h1>
+        <h1 className="text-xl font-semibold tracking-[-0.5px] text-fg">Opengeni UI kit</h1>
         <p className="mt-1 text-sm text-fg-muted">
           Pick the version you like for each component. Your picks are saved in this browser and
           shape the page previews.

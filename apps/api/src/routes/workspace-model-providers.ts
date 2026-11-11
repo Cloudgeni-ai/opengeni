@@ -1,17 +1,15 @@
 import { claudeProviderId } from "@opengeni/config";
-import { refreshClaudeSubscriptionUsage } from "../claude-subscription-usage";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { createHash } from "node:crypto";
 import {
   CreateWorkspaceGatewayCustomModelRequest,
   DeleteWorkspaceGatewayCustomModelRequest,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
-  ClaudeSubscriptionUsage,
 } from "@opengeni/contracts";
 import {
   requireAccessGrant,
-  requireWorkspaceSettingsGrant,
+  requireWorkspaceContributorGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -22,11 +20,11 @@ import {
   nestedPostgresSqlState,
   WorkspaceClaudeCustomModelLimitError,
   type WorkspaceProviderCustomModel,
-  readClaudeSubscriptionUsage,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { parseRequestBody, requestValidationError } from "../http/request-body";
 
 const Kind = z.enum(["anthropic", "claude_subscription"]);
 function requestHash(value: unknown): string {
@@ -51,7 +49,7 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
       throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
     const workspaceId = c.req.param("workspaceId")!;
     const grant = mutate
-      ? await requireWorkspaceSettingsGrant(c, deps, workspaceId)
+      ? await requireWorkspaceContributorGrant(c, deps, workspaceId)
       : await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     c.header("cache-control", "private, no-store");
     return { accountId: grant.accountId, workspaceId, providerKind, subjectId: grant.subjectId };
@@ -66,11 +64,7 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
     const input = await scope(c, false);
     if (input.providerKind !== "claude_subscription")
       throw new HTTPException(404, { message: "Usage not available for this provider" });
-    return c.json(
-      ClaudeSubscriptionUsage.parse(
-        await readClaudeSubscriptionUsage(deps.db, { ...input, scope: "workspace" }),
-      ),
-    );
+    throw new HTTPException(410, { message: "Check usage on the individual Claude account." });
   });
   app.post(`${usagePath}/refresh`, async (c) => {
     requireSameOriginBrowserMutation(c, deps);
@@ -78,22 +72,16 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
     if (input.providerKind !== "claude_subscription")
       throw new HTTPException(404, { message: "Usage not available for this provider" });
     await requireAccessGrant(c, deps, input.workspaceId, "connections:write");
-    return c.json(
-      ClaudeSubscriptionUsage.parse(
-        await refreshClaudeSubscriptionUsage(deps.db, deps.settings, {
-          ...input,
-          scope: "workspace",
-        }),
-      ),
-    );
+    throw new HTTPException(410, { message: "Check usage on the individual Claude account." });
   });
   app.post(path, async (c) => {
     const input = await scope(c, true);
-    const parsed = CreateWorkspaceGatewayCustomModelRequest.safeParse(
+    const parsed = parseRequestBody(
+      CreateWorkspaceGatewayCustomModelRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "Invalid custom model" },
     );
-    if (!parsed.success) throw new HTTPException(422, { message: "Invalid custom model" });
-    const payload = parsed.data;
+    const payload = parsed;
     if (
       `${claudeProviderId(input.providerKind, "workspace")}/${payload.upstreamModelId}`.length > 256
     )
@@ -140,8 +128,12 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
     const parsed = DeleteWorkspaceGatewayCustomModelRequest.safeParse(
       await c.req.json().catch(() => null),
     );
-    if (!id.success || !parsed.success)
-      throw new HTTPException(422, { message: "Invalid custom model deletion" });
+    if (!id.success) throw new HTTPException(422, { message: "Invalid custom model deletion" });
+    if (!parsed.success)
+      throw requestValidationError(parsed.error, "body", {
+        status: 422,
+        message: "Invalid custom model deletion",
+      });
     const customModelId = id.data;
     const removed = await deleteWorkspaceProviderCustomModel(deps.db, {
       ...input,

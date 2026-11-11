@@ -41,7 +41,7 @@ Only that descriptor, not the full Skill body, enters the prompt index.
 
 The unconditional CORE in `packages/runtime/src/index.ts` owns this routing and
 instruction-edit safety guidance. Empty governance and customized personas must
-not remove it. Tool descriptions and the bundled `opengeni-skills` guide reinforce
+not remove it. Tool descriptions and the bundled `skill-management` guide reinforce
 the same distinction. Report the actual destination and lifecycle receipt:
 active, pending review, or not saved. A Knowledge save is not a promise of future
 behavior. No content classifier, automatic data migration or retrieval change is

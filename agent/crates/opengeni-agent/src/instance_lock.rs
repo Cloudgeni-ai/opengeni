@@ -20,6 +20,11 @@
 //! Only `run` (explicit and run-by-default) takes the lock. `connect`,
 //! `connections`, `disconnect`, `uninstall`, `service`, and `update` legitimately
 //! run BESIDE a live agent and must not.
+//!
+//! Windows has no `flock`; there the lock is the standard library's whole-file
+//! `LockFileEx` lock. It also answers "is the agent running?" for `status` and
+//! `stop` without taking the lock: while it is held, reading the lock file fails
+//! with a lock violation.
 
 use std::path::{Path, PathBuf};
 
@@ -71,8 +76,7 @@ pub struct InstanceLock {
     // holds the lock. `nix::fcntl::Flock` owns the `File` and unlocks on drop.
     #[cfg(unix)]
     _flock: nix::fcntl::Flock<std::fs::File>,
-    // Non-unix: we keep the file open but do not (yet) take a real OS lock — see
-    // [`acquire_in`]. Held so the handle has consistent drop semantics.
+    // Non-unix: the open handle holds the whole-file lock; closing it unlocks.
     #[cfg(not(unix))]
     _file: std::fs::File,
 }
@@ -143,14 +147,39 @@ pub fn acquire_in(dir: &Path) -> Result<InstanceLock, LockError> {
     }
     #[cfg(not(unix))]
     {
-        // Windows has no `flock`; a safe cross-platform lock would need a named
-        // mutex / `LockFileEx` binding (and the workspace forbids `unsafe`, so a
-        // raw win32 call is out). The Windows model is the always-on Service, not a
-        // double-clickable launcher, so the Raycast+terminal race this guards does
-        // not arise there. Keep the file open for symmetric drop semantics and
-        // treat acquisition as a no-op success. (Tracked for a future named-mutex.)
-        Ok(InstanceLock { _file: file })
+        use std::io::Write as _;
+        match file.try_lock() {
+            Ok(()) => {
+                // Written through the locking handle, so the file is never empty
+                // while held and a reader always meets the lock (see `is_held`).
+                let mut holder = &file;
+                let _ = file.set_len(0);
+                let _ = holder.write_all(std::process::id().to_string().as_bytes());
+                let _ = holder.flush();
+                crate::windows_control::record_pid(dir);
+                Ok(InstanceLock { _file: file })
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Contended {
+                holder_pid: crate::windows_control::recorded_pid(dir),
+            }),
+            Err(std::fs::TryLockError::Error(source)) => Err(LockError::io(&path, source)),
+        }
     }
+}
+
+/// Whether a running agent holds the lock in `dir`, without taking it (taking it,
+/// even briefly, could turn away an agent that is starting at that moment).
+#[cfg(windows)]
+#[must_use]
+pub fn is_held_in(dir: &Path) -> bool {
+    use std::io::Read as _;
+    // ERROR_LOCK_VIOLATION: the bytes are locked by another handle.
+    const LOCK_VIOLATION: i32 = 33;
+    let Ok(mut file) = std::fs::File::open(dir.join(LOCK_FILE)) else {
+        return false;
+    };
+    let mut byte = [0_u8; 1];
+    matches!(file.read(&mut byte), Err(error) if error.raw_os_error() == Some(LOCK_VIOLATION))
 }
 
 /// Records this process's pid into the (now-locked) lock file so a later contender
@@ -214,5 +243,28 @@ mod tests {
         let first = acquire_in(dir.path()).expect("first acquire");
         drop(first);
         let _second = acquire_in(dir.path()).expect("re-acquire after drop");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_held_lock_turns_away_a_second_agent_and_reads_as_running() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!is_held_in(dir.path()));
+        let held = acquire_in(dir.path()).expect("first acquire");
+        assert!(is_held_in(dir.path()));
+        match acquire_in(dir.path()) {
+            Err(LockError::Contended { holder_pid }) => {
+                assert_eq!(holder_pid, Some(std::process::id()));
+            }
+            Err(e) => panic!("expected Contended, got a different error: {e:?}"),
+            Ok(_) => panic!("expected Contended, but the second acquire succeeded"),
+        }
+        drop(held);
+        assert!(!is_held_in(dir.path()));
+        let _again = acquire_in(dir.path()).expect("re-acquire after drop");
     }
 }

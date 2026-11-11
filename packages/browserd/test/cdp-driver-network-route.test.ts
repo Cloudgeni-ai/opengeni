@@ -6,6 +6,7 @@ import {
   type BrowserCommandRunner,
   type CdpEvent,
 } from "../src";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 test.each(["chrome_internal", "intercepted_local"] as const)(
   "installs route emulation on about:blank before the first external navigation (%s)",
@@ -44,6 +45,8 @@ test.each(["chrome_internal", "intercepted_local"] as const)(
         options?: { sessionId?: string },
       ): Promise<T> {
         cdpCalls.push({ method, params, sessionId: options?.sessionId });
+        const probe = protectedFieldsProbeAnswer(method, params);
+        if (probe) return probe as T;
         switch (method) {
           case "Browser.getVersion":
             return { product: "Chrome/151.0.0.0", userAgent: "fixture" } as T;
@@ -144,6 +147,8 @@ test.each(["chrome_internal", "intercepted_local"] as const)(
             return { result: { value: "complete" } } as T;
           case "Accessibility.getFullAXTree":
             return { nodes: [] } as T;
+          case "DOMSnapshot.captureSnapshot":
+            return { strings: [], documents: [] } as T;
           default:
             return {} as T;
         }
@@ -313,12 +318,12 @@ test.each(["chrome_internal", "intercepted_local"] as const)(
 );
 
 test.each([
-  { targetLifecycle: "runner", foregroundManagedTabs: false },
-  { targetLifecycle: "runner", foregroundManagedTabs: true },
-  { targetLifecycle: "cdp", foregroundManagedTabs: false },
+  { targetLifecycle: "runner", focusEmulation: false },
+  { targetLifecycle: "runner", focusEmulation: true },
+  { targetLifecycle: "cdp", focusEmulation: false },
 ] as const)(
-  "settles a new target using $targetLifecycle lifecycle (foreground=$foregroundManagedTabs)",
-  async ({ targetLifecycle, foregroundManagedTabs }) => {
+  "settles a new target using $targetLifecycle lifecycle (focusEmulation=$focusEmulation)",
+  async ({ targetLifecycle, focusEmulation }) => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "controller-background";
     let created = false;
@@ -354,6 +359,8 @@ test.each([
           ...(params ? { params } : {}),
           ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
         });
+        const probe = protectedFieldsProbeAnswer(method, params);
+        if (probe) return probe as T;
         if (method === "Browser.getVersion") {
           return { product: "Chrome/151.0.0.0", userAgent: "fixture" } as T;
         }
@@ -430,6 +437,7 @@ test.each([
           return { data: Buffer.from(jpeg).toString("base64") } as T;
         }
         if (method === "Accessibility.getFullAXTree") return { nodes: [] } as T;
+        if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [] } as T;
         return {} as T;
       },
       on() {
@@ -445,7 +453,7 @@ test.each([
       controllerGeneration,
       runner,
       targetLifecycle,
-      foregroundManagedTabs,
+      focusEmulation,
       connect: async () => connection,
     });
     try {
@@ -481,8 +489,9 @@ test.each([
       });
       expect(createdTargetReads).toBeGreaterThanOrEqual(2);
       expect(createdFrameReads).toBeGreaterThanOrEqual(3);
-      expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(
-        foregroundManagedTabs,
+      expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(false);
+      expect(calls.some((call) => call.method === "Emulation.setFocusEmulationEnabled")).toBe(
+        focusEmulation,
       );
       // Chromium can briefly report a non-URL main-frame placeholder even
       // after the target itself advertises the requested absolute URL.

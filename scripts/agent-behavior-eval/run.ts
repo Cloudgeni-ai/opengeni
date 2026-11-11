@@ -29,6 +29,7 @@ import { startEvalStack, type EvalStack } from "./stack";
 import { writeEvalCaBundle } from "./tls";
 import type { RunObservation, ScenarioRunResult, UsageTotals } from "./types";
 import { selectVariants, VARIANTS, type Variant } from "./variants";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const USAGE = `Usage: bun run eval:behavior -- [options]
 
@@ -347,7 +348,7 @@ async function runTask(
     return {
       ...base,
       status: "error",
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
       checks: [],
       deterministicPass: false,
       judge: null,

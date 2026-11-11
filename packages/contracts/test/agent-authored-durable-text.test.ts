@@ -68,11 +68,11 @@ describe("agent-authored durable-text budgets", () => {
       "every session bound to the role for a role policy",
     );
     expect(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE).toContain(
-      `under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
+      `at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
     );
   });
 
-  test("the numbered procedural rule that motivated this budget is rejected", () => {
+  test("instructions longer than the old agent-only budget remain valid", () => {
     const essay = [
       "1. Before starting any work, search Linear for an existing issue that covers it.",
       "2. If no issue exists, create one with a clear title and a short description.",
@@ -84,11 +84,10 @@ describe("agent-authored durable-text budgets", () => {
       .repeat(5);
     expect(essay.length).toBeGreaterThan(1_800);
     const result = RememberRequest.safeParse(rule(essay));
-    expect(result.success).toBe(false);
-    expect(contentIssue(result)).toBe(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE);
+    expect(result.success).toBe(true);
   });
 
-  test("preferences carry a larger budget because only the descriptor is composed", () => {
+  test("preferences retain their independent retrieval budget", () => {
     expect(
       RememberRequest.safeParse(preference("y".repeat(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS)))
         .success,
@@ -98,10 +97,8 @@ describe("agent-authored durable-text budgets", () => {
     );
     expect(result.success).toBe(false);
     expect(contentIssue(result)).toBe(AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE);
-    expect(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS).toBeGreaterThan(
-      AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
-    );
-    // The honest reason for the larger budget: shortening `content` does not
+    expect(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS).toBe(1_200);
+    // Shortening `content` does not
     // shrink the prompt, because only the descriptor pair is composed.
     expect(AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE).toContain("retrieve on demand");
     expect(AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE).toContain(
@@ -250,7 +247,7 @@ describe("agent-authored durable-text budgets", () => {
     expect(AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES).toBeLessThan(
       COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES,
     );
-    expect(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS).toBeLessThan(
+    expect(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS).toBe(
       WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
     );
     expect(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS).toBeLessThan(

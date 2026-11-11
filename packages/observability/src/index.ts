@@ -1,37 +1,95 @@
+export {
+  failureOrigin,
+  isCustomerManagedMetricProvider,
+  isProviderAccountRefusal,
+  PROVIDER_ACCOUNT_REFUSALS,
+  type FailureOrigin,
+  type ProviderAccountRefusal,
+} from "./failure-attribution";
 import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
 import {
+  CLIENT_DESKTOP_APP_VERSION_PATTERN,
   CLIENT_ERROR_REVISION_PATTERN,
   CLIENT_ERROR_ROUTE_PATTERN,
+  isProjectedClientErrorText,
+  type ClientErrorDetailField,
 } from "@opengeni/contracts/client-error-report";
 import {
   currentTraceContext,
   validTraceContext,
   admissionTraceContext,
+  withoutTraceContext,
+  type ChildSpanRecorder,
+  type SpanKind,
   type TraceContext,
 } from "./trace-context";
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
+import { projectErrorCauseAttributes, projectErrorCauseMessage } from "./error-cause";
+import { operationalErrorDiagnostic } from "./operational-error";
+export {
+  errorCauseAttributes,
+  errorCauseMessage,
+  ERROR_CAUSE_MESSAGE_MAX_BYTES,
+  PUBLIC_ERROR_CAUSE_NAMES,
+  PUBLIC_INTERACTION_ERROR_CODES,
+  type ErrorCauseAttributes,
+} from "./error-cause";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
+export {
+  AGENT_TOOL_CALL_OUTCOMES,
+  AGENT_TOOL_METRIC_FAMILIES,
+  agentToolCallOutcome,
+  agentToolMetricFamily,
+  recordAgentToolCall,
+  type AgentToolCallOutcome,
+  type AgentToolMetricFamily,
+} from "./agent-tool-metrics";
+export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
+import { TEMPORAL_SDK_COMPONENT_PATTERN, TEMPORAL_TYPE_NAME_PATTERN } from "./temporal-sdk-logger";
+export {
+  createTemporalSdkLogger,
+  projectTemporalSdkLogRecord,
+  TEMPORAL_SDK_FALLBACK_LOG_MESSAGE,
+  type TemporalSdkLogger,
+  type TemporalSdkLogLevel,
+  type TemporalSdkLoggerOptions,
+} from "./temporal-sdk-logger";
 export {
   withMcpTelemetry,
   withMcpCallIdentity,
   bindMcpTelemetry,
   beginMcpPhase,
   measureMcpPhase,
+  recordToolApproval,
   MCP_EXECUTION_PHASES,
 } from "./mcp-timing";
 export {
   currentTraceContext,
   withTraceContext,
+  withoutTraceContext,
+  startChildSpan,
+  childSpanRecordingActive,
   parseTraceparent,
   traceparent,
   admissionTraceContext,
   linkCurrentSpanToAdmission,
+  type ChildSpan,
+  type ChildSpanAttributes,
+  type SpanKind,
   type TraceContext,
 } from "./trace-context";
+export { traceClientCalls, traceFetch, tracedFetchTarget } from "./client-spans";
+export {
+  analyzeCpuSamples,
+  captureCpuSamplingProfile,
+  installCpuSamplingSignal,
+  type CpuSampleTrace,
+  type CpuSamplingSummary,
+} from "./cpu-sampling";
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
@@ -66,6 +124,8 @@ export type Span = {
   spanId: string;
   traceFlags?: string;
   addLink?: (context: TraceContext) => void;
+  /** Present on roots started with `childSpanLimit`; scoped by withTraceContext. */
+  childSpans?: ChildSpanRecorder;
   end: (input?: { attributes?: Attributes; error?: unknown }) => void;
 };
 
@@ -108,7 +168,7 @@ export function turnExecutionTelemetryKey(
 }
 
 /**
- * Stable selectors shared by OpenGeni's runtime metrics and optional
+ * Stable selectors shared by Opengeni's runtime metrics and optional
  * Prometheus/Grafana distribution. Operators can use these values for custom
  * namespaces and dashboard ConfigMaps without duplicating chart internals.
  */
@@ -224,7 +284,6 @@ const INTERACTION_OPERATIONS = new Set([
   "attach",
   "auth_start",
   "auth_report",
-  "auth_fill",
   "auth_verify",
   "intervention_create",
   "intervention_resolve",
@@ -234,9 +293,58 @@ const INTERACTION_OUTCOMES = new Set([
   "dispatched",
   "completed",
   "failed",
+  "denied",
   "outcome_unknown",
   "stale",
   "cancelled",
+]);
+/** Receipt error codes (InteractionError.code) plus HTTP-derived refusals. */
+const INTERACTION_OPERATION_REASONS = new Set([
+  "none",
+  "resource_not_found",
+  "resource_unavailable",
+  "controller_stale",
+  "target_not_found",
+  "target_stale",
+  "observation_stale",
+  "document_stale",
+  "frame_stale",
+  "locator_not_found",
+  "locator_ambiguous",
+  "unsupported",
+  "permission_denied",
+  "machine_locked",
+  "capacity_exhausted",
+  "attempt_stale",
+  "operation_conflict",
+  "outcome_unknown",
+  "invalid_action",
+  "timeout",
+  "controller_lost",
+  "driver_failed",
+  "action_failed",
+  "stale",
+  "unauthenticated",
+  "access_denied",
+  "not_found",
+  "conflict",
+  "invalid_request",
+  "rate_limited",
+  "unavailable",
+  "internal",
+  "rejected",
+  "control_unsupported",
+  "control_os",
+  "control_not_found",
+  "control_consent_required",
+  "control_timeout",
+  "control_draining",
+  "control_protocol",
+  "control_stream",
+  "control_agent_offline",
+  "control_fenced",
+  "control_payload_too_large",
+  "control_unknown",
 ]);
 const INTERACTION_MODES = new Set([
   "semantic",
@@ -252,7 +360,6 @@ const INTERACTION_MODES = new Set([
 const INTERACTION_AUTH_STATES = new Set([
   "discovering",
   "awaiting_choice",
-  "awaiting_secret",
   "awaiting_external_action",
   "working",
   "verified",
@@ -290,7 +397,7 @@ const PUBLIC_STARTUP_DEPENDENCIES = new Set([
 
 /**
  * External logs and OTLP are public/third-party projections, not canonical
- * OpenGeni storage. Only this reviewed closed set of operational fields may
+ * Opengeni storage. Only this reviewed closed set of operational fields may
  * cross that boundary. Unknown keys are omitted regardless of their value, so
  * a new diagnostic, identifier, command, response, or provider field cannot
  * become public by accident. This is schema projection, never value inspection
@@ -304,6 +411,10 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "opengeni.finalization_duration_ms",
   "opengeni.trigger_kind",
   "opengeni.status",
+  // Child spans under API requests (trace-context.ts startChildSpan): how many
+  // the request's span budget dropped, and a query's returned row count.
+  "opengeni.child_spans_dropped",
+  "db.response.returned_rows",
   "error.type",
   "error.status_code",
   "method",
@@ -312,6 +423,9 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "durationMs",
   "attempt",
   "attempts",
+  "examined",
+  "registered",
+  "failed",
   "delayMs",
   "provider",
   "providerApi",
@@ -338,20 +452,120 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "fullEvidenceAvailable",
   "retainedOutputKind",
   "suppressedCount",
+  // On-demand CPU profile summaries (cpu-sampling.ts): counts and durations.
+  "cpuProfileWindowMs",
+  "cpuProfileSamples",
+  "cpuProfileBusyMs",
+  "cpuProfileLongestBlockMs",
+  "cpuProfileBlocksOver100Ms",
+  // Database password rotation events (packages/db database-credentials.ts):
+  // candidate positions, counts and whether a refusal was stale. Never a
+  // password or file contents.
+  "credentialIndex",
+  "credentialFromIndex",
+  "credentialToIndex",
+  "credentialCandidates",
+  "credentialStale",
+  // Refused realtime negotiations (apps/api codex-realtime.ts): the provider's
+  // HTTP status for the failed request.
+  "providerStatus",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
  * grammar. Merely adding one to the ordinary allow-list would let an unrelated
  * caller accidentally publish a raw identifier under that name. */
+const HTTP_REJECTION_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const CPU_PROFILE_FRAMES_PATTERN = /^[\w$<>()[\]:./@ |#*,-]{0,2000}$/;
+const HTTP_REJECTION_REASON_PATTERN =
+  /^(?:permission:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*|control:[a-z][a-z0-9_]{0,31}|[A-Za-z][A-Za-z0-9_.-]{0,63})$/;
+const REALTIME_PROVIDER_ERROR_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _.:-]{0,63}$/;
+const REALTIME_PROVIDER_VALUE_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
+  [
+    "writerKinds",
+    /^(?:tool_call|shell_session|pending_shell_start|remote_operation)(?:,(?:tool_call|shell_session|pending_shell_start|remote_operation)){0,3}$/,
+  ],
+  // Rejected-request classification (apps/api/src/http/rejection-telemetry.ts):
+  // the public ErrorEnvelope code enum, a catalog permission or typed detail
+  // code, and a one-way message hash. Never message text or identifiers.
+  ["rejectionCode", HTTP_REJECTION_CODE_PATTERN],
+  ["rejectionReason", HTTP_REJECTION_REASON_PATTERN],
+  ["rejectionFingerprint", /^m_[0-9a-f]{10}$/],
   // Web error beacon: a route PATTERN of lowercase literal and `$param`
   // segments (never a concrete path or id) and the bundle revision token, in
   // the exact wire grammar the API route admits.
   ["clientRoute", CLIENT_ERROR_ROUTE_PATTERN],
   ["clientRevision", CLIENT_ERROR_REVISION_PATTERN],
+  // Desktop bridge-missing signal: the desktop app's version from its user
+  // agent (digits, dots and a short prerelease tag), or `unknown`.
+  ["clientAppVersion", new RegExp(`(?:${CLIENT_DESKTOP_APP_VERSION_PATTERN.source})|^unknown$`)],
+  // Temporal SDK records (temporal-sdk-logger.ts): the SDK's closed component
+  // enum and a code-registered workflow type name, never an identifier.
+  ["sdkComponent", TEMPORAL_SDK_COMPONENT_PATTERN],
+  // Optional package-version diagnostics from SDK requests. Never metric labels.
+  ["sdkVersion", /^(?=.{1,80}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/],
+  ["opengeni.sdk.version", /^(?=.{1,80}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/],
+  ["workflowType", TEMPORAL_TYPE_NAME_PATTERN],
+  // CPU profile summaries: the report file under the temp directory, and
+  // sampled code locations (function names and bundle file:line:column,
+  // joined with counts and separators). Code identity, never request data.
+  ["cpuProfilePath", /^\/[\w./-]{1,255}$/],
+  ["cpuProfileTopSelf", CPU_PROFILE_FRAMES_PATTERN],
+  ["cpuProfileLongestBlockTopStack", CPU_PROFILE_FRAMES_PATTERN],
+  // Database query spans (packages/db database-spans.ts): the statement's
+  // leading keyword and first table or routine name, read from the SQL text,
+  // and the SQLSTATE of a failure. Never SQL text or bound parameters.
+  ["db.system.name", /^postgresql$/],
+  ["db.operation.name", /^[A-Z]{2,16}$/],
+  ["db.collection.name", /^[a-z_][a-z0-9_]{0,62}$/],
+  ["db.response.status_code", /^[0-9A-Z]{5}$/],
+  // Instrumented clients (client-spans.ts): a code-chosen client name and the
+  // method called on it.
+  ["opengeni.client", /^[a-z][a-z0-9_]{0,31}$/],
+  ["opengeni.client.operation", /^[A-Za-z][A-Za-z0-9_]{0,63}$/],
+  // Database password rotation events: the code-chosen pool name, which
+  // password file could not be read, and its errno code.
+  ["databasePool", /^[a-z][a-z0-9-]{0,63}$/],
+  ["credentialFile", /^(?:current|previous)$/],
+  ["credentialFileErrorCode", /^[A-Z][A-Z0-9_]{0,31}$/],
+  // Refused realtime negotiations (apps/api codex-realtime.ts): the failing
+  // stage, the adapter's own code-authored failure message, identifier-shaped
+  // provider error fields, and the provider call parameters with their source.
+  // Never a provider response body, credential, account or request content.
+  ["realtimeStage", /^(?:request|config|call)$/],
+  [
+    "realtimeSetupPhase",
+    /^(?:owner|candidates|lease|history|token|config|fence|provider_call|release)$/,
+  ],
+  ["realtimeFailureMessage", /^[A-Za-z][A-Za-z0-9 ._:()/-]{0,159}$/],
+  ["providerErrorCode", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["providerErrorType", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["providerErrorParam", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["realtimeConfigSource", /^(?:remote|fallback)$/],
+  ["realtimeAdvertisedVersion", REALTIME_PROVIDER_VALUE_PATTERN],
+  ["realtimeProviderModel", REALTIME_PROVIDER_VALUE_PATTERN],
+  ["realtimeProviderArchitecture", REALTIME_PROVIDER_VALUE_PATTERN],
+]);
+
+/**
+ * Web client error diagnostics: the only free-text fields allowed across the
+ * public boundary, reviewed as a deliberate exception so that a browser crash
+ * report says why the page failed, not only where. They are error text that
+ * can occasionally quote user content. A value is admitted only when it is
+ * already exactly what the shared client-error projection produces (scrubbed
+ * of obvious credentials and URL query strings, and within its per-field
+ * byte bound), so a caller that passes raw text under one of these names
+ * publishes nothing. No other caller uses these names.
+ */
+const PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES = new Map<string, ClientErrorDetailField>([
+  ["clientErrorName", "name"],
+  ["clientErrorMessage", "message"],
+  ["clientErrorStack", "stack"],
+  ["clientComponentStack", "componentStack"],
 ]);
 
 const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
@@ -372,6 +586,24 @@ const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
   "terminal.pty.write",
   "terminal.pty.resize",
   "terminal.pty.close",
+  "artifact.publish",
+  "browser.create",
+  "browser.resume",
+  "browser.suspend",
+  "browser.end",
+  "browser.read",
+  "browser.action",
+  "browser.control",
+  "browser.download.save",
+  "browser.recording.save",
+  "browser.attach",
+  "browser.hold",
+  "computer.create",
+  "computer.end",
+  "computer.read",
+  "computer.action",
+  "computer.control",
+  "computer.attach",
   "read",
   "mutation",
 ]);
@@ -411,7 +643,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "CodexCheckpointOperationError",
   "CodexFleetShadowOperationError",
   "ComputerActionTimeoutError",
-  "ComputerUnavailableError",
+  "ContextCompactionError",
   "CredentialRenewalOperationError",
   "CredentialReadOperationError",
   "EventPublishOperationError",
@@ -425,12 +657,15 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "MemorySearchOperationError",
   "NatsAuthCalloutOperationError",
   "OAuthOperationError",
+  "ParallelSessionTitleGenerationError",
+  "ParallelSessionTitlePersistenceError",
   "RunCredentialRenewalOperationError",
-  "RunStateCompatibilityError",
   "SandboxChannelAOperationError",
+  "SessionArchiveOperationError",
   "SnapshotOperationError",
   "StartupDependencyError",
   "TelemetryExportError",
+  "TemporalSdkOperationError",
   "CodemodeOperationError",
   "CodemodeTokenRenewalOperationError",
   "WorkerLifecycleOperation",
@@ -440,6 +675,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
 ]);
 
 const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
+  "action_timeout",
   "agent_command_wake_failed",
   "api_startup_failed",
   "api_uncaught_exception",
@@ -457,6 +693,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "codex_lease_loss_checkpoint_failed",
   "codex_active_credential_read_failed",
   "command_yield_timeout",
+  "compaction_provider_request_failed",
+  "compaction_summary_empty",
   "conflict",
   "control_wake_dispatch_failed",
   "fenced_event_live_publish_failed",
@@ -482,12 +720,16 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "memory_edit_embedding_failed",
   "memory_hybrid_vector_failed",
   "memory_save_embedding_failed",
+  "model_context_window_exceeded",
+  "model_request_size_exceeded",
   "nats_auth_callout_start_failed",
   "nested_agent_depth_exceeded",
   "nested_agent_depth_override_forbidden",
   "not_found",
   "oauth_operation_failed",
   "otlp_export_failed",
+  "parallel_session_title_generation_failed",
+  "parallel_session_title_persistence_failed",
   "payment_required",
   "provider_verification_failed",
   "sandbox_channel_a_cancelled",
@@ -497,9 +739,14 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "sandbox_channel_a_provider_unavailable",
   "screenshot_capture_failed",
   "session_event_live_publish_failed",
+  "session_archive_failed",
+  "session_archive_hash_mismatch",
+  "session_archive_object_missing",
+  "session_archive_storage_failed",
   "session_workflow_wake_failed",
   "snapshot_operation_failed",
   "startup_dependency_retry",
+  "temporal_sdk_failure_logged",
   "tool_list_too_large",
   "tool_result_too_large",
   "codemode_operation_failed",
@@ -509,8 +756,15 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "worker_draining",
   "worker_operation_failed",
   "worker_shutdown_request_failed",
+  "worker_cleanup_drain_exhausted",
   "workspace_control_live_publish_failed",
 ]);
+
+// Human-readable descriptions come only from the reviewed protocol vocabulary,
+// never an exception message or a caller-supplied errorMessage attribute.
+const PUBLIC_TELEMETRY_ERROR_MESSAGES = new Map(
+  [...PUBLIC_TELEMETRY_ERROR_CODES].map((code) => [code, code.replaceAll("_", " ")]),
+);
 
 const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
   "api",
@@ -530,7 +784,7 @@ const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
 export type SandboxOperationMetricObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "not_found" | "failed";
+  outcome: "ok" | "not_found" | "rejected" | "failed";
   durationMs: number;
   materializationFailureReason?: string;
 };
@@ -552,6 +806,31 @@ export function createObservability(
   options: ObservabilityOptions,
 ): Observability {
   return new Observability(settings, options);
+}
+
+/**
+ * Default metrics whose collection walks the whole JavaScript heap on Bun.
+ * Bun answers `v8.getHeapSpaceStatistics()` from a full heap census, which
+ * blocks the event loop for hundreds of milliseconds on a busy process at
+ * every scrape, stalling every request in flight. The per-space split is
+ * V8-specific anyway; heap totals stay available from the cheap
+ * `nodejs_heap_size_*` and `process_heap_bytes` series.
+ */
+export const FULL_HEAP_WALK_DEFAULT_METRICS = [
+  "nodejs_heap_space_size_total_bytes",
+  "nodejs_heap_space_size_used_bytes",
+  "nodejs_heap_space_size_available_bytes",
+] as const;
+
+export function dropFullHeapWalkMetrics(
+  registry: Registry,
+  prefix: string,
+  runtime: { bun?: string | undefined } = process.versions,
+): void {
+  if (!runtime.bun) return;
+  for (const name of FULL_HEAP_WALK_DEFAULT_METRICS) {
+    registry.removeSingleMetric(`${prefix}${name}`);
+  }
 }
 
 type MetricRegistration = {
@@ -600,7 +879,10 @@ export class Observability {
     private readonly options: ObservabilityOptions,
   ) {
     this.now = options.now ?? Date.now;
-    this.exporter = options.exporter ?? defaultExporter;
+    const exporter = options.exporter ?? defaultExporter;
+    // Export runs outside the trace that produced the data, or an outbound-call
+    // span would record (and then export) the export request itself.
+    this.exporter = (url, body, headers) => withoutTraceContext(() => exporter(url, body, headers));
     this.resourceAttributes = {
       "service.name": settings.serviceName,
       "service.instance.id": serviceInstanceId,
@@ -616,9 +898,10 @@ export class Observability {
     });
     if (settings.observabilityMetricsEnabled) {
       collectDefaultMetrics({ register: this.registry, prefix: "opengeni_" });
+      dropFullHeapWalkMetrics(this.registry, "opengeni_");
       this.setGauge({
         name: "opengeni_build_info",
-        help: "OpenGeni build information.",
+        help: "Opengeni build information.",
         labels: {
           version: buildVersion(),
           revision: settings.deploymentRevision ?? "dev",
@@ -705,14 +988,54 @@ export class Observability {
     this.log("warn", message, attributes);
   }
 
-  error(message: string, attributes: Attributes = {}): void {
-    this.log("error", message, attributes);
+  error(message: string, attributes: Record<string, unknown> = {}): void {
+    const context: Attributes = Object.fromEntries(
+      Object.entries(attributes).filter(
+        ([key, value]) =>
+          key !== "error" &&
+          (value == null || ["string", "number", "boolean"].includes(typeof value)),
+      ),
+    ) as Attributes;
+    if (attributes.error === undefined) {
+      this.log("error", message, context);
+      return;
+    }
+    const error = attributes.error;
+    const sessionId = context.childSessionId ?? context.sessionId ?? context["opengeni.session_id"];
+    const attemptId = context.attemptId ?? context["opengeni.attempt_id"];
+    const input: FailureDiagnosticInput = {
+      code: "operational_failure",
+      stage: "observability.error",
+      error,
+      ...(typeof sessionId === "string" ? { sessionId } : {}),
+      ...(typeof context.parentSessionId === "string"
+        ? { parentSessionId: context.parentSessionId }
+        : {}),
+      ...(typeof context.turnId === "string" ? { turnId: context.turnId } : {}),
+      ...(typeof attemptId === "string" ? { attemptId } : {}),
+    };
+    const projected = operationalErrorDiagnostic(input);
+    try {
+      this.recordFailureDiagnostic({ ...input, diagnosticId: projected.diagnostic.diagnosticId });
+    } catch {
+      // An unavailable diagnostic exporter must not suppress the local failure.
+    }
+    this.emitLog("error", message, context, projected.attributes);
   }
 
   log(
     level: "debug" | "info" | "warn" | "error",
     message: string,
     attributes: Attributes = {},
+  ): void {
+    this.emitLog(level, message, attributes);
+  }
+
+  private emitLog(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    attributes: Attributes,
+    failureAttributes: Attributes = {},
   ): void {
     const publicAttributes = projectPublicTelemetryAttributes(attributes);
     if (!this.settings.observabilityStructuredLogs) {
@@ -734,6 +1057,7 @@ export class Observability {
       environment: this.settings.environment,
       component: this.options.component,
       ...cleanAttributes(publicAttributes),
+      ...failureAttributes,
       ...(context ? { traceId: context.traceId, spanId: context.spanId } : {}),
     };
     const serialized = JSON.stringify(record);
@@ -749,7 +1073,19 @@ export class Observability {
   startSpan(
     name: string,
     attributes: Attributes = {},
-    options: { parent?: TraceContext | null; links?: TraceContext[]; startTimeMs?: number } = {},
+    options: {
+      parent?: TraceContext | null;
+      links?: TraceContext[];
+      startTimeMs?: number;
+      kind?: SpanKind;
+      /**
+       * Let code running under this span (database queries, outbound calls)
+       * record child spans through startChildSpan, at most this many for the
+       * whole tree and only until this span ends. Ignored while no OTLP
+       * endpoint is configured, so unexported spans cost nothing.
+       */
+      childSpanLimit?: number;
+    } = {},
   ): Span {
     const parent =
       options.parent === null
@@ -765,11 +1101,36 @@ export class Observability {
     const startMs = Number.isFinite(options.startTimeMs)
       ? Math.min(now, Math.max(0, options.startTimeMs!))
       : now;
+    const kind = options.kind ?? "internal";
     let ended = false;
+    let childSpansDropped = 0;
+    const childSpanLimit =
+      this.settings.observabilityOtlpEndpoint &&
+      Number.isInteger(options.childSpanLimit) &&
+      options.childSpanLimit! > 0
+        ? options.childSpanLimit!
+        : 0;
+    let childSpansRemaining = childSpanLimit;
+    const childSpans: ChildSpanRecorder | undefined =
+      childSpanLimit > 0
+        ? (childName, childAttributes, childKind, childParent) => {
+            if (ended) return undefined;
+            if (childSpansRemaining <= 0) {
+              childSpansDropped++;
+              return undefined;
+            }
+            childSpansRemaining--;
+            return this.startSpan(childName, childAttributes, {
+              parent: childParent,
+              kind: childKind,
+            });
+          }
+        : undefined;
     return {
       traceId,
       spanId,
       ...(parent?.traceFlags === undefined ? {} : { traceFlags: parent.traceFlags }),
+      ...(childSpans ? { childSpans } : {}),
       addLink: (context) => {
         const valid = validTraceContext(context);
         if (
@@ -796,12 +1157,16 @@ export class Observability {
           ...(parent ? { parentSpanId: parent.spanId } : {}),
           links,
           name: boundedOtlpString(name),
+          kind,
           startMs,
           endMs: this.now(),
           attributes: {
             ...projectPublicTelemetryAttributes({
               ...attributes,
               ...input.attributes,
+              ...(childSpansDropped > 0
+                ? { "opengeni.child_spans_dropped": childSpansDropped }
+                : {}),
               ...errorAttributes,
             }),
           },
@@ -819,7 +1184,7 @@ export class Observability {
   }): void {
     this.incrementCounter({
       name: "opengeni_http_requests_total",
-      help: "Total HTTP requests handled by OpenGeni.",
+      help: "Total HTTP requests handled by Opengeni.",
       labels: {
         method: input.method,
         route: input.route,
@@ -835,6 +1200,39 @@ export class Observability {
       labels: {
         method: input.method,
         route: input.route,
+        // Keep successful latency separate from fast denials without adding
+        // one histogram family per exact status code.
+        status_class:
+          Number.isInteger(input.status) && input.status >= 100 && input.status < 600
+            ? `${Math.floor(input.status / 100)}xx`
+            : "unknown",
+        component: this.options.component,
+      },
+    });
+  }
+
+  /**
+   * Count a rejected API request by route, status, public error code, and a
+   * bounded reason (`permission:<name>`, a typed detail code, or
+   * `unclassified`). Values outside the closed grammars collapse to `other` so
+   * a malformed caller can never mint a free-form series.
+   */
+  recordHttpRejection(input: {
+    method: string;
+    route: string;
+    status: number;
+    code: string;
+    reason: string;
+  }): void {
+    this.incrementCounter({
+      name: "opengeni_http_request_rejections_total",
+      help: "Rejected HTTP requests (status >= 400) by route, status, public error code, and bounded reason.",
+      labels: {
+        method: input.method,
+        route: input.route,
+        status: String(input.status),
+        code: HTTP_REJECTION_CODE_PATTERN.test(input.code) ? input.code : "other",
+        reason: HTTP_REJECTION_REASON_PATTERN.test(input.reason) ? input.reason : "other",
         component: this.options.component,
       },
     });
@@ -1068,6 +1466,7 @@ export class Observability {
     parentSpanId?: string;
     links: TraceContext[];
     name: string;
+    kind?: SpanKind;
     startMs: number;
     endMs: number;
     attributes: Attributes;
@@ -1095,7 +1494,7 @@ export class Observability {
                   ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
                   links: span.links.map(({ traceId, spanId }) => ({ traceId, spanId })),
                   name: span.name,
-                  kind: 1,
+                  kind: OTLP_SPAN_KIND[span.kind ?? "internal"],
                   startTimeUnixNano: millisToNanos(span.startMs),
                   endTimeUnixNano: millisToNanos(span.endMs),
                   attributes: otlpAttributes(span.attributes),
@@ -1108,14 +1507,18 @@ export class Observability {
       ],
     };
     this.spanBatch.push(body.resourceSpans[0]);
+    // Coalesce spans for a short window: a per-microtask flush sent nearly every
+    // span as its own request through the single serial export lane, which
+    // overflowed the bounded queue under concurrent turns and dropped spans.
     if (!this.spanBatchScheduled) {
       this.spanBatchScheduled = true;
-      queueMicrotask(() => {
+      const timer = setTimeout(() => {
         this.spanBatchScheduled = false;
         this.submitSpanBatch();
-      });
+      }, SPAN_BATCH_WINDOW_MS);
+      (timer as { unref?: () => void }).unref?.();
     }
-    if (this.spanBatch.length >= 32) this.submitSpanBatch();
+    if (this.spanBatch.length >= SPAN_BATCH_MAX_SPANS) this.submitSpanBatch();
   }
 
   private submitSpanBatch(): void {
@@ -1132,6 +1535,13 @@ export class Observability {
     );
   }
 }
+
+/** Spans buffered before one OTLP request; bounded well under the collector's request body cap. */
+const SPAN_BATCH_MAX_SPANS = 256;
+/** OTLP SpanKind numbers (opentelemetry-proto trace.proto). */
+const OTLP_SPAN_KIND: Record<SpanKind, number> = { internal: 1, server: 2, client: 3 };
+/** Longest a span waits in the batch before export. */
+const SPAN_BATCH_WINDOW_MS = 250;
 
 /**
  * Convert routed sandbox-provider observations into one bounded Prometheus
@@ -1236,6 +1646,8 @@ export type InteractionOperationMetricObservation = {
   operation: string;
   outcome: string;
   mode: string;
+  /** Bounded failure reason; `none` for successful or non-failed outcomes. */
+  reason?: string | undefined;
   durationMs: number;
   replayed?: boolean | undefined;
 };
@@ -1253,11 +1665,12 @@ export function interactionOperationMetricObserver(
     const operation = boundedMetricEnum(INTERACTION_OPERATIONS, observation.operation);
     const outcome = boundedMetricEnum(INTERACTION_OUTCOMES, observation.outcome);
     const mode = boundedMetricEnum(INTERACTION_MODES, observation.mode);
+    const reason = boundedMetricEnum(INTERACTION_OPERATION_REASONS, observation.reason ?? "none");
     try {
       observability.incrementCounter({
         name: "opengeni_interaction_operations_total",
-        help: "Browser and Computer operations by bounded resource, operation, mode, and outcome.",
-        labels: { resource, operation, mode, outcome },
+        help: "Browser and Computer operations by bounded resource, operation, mode, outcome, and failure reason.",
+        labels: { resource, operation, mode, outcome, reason },
       });
       observability.observeHistogram({
         name: "opengeni_interaction_operation_duration_seconds",
@@ -1540,19 +1953,63 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
+      ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectKnowledgeIndexDiagnosticAttributes(attributes),
+      ...projectTemporalSdkDiagnosticAttributes(attributes),
+      ...projectContextCompactionAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
-  return Object.fromEntries(
-    Object.entries(attributes).filter(([key, value]) => {
-      if (value === undefined) return false;
-      if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
-      const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
-      return typeof value === "string" && pattern?.test(value) === true;
-    }),
-  );
+  return {
+    ...projectContextCompactionAttributes(attributes),
+    ...Object.fromEntries(
+      Object.entries(attributes).filter(([key, value]) => {
+        if (value === undefined) return false;
+        if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+        const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
+        if (clientErrorField) {
+          return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
+        }
+        const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
+        return typeof value === "string" && pattern?.test(value) === true;
+      }),
+    ),
+  };
+}
+
+function projectContextCompactionAttributes(attributes: Attributes): Attributes {
+  if (attributes.op !== "context_compaction") return {};
+  const projected: Attributes = { op: "context_compaction" };
+  for (const [key, values] of [
+    ["reason", ["operator", "proactive", "overflow"]],
+    ["signalSource", ["provider", "operator", "history_footprint"]],
+    [
+      "historyFootprintDimension",
+      ["json_bytes", "rows", "json_nodes", "json_properties", "images"],
+    ],
+  ] as const) {
+    const value = attributes[key];
+    if (typeof value === "string" && (values as readonly string[]).includes(value))
+      projected[key] = value;
+  }
+  for (const key of [
+    "signalTokens",
+    "thresholdTokens",
+    "historyFootprintActual",
+    "historyFootprintThreshold",
+    "requestBytes",
+    "imageCount",
+    "imageBase64Bytes",
+    "systemBytes",
+    "toolsBytes",
+    "limitBytes",
+  ]) {
+    const value = attributes[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+      projected[key] = value;
+  }
+  return projected;
 }
 
 function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes {
@@ -1564,6 +2021,49 @@ function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes
     ...(typeof reasonKind === "string" && PUBLIC_API_FATAL_REASON_KINDS.has(reasonKind)
       ? { reasonKind }
       : {}),
+  };
+}
+
+function projectHttpDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "HttpOperationError") return {};
+  const method = attributes.method;
+  const route = attributes.route;
+  const reasonKind = attributes.reasonKind;
+  const diagnosticId = attributes.diagnosticId;
+  return {
+    ...(typeof method === "string" &&
+    ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(method)
+      ? { method }
+      : {}),
+    // Callers supply routeLabel(), not a URL, query, or concrete tenant path.
+    ...(typeof route === "string" &&
+    route.length <= 256 &&
+    /^\/(?:[A-Za-z0-9_-]+|:[A-Za-z][A-Za-z0-9_]*)(?:\/(?:[A-Za-z0-9_-]+|:[A-Za-z][A-Za-z0-9_]*))*$/.test(
+      route,
+    )
+      ? { route }
+      : {}),
+    ...(typeof reasonKind === "string" &&
+    [
+      "Error",
+      "TypeError",
+      "RangeError",
+      "AggregateError",
+      "PostgresError",
+      "DrizzleQueryError",
+      "SessionEventPersistenceError",
+      "SandboxWorkspaceMutationFencedError",
+      "Response",
+    ].includes(reasonKind)
+      ? { reasonKind }
+      : {}),
+    ...(typeof diagnosticId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(diagnosticId)
+      ? { diagnosticId }
+      : {}),
+    ...projectErrorCauseAttributes(attributes),
+    // Only an unclassified internal error logs its scrubbed cause message.
+    ...(attributes.errorCode === "internal_error" ? projectErrorCauseMessage(attributes) : {}),
   };
 }
 
@@ -1612,6 +2112,7 @@ function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attr
     PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get("sandboxLeaseKey")?.test(sandboxLeaseKey)
       ? { sandboxLeaseKey }
       : {}),
+    ...projectErrorCauseAttributes(attributes),
   };
 }
 
@@ -1671,6 +2172,28 @@ function projectKnowledgeIndexDiagnosticAttributes(attributes: Attributes): Attr
   return typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState) ? { sqlState } : {};
 }
 
+function projectTemporalSdkDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "TemporalSdkOperationError") return {};
+  const { sdkComponent, activity, workflowType, attempt, durationMs } = attributes;
+  // Code-registered type names and the SDK's component enum only; task
+  // tokens, workflow/run identifiers and the cause never cross this boundary.
+  return {
+    ...(typeof sdkComponent === "string" && TEMPORAL_SDK_COMPONENT_PATTERN.test(sdkComponent)
+      ? { sdkComponent }
+      : {}),
+    ...(typeof activity === "string" && TEMPORAL_TYPE_NAME_PATTERN.test(activity)
+      ? { activity }
+      : {}),
+    ...(typeof workflowType === "string" && TEMPORAL_TYPE_NAME_PATTERN.test(workflowType)
+      ? { workflowType }
+      : {}),
+    ...(typeof attempt === "number" && Number.isInteger(attempt) && attempt > 0 ? { attempt } : {}),
+    ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
+      ? { durationMs }
+      : {}),
+  };
+}
+
 function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
   const errorClass = attributes.errorClass;
   const errorCode = attributes.errorCode;
@@ -1683,7 +2206,7 @@ function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
         ? errorClass
         : "OperationError",
     ...(typeof errorCode === "string" && PUBLIC_TELEMETRY_ERROR_CODES.has(errorCode)
-      ? { errorCode }
+      ? { errorCode, errorMessage: PUBLIC_TELEMETRY_ERROR_MESSAGES.get(errorCode)! }
       : {}),
     ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
       ? { status }
@@ -1704,7 +2227,7 @@ type TelemetrySpanError = {
 
 /**
  * External OTLP projection. It intentionally exports only error class/status
- * metadata and never mutates canonical OpenGeni errors, events, or history.
+ * metadata and never mutates canonical Opengeni errors, events, or history.
  */
 function projectSpanErrorForTelemetry(error: unknown): TelemetrySpanError {
   const statusCode = errorStatusCode(error);
@@ -1809,6 +2332,8 @@ async function defaultExporter(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(1_000),
   });
+  // Export decisions use only the status; release the ignored response body.
+  await response.body?.cancel().catch(() => {});
   if (!response.ok) {
     throw new Error(`OTLP endpoint returned HTTP ${response.status}`);
   }

@@ -84,3 +84,58 @@ pub(super) fn configure_process_cgroup_before_exec(
         });
     }
 }
+
+/// Switches the calling thread (and only it) to `uid`/`gid` with exactly
+/// `groups` as supplementary groups, using the raw per-thread syscalls. Glibc's
+/// and musl's wrappers broadcast credential changes to every thread of the
+/// process; the raw syscalls do not, and after `fork` the child has one thread,
+/// so the same sequence serves both callers. Groups and gid change first, while
+/// the thread still holds the privilege to change them.
+fn switch_thread_credentials(uid: u32, gid: u32, groups: &[u32]) -> std::io::Result<()> {
+    // SAFETY: plain credential syscalls with a valid pointer/length pair; no
+    // allocation, locking or libc state is touched, so this is also
+    // async-signal-safe in a post-fork child.
+    unsafe {
+        if libc::syscall(libc::SYS_setgroups, groups.len(), groups.as_ptr()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::syscall(libc::SYS_setresgid, gid, gid, gid) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::syscall(libc::SYS_setresuid, uid, uid, uid) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn configure_credentials_before_exec(
+    command: &mut tokio::process::Command,
+    uid: u32,
+    gid: u32,
+    groups: Vec<u32>,
+    cwd: Option<std::ffi::CString>,
+) {
+    // SAFETY: the closure owns its group list and working directory (allocated
+    // before fork, only read after it) and calls nothing but the raw credential
+    // syscalls above and chdir(2), all async-signal-safe.
+    unsafe {
+        command.as_std_mut().pre_exec(move || {
+            switch_thread_credentials(uid, gid, &groups)?;
+            if let Some(cwd) = &cwd {
+                if libc::chdir(cwd.as_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+pub(super) fn drop_current_thread_credentials(
+    uid: u32,
+    gid: u32,
+    groups: &[u32],
+) -> std::io::Result<()> {
+    switch_thread_credentials(uid, gid, groups)
+}

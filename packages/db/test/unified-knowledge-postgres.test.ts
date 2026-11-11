@@ -1,8 +1,9 @@
 import { sql } from "drizzle-orm";
+import { WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS } from "@opengeni/contracts";
 import {
+  changeKnowledgeEntryReach,
   prepareKnowledgeFile,
   updateScheduledTaskForApi,
-  captureScheduledTaskRestoreState,
   syncUpdatedScheduledTask,
   type AccessGrantAuthorization,
   type SessionWorkflowClient,
@@ -11,7 +12,7 @@ import { parseDocumentBytes, type DocumentServices } from "@opengeni/documents";
 import type { ObjectStorage } from "@opengeni/storage";
 import { knowledgeContractPdf } from "./fixtures/knowledge-pdf";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   appendSessionHistoryItems,
@@ -23,11 +24,14 @@ import {
   getFilesForSubject,
   listFilesForSubject,
   nestedPostgresSqlState,
+  updateFileReach,
   withSessionRlsActorContext,
   withRlsContext,
   KnowledgeEntryIdRequiredError,
   KnowledgeEntryIdTakenError,
   knowledgeEntryIdForOperation,
+  createWorkspaceInstructionPolicyDraft,
+  activateWorkspaceInstructionPolicyRevision,
 } from "../src";
 import { applySkillLifecycle } from "../src/skills";
 import { createTaskNote, archiveTaskNote } from "../src/task-notes";
@@ -41,12 +45,14 @@ import {
   listAgentLearningOverrides,
   getAgentInstruction,
   getKnowledgeEntry,
+  getKnowledgeEntryReach,
   listKnowledgeEntries,
   listKnowledgeReviewBatches,
   restoreKnowledgeEntry,
   reviewKnowledgeEntry,
   saveAgentLearningSettings,
   saveKnowledgeEntry,
+  setKnowledgeEntryReach,
   reviewKnowledgeEntries,
   saveAgentInstruction,
   reviewAgentInstruction,
@@ -90,6 +96,16 @@ async function fixture() {
       },
     };
   return { accountId, workspaceId, subjectId, human };
+}
+/** The fixture person's Personal workspace in its organization. */
+async function personalWorkspace(f: Awaited<ReturnType<typeof fixture>>) {
+  const id = crypto.randomUUID();
+  await shared!
+    .admin`INSERT INTO workspaces(id,account_id,name) VALUES(${id},${f.accountId},'Personal')`;
+  await shared!
+    .admin`INSERT INTO organization_memberships(account_id,subject_id,status,personal_workspace_id)
+    VALUES(${f.accountId},${f.subjectId},'active',${id})`;
+  return id;
 }
 async function attempt(
   f: Awaited<ReturnType<typeof fixture>>,
@@ -201,7 +217,7 @@ describe("unified Knowledge storage", () => {
       canonicalLocalHumanSession: false,
     };
     const source = { kind: "scheduled_task" as const, id: task.id };
-    const restoreState = await captureScheduledTaskRestoreState(client.db, task);
+    const restoreState = { task };
     await expect(
       updateScheduledTaskForApi(
         client.db,
@@ -249,8 +265,11 @@ describe("unified Knowledge storage", () => {
         previous: restoreState,
         task: changed,
         workflowClient: {
-          syncScheduledTask: async () => {
-            throw new Error("Temporal unavailable");
+          syncScheduledTask: async ({
+            onFailure,
+          }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+            const error = new Error("Temporal unavailable");
+            throw await client.db.transaction((tx) => onFailure!(tx, error));
           },
         } as unknown as SessionWorkflowClient,
       }),
@@ -778,9 +797,9 @@ describe("unified Knowledge storage", () => {
 
   test("personal knowledge and defaults survive deletion of their originating workspace", async () => {
     const f = await fixture();
-    const destination = crypto.randomUUID();
-    await shared!
-      .admin`INSERT INTO workspaces(id,account_id,name) VALUES(${destination},${f.accountId},'Other workspace')`;
+    // A new personal entry works where it was added and in its owner's
+    // Personal workspace (1196), which keeps it when the other one goes.
+    const destination = await personalWorkspace(f);
     const personal = await save(f.human, "Company research retained privately", {
       scope: "personal",
     });
@@ -867,7 +886,7 @@ describe("unified Knowledge storage", () => {
     );
   }, 180_000);
 
-  test("a private agent reads shared facts but only authors its own personal Knowledge", async () => {
+  test("a private agent authors personal Knowledge by default and shared Knowledge only by explicit choice", async () => {
     const f = await fixture();
     const sharedFact = await save(f.human, "A shared customer fact");
     const { agent } = await attempt(f, null, true);
@@ -878,21 +897,23 @@ describe("unified Knowledge storage", () => {
     expect((await getKnowledgeEntry(client.db, f.human, privateFact.entryId))?.scope).toBe(
       "personal",
     );
-    await fails(
-      save(agent, "Cannot overwrite the shared fact", {
-        entryId: sharedFact.entryId,
-        expectedVersion: 1,
-      }),
-      "42501",
-    );
-    await fails(
-      archiveKnowledgeEntry(client.db, agent, {
-        operationId: crypto.randomUUID(),
-        entryId: sharedFact.entryId,
-        expectedVersion: 1,
-      }),
-      "42501",
-    );
+    // Correcting a shared fact by its id, or choosing the workspace scope,
+    // saves to the workspace under the workspace's own Knowledge mode.
+    const corrected = await save(agent, "A corrected shared fact", {
+      entryId: sharedFact.entryId,
+      expectedVersion: 1,
+    });
+    expect(corrected.outcome).toBe("published");
+    const after = await getKnowledgeEntry(client.db, f.human, sharedFact.entryId);
+    expect(after?.scope).toBe("workspace");
+    expect(after?.revision.entry.content).toBe("A corrected shared fact");
+    const chosen = await save(agent, "A fact for everyone", { scope: "workspace" });
+    expect((await getKnowledgeEntry(client.db, f.human, chosen.entryId))?.scope).toBe("workspace");
+    await archiveKnowledgeEntry(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      entryId: sharedFact.entryId,
+      expectedVersion: 2,
+    });
     const other = { ...f.human, actor: { ...f.human.actor, subjectId: "user:someone-else" } };
     expect(await getKnowledgeEntry(client.db, other, privateFact.entryId)).toBeNull();
   });
@@ -1009,6 +1030,28 @@ describe("unified Knowledge storage", () => {
     const elsewhere = crypto.randomUUID();
     await shared!
       .admin`INSERT INTO workspaces(id,account_id,name) VALUES(${elsewhere},${f.accountId},'Another workspace')`;
+    // A new Only me file works only where it was stored until its owner turns
+    // it on in another workspace.
+    await withSessionRlsActorContext(owned, async () => {
+      const page = await listFilesForSubject(client.db, {
+        ...request,
+        workspaceId: elsewhere,
+        scope: "personal",
+      });
+      expect(page.files).toEqual([]);
+    });
+    expect(
+      (
+        await updateFileReach(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          fileId,
+          reachWorkspaceIds: [elsewhere],
+          actorSubjectId: f.subjectId,
+          auditSubjectId: f.subjectId,
+        })
+      ).kind,
+    ).toBe("changed");
     await withSessionRlsActorContext(owned, async () => {
       const page = await listFilesForSubject(client.db, {
         ...request,
@@ -1093,9 +1136,7 @@ describe("unified Knowledge storage", () => {
     expect(
       await getKnowledgeOriginalFile(client.db, sharedAgent.agent, source.receipt.entryId),
     ).toBeNull();
-    const destination = crypto.randomUUID();
-    await shared!
-      .admin`INSERT INTO workspaces(id,account_id,name) VALUES(${destination},${f.accountId},'Other workspace')`;
+    const destination = await personalWorkspace(f);
     await shared!.admin`DELETE FROM workspaces WHERE id=${f.workspaceId}`;
     const reader = { ...f.human, workspaceId: destination };
     expect(
@@ -1647,11 +1688,12 @@ describe("unified Knowledge storage", () => {
       expectedActivationVersion: 0,
       content: null,
     });
+    const prefix = "Keep unrelated standing rules.\n".repeat(100);
     const published = await saveAgentInstruction(client.db, first.agent, {
       operationId: crypto.randomUUID(),
       target: { kind: "policy", scope: "global", roleKey: null },
       editMode: "append",
-      content: "Include the contract currency when reporting a renewal amount.",
+      content: prefix + "Include the contract currency when reporting a renewal amount.",
       expectedCurrentRevisionId: null,
       expectedActivationVersion: 0,
       reason: "Avoid ambiguous amounts",
@@ -1666,7 +1708,7 @@ describe("unified Knowledge storage", () => {
     ).toMatchObject({
       expectedCurrentRevisionId: published.revisionId,
       expectedActivationVersion: 1,
-      content: "Include the contract currency when reporting a renewal amount.",
+      content: prefix + "Include the contract currency when reporting a renewal amount.",
     });
     await saveAgentLearningSettings(client.db, f.human, {
       scope: "workspace",
@@ -1730,7 +1772,198 @@ describe("unified Knowledge storage", () => {
         roleKey: null,
       }),
     ).toMatchObject({
-      content: "Include the contract currency and applicable tax when reporting a renewal amount.",
+      content:
+        prefix +
+        "Include the contract currency and applicable tax when reporting a renewal amount.",
+    });
+  });
+
+  test("agent instruction size parity: long localized edits, appends and removals preserve a human policy", async () => {
+    const f = await fixture();
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: { knowledge: "automatic", instructions: "automatic", skills: "review_first" },
+    });
+    const { agent } = await attempt(f);
+    const target = { kind: "policy" as const, scope: "global" as const, roleKey: null };
+    const prefix = "Preserve this unrelated rule.\n".repeat(100);
+    const suffix = "\nPreserve the final rule.";
+    const oldText = "Report blockers early.".repeat(40);
+    const newText = "Report confirmed blockers early.".repeat(40);
+    const content = prefix + oldText + suffix;
+    const draft = await createWorkspaceInstructionPolicyDraft(client.db, {
+      ...target,
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      content,
+      provenanceSource: "human",
+      provenanceSourceId: null,
+      supersedesRevisionId: null,
+      createdBySubjectId: f.subjectId,
+    });
+    await activateWorkspaceInstructionPolicyRevision(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      revisionId: draft.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.subjectId,
+      reason: "Human baseline",
+    });
+    const edited = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "edit",
+      oldText,
+      newText,
+      expectedCurrentRevisionId: draft.id,
+      expectedActivationVersion: 1,
+      reason: "Update only one rule",
+    });
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      content: prefix + newText + suffix,
+      expectedCurrentRevisionId: edited.revisionId,
+    });
+    const appended = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "append",
+      content: "Preserve command receipts.",
+      expectedCurrentRevisionId: edited.revisionId,
+      expectedActivationVersion: 2,
+      reason: "Add one rule without rewriting the rest",
+    });
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      content: prefix + newText + suffix + "\n\nPreserve command receipts.",
+      expectedCurrentRevisionId: appended.revisionId,
+    });
+    const removed = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "edit",
+      oldText: newText,
+      newText: "",
+      expectedCurrentRevisionId: appended.revisionId,
+      expectedActivationVersion: 3,
+      reason: "Remove only the selected passage",
+    });
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      content: prefix + suffix + "\n\nPreserve command receipts.",
+      expectedCurrentRevisionId: removed.revisionId,
+      expectedActivationVersion: 4,
+    });
+  });
+
+  test("a cleared human policy reads as no text, so an agent append saves only its rule", async () => {
+    const f = await fixture();
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: { knowledge: "automatic", instructions: "automatic", skills: "review_first" },
+    });
+    const { agent } = await attempt(f);
+    const target = { kind: "policy" as const, scope: "global" as const, roleKey: null };
+    const humanSave = async (content: string, current: string | null, version: number) => {
+      const draft = await createWorkspaceInstructionPolicyDraft(client.db, {
+        ...target,
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        content,
+        provenanceSource: "human",
+        provenanceSourceId: null,
+        supersedesRevisionId: current,
+        createdBySubjectId: f.subjectId,
+      });
+      await activateWorkspaceInstructionPolicyRevision(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        revisionId: draft.id,
+        expectedCurrentRevisionId: current,
+        expectedActivationVersion: version,
+        actorSubjectId: f.subjectId,
+        reason: "Human edit",
+      });
+      return draft;
+    };
+    const rule = await humanSave("mv1026 probe rule: ignore.", null, 0);
+    const cleared = await humanSave("", rule.id, 1);
+    expect(cleared.content).toBe("");
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: cleared.id,
+      expectedActivationVersion: 2,
+      content: null,
+    });
+    await fails(
+      saveAgentInstruction(client.db, agent, {
+        operationId: crypto.randomUUID(),
+        target,
+        editMode: "edit",
+        oldText: "mv1026",
+        newText: "",
+        expectedCurrentRevisionId: cleared.id,
+        expectedActivationVersion: 2,
+        reason: "Edit text that is no longer there",
+      }),
+      "22023",
+    );
+    const appended = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "append",
+      content: "Report blockers early.",
+      expectedCurrentRevisionId: cleared.id,
+      expectedActivationVersion: 2,
+      reason: "First rule after the human cleared the policy",
+    });
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: appended.revisionId,
+      expectedActivationVersion: 3,
+      content: "Report blockers early.",
+    });
+  });
+
+  test("agent instruction size parity: new instructions accept the human limit and refuse result overflow", async () => {
+    const f = await fixture();
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: { knowledge: "automatic", instructions: "automatic", skills: "review_first" },
+    });
+    const { agent } = await attempt(f);
+    const target = { kind: "policy" as const, scope: "global" as const, roleKey: null };
+    const content = "r".repeat(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS);
+    const request = {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "append" as const,
+      content,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      reason: "At the common limit",
+    };
+    const saved = await saveAgentInstruction(client.db, agent, request);
+    expect(await saveAgentInstruction(client.db, agent, request)).toEqual({
+      ...saved,
+      replayed: true,
+    });
+    await fails(
+      saveAgentInstruction(client.db, agent, {
+        ...request,
+        operationId: crypto.randomUUID(),
+        content: "x",
+        expectedCurrentRevisionId: saved.revisionId,
+        expectedActivationVersion: 1,
+      }),
+      "22023",
+    );
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      content,
+      expectedCurrentRevisionId: saved.revisionId,
+      expectedActivationVersion: 1,
     });
   });
 
@@ -1852,7 +2085,7 @@ describe("unified Knowledge storage", () => {
         operationId: crypto.randomUUID(),
         target,
         editMode: "append",
-        content: "R".repeat(590),
+        content: "R".repeat(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS - 1),
         expectedCurrentRevisionId: edited.revisionId,
         expectedActivationVersion: 3,
         reason: "Do not truncate",
@@ -2128,27 +2361,6 @@ describe("unified Knowledge storage", () => {
     ).toEqual([saved.receipt.entryId, finding.entryId].sort());
     await shared!.admin`UPDATE files SET status='failed' WHERE id=${fileId}`;
     expect(await getKnowledgeEntry(client.db, agent, finding.entryId)).toBeNull();
-  });
-
-  test("0469 rejects missing or live old runtime identities before changing definitions", async () => {
-    const migration = await Bun.file(
-      new URL("../drizzle/0469_knowledge_source_discovery.sql", import.meta.url),
-    ).text();
-    const drain = migration.slice(
-      migration.indexOf("DO $drain$"),
-      migration.indexOf("END $drain$;") + "END $drain$;".length,
-    );
-    const appRole = decodeURIComponent(new URL(shared!.appUrl).username);
-    // Open the lazy runtime pool even when this test is run in isolation.
-    await listKnowledgeEntries(client.db, (await fixture()).human);
-    for (const roles of ["", "[]", '[" invalid "]', JSON.stringify([appRole])]) {
-      await expect(
-        shared!.admin.begin(async (tx) => {
-          await tx`SELECT set_config('opengeni.migration_application_roles',${roles},true)`;
-          await tx.unsafe(drain);
-        }),
-      ).rejects.toMatchObject({ code: "55000" });
-    }
   });
 
   test("source purpose is validated at the database lifecycle boundary", async () => {
@@ -2447,5 +2659,226 @@ describe("unified Knowledge storage", () => {
       }),
       "42501",
     );
+  });
+});
+
+describe("where Knowledge works (1196)", () => {
+  /** The fixture's workspace A, shared workspaces B and C, and the person's
+   * Personal workspace P. The person is a member of A and B. */
+  async function organization() {
+    const f = await fixture();
+    const workspace = async (name: string) => {
+      const id = crypto.randomUUID();
+      await shared!
+        .admin`INSERT INTO workspaces(id,account_id,name) VALUES(${id},${f.accountId},${name})`;
+      await shared!
+        .admin`INSERT INTO workspace_inference_controls(workspace_id,account_id) VALUES(${id},${f.accountId})`;
+      return id;
+    };
+    const b = await workspace("B");
+    const c = await workspace("C");
+    const p = await personalWorkspace(f);
+    for (const id of [f.workspaceId, b])
+      await shared!.admin`INSERT INTO workspace_memberships(account_id,workspace_id,subject_id)
+        VALUES(${f.accountId},${id},${f.subjectId})`;
+    const as = (
+      workspaceId: string,
+      writeScopes: Array<"workspace" | "personal" | "organization"> = f.human.actor.writeScopes,
+    ): KnowledgeContext => ({ ...f.human, workspaceId, actor: { ...f.human.actor, writeScopes } });
+    return { f, a: f.workspaceId, b, c, p, as };
+  }
+  type Org = Awaited<ReturnType<typeof organization>>;
+  const add = async (context: KnowledgeContext, scope: "organization" | "workspace" | "personal") =>
+    (
+      await saveKnowledgeEntry(client.db, context, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        scope,
+        entry: { kind: "fact", title: `Reach ${scope}`, content: "Where this works" },
+      })
+    ).entryId;
+  /** Whether a person (or `context`) in each workspace can open and list it. */
+  const where = async (org: Org, entryId: string, context = org.as) => {
+    const seen: Record<"a" | "b" | "c" | "p", boolean> = { a: false, b: false, c: false, p: false };
+    for (const key of ["a", "b", "c", "p"] as const) {
+      const here = context(org[key]);
+      const opened = (await getKnowledgeEntry(client.db, here, entryId)) !== null;
+      const listed = (await listKnowledgeEntries(client.db, here, { limit: 50 })).entries.some(
+        (entry) => entry.id === entryId,
+      );
+      expect(listed).toBe(opened);
+      seen[key] = opened;
+    }
+    return seen;
+  };
+  const reach = (allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean) => ({
+    allowedWorkspaceIds,
+    allowPersonalWorkspaces,
+  });
+
+  test("an organization entry works everywhere until its organization picks workspaces", async () => {
+    const org = await organization();
+    const id = await add(org.as(org.a), "organization");
+    expect(await where(org, id)).toEqual({ a: true, b: true, c: true, p: true });
+    expect(await getKnowledgeEntryReach(client.db, org.as(org.b), id)).toEqual({
+      entryId: id,
+      scope: "organization",
+      originWorkspaceId: org.a,
+      reach: reach(null, true),
+      canChange: true,
+    });
+
+    // Changed from B, which then loses it; A always keeps it and isn't stored.
+    const changed = await setKnowledgeEntryReach(client.db, org.as(org.b), {
+      entryId: id,
+      reach: reach([org.c, org.a, org.c], false),
+    });
+    expect(changed.reach).toEqual(reach([org.c], false));
+    expect(await where(org, id)).toEqual({ a: true, b: false, c: true, p: false });
+    expect(await getKnowledgeEntryReach(client.db, org.as(org.b), id)).toBeNull();
+
+    await setKnowledgeEntryReach(client.db, org.as(org.a), {
+      entryId: id,
+      reach: reach(null, false),
+    });
+    expect(await where(org, id)).toEqual({ a: true, b: true, c: true, p: false });
+    await setKnowledgeEntryReach(client.db, org.as(org.a), { entryId: id, reach: reach([], true) });
+    expect(await where(org, id)).toEqual({ a: true, b: false, c: false, p: true });
+
+    // Not a revision: the entry keeps its version. The change is audited.
+    expect((await getKnowledgeEntry(client.db, org.as(org.a), id))?.version).toBe(1);
+    const audits = await shared!.admin<{ subject_id: string; metadata: unknown }[]>`
+      SELECT subject_id, metadata FROM audit_events WHERE account_id=${org.f.accountId}
+        AND action='knowledge.reach.changed' AND target_id=${id} ORDER BY occurred_at, id`;
+    expect(audits).toHaveLength(3);
+    expect(audits[0]).toEqual({
+      subject_id: org.f.subjectId,
+      metadata: { scope: "organization", from: reach(null, true), to: reach([org.c], false) },
+    });
+
+    // Without organization write access: visible, but not changeable.
+    const reader = org.as(org.a, ["workspace", "personal"]);
+    expect((await getKnowledgeEntryReach(client.db, reader, id))?.canChange).toBe(false);
+    await fails(
+      setKnowledgeEntryReach(client.db, reader, { entryId: id, reach: reach(null, true) }),
+      "42501",
+    );
+  });
+
+  test("a new personal entry works where it was added, in Personal and where its owner turns it on", async () => {
+    const org = await organization();
+    const id = await add(org.as(org.a), "personal");
+    expect(await where(org, id)).toEqual({ a: true, b: false, c: false, p: true });
+    expect((await getKnowledgeEntryReach(client.db, org.as(org.p), id))?.reach).toEqual(
+      reach([], true),
+    );
+
+    await setKnowledgeEntryReach(client.db, org.as(org.p), {
+      entryId: id,
+      reach: reach([org.b], true),
+    });
+    expect(await where(org, id)).toEqual({ a: true, b: true, c: false, p: true });
+    await setKnowledgeEntryReach(client.db, org.as(org.p), {
+      entryId: id,
+      reach: reach(null, true),
+    });
+    expect(await where(org, id)).toEqual({ a: true, b: true, c: true, p: true });
+
+    // Personal always has it.
+    await fails(
+      setKnowledgeEntryReach(client.db, org.as(org.p), { entryId: id, reach: reach([], false) }),
+      "22023",
+    );
+    // Nobody else sees it, so nobody else reads or changes where it works.
+    const other = {
+      ...org.as(org.a),
+      actor: { ...org.f.human.actor, subjectId: `user:${crypto.randomUUID()}` },
+    };
+    expect(await getKnowledgeEntryReach(client.db, other, id)).toBeNull();
+    await fails(
+      setKnowledgeEntryReach(client.db, other, { entryId: id, reach: reach(null, true) }),
+      "42501",
+    );
+  });
+
+  test("existing personal entries keep working everywhere", async () => {
+    const org = await organization();
+    const id = await add(org.as(org.a), "personal");
+    await shared!.admin`UPDATE knowledge_entries SET reach_workspace_ids=NULL WHERE id=${id}`;
+    expect(await where(org, id)).toEqual({ a: true, b: true, c: true, p: true });
+    const organizationEntry = await add(org.as(org.a), "organization");
+    const [stored] = await shared!.admin<
+      { allowed_workspace_ids: string[] | null; allow_personal_workspaces: boolean }[]
+    >`SELECT allowed_workspace_ids, allow_personal_workspaces
+      FROM knowledge_entries WHERE id=${organizationEntry}`;
+    expect({ ...stored }).toEqual({ allowed_workspace_ids: null, allow_personal_workspaces: true });
+  });
+
+  test("workspace Knowledge stays in its workspace", async () => {
+    const org = await organization();
+    const id = await add(org.as(org.a), "workspace");
+    expect(await getKnowledgeEntryReach(client.db, org.as(org.a), id)).toEqual({
+      entryId: id,
+      scope: "workspace",
+      originWorkspaceId: org.a,
+      reach: null,
+      canChange: false,
+    });
+    await fails(
+      setKnowledgeEntryReach(client.db, org.as(org.a), { entryId: id, reach: reach(null, true) }),
+      "22023",
+    );
+  });
+
+  test("an agent that learns for its person finds their personal Knowledge only where it works", async () => {
+    const org = await organization();
+    // Added in Personal, so workspace A doesn't have it yet.
+    const id = await add(org.as(org.p), "personal");
+    const { agent } = await attempt(org.f, "automatic", true);
+    expect(await getKnowledgeEntry(client.db, agent, id)).toBeNull();
+    await setKnowledgeEntryReach(client.db, org.as(org.p), {
+      entryId: id,
+      reach: reach([org.a], true),
+    });
+    expect((await getKnowledgeEntry(client.db, agent, id))?.id).toBe(id);
+    // Agents never read or change where Knowledge works.
+    await fails(getKnowledgeEntryReach(client.db, agent, id), "42501");
+    await fails(
+      setKnowledgeEntryReach(client.db, agent, { entryId: id, reach: reach(null, true) }),
+      "42501",
+    );
+  });
+
+  test("the host checks the picked workspaces: shared ones for the organization, the owner's own for them", async () => {
+    const org = await organization();
+    const organizationEntry = await add(org.as(org.a), "organization");
+    const change = (context: KnowledgeContext, entryId: string, value: ReturnType<typeof reach>) =>
+      withSessionRlsActorContext({ subjectId: org.f.subjectId }, () =>
+        changeKnowledgeEntryReach({ db: client.db }, context, entryId, value),
+      );
+    const refused = async (action: Promise<unknown>, status: number) => {
+      const error = await action.then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect((error as { status?: number } | null)?.status).toBe(status);
+    };
+    // A Personal workspace isn't one of the organization's shared workspaces.
+    await refused(change(org.as(org.a), organizationEntry, reach([org.p], false)), 422);
+    expect(
+      (await change(org.as(org.a), organizationEntry, reach([org.b, org.c], false))).reach,
+    ).toEqual(reach([org.b, org.c].sort(), false));
+
+    const personalEntry = await add(org.as(org.a), "personal");
+    // C is not one of the owner's workspaces; their Personal one always has it.
+    await refused(change(org.as(org.a), personalEntry, reach([org.c], true)), 422);
+    expect((await change(org.as(org.a), personalEntry, reach([org.b, org.p], true))).reach).toEqual(
+      reach([org.b], true),
+    );
+    await refused(change(org.as(org.a), personalEntry, reach([], false)), 422);
+    const workspaceEntry = await add(org.as(org.a), "workspace");
+    await refused(change(org.as(org.a), workspaceEntry, reach(null, true)), 409);
+    await refused(change(org.as(org.b), workspaceEntry, reach(null, true)), 404);
   });
 });

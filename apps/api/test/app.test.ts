@@ -2,7 +2,12 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, spyOn, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
+import { SITE_FRAME_HEADER } from "@opengeni/contracts/site-session-http";
 import { ConnectAttemptConflictError, ConnectAttemptNotFoundError } from "@opengeni/db";
+import {
+  OPENGENI_BROWSER_REQUEST_HEADERS,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+} from "@opengeni/sdk/browser";
 import {
   apiRequestBodyLimitBytes,
   allowedCorsOrigin,
@@ -49,7 +54,8 @@ import {
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import * as opengeniDb from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,
@@ -59,6 +65,7 @@ import {
   type CapabilityInstallation,
   type SessionEvent,
 } from "@opengeni/contracts";
+import { errorMessage } from "@opengeni/contracts/values";
 
 describe("API helpers", () => {
   test("rejects embedded query setup transport without the edge-sanitization proof", () => {
@@ -100,7 +107,7 @@ describe("API helpers", () => {
 
   test("leaves only route-specific workspace protocols outside ordinary actor middleware", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
-    expect(workspaceActorContextExempt("PUT", "/v1/workspaces/external")).toBe(true);
+    expect(workspaceActorContextExempt("PUT", "/v1/workspaces/external")).toBe(false);
     expect(workspaceActorContextExempt("GET", "/v1/workspaces/external")).toBe(false);
     expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp`)).toBe(true);
     expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp/docs`)).toBe(true);
@@ -449,6 +456,7 @@ describe("API helpers", () => {
     expect(temporalOverlapPolicy("allow_concurrent")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
     expect(temporalOverlapPolicy("skip")).toBe(ScheduleOverlapPolicy.SKIP);
     expect(temporalOverlapPolicy("buffer_one")).toBe(ScheduleOverlapPolicy.BUFFER_ONE);
+    expect(temporalOverlapPolicy("steer")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
   });
 
   test("only creates a schedule after update when Temporal reports not found", () => {
@@ -526,9 +534,26 @@ describe("API helpers", () => {
     expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
     expect(external.headers.get("access-control-allow-headers")).toContain("Range");
     expect(external.headers.get("access-control-allow-headers")).toContain("X-OpenGeni-Site-Id");
+    // Resumable dictation uploads from a cross-origin embed send these per chunk.
+    for (const chunkHeader of [
+      "X-OpenGeni-Chunk-Duration-Milliseconds",
+      "X-OpenGeni-Chunk-Sha256",
+      "X-OpenGeni-Chunk-Start-Milliseconds",
+    ]) {
+      expect(external.headers.get("access-control-allow-headers")).toContain(chunkHeader);
+    }
     expect(external.headers.get("access-control-allow-headers")).toContain(
       "X-OpenGeni-Site-Version",
     );
+    // A conversation scopes media and Site reads to its session for proxies.
+    expect(external.headers.get("access-control-allow-headers")).toContain("X-OpenGeni-Session-Id");
+    // Every header the SDK's browser clients may send passes the preflight.
+    const allowedHeaders = (external.headers.get("access-control-allow-headers") ?? "")
+      .toLowerCase()
+      .split(/\s*,\s*/);
+    expect(
+      OPENGENI_BROWSER_REQUEST_HEADERS.filter((name) => !allowedHeaders.includes(name)),
+    ).toEqual([]);
 
     const externalResponse = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },
@@ -536,13 +561,18 @@ describe("API helpers", () => {
     expect(externalResponse.status).toBe(200);
     expect(externalResponse.headers.get("access-control-allow-origin")).toBe("*");
     expect(externalResponse.headers.get("access-control-allow-credentials")).toBeNull();
-    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
+    // Header names are case-insensitive; the exposed list is the SDK's lowercase contract.
+    const exposedHeaders = (externalResponse.headers.get("access-control-expose-headers") ?? "")
+      .toLowerCase()
+      .split(/\s*,\s*/);
+    expect(
+      OPENGENI_BROWSER_RESPONSE_HEADERS.filter((name) => !exposedHeaders.includes(name)),
+    ).toEqual([]);
+    for (const exposedHeader of [
       "Accept-Ranges",
-    );
-    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
       "Content-Range",
-    );
-    for (const eventHeader of [
+      "X-OpenGeni-Browser-Frame",
+      "X-OpenGeni-Browser-Frame-Note",
       "X-OpenGeni-Forensic-Exact",
       "X-OpenGeni-Has-More",
       "X-OpenGeni-Next-After",
@@ -550,7 +580,7 @@ describe("API helpers", () => {
       "X-OpenGeni-Page-Bytes",
       "X-OpenGeni-Truncated-By",
     ]) {
-      expect(externalResponse.headers.get("access-control-expose-headers")).toContain(eventHeader);
+      expect(exposedHeaders).toContain(exposedHeader.toLowerCase());
     }
 
     const trusted = await preflight("http://localhost:5173");
@@ -580,6 +610,39 @@ describe("API helpers", () => {
     expect(externalResponse.headers.get("access-control-expose-headers")?.toLowerCase()).toContain(
       "x-opengeni-actor-state",
     );
+  });
+
+  test("allows every header a Site bridge sets on cross-origin preflights", async () => {
+    const app = createApp({
+      settings: testSettings({ productAccessMode: "managed" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    // The bridge marks every bridged request as framed, names the frame and pins the Site.
+    const bridgeHeaders = [
+      SITE_FRAME_HEADER,
+      "x-opengeni-site-frame-id",
+      "x-opengeni-site-id",
+      "x-opengeni-site-version",
+    ];
+    for (const origin of ["https://product.example", "http://localhost:5173"]) {
+      const preflight = await app.request(
+        "http://localhost/v1/workspaces/00000000-0000-4000-8000-000000000001/published-artifacts/current/data/query",
+        {
+          method: "OPTIONS",
+          headers: {
+            origin,
+            "access-control-request-method": "POST",
+            "access-control-request-headers": ["content-type", ...bridgeHeaders].join(","),
+          },
+        },
+      );
+      expect(preflight.status).toBe(204);
+      const allowed = preflight.headers.get("access-control-allow-headers")?.toLowerCase() ?? "";
+      for (const header of bridgeHeaders) expect(allowed).toContain(header);
+    }
   });
 
   test("normalizes dynamic route labels for metrics", () => {
@@ -656,11 +719,9 @@ describe("API helpers", () => {
       "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/diagnostics",
     );
     expect(
-      routeLabel(
-        `/v1/workspaces/${workspace}/browser-sessions/browser-1/auth-runs/run-1/protected-fill`,
-      ),
+      routeLabel(`/v1/workspaces/${workspace}/browser-sessions/browser-1/auth-runs/run-1/report`),
     ).toBe(
-      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill",
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report",
     );
     expect(
       routeLabel(
@@ -788,9 +849,6 @@ describe("API helpers", () => {
     expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
       "/v1/integrations/provider-oauth/callback",
     );
-    expect(routeLabel("/v1/integrations/google-drive/callback")).toBe(
-      "/v1/integrations/google-drive/callback",
-    );
     expect(routeLabel(`/v1/workspaces/${workspace}/plugins/preview`)).toBe(
       "/v1/workspaces/:workspaceId/plugins/preview",
     );
@@ -826,6 +884,7 @@ describe("API helpers", () => {
     expect(errorCodeForStatus(401)).toBe("unauthenticated");
     expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
+    expect(errorCodeForStatus(410)).toBe("gone");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
   });
 
@@ -887,7 +946,7 @@ describe("API helpers", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         requestId: "browser-safe-503",
       },
@@ -912,7 +971,7 @@ describe("API helpers", () => {
     });
     const body = (await response.json()) as { error: { requestId: string; message: string } };
     expect(response.status).toBe(500);
-    expect(body.error.message).toBe("OpenGeni could not complete the request.");
+    expect(body.error.message).toBe("The workspace could not complete the request.");
     expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
@@ -1117,6 +1176,7 @@ describe("API helpers", () => {
     });
 
     expect(params.mode).toBe("payment");
+    expect(params.allow_promotion_codes).toBe(false);
     expect(params.customer).toBe("cus_test");
     expect(params.customer_update).toEqual({ address: "auto", name: "auto" });
     expect(params.automatic_tax).toEqual({ enabled: true });
@@ -1128,6 +1188,7 @@ describe("API helpers", () => {
           opengeni_credit_amount_usd: "25.50",
           opengeni_credit_micros: "25500000",
           opengeni_credit_idempotency_key: "checkout:test",
+          opengeni_credit_coupon_v1: "1",
         },
       },
     });
@@ -1135,12 +1196,50 @@ describe("API helpers", () => {
     expect(params.line_items?.[0]?.price_data?.product).toBe("prod_opengeni_credits");
     expect(params.metadata?.opengeni_credit_amount_usd).toBe("25.50");
     expect(params.metadata?.opengeni_credit_idempotency_key).toBe("checkout:test");
+    expect(params.metadata?.opengeni_credit_coupon_v1).toBe("1");
     expect(params.payment_intent_data?.metadata?.opengeni_account_id).toBe(
       "00000000-0000-4000-8000-000000000001",
     );
+    expect(params.payment_intent_data?.metadata?.opengeni_credit_coupon_v1).toBe("1");
   });
 
-  test("restricts Stripe Checkout return URLs to the public OpenGeni origin", () => {
+  test("applies a typed promotion code up front instead of Stripe's code field", () => {
+    const params = stripeCheckoutSessionCreateParams({
+      accountId: "00000000-0000-4000-8000-000000000001",
+      customerId: "cus_test",
+      amountCents: 10_000,
+      amountMicros: 100_000_000,
+      publicBaseUrl: "https://app.opengeni.ai",
+      successUrl:
+        "https://app.opengeni.ai/workspaces/w/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}",
+      idempotencyKey: "checkout:test",
+      promotionCodeId: "promo_test",
+      fullyDiscounted: true,
+    });
+
+    expect(params.discounts).toEqual([{ promotion_code: "promo_test" }]);
+    expect(params.allow_promotion_codes).toBeUndefined();
+    // A $0 checkout has nothing to tax, so Checkout asks for no billing address.
+    expect(params.automatic_tax).toEqual({ enabled: false });
+    expect(
+      stripeCheckoutSessionCreateParams({
+        accountId: "00000000-0000-4000-8000-000000000001",
+        customerId: "cus_test",
+        amountCents: 10_000,
+        amountMicros: 100_000_000,
+        publicBaseUrl: "https://app.opengeni.ai",
+        idempotencyKey: "checkout:test",
+        promotionCodeId: "promo_half",
+        fullyDiscounted: false,
+      }).automatic_tax,
+    ).toEqual({ enabled: true });
+    expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(10_000);
+    expect(params.metadata?.opengeni_credit_micros).toBe("100000000");
+    // Stripe fills in the session id; the placeholder must survive validation.
+    expect(params.success_url).toContain("checkoutSession={CHECKOUT_SESSION_ID}");
+  });
+
+  test("restricts Stripe Checkout return URLs to the public Opengeni origin", () => {
     const params = stripeCheckoutSessionCreateParams({
       accountId: "00000000-0000-4000-8000-000000000001",
       customerId: "cus_test",
@@ -1166,7 +1265,40 @@ describe("API helpers", () => {
         successUrl: "https://evil.example/checkout",
         idempotencyKey: "checkout:test-open-redirect",
       }),
-    ).toThrow("successUrl must use the OpenGeni public origin");
+    ).toThrow("successUrl must use the Opengeni public origin");
+  });
+
+  test("returns local Stripe Checkout to the configured web origin", () => {
+    const base = {
+      accountId: "00000000-0000-4000-8000-000000000001",
+      customerId: "cus_test",
+      amountCents: 1000,
+      amountMicros: 10_000_000,
+      publicBaseUrl: "http://127.0.0.1:8000",
+      webBaseUrl: "http://127.0.0.1:3000",
+      idempotencyKey: "checkout:test-local-return",
+    };
+    const params = stripeCheckoutSessionCreateParams({
+      ...base,
+      successUrl:
+        "http://127.0.0.1:3000/workspaces/test/organization?section=billing&checkout=success",
+      cancelUrl:
+        "http://127.0.0.1:3000/workspaces/test/organization?section=billing&checkout=cancelled",
+    });
+    expect(params.success_url).toContain("http://127.0.0.1:3000/workspaces/test/organization");
+    expect(params.cancel_url).toContain("checkout=cancelled");
+    expect(stripeCheckoutSessionCreateParams(base).success_url).toBe(
+      "http://127.0.0.1:3000/checkout-complete.html?checkout=success",
+    );
+    expect(stripeCheckoutSessionCreateParams(base).cancel_url).toBe(
+      "http://127.0.0.1:3000/checkout-complete.html?checkout=cancelled",
+    );
+    expect(() =>
+      stripeCheckoutSessionCreateParams({
+        ...base,
+        successUrl: "https://evil.example/checkout",
+      }),
+    ).toThrow("successUrl must use the Opengeni public or web origin");
   });
 
   test("namespaces Stripe customer mirrors by live and test mode", () => {
@@ -1197,7 +1329,15 @@ describe("API helpers", () => {
         publicBaseUrl: "https://app.opengeni.ai",
         returnUrl: "https://evil.example/billing",
       }),
-    ).toThrow("returnUrl must use the OpenGeni public origin");
+    ).toThrow("returnUrl must use the Opengeni public origin");
+    expect(
+      stripeBillingPortalSessionCreateParams({
+        customerId: "cus_test",
+        publicBaseUrl: "http://127.0.0.1:8000",
+        webBaseUrl: "http://127.0.0.1:3000",
+        returnUrl: "http://127.0.0.1:3000/workspaces/test/organization?section=billing",
+      }).return_url,
+    ).toBe("http://127.0.0.1:3000/workspaces/test/organization?section=billing");
   });
 
   test("discovers public MCP registry servers with bounded latest-version search", async () => {
@@ -1563,10 +1703,10 @@ describe("API helpers", () => {
         );
       });
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
 
-    expect(message).toContain("OpenGeni could not initialize configured.example");
+    expect(message).toContain("the workspace could not initialize configured.example");
     expect(message).not.toContain(fixturePassword);
     expect(message).not.toContain(fixtureSecret);
     expect(message).not.toContain("fixture-user");
@@ -1592,7 +1732,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because OpenGeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because the workspace could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 
@@ -1766,7 +1906,7 @@ describe("curated skill catalog enablement", () => {
         version: "1.0.0",
         contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
         sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
-        provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+        provenance: "Vendored from hashicorp/agent-skills; reviewed Opengeni curated entry.",
       },
     });
 
@@ -1788,7 +1928,7 @@ describe("curated skill catalog enablement", () => {
           libraryVersion: "1.0.0",
           contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
           sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
-          provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+          provenance: "Vendored from hashicorp/agent-skills; reviewed Opengeni curated entry.",
         },
       },
       new Set(),
@@ -1912,7 +2052,7 @@ describe("GET /v1/config/client", () => {
     const defaultModel = config.models.find((model) => model.id === settings.openaiModel);
     expect(defaultModel).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       api: "responses",
     });
@@ -1988,6 +2128,30 @@ describe("GET /v1/config/client", () => {
     expect(JSON.stringify(config.auth)).not.toContain("secret");
   });
 
+  test("projects whether new managed accounts may be created", async () => {
+    const open = await fetchClientConfig(testSettings({ productAccessMode: "managed" }));
+    expect(open.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: true });
+    const paused = await fetchClientConfig(
+      testSettings({ productAccessMode: "managed", managedAuthNewSignupsEnabled: false }),
+    );
+    expect(paused.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: false });
+  });
+
+  test("projects the server's own email verification requirement", async () => {
+    const required = await fetchClientConfig(testSettings({ productAccessMode: "managed" }));
+    expect(required.auth).toMatchObject({
+      mode: "managedSession",
+      emailVerificationRequired: true,
+    });
+    const optional = await fetchClientConfig(
+      testSettings({ productAccessMode: "managed", managedAuthRequireEmailVerification: false }),
+    );
+    expect(optional.auth).toMatchObject({
+      mode: "managedSession",
+      emailVerificationRequired: false,
+    });
+  });
+
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {
     const disabled = await fetchClientConfig(testSettings());
     expect(disabled.analytics).toEqual({ consentRequired: true, providers: {} });
@@ -2023,6 +2187,25 @@ describe("GET /v1/config/client", () => {
     expect(
       (await fetchClientConfig(testSettings({ documentationUrl: null }))).documentationUrl,
     ).toBeNull();
+  });
+
+  test("publishes legal document links only when the operator configures them", async () => {
+    const unconfigured = await fetchClientConfig(testSettings());
+    expect(unconfigured.legal).toEqual({});
+    expect(unconfigured.supportEmail).toBeUndefined();
+
+    const configured = await fetchClientConfig(
+      testSettings({
+        legalPrivacyPolicyUrl: "https://opengeni.ai/privacy",
+        legalTermsOfServiceUrl: "https://opengeni.ai/terms",
+        supportEmail: "support@opengeni.ai",
+      }),
+    );
+    expect(configured.legal).toEqual({
+      privacyPolicyUrl: "https://opengeni.ai/privacy",
+      termsOfServiceUrl: "https://opengeni.ai/terms",
+    });
+    expect(configured.supportEmail).toBe("support@opengeni.ai");
   });
 
   test("does not advertise a disconnected Codex subscription, even as deployment default", async () => {
@@ -2064,7 +2247,10 @@ describe("GET /v1/config/client", () => {
     expect(
       (await app.request("/v1/config/client", { headers: { cookie: "unrelated=expired" } })).status,
     ).toBe(200);
-    expect((await app.request("/v1/config/client?workspaceId=workspace")).status).toBe(401);
+    expect(
+      (await app.request("/v1/config/client?workspaceId=11111111-1111-4111-8111-111111111111"))
+        .status,
+    ).toBe(401);
     expect((await app.request("/v1/config/client?workspaceId=")).status).toBe(422);
   });
 
@@ -2090,7 +2276,10 @@ describe("GET /v1/config/client", () => {
     expect(bootstrap.status).toBe(200);
     expect(ClientConfig.parse(await bootstrap.json()).auth.mode).toBe("managedSession");
     expect(authReads).toBe(0);
-    const scoped = await app.request("/v1/config/client?workspaceId=workspace", { headers });
+    const scoped = await app.request(
+      "/v1/config/client?workspaceId=11111111-1111-4111-8111-111111111111",
+      { headers },
+    );
     expect(scoped.status).toBe(409);
     expect(authReads).toBe(1);
   });
@@ -2124,7 +2313,7 @@ describe("GET /v1/config/client", () => {
       id: "accounts/fireworks/models/glm-5p2",
       label: "GLM 5.2",
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       api: "chat",
       contextWindowTokens: 1_048_576,
@@ -2160,6 +2349,13 @@ describe("GET /v1/config/client", () => {
       config.models.find((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID),
     ).not.toHaveProperty("source");
     expect(JSON.stringify(config)).not.toContain("openrouter-client-config-secret");
+  });
+
+  test("tells clients whether this deployment accepts connected machines", async () => {
+    const enabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: true }));
+    expect(enabled.connectedMachines).toBe(true);
+    const disabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: false }));
+    expect(disabled.connectedMachines).toBe(false);
   });
 });
 

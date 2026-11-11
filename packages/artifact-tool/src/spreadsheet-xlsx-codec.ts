@@ -10,6 +10,7 @@ import {
 } from "./bounded-zip";
 import { FileBlob } from "./file-blob";
 import {
+  EXCEL_MAX_ROWS,
   formatCellAddress,
   formatRangeAddress,
   parseRangeAddress,
@@ -48,6 +49,7 @@ import type {
   FormulaResult,
   SpreadsheetImageConfig,
 } from "./spreadsheet-types";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const DEFAULT_XLSX_IMPORT_LIMITS: SpreadsheetXlsxImportLimits = Object.freeze({
   compressedBytes: 64 * 1024 * 1024,
@@ -520,9 +522,17 @@ function importWorkbook(
         if (view.xSplit) worksheet.freezePanes.freezeColumns(view.xSplit);
       }
 
+      // ExcelJS exposes sparse rows at runtime; its WorksheetModel declaration
+      // omits the field even though RowModel is public.
+      const rowModels = sourceSheet.model as ExcelJS.WorksheetModel & {
+        rows?: readonly ExcelJS.RowModel[];
+      };
+      for (const row of rowModels.rows ?? []) {
+        if (row.height && row.height > 0) {
+          worksheet.setRowHeight(row.number - 1, pointsToPixels(row.height));
+        }
+      }
       sourceSheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-        if (row.height && row.height > 0)
-          worksheet.setRowHeight(rowNumber - 1, pointsToPixels(row.height));
         row.eachCell({ includeEmpty: false }, (cell, columnNumber) => {
           const value = importCellValue(cell.value);
           const formula = formulaOf(cell.value);
@@ -540,10 +550,9 @@ function importWorkbook(
         });
       });
 
-      for (let columnNumber = 1; columnNumber <= sourceSheet.columnCount; columnNumber += 1) {
-        const width = sourceSheet.getColumn(columnNumber).width;
-        if (width && width > 0)
-          worksheet.setColumnWidth(columnNumber - 1, excelWidthToPixels(width));
+      for (const [column, definition] of (sourceSheet.columns ?? []).entries()) {
+        const width = definition?.width;
+        if (width && width > 0) worksheet.setColumnWidth(column, excelWidthToPixels(width));
       }
       for (const merge of sourceSheet.model.merges ?? []) worksheet.mergeCells(merge);
       importTables(worksheet, sourceSheet);
@@ -560,8 +569,8 @@ function importWorkbook(
 
 async function exportWorkbook(workbook: Workbook): Promise<ExcelJS.Workbook> {
   const output = await createExcelWorkbook();
-  output.creator = "OpenGeni";
-  output.lastModifiedBy = "OpenGeni";
+  output.creator = "Opengeni";
+  output.lastModifiedBy = "Opengeni";
   output.created = new Date(0);
   output.modified = new Date(0);
   output.calcProperties.fullCalcOnLoad = true;
@@ -607,12 +616,24 @@ async function exportWorkbook(workbook: Workbook): Promise<ExcelJS.Workbook> {
         sheet.getRow(row + 1).height = pixelsToPoints(worksheet.rowHeight(row));
       }
     }
+    // Sparse geometry can exist beyond the cell rectangle or on an empty sheet.
+    for (const [col, width] of worksheet.columnWidthEntries()) {
+      sheet.getColumn(col + 1).width = pixelsToExcelWidth(width);
+    }
+    for (const [row, height] of worksheet.rowHeightEntries()) {
+      sheet.getRow(row + 1).height = pixelsToPoints(height);
+    }
     for (const merge of worksheet.mergeRegions()) sheet.mergeCells(formatRangeAddress(merge));
     exportDataValidations(worksheet, sheet);
     exportConditionalFormattings(worksheet, sheet);
     exportTables(worksheet, sheet);
     exportImages(output, worksheet, sheet);
     exportComments(workbook, worksheet, sheet);
+  }
+  // OOXML requires at least one <sheet>, and Excel rejects a sheetless
+  // package as corrupt, so an empty workbook exports as one blank sheet.
+  if (workbook.worksheets.items.length === 0) {
+    output.addWorksheet("Sheet1", { views: [{ state: "normal" }] });
   }
   return output;
 }
@@ -1243,6 +1264,9 @@ function excelWidthToPixels(width: number): number {
 }
 
 function pixelsToExcelWidth(pixels: number): number {
+  if (pixels < 6) {
+    throw new RangeError("XLSX column widths below 6 pixels cannot round-trip through this codec");
+  }
   return Math.max(0.1, Number(((pixels - 5) / 7).toFixed(2)));
 }
 
@@ -1296,13 +1320,6 @@ async function toBytes(
 
 async function workbookModelDigest(workbook: Workbook): Promise<string> {
   return sha256Hex(new TextEncoder().encode(JSON.stringify(workbook.toJSON())));
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const owned = new Uint8Array(bytes.byteLength);
-  owned.set(bytes);
-  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", owned));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** ExcelJS stamps ZIP headers with wall-clock time; normalize package metadata only. */
@@ -1441,6 +1458,8 @@ async function preflightXlsx(
   let xmlElements = 0;
   let xmlTextCharacters = 0;
   let worksheetCells = 0;
+  let worksheetMergeCells = 0;
+  let worksheetValidationAddresses = 0;
   let formulas = 0;
   let formulaBytes = 0;
   let sharedStrings = 0;
@@ -1570,6 +1589,8 @@ async function preflightXlsx(
     xmlElements += counts.elements;
     xmlTextCharacters += counts.textCharacters;
     worksheetCells += counts.worksheetCells;
+    worksheetMergeCells += counts.worksheetMergeCells;
+    worksheetValidationAddresses += counts.worksheetValidationAddresses;
     formulas += counts.formulas;
     formulaBytes += counts.formulaBytes;
     sharedStrings += counts.sharedStrings;
@@ -1621,6 +1642,20 @@ async function preflightXlsx(
     if (worksheetCells > limits.worksheetCells) {
       throw securityError(
         `OOXML package exceeds the ${limits.worksheetCells} worksheet-cell limit`,
+        "limit-exceeded",
+        entry.name,
+      );
+    }
+    if (worksheetMergeCells > limits.worksheetCells) {
+      throw securityError(
+        `OOXML package merged ranges exceed the ${limits.worksheetCells} worksheet-cell limit`,
+        "limit-exceeded",
+        entry.name,
+      );
+    }
+    if (worksheetValidationAddresses > MAX_DATA_VALIDATION_ADDRESSES) {
+      throw securityError(
+        `OOXML package data validations exceed the ${MAX_DATA_VALIDATION_ADDRESSES} covered-address limit`,
         "limit-exceeded",
         entry.name,
       );
@@ -2041,6 +2076,10 @@ type XmlInspection = {
   elements: number;
   textCharacters: number;
   worksheetCells: number;
+  /** Cells covered by merged ranges, which ExcelJS materializes as real cells. */
+  worksheetMergeCells: number;
+  /** Addresses covered by data-validation ranges, which ExcelJS expands into map entries. */
+  worksheetValidationAddresses: number;
   formulas: number;
   formulaBytes: number;
   sharedStrings: number;
@@ -2103,6 +2142,8 @@ function inspectXml(
     elements: 0,
     textCharacters: 0,
     worksheetCells: 0,
+    worksheetMergeCells: 0,
+    worksheetValidationAddresses: 0,
     formulas: 0,
     formulaBytes: 0,
     sharedStrings: 0,
@@ -2265,6 +2306,27 @@ function inspectXml(
         );
       }
     }
+    if (/^xl\/worksheets\/[^/]+\.xml$/i.test(entryName) && tag.prefix === "") {
+      if (localName === "mergeCell") {
+        // ExcelJS creates a real cell for every merged address, so merged areas are charged
+        // against the worksheet-cell budget before the package reaches it.
+        result.worksheetMergeCells = chargeWorksheetRangeArea(
+          attributes.get("ref"),
+          result.worksheetMergeCells,
+          limits.worksheetCellsPerPart,
+          "merged ranges",
+          entryName,
+        );
+      } else if (localName === "dataValidation") {
+        result.worksheetValidationAddresses = chargeWorksheetRangeArea(
+          attributes.get("sqref"),
+          result.worksheetValidationAddresses,
+          MAX_DATA_VALIDATION_ADDRESSES,
+          "data validations",
+          entryName,
+        );
+      }
+    }
     if (/^xl\/sharedStrings\.xml$/i.test(entryName) && localName === "si") {
       result.sharedStrings += 1;
       if (result.sharedStrings > limits.sharedStrings) {
@@ -2360,7 +2422,10 @@ function inspectXml(
       const value = activeMetadata.text.trim();
       if (
         value.length > 0 &&
-        !(["creator", "lastModifiedBy"].includes(activeMetadata.name) && value === "OpenGeni")
+        !(
+          ["creator", "lastModifiedBy"].includes(activeMetadata.name) &&
+          (value === "Opengeni" || value === "OpenGeni")
+        )
       ) {
         features.add("workbook-properties");
       }
@@ -2395,6 +2460,61 @@ function inspectXml(
   );
   result.opaqueFeatures = [...features].sort();
   return result;
+}
+
+/**
+ * ExcelJS expands every data-validation `sqref` into one map entry per covered address. That
+ * measured at about 140 MB and 0.9 s per full Excel column, far cheaper per address than real
+ * cells, so validations get their own ceiling of four full columns per part and per package
+ * instead of sharing the worksheet-cell budget. One whole-column dropdown still imports.
+ */
+const MAX_DATA_VALIDATION_ADDRESSES = 4 * EXCEL_MAX_ROWS;
+
+/**
+ * Adds the area of a merge `ref` or a space-separated data-validation `sqref` to `charged` and
+ * rejects the part once it covers more than `limit` addresses. Each parsed range covers at most
+ * EXCEL_MAX_ROWS x EXCEL_MAX_COLUMNS (about 1.7e10) cells and the running total is checked after
+ * every range, so the sum stays far below Number.MAX_SAFE_INTEGER. Malformed references are
+ * rejected rather than skipped, because ExcelJS would otherwise interpret them on its own terms.
+ */
+function chargeWorksheetRangeArea(
+  reference: string | undefined,
+  charged: number,
+  limit: number,
+  label: string,
+  entryName: string,
+): number {
+  const ranges = (reference ?? "").split(/[ \t\r\n]+/u).filter((range) => range.length > 0);
+  if (ranges.length === 0) {
+    throw securityError("Worksheet range reference is missing", "invalid-package", entryName);
+  }
+  let total = charged;
+  for (const text of ranges) {
+    let range: RangeAddress;
+    try {
+      range = parseRangeAddress(text);
+    } catch (error) {
+      const failure = securityError(
+        "Worksheet range reference is invalid",
+        "invalid-package",
+        entryName,
+      );
+      Object.defineProperty(failure, "cause", {
+        value: error,
+        enumerable: false,
+      });
+      throw failure;
+    }
+    total += range.rowCount * range.colCount;
+    if (total > limit) {
+      throw securityError(
+        `Worksheet ${label} exceed the ${limit} covered-address limit`,
+        "limit-exceeded",
+        entryName,
+      );
+    }
+  }
+  return total;
 }
 
 function localAttributes(tag: SaxesTagNS, entryName: string): Map<string, string> {

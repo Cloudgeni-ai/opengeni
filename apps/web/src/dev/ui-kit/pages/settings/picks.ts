@@ -1,14 +1,14 @@
-import type { DisclosureVariant } from "@/components/ui/disclosure";
-import type { EmptyStateVariant } from "@/components/ui/empty-state";
-import type { RowListVariant } from "@/components/ui/list-row";
-import type { PageHeaderIconMode, PageHeaderVariant } from "@/components/ui/page-header";
-import type { SectionVariant } from "@/components/ui/section";
-import type { SegmentedControlVariant } from "@/components/ui/segmented-control";
-import type { SelectMenuVariant } from "@/components/ui/select-menu";
-import type { SettingRowVariant } from "@/components/ui/setting-row";
-import type { StatusBadgeVariant } from "@/components/ui/status-badge";
-import type { SwitchVariant } from "@/components/ui/switch";
-import type { AccessListVariant } from "@/components/ui/access-list";
+import type { DisclosureVariant } from "@opengeni/react/ui/disclosure";
+import type { EmptyStateVariant } from "@opengeni/react/ui/empty-state";
+import type { RowListVariant } from "@opengeni/react/ui/list-row";
+import type { PageHeaderIconMode, PageHeaderVariant } from "@opengeni/react/ui/page-header";
+import type { SectionVariant } from "@opengeni/react/ui/section";
+import type { SegmentedControlVariant } from "@opengeni/react/ui/segmented-control";
+import type { SelectMenuVariant } from "@opengeni/react/ui/select-menu";
+import type { SettingRowVariant } from "@opengeni/react/ui/setting-row";
+import type { StatusBadgeVariant } from "@opengeni/react/ui/status-badge";
+import type { SwitchVariant } from "@opengeni/react/ui/switch";
+import type { AccessListVariant } from "@opengeni/react/ui/access-list";
 
 import { usePick } from "../../picks";
 

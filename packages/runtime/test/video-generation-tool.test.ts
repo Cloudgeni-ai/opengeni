@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { RunContext } from "@openai/agents";
 import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniAgent, composeRuntimeSkills, runtimeSkillIndexForAgent } from "../src";
 
 const capabilities = {
@@ -63,8 +64,8 @@ describe("video generation runtime surface", () => {
       sites: false,
       videoGeneration: true,
     });
-    expect(disabled.index.map((entry) => entry.name)).not.toContain("opengeni-video-generation");
-    expect(enabled.index.map((entry) => entry.name)).toContain("opengeni-video-generation");
+    expect(disabled.index.map((entry) => entry.name)).not.toContain("video-generation");
+    expect(enabled.index.map((entry) => entry.name)).toContain("video-generation");
   });
 
   test("keeps video tools and server-readable guidance on connected machines", () => {
@@ -95,7 +96,7 @@ describe("video generation runtime surface", () => {
       "skill_read",
     ]);
     expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toContain(
-      "opengeni-video-generation",
+      "video-generation",
     );
   });
 
@@ -138,5 +139,130 @@ describe("video generation runtime surface", () => {
       message: "Use the exact current /workspace path and try again.",
       operationCreated: false,
     });
+  });
+
+  test("returns an unavailable answer from both tools as normal tool output", async () => {
+    const off = {
+      schemaVersion: 1 as const,
+      status: "unavailable" as const,
+      code: "video_generation_off" as const,
+      message: "Video generation is off in this workspace.",
+      operationCreated: false as const,
+    };
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none", webSearchEnabled: false }),
+      [],
+      {
+        humanInputEnabled: false,
+        videoGeneration: { capabilities: async () => off, execute: async () => off },
+      },
+    );
+    const tools = (
+      agent as unknown as {
+        tools: Array<{
+          name: string;
+          invoke: (context: unknown, input: string, details: unknown) => Promise<unknown>;
+        }>;
+      }
+    ).tools;
+    const invoke = async (name: string, input: unknown) =>
+      await tools
+        .find((candidate) => candidate.name === name)!
+        .invoke(undefined, JSON.stringify(input), { toolCall: { callId: `call-${name}` } });
+    await expect(invoke("get_video_generation_capabilities", {})).resolves.toEqual(off);
+    await expect(invoke("generate_video", { prompt: "animate" })).resolves.toEqual(off);
+  });
+
+  test("returns invalid arguments to the model and keeps execution failures fatal", async () => {
+    const executed: unknown[] = [];
+    let failExecution = false;
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none", webSearchEnabled: false }),
+      [],
+      {
+        humanInputEnabled: false,
+        videoGeneration: {
+          capabilities: async () => capabilities,
+          execute: async (input, context) => {
+            if (failExecution) throw new Error("adapter failed");
+            executed.push(input);
+            return { schemaVersion: 1, status: "accepted", operationId: context.toolCallId };
+          },
+        },
+      },
+    );
+    const tools = (
+      agent as unknown as {
+        tools: Array<{
+          name: string;
+          invoke: (context: unknown, input: string, details: unknown) => Promise<unknown>;
+        }>;
+      }
+    ).tools;
+    const invoke = async (name: string, raw: string) =>
+      await tools
+        .find((candidate) => candidate.name === name)!
+        .invoke(new RunContext({}), raw, { toolCall: { callId: `call-${name}` } });
+
+    const outOfRange = await invoke(
+      "generate_video",
+      JSON.stringify({ prompt: "animate", durationSeconds: 4.5, extra: true }),
+    );
+    expect(typeof outOfRange).toBe("string");
+    expect(outOfRange).toContain("generate_video tool was not called");
+    expect(await invoke("skill_read", JSON.stringify({ skill: 7 }))).toContain(
+      "skill_read tool was not called",
+    );
+    expect(executed).toEqual([]);
+
+    // Strict-mode nulls for omitted optional fields stay valid.
+    await expect(
+      invoke(
+        "generate_video",
+        JSON.stringify({
+          prompt: "animate",
+          modelId: null,
+          source: null,
+          durationSeconds: null,
+          aspectRatio: null,
+          resolution: null,
+          generateAudio: null,
+        }),
+      ),
+    ).resolves.toEqual({
+      schemaVersion: 1,
+      status: "accepted",
+      operationId: "call-generate_video",
+    });
+    expect(executed).toEqual([{ prompt: "animate" }]);
+
+    failExecution = true;
+    await expect(invoke("generate_video", JSON.stringify({ prompt: "animate" }))).rejects.toThrow(
+      "adapter failed",
+    );
+  });
+
+  test("attaching the video tools leaves the system prompt byte-identical", async () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const prompt = async (withVideo: boolean) =>
+      await buildOpenGeniAgent(settings, [], {
+        humanInputEnabled: false,
+        skillCatalog: [],
+        ...(withVideo
+          ? {
+              videoGeneration: {
+                capabilities: async () => capabilities,
+                execute: async (_input, context) => ({
+                  schemaVersion: 1 as const,
+                  status: "accepted" as const,
+                  operationId: context.toolCallId,
+                }),
+              },
+            }
+          : {}),
+      }).getSystemPrompt(new RunContext({}));
+    const without = await prompt(false);
+    expect(without).toBeTruthy();
+    expect(await prompt(true)).toBe(without);
   });
 });

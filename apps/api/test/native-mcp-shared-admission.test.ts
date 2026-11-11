@@ -9,12 +9,9 @@ import {
 } from "@opengeni/sdk";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   createWorkspace,
@@ -175,12 +172,14 @@ test.each(["configured", "session-local", "durable"] as const)(
             prompt: "Read my account",
             tools: target ? [] : [{ kind: "mcp", id: server.id }],
           },
-          connectionAccounts: selections[i]!.selection,
+          // An existing-chat schedule uses that chat's connectors with the
+          // owner's current accounts; only a schedule that starts its own
+          // session pins them.
+          ...(target ? {} : { pinnedAccounts: selections[i]!.selection }),
         });
         if (target) {
           const updated = await actors[i]!.updateScheduledTask(workspace.id, task.id, {
             agentConfig: { prompt: "Read my account after updating the schedule", tools: [] },
-            connectionAccounts: selections[i]!.selection,
           });
           expect(updated.id).toBe(task.id);
           expect(updated.agentConfig.tools).toEqual([]);

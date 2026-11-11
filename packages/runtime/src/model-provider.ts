@@ -13,12 +13,18 @@ import { MultiProviderModelProvider } from "./model-provider-routing";
 export { ResponsesStreamingTerminalError } from "./responses-terminal-error";
 export {
   CodexSubscriptionUnavailableError,
+  INCOMPLETE_CHAT_COMPLETION_CODE,
+  IncompleteChatCompletionError,
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
+  OrganizationOpperUnavailableError,
+  OrganizationOpenAIUnavailableError,
+  OrganizationAzureOpenAIUnavailableError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
+  WorkspaceOpperUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
@@ -29,6 +35,7 @@ export {
   configureRuntimeMetricsHooks,
   recordRuntimeMcpLifecycleMetric,
   recordRuntimeMcpToolCallMetric,
+  warmCodexResponsesWebSocket,
 } from "./model-provider-client";
 export {
   modelRequestPolicyForProvider,

@@ -9,12 +9,13 @@ async function source(path: string): Promise<string> {
 }
 
 describe("public Browser/Computer ownership", () => {
-  test("keeps apps/web as a thin SandboxWorkspace adapter", async () => {
-    const adapter = await source("apps/web/src/components/session/sandbox-workspace.tsx");
+  test("keeps the app session dock a thin SandboxWorkspace adapter", async () => {
+    const adapter = await source("packages/react/src/app/components/session/sandbox-workspace.tsx");
 
-    expect(adapter).toContain('from "@opengeni/react"');
+    expect(adapter).toContain('from "../../.."');
     expect(adapter).toContain("<SandboxWorkspace");
     expect(adapter).not.toMatch(/@opengeni\/(?:react|sdk)\/interaction/u);
+    expect(adapter).not.toMatch(/from\s+["'](?:\.\.?\/)+(?:[\w-]+\/)*interaction(?:\/|["'])/u);
     expect(adapter).not.toMatch(
       /(?:BrowserViewer|ComputerViewer|useBrowserSessions|useComputerSessions)/u,
     );

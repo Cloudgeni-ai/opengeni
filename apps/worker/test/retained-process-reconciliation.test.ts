@@ -5,39 +5,57 @@ import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { promisify } from "node:util";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { Manifest } from "@openai/agents/sandbox";
+import {
+  createSandboxClientForBackend,
+  isInSandboxSupervisedProcess,
+  RoutingSandboxSession,
+  serializeEstablishedSandboxEnvelope,
+} from "@opengeni/runtime";
+import { sessionAttemptPendingWritersSql } from "../../../packages/db/src/session-attempt-writers";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import {
   createProviderCommandRetainer,
   getRetainedProviderCommand,
-  acknowledgeRetainedProviderOutput,
   reserveRetainedProviderInput,
+  requestRetainedProcessCancellation,
 } from "@opengeni/db/retained-provider-commands";
+import { testSettings } from "@opengeni/testing/settings";
 import {
-  testSettings,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   applySessionTurnSettlement,
   getSessionTurn,
+  getActiveSessionHistoryItems,
+  registerPendingSessionToolCall,
+  readWorkspaceArchiveCapturePreflight,
   peekSessionWork,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   adoptManagedSessionBackgroundCommand,
+  recoverManagedSessionBackgroundCommand,
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,
+  advanceWorkspaceGenerationForRetainedProcess,
   claimSessionWorkForAttempt,
   claimTerminalRetainedProcesses,
   countActiveRetainedProcessesByOwnerState,
   countExpiredDrainingSandboxLeases,
+  evaluateSessionControl,
   createDb,
   createSession,
+  findRunningSessionBackgroundProcess,
   getRetainedProcess,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
   readLease,
   recordRetainedProcessReconciliationProof,
+  rejectRetainedSupervisedLaunch,
   releaseLeaseHolder,
   requestSessionTurnRecovery,
   retainedProcessSettlementIdentity,
@@ -47,6 +65,7 @@ import {
   SessionBackgroundCommandAdoptionFencedError,
   SandboxWorkspaceMutationFencedError,
   verifyWorkspaceMutationSettlement,
+  verifyRetainedProcessMutationSettlement,
   settleRetainedProcess,
   type Database,
   type DbClient,
@@ -68,6 +87,7 @@ import {
   probeRetainedProcessAtProvider,
   RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
   RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
+  RETAINED_PROCESS_STOP_SETTLE_WAIT_MS,
   type HistoricalModalSandboxLifecycleProbeFn,
   type RetainedProcessProbeFn,
 } from "../src/activities/sandbox-lease";
@@ -125,7 +145,7 @@ const MODAL_PROVIDER_BINDING = {
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
-let shared: SharedTestDatabase | null = null;
+let shared: RestrictedRuntimeTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -214,11 +234,26 @@ async function freshTurn(ids: WorkspaceIds): Promise<TurnFixture> {
   };
 }
 
+/** A real provider box for the lease instead of the default synthetic Modal one. */
+type LeaseBox = {
+  backend: string;
+  resumeBackendId: string;
+  instanceId: string;
+  resumeState: Record<string, unknown>;
+};
+
 async function insertWarmLease(
   ids: WorkspaceIds,
-  input: { sessionId: string; holderId: string; holderKind: "turn" | "direct" },
+  input: { sessionId: string; holderId: string; holderKind: "turn" | "direct"; box?: LeaseBox },
 ): Promise<{ leaseId: string; instanceId: string }> {
-  const instanceId = `retained-process-box-${crypto.randomUUID()}`;
+  const instanceId = input.box?.instanceId ?? `retained-process-box-${crypto.randomUUID()}`;
+  const backend = input.box?.backend ?? "modal";
+  const resumeBackendId = input.box?.resumeBackendId ?? "modal";
+  const resumeState = input.box?.resumeState ?? {
+    backendId: "modal",
+    sessionState: { providerState: { sandboxId: instanceId } },
+    workspaceArchive: "UNCHANGED_ARCHIVE",
+  };
   const [lease] = await admin<{ id: string }[]>`
     insert into sandbox_leases (
       account_id, workspace_id, sandbox_group_id, liveness, refcount,
@@ -226,12 +261,8 @@ async function insertWarmLease(
       resume_backend_id, resume_state, expires_at
     ) values (
       ${ids.accountId}, ${ids.workspaceId}, ${ids.groupId}, 'warm', 1,
-      ${input.holderKind === "turn" ? 1 : 0}, 0, ${instanceId}, 'modal', 7,
-      'modal', ${JSON.stringify({
-        backendId: "modal",
-        sessionState: { providerState: { sandboxId: instanceId } },
-        workspaceArchive: "UNCHANGED_ARCHIVE",
-      })}::text::jsonb, now() + interval '10 minutes'
+      ${input.holderKind === "turn" ? 1 : 0}, 0, ${instanceId}, ${backend}, 7,
+      ${resumeBackendId}, ${JSON.stringify(resumeState)}::text::jsonb, now() + interval '10 minutes'
     ) returning id`;
   await admin`
     insert into sandbox_lease_holders (
@@ -287,7 +318,10 @@ async function promoteTurnProcess(
     backgroundCommand?: string;
     providerCommand?: boolean;
     supervised?: boolean;
+    routerCommand?: boolean;
     providerCommandSandboxId?: string;
+    box?: LeaseBox;
+    inSandboxSupervisor?: boolean;
   } = {},
 ): Promise<ProcessFixture> {
   const ids = await freshWorkspace();
@@ -296,6 +330,7 @@ async function promoteTurnProcess(
     sessionId: attempt.sessionId,
     holderId: attempt.holderId,
     holderKind: "turn",
+    ...(input.box ? { box: input.box } : {}),
   });
   const operation = `retainedProcessTurn-${crypto.randomUUID()}`;
   const admission = await advanceWorkspaceGeneration(db, {
@@ -314,32 +349,26 @@ async function promoteTurnProcess(
   const processId = crypto.randomUUID();
   const providerSessionId = input.providerSessionId ?? 71;
   const invocationId = crypto.randomUUID();
-  const command: SandboxProviderCommand | null = input.supervised
-    ? {
-        kind: "modal-router-v1",
-        sandboxId: instanceId,
-        taskId: "ta-test",
-        execId: crypto.randomUUID(),
-        supervision: {
-          protocol: "native-subreaper-v1",
-          invocationId,
-          nonce: "a".repeat(64),
-          controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
-        },
-        streams: {
-          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
-          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
-        },
-      }
-    : input.providerCommand
+  const command: SandboxProviderCommand | null =
+    input.supervised || input.routerCommand || input.providerCommand
       ? {
-          kind: "modal-control-v1",
+          kind: "modal-router-v1",
           sandboxId: input.providerCommandSandboxId ?? instanceId,
           taskId: "ta-test",
-          execId: `tp-${crypto.randomUUID()}`,
+          execId: crypto.randomUUID(),
+          ...(input.supervised
+            ? {
+                supervision: {
+                  protocol: "native-subreaper-v1" as const,
+                  invocationId,
+                  nonce: "a".repeat(64),
+                  controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
+                },
+              }
+            : {}),
           streams: {
-            stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-            stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
           },
         }
       : null;
@@ -353,12 +382,15 @@ async function promoteTurnProcess(
     admittedWorkspaceGeneration: admission.workspaceGeneration,
     operation,
     providerCommand: command,
-    providerBinding: MODAL_PROVIDER_BINDING,
+    ...(input.box && input.box.backend !== "modal"
+      ? {}
+      : { providerBinding: MODAL_PROVIDER_BINDING }),
     ...(input.backgroundCommand
       ? {
           backgroundCommand: { commandId: processId, command: input.backgroundCommand },
         }
       : {}),
+    ...(input.inSandboxSupervisor ? { inSandboxSupervisor: true } : {}),
     owner: {
       kind: "turn",
       turnId: attempt.turnId,
@@ -544,7 +576,10 @@ async function settlementProjection(fixture: ProcessFixture) {
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-retained-process-reconciliation");
+  shared = await acquireRestrictedRuntimeTestDatabase(
+    "worker-retained-process-reconciliation",
+    "public",
+  );
   if (!shared) {
     if (requireRealDatabase) {
       throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable");
@@ -575,6 +610,172 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  for (const operation of ["execCommand", "writeFile"] as const) {
+    test(`locator-less legacy recovery preserves unknown truth (${operation})`, async () => {
+      if (!available) return;
+      const ids = await freshWorkspace();
+      const attempt = await freshTurn(ids);
+      const { leaseId, instanceId } = await insertWarmLease(ids, {
+        sessionId: attempt.sessionId,
+        holderId: attempt.holderId,
+        holderKind: "turn",
+      });
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 7,
+        expectedInstanceId: instanceId,
+        operation,
+      });
+      const callId = crypto.randomUUID();
+      expect(
+        await registerPendingSessionToolCall(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          callId,
+          callType: "function_call",
+          callItem: { type: "function_call", callId, name: operation, arguments: "{}" },
+        }),
+      ).toMatchObject({ accepted: true, registered: true });
+      expect(
+        await recoverSessionDispatch(db, ids.workspaceId, {
+          sessionId: attempt.sessionId,
+          attemptId: attempt.attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        }),
+      ).toMatchObject({ action: "recovering" });
+      const claim = () =>
+        claimSessionWorkForAttempt(db, ids.workspaceId, {
+          sessionId: attempt.sessionId,
+          workflowId: `session-${attempt.sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+      if (operation === "execCommand") {
+        for (const [
+          name,
+          admissionOverride,
+          attemptOverride,
+          inferencePending,
+          retainedLocator = false,
+        ] of [
+          ["exact legacy owner", {}, {}, false],
+          ["live owner", {}, { state: "running" }, true],
+          ["completed owner", {}, { outcome: "completed" }, true],
+          ["other provider", { provider_backend: "local" }, {}, true],
+          [
+            "active route",
+            { route_kind: "active", route_target_id: crypto.randomUUID() },
+            {},
+            true,
+          ],
+          ["non-exec", { operation: "writeFile" }, {}, true],
+          ["wrong actor", { actor_id: crypto.randomUUID() }, {}, true],
+          ["wrong turn", { turn_id: crypto.randomUUID() }, {}, true],
+          ["wrong generation", { execution_generation: attempt.executionGeneration + 1 }, {}, true],
+          ["known provider outcome", { provider_outcome: "retained" }, {}, true],
+          ["retained parent locator", {}, {}, true, true],
+        ] as const) {
+          const [predicate] = await withWorkspaceSessionActivityRls(
+            db,
+            ids.workspaceId,
+            (scopedDb) =>
+              scopedDb.execute<{ physical: boolean; inference: boolean }>(sql`
+            with sandbox_workspace_mutation_admissions as (
+              select (jsonb_populate_record(null::sandbox_workspace_mutation_admissions,
+                to_jsonb(source) || ${JSON.stringify(admissionOverride)}::jsonb)).*
+              from public.sandbox_workspace_mutation_admissions source where id=${admission.id}
+            ), sandbox_retained_processes as (
+              select * from public.sandbox_retained_processes where parent_admission_id=${admission.id}
+              union all select (jsonb_populate_record(null::sandbox_retained_processes,
+                ${JSON.stringify({ id: crypto.randomUUID(), parent_admission_id: admission.id, account_id: ids.accountId, workspace_id: ids.workspaceId, session_id: attempt.sessionId, owner_attempt_id: attempt.attemptId, state: "exited" })}::jsonb)).*
+              where ${retainedLocator}
+            ), owner as (
+              select (jsonb_populate_record(null::session_turn_attempts,
+                to_jsonb(source) || ${JSON.stringify(attemptOverride)}::jsonb)).*
+              from session_turn_attempts source where id=${attempt.attemptId}
+            )
+            select ${sessionAttemptPendingWritersSql(sql`owner`)} as physical,
+              ${sessionAttemptPendingWritersSql(sql`owner`, "inference")} as inference from owner
+          `),
+          );
+          expect(predicate, name).toEqual({ physical: true, inference: inferencePending });
+        }
+        const operationId = crypto.randomUUID();
+        await admin`insert into session_command_receipts (id,account_id,workspace_id,actor_type,actor_subject_id,
+          action,target_session_id,operation_key,canonical_request_hash)
+          values (${operationId},${ids.accountId},${ids.workspaceId},'human','user:test-owner',
+          'prompt.steer',${attempt.sessionId},${crypto.randomUUID()},${"a".repeat(64)})`;
+        await admin`insert into session_attempt_interruptions (account_id,workspace_id,session_id,operation_id,
+          attempt_id,kind,control_revision,state,settled_at)
+          values (${ids.accountId},${ids.workspaceId},${attempt.sessionId},${operationId},
+          ${attempt.attemptId},'steer',0,'settled',now())`;
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "cancellation-wait",
+          attemptId: attempt.attemptId,
+        });
+        expect(await claim()).toMatchObject({ action: "unclaimed", reason: "control-pending" });
+        await admin`delete from session_attempt_interruptions where operation_id=${operationId}`;
+        await admin`delete from session_command_receipts where id=${operationId}`;
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "runnable",
+        });
+        expect(await claim()).toMatchObject({ action: "claimed", turn: { id: attempt.turnId } });
+        const history = await getActiveSessionHistoryItems(db, ids.workspaceId, attempt.sessionId);
+        const result = history.find(
+          ({ item }) => item.type === "function_call_result" && item.callId === callId,
+        );
+        expect(result?.item).toMatchObject({
+          type: "function_call_result",
+          output: { type: "text" },
+        });
+        expect(JSON.stringify(result?.item)).toContain(
+          "side-effect outcome is unknown; inspect actual state before repeating the call",
+        );
+      } else {
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "cancellation-wait",
+          attemptId: attempt.attemptId,
+        });
+        expect(await claim()).toMatchObject({ action: "unclaimed", reason: "control-pending" });
+      }
+      const [unchanged] =
+        await admin`select admission.provider_outcome, admission.settled_at, attempt.quiesced_at
+        from sandbox_workspace_mutation_admissions admission join session_turn_attempts attempt on attempt.id=admission.attempt_id
+        where admission.id=${admission.id}`;
+      expect(unchanged).toMatchObject({
+        provider_outcome: null,
+        settled_at: null,
+        quiesced_at: null,
+      });
+      expect(
+        await readWorkspaceArchiveCapturePreflight(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: 7,
+          expectedInstanceId: instanceId,
+          liveness: "warm",
+        }),
+      ).toBeNull();
+      const [lease] = await admin`select instance_id from sandbox_leases where id=${leaseId}`;
+      expect(lease!.instance_id).toBe(instanceId);
+    }, 60_000);
+  }
+
   test.skipIf(process.platform !== "linux")(
     "SIGKILL after native launch preserves the pre-dispatch DB reservation and cancels the original idle invocation",
     async () => {
@@ -1037,31 +1238,20 @@ describe("retained-process terminal-owner reconciliation", () => {
     }, 60_000);
   }
 
-  test("provider identity and cursors survive fresh database reads without accepting a rebind", async () => {
+  test("provider identity survives fresh database reads and input reservations stay monotonic", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ providerCommand: true });
     const scope = { ...fixture, processId: fixture.process.id };
     const original = (await getRetainedProviderCommand(db, scope))!;
     expect(original.sandboxId).toBe(fixture.process.providerInstanceId);
-    const next = structuredClone(original);
-    next.streams.stdout.batchIndex = 2;
-    next.streams.stderr.batchIndex = 3;
-    await acknowledgeRetainedProviderOutput(db, scope, next);
-    expect(await acknowledgeRetainedProviderOutput(db, scope, original)).toEqual(next);
-    expect(await getRetainedProviderCommand(db, scope)).toEqual(next);
-    await expect(
-      acknowledgeRetainedProviderOutput(db, scope, { ...next, execId: "tp-foreign" }),
-    ).rejects.toThrow("identity");
-    const conflicting = structuredClone(next);
-    conflicting.streams.stdout.exitCode = 0;
-    await expect(acknowledgeRetainedProviderOutput(db, scope, conflicting)).rejects.toThrow(
-      "conflicts",
-    );
+    expect(await getRetainedProviderCommand(db, scope)).toEqual(original);
     expect(
       (
-        await Promise.all(Array.from({ length: 5 }, () => reserveRetainedProviderInput(db, scope)))
+        await Promise.all(
+          Array.from({ length: 5 }, () => reserveRetainedProviderInput(db, scope, 2)),
+        )
       ).sort(),
-    ).toEqual([1, 2, 3, 4, 5]);
+    ).toEqual([0, 2, 4, 6, 8]);
     expect(
       await getRetainedProviderCommand(db, { ...scope, sessionId: crypto.randomUUID() }),
     ).toBeNull();
@@ -1132,6 +1322,356 @@ describe("retained-process terminal-owner reconciliation", () => {
     ).toMatchObject({ status: "proved", proof: { outcome: "exited", exitCode: 0 } });
     expect(outputs).toEqual([result]);
   }, 60_000);
+
+  test("a local shell outlives its turn: the reaper reads it, a later turn drives it, cancellation stops it", async () => {
+    if (!available) throw new Error("PostgreSQL required for session-owned process regression");
+    type LocalSession = {
+      state: { workspaceRootPath: string };
+      execCommand(args: Record<string, unknown>): Promise<string>;
+      writeStdin(args: Record<string, unknown>): Promise<string>;
+      close(): Promise<void>;
+    };
+    type LocalClient = {
+      create(manifest: Manifest): Promise<LocalSession>;
+      resumeExact(state: unknown): Promise<LocalSession>;
+    };
+    const localClient = createSandboxClientForBackend("local", SETTINGS) as LocalClient;
+    // Keep the host PATH so the in-sandbox supervisor finds mkfifo on any host.
+    const box = await localClient.create(
+      new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+    );
+    try {
+      const root = box.state.workspaceRootPath;
+      const handleOf = (banner: string) =>
+        Number(/Process running with session ID (\d+)/.exec(banner)?.[1] ?? Number.NaN);
+      const started = await box.execCommand({ cmd: "sh", yieldTimeMs: 200 });
+      const shellId = handleOf(started);
+      expect(shellId).toBeGreaterThanOrEqual(1_000_000);
+      const resumeState = await serializeEstablishedSandboxEnvelope({
+        client: localClient,
+        session: box,
+        sessionState: box.state,
+        instanceId: root,
+        backendId: "unix_local",
+      } as never);
+      if (!resumeState) throw new Error("Expected a resumable local envelope");
+      const fixture = await promoteTurnProcess({
+        providerSessionId: shellId,
+        backgroundCommand: "sh",
+        box: { backend: "local", resumeBackendId: "unix_local", instanceId: root, resumeState },
+      });
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        turnId: fixture.attempt!.turnId,
+        executionGeneration: fixture.attempt!.executionGeneration,
+        attemptId: fixture.attempt!.attemptId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        command: "sh",
+      });
+      // The turn ends. Nothing stops the shell: it is session-owned now.
+      await closeTurnOwner(fixture, fixture.attempt!, "completed");
+      const lease = await readLease(db, fixture.workspaceId, fixture.groupId);
+      if (!lease) throw new Error("Expected lease");
+      const retained = await durableProcess(fixture);
+      expect(retained).toMatchObject({ state: "active", providerBackend: "local" });
+
+      // The reaper reaches it from a session object of its own.
+      expect(
+        await probeRetainedProcessAtProvider(SETTINGS, lease, retained, "observe", async () => {}),
+      ).toEqual({ status: "deferred", reason: "provider_running" });
+
+      // A later turn finds it by the handle the model was given and drives it.
+      const lookup = {
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        providerSessionId: shellId,
+        providerBackend: "local",
+      };
+      expect(
+        await findRunningSessionBackgroundProcess(db, {
+          ...lookup,
+          providerInstanceId: "another-workspace",
+          leaseEpoch: 7,
+        }),
+      ).toBeNull();
+      expect(
+        await findRunningSessionBackgroundProcess(db, { ...lookup, providerBackend: "docker" }),
+      ).toBeNull();
+      const later = await localClient.resumeExact(structuredClone(box.state));
+      const owner = {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      };
+      const laterTurn = new RoutingSandboxSession({
+        defaultResolved: {
+          session: later as never,
+          sandboxId: null,
+          kind: "local",
+          leaseEpoch: 7,
+          providerInstanceId: root,
+        },
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({
+          session: later as never,
+          sandboxId: null,
+          kind: "local",
+        }),
+        findSessionProcess: async (providerSessionId) => {
+          const found = await findRunningSessionBackgroundProcess(db, {
+            ...lookup,
+            providerSessionId,
+            providerInstanceId: root,
+            leaseEpoch: 7,
+          });
+          return found
+            ? {
+                process: { id: found.id, providerSessionId: found.providerSessionId },
+                backend: {
+                  sandboxId: null,
+                  leaseEpoch: found.leaseEpoch,
+                  providerInstanceId: found.providerInstanceId,
+                  activeEpoch: found.routeEpoch,
+                },
+              }
+            : null;
+        },
+        beforeProcessMutation: async ({ op, process }) =>
+          await advanceWorkspaceGenerationForRetainedProcess(db, {
+            ...owner,
+            processId: process.id,
+            operation: op,
+            captureWaitMs: 1_000,
+          }),
+        afterProcessMutation: async ({ op, process, admission, outcome }) => {
+          await verifyRetainedProcessMutationSettlement(db, {
+            ...owner,
+            processId: process.id,
+            admission: admission as never,
+            operation: op,
+            outcome,
+          });
+        },
+      });
+      const driven = await laterTurn.writeStdin({
+        sessionId: shellId,
+        chars: "echo from-later-turn; exit 3\n",
+        yieldTimeMs: 2_000,
+      });
+      expect(driven).toContain("from-later-turn");
+      // The shell may already report its exit within this read.
+      expect(driven).toMatch(
+        new RegExp(`Process (exited with code 3|running with session ID ${shellId})`),
+      );
+
+      // The reaper then proves the exit the later turn caused.
+      expect(
+        await probeRetainedProcessAtProvider(SETTINGS, lease, retained, "observe", async () => {}),
+      ).toMatchObject({ status: "proved", proof: { outcome: "exited", exitCode: 3 } });
+
+      // An explicit stop reaches a session-owned command through the supervisor.
+      const server = handleOf(await box.execCommand({ cmd: "sleep 600", yieldTimeMs: 200 }));
+      expect(server).toBeGreaterThanOrEqual(1_000_000);
+      let stopped: unknown;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        stopped = await probeRetainedProcessAtProvider(
+          SETTINGS,
+          lease,
+          { ...retained, providerSessionId: server },
+          attempt === 0 ? "cancel" : "observe",
+          async () => {},
+        );
+        if ((stopped as { status: string }).status === "proved") break;
+      }
+      expect(stopped).toMatchObject({ status: "proved", proof: { outcome: "exited" } });
+    } finally {
+      await box.close();
+    }
+  }, 120_000);
+
+  test("rolling deploy: an older worker's reaper never claims a supervised local command", async () => {
+    if (!available) throw new Error("PostgreSQL required for the mixed-version reaper regression");
+    type LocalSession = {
+      state: { workspaceRootPath: string };
+      execCommand(args: Record<string, unknown>): Promise<string>;
+      close(): Promise<void>;
+    };
+    type LocalClient = { create(manifest: Manifest): Promise<LocalSession> };
+    const localClient = createSandboxClientForBackend("local", SETTINGS) as LocalClient;
+    const box = await localClient.create(
+      new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+    );
+    try {
+      const root = box.state.workspaceRootPath;
+      const started = await box.execCommand({ cmd: "sleep 600", yieldTimeMs: 200 });
+      const handle = Number(/Process running with session ID (\d+)/.exec(started)?.[1]);
+      // The worker derives the flag from the live session, as routing does.
+      expect(isInSandboxSupervisedProcess(box, handle)).toBe(true);
+      expect(isInSandboxSupervisedProcess(box, 71)).toBe(false);
+      const resumeState = await serializeEstablishedSandboxEnvelope({
+        client: localClient,
+        session: box,
+        sessionState: box.state,
+        instanceId: root,
+        backendId: "unix_local",
+      } as never);
+      if (!resumeState) throw new Error("Expected a resumable local envelope");
+      const supervised = await promoteTurnProcess({
+        providerSessionId: handle,
+        backgroundCommand: "sleep 600",
+        inSandboxSupervisor: isInSandboxSupervisedProcess(box, handle),
+        box: { backend: "local", resumeBackendId: "unix_local", instanceId: root, resumeState },
+      });
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: supervised.accountId,
+        workspaceId: supervised.workspaceId,
+        sessionId: supervised.sessionId,
+        turnId: supervised.attempt!.turnId,
+        executionGeneration: supervised.attempt!.executionGeneration,
+        attemptId: supervised.attempt!.attemptId,
+        processId: supervised.process.id,
+        expected: retainedProcessSettlementIdentity(supervised.process),
+        command: "sleep 600",
+      });
+      await closeTurnOwner(supervised, supervised.attempt!, "completed");
+      // A process an older worker could also reach keeps the original version.
+      const legacy = await promoteTurnProcess({ outcome: "completed" });
+      const versions = await admin<{ id: string; reconciler_version: number }[]>`
+        select id, reconciler_version from sandbox_retained_processes
+        where id in (${supervised.process.id}, ${legacy.process.id})`;
+      expect(Object.fromEntries(versions.map((row) => [row.id, row.reconciler_version]))).toEqual({
+        [supervised.process.id]: 2,
+        [legacy.process.id]: 1,
+      });
+
+      // An older worker still calls the three-argument claim it was built with.
+      // It keeps reconciling the rows it understands, but is never handed the
+      // supervised command, so it can never probe its own memory for it and
+      // settle a live command as lost.
+      const oldReaperClaim = async () =>
+        (
+          await db.execute<{ process_id: string }>(sql`
+            select process_id from opengeni_private.claim_terminal_retained_processes(
+              ${crypto.randomUUID()}::uuid, 100::integer, 0::bigint
+            )`)
+        ).map((row) => row.process_id);
+      const oldClaims = await oldReaperClaim();
+      expect(oldClaims).toContain(legacy.process.id);
+      expect(oldClaims).not.toContain(supervised.process.id);
+      expect(await durableProcess(supervised)).toMatchObject({
+        state: "active",
+        reconcileClaimId: null,
+      });
+
+      // A newer worker running next to it claims and reaches the command.
+      const newClaims = await claimTerminalRetainedProcesses(db, {
+        claimId: crypto.randomUUID(),
+        limit: 100,
+        claimTtlMs: 0,
+      });
+      expect(newClaims.map((claim) => claim.process.id)).toContain(supervised.process.id);
+      const lease = await readLease(db, supervised.workspaceId, supervised.groupId);
+      if (!lease) throw new Error("Expected lease");
+      const retained = await durableProcess(supervised);
+      expect(
+        await probeRetainedProcessAtProvider(SETTINGS, lease, retained, "observe", async () => {}),
+      ).toEqual({ status: "deferred", reason: "provider_running" });
+      // Repeated old-reaper passes, including after the newer claim expires,
+      // still never return it.
+      expect(await oldReaperClaim()).not.toContain(supervised.process.id);
+      expect(await durableProcess(supervised)).toMatchObject({ state: "active" });
+      await expect(
+        (async () =>
+          await db.execute(sql`
+            select * from opengeni_private.claim_terminal_retained_processes(
+              ${crypto.randomUUID()}::uuid, 1::integer, 0::bigint, 0::integer
+            )`))(),
+      ).rejects.toThrow();
+
+      let stopped: unknown;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        stopped = await probeRetainedProcessAtProvider(
+          SETTINGS,
+          lease,
+          retained,
+          attempt === 0 ? "cancel" : "observe",
+          async () => {},
+        );
+        if ((stopped as { status: string }).status === "proved") break;
+      }
+      expect(stopped).toMatchObject({ status: "proved", proof: { outcome: "exited" } });
+    } finally {
+      await box.close();
+    }
+  }, 120_000);
+
+  test("a Stop of a supervised local command that ignores TERM settles in one reaper pass", async () => {
+    if (!available) throw new Error("PostgreSQL required for the supervised stop regression");
+    type LocalSession = {
+      state: { workspaceRootPath: string };
+      execCommand(args: Record<string, unknown>): Promise<string>;
+      close(): Promise<void>;
+    };
+    type LocalClient = { create(manifest: Manifest): Promise<LocalSession> };
+    const localClient = createSandboxClientForBackend("local", SETTINGS) as LocalClient;
+    const box = await localClient.create(
+      new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+    );
+    try {
+      const root = box.state.workspaceRootPath;
+      // A command that survives TERM ends only at the supervisor's KILL.
+      const command = "trap '' TERM; while :; do sleep 1; done";
+      const started = await box.execCommand({ cmd: command, yieldTimeMs: 200 });
+      const handle = Number(/Process running with session ID (\d+)/.exec(started)?.[1]);
+      const resumeState = await serializeEstablishedSandboxEnvelope({
+        client: localClient,
+        session: box,
+        sessionState: box.state,
+        instanceId: root,
+        backendId: "unix_local",
+      } as never);
+      if (!resumeState) throw new Error("Expected a resumable local envelope");
+      const supervised = await promoteTurnProcess({
+        providerSessionId: handle,
+        backgroundCommand: command,
+        inSandboxSupervisor: isInSandboxSupervisedProcess(box, handle),
+        box: { backend: "local", resumeBackendId: "unix_local", instanceId: root, resumeState },
+      });
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: supervised.accountId,
+        workspaceId: supervised.workspaceId,
+        sessionId: supervised.sessionId,
+        turnId: supervised.attempt!.turnId,
+        executionGeneration: supervised.attempt!.executionGeneration,
+        attemptId: supervised.attempt!.attemptId,
+        processId: supervised.process.id,
+        expected: retainedProcessSettlementIdentity(supervised.process),
+        command,
+      });
+      await closeTurnOwner(supervised, supervised.attempt!, "completed");
+      const lease = await readLease(db, supervised.workspaceId, supervised.groupId);
+      if (!lease) throw new Error("Expected lease");
+      const retained = await durableProcess(supervised);
+
+      // The one cancelling probe waits through the KILL escalation, so the
+      // Stop settles in this pass instead of after a reconciliation backoff.
+      const startedAt = Date.now();
+      const stopped = await probeRetainedProcessAtProvider(
+        SETTINGS,
+        lease,
+        retained,
+        "cancel",
+        async () => {},
+      );
+      expect(stopped).toMatchObject({ status: "proved" });
+      expect(Date.now() - startedAt).toBeLessThan(RETAINED_PROCESS_STOP_SETTLE_WAIT_MS + 3_000);
+    } finally {
+      await box.close();
+    }
+  }, 120_000);
 
   test("running and terminal reaper output is retained without observing completion", async () => {
     if (!available) return;
@@ -1212,6 +1752,225 @@ describe("retained-process terminal-owner reconciliation", () => {
       state: "running",
     });
   });
+
+  test("lost legacy observation after turn completion recovers background ownership and admits the next turn", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ routerCommand: true });
+    const originalCommand = await getRetainedProviderCommand(db, {
+      ...fixture,
+      processId: fixture.process.id,
+    });
+    const attempt = fixture.attempt!;
+    await applySessionTurnSettlement(db, fixture.workspaceId, {
+      sessionId: fixture.sessionId,
+      turnId: attempt.turnId,
+      triggerEventId: attempt.triggerEventId,
+      attemptId: attempt.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "done" } }],
+    });
+    await addSessionSystemUpdate(db, {
+      ...fixture,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: crypto.randomUUID(),
+      summary: "Child finished",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toMatchObject({
+      kind: "cancellation-wait",
+    });
+    let probes = 0;
+    await runReaper(async () => {
+      probes++;
+      throw new Error("Original command observation unavailable");
+    });
+    expect(probes).toBe(1);
+    const commands = await listSessionBackgroundCommands(db, fixture);
+    expect(commands).toEqual([
+      expect.objectContaining({ id: fixture.process.id, state: "running" }),
+    ]);
+    expect(commands[0]!.commandPreview).toContain("outcome unknown");
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "active",
+      processExitCode: null,
+      admissionOutcome: "retained",
+      admissionSettled: false,
+      processHolders: 1,
+    });
+    expect(
+      await getRetainedProviderCommand(db, { ...fixture, processId: fixture.process.id }),
+    ).toEqual(originalCommand);
+    expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toEqual({
+      kind: "runnable",
+    });
+    expect(
+      (
+        await claimSessionWorkForAttempt(db, fixture.workspaceId, {
+          sessionId: fixture.sessionId,
+          workflowId: `session-${fixture.sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        })
+      ).action,
+    ).toBe("claimed");
+    const [wake] =
+      await admin`select reason from session_workflow_wake_outbox where session_id=${fixture.sessionId}`;
+    expect(wake?.reason).toBe("retained_command_background_recovery");
+  }, 60_000);
+
+  test("closed legacy command recovery rejects a stale claim and mismatched process, then is idempotent", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({
+      routerCommand: true,
+      outcome: "interrupted_recoverable",
+    });
+    const claimId = crypto.randomUUID();
+    const claims = await claimTerminalRetainedProcesses(db, {
+      claimId,
+      limit: 100,
+      claimTtlMs: 60_000,
+    });
+    const claim = claims.find((item) => item.process.id === fixture.process.id)!;
+    expect(claim).toBeDefined();
+    const input = {
+      ...fixture,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(claim.process),
+      reconciliationClaimId: claim.claimId,
+    };
+    expect(
+      await recoverManagedSessionBackgroundCommand(db, {
+        ...input,
+        reconciliationClaimId: crypto.randomUUID(),
+      }),
+    ).toBeNull();
+    expect(
+      await recoverManagedSessionBackgroundCommand(db, {
+        ...input,
+        expected: { ...input.expected, leaseEpoch: 8 },
+      }),
+    ).toBeNull();
+    expect(await listSessionBackgroundCommands(db, fixture)).toEqual([]);
+    const controlQueries: string[] = [];
+    const dialect = new PgDialect();
+    const observe = (database: Database): Database =>
+      new Proxy(database, {
+        get(target, property, receiver) {
+          if (property === "transaction")
+            return (run: (tx: Database) => Promise<unknown>, config?: unknown) =>
+              target.transaction((tx) => run(observe(tx)), config as never);
+          if (property === "execute")
+            return (query: Parameters<Database["execute"]>[0]) => {
+              controlQueries.push(
+                typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql,
+              );
+              return target.execute(query);
+            };
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    expect(await recoverManagedSessionBackgroundCommand(observe(db), input)).toMatchObject({
+      id: fixture.process.id,
+      state: "running",
+    });
+    expect(
+      controlQueries.filter(
+        (query) =>
+          /count\s*\(/i.test(query) &&
+          /session_background_commands|session_attempt_interruptions/i.test(query),
+      ),
+    ).toEqual([]);
+    expect(await recoverManagedSessionBackgroundCommand(db, input)).toBeNull();
+    expect(await listSessionBackgroundCommands(db, fixture)).toHaveLength(1);
+  }, 60_000);
+
+  test.each([false, true])(
+    "background recovery preserves cancellation intent (paused=%s)",
+    async (paused) => {
+      if (!available) return;
+      const fixture = await promoteTurnProcess({ routerCommand: true });
+      if (paused)
+        await withWorkspaceSessionActivityRls(db, fixture.workspaceId, (tx) =>
+          mutateSessionControlInTransaction(tx, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            sessionId: fixture.sessionId,
+            actor: { type: "human", subjectId: "user:test-owner" },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          }),
+        );
+      else
+        await requestRetainedProcessCancellation(
+          db,
+          {
+            ...fixture,
+            processId: fixture.process.id,
+          },
+          "explicit_stop",
+        );
+      await closeTurnOwner(fixture, fixture.attempt!, "cancelled");
+      let cancelProbes = 0;
+      await runReaper(async (_settings, _lease, _process, mode) => {
+        expect(mode).toBe("cancel");
+        cancelProbes++;
+        return { status: "deferred", reason: "provider_error" };
+      });
+      expect(cancelProbes).toBe(1);
+      expect(await listSessionBackgroundCommands(db, fixture)).toEqual([
+        expect.objectContaining({ state: "stopping" }),
+      ]);
+      const control = await withWorkspaceSessionActivityRls(db, fixture.workspaceId, (tx) =>
+        evaluateSessionControl(tx, fixture.workspaceId, fixture.sessionId),
+      );
+      expect(control.state).toBe(paused ? "paused" : "active");
+      expect((await durableProcess(fixture)).state).toBe("active");
+    },
+    60_000,
+  );
+
+  test.each([false, true])(
+    "background recovery refuses a live owner or supervised command (supervised=%s)",
+    async (supervised) => {
+      if (!available) return;
+      const fixture = await promoteTurnProcess({
+        routerCommand: true,
+        supervised,
+        ...(supervised ? { outcome: "interrupted_recoverable" as const } : {}),
+      });
+      const claimId = crypto.randomUUID();
+      await admin`update sandbox_retained_processes set reconcile_claim_id=${claimId}, reconcile_claimed_at=now() where id=${fixture.process.id}`;
+      expect(
+        await recoverManagedSessionBackgroundCommand(db, {
+          ...fixture,
+          processId: fixture.process.id,
+          expected: retainedProcessSettlementIdentity(fixture.process),
+          reconciliationClaimId: claimId,
+        }),
+      ).toBeNull();
+      expect(await listSessionBackgroundCommands(db, fixture)).toEqual([]);
+      expect((await durableProcess(fixture)).state).toBe("active");
+      if (supervised) {
+        // This synthetic fixture reserved the invocation but never launched it.
+        const scope = { ...fixture, processId: fixture.process.id };
+        const command = await getRetainedProviderCommand(db, scope);
+        if (command?.kind !== "modal-router-v1") throw new Error("Expected router command");
+        await rejectRetainedSupervisedLaunch(db, scope, command);
+      }
+    },
+    60_000,
+  );
 
   test("a retained command that finishes during foreground waiting creates no background input", async () => {
     if (!available) return;
@@ -1321,13 +2080,13 @@ describe("retained-process terminal-owner reconciliation", () => {
       let fenced: SandboxRetainedProcessPromotionFencedError | null = null;
       const providerCommand: SandboxProviderCommand | null = withProviderCommand
         ? {
-            kind: "modal-control-v1",
+            kind: "modal-router-v1",
             sandboxId: instanceId,
             taskId: "ta-test",
-            execId: "tp-paused-test",
+            execId: crypto.randomUUID(),
             streams: {
-              stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-              stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+              stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+              stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
             },
           }
         : null;
@@ -1421,6 +2180,15 @@ describe("retained-process terminal-owner reconciliation", () => {
       exitCode: 130,
       settlementReason: "provider_exit_banner",
     });
+    // The agent learns the command was stopped, not that it failed or (for a
+    // terminal wrapper that exits 0 on a stop) that it completed successfully.
+    const updates = await admin<{ classification: string; summary: string }[]>`
+      select classification, summary from session_system_updates
+      where session_id = ${fixture.sessionId} and source_id = ${fixture.process.id}
+        and kind = 'background_command_result'`;
+    expect(updates).toEqual([
+      { classification: "info", summary: "`bun test --watch` was stopped." },
+    ]);
   });
 
   test("command-result failure rolls back retained-process settlement and retries proof without replay", async () => {
@@ -2007,6 +2775,8 @@ describe("retained-process terminal-owner reconciliation", () => {
     const restricted = postgres(shared!.appUrl, { max: 1, prepare: false });
     try {
       const result = await restricted.begin(async (tx) => {
+        // A raw driver must advertise the same supported schema protocol as createDb.
+        await tx`set local application_name = 'opengeni-lossless-v1-session-variable-sets-v1'`;
         await tx`set local search_path = pg_temp, public, opengeni_private, pg_catalog`;
         const [identity] = await tx<
           {
@@ -2124,7 +2894,9 @@ describe("retained-process terminal-owner reconciliation", () => {
         hasTemp: true,
         forceRls: true,
       });
-      expect(result.functions).toHaveLength(4);
+      // The three-argument claim an older worker calls and the versioned claim
+      // it wraps both pin the same search path.
+      expect(result.functions).toHaveLength(5);
       for (const fn of result.functions) {
         if (fn.name === "claim_terminal_retained_processes") {
           expect(fn.config).toEqual(["search_path=pg_catalog, public, pg_temp"]);
@@ -2691,6 +3463,54 @@ describe("retained-process terminal-owner reconciliation", () => {
       count: 1,
     });
   });
+
+  test("inventory counts an adopted background command as session-owned, not a terminal-owner backlog", async () => {
+    if (!available) return;
+    // A server the agent left running is session-owned once its turn ends.
+    const fixture = await promoteTurnProcess({
+      outcome: "completed",
+      backgroundCommand: "ollama serve",
+    });
+    const byState = async () =>
+      new Map(
+        (await countActiveRetainedProcessesByOwnerState(db)).map((row) => [row.ownerState, row]),
+      );
+
+    let owners = await byState();
+    expect(owners.get("background_running")).toEqual({
+      ownerState: "background_running",
+      activeCount: 1,
+      terminalOwnerCount: 0,
+    });
+    // Its completed launch turn no longer classifies it.
+    expect(owners.get("completed")).toBeUndefined();
+
+    // The claim path already classifies it the same way.
+    const claims = await claimTerminalRetainedProcesses(db, {
+      claimId: crypto.randomUUID(),
+      limit: 100,
+      claimTtlMs: 300_000,
+    });
+    expect(claims.find((claim) => claim.process.id === fixture.process.id)?.ownerState).toBe(
+      "background_running",
+    );
+
+    // A stop request that has not yet produced exit/loss proof is backlog.
+    await requestSessionBackgroundCommandCancellation(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      commandId: fixture.process.id,
+      subjectId: "user:test-owner",
+    });
+    owners = await byState();
+    expect(owners.get("background_running")).toBeUndefined();
+    expect(owners.get("background_stopping")).toEqual({
+      ownerState: "background_stopping",
+      activeCount: 1,
+      terminalOwnerCount: 1,
+    });
+  });
 });
 
 describe("retained-process metric contracts", () => {
@@ -2721,6 +3541,13 @@ describe("retained-process metric contracts", () => {
     expect(metrics).toMatch(
       /opengeni_retained_processes_active\{[^}]*owner_state="unknown"[^}]*\} 3/,
     );
+    for (const ownerState of ["background_running", "background_stopping"]) {
+      expect(metrics).toMatch(
+        new RegExp(
+          `opengeni_retained_processes_terminal_owner_backlog\\{[^}]*owner_state="${ownerState}"[^}]*\\} 0`,
+        ),
+      );
+    }
     expect(metrics).toMatch(
       /opengeni_retained_process_reconciliation_total\{[^}]*outcome="settlement_failed"[^}]*\} 1/,
     );

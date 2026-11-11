@@ -1,59 +1,64 @@
+import * as primitives from "./primitives";
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
-export const ConnectorDocumentDestinationAuthority = z.enum([
-  "organization",
-  "workspace",
-  "personal",
-]);
+export const ConnectorDocumentDestinationAuthority = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["organization", "workspace", "personal"]),
+);
 export type ConnectorDocumentDestinationAuthority = z.infer<
   typeof ConnectorDocumentDestinationAuthority
 >;
 
-export const ConnectorDocumentDestinationSelection = z.object({
-  authorityKind: ConnectorDocumentDestinationAuthority,
-  collectionId: z.string().uuid().nullable().default(null),
-});
+export const ConnectorDocumentDestinationSelection = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    authorityKind: ConnectorDocumentDestinationAuthority,
+    collectionId: primitives.nullableUuid.default(null),
+  }),
+);
 export type ConnectorDocumentDestinationSelection = z.infer<
   typeof ConnectorDocumentDestinationSelection
 >;
 
-export const ConnectorDocumentDestination = z
-  .object({
-    authorityKind: ConnectorDocumentDestinationAuthority,
-    authorityAccountId: z.string().uuid(),
-    authorityWorkspaceId: z.string().uuid().nullable(),
-    authoritySubjectId: z.string().trim().min(1).max(1024).nullable(),
-    collectionId: z.string().uuid().nullable().default(null),
-  })
-  .superRefine((destination, context) => {
-    if (destination.authorityKind === "organization") {
-      if (destination.authorityWorkspaceId !== null || destination.authoritySubjectId !== null) {
+export const ConnectorDocumentDestination = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      authorityKind: ConnectorDocumentDestinationAuthority,
+      authorityAccountId: primitives.uuid,
+      authorityWorkspaceId: primitives.nullableUuid,
+      authoritySubjectId: primitives.string.trim().min(1).max(1024).nullable(),
+      collectionId: primitives.nullableUuid.default(null),
+    })
+    .superRefine((destination, context) => {
+      if (destination.authorityKind === "organization") {
+        if (destination.authorityWorkspaceId !== null || destination.authoritySubjectId !== null) {
+          context.addIssue({
+            code: "custom",
+            message:
+              "organization connector destinations cannot bind workspace or subject authority",
+          });
+        }
+        return;
+      }
+      if (destination.authorityWorkspaceId === null) {
         context.addIssue({
           code: "custom",
-          message: "organization connector destinations cannot bind workspace or subject authority",
+          message: "workspace and personal connector destinations require workspace authority",
         });
       }
-      return;
-    }
-    if (destination.authorityWorkspaceId === null) {
-      context.addIssue({
-        code: "custom",
-        message: "workspace and personal connector destinations require workspace authority",
-      });
-    }
-    if (destination.authorityKind === "workspace" && destination.authoritySubjectId !== null) {
-      context.addIssue({
-        code: "custom",
-        message: "workspace connector destinations cannot bind subject authority",
-      });
-    }
-    if (destination.authorityKind === "personal" && destination.authoritySubjectId === null) {
-      context.addIssue({
-        code: "custom",
-        message: "personal connector destinations require immutable subject authority",
-      });
-    }
-  });
+      if (destination.authorityKind === "workspace" && destination.authoritySubjectId !== null) {
+        context.addIssue({
+          code: "custom",
+          message: "workspace connector destinations cannot bind subject authority",
+        });
+      }
+      if (destination.authorityKind === "personal" && destination.authoritySubjectId === null) {
+        context.addIssue({
+          code: "custom",
+          message: "personal connector destinations require immutable subject authority",
+        });
+      }
+    }),
+);
 export type ConnectorDocumentDestination = z.infer<typeof ConnectorDocumentDestination>;
 
 export function bindConnectorDocumentDestination(
@@ -128,5 +133,5 @@ export function connectorDocumentDestinationCollectionId(
   destination: ConnectorDocumentDestination,
   defaultCollectionId: string,
 ): string {
-  return destination.collectionId ?? z.string().uuid().parse(defaultCollectionId);
+  return destination.collectionId ?? primitives.uuid.parse(defaultCollectionId);
 }

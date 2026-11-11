@@ -1,4 +1,4 @@
-# OpenGeni artifact kernel bindings
+# Opengeni artifact kernel bindings
 
 Production adapters over the same safe Rust model kernel:
 

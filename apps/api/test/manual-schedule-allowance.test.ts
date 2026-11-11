@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { parseSync } from "oxc-parser";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
@@ -36,7 +36,7 @@ describe("manual schedule allowance attribution", () => {
         principalKind: "human_session" as const,
       };
       const access = spyOn(core, "requireAccessGrant").mockResolvedValue(grant);
-      const task = spyOn(core, "requireScheduledTaskForApi").mockResolvedValue({
+      const task = spyOn(core, "requireVisibleScheduledTask").mockResolvedValue({
         id: TASK,
         accountId: ACCOUNT,
         workspaceId: WORKSPACE,
@@ -45,7 +45,7 @@ describe("manual schedule allowance attribution", () => {
         action: { kind: "agent_turn" },
         runMode: "new_session_per_run",
         agentConfig: {},
-      } as Awaited<ReturnType<typeof core.requireScheduledTaskForApi>>);
+      } as Awaited<ReturnType<typeof core.requireVisibleScheduledTask>>);
       const catalog = spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({
         settings,
       } as Awaited<ReturnType<typeof core.resolveWorkspaceCatalogSettings>>);
@@ -100,6 +100,74 @@ describe("manual schedule allowance attribution", () => {
       }
     },
   );
+
+  test.each([
+    { name: "an API key runs a schedule set up in the app", caller: "api", taskOrigin: "app" },
+    { name: "a person runs a schedule an API key set up", caller: "app", taskOrigin: "api" },
+  ] as const)("credits are checked as API use when $name", async ({ caller, taskOrigin }) => {
+    const settings = testSettings({ billingMode: "stripe", usageLimitsMode: "managed" });
+    const deps = {
+      db: {} as db.Database,
+      settings,
+      bus: {} as never,
+      workflowClient: {} as never,
+      objectStorage: null,
+    } as core.ApiRouteDeps;
+    const grant = {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      subjectId: caller === "api" ? "api-key:product" : "user:person",
+      permissions: ["scheduled_tasks:run" as const],
+      principalKind: caller === "api" ? ("api_key" as const) : ("human_session" as const),
+    };
+    const spies = [
+      spyOn(core, "requireAccessGrant").mockResolvedValue(grant),
+      spyOn(core, "requireVisibleScheduledTask").mockResolvedValue({
+        id: TASK,
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        authorityRevision: 1,
+        ownerSubjectId: null,
+        action: { kind: "agent_turn" },
+        runMode: "new_session_per_run",
+        agentConfig: {},
+      } as Awaited<ReturnType<typeof core.requireVisibleScheduledTask>>),
+      spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({
+        settings,
+      } as Awaited<ReturnType<typeof core.resolveWorkspaceCatalogSettings>>),
+      spyOn(core, "validateScheduledTaskTarget").mockResolvedValue(null),
+      spyOn(core, "validateScheduledTaskMachineTarget").mockResolvedValue(),
+      spyOn(db, "getScheduledTaskRevisionAuthoritySubject").mockResolvedValue(null),
+      spyOn(core, "resolveScheduledTaskPreflightModel").mockResolvedValue("scripted-model"),
+      spyOn(db, "isCodexBilledTurn").mockResolvedValue(false),
+      spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null),
+      spyOn(db, "readScheduledTaskBillingOrigin").mockResolvedValue(taskOrigin),
+      // $50 of plan credit and no credits: only app work may run.
+      spyOn(db, "getSpendableCreditBalance").mockImplementation(
+        async (_db, accountId, _usage, _revision, _at, origin) => ({
+          accountId,
+          balanceMicros: (origin ?? db.chargeBillingOrigin()) === "api" ? 0 : 50_000_000,
+          currency: "usd",
+          updatedAt: new Date().toISOString(),
+        }),
+      ),
+    ];
+    const trigger = spyOn(core, "triggerScheduledTaskForGrant").mockResolvedValue();
+    const app = new Hono();
+    registerScheduledTaskRoutes(app, deps);
+    try {
+      const response = await db.withBillingOriginOverride(caller, () =>
+        app.request(`/v1/workspaces/${WORKSPACE}/scheduled-tasks/${TASK}/trigger`, {
+          method: "POST",
+        }),
+      );
+      expect(response.status).toBe(402);
+      expect(trigger).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+      trigger.mockRestore();
+    }
+  });
 
   test("MCP trigger uses the task revision authority and the resolved catalog before admission", async () => {
     const source = await Bun.file(new URL("../src/mcp/server.ts", import.meta.url)).text();

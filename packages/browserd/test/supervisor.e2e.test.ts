@@ -1,32 +1,1078 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readlink, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import type {
   BrowserActionCommand,
+  BrowserActionReceipt,
   BrowserObservation,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { resolvePinnedHeadlessShell } from "../src/headless-shell";
 import {
   AgentBrowserDriver,
-  AgentBrowserJsonRunner,
+  ManagedBrowserRunner,
   BrowserSupervisor,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
 } from "../src";
+import {
+  clickFirstButton,
+  openManagedRecoverySupervisor,
+  semanticNames,
+} from "./fixtures/managed-recovery-fixture";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
+// Positive directory recovery needs a complete process inventory and the exact
+// Chromium executable. CI runs this separately in an owned PID namespace.
+const recoveryE2e =
+  process.platform === "linux" && process.env.OPENGENI_BROWSERD_RECOVERY_E2E === "1"
+    ? e2e
+    : test.skip;
+
+// "graceful": the controller shuts down as for an upgrade or service restart.
+// "killed": the controller, its launcher daemon and Chrome's stderr drain are
+// killed outright, as a service stop does to everything left in its cgroup.
+// "stopped": the controller runs as a systemd user service with the native
+// agent's KillMode and that service is stopped; the browser it launched lives
+// in its own scope and keeps every process. Needs a user service manager.
+// Headed modes run when a display is available (for example, under Xvfb).
+// A reachable manager is not enough (from another PID namespace it answers but
+// cannot place processes); require that this process can create a scope.
+const userScopes =
+  process.platform === "linux" &&
+  spawnSync("systemd-run", ["--user", "--scope", "--quiet", "--collect", "--", "true"]).status ===
+    0;
+const recoveryEndings = userScopes
+  ? (["graceful", "killed", "stopped"] as const)
+  : (["graceful", "killed"] as const);
+const recoveryCases = recoveryEndings.flatMap((ending) =>
+  (process.env.DISPLAY ? [false, true] : [false]).map((headed) => ({ ending, headed })),
+);
+recoveryE2e.each(recoveryCases)(
+  "a $ending controller leaves the same live browser and unsaved page state (headed: $headed)",
+  async ({ ending, headed }) => {
+    const directory = await mkdtemp("/tmp/ogb-recovery-e2e-");
+    const rootDirectory = join(directory, "state");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () =>
+        new Response(
+          `<!doctype html><title>Recovery fixture</title>
+      <button id="counter">Counter</button><p id="cookie"></p><p id="live"></p><script>
+        let unsaved = 0;
+        const render = () => {
+          counter.textContent = 'Counter ' + (localStorage.getItem('count') || '0');
+          cookie.textContent = 'Cookie ' + (document.cookie || 'empty');
+          live.textContent = 'Unsaved ' + unsaved;
+        };
+        counter.onclick = () => {
+          const count = Number(localStorage.getItem('count') || '0') + 1;
+          localStorage.setItem('count', String(count));
+          document.cookie = 'counter=' + count + '; Max-Age=3600; Path=/';
+          unsaved += 1;
+          render();
+        }; render();
+      </script>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    });
+    const options = {
+      ...reference(),
+      headed,
+      initialUrl: `http://127.0.0.1:${server.port}/`,
+      browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium",
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    let first: BrowserSupervisor | undefined;
+    let second: BrowserSupervisor | undefined;
+    let controller: ReturnType<typeof Bun.spawn> | undefined;
+    let controllerUnit: string | undefined;
+    let browserPid: number | undefined;
+    const failures: unknown[] = [];
+    try {
+      if (ending === "graceful") {
+        first = await openManagedRecoverySupervisor(rootDirectory);
+        const created = await first.createSession(options);
+        const clicked = await first.action(clickFirstButton(created.observation));
+        expect(clicked.state).toBe("completed");
+        expect(semanticNames(clicked.observation!)).toContain("Unsaved 1");
+        browserPid = await chromiumProfilePid(profile);
+        await first.close();
+      } else if (ending === "killed") {
+        controller = Bun.spawn(
+          [
+            process.execPath,
+            join(import.meta.dir, "fixtures", "managed-recovery-fixture.ts"),
+            JSON.stringify({ rootDirectory, options }),
+          ],
+          { stdout: "pipe", stderr: "inherit" },
+        );
+        const line = await firstLine(controller.stdout as ReadableStream<Uint8Array>, 30_000);
+        const clicked = JSON.parse(line) as { state: string; names: string[] };
+        expect(clicked.state).toBe("completed");
+        expect(clicked.names).toContain("Unsaved 1");
+        browserPid = await chromiumProfilePid(profile);
+        const launcher = await parentPid(browserPid);
+        const drains = await childPids(browserPid, "tail");
+        for (const pid of [controller.pid, launcher, ...drains]) process.kill(pid, "SIGKILL");
+        await controller.exited;
+        for (const pid of [launcher, ...drains]) await waitForProcessDeath(pid);
+      } else {
+        controllerUnit = `ogb-controller-${randomUUID()}.service`;
+        controller = Bun.spawn(
+          [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--collect",
+            "--pipe",
+            "--same-dir",
+            `--unit=${controllerUnit}`,
+            "--property=KillMode=mixed",
+            ...Object.keys(process.env)
+              .filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key))
+              .map((key) => `--setenv=${key}`),
+            "--",
+            process.execPath,
+            join(import.meta.dir, "fixtures", "managed-recovery-fixture.ts"),
+            JSON.stringify({ rootDirectory, options }),
+          ],
+          { stdin: "ignore", stdout: "pipe", stderr: "inherit" },
+        );
+        const line = await firstLine(controller.stdout as ReadableStream<Uint8Array>, 30_000);
+        const clicked = JSON.parse(line) as { state: string; names: string[] };
+        expect(clicked.state).toBe("completed");
+        expect(clicked.names).toContain("Unsaved 1");
+        browserPid = await chromiumProfilePid(profile);
+        const browserTree = [browserPid, ...(await descendantPids(browserPid))];
+        expect(browserTree.length).toBeGreaterThan(2);
+        // The whole browser tree, including the process Chromium itself moves
+        // into an app scope at startup, is in the browser's own scope.
+        const scope = await processUnit(browserPid);
+        expect(scope).toMatch(/\/opengeni-browsers\.slice\/opengeni-browser-[^/]+\.scope$/u);
+        for (const pid of browserTree) expect(await processUnit(pid)).toBe(scope);
+        expect(spawnSync("systemctl", ["--user", "stop", controllerUnit]).status).toBe(0);
+        await controller.exited;
+        for (const pid of browserTree) expect(() => process.kill(pid, 0)).not.toThrow();
+      }
+      // The controller is gone; the browser it launched is not.
+      const inode = (await stat(profile)).ino;
+      expect(() => process.kill(browserPid!, 0)).not.toThrow();
+      second = await openManagedRecoverySupervisor(rootDirectory);
+      const { initialUrl, ...recoveryOptions } = options;
+      const recovered = await second.createSession({
+        ...recoveryOptions,
+        recoverExistingWorkingDirectory: true,
+      });
+      expect(recovered.browserSessionId).toBe(options.browserSessionId);
+      expect(recovered.controllerGeneration).toBe(options.controllerGeneration);
+      expect((await stat(profile)).ino).toBe(inode);
+      expect(await chromiumProfilePid(profile)).toBe(browserPid);
+      // The original document was never reloaded: in-memory state survived.
+      const targets = await second.listTargets(options);
+      expect(targets).toHaveLength(1);
+      const kept = await second.observe(options, targets[0]!.id);
+      expect(semanticNames(kept)).toContain("Unsaved 1");
+      const again = await second.action(clickFirstButton(kept));
+      expect(again.state).toBe("completed");
+      expect(semanticNames(again.observation!)).toContain("Unsaved 2");
+      const page = await second.openTarget(options, initialUrl);
+      expect(semanticNames(page)).toContain("Counter 2");
+      expect(semanticNames(page).join(" ")).toContain("Cookie counter=2");
+      await second.endSession(options, { removeState: true });
+      // After a killed controller, Chromium is reparented to this PID namespace's
+      // init (the test runner), which does not reap it: a zombie counts as gone.
+      await waitForProcessDeath(browserPid);
+    } catch (error) {
+      failures.push(error);
+      if (browserPid) {
+        try {
+          process.kill(browserPid, "SIGKILL");
+        } catch {}
+      }
+    } finally {
+      if (controller?.exitCode === null) controller.kill("SIGKILL");
+      if (controllerUnit) spawnSync("systemctl", ["--user", "stop", controllerUnit]);
+      const cleanup = await Promise.allSettled([first?.close(), second?.close()]);
+      server.stop(true);
+      const cleanupFailures = cleanup.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      failures.push(...cleanupFailures);
+      if (!cleanupFailures.length) {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, "managed recovery fixture failed");
+  },
+  90_000,
+);
+
+// Distributions install Chromium behind a launcher that prepares the sandbox
+// helper and environment and then execs the browser image (NixOS without it
+// aborts at startup). After the controller and its browser are both lost, the
+// recovered directory must relaunch through that launcher, not the recorded
+// process image.
+recoveryE2e(
+  "a lost controller and browser relaunch the same directory through the browser launcher",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-relaunch-e2e-");
+    const rootDirectory = join(directory, "state");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () =>
+        new Response(
+          `<!doctype html><title>Relaunch fixture</title><button id="counter">Counter</button>
+      <script>
+        const render = () => { counter.textContent = 'Counter ' + (localStorage.getItem('count') || '0'); };
+        counter.onclick = () => {
+          localStorage.setItem('count', String(Number(localStorage.getItem('count') || '0') + 1));
+          render();
+        }; render();
+      </script>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    });
+    const browser = process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium";
+    // The launcher records its PID (exec keeps it as the browser PID); its
+    // version probe records one too.
+    const launcher = join(directory, "chromium-launcher");
+    const launches = join(directory, "launches");
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    await writeFile(
+      launcher,
+      `#!/bin/sh\necho $$ >> ${quote(launches)}\nexec ${quote(browser)} "$@"\n`,
+      { mode: 0o700 },
+    );
+    const launchedPids = async () =>
+      (await readFile(launches, "utf8")).trim().split("\n").map(Number);
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `http://127.0.0.1:${server.port}/`,
+      browserExecutablePath: launcher,
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    let second: BrowserSupervisor | undefined;
+    let controller: ReturnType<typeof Bun.spawn> | undefined;
+    let relaunchedPid: number | undefined;
+    try {
+      controller = Bun.spawn(
+        [
+          process.execPath,
+          join(import.meta.dir, "fixtures", "managed-recovery-fixture.ts"),
+          JSON.stringify({ rootDirectory, options }),
+        ],
+        { stdout: "pipe", stderr: "inherit" },
+      );
+      const line = await firstLine(controller.stdout as ReadableStream<Uint8Array>, 30_000);
+      expect((JSON.parse(line) as { names: string[] }).names).toContain("Counter 1");
+      const browserPid = await chromiumProfilePid(profile);
+      expect(await launchedPids()).toContain(browserPid);
+      const daemon = await parentPid(browserPid);
+      const drains = await childPids(browserPid, "tail");
+      for (const pid of [controller.pid, daemon, ...drains, browserPid]) {
+        process.kill(pid, "SIGKILL");
+      }
+      await controller.exited;
+      for (const pid of [daemon, ...drains, browserPid]) await waitForProcessDeath(pid);
+      const inode = (await stat(profile)).ino;
+
+      second = await openManagedRecoverySupervisor(rootDirectory);
+      const { initialUrl, ...recoveryOptions } = options;
+      const recovered = await second.createSession({
+        ...recoveryOptions,
+        recoverExistingWorkingDirectory: true,
+      });
+      expect(recovered.controllerGeneration).toBe(options.controllerGeneration);
+      relaunchedPid = await chromiumProfilePid(profile);
+      expect(relaunchedPid).not.toBe(browserPid);
+      expect(await launchedPids()).toContain(relaunchedPid);
+      expect((await stat(profile)).ino).toBe(inode);
+      // The relaunched browser serves the recovered session.
+      const page = await second.openTarget(options, initialUrl);
+      expect(semanticNames(page)).toContain("Relaunch fixture");
+      await second.endSession(options, { removeState: true });
+      await waitForProcessDeath(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      if (controller?.exitCode === null) controller.kill("SIGKILL");
+      await second?.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "an idle browser stops and its next use relaunches the same profile with its tabs",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-idle-release-e2e-");
+    const rootDirectory = join(directory, "state");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) =>
+        new Response(
+          `<!doctype html><title>Idle ${new URL(request.url).pathname}</title><h1>Idle page</h1>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    });
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `http://127.0.0.1:${server.port}/first`,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    let relaunchedPid: number | undefined;
+    try {
+      const first = await supervisor.createSession(options);
+      const second = await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/second`);
+      const browserPid = await chromiumProfilePid(profile);
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+      await expect(supervisor.listTargets(options)).rejects.toMatchObject({
+        code: "resource_not_found",
+      });
+
+      const { initialUrl, ...recoveryOptions } = options;
+      await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      expect(relaunchedPid).not.toBe(browserPid);
+      // Chrome restored both tabs from the profile it shut down cleanly.
+      const reopened = await supervisor.listTargets(options);
+      const urls = reopened.map((target) => target.url);
+      expect(urls).toEqual(
+        expect.arrayContaining([initialUrl, `http://127.0.0.1:${server.port}/second`]),
+      );
+      // The reopened tabs keep their IDs, so a call still naming one works.
+      expect(reopened.find((target) => target.url.endsWith("/second"))?.id).toBe(second.target.id);
+      expect(reopened.find((target) => target.url === initialUrl)?.id).toBe(
+        first.observation.target.id,
+      );
+      expect((await supervisor.targetState(options, second.target.id)).targetId).toBe(
+        second.target.id,
+      );
+      const observed = await supervisor.observe(options, first.observation.target.id);
+      expect(observed.target.id).toBe(first.observation.target.id);
+      expect(observed.target.url).toBe(initialUrl);
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+/** A managed browser with these tabs open, each holding unsaved typing, that
+ * was stopped for going unused and relaunched: Chrome reopens the tabs and
+ * loads each page again. Chrome restores the pages of only the first few;
+ * the rest have no renderer until they are used. */
+async function withRelaunchedTabs(
+  paths: readonly string[],
+  run: (relaunched: {
+    supervisor: BrowserSupervisor;
+    options: ReturnType<typeof reference>;
+    tabs: Record<string, string>;
+    url: (path: string) => string;
+    command: (
+      targetId: string,
+      action: BrowserActionCommand["action"],
+      observationMode?: BrowserActionCommand["observationMode"],
+    ) => Promise<BrowserActionCommand>;
+    /** The agent fills a tab's message, as its own tools ask: with notices. */
+    fill: (targetId: string) => Promise<BrowserActionReceipt>;
+  }) => Promise<void>,
+): Promise<void> {
+  const directory = await mkdtemp("/tmp/ogb-reloaded-tab-e2e-");
+  const rootDirectory = join(directory, "state");
+  // A page that keeps what was typed only in memory.
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) =>
+      new Response(
+        `<!doctype html><title>Draft ${new URL(request.url).pathname}</title><label>Message <textarea placeholder="Message"></textarea></label>`,
+        { headers: { "content-type": "text/html" } },
+      ),
+  });
+  const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
+  let clock = Date.now();
+  const options = {
+    ...reference(),
+    headed: process.env.DISPLAY !== undefined,
+    initialUrl: url(paths[0]!),
+    ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+      ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+      : {}),
+    workingRuntimeAuthority: {
+      tokenGeneration: 1,
+      placementDigest: "a".repeat(64),
+      controlDigest: "b".repeat(64),
+      viewDigest: "c".repeat(64),
+    },
+  };
+  const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+  const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+    idleReleaseMs: 60_000,
+    now: () => clock,
+  });
+  const command = async (
+    targetId: string,
+    action: BrowserActionCommand["action"],
+    observationMode?: BrowserActionCommand["observationMode"],
+  ): Promise<BrowserActionCommand> => {
+    const state = await supervisor.targetState(options, targetId);
+    return {
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId: options.browserSessionId,
+      controllerGeneration: state.controllerGeneration,
+      targetId,
+      expectedTargetGeneration: state.targetGeneration,
+      expectedDocumentGeneration: state.documentGeneration,
+      expectedFrameId: state.frameId,
+      actor: { kind: "system", subjectId: "native-e2e" },
+      ...(observationMode ? { observationMode } : {}),
+      action,
+    };
+  };
+  const fillWith = async (targetId: string, value: string, notices: boolean) =>
+    await supervisor.action(
+      await command(targetId, { type: "fill", locator: reloadedMessage, value }),
+      notices ? { notices: true } : {},
+    );
+  let relaunchedPid: number | undefined;
+  try {
+    const tabs: Record<string, string> = {
+      [paths[0]!]: (await supervisor.createSession(options)).observation.target.id,
+    };
+    for (const path of paths.slice(1)) {
+      tabs[path] = (await supervisor.openTarget(options, url(path))).target.id;
+    }
+    for (const tab of Object.values(tabs)) {
+      expect((await fillWith(tab, "half-written", false)).error).toBeNull();
+    }
+    const browserPid = await chromiumProfilePid(profile);
+    clock += 61_000;
+    expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+    await waitForProcessExit(browserPid);
+    const { initialUrl: _initialUrl, ...recoveryOptions } = options;
+    await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+    relaunchedPid = await chromiumProfilePid(profile);
+    expect(relaunchedPid).not.toBe(browserPid);
+    expect((await supervisor.listTargets(options)).map((target) => target.id)).toEqual(
+      expect.arrayContaining(Object.values(tabs)),
+    );
+    await run({
+      supervisor,
+      options,
+      tabs,
+      url,
+      command,
+      fill: async (targetId) => await fillWith(targetId, "again", true),
+    });
+    await supervisor.endSession(options, { removeState: true });
+    await waitForProcessExit(relaunchedPid);
+  } catch (error) {
+    if (relaunchedPid) {
+      try {
+        process.kill(relaunchedPid, "SIGKILL");
+      } catch {}
+    }
+    throw error;
+  } finally {
+    await supervisor.close();
+    server.stop(true);
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+const reloadedMessage = { kind: "placeholder", text: "Message" } as const;
+
+const reloadedNotice =
+  "This browser was stopped after going unused for 1 minute and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
+
+function textboxValue(observation: BrowserObservation | null | undefined): unknown {
+  return flatten(observation?.semantic?.kind === "snapshot" ? observation.semantic.roots : []).find(
+    (node) => node.role === "textbox",
+  )?.value;
+}
+
+recoveryE2e(
+  "a relaunch's reload notice goes to the agent once, and a person's viewer neither sees nor uses it up",
+  async () => {
+    await withRelaunchedTabs(["/viewed", "/acted"], async ({ supervisor, options, tabs, fill }) => {
+      // A person's viewer reads the tab first: no notice, and it stays.
+      const viewed = await supervisor.observe(options, tabs["/viewed"]!);
+      expect(viewed.notice).toBeUndefined();
+      expect(textboxValue(viewed)).toBeFalsy();
+      const agent = { notices: true } as const;
+      expect((await supervisor.observe(options, tabs["/viewed"]!, agent)).notice).toBe(
+        reloadedNotice,
+      );
+      expect((await supervisor.observe(options, tabs["/viewed"]!, agent)).notice).toBeUndefined();
+      // An action's receipt carries it the same way, after a viewer read.
+      await supervisor.observe(options, tabs["/acted"]!);
+      const acted = await fill(tabs["/acted"]!);
+      expect(acted.error).toBeNull();
+      expect(acted.observation?.notice).toBe(reloadedNotice);
+    });
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "after a relaunch, an agent that saw a tab by selecting, capturing, reading or a quiet navigation acts on it",
+  async () => {
+    await withRelaunchedTabs(
+      ["/selected", "/captured", "/read", "/quiet"],
+      async ({ supervisor, options, tabs, url, command, fill }) => {
+        const agent = { notices: true } as const;
+        // Selecting shows the tab with the notice; acting next runs.
+        const selected = await supervisor.selectTarget(options, tabs["/selected"]!, agent);
+        expect(selected.notice).toBe(reloadedNotice);
+        const afterSelect = await fill(tabs["/selected"]!);
+        expect(afterSelect.error).toBeNull();
+        expect(textboxValue(afterSelect.observation)).toBe("again");
+        expect(afterSelect.observation?.notice).toBeUndefined();
+
+        // A screenshot or a page read returns no observation: the action
+        // after it runs, and its receipt carries the notice.
+        await supervisor.screenshot(options, tabs["/captured"]!);
+        const afterCapture = await fill(tabs["/captured"]!);
+        expect(afterCapture.error).toBeNull();
+        expect(afterCapture.observation?.notice).toBe(reloadedNotice);
+        const state = await supervisor.targetState(options, tabs["/read"]!);
+        const read = await supervisor.readDom(options, tabs["/read"]!, {
+          kind: "count",
+          selector: "textarea",
+          expectedTargetGeneration: state.targetGeneration,
+          expectedDocumentGeneration: state.documentGeneration!,
+          expectedFrameId: state.frameId!,
+        });
+        expect(read.count).toBe(1);
+        const afterRead = await fill(tabs["/read"]!);
+        expect(afterRead.error).toBeNull();
+        expect(afterRead.observation?.notice).toBe(reloadedNotice);
+
+        // A navigation that returns no observation, then an action: both
+        // run, and the action's receipt carries the notice.
+        const quiet = await supervisor.action(
+          await command(tabs["/quiet"]!, { type: "navigate", url: url("/quiet-next") }, "none"),
+          agent,
+        );
+        expect(quiet.error).toBeNull();
+        expect(quiet.observation ?? null).toBeNull();
+        const afterQuiet = await fill(tabs["/quiet"]!);
+        expect(afterQuiet.error).toBeNull();
+        expect(afterQuiet.observation?.target.title).toBe("Draft /quiet-next");
+        expect(afterQuiet.observation?.notice).toBe(reloadedNotice);
+      },
+    );
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "after a relaunch, a batch that navigates and then fills runs whole",
+  async () => {
+    await withRelaunchedTabs(["/batched"], async ({ supervisor, tabs, url, command }) => {
+      const batched = await supervisor.action(
+        await command(tabs["/batched"]!, {
+          type: "batch",
+          actions: [
+            { type: "navigate", url: url("/batched-next") },
+            { type: "fill", locator: reloadedMessage, value: "again" },
+          ],
+        }),
+        { notices: true },
+      );
+      expect(batched.error).toBeNull();
+      expect(batched.observation?.target.title).toBe("Draft /batched-next");
+      expect(textboxValue(batched.observation)).toBe("again");
+      expect(batched.observation?.notice).toBe(reloadedNotice);
+    });
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "every tab a relaunch reopened answers, including those Chrome had not loaded yet",
+  async () => {
+    const paths = Array.from({ length: 9 }, (_, index) => `/tab-${index}`);
+    await withRelaunchedTabs(paths, async ({ supervisor, options, tabs }) => {
+      // From the last tab back, so the tabs Chrome left unloaded are read
+      // before anything else could load them.
+      for (const path of [...paths].reverse()) {
+        const observation = await supervisor.observe(options, tabs[path]!);
+        expect(observation.target.title).toBe(`Draft ${path}`);
+        expect(textboxValue(observation)).toBeFalsy();
+      }
+    });
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "a tab showing an error page keeps its ID when a relaunch reopens it at the address it failed to load",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-error-tab-e2e-");
+    const rootDirectory = join(directory, "state");
+    const page = (request: Request) =>
+      new Response(
+        `<!doctype html><title>Loaded ${new URL(request.url).pathname}</title><h1>Loaded</h1>`,
+        { headers: { "content-type": "text/html" } },
+      );
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: page });
+    // A port nothing listens on yet: the tab's load is refused and it shows
+    // the browser's error page until the address comes up.
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: page });
+    const refusedPort = Number(probe.port);
+    probe.stop(true);
+    const failedUrl = `http://127.0.0.1:${refusedPort}/later`;
+    let late: ReturnType<typeof Bun.serve> | undefined;
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: process.env.DISPLAY !== undefined,
+      initialUrl: failedUrl,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    let relaunchedPid: number | undefined;
+    try {
+      // The first tab's load is refused; it stays open on the error page.
+      const failed = (await supervisor.createSession(options)).observation;
+      const other = await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/other`);
+      // What callers are shown is the browser's own error page.
+      expect(
+        (await supervisor.listTargets(options)).find((target) => target.id === failed.target.id)
+          ?.url,
+      ).toStartWith("chrome-error:");
+      const browserPid = await chromiumProfilePid(profile);
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+
+      late = Bun.serve({ hostname: "127.0.0.1", port: refusedPort, fetch: page });
+      const { initialUrl: _initialUrl, ...recoveryOptions } = options;
+      await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      // The browser reopened the tab at the address it failed to load, which
+      // loads now; the tab keeps its ID and says its page reloaded.
+      const reopened = await supervisor.listTargets(options);
+      expect(reopened.find((target) => target.url === failedUrl)?.id).toBe(failed.target.id);
+      expect(reopened.find((target) => target.url.endsWith("/other"))?.id).toBe(other.target.id);
+      const observed = await supervisor.observe(options, failed.target.id, { notices: true });
+      expect(observed.target.url).toBe(failedUrl);
+      expect(observed.notice).toBe(
+        "This browser was stopped after going unused for 1 minute and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.",
+      );
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      late?.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "tabs showing the same page never take each other's IDs when the browser relaunches",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-duplicate-tabs-e2e-");
+    const rootDirectory = join(directory, "state");
+    // Each tab keeps its own marker in sessionStorage, which the browser
+    // restores per tab, and then shows the same /dup URL as the others.
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        const path = new URL(request.url).pathname;
+        const script = path.startsWith("/mark/")
+          ? `sessionStorage.setItem("marker", ${JSON.stringify(path.slice(6))}); location.replace("/dup");`
+          : `document.title = "Tab " + (sessionStorage.getItem("marker") ?? "none");`;
+        return new Response(
+          `<!doctype html><title>Loading</title><h1>Duplicate</h1><script>${script}</script>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `${base}/mark/A`,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    const markedTabs = async (expected: number) => {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const targets = await supervisor.listTargets(options);
+        if (
+          targets.length === expected &&
+          targets.every(
+            (target) => target.url === `${base}/dup` && /^Tab [ABC]$/u.test(target.title),
+          )
+        )
+          return targets;
+        if (Date.now() > deadline)
+          throw new Error(`tabs never showed their markers: ${JSON.stringify(targets)}`);
+        await Bun.sleep(50);
+      }
+    };
+    let relaunchedPid: number | undefined;
+    try {
+      const a = await supervisor.createSession(options);
+      await supervisor.openTarget(options, `${base}/mark/B`);
+      await supervisor.openTarget(options, `${base}/mark/C`);
+      const before = await markedTabs(3);
+      const markerOf = new Map(before.map((target) => [target.id, target.title]));
+      expect(markerOf.get(a.observation.target.id)).toBe("Tab A");
+      // The agent's selected tab is not the browser's last opened one.
+      await supervisor.selectTarget(options, a.observation.target.id);
+      const browserPid = await chromiumProfilePid(profile);
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+
+      const { initialUrl: _initialUrl, ...recoveryOptions } = options;
+      await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      const after = await markedTabs(3);
+      // No earlier ID may name another tab's page: an ID either still shows
+      // its own tab or reads as replaced.
+      for (const [id, marker] of markerOf) {
+        const reopened = after.find((target) => target.id === id);
+        if (reopened) expect(reopened.title).toBe(marker);
+        const observed: BrowserObservation | Error = await supervisor
+          .observe(options, id)
+          .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+        if (observed instanceof Error) {
+          expect(observed).toMatchObject({ code: "target_not_found" });
+          expect(observed.message).toContain("and this tab was replaced");
+        } else {
+          expect(observed.target.title).toBe(marker);
+        }
+      }
+      // Three tabs showing one URL can't be told apart, so none kept its ID.
+      expect(after.filter((target) => markerOf.has(target.id))).toEqual([]);
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "a browser handed off at shutdown is stopped by the next controller once idle and relaunches with its tabs",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-detached-release-e2e-");
+    const rootDirectory = join(directory, "state");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) =>
+        new Response(
+          `<!doctype html><title>Handoff ${new URL(request.url).pathname}</title><h1>Handoff</h1>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    });
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `http://127.0.0.1:${server.port}/first`,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const first = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    let second: BrowserSupervisor | undefined;
+    let third: BrowserSupervisor | undefined;
+    let browserPid: number | undefined;
+    let relaunchedPid: number | undefined;
+    try {
+      const firstTab = await first.createSession(options);
+      const secondTab = await first.openTarget(options, `http://127.0.0.1:${server.port}/second`);
+      browserPid = await chromiumProfilePid(profile);
+      await first.close();
+      // Recently used, so the shutdown handed the live browser off.
+      expect(processRunning(browserPid)).toBe(true);
+
+      second = await openManagedRecoverySupervisor(rootDirectory, {
+        idleReleaseMs: 60_000,
+        now: () => clock,
+      });
+      expect(await second.releaseDetachedBrowsers()).toEqual([]);
+      expect(processRunning(browserPid)).toBe(true);
+      clock += 61_000;
+      expect(await second.releaseDetachedBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+
+      const { initialUrl, ...recoveryOptions } = options;
+      await second.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      expect(relaunchedPid).not.toBe(browserPid);
+      const reopened = await second.listTargets(options);
+      const urls = reopened.map((target) => target.url);
+      expect(urls).toEqual(
+        expect.arrayContaining([initialUrl, `http://127.0.0.1:${server.port}/second`]),
+      );
+      // The reopened tabs keep their IDs.
+      const tabIds = reopened.map((target) => target.id).sort();
+      expect(tabIds).toEqual([firstTab.observation.target.id, secondTab.target.id].sort());
+      expect((await second.targetState(options, secondTab.target.id)).targetId).toBe(
+        secondTab.target.id,
+      );
+
+      // A controller that reattaches to the same running browser gives its
+      // tabs the same IDs.
+      await second.close();
+      expect(processRunning(relaunchedPid)).toBe(true);
+      third = await openManagedRecoverySupervisor(rootDirectory, {
+        idleReleaseMs: 60_000,
+        now: () => clock,
+      });
+      await third.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      expect(await chromiumProfilePid(profile)).toBe(relaunchedPid);
+      expect((await third.listTargets(options)).map((target) => target.id).sort()).toEqual(tabIds);
+      const observed = await third.observe(options, secondTab.target.id);
+      expect(observed.target.url).toBe(`http://127.0.0.1:${server.port}/second`);
+      await third.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      for (const pid of [browserPid, relaunchedPid]) {
+        if (!pid) continue;
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await first.close();
+      await second?.close();
+      await third?.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "an idle browser still receiving a download keeps running and completes it",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-idle-download-e2e-");
+    const rootDirectory = join(directory, "state");
+    let finishDownload = () => {};
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/large.bin") {
+          // Keeps transferring until the test ends it.
+          let timer: ReturnType<typeof setInterval> | undefined;
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(64 * 1024));
+              timer = setInterval(() => controller.enqueue(new Uint8Array(1024)), 100);
+              finishDownload = () => {
+                clearInterval(timer);
+                controller.close();
+              };
+            },
+            cancel() {
+              clearInterval(timer);
+            },
+          });
+          return new Response(body, {
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-disposition": 'attachment; filename="large.bin"',
+            },
+          });
+        }
+        return new Response(
+          `<!doctype html><title>Download</title><script>setTimeout(()=>{location.href="/large.bin"},50)</script>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    let browserPid: number | undefined;
+    try {
+      await supervisor.createSession(options);
+      browserPid = await chromiumProfilePid(profile);
+      await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/download`);
+      let downloads = await supervisor.listDownloads(options);
+      for (let attempt = 0; attempt < 100 && downloads.length === 0; attempt++) {
+        await Bun.sleep(100);
+        downloads = await supervisor.listDownloads(options);
+      }
+      expect(downloads.map((download) => download.status)).toEqual(["in_progress"]);
+      // Nobody calls browserd for longer than the idle time while bytes arrive.
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+      expect(() => process.kill(browserPid!, 0)).not.toThrow();
+      finishDownload();
+      for (let attempt = 0; attempt < 100; attempt++) {
+        downloads = await supervisor.listDownloads(options);
+        if (downloads[0]?.status !== "in_progress") break;
+        await Bun.sleep(100);
+      }
+      expect(downloads.map((download) => download.status)).toEqual(["completed"]);
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(browserPid);
+    } catch (error) {
+      if (browserPid) {
+        try {
+          process.kill(browserPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
 e2e("runs multiple real browser sessions through one placement supervisor", async () => {
   const directory = await mkdtemp("/tmp/ogb-supervisor-e2e-");
-  const socketDirectory = await mkdtemp("/tmp/ogs-");
   const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
     ? await resolvePinnedHeadlessShell(process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY)
     : undefined;
   const supervisor = await BrowserSupervisor.open({
     ...(headlessShell ? { headlessShell } : {}),
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: socketDirectory,
   });
   const first = reference();
   const second = reference();
@@ -60,7 +1106,6 @@ e2e("runs multiple real browser sessions through one placement supervisor", asyn
   } finally {
     await supervisor.close();
     await rm(directory, { recursive: true, force: true });
-    await rm(socketDirectory, { recursive: true, force: true });
   }
 });
 
@@ -68,13 +1113,11 @@ e2e.each(["read", "capture"] as const)(
   "recovers after exact Chromium process loss before %s without reusing target refs",
   async (operation) => {
     const directory = await mkdtemp("/tmp/ogb-browser-loss-e2e-");
-    const socketDirectory = await mkdtemp("/tmp/ogl-");
     let driverLifecycles = 0;
     let uploads = 0;
     let profileDirectory: string | undefined;
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
-      socketRootDirectory: socketDirectory,
       uploadArtifact: async (path) => {
         expect((await stat(path)).size).toBeGreaterThan(0);
         uploads += 1;
@@ -82,13 +1125,8 @@ e2e.each(["read", "capture"] as const)(
       createDriver: async (driverContext) => {
         profileDirectory = driverContext.profileDirectory;
         driverLifecycles += 1;
-        const runner = await AgentBrowserJsonRunner.create({
-          namespace: "og",
-          sessionName: `r${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-          socketDirectory: driverContext.socketDirectory,
+        const runner = await ManagedBrowserRunner.create({
           profileDirectory: driverContext.profileDirectory,
-          downloadDirectory: driverContext.downloadDirectory,
-          screenshotDirectory: driverContext.screenshotDirectory,
           headed: false,
           browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium",
         });
@@ -138,16 +1176,21 @@ e2e.each(["read", "capture"] as const)(
       const recovered = await supervisor.listTargets(session);
       expect(driverLifecycles).toBe(operation === "capture" ? 3 : 2);
       expect(recovered).toHaveLength(1);
-      expect(recovered[0]!.id).not.toBe(created.observation.target.id);
+      // The reopened tab keeps its ID.
+      expect(recovered[0]!.id).toBe(created.observation.target.id);
       expect(recovered[0]!.url).toBe(fixture("Recovery"));
 
+      // An action prepared on the lost browser's page is refused as stale,
+      // never applied to a page it did not see.
       const stale = await supervisor.action(clickCommand(created.observation));
       expect(stale.state).toBe("failed");
-      expect(stale.error?.code).toBe("target_not_found");
+      expect(stale.error?.code).toBe("target_stale");
+      // Observed again under the same ID, the tab takes actions.
+      const fresh = await supervisor.observe(session, created.observation.target.id);
+      expect((await supervisor.action(clickCommand(fresh))).state).toBe("completed");
     } finally {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });
-      await rm(socketDirectory, { recursive: true, force: true });
     }
   },
 );
@@ -204,6 +1247,15 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+function processRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function chromiumProfilePid(profileDirectory: string): Promise<number> {
   const lock = await readlink(join(profileDirectory, "SingletonLock"));
   const match = /-([1-9][0-9]{0,9})$/u.exec(lock);
@@ -225,4 +1277,71 @@ async function waitForProcessExit(pid: number): Promise<void> {
     await Bun.sleep(25);
   }
   throw new Error("Chromium did not exit after SIGKILL");
+}
+
+/** A killed process counts as dead once it is gone or a zombie its parent has
+ * not reaped yet (Chrome does not reap its stderr drain). */
+async function waitForProcessDeath(pid: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const procStat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => null);
+    if (procStat === null || procStat.slice(procStat.lastIndexOf(")") + 2).startsWith("Z")) return;
+    await Bun.sleep(25);
+  }
+  throw new Error(`process ${pid} did not die after SIGKILL`);
+}
+
+async function parentPid(pid: number): Promise<number> {
+  const procStat = await readFile(`/proc/${pid}/stat`, "utf8");
+  return Number(procStat.slice(procStat.lastIndexOf(")") + 2).split(" ")[1]);
+}
+
+async function descendantPids(pid: number): Promise<number[]> {
+  const children = (await readFile(`/proc/${pid}/task/${pid}/children`, "utf8").catch(() => ""))
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean)
+    .map(Number);
+  const nested = await Promise.all(children.map((child) => descendantPids(child)));
+  return [...children, ...nested.flat()];
+}
+
+/** The unified-hierarchy cgroup path of a process. */
+async function processUnit(pid: number): Promise<string> {
+  const line = (await readFile(`/proc/${pid}/cgroup`, "utf8"))
+    .split("\n")
+    .find((entry) => entry.startsWith("0::"));
+  if (!line) throw new Error("process has no unified cgroup");
+  return line.slice(3);
+}
+
+async function childPids(pid: number, command: string): Promise<number[]> {
+  const children = (await readFile(`/proc/${pid}/task/${pid}/children`, "utf8"))
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean)
+    .map(Number);
+  const matches: number[] = [];
+  for (const child of children) {
+    const argv = await readFile(`/proc/${child}/cmdline`, "utf8").catch(() => "");
+    if (basename(argv.split("\0")[0] ?? "") === command) matches.push(child);
+  }
+  return matches;
+}
+
+async function firstLine(stream: ReadableStream<Uint8Array>, timeoutMs: number): Promise<string> {
+  const reader = stream.getReader();
+  const timer = setTimeout(() => void reader.cancel(), timeoutMs);
+  let output = "";
+  try {
+    while (!output.includes("\n")) {
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error("controller exited before reporting its session");
+      output += new TextDecoder().decode(chunk.value);
+    }
+    return output.slice(0, output.indexOf("\n"));
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
 }

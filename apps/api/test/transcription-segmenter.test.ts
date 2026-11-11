@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createFfmpegTranscriptionSegmenter,
   TranscriptionSegmenterError,
-} from "../src/transcription/segmenter";
+} from "@opengeni/core/transcription-service";
 
 async function* chunks(): AsyncIterable<Uint8Array> {
   yield new Uint8Array([1]);
@@ -84,5 +84,46 @@ printf '\\002' > "$output_directory/segment-000001.wav"
     }
     expect(caught).toBeInstanceOf(TranscriptionSegmenterError);
     expect(caught).toMatchObject({ code: "too_large", retryable: false });
+  });
+
+  test("ffmpeg stopped from outside is retried; ffmpeg failing on its own is bad audio", async () => {
+    const segment = async (
+      runCommand: () => Promise<{ exitCode: number | null; stderr: string }>,
+    ) => {
+      const segmenter = createFfmpegTranscriptionSegmenter({
+        ffmpegPath: "ffmpeg",
+        runCommand: async () => ({ ...(await runCommand()), spawnError: false, cancelled: false }),
+      });
+      try {
+        for await (const _segment of segmenter.segment({
+          sourceMimeType: "audio/webm",
+          totalDurationMilliseconds: 10_000,
+          providerSegmentSeconds: 50,
+          chunks: chunks(),
+        })) {
+          // Fails before a segment is read.
+        }
+      } catch (error) {
+        return error;
+      }
+      return null;
+    };
+    // Killed with the worker, or ffmpeg's own exit after a signal.
+    expect(await segment(async () => ({ exitCode: null, stderr: "" }))).toMatchObject({
+      code: "cancelled",
+      retryable: true,
+    });
+    expect(
+      await segment(async () => ({
+        exitCode: 255,
+        stderr: "Exiting normally, received signal 15.",
+      })),
+    ).toMatchObject({ code: "cancelled", retryable: true });
+    expect(
+      await segment(async () => ({
+        exitCode: 1,
+        stderr: "Invalid data found when processing input",
+      })),
+    ).toMatchObject({ code: "invalid_audio", retryable: false });
   });
 });

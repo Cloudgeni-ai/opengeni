@@ -1,0 +1,501 @@
+import {
+  MACHINE_ACCESS_REQUIRED_CODE,
+  machineAccessNeededMessage,
+} from "@opengeni/contracts/machine-access";
+import {
+  ENCRYPTED_CONTENT_REJECTION_CODE,
+  isEncryptedReasoningRefusalText,
+} from "@opengeni/contracts/encrypted-reasoning-refusal";
+import { t } from "./console-text";
+import {
+  creditRefusalHeadline,
+  creditRefusalKindFromText,
+  isDiagnosticFailureCode,
+  type CreditRefusalKind,
+} from "../../lib/format";
+import { providerRecoverySubject } from "../../lib/provider-recovery";
+import type { SessionFailureSummary } from "./events";
+import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
+
+/**
+ * Known provider failure classes. Presentation only: the stored event keeps the
+ * exact recorded text, which the banner offers behind a details toggle.
+ * `suggestModel` points the user at the model picker when another model avoids
+ * the failure. `retryUnhelpful` is reserved for rejected credentials: the same
+ * request on the same model cannot succeed until the key is fixed, so Retry
+ * returns only once another model is selected. Billing, access and limit
+ * failures keep Retry because the condition can clear (a top-up, a verified
+ * organization, a daily reset).
+ */
+type KnownFailure = {
+  /** Closed analytics class (turn-failure-analytics.ts); never shown to people. */
+  kind: KnownFailureKind;
+  message: string;
+  retryUnhelpful: boolean;
+  suggestModel: boolean;
+  /**
+   * Whole headline when another model can be chosen, for transient refusals
+   * whose remedy reads as a choice. Otherwise " Choose another model below."
+   * is appended to `message`.
+   */
+  chooseModelMessage?: string | undefined;
+};
+export type KnownFailureKind =
+  | "provider_credentials"
+  | "provider_billing"
+  | "provider_access"
+  | "daily_limit"
+  | "monthly_limit"
+  | "provider_quota"
+  | "rate_limited"
+  | "provider_error"
+  | "model_history";
+
+const CREDENTIALS: KnownFailure = {
+  kind: "provider_credentials",
+  message: "The model provider rejected the credentials for this model.",
+  retryUnhelpful: true,
+  suggestModel: true,
+};
+const PROVIDER_BILLING: KnownFailure = {
+  kind: "provider_billing",
+  message: "The model provider account for this model is out of credits.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+const PROVIDER_PAYMENT: KnownFailure = {
+  kind: "provider_billing",
+  message: "The model provider couldn't bill this request. Check the account's payment details.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+const PROVIDER_ACCESS: KnownFailure = {
+  kind: "provider_access",
+  message: "The model provider denied access to this model.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+const DAILY_LIMIT: KnownFailure = {
+  kind: "daily_limit",
+  message: "This model's daily limit has been reached.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+const MONTHLY_LIMIT: KnownFailure = {
+  kind: "monthly_limit",
+  message: "This model's monthly limit has been reached.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+const QUOTA: KnownFailure = {
+  kind: "provider_quota",
+  message: "The model provider's usage quota for this model is used up.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+const RATE_LIMITED: KnownFailure = {
+  kind: "rate_limited",
+  message: "This model is throttled due to high demand. Try again in a few minutes.",
+  chooseModelMessage:
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+const PROVIDER_ERROR: KnownFailure = {
+  kind: "provider_error",
+  message: "This model is temporarily unavailable. Try again in a few minutes.",
+  chooseModelMessage:
+    "This model is temporarily unavailable. Select a different model, or try again in a few minutes.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+/**
+ * The provider refused encrypted reasoning another model or account left in
+ * this chat. Retry stays: the worker resends that reasoning as readable text
+ * where it can, and failures recorded before it did succeed on Retry.
+ */
+const UNREADABLE_HISTORY: KnownFailure = {
+  kind: "model_history",
+  message: "This model can’t read earlier reasoning in this chat.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+
+/**
+ * The same HTTP 400 refusal the runtime recovers from
+ * (`classifyEncryptedArtifactRejection`). Recorded with no failure code: a coded
+ * failure keeps its own copy and retry decision.
+ */
+function isUnreadableHistory(recorded: string, status: string | null): boolean {
+  return (
+    status === "400" &&
+    (new RegExp(`\\b${ENCRYPTED_CONTENT_REJECTION_CODE}\\b`).test(recorded) ||
+      isEncryptedReasoningRefusalText(recorded))
+  );
+}
+
+const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
+const SANDBOX_START_FAILURE = "The sandbox didn’t start.";
+const EXECUTION_CONNECTION_FAILURE = "Opengeni lost contact with the execution environment.";
+const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
+const COMPACTION_FAILURE =
+  "Couldn’t compact conversation history. If the next message fails too, start a new session.";
+/** The worker's code for a turn whose personal machine isn't allowed in this chat. */
+export { MACHINE_ACCESS_REQUIRED_CODE };
+const MACHINE_ACCESS_REQUIRED = machineAccessNeededMessage();
+
+/** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
+function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
+  switch (scope) {
+    case "daily":
+      return DAILY_LIMIT;
+    case "monthly":
+      return MONTHLY_LIMIT;
+    case "credits":
+      return PROVIDER_BILLING;
+    case "quota":
+      return QUOTA;
+    default:
+      return null;
+  }
+}
+
+// Worker codes whose recorded text is the provider's own (or, for an exhausted
+// quota, authored copy plus the provider's text). Every other code already
+// carries authored copy (Codex, SuperGrok, sandbox, MCP, ...).
+const PROVIDER_TEXT_CODES = new Set([
+  "provider_rate_limited",
+  "provider_unavailable",
+  "provider_quota_exhausted",
+]);
+
+/** Classify known provider text; unknown failures use a separate generic headline. */
+export function classifyProviderFailure(
+  recorded: string,
+  failureCode?: string | null,
+  quotaScope?: string | null,
+): KnownFailure | null {
+  if (failureCode === "provider_billing_error") return PROVIDER_PAYMENT;
+  if (failureCode === "anthropic_authentication_error") return CREDENTIALS;
+  const scoped = quotaScopeFailure(quotaScope);
+  if (scoped) return scoped;
+  if (failureCode && !PROVIDER_TEXT_CODES.has(failureCode)) return null;
+  const text = recorded.toLowerCase();
+  // Closed legacy copy authored by the native Claude adapter, whose original
+  // worker payload omitted the HTTP status/code. Preserve its credential
+  // remedy without granting classification to arbitrary expiry wording.
+  if (
+    recorded.trim() ===
+    "Claude credentials expired or were revoked. Replace the key or setup token in Models."
+  )
+    return CREDENTIALS;
+  // Platform credit exhaustion ("workspace credits"; older history says
+  // "Opengeni credits") has a dedicated billing remedy upstream.
+  if (text.includes("workspace credits") || text.includes("opengeni credits")) return null;
+  // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
+  // status alone classifies only 401/402/403/429; other statuses do not prove
+  // a cause and use the generic headline with recorded diagnostics.
+  const status = /^\s*(4\d\d)\b/.exec(recorded)?.[1] ?? null;
+  if (!failureCode && isUnreadableHistory(recorded, status)) return UNREADABLE_HISTORY;
+  if (
+    status === "401" ||
+    /\b(?:incorrect|invalid)[ _-]?(?:api[ _-]?key|x-api-key|subscription key)\b/.test(text) ||
+    text.includes("authentication_error") ||
+    text.includes("platform.openai.com/account/api-keys") ||
+    text.includes("rejected this deployment's engine credentials") ||
+    (/\b401\b/.test(text) && /\b(?:api key|unauthori[sz]ed|authenticat)/.test(text))
+  ) {
+    return CREDENTIALS;
+  }
+  if (/free-models-per-day|daily (?:limit|quota)|requests per day/.test(text)) return DAILY_LIMIT;
+  if (
+    text.includes("insufficient_quota") ||
+    text.includes("exceeded your current quota") ||
+    text.includes("provider quota is exhausted")
+  ) {
+    return QUOTA;
+  }
+  if (
+    status === "402" ||
+    /\bpayment required\b|\binsufficient (?:credits|balance|funds)\b|\brequires more credits\b|\bout of credits\b|\bcredit balance is too low\b|\bupgrade to a paid account\b/.test(
+      text,
+    )
+  ) {
+    return PROVIDER_BILLING;
+  }
+  if (
+    status === "403" ||
+    /organization must be verified|country, region, or territory not supported/.test(text)
+  ) {
+    return PROVIDER_ACCESS;
+  }
+  // The worker stopped retrying because the quota cannot clear in minutes.
+  if (failureCode === "provider_quota_exhausted") return QUOTA;
+  if (failureCode === "provider_rate_limited" || status === "429") return RATE_LIMITED;
+  if (failureCode === "provider_unavailable") return PROVIDER_ERROR;
+  return null;
+}
+
+/** Summarize recorded evidence without guessing a provider, expiry or reset time. */
+export function failedSessionCopy(
+  failure: SessionFailureSummary,
+  creditExhausted = false,
+  modelChanged = false,
+  canChooseModel = false,
+  /** Free credit remains, but not for this model: name the gap instead of an empty workspace. */
+  freeCreditGap: FreeCreditGap | null = null,
+  /**
+   * The refusal the last turn ended on (`creditRefusalFromEvents`); null when
+   * it named none. Omitted, the recorded failure text decides.
+   */
+  stopRefusal?: CreditRefusalKind | null,
+): {
+  reason: string;
+  unavailableModel: boolean;
+  /** Rejected credentials: Retry on the same model cannot help; offer it again once the model changes. */
+  retryUnhelpful?: boolean | undefined;
+  /** Exact recorded text for a details toggle, when the headline replaced it. */
+  detail?: string | undefined;
+  /** A daily allowance is spent; the banner may name the deployment's free model. */
+  dailyLimit?: true | undefined;
+  /** The compaction-failure headline; the timeline's own landmark can carry it instead. */
+  compaction?: true | undefined;
+  /** A credit stop one action fixes (own-key fee or API use); no model choice helps. */
+  creditRefusal?: CreditRefusalKind | undefined;
+  /** The chat's personal machine isn't allowed for it; its owner can allow it here. */
+  machineAccess?: true | undefined;
+} {
+  const recorded = failure.reason?.replace(/\s+/g, " ").trim();
+  const diagnostic = failure.recordedDetail || failure.reason;
+  // Worker Codex account copy names the account and plan and already offers
+  // the remedies (upgrade, another account, another model): keep it whole.
+  // Retry stays, because an upgrade or another account clears the condition
+  // and admission re-checks the plan without a model request.
+  const code = failure.failureCode;
+  // The worker names the machine; the owner allows it for this chat. Retrying
+  // the same message can't, so Allow takes its place where it is offered.
+  if (code === MACHINE_ACCESS_REQUIRED_CODE) {
+    return {
+      reason: recorded || MACHINE_ACCESS_REQUIRED,
+      unavailableModel: false,
+      machineAccess: true,
+      // The owner's Allow headline names the machine instead of this text.
+      ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
+  if (code === "codex_request_rejected") {
+    return {
+      reason:
+        canChooseModel && !modelChanged
+          ? `${CODEX_REQUEST_REJECTED} Try again, or choose another model below.`
+          : `${CODEX_REQUEST_REJECTED} Try again when you're ready.`,
+      unavailableModel: false,
+      ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
+  if (recorded && code === "codex_plan_entitlement") {
+    const detail = failure.recordedDetail?.trim();
+    return {
+      reason: recorded,
+      unavailableModel: false,
+      ...(detail && detail !== recorded ? { detail } : {}),
+    };
+  }
+  // Spent automatic recovery on a recorded model route: name the model and the
+  // provider condition. Legacy events without the route keep the classified
+  // copy below; the exact recorded text stays behind Details either way.
+  const recovery = failure.providerRecovery;
+  if (
+    recovery?.modelRoute &&
+    recovery.modelLabel &&
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !failure.quotaScope
+  ) {
+    const subject = providerRecoverySubject(t, recovery);
+    return {
+      reason: modelChanged
+        ? `${subject}. Retry to continue with the selected model.`
+        : canChooseModel
+          ? `${subject}. Select a different model, or try again in a few minutes.`
+          : `${subject}. Try again in a few minutes.`,
+      unavailableModel: false,
+      retryUnhelpful: false,
+      ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
+  // Require an explicit claim about the model itself, not e.g. its connection
+  // or service being unavailable.
+  const unavailableModel =
+    /\bmodel(?:\s+[`'"][^`'"]+[`'"])?\s+(?:(?:is|was)\s+)?(?:not supported|not available|unavailable|does not exist)\b/i.test(
+      recorded ?? "",
+    );
+  const known =
+    creditExhausted || failure.safetyRefusal || unavailableModel
+      ? null
+      : (quotaScopeFailure(failure.quotaScope) ??
+        // A recorded recovery streak proves the worker paced this transient
+        // refusal. Provider quota wording alone must not override that typed
+        // decision (e.g. Gemini's per-minute quota); legacy failures with an
+        // unknown streak retain their existing text fallback.
+        (failure.failureCode === "provider_rate_limited" &&
+        failure.consecutiveRecoveryCount !== null
+          ? RATE_LIMITED
+          : classifyProviderFailure(
+              failure.recordedDetail ?? recorded ?? "",
+              failure.failureCode,
+              failure.quotaScope,
+            )));
+  if (known) {
+    const detail = diagnostic;
+    const suggest = known.suggestModel && canChooseModel && !modelChanged;
+    return {
+      reason: suggest
+        ? (known.chooseModelMessage ?? `${known.message} Choose another model below.`)
+        : known.message,
+      unavailableModel: false,
+      retryUnhelpful: known.retryUnhelpful,
+      ...(detail && detail !== known.message ? { detail } : {}),
+      ...(known === DAILY_LIMIT ? { dailyLimit: true as const } : {}),
+    };
+  }
+  // Unclassified text (and the few codes that record operator text) is a
+  // diagnostic, not copy for people: name the outcome and keep the complete
+  // diagnostic behind the existing Details disclosure. Presentation only:
+  // transport text grants no retry or provider-loss proof.
+  if (
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !failure.structuralSandboxFailure &&
+    !unavailableModel &&
+    isDiagnosticFailureCode(code) &&
+    !/(?:workspace|opengeni) credits/i.test(recorded ?? "")
+  ) {
+    const detail = diagnostic;
+    return {
+      reason: failure.sandboxStartFailed
+        ? SANDBOX_START_FAILURE
+        : /\/modal\.task_command_router\.TaskCommandRouter\/\w+\s+(?:UNAVAILABLE|DEADLINE_EXCEEDED)/.test(
+              detail ?? "",
+            )
+          ? EXECUTION_CONNECTION_FAILURE
+          : UNKNOWN_FAILURE,
+      unavailableModel: false,
+      ...(detail ? { detail } : {}),
+    };
+  }
+  // The recorded compaction text is the provider's raw rejection: name the
+  // outcome and keep the exact text behind Details.
+  if (
+    code === "context_compaction_failed" &&
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !unavailableModel
+  ) {
+    return {
+      reason: COMPACTION_FAILURE,
+      unavailableModel: false,
+      compaction: true,
+      ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
+  // An own-key or API stop names its one fix; free credit for another model
+  // can't pay for either.
+  const creditRefusal = creditExhausted
+    ? stopRefusal !== undefined
+      ? stopRefusal
+      : creditRefusalKindFromText(failure.recordedDetail, failure.reason)
+    : null;
+  if (creditRefusal) {
+    return {
+      reason: creditRefusalHeadline(t, creditRefusal),
+      unavailableModel: false,
+      creditRefusal,
+    };
+  }
+  const reason = creditExhausted
+    ? freeCreditGap
+      ? freeCreditGapReason(freeCreditGap)
+      : "This workspace is out of Opengeni credits."
+    : failure.safetyRefusal
+      ? "The model provider declined this request."
+      : unavailableModel
+        ? modelChanged
+          ? "The previous model isn’t available."
+          : canChooseModel
+            ? "This model isn’t available. Choose another below."
+            : "This model isn’t available."
+        : recorded
+          ? recorded.length > 160
+            ? `${recorded.slice(0, 157)}…`
+            : recorded
+          : "This session failed.";
+  // The banner is where a current failure is shown (the timeline keeps only
+  // a quiet status), so recorded text the headline shortened or replaced stays
+  // reachable behind Details. A credit stop's recorded text adds nothing.
+  const detail = creditExhausted ? undefined : diagnostic?.trim();
+  return {
+    reason,
+    unavailableModel,
+    ...(detail && detail.replace(/\s+/g, " ") !== reason ? { detail } : {}),
+  };
+}
+
+/**
+ * The composer placeholder of a chat. "Send a message to revive" is a dead end
+ * without credits: the reply turn stops the same way. An own-key or API stop
+ * names its one fix; with free credit left for other models, a covered model
+ * revives it.
+ */
+export function chatComposerPlaceholder(input: {
+  /** Archived chats are read-only; their work continues in a new chat. */
+  archived?: boolean | undefined;
+  cancelled: boolean;
+  /** Out of credits, and the chat has stopped (failed or idle). */
+  creditStopped: boolean;
+  stopRefusal: CreditRefusalKind | null;
+  creditGap: FreeCreditGap | null;
+  canBuyCredits: boolean;
+}): string {
+  if (input.archived) return "This chat is archived.";
+  if (input.cancelled) return "This session was cancelled.";
+  if (!input.creditStopped) return "Send a follow-up…";
+  if (input.stopRefusal) return creditRefusalHeadline(t, input.stopRefusal, input.canBuyCredits);
+  if (input.creditGap) {
+    return input.creditGap.selectionUsable
+      ? "Send a follow-up…"
+      : "Your free credits don't cover this model — choose another model or add credits.";
+  }
+  return "Out of Opengeni credits — add credits to continue.";
+}
+
+/**
+ * The recorded text to keep behind Details under a failure headline, or
+ * nothing when the headline already says exactly that. The timeline leaves a
+ * presented failure's text to the banner, so text the headline replaced must
+ * stay reachable here.
+ */
+export function detailBeyondHeadline(
+  headline: unknown,
+  detail: string | null | undefined,
+): string | undefined {
+  const text = detail?.trim();
+  if (!text) return undefined;
+  return typeof headline === "string" &&
+    text.replace(/\s+/g, " ") === headline.replace(/\s+/g, " ").trim()
+    ? undefined
+    : text;
+}
+
+/**
+ * The plain failure line shown while the banner loads or if it fails: the
+ * banner's headline, so a member is told to ask an owner there too.
+ */
+export function failureFallbackReason(
+  copy: { reason: string; creditRefusal?: CreditRefusalKind | null | undefined },
+  canBuyCredits: boolean,
+): string {
+  return copy.creditRefusal && !canBuyCredits
+    ? creditRefusalHeadline(t, copy.creditRefusal, false)
+    : copy.reason;
+}

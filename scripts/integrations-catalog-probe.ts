@@ -14,6 +14,7 @@ import {
   type McpOAuthDiscoveryClassification,
   type McpOAuthMetadataFetchResult,
 } from "../packages/network/src/index";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type CatalogProbeStatus = "real" | "junk" | "unverified";
 export type CatalogProbeReason =
@@ -274,7 +275,7 @@ export async function probeMcpEndpoint(
     return {
       status: "junk",
       reason: "connection_error",
-      detail: error instanceof Error ? error.message : String(error),
+      detail: errorMessage(error),
     };
   } finally {
     clearTimeout(timeout);

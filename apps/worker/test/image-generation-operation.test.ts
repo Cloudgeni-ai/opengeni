@@ -8,7 +8,11 @@ import {
   type ExecuteImageGenerationOperationInput,
   type ImageGenerationOperationPorts,
 } from "../src/activities/image-generation-operation";
+import { executeCodexImageGeneration } from "../src/activities/codex-image-generation";
+import { isAuxiliaryProviderDispatch } from "../src/activities/auxiliary-provider-dispatch";
+import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import type { GeneratedImageReceipt } from "../src/activities/generated-images";
+import { ImageGenerationCreditError } from "@opengeni/db";
 
 const base = {
   workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -180,6 +184,119 @@ describe("image generation paid-operation fence", () => {
     expect(result).toEqual(receipt);
     expect(generateCalls.count).toBe(1);
     expect(calls).toEqual(["prepare", "begin", "provider", "retain", "complete"]);
+  });
+
+  test("completion carries the image route's processing residency to its usage event", async () => {
+    const completed: unknown[] = [];
+    const processingResidency = {
+      geography: "global" as const,
+      deploymentType: "gateway" as const,
+      regions: [],
+    };
+    await executeImageGenerationOperation(
+      { ...executionInput({ count: 0 }), processingResidency },
+      operationPorts({
+        complete: async (_db, completeInput) => {
+          completed.push(completeInput);
+          return { status: "completed" } as never;
+        },
+      }),
+    );
+    expect(completed).toEqual([expect.objectContaining({ processingResidency })]);
+  });
+
+  test("Codex images record the subscription's code-owned region", async () => {
+    const completed: unknown[] = [];
+    await executeCodexImageGeneration(
+      {
+        ...executionInput({ count: 0 }),
+        credentialId: "credential",
+        codexContext: { clientVersion: "test", getToken: async () => "token" } as never,
+        generateImage: async () => ({ bytes: Uint8Array.of(1), declaredMediaType: "image/png" }),
+      },
+      operationPorts({
+        complete: async (_db, completeInput) => {
+          completed.push(completeInput);
+          return { status: "completed" } as never;
+        },
+      }),
+    );
+    expect(completed).toEqual([
+      expect.objectContaining({
+        processingResidency: { geography: "us", deploymentType: "subscription", regions: [] },
+      }),
+    ]);
+  });
+
+  test("freezes a credit price on the operation and never dispatches a refused image", async () => {
+    const generateCalls = { count: 0 };
+    const prepared: unknown[] = [];
+    const refusal = new ImageGenerationCreditError();
+    const marks: string[] = [];
+    await expect(
+      executeImageGenerationOperation(
+        {
+          ...executionInput(generateCalls),
+          pricedCostMicros: 250_000,
+          creditUsageModelId: "gpt-6-sol",
+        },
+        operationPorts({
+          prepare: async (_db, value) => {
+            prepared.push(value);
+            return { operation: { status: "prepared" } as never, created: true };
+          },
+          begin: async () => {
+            throw refusal;
+          },
+          markOutcomeUnknown: async () => {
+            marks.push("outcome_unknown");
+            return { status: "outcome_unknown" } as never;
+          },
+          markRetentionFailed: async () => {
+            marks.push("retention_failed");
+            return { status: "retention_failed" } as never;
+          },
+        }),
+      ),
+    ).rejects.toBe(refusal);
+    expect(prepared).toEqual([
+      expect.objectContaining({ pricedCostMicros: 250_000, creditUsageModelId: "gpt-6-sol" }),
+    ]);
+    expect(generateCalls.count).toBe(0);
+    expect(marks).toEqual([]);
+  });
+
+  test("retention completes the operation as the image turns ready", async () => {
+    const retained: Array<Record<string, unknown>> = [];
+    const input = { ...executionInput({ count: 0 }), pricedCostMicros: 250_000 };
+    await executeImageGenerationOperation(
+      input,
+      operationPorts({
+        retain: async (value) => {
+          retained.push(value);
+          return { receipt, artifact: {} as never };
+        },
+      }),
+    );
+    const identity = imageGenerationOperationIdentity(input);
+    expect(retained[0]).toMatchObject({
+      operation: { operationId: identity.operationId, operationKey: identity.operationKey },
+    });
+  });
+
+  test("leaves an unpriced operation without a credit price", async () => {
+    const prepared: Array<Record<string, unknown>> = [];
+    await executeImageGenerationOperation(
+      executionInput({ count: 0 }),
+      operationPorts({
+        prepare: async (_db, value) => {
+          prepared.push(value);
+          return { operation: { status: "prepared" } as never, created: true };
+        },
+      }),
+    );
+    expect(prepared[0]).not.toHaveProperty("pricedCostMicros");
+    expect(prepared[0]).not.toHaveProperty("creditUsageModelId");
   });
 
   test("recovers a completed artifact without invoking the provider", async () => {
@@ -433,4 +550,85 @@ describe("image generation paid-operation fence", () => {
     ).rejects.toBeInstanceOf(ImageGenerationRetentionFailedError);
     expect(generateCalls.count).toBe(0);
   });
+});
+
+test("a Codex credit-policy refusal before image dispatch leaves the operation retryable", async () => {
+  for (const failure of [new CodexIncludedUsageExhaustedError(60)]) {
+    let resets = 0;
+    let unknown = 0;
+    const baseInput = executionInput({ count: 0 });
+    await expect(
+      executeCodexImageGeneration(
+        {
+          ...baseInput,
+          credentialId: "77777777-7777-4777-8777-777777777777",
+          codexContext: {
+            clientVersion: "test",
+            getToken: async () => {
+              throw failure;
+            },
+            refresh: async () => {
+              throw failure;
+            },
+          },
+          generateImage: async ({ context }) => {
+            await context.getToken();
+            throw new Error("unreachable");
+          },
+        },
+        operationPorts({
+          resetBeforeProviderDispatch: async () => {
+            resets++;
+            return { status: "prepared" } as never;
+          },
+          markOutcomeUnknown: async () => {
+            unknown++;
+            return { status: "outcome_unknown" } as never;
+          },
+        }),
+      ),
+    ).rejects.toBe(failure);
+    expect(resets).toBe(1);
+    expect(unknown).toBe(0);
+  }
+});
+
+test("an image request runs the turn's dispatch checks as an auxiliary dispatch", async () => {
+  // The turn's checks also feed the main stream's call timing; an image is a
+  // separate provider call and must not open the next main call's timing.
+  const observed: boolean[] = [];
+  const failure = new Error("stop after dispatch checks");
+  const baseInput = executionInput({ count: 0 });
+  await expect(
+    executeCodexImageGeneration(
+      {
+        ...baseInput,
+        credentialId: "77777777-7777-4777-8777-777777777777",
+        codexContext: {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "token",
+            chatgptAccountId: null,
+            isFedramp: false,
+          }),
+          refresh: async () => {
+            throw new Error("no refresh expected");
+          },
+          beforeProviderDispatch: async () => {
+            observed.push(isAuxiliaryProviderDispatch());
+            throw failure;
+          },
+        },
+        generateImage: async ({ context }) => {
+          await context.beforeProviderDispatch?.({ requestId: "image", transportAttempt: 1 });
+          throw new Error("unreachable");
+        },
+      },
+      operationPorts({
+        resetBeforeProviderDispatch: async () => ({ status: "prepared" }) as never,
+      }),
+    ),
+  ).rejects.toBe(failure);
+  expect(observed).toEqual([true]);
+  expect(isAuxiliaryProviderDispatch()).toBe(false);
 });

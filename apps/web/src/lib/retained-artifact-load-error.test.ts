@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 import { ApiError } from "../api";
-import { retainedArtifactLoadErrorPresentation } from "./retained-artifact-load-error";
+import { retainedArtifactLoadErrorPresentation } from "@opengeni/react/app/lib/retained-artifact-load-error";
 
 const unavailableCopy = {
   title: "Artifact unavailable",
@@ -12,12 +12,39 @@ const unavailableCopy = {
 
 function assertNoRawApiPhrasing(presentation: { title: string; description: string }) {
   const serialized = JSON.stringify(presentation);
-  expect(serialized).not.toContain("OpenGeni API");
+  expect(serialized).not.toContain("Opengeni API");
   expect(serialized).not.toContain("API 404");
   expect(serialized).not.toContain("artifact not found");
 }
 
 describe("retained artifact load error presentation", () => {
+  test("explains someone else's private file only from the typed private answer", () => {
+    const privateBody = JSON.stringify({
+      artifactId: "22222222-2222-4222-8222-222222222222",
+      available: false,
+      reason: "private",
+    });
+    const privateFile = retainedArtifactLoadErrorPresentation(
+      new OpenGeniApiError(403, privateBody, { correlationId: "corr-private" }),
+    );
+    expect(privateFile.title).toBe("This file is private");
+    expect(privateFile.description).toContain("Ask them to share it with the workspace.");
+    expect(privateFile.retryable).toBe(false);
+    expect(privateFile.supportReference).toBe("corr-private");
+    expect(retainedArtifactLoadErrorPresentation(new ApiError(403, privateBody)).title).toBe(
+      "This file is private",
+    );
+    // The same body on any other status, or a different reason, stays unavailable.
+    expect(
+      retainedArtifactLoadErrorPresentation(new OpenGeniApiError(404, privateBody)).title,
+    ).toBe(unavailableCopy.title);
+    expect(
+      retainedArtifactLoadErrorPresentation(
+        new OpenGeniApiError(403, JSON.stringify({ available: false, reason: "deleted" })),
+      ).title,
+    ).toBe(unavailableCopy.title);
+  });
+
   test("treats 403 and 404 as the same unavailable copy without retry", () => {
     const forbidden = retainedArtifactLoadErrorPresentation(
       new OpenGeniApiError(403, JSON.stringify({ error: { message: "forbidden" } }), {

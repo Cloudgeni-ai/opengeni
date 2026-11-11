@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { FunctionTool } from "@openai/agents";
 import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
 
 import {
@@ -8,8 +9,15 @@ import {
   SandboxWorkspaceReadNotFoundError,
   type SandboxSessionLike,
 } from "@openai/agents/sandbox";
-import { SandboxFilesystemNotFoundError } from "modal";
-import { testSettings } from "@opengeni/testing";
+import {
+  NotFoundError as ModalNotFoundError,
+  SandboxFilesystemError,
+  SandboxFilesystemNotADirectoryError,
+  SandboxFilesystemNotFoundError,
+  SandboxFilesystemPermissionError,
+} from "modal";
+import { ErrorCode } from "@opengeni/agent-proto";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { buildAgentCapabilities, repositoryWorkspaceSkillPathsOption } from "../src";
 import {
@@ -18,6 +26,18 @@ import {
   recordModelPreparationMeasurement,
   withModelPreparationObserver,
 } from "../src/model-preparation-diagnostics";
+import {
+  agentErrorToControlError,
+  offlineAgentError,
+  SelfhostedControlError,
+  timeoutAgentError,
+} from "../src/sandbox/selfhosted/control-rpc";
+import { RoutingBackendRecoveryRequiredError } from "../src/sandbox/routing/routing-session";
+import {
+  ChannelASymlinkPathError,
+  ChannelAUnavailableError,
+  ChannelAValidationError,
+} from "../src/sandbox/channel-a";
 import { discoverWorkspaceSkills, workspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
@@ -190,18 +210,190 @@ describe("workspace repository skills", () => {
   test("repository YAML descriptions preserve folded text", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni/SKILL.md":
-        "---\nname: opengeni\ndescription: >-\n  Maintain OpenGeni\n  source code.\n---\n# Guidance",
+        "---\nname: opengeni\ndescription: >-\n  Maintain Opengeni\n  source code.\n---\n# Guidance",
     });
     const entries = await discoverWorkspaceSkills(session, [
       { path: ".agents/skills", source: "repository" },
     ]);
-    expect(entries[0]?.description).toBe("Maintain OpenGeni source code.");
+    expect(entries[0]?.description).toBe("Maintain Opengeni source code.");
+  });
+
+  test("a deferred index never touches the workspace before the model runs", async () => {
+    const session = fakeSession({
+      ".agents/skills/opengeni/SKILL.md":
+        "---\nname: opengeni\ndescription: Maintain Opengeni.\n---\n# Guidance",
+    });
+    let operations = 0;
+    const listDir = session.listDir!;
+    const readFile = session.readFile!;
+    session.listDir = async (args) => {
+      operations++;
+      return listDir(args);
+    };
+    session.readFile = async (args) => {
+      operations++;
+      return readFile(args);
+    };
+    const capability = workspaceSkills(
+      [
+        { path: ".agents/skills", source: "workspace .agents/skills" },
+        { path: "repos/app/.claude/skills", source: "repos/app/.claude/skills" },
+      ],
+      [],
+      [],
+      { deferred: true },
+    ).bind(session);
+
+    const instructions = await capability.instructions();
+    expect(operations).toBe(0);
+    expect(instructions).toContain("## Repository skills");
+    expect(instructions).toContain("may not be ready until a tool first uses the workspace");
+    expect(instructions).toContain(".agents/skills, repos/app/.claude/skills");
+    // No skill is listed, and the notice says how to name one: repository:
+    // and the SKILL.md path from the workspace root, shown with a real folder.
+    expect(instructions).not.toContain("repository:.agents/skills/opengeni");
+    expect(instructions).toContain("(paths from the workspace root)");
+    expect(instructions).toContain("such as repository:.agents/skills/<folder>/SKILL.md");
+
+    // The reader still discovers live when a tool asks for an exact skill, and
+    // its description names skills the way the notice does, not by an index.
+    const tool = capability
+      .tools()
+      .find(
+        (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
+      );
+    if (tool?.type !== "function") throw new Error("missing reader");
+    expect(tool.description).toContain(
+      "repository: followed by its SKILL.md path from the workspace root",
+    );
+    expect(tool.description).not.toContain("Repository skills index");
+    // A wrong name is told the identifiers that exist.
+    const miss = (await tool.invoke(
+      undefined!,
+      JSON.stringify({ skill: "repository:.agents/skills/opengeni" }),
+    )) as string;
+    // There is no index on these turns, so the miss does not point at one.
+    expect(miss).toContain("No repository skill has this identifier.");
+    expect(miss).not.toContain("index");
+    expect(miss).toContain("repository:.agents/skills/opengeni/SKILL.md");
+    const result = JSON.parse(
+      (await tool.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" }),
+      )) as string,
+    );
+    expect(result.files[0].content).toContain("# Guidance");
+    expect(operations).toBeGreaterThan(0);
+  });
+
+  test("a deferred reader discovers again after a failed first attempt", async () => {
+    const session = fakeSession({ ".agents/skills/opengeni/SKILL.md": "# Guidance" });
+    const listDir = session.listDir!;
+    let failures = 1;
+    session.listDir = async (args) => {
+      if (failures-- > 0) throw new Error("transient provision failure");
+      return listDir(args);
+    };
+    const reader = deferredReader(session);
+    const id = JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" });
+    // The reader is often the first workspace operation; its failure surfaces
+    // on that call and does not stick for the rest of the run.
+    expect(String(await reader.invoke(undefined!, id))).toContain("transient provision failure");
+    const result = JSON.parse((await reader.invoke(undefined!, id)) as string);
+    expect(result.files[0].content).toContain("# Guidance");
+  });
+
+  test("a deferred reader says the workspace is unreachable, then reads once it answers", async () => {
+    const session = fakeSession({ ".agents/skills/opengeni/SKILL.md": "# Guidance" });
+    const listDir = session.listDir!;
+    let failures = 1;
+    session.listDir = async (args) => {
+      if (failures-- > 0) throw agentErrorToControlError(offlineAgentError(undefined, true));
+      return listDir(args);
+    };
+    const reader = deferredReader(session);
+    const id = JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" });
+    const miss = String(await reader.invoke(undefined!, id));
+    expect(miss).toContain("the workspace is unreachable");
+    expect(miss).not.toContain("No repository skills were found");
+    const result = JSON.parse((await reader.invoke(undefined!, id)) as string);
+    expect(result.files[0].content).toContain("# Guidance");
+  });
+
+  test("concurrent deferred reads share one discovery, and both retry after it fails", async () => {
+    const session = fakeSession({ ".agents/skills/opengeni/SKILL.md": "# Guidance" });
+    const listDir = session.listDir!;
+    let discoveries = 0;
+    let failing = true;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    session.listDir = async (args) => {
+      if (args.path === ".agents/skills") discoveries++;
+      if (failing) {
+        await gate;
+        throw new Error("transient provision failure");
+      }
+      return listDir(args);
+    };
+    const reader = deferredReader(session);
+    const id = JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" });
+    const pending = [reader.invoke(undefined!, id), reader.invoke(undefined!, id)];
+    // Both reads are waiting on the same discovery before it fails.
+    await Bun.sleep(10);
+    release();
+    for (const output of await Promise.all(pending))
+      expect(String(output)).toContain("transient provision failure");
+    expect(discoveries).toBe(1);
+    failing = false;
+    const results = await Promise.all([
+      reader.invoke(undefined!, id),
+      reader.invoke(undefined!, id),
+    ]);
+    for (const output of results)
+      expect(JSON.parse(output as string).files[0].content).toContain("# Guidance");
+    expect(discoveries).toBe(2);
+  });
+
+  test("a deferred miss names skipped skill folders and why", async () => {
+    const session = fakeSession({
+      ".agents/skills/release/SKILL.md":
+        "---\nname: release\ndescription: Repository release instructions.\n---\n",
+    });
+    const reader = deferredReader(session, ["release"]);
+    const miss = String(
+      await reader.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/release/SKILL.md" }),
+      ),
+    );
+    expect(miss).toContain("No repository skills were found.");
+    expect(miss).toContain("Skipped: .agents/skills/release");
+  });
+
+  test("agent capabilities keep a deferred repository index through SDK clone and bind", async () => {
+    const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+    session.listDir = async () => {
+      throw new Error("the workspace must not be prepared before the model runs");
+    };
+    const capabilities = buildAgentCapabilities(testSettings(), [], {
+      ...repositoryWorkspaceSkillPathsOption([
+        { kind: "repository", uri: "https://github.com/example/app", ref: "main" },
+      ]),
+      deferRepositorySkillIndex: true,
+      structuredToolTransport: false,
+    });
+    const capability = capabilities.find((entry) => entry.type === "workspace-skills")!;
+    const instructions = await capability
+      .clone()
+      .bind(session)
+      .instructions(new Manifest({ root: "/workspace" }));
+    expect(instructions).toContain("may not be ready until a tool first uses the workspace");
   });
 
   test("advertised repository skills have an explicit live reader", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni/SKILL.md":
-        "---\nname: opengeni\ndescription: Maintain OpenGeni.\n---\n# Guidance",
+        "---\nname: opengeni\ndescription: Maintain Opengeni.\n---\n# Guidance",
     });
     const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
       session,
@@ -215,6 +407,9 @@ describe("workspace repository skills", () => {
       );
     expect(tool).toBeDefined();
     if (tool?.type !== "function") throw new Error("missing reader");
+    expect(tool.description).toContain(
+      "Use the exact repository: identifier from the Repository skills index.",
+    );
     const result = JSON.parse(
       (await tool.invoke(
         undefined!,
@@ -523,6 +718,7 @@ description: Prepare a safe release.
       phase: "repository_skill_discovery",
       outcome: "failed",
       count: 1,
+      failure: { errorClass: "unsupported", handling: "degraded" },
     });
   });
 
@@ -559,21 +755,35 @@ description: Prepare a safe release.
     expect(reads).toEqual([".agents/skills/deploy/SKILL.md", ".agents/skills/release/SKILL.md"]);
   });
 
-  test("fails when the same skill name has different contents", async () => {
+  test("skips all conflicting definitions without resurrecting a third copy", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: First definition.\n---\n",
       ".claude/skills/release/SKILL.md":
         "---\nname: release\ndescription: Different definition.\n---\n",
+      ".third/skills/release/SKILL.md": "---\nname: release\ndescription: First definition.\n---\n",
+      ".agents/skills/good/SKILL.md": "# Valid skill",
     });
-    await expect(
-      discoverWorkspaceSkills(session, [
-        { path: ".agents/skills", source: ".agents/skills" },
-        { path: ".claude/skills", source: ".claude/skills" },
-      ]),
-    ).rejects.toThrow(
-      'Workspace skill "release" has conflicting definitions in .agents/skills and .claude/skills',
-    );
+    const capability = workspaceSkills([
+      { path: ".agents/skills", source: ".agents/skills" },
+      { path: ".claude/skills", source: ".claude/skills" },
+      { path: ".third/skills", source: ".third/skills" },
+    ]).bind(session);
+    const instructions = await capability.instructions();
+    expect(instructions).toContain('"name":"good"');
+    expect(instructions).not.toContain('"id":"repository:.agents/skills/release/SKILL.md"');
+    expect(instructions).not.toContain('"id":"repository:.third/skills/release/SKILL.md"');
+    expect(instructions).toContain('"code":"conflicting_definitions"');
+    expect(instructions).toContain(".agents/skills/release/SKILL.md");
+    expect(instructions).toContain(".claude/skills/release/SKILL.md");
+    const reader = capability.tools()[0]!;
+    if (reader.type !== "function") throw new Error("missing reader");
+    expect(
+      await reader.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/release/SKILL.md" }),
+      ),
+    ).toContain("Repository Skill is not in this index");
   });
 
   test("same name with identical SKILL.md but different helpers still conflicts", async () => {
@@ -593,12 +803,10 @@ description: Prepare a safe release.
         { path: ".agents/skills", source: ".agents/skills" },
         { path: ".claude/skills", source: ".claude/skills" },
       ]),
-    ).rejects.toThrow(
-      'Workspace skill "release" has conflicting definitions in .agents/skills and .claude/skills',
-    );
+    ).resolves.toEqual([]);
   });
 
-  test("fails instead of ambiguously shadowing configured skills", async () => {
+  test("skips repository entries instead of shadowing configured skills", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: Repository release instructions.\n---\n",
@@ -609,13 +817,18 @@ description: Prepare a safe release.
         [{ path: ".agents/skills", source: ".agents/skills" }],
         new Set(["release"]),
       ),
-    ).rejects.toThrow('Workspace skill "release" conflicts with a configured OpenGeni skill');
+    ).resolves.toEqual([]);
+    const capability = workspaceSkills(
+      [{ path: ".agents/skills", source: "agents" }],
+      ["release"],
+    ).bind(session);
+    expect(await capability.instructions()).toContain('"code":"configured_name_conflict"');
   });
 
   test("lets native tool-bound Skills deterministically shadow workspace copies", async () => {
     const session = fakeSession({
-      ".agents/skills/opengeni-documents/SKILL.md":
-        "---\nname: opengeni-documents\ndescription: Repository copy.\n---\n",
+      ".agents/skills/documents/SKILL.md":
+        "---\nname: documents\ndescription: Repository copy.\n---\n",
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: Repository release instructions.\n---\n",
     });
@@ -625,7 +838,7 @@ description: Prepare a safe release.
         [{ path: ".agents/skills", source: ".agents/skills" }],
         new Set(),
         undefined,
-        new Set(["opengeni-documents"]),
+        new Set(["documents"]),
       ),
     ).resolves.toEqual([
       expect.objectContaining({
@@ -633,6 +846,720 @@ description: Prepare a safe release.
         description: "Repository release instructions.",
       }),
     ]);
+  });
+
+  const unreachableFailures: Array<[string, () => SelfhostedControlError]> = [
+    [
+      "no authoritative live runner connection",
+      () =>
+        new SelfhostedControlError({
+          message: "The Connected Machine has no authoritative live runner connection.",
+          code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+          reason: "agent_offline",
+          retryable: false,
+          agentOffline: true,
+        }),
+    ],
+    ["transport offline", () => agentErrorToControlError(offlineAgentError(undefined, true))],
+    ["control request timeout", () => agentErrorToControlError(timeoutAgentError())],
+  ];
+  for (const [label, unreachable] of unreachableFailures) {
+    test(`an unreachable workspace (${label}) degrades repository skills instead of failing instructions`, async () => {
+      const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+      let calls = 0;
+      session.listDir = async () => {
+        calls++;
+        throw unreachable();
+      };
+      const capability = workspaceSkills([
+        { path: ".agents/skills", source: "agents" },
+        { path: ".claude/skills", source: "claude" },
+      ]).bind(session);
+      const instructions = await capability.instructions();
+      expect(instructions).toContain("Repository skills could not be indexed");
+      expect(instructions).not.toContain("repository_skill_read");
+      // The run memoizes the degraded index: later model requests in the same
+      // binding neither re-pay the unreachable cost nor change the prefix.
+      expect(await capability.instructions()).toBe(instructions);
+      expect(calls).toBe(2);
+      const reader = capability.tools()[0]!;
+      if (reader.type !== "function") throw new Error("missing reader");
+      // The SDK renders the reader's refusal into the tool result.
+      expect(
+        await reader.invoke(
+          undefined!,
+          JSON.stringify({ skill: "repository:.agents/skills/example/SKILL.md" }),
+        ),
+      ).toContain(
+        // This run keeps its index, so the text does not invite a retry.
+        "the workspace was unreachable when this run started. Once workspace tools respond, read the skill's SKILL.md with file tools.",
+      );
+      expect(calls).toBe(2);
+    });
+  }
+
+  for (const offlineIndex of [0, 1]) {
+    for (const offlineSettlesFirst of [true, false]) {
+      test(`a concurrent genuine failure outranks an unreachable one (offline at index ${offlineIndex}, ${offlineSettlesFirst ? "offline" : "genuine"} settles first)`, async () => {
+        const genuine = Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+        const offline = agentErrorToControlError(offlineAgentError(undefined, true));
+        const pending = new Map<string, (error: unknown) => void>();
+        let bothStarted!: () => void;
+        const started = new Promise<void>((resolve) => (bothStarted = resolve));
+        const session = fakeSession({});
+        session.listDir = ({ path }) =>
+          new Promise((_, reject) => {
+            pending.set(path, reject);
+            if (pending.size === 2) bothStarted();
+          });
+        const paths = ["root0", "root1"];
+        const capability = workspaceSkills(paths.map((path) => ({ path, source: path }))).bind(
+          session,
+        );
+        // Observe the outcome now: it may settle while the reads are released.
+        const outcome = capability.instructions().then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await started;
+        const offlinePath = paths[offlineIndex]!;
+        const genuinePath = paths[1 - offlineIndex]!;
+        const order = offlineSettlesFirst
+          ? [
+              [offlinePath, offline],
+              [genuinePath, genuine],
+            ]
+          : [
+              [genuinePath, genuine],
+              [offlinePath, offline],
+            ];
+        for (const [path, error] of order) {
+          pending.get(path as string)!(error);
+          await Bun.sleep(0);
+        }
+        expect(await outcome).toBe(genuine);
+      });
+    }
+  }
+
+  test("only unreachable failures degrade; the lowest index still wins among genuine ones", async () => {
+    const first = new Error("first");
+    const second = new Error("second");
+    const session = fakeSession({});
+    session.listDir = async ({ path }) => {
+      if (path === "root0") throw agentErrorToControlError(timeoutAgentError());
+      await Bun.sleep(path === "root1" ? 5 : 1);
+      throw path === "root1" ? first : second;
+    };
+    await expect(
+      discoverWorkspaceSkills(
+        session,
+        ["root0", "root1", "root2"].map((path) => ({ path, source: path })),
+      ),
+    ).rejects.toBe(first);
+  });
+
+  test("an unreachable skill file read mid-discovery also degrades", async () => {
+    const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+    session.readFile = async () => {
+      throw agentErrorToControlError(timeoutAgentError());
+    };
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+      session,
+    );
+    expect(await capability.instructions()).toContain("Repository skills could not be indexed");
+  });
+
+  test("a later run discovers repository skills once the workspace is reachable again", async () => {
+    const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+    const listDir = session.listDir!;
+    let offline = true;
+    session.listDir = async (args) => {
+      if (offline) throw agentErrorToControlError(offlineAgentError(undefined, true));
+      return await listDir(args);
+    };
+    const template = workspaceSkills([{ path: ".agents/skills", source: "agents" }]);
+    const first = template.clone().bind(session);
+    expect(await first.instructions()).toContain("Repository skills could not be indexed");
+    offline = false;
+    // The SDK clones and rebinds capabilities for every run; the degraded
+    // result must not carry over as an authoritative empty index.
+    const second = first.clone().bind(session);
+    const instructions = await second.instructions();
+    expect(instructions).toContain("repository:.agents/skills/example/SKILL.md");
+    expect(instructions).not.toContain("could not be indexed");
+  });
+
+  const reachableFailures: Array<[string, () => unknown]> = [
+    [
+      "fenced control error",
+      () =>
+        new SelfhostedControlError({
+          message: "fenced",
+          code: ErrorCode.ERROR_CODE_FENCED,
+          reason: null,
+          retryable: true,
+          fenced: true,
+        }),
+    ],
+    ["untyped error mentioning offline", () => new Error("agent offline: timed out")],
+    [
+      "untyped error shaped like an offline control error",
+      () => Object.assign(new Error("offline"), { agentOffline: true, reason: "agent_offline" }),
+    ],
+  ];
+  for (const [label, failure] of reachableFailures) {
+    test(`repository skill instructions still fail on a ${label}`, async () => {
+      const error = failure();
+      const session = fakeSession({});
+      session.listDir = async () => {
+        throw error;
+      };
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        session,
+      );
+      await expect(capability.instructions()).rejects.toBe(error);
+    });
+  }
+
+  // The workspace answered, but one search path or skill folder could not be
+  // used. Only that entry is skipped, with a reason, on every backend
+  // including Modal; skills from other search paths stay indexed.
+  const machineAnswer = (code: ErrorCode) =>
+    agentErrorToControlError({ code, message: "refused", retryable: false, detail: {} });
+  const skippableFailures: Array<[string, () => unknown, string]> = [
+    [
+      "Modal permission error",
+      () => new SandboxFilesystemPermissionError("permission denied"),
+      "permission_denied",
+    ],
+    [
+      "errno permission error from a filesystem call",
+      () => Object.assign(new Error("EACCES"), { code: "EACCES", syscall: "scandir" }),
+      "permission_denied",
+    ],
+    [
+      "Modal not-a-directory error",
+      () => new SandboxFilesystemNotADirectoryError("not a directory"),
+      "filesystem",
+    ],
+    [
+      "symlinked search path refused by the file API",
+      () => new ChannelAValidationError("path resolves through a symlink"),
+      "filesystem",
+    ],
+    [
+      "errno not-a-directory from a filesystem call",
+      () => Object.assign(new Error("ENOTDIR"), { code: "ENOTDIR", syscall: "scandir" }),
+      "filesystem",
+    ],
+    [
+      "Connected Machine consent refusal",
+      () => machineAnswer(ErrorCode.ERROR_CODE_CONSENT_REQUIRED),
+      "machine_refused",
+    ],
+    ["Connected Machine OS error", () => machineAnswer(ErrorCode.ERROR_CODE_OS), "machine_refused"],
+    [
+      "Connected Machine unknown run-as user",
+      () => machineAnswer(ErrorCode.ERROR_CODE_RUN_AS_UNKNOWN_USER),
+      "machine_refused",
+    ],
+    [
+      "Connected Machine oversized reply",
+      () => machineAnswer(ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE),
+      "machine_refused",
+    ],
+  ];
+  for (const [label, failure, errorClass] of skippableFailures) {
+    test(`${label} skips only that search path with a reason`, async () => {
+      const session = fakeSession({
+        ".agents/skills/example/SKILL.md": "---\nname: example\ndescription: Example\n---\n",
+      });
+      const listDir = session.listDir!;
+      let calls = 0;
+      session.listDir = async (args) => {
+        calls++;
+        if (args.path === ".claude/skills") throw failure();
+        return listDir(args);
+      };
+      const capability = workspaceSkills([
+        { path: ".claude/skills", source: "claude" },
+        { path: ".agents/skills", source: "agents" },
+      ]).bind(session);
+      const instructions = await capability.instructions();
+      expect(instructions).toContain("repository:.agents/skills/example/SKILL.md");
+      expect(instructions).toContain(
+        `### Skipped repository skills\nThese repository entries were omitted because their folders could not be read or their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n- {"code":"unreadable_search_path","paths":[".claude/skills"],"reason":"${errorClass}"}`,
+      );
+      const measurements: ModelPreparationMeasurement[] = [];
+      await withModelPreparationObserver(
+        (measurement) => measurements.push(measurement),
+        () =>
+          discoverWorkspaceSkills(session, [
+            { path: ".claude/skills", source: "claude" },
+            { path: ".agents/skills", source: "agents" },
+          ]),
+      );
+      expect(measurements).toEqual([
+        expect.objectContaining({ outcome: "completed", skipped: [errorClass] }),
+      ]);
+      const callsAfterFirst = calls;
+      expect(await capability.instructions()).toBe(instructions);
+      expect(calls).toBe(callsAfterFirst);
+    });
+  }
+
+  test("a symlinked search path is skipped without a model-visible warning", async () => {
+    const session = fakeSession({
+      ".agents/skills/example/SKILL.md": "---\nname: example\ndescription: Example\n---\n",
+    });
+    const listDir = session.listDir!;
+    session.listDir = async (args) => {
+      if (args.path === ".claude/skills")
+        throw new ChannelASymlinkPathError("directory path must not be a symbolic link");
+      return listDir(args);
+    };
+    const measurements: ModelPreparationMeasurement[] = [];
+    const instructions = await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () =>
+        workspaceSkills([
+          { path: ".claude/skills", source: "claude" },
+          { path: ".agents/skills", source: "agents" },
+        ])
+          .bind(session)
+          .instructions(),
+    );
+    expect(instructions).toContain("repository:.agents/skills/example/SKILL.md");
+    expect(instructions).not.toContain("Skipped repository skills");
+    expect(measurements).toEqual([
+      expect.objectContaining({
+        phase: "repository_skill_discovery",
+        outcome: "completed",
+        skipped: ["symlink"],
+      }),
+    ]);
+  });
+
+  test("a symlinked search path without an indexed sibling is listed", async () => {
+    const session = fakeSession({
+      "repo/.claude/skills/example/SKILL.md": "---\nname: example\ndescription: Example\n---\n",
+    });
+    const listDir = session.listDir!;
+    session.listDir = async (args) => {
+      if (args.path === ".agents/skills" || args.path === "repo/.agents/skills")
+        throw new ChannelASymlinkPathError("directory path must not be a symbolic link");
+      return listDir(args);
+    };
+    const instructions = await workspaceSkills([
+      { path: ".agents/skills", source: "agents" },
+      { path: ".claude/skills", source: "claude" },
+      { path: "repo/.agents/skills", source: "agents" },
+      { path: "repo/.claude/skills", source: "claude" },
+    ])
+      .bind(session)
+      .instructions();
+    expect(instructions).toContain("repository:repo/.claude/skills/example/SKILL.md");
+    // The workspace root has no indexed sibling; the repository does.
+    expect(instructions).toContain(
+      '- {"code":"unreadable_search_path","paths":[".agents/skills"],"reason":"symlink"}',
+    );
+    expect(instructions).not.toContain('"paths":["repo/.agents/skills"]');
+  });
+
+  test("an unreadable skill folder skips only that skill with a reason", async () => {
+    const session = fakeSession({
+      ".agents/skills/locked/SKILL.md": "---\nname: locked\n---\n",
+      ".agents/skills/open/SKILL.md": "---\nname: open\ndescription: Open\n---\n",
+    });
+    const readFile = session.readFile!;
+    session.readFile = async (args) => {
+      if (args.path.includes("locked")) throw new SandboxFilesystemPermissionError("denied");
+      return readFile(args);
+    };
+    const instructions = await workspaceSkills([{ path: ".agents/skills", source: "agents" }])
+      .bind(session)
+      .instructions();
+    expect(instructions).toContain("repository:.agents/skills/open/SKILL.md");
+    expect(instructions).not.toContain("repository:.agents/skills/locked/SKILL.md");
+    expect(instructions).toContain(
+      '- {"code":"unreadable_skill","paths":[".agents/skills/locked"],"reason":"permission_denied"}',
+    );
+  });
+
+  test("too many skill directories degrade the index with a short notice", async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 257 }, (_, index) => [`.agents/skills/s${index}/SKILL.md`, "# S"]),
+    );
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+      fakeSession(files),
+    );
+    const measurements: ModelPreparationMeasurement[] = [];
+    const instructions = await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () => capability.instructions(),
+    );
+    expect(instructions).toBe(
+      "## Repository skills\n\nRepository skills are not indexed for this run (too many skill folders or files). If a repository skill matters, try reading its SKILL.md directly.",
+    );
+    expect(measurements).toEqual([
+      expect.objectContaining({
+        phase: "repository_skill_discovery",
+        outcome: "failed",
+        failure: { errorClass: "limit_exceeded", handling: "degraded" },
+      }),
+    ]);
+  });
+
+  test("a session without a filesystem API degrades instead of failing the turn", async () => {
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind({
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+    } as SandboxSessionLike);
+    expect(await capability.instructions()).toBe(
+      "## Repository skills\n\nRepository skills are not indexed for this run (this workspace cannot list files).",
+    );
+  });
+
+  test("a permission failure while comparing duplicate skills degrades the whole index", async () => {
+    const session = fakeSession({
+      "a/deploy/SKILL.md": "---\nname: deploy\n---\n",
+      "a/deploy/extra.md": "a",
+      "b/deploy/SKILL.md": "---\nname: deploy\n---\n",
+      "b/deploy/extra.md": "b",
+    });
+    const readFile = session.readFile!;
+    session.readFile = async (args) => {
+      if (args.path.endsWith("extra.md")) throw new SandboxFilesystemPermissionError("denied");
+      return readFile(args);
+    };
+    const instructions = await workspaceSkills([
+      { path: "a", source: "a" },
+      { path: "b", source: "b" },
+    ])
+      .bind(session)
+      .instructions();
+    expect(instructions).toBe(
+      "## Repository skills\n\nRepository skills are not indexed for this run (permission denied). If a repository skill matters, try reading its SKILL.md directly.",
+    );
+  });
+
+  // The box or its route could not answer. These reach the turn's existing
+  // recovery (lease loss, route re-resolution, retry, cancellation) unmasked.
+  const controlError = (input: Partial<ConstructorParameters<typeof SelfhostedControlError>[0]>) =>
+    new SelfhostedControlError({
+      message: "control failure",
+      code: ErrorCode.ERROR_CODE_UNSPECIFIED,
+      reason: null,
+      retryable: false,
+      ...input,
+    });
+  const infrastructureFailures: Array<[string, () => unknown, string]> = [
+    [
+      "cancellation",
+      () => Object.assign(new Error("cancelled"), { code: "ABORT_ERR" }),
+      "cancelled",
+    ],
+    ["abort", () => Object.assign(new Error("aborted"), { name: "AbortError" }), "cancelled"],
+    [
+      "Temporal cancellation",
+      () => Object.assign(new Error("cancelled"), { name: "CancelledFailure" }),
+      "cancelled",
+    ],
+    [
+      "fenced control error",
+      () => controlError({ code: ErrorCode.ERROR_CODE_FENCED, retryable: true, fenced: true }),
+      "fenced",
+    ],
+    [
+      "draining Connected Machine",
+      () => controlError({ code: ErrorCode.ERROR_CODE_DRAINING, retryable: true, draining: true }),
+      "transport",
+    ],
+    [
+      "replaced Connected Machine connection",
+      () => controlError({ code: ErrorCode.ERROR_CODE_OS, connectionReplaced: true }),
+      "transport",
+    ],
+    [
+      "Connected Machine stream error",
+      () => controlError({ code: ErrorCode.ERROR_CODE_STREAM }),
+      "transport",
+    ],
+    [
+      "Connected Machine protocol error",
+      () => controlError({ code: ErrorCode.ERROR_CODE_PROTOCOL }),
+      "control_error",
+    ],
+    ["unspecified Connected Machine error", () => controlError({}), "control_error"],
+    [
+      "lost home box",
+      () => new RoutingBackendRecoveryRequiredError("listDir", 3, "pending"),
+      "route_changed",
+    ],
+    [
+      "terminated Modal sandbox",
+      () => new Error("Modal sandbox sb-abc123 is no longer running."),
+      "sandbox_gone",
+    ],
+    [
+      "Modal filesystem API on a vanished sandbox",
+      () =>
+        new ModalNotFoundError(
+          "The Sandbox is unavailable. This Sandbox may have already shut down.",
+        ),
+      "sandbox_gone",
+    ],
+    [
+      "Channel A exec failure during a listing",
+      () => new ChannelAUnavailableError("listing failed"),
+      "workspace_unavailable",
+    ],
+    [
+      "untyped Modal filesystem error (lost gRPC status or killed helper)",
+      () =>
+        new SandboxFilesystemError(
+          "An unexpected error occurred, please contact support@modal.com",
+        ),
+      "provider_error",
+    ],
+    ["gRPC unavailable", () => Object.assign(new Error("unavailable"), { code: 14 }), "transport"],
+    [
+      "connection reset",
+      () => Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+      "transport",
+    ],
+    [
+      "socket permission error",
+      () =>
+        Object.assign(new Error("connect EACCES /var/run/docker.sock"), {
+          code: "EACCES",
+          syscall: "connect",
+        }),
+      "unclassified",
+    ],
+    ["unrecognized error", () => new Error("exec failed"), "unclassified"],
+  ];
+  for (const [label, failure, errorClass] of infrastructureFailures) {
+    test(`${label} still fails repository skill instructions for turn recovery`, async () => {
+      const error = failure();
+      const session = fakeSession({});
+      session.listDir = async () => {
+        throw error;
+      };
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        session,
+      );
+      const measurements: ModelPreparationMeasurement[] = [];
+      await expect(
+        withModelPreparationObserver(
+          (measurement) => measurements.push(measurement),
+          () => capability.instructions(),
+        ),
+      ).rejects.toBe(error);
+      expect(measurements).toEqual([
+        expect.objectContaining({
+          phase: "repository_skill_discovery",
+          outcome: "failed",
+          failure: { errorClass, handling: "propagated" },
+        }),
+      ]);
+    });
+  }
+
+  test("a concurrent infrastructure failure outranks a skipped search path", async () => {
+    const infrastructure = Object.assign(new Error("reset"), { code: "ECONNRESET" });
+    const session = fakeSession({});
+    session.listDir = async ({ path }) => {
+      if (path === "root0") throw new SandboxFilesystemPermissionError("denied");
+      await Bun.sleep(5);
+      throw infrastructure;
+    };
+    const capability = workspaceSkills(
+      ["root0", "root1"].map((path) => ({ path, source: path })),
+    ).bind(session);
+    await expect(capability.instructions()).rejects.toBe(infrastructure);
+  });
+
+  test("an unreachable workspace wins over a skipped search path", async () => {
+    const session = fakeSession({});
+    session.listDir = async ({ path }) => {
+      if (path === "root0") throw agentErrorToControlError(timeoutAgentError());
+      throw new SandboxFilesystemPermissionError("denied");
+    };
+    const capability = workspaceSkills(
+      ["root0", "root1"].map((path) => ({ path, source: path })),
+    ).bind(session);
+    expect(await capability.instructions()).toContain("the workspace was unreachable");
+  });
+
+  test("failed discovery telemetry carries the bounded error class and handling", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    const session = fakeSession({});
+    session.listDir = async () => {
+      throw Object.assign(new Error("reset"), { code: "ECONNRESET" });
+    };
+    await expect(
+      withModelPreparationObserver(
+        (measurement) => measurements.push(measurement),
+        () => discoverWorkspaceSkills(session, [{ path: ".agents/skills", source: "agents" }]),
+      ),
+    ).rejects.toThrow("reset");
+    expect(measurements).toEqual([
+      expect.objectContaining({
+        phase: "repository_skill_discovery",
+        outcome: "failed",
+        failure: { errorClass: "transport", handling: "propagated" },
+      }),
+    ]);
+  });
+
+  test("an invalid repository skill emits a warning even when no valid skills remain", async () => {
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+      fakeSession({ ".agents/skills/bad/SKILL.md": "---\nname: bad name!\n---\n" }),
+    );
+    expect(await capability.instructions()).toContain('"code":"invalid_name"');
+  });
+
+  test.each([
+    ["---\nname: [invalid\n---\n", "invalid_name", "name must be 1-64"],
+    ["---\nname: first\nname: duplicate\n---\n", "invalid_metadata", "duplicate_name"],
+    ["---\n- not a mapping\n---\n", "invalid_metadata", "yaml_not_mapping_without_name"],
+    [
+      "---\ndescription: Use when: deploying\n---\n",
+      "invalid_metadata",
+      "yaml_block_as_implicit_key_without_name",
+    ],
+  ])(
+    "still-rejected repository metadata is isolated from valid skills and names its reason: %s",
+    async (markdown, code, reason) => {
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        fakeSession({
+          ".agents/skills/bad/SKILL.md": markdown,
+          ".agents/skills/good/SKILL.md": "# Good",
+        }),
+      );
+      const instructions = await capability.instructions();
+      expect(instructions).toContain('"name":"good"');
+      expect(instructions).toContain(`"code":"${code}"`);
+      expect(instructions).toContain(`"reason":"${reason}`);
+      expect(instructions).toContain(".agents/skills/bad/SKILL.md");
+      expect(instructions).toContain("### Skipped repository skills");
+      expect(instructions).not.toContain("invalid YAML");
+      expect(instructions).not.toContain("deploying");
+      expect(await capability.instructions()).toBe(instructions);
+    },
+  );
+
+  // Hand-written frontmatter as it appears in public Claude Code and agent
+  // Skill folders. Strict YAML rejects each one; the fallback recovers the
+  // advertised name and description instead of skipping the skill.
+  test.each([
+    [
+      "unquoted colon in the description",
+      "---\nname: deploy\ndescription: Use when: shipping to production\n---\n",
+      "Use when: shipping to production",
+    ],
+    [
+      "tab-indented description",
+      "---\nname: deploy\ndescription:\n\tShip safely.\n\tCheck the logs.\n---\n",
+      "Ship safely. Check the logs.",
+    ],
+    [
+      "unindented continuation line",
+      "---\nname: deploy\ndescription: Ship the app\nto production.\nallowed-tools: Bash\n---\n",
+      "Ship the app to production.",
+    ],
+    [
+      "description starting with a bracket",
+      "---\nname: deploy\ndescription: [WIP] Ship the app\n---\n",
+      "[WIP] Ship the app",
+    ],
+    [
+      "description starting with a backtick",
+      "---\nname: deploy\ndescription: `kubectl` rollout helper\n---\n",
+      "`kubectl` rollout helper",
+    ],
+    [
+      "description starting with @",
+      "---\nname: deploy\ndescription: @release-team helper: ship it\n---\n",
+      "@release-team helper: ship it",
+    ],
+    [
+      "quoted prefix followed by more text",
+      '---\nname: deploy\ndescription: "Deploy" the app\n---\n',
+      '"Deploy" the app',
+    ],
+    [
+      "folded block with a colon and unknown keys",
+      "---\nname: deploy\ndescription: >\n  Use when:\n  shipping.\nmetadata:\n\tversion: 1\nlicense: MIT\n---\n",
+      "Use when: shipping.",
+    ],
+    [
+      "CRLF line endings and a trailing name comment",
+      "---\r\nname: deploy # release skill\r\ndescription: Ship: now\r\n---\r\n",
+      "Ship: now",
+    ],
+  ])("lenient repository metadata keeps a skill with %s", async (_label, markdown, description) => {
+    const warnings: unknown[][] = [];
+    const info = console.info;
+    console.info = (...args: unknown[]) => void warnings.push(args);
+    try {
+      const capability = workspaceSkills([{ path: ".claude/skills", source: "claude" }]).bind(
+        fakeSession({ ".claude/skills/deploy/SKILL.md": markdown }),
+      );
+      const instructions = await capability.instructions();
+      const descriptor = JSON.parse(
+        instructions!
+          .split("\n")
+          .find((line) => line.startsWith("- {"))!
+          .slice(2),
+      );
+      expect(descriptor).toMatchObject({ name: "deploy", description });
+      expect(instructions).not.toContain("Skipped repository skills");
+    } finally {
+      console.info = info;
+    }
+    // The parse reason is logged (info: the skill works) with key names only.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]![0]).toBe("Repository skill metadata read with the lenient fallback");
+    const detail = warnings[0]![1] as { path: string; reason: string; keys: string[] };
+    expect(detail.path).toBe(".claude/skills/deploy/SKILL.md");
+    expect(detail.reason).toMatch(/^yaml_[a-z_]+$/);
+    expect(detail.keys).toContain("name");
+    expect(JSON.stringify(detail)).not.toContain("production");
+    expect(JSON.stringify(detail)).not.toContain("Ship");
+  });
+
+  test("strictly valid repository metadata does not log a fallback", async () => {
+    const warnings: unknown[][] = [];
+    const info = console.info;
+    console.info = (...args: unknown[]) => void warnings.push(args);
+    try {
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        fakeSession({
+          ".agents/skills/deploy/SKILL.md":
+            '---\nname: deploy\ndescription: "Use when: shipping"\nallowed-tools: Bash\n---\n',
+        }),
+      );
+      expect(await capability.instructions()).toContain('"description":"Use when: shipping"');
+    } finally {
+      console.info = info;
+    }
+    expect(warnings).toEqual([]);
+  });
+
+  test("managed inline Skill metadata remains fail-closed", () => {
+    expect(() =>
+      buildAgentCapabilities(testSettings(), [
+        sessionActivation(
+          {
+            name: "broken",
+            files: [{ path: "SKILL.md", content: "---\nname: [broken\n---\n" }],
+          },
+          "broken",
+        ),
+      ]),
+    ).toThrow("invalid YAML");
   });
 
   test("deduplicates identical inline session skills and rejects conflicts", () => {
@@ -682,6 +1609,23 @@ function sessionActivation(
     artifact,
     reason: "attached to session",
   };
+}
+
+/** The repository_skill_read tool of a deferred index bound to `session`. */
+function deferredReader(
+  session: SandboxSessionLike,
+  reservedNames: string[] = [],
+): FunctionTool<unknown> {
+  const tool = workspaceSkills([{ path: ".agents/skills", source: "agents" }], reservedNames, [], {
+    deferred: true,
+  })
+    .bind(session)
+    .tools()
+    .find(
+      (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
+    );
+  if (tool?.type !== "function") throw new Error("missing reader");
+  return tool as FunctionTool<unknown>;
 }
 
 function fakeSession(files: Record<string, string>): SandboxSessionLike {

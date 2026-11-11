@@ -308,7 +308,7 @@ pub enum DocumentError {
     InvalidTextStyle,
     InvalidParagraphStyle,
     InvalidTable,
-    InvalidTableStyle,
+    InvalidTableStyle(String),
     InvalidSection,
     InvalidComment,
     InvalidTrackedChange,
@@ -349,7 +349,9 @@ impl fmt::Display for DocumentError {
             Self::InvalidTextStyle => formatter.write_str("invalid document text style"),
             Self::InvalidParagraphStyle => formatter.write_str("invalid document paragraph style"),
             Self::InvalidTable => formatter.write_str("invalid document table"),
-            Self::InvalidTableStyle => formatter.write_str("invalid document table style"),
+            Self::InvalidTableStyle(reason) => {
+                write!(formatter, "invalid document table style: {reason}")
+            }
             Self::InvalidSection => formatter.write_str("invalid document section"),
             Self::InvalidComment => formatter.write_str("invalid document comment"),
             Self::InvalidTrackedChange => formatter.write_str("invalid document tracked change"),

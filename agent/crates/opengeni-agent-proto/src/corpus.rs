@@ -17,36 +17,32 @@
 
 use crate::v1;
 
-/// A map-free `ControlResponse` carrying a structured git status. Used for the
-/// strict byte-equality cross-stack check.
+/// A map-free `ControlResponse` carrying a directory listing (strings, an enum,
+/// and 64/32-bit integers). Used for the strict byte-equality cross-stack check.
 #[must_use]
 pub fn canonical_control_response() -> v1::ControlResponse {
     v1::ControlResponse {
         request_id: "req-0001".to_string(),
         error: None,
-        result: Some(v1::control_response::Result::Git(v1::GitResponse {
-            exit_code: 0,
-            stdout: prost::bytes::Bytes::from_static(b"on branch main\n"),
-            stderr: prost::bytes::Bytes::new(),
-            status: Some(v1::GitStatus {
-                branch: "main".to_string(),
-                upstream: "origin/main".to_string(),
-                ahead: 2,
-                behind: 0,
-                files: vec![
-                    v1::GitFileStatus {
-                        path: "src/lib.rs".to_string(),
-                        code: " M".to_string(),
-                        staged: false,
-                    },
-                    v1::GitFileStatus {
-                        path: "README.md".to_string(),
-                        code: "??".to_string(),
-                        staged: false,
-                    },
-                ],
-                clean: false,
-            }),
+        result: Some(v1::control_response::Result::FsList(v1::FsListResponse {
+            entries: vec![
+                v1::FsEntry {
+                    name: "lib.rs".to_string(),
+                    path: "src/lib.rs".to_string(),
+                    kind: v1::FsEntryKind::File as i32,
+                    size: 4096,
+                    modified_ms: 1_767_225_600_000,
+                    mode: 0o644,
+                },
+                v1::FsEntry {
+                    name: "docs".to_string(),
+                    path: "docs".to_string(),
+                    kind: v1::FsEntryKind::Directory as i32,
+                    size: 0,
+                    modified_ms: 1_767_225_660_000,
+                    mode: 0o755,
+                },
+            ],
         })),
     }
 }
@@ -64,6 +60,7 @@ pub fn canonical_control_request() -> v1::ControlRequest {
         resource_policy: None,
         op: Some(v1::control_request::Op::OpStart(v1::OpStart {
             op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                run_as: String::new(),
                 command: vec!["echo".to_string(), "hello".to_string()],
                 shell: false,
                 cwd: "/home/user/repo".to_string(),
@@ -74,6 +71,7 @@ pub fn canonical_control_request() -> v1::ControlRequest {
             window_bytes: 65_536,
             deadline_ms: 1_800_000_000_000,
             origin_id: "session-abc".to_string(),
+            connection_generation: 0,
         })),
     }
 }
@@ -91,6 +89,8 @@ pub fn canonical_hello() -> v1::Hello {
         machine_name: "buildbox".to_string(),
         workspace_root: "/home/user".to_string(),
         capabilities: Some(v1::Capabilities {
+            run_as: false,
+            op_release: false,
             exec: true,
             filesystem: true,
             git: true,
@@ -114,6 +114,10 @@ pub fn canonical_hello() -> v1::Hello {
             operation_resource_policy: false,
             operation_cpu_quota: false,
             transactional_fs_write: false,
+            transactional_fs_write_machine: false,
+            credential_renew: false,
+            mac_permissions: None,
+            browser_control_http: false,
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),

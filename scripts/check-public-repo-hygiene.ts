@@ -1,5 +1,6 @@
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { lstat, readlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import {
   catalogMcpUrlRejection,
   normalizeCatalogSnapshot,
@@ -59,6 +60,67 @@ const RETIRED_MILESTONE_LABEL = new RegExp(
   ["\\b(?:P4", "a|M", "12|F", "18|I", "8)\\b"].join(""),
   "gi",
 );
+// Published upstream random digest inputs must retain their expected hashes.
+// These exact bytes contain coincidental labels, not internal work references.
+// Only this rule is suppressed; every other public-text check still runs.
+const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
+  string,
+  { bytes: number; sha256: string; offsets: "all" | readonly number[] }
+> = {
+  // Upstream affine matrix field names in the generated desktop schema.
+  "packages/contracts/src/cua-desktop-tools.gen.json": {
+    bytes: 235_293,
+    sha256: "2e8ac52c0a24ba70713ee5da5dedafa33a0fbaaee4bf43f516ea4c98b9d2e24a",
+    offsets: "all",
+  },
+  "packages/contracts/src/cua-desktop-tools.linux.gen.json": {
+    bytes: 240_708,
+    sha256: "1c6e616e1213731500f719a1ee88671593290f2bfa4d26953a490949e2ac82ad",
+    offsets: "all",
+  },
+  "packages/contracts/src/cua-desktop-tools.windows.gen.json": {
+    bytes: 249_245,
+    sha256: "97c5235a12b36015a27ec1876e2d8878c4ad0f2e1fb6642bb7c36746966ffbaf",
+    offsets: "all",
+  },
+  // Lucide's SVG path data for the bot avatar icons; its move-to commands look like labels.
+  "apps/api/src/integrations/session-avatar-icons.ts": {
+    bytes: 5_842,
+    sha256: "59a94eb77fd96ef62a6624e8eb2dfddf812c43ad4eaae12dcdac65f8cd9ecc43",
+    offsets: "all",
+  },
+  "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt": {
+    bytes: 10_000,
+    sha256: "460689f95489b6336f81772e8c2288bda85e897ffa19109c7dd4589c0715cb7f",
+    offsets: "all",
+  },
+  "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt": {
+    bytes: 100_000,
+    sha256: "c9a9fba700559c2d72391aaa8017ddeb8fea030eaaf5f340eb4fca46230ca281",
+    offsets: "all",
+  },
+  "agent/vendor/async-nats/src/lib.rs": {
+    bytes: 61_891,
+    sha256: "f453d8de7e2dfc7bf479e63c24485a45e489472ed4520e5ff5d52b2f00943572",
+    // Only the signed-byte field primitive, not a string or comment.
+    offsets: [9_379],
+  },
+};
+// Preserve the five published copyright contacts from agentkeepalive, fastq,
+// follow-redirects, isomorphic-ws and yaml. Only these personal-mail matches are
+// suppressed, at this exact notices path, UTF-8 size, hash and string offsets.
+// Every other rule still runs; changed license bytes require renewed review.
+const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
+  string,
+  { bytes: number; sha256: string; offsets: readonly number[] }
+> = {
+  "packages/runtime/THIRD_PARTY_NOTICES": {
+    bytes: 153_969,
+    sha256: "30d9bdbf27f1f06272f2cb8ffe49bfd737c7eecb3ce842b9d442b5b1ea2c5a17",
+    offsets: [84_471, 101_317, 102_203, 124_099, 153_247],
+  },
+};
+const RUST_SIGNED_BYTE_TYPE = ["i", "8"].join("");
 const PRIVATE_PROJECT_CODENAME = new RegExp(["\\bpelo", "ton\\b"].join(""), "gi");
 const RETIRED_DESIGN_RECORD_TERM = new RegExp(["\\bdos", "sier\\b"].join(""), "gi");
 const RETIRED_DESIGN_RECORD_PATH = new RegExp(
@@ -75,61 +137,55 @@ const RETIRED_DESIGN_RECORD_PATH = new RegExp(
   "gi",
 );
 const MACHINE_NIX_STORE_PATH = /\/nix\/store\/[a-z0-9]{20,}-/gi;
-const LEGACY_MIGRATION_REFERENCE_ALLOWLIST = new Set([
-  "packages/db/drizzle/0017_sandbox_leases.sql",
-  "packages/db/drizzle/0018_sandbox_os.sql",
-  "packages/db/drizzle/0019_session_stream_acknowledgments.sql",
-  "packages/db/drizzle/0020_session_recordings.sql",
-  "packages/db/drizzle/0021_sandbox_pty_sessions.sql",
-  "packages/db/drizzle/0024_sandboxes_enrollments_metrics.sql",
-  "packages/db/drizzle/0025_device_enrollment_requests.sql",
-  "packages/db/drizzle/0045_workspace_captures.sql",
-  "packages/db/drizzle/0053_codex_credential_leases.sql",
-  "packages/db/drizzle/0057_durable_queue_control.sql",
-  "packages/db/drizzle/0061_session_workflow_wake_outbox.sql",
-  "packages/db/drizzle/0062_session_list_snapshot_reaper.sql",
-  "packages/db/drizzle/0063_session_control_mega_foundation.sql",
-  "packages/db/drizzle/0064_rotation_strategy_sharded_backfill.sql",
-  "packages/db/drizzle/0067_session_event_payload_bounds.sql",
-  "packages/db/drizzle/0068_workspace_control_event_bounds.sql",
-  "packages/db/drizzle/0069_session_event_history_backfill.sql",
-  "packages/db/drizzle/0074_session_activity_revisions.sql",
-  "packages/db/drizzle/0120_durable_goal_wake.sql",
-]);
 const CATALOG_SNAPSHOT = "data/catalog/integrations-snapshot.json";
 const PUBLIC_FITNESS_DOMAIN = ["one", "pelo", "ton", ".com"].join("");
 const PUBLIC_FITNESS_NAME = ["Pelo", "ton"].join("");
 
 export function auditPublicText(file: string, source: string): Finding[] {
   const findings: Finding[] = [];
-  collectMatches(file, source, PERSONAL_MAIL, "personal email address", findings);
+  const reviewedContacts = reviewedUpstreamLicenseContactOffsets(file, source);
+  collectMatches(
+    file,
+    source,
+    PERSONAL_MAIL,
+    "personal email address",
+    findings,
+    (match) => reviewedContacts?.includes(match.index ?? -1) === true,
+  );
   collectMatches(file, source, PRIVATE_WORKTREE_PATH, "private worktree path", findings);
   collectMatches(file, source, PRIVATE_ISSUE_REFERENCE, "private issue reference", findings);
   collectMatches(file, source, INTERNAL_WORK_LABEL, "internal work label", findings);
-  collectMatches(file, source, RETIRED_MILESTONE_LABEL, "retired milestone label", findings);
+  const reviewedLabels = reviewedUpstreamLabelOffsets(file, source);
+  const pathData = svgPathDataRanges(file, source);
+  collectMatches(
+    file,
+    source,
+    RETIRED_MILESTONE_LABEL,
+    "retired milestone label",
+    findings,
+    (match) =>
+      reviewedLabels === "all" ||
+      insideRanges(pathData, match.index ?? -1) ||
+      (match[0] === RUST_SIGNED_BYTE_TYPE && reviewedLabels?.includes(match.index ?? -1) === true),
+  );
   collectMatches(file, source, MACHINE_NIX_STORE_PATH, "machine-specific Nix store path", findings);
   collectMatches(file, source, PERSONAL_NAME, "personal name", findings);
-  if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
-    collectMatches(
-      file,
-      source,
-      RETIRED_DESIGN_RECORD_PATH,
-      "retired internal design-record path",
-      findings,
-    );
-  }
-
-  if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
-    collectMatches(file, source, INTERNAL_ISSUE_REFERENCE, "internal issue reference", findings);
-    collectMatches(file, source, PRIVATE_AGENT_DOC, "private .agent document reference", findings);
-    collectMatches(
-      file,
-      source,
-      RETIRED_DESIGN_RECORD_TERM,
-      "retired internal design-record terminology",
-      findings,
-    );
-  }
+  collectMatches(
+    file,
+    source,
+    RETIRED_DESIGN_RECORD_PATH,
+    "retired internal design-record path",
+    findings,
+  );
+  collectMatches(file, source, INTERNAL_ISSUE_REFERENCE, "internal issue reference", findings);
+  collectMatches(file, source, PRIVATE_AGENT_DOC, "private .agent document reference", findings);
+  collectMatches(
+    file,
+    source,
+    RETIRED_DESIGN_RECORD_TERM,
+    "retired internal design-record terminology",
+    findings,
+  );
 
   PRIVATE_PROJECT_CODENAME.lastIndex = 0;
   for (const match of source.matchAll(PRIVATE_PROJECT_CODENAME)) {
@@ -146,7 +202,8 @@ export function auditPublicText(file: string, source: string): Finding[] {
   HOME_PATH.lastIndex = 0;
   for (const match of source.matchAll(HOME_PATH)) {
     const account = match[1]?.toLowerCase();
-    if (!account || GENERIC_HOME_NAMES.has(account)) continue;
+    // Dot segments such as /Users/.. name no account.
+    if (!account || GENERIC_HOME_NAMES.has(account) || /^\.+$/.test(account)) continue;
     // A nested HTTP resource path containing a home directory segment is not
     // a machine filesystem root. Keep root paths, file URLs, and query values
     // subject to the normal check; do not exempt the surrounding line.
@@ -424,11 +481,68 @@ function collectMatches(
   pattern: RegExp,
   reason: string,
   findings: Finding[],
+  ignore?: (match: RegExpMatchArray) => boolean,
 ): void {
   pattern.lastIndex = 0;
   for (const match of source.matchAll(pattern)) {
+    if (ignore?.(match)) continue;
     findings.push({ file, line: lineAt(source, match.index ?? 0), reason });
   }
+}
+
+// SVG path data is drawing commands: a move-to command followed by its
+// coordinate can read like a retired label (vendored brand marks are full of them).
+// Only the values of a `.svg` file's `d` and `points` attributes are skipped,
+// and only for that rule; text, titles and every other attribute still run.
+const SVG_PATH_DATA_ATTRIBUTE = /\s(?:d|points)\s*=\s*("[^"]*"|'[^']*')/g;
+// Android vector drawables draw with the same path syntax.
+const ANDROID_PATH_DATA_ATTRIBUTE = /\sandroid:pathData\s*=\s*("[^"]*"|'[^']*')/g;
+
+/** Where an SVG or an Android vector drawable keeps its path coordinates. */
+function svgPathDataRanges(file: string, source: string): Array<[number, number]> {
+  const extension = extname(file).toLowerCase();
+  const attribute =
+    extension === ".svg"
+      ? SVG_PATH_DATA_ATTRIBUTE
+      : extension === ".xml" && /(?:^|\/)res\/drawable[^/]*\//u.test(file)
+        ? ANDROID_PATH_DATA_ATTRIBUTE
+        : null;
+  if (!attribute) return [];
+  const ranges: Array<[number, number]> = [];
+  for (const match of source.matchAll(attribute)) {
+    const value = match[1]!;
+    const start = (match.index ?? 0) + match[0].length - value.length;
+    ranges.push([start, start + value.length]);
+  }
+  return ranges;
+}
+
+function insideRanges(ranges: Array<[number, number]>, index: number): boolean {
+  return ranges.some(([start, end]) => index > start && index < end);
+}
+
+function reviewedUpstreamLabelOffsets(
+  file: string,
+  source: string,
+): "all" | readonly number[] | undefined {
+  const reviewed = REVIEWED_UPSTREAM_LABEL_MATCHES[file];
+  if (!reviewed || Buffer.byteLength(source, "utf8") !== reviewed.bytes) return undefined;
+  if (createHash("sha256").update(source, "utf8").digest("hex") !== reviewed.sha256) {
+    return undefined;
+  }
+  return reviewed.offsets;
+}
+
+function reviewedUpstreamLicenseContactOffsets(
+  file: string,
+  source: string,
+): readonly number[] | undefined {
+  const reviewed = REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES[file];
+  if (!reviewed || Buffer.byteLength(source, "utf8") !== reviewed.bytes) return undefined;
+  if (createHash("sha256").update(source, "utf8").digest("hex") !== reviewed.sha256) {
+    return undefined;
+  }
+  return reviewed.offsets;
 }
 
 function lineAt(source: string, index: number): number {

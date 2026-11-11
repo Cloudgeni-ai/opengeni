@@ -11,7 +11,7 @@ import { modelToolResultFits } from "@opengeni/runtime";
 import {
   listSkillPaths,
   PORTABLE_SKILL_MAX_FILES,
-  readSkillFiles,
+  readSkillFilesReportingMissing,
   skillScriptIndex,
   SKILL_READ_MAX_PATHS,
   type SkillTextFile,
@@ -185,7 +185,7 @@ export function createSkillReadAttemptToolDefinition(input: {
     codemodePath: ["opengeni", SKILL_READ_TOOL_NAME],
     title: "Read Skill files",
     description:
-      "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths and available revision identity only, with no file bodies. Use an id or name from the Skill index or skill_search. Management tools are lazy; when listed, opengeni-skills explains how to use them.",
+      "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths and available revision identity only, with no file bodies. Use an id or name from the Skill index or skill_search. Management tools are lazy; when listed, skill-management explains how to use them.",
     inputSchema: {
       type: "object",
       properties: {
@@ -275,7 +275,9 @@ async function readResult(
       result: textResult({ ...identity, ...listSkillPaths(files, PORTABLE_SKILL_MAX_FILES) }),
     };
   }
-  const selected = readSkillFiles(files, args.paths);
+  // Explicit paths that are not in this Skill are reported beside the files
+  // that exist, with the Skill's own paths, instead of failing the read.
+  const selected = readSkillFilesReportingMissing(files, args.paths);
   // Only the model's default SKILL.md read is deduplicated: explicit paths
   // are the fresh-copy request, and a Codemode program never sees history.
   if (

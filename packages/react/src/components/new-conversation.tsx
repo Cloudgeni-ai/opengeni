@@ -1,0 +1,272 @@
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { lazy, useRef, type ComponentProps, type FormEvent, type ReactNode } from "react";
+import {
+  useNewConversation,
+  type NewConversationController,
+  type UseNewConversationOptions,
+} from "../hooks/use-new-conversation";
+import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
+import { useErrorMessage } from "../lib/error-message";
+import { useHostTheme } from "../lib/host-theme";
+import { cn } from "../lib/cn";
+import type { NewSessionRealtimeControl } from "../realtime/realtime-control";
+import { ChatComposer } from "./chat-composer";
+import type { ComposerVoiceInputOptions } from "./composer-transcription-control";
+import { ModelPolicyPicker } from "./model-policy-picker";
+import { useComposerTranscription, type SessionConversationProps } from "./session-conversation";
+import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
+import { ConversationRenderBoundary } from "./conversation-render-boundary";
+import { LazyPart } from "./lazy-part";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+const LazyNewVoice = lazy(() => import("../realtime/embedded-new-voice"));
+
+export type NewConversationLabels = {
+  title: string;
+  placeholder: string;
+  send: string;
+  unavailable: string;
+  retry: string;
+  pending: string;
+  finishingUploads: string;
+};
+const DEFAULT_LABELS = (t: OpenGeniText): NewConversationLabels => ({
+  title: t("newConversation.howCanIHelp"),
+  placeholder: t("newConversation.askAnything"),
+  send: t("newConversation.send"),
+  unavailable: t("newConversation.newChatsAreNotEnabled"),
+  retry: t("newConversation.retry"),
+  pending: t("newConversation.creationIsNotConfirmedRetry"),
+  finishingUploads: t("newConversation.chatCreatedFinishOrRemove"),
+});
+type Presentation = {
+  composerProps?: SessionConversationProps["composerProps"] | undefined;
+  modelPickerProps?: SessionConversationProps["modelPickerProps"] | undefined;
+  /** The composer microphone: false hides it; options set its language or a check before it starts. */
+  voiceInput?: boolean | ComposerVoiceInputOptions | undefined;
+  realtimeVoiceProps?: SessionConversationProps["realtimeVoiceProps"] | undefined;
+  labels?: Partial<NewConversationLabels> | undefined;
+  theme?: SessionConversationProps["theme"] | undefined;
+  surface?: SessionConversationProps["surface"] | undefined;
+  height?: SessionConversationProps["height"] | undefined;
+  className?: string | undefined;
+};
+
+export type NewConversationProps = UseNewConversationOptions & SessionProxyBaseUrl & Presentation;
+export type NewConversationViewProps = Presentation & { creation: NewConversationController };
+
+/** Standalone stock new-chat composer. OpenGeniChat uses this same implementation. */
+export function NewConversation({ baseUrl, headers, fetch, ...props }: NewConversationProps) {
+  const resetKey = props.workspaceId ?? "";
+  if (baseUrl === undefined)
+    return (
+      <ConversationRenderBoundary resetKey={resetKey}>
+        <NewConversationRuntime {...props} />
+      </ConversationRenderBoundary>
+    );
+  const { client, workspaceId, ...rest } = props;
+  return (
+    <ConversationRenderBoundary resetKey={resetKey}>
+      <SessionProxyScope
+        baseUrl={baseUrl}
+        headers={headers}
+        fetch={fetch}
+        client={client}
+        workspaceId={workspaceId}
+      >
+        <NewConversationRuntime {...rest} />
+      </SessionProxyScope>
+    </ConversationRenderBoundary>
+  );
+}
+function NewConversationRuntime(props: NewConversationProps) {
+  const creation = useNewConversation(props);
+  return <NewConversationView {...props} creation={creation} />;
+}
+
+/** Presentation for a new-chat controller kept above host layout changes. */
+export function NewConversationView({
+  creation,
+  labels: overrides,
+  composerProps,
+  modelPickerProps,
+  voiceInput = true,
+  realtimeVoiceProps,
+  theme,
+  surface,
+  height = "100%",
+  className,
+}: NewConversationViewProps) {
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_LABELS(t), ...overrides };
+  const { composer, config, catalog, files, uploadsEnabled, available } = creation;
+  const root = useRef<HTMLFormElement>(null);
+  const hostTheme = useHostTheme(root, { theme, surface });
+  const transcription = useComposerTranscription(
+    creation.client,
+    creation.workspaceId,
+    voiceInput && available ? config.voiceInput : null,
+    typeof voiceInput === "object" ? voiceInput : undefined,
+  );
+  const voice = useNewConversationVoice(creation, realtimeVoiceProps);
+  return (
+    <form
+      onSubmit={(event: FormEvent) => {
+        event.preventDefault();
+        void composer.send();
+      }}
+      ref={root}
+      className={cn(
+        "og-root mx-auto box-border flex w-full max-w-3xl flex-col gap-4 bg-og-bg p-3 text-og-base text-og-fg",
+        className,
+      )}
+      style={{ ...hostTheme.style, height }}
+      data-og-theme={hostTheme.attribute}
+      data-og-host-theme=""
+      data-og-new-chat-composer=""
+    >
+      <div aria-hidden className="min-h-0 flex-[2]" />
+      {labels.title ? (
+        <p className="text-center text-og-md font-medium text-og-fg">{labels.title}</p>
+      ) : null}
+      <ChatComposer
+        {...composerProps}
+        {...(transcription && composerProps?.transcription === undefined ? { transcription } : {})}
+        composer={composer}
+        attachments={uploadsEnabled ? files : undefined}
+        disabled={!available || composerProps?.disabled}
+        runControl="none"
+        running={false}
+        placeholder={overrides?.placeholder ?? composerProps?.placeholder ?? labels.placeholder}
+        inputProps={{ "aria-label": labels.placeholder, ...composerProps?.inputProps }}
+        messages={{ sendMessageAriaLabel: labels.send, ...composerProps?.messages }}
+        actionsStart={
+          voice ? (
+            <>
+              {composerProps?.actionsStart}
+              {voice}
+            </>
+          ) : (
+            composerProps?.actionsStart
+          )
+        }
+        controlsStart={
+          composerProps?.controlsStart ??
+          (composer.policy ? (
+            <ModelPolicyPicker
+              groupPresentation={modelPickerProps?.groupPresentation}
+              messages={modelPickerProps?.messages}
+              rows={catalog.rows}
+              model={composer.policy.model}
+              effort={composer.policy.reasoningEffort}
+              latencyMode={composer.policy.latencyMode}
+              loading={catalog.loading}
+              error={catalog.error?.message}
+              disabled={composer.sending}
+              menuSide="bottom"
+              onOpenChange={(open) => {
+                if (open) void catalog.refresh();
+              }}
+              onModelChange={composer.setModel!}
+              onEffortChange={composer.setReasoningEffort!}
+              onLatencyModeChange={composer.setLatencyMode!}
+            />
+          ) : undefined)
+        }
+        responsiveBasis={composerProps?.responsiveBasis ?? "container"}
+      />
+      <NewConversationStatus creation={creation} labels={labels} />
+      <div aria-hidden className="min-h-0 flex-[3]" />
+    </form>
+  );
+}
+
+/**
+ * The voice-first start for a new chat, or null when the workspace offers no
+ * voice model. Shared by the stock view and the console's own layouts.
+ */
+export function useNewConversationVoice(
+  creation: NewConversationController,
+  realtimeVoiceProps?: SessionConversationProps["realtimeVoiceProps"] | undefined,
+): ReactNode {
+  const models = useRealtimeVoiceModels(
+    creation.client,
+    creation.workspaceId,
+    creation.realtimeVoiceEnabled && creation.available,
+  );
+  if (!models.length) return null;
+  return (
+    <LazyPart onLoadFailure="hide" fallback={null}>
+      <LazyNewVoice
+        client={
+          creation.client as unknown as ComponentProps<typeof NewSessionRealtimeControl>["client"]
+        }
+        workspaceId={creation.workspaceId}
+        codexConnected={realtimeVoiceProps?.codexConnected ?? false}
+        modelMenu={realtimeVoiceProps?.modelMenu}
+        disabled={
+          creation.composer.sending ||
+          creation.pending !== null ||
+          creation.finishingUploads ||
+          creation.files.hasUnresolved
+        }
+        onStart={creation.startRealtime}
+      />
+    </LazyPart>
+  );
+}
+
+/**
+ * What stands between a new chat and its creation: unavailable, a failed or
+ * unconfirmed create (with Retry), or uploads still finishing.
+ */
+export function NewConversationStatus({
+  creation,
+  labels: overrides,
+}: {
+  creation: NewConversationController;
+  labels?: Partial<NewConversationLabels> | undefined;
+}) {
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_LABELS(t), ...overrides };
+  const formatError = useErrorMessage();
+  const { available, error, pending, composer } = creation;
+  return (
+    <>
+      {!available ? (
+        <p className="text-center text-og-sm text-og-fg-muted" data-og-new-chat-unavailable="">
+          {labels.unavailable}
+        </p>
+      ) : error ? (
+        <p role="alert" className="text-center text-og-sm text-og-status-failed">
+          {formatError(
+            error.cause,
+            error.cause instanceof OpenGeniApiError && error.cause.code === "route_not_allowed"
+              ? labels.unavailable
+              : undefined,
+          )}
+        </p>
+      ) : null}
+      {pending ? (
+        <div className="text-center text-og-sm text-og-fg-muted">
+          <p role="status">{labels.pending}</p>
+          <button
+            type="button"
+            disabled={composer.sending}
+            onClick={() => {
+              void creation.retry();
+            }}
+            className="mt-2 rounded-og-sm border border-og-border px-3 py-1.5 text-og-fg hover:bg-og-hover disabled:opacity-50"
+          >
+            {labels.retry}
+          </button>
+        </div>
+      ) : null}
+      {creation.finishingUploads ? (
+        <p role="status" className="text-center text-og-sm text-og-fg-muted">
+          {labels.finishingUploads}
+        </p>
+      ) : null}
+    </>
+  );
+}

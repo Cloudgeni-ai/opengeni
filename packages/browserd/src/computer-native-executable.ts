@@ -11,7 +11,7 @@ export async function prepareComputerNativeExecutable(
   platform: NodeJS.Platform = process.platform,
 ): Promise<{ path: string; cleanup(): Promise<void> }> {
   if (platform !== "darwin") return { path: binaryPath, async cleanup() {} };
-  const directory = await mkdtemp(join(tmpdir(), "opengeni-computer-native-"));
+  const directory = await mkdtemp(join(tmpdir(), "computer-native-"));
   const path = join(directory, basename(binaryPath));
   try {
     await chmod(directory, 0o700);

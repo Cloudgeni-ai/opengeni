@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDatabaseConnectionLoss } from "@opengeni/db";
 import type { Attributes, Observability, Span } from "@opengeni/observability";
 
 export type ApiFatalEvent = "startup_failure" | "unhandled_rejection" | "uncaught_exception";
@@ -16,7 +17,7 @@ export type ApiFatalReasonKind =
   | "undefined";
 
 type ApiFatalObservability = Pick<Observability, "error" | "flush" | "startSpan"> &
-  Partial<Pick<Observability, "recordFailureDiagnostic">>;
+  Partial<Pick<Observability, "recordFailureDiagnostic" | "warn" | "incrementCounter">>;
 
 type ApiFatalProcess = {
   on: (
@@ -36,6 +37,14 @@ export type ApiFatalProcessBoundaryOptions = {
   flushTimeoutMs?: number;
   correlationId?: () => string;
   fallbackLog?: (message: string) => void;
+  /**
+   * Classifies an unhandled rejection that leaves no process state behind and
+   * is therefore survivable once the API is serving. Defaults to a lost
+   * database connection (deploy drain, failover, restart): the rejected query
+   * held only a pooled connection the driver has already discarded, and every
+   * durable loop retries its claim on the next tick.
+   */
+  isRecoverableRejection?: (reason: unknown) => boolean;
 };
 
 export type ApiFatalProcessBoundary = {
@@ -61,9 +70,48 @@ export function installApiFatalProcessBoundary(
   const flushTimeoutMs = options.flushTimeoutMs ?? API_FATAL_FLUSH_TIMEOUT_MS;
   const correlationId = options.correlationId ?? (() => `api-fatal.${randomUUID()}`);
   const fallbackLog = options.fallbackLog ?? ((message: string) => console.error(message));
+  const isRecoverableRejection = options.isRecoverableRejection ?? isDatabaseConnectionLoss;
   let observability = options.observability;
   let phase: ApiFatalPhase = "startup";
   let reporting = false;
+
+  const recover = (reason: unknown): boolean => {
+    if (phase !== "running" || reporting) return false;
+    let recoverable = false;
+    try {
+      recoverable = isRecoverableRejection(reason);
+    } catch {
+      return false;
+    }
+    if (!recoverable) return false;
+    const attributes = {
+      errorClass: "ApiRecoveredRejection",
+      errorCode: "api_unhandled_database_connection_loss",
+      origin: "api",
+      reasonKind: apiFatalReasonKind(reason),
+    };
+    try {
+      if (observability?.warn) {
+        observability.warn(
+          "Opengeni API recovered an unhandled database connection loss",
+          attributes,
+        );
+      } else {
+        safeFallbackLog(
+          fallbackLog,
+          "Opengeni API recovered an unhandled database connection loss (api_unhandled_database_connection_loss)",
+        );
+      }
+      observability?.incrementCounter?.({
+        name: "opengeni_api_recovered_rejections_total",
+        help: "Unhandled rejections the API survived because they only reported a lost database connection.",
+        labels: { code: "api_unhandled_database_connection_loss" },
+      });
+    } catch {
+      // Recovery never depends on the observer.
+    }
+    return true;
+  };
 
   const report = async (event: ApiFatalEvent, reason: unknown): Promise<void> => {
     if (reporting) return;
@@ -114,6 +162,7 @@ export function installApiFatalProcessBoundary(
   };
 
   const onUnhandledRejection = (reason: unknown): void => {
+    if (recover(reason)) return;
     void report("unhandled_rejection", reason);
   };
   const onUncaughtException = (reason: unknown): void => {
@@ -184,7 +233,7 @@ function apiFatalReasonKind(reason: unknown): ApiFatalReasonKind {
 
 function apiFatalMessage(diagnostic: ReturnType<typeof apiFatalDiagnostic>): string {
   return (
-    `OpenGeni API fatal process failure (${diagnostic.errorCode}; ` +
+    `Opengeni API fatal process failure (${diagnostic.errorCode}; ` +
     `phase=${diagnostic.phase}; reason_kind=${diagnostic.reasonKind}; ` +
     `correlation_id=${diagnostic.correlationId})`
   );

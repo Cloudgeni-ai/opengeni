@@ -2,12 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ManagedEmailMessage, ManagedEmailTransport } from "@opengeni/core";
 import { createDb, type DbClient } from "@opengeni/db";
 import { createObservability, type Observability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../src/app";
 import { createManagedAuth } from "../src/auth/managed-auth";
@@ -166,11 +163,17 @@ describe("managed sign-up funnel metrics", () => {
     ).toBe(0);
     expect(await authSessionIds(email)).toEqual([]);
 
-    // A duplicate sign-up for the same address creates no second user.
+    // A duplicate sign-up for the same address creates no second user. Like
+    // the web client, it asks to land on the same attributed page.
     const duplicate = await app.request("/v1/auth/sign-up/email", {
       method: "POST",
       headers: requestHeaders(),
-      body: JSON.stringify({ name: "Funnel Human", email, password }),
+      body: JSON.stringify({
+        name: "Funnel Human",
+        email,
+        password,
+        callbackURL: "/?auth_event=email_verified&utm_source=producthunt",
+      }),
     });
     expect(duplicate.status).toBeLessThan(300);
     expect(
@@ -181,7 +184,8 @@ describe("managed sign-up funnel metrics", () => {
     ).toBe(1);
     expect(await authSessionIds(email)).toEqual([]);
 
-    const verification = messages.find((message) => message.kind === "email_verification");
+    // Only the newest sign-up's link verifies the address.
+    const verification = messages.findLast((message) => message.kind === "email_verification");
     const link = verification?.text.match(/https?:\/\/\S+/)?.[0];
     expect(link).toBeDefined();
     const verificationUrl = new URL(link!);
@@ -327,12 +331,11 @@ describe("managed sign-up funnel metrics", () => {
       const accountId = crypto.randomUUID();
       google.getUserInfo = async () => ({
         user: {
-          id: accountId,
           name: "Provider Human",
           email: `social-${accountId}@example.test`,
           emailVerified: true,
         },
-        data: {},
+        data: { sub: accountId },
       });
       const start = await app.request("/v1/auth/sign-in/social", {
         method: "POST",

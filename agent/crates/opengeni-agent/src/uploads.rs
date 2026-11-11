@@ -1,8 +1,7 @@
 //! Connection-instance-local transactional upload lifecycle. No op frames,
 //! child processes, implicit authority, automatic retries, or restart adoption.
 
-#[path = "update_drain.rs"]
-pub(crate) mod update_drain;
+pub(crate) use opengeni_agent_engine::update_drain;
 use opengeni_agent_platform::{transactional_write::TransactionalWrite, Platform, PlatformError};
 use opengeni_agent_proto::v1::{self, control_request::Op, control_response::Result as ResultBody};
 use std::collections::HashMap;
@@ -159,6 +158,7 @@ impl Uploads {
     /// Caller serializes through the exact link's mutex on a blocking thread.
     /// The live connection predicate is also checked at the actual commit point.
     /// Request epochs belong to individual sessions, not this shared machine.
+    /// Zero denotes a machine-addressed operation and is pinned like any epoch.
     pub fn serve<P: Platform>(
         &mut self,
         platform: &P,
@@ -186,11 +186,11 @@ impl Uploads {
         request: &v1::ControlRequest,
         connection_live: &dyn Fn() -> bool,
     ) -> Result<ResultBody, v1::AgentError> {
-        if request.epoch == 0 || !connection_live() {
+        if !connection_live() {
             return Err(error(
                 v1::ErrorCode::Fenced,
                 "WRITE_FENCED",
-                "transaction requires a live connection and nonzero session epoch",
+                "transaction requires a live connection",
             ));
         }
         if request.resource_policy.is_some() {
@@ -680,6 +680,56 @@ mod tests {
     }
 
     #[test]
+    fn machine_addressed_upload_keeps_zero_epoch_and_exact_identity() {
+        let mut rig = Rig::new();
+        let bytes = vec![b'm'; 3 * CHUNK_BYTES + 13];
+        let begin = request(start(&bytes), 0);
+        assert!(rig
+            .uploads
+            .serve(&rig.platform, &begin, &|| true)
+            .error
+            .is_none());
+        for op in [
+            start(&bytes),
+            chunk(0, 0, b"wrong epoch", true),
+            Op::OpQuery(v1::OpQuery { op_id: ID.into() }),
+            Op::OpCancel(v1::OpCancel { op_id: ID.into() }),
+        ] {
+            let reply = rig.uploads.serve(&rig.platform, &request(op, 1), &|| true);
+            assert_eq!(reply.error.unwrap().code, v1::ErrorCode::Fenced as i32);
+        }
+        for (seq, body) in bytes.chunks(CHUNK_BYTES).enumerate() {
+            let offset = seq * CHUNK_BYTES;
+            let op = chunk(
+                seq as u64,
+                offset as u64,
+                body,
+                offset + body.len() == bytes.len(),
+            );
+            let request = request(op, 0);
+            assert!(rig
+                .uploads
+                .serve(&rig.platform, &request, &|| true)
+                .error
+                .is_none());
+        }
+        let query = request(Op::OpQuery(v1::OpQuery { op_id: ID.into() }), 0);
+        let reply = rig.uploads.serve(&rig.platform, &query, &|| true);
+        let Some(ResultBody::OpStatus(status)) = reply.result else {
+            panic!("status")
+        };
+        assert_eq!(status.state, v1::OpState::Complete as i32);
+        assert_eq!(
+            status.exit.unwrap().digests["content"],
+            blake3::hash(&bytes).to_hex().to_string()
+        );
+        assert_eq!(
+            std::fs::read(rig.dir.path().join("document")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
     fn exact_operation_epoch_and_live_connection_are_required() {
         let mut rig = Rig::new();
         assert!(rig.begin(b"hello").error.is_none());
@@ -755,18 +805,26 @@ mod tests {
 
     #[test]
     fn stopped_connection_rejects_every_upload_action() {
-        let mut rig = Rig::new();
-        assert!(rig.begin(b"hello").error.is_none());
-        for op in [
-            start(b"hello"),
-            chunk(0, 0, b"hello", true),
-            Op::OpQuery(v1::OpQuery { op_id: ID.into() }),
-            Op::OpCancel(v1::OpCancel { op_id: ID.into() }),
-        ] {
-            let reply = rig.uploads.serve(&rig.platform, &request(op, 7), &|| false);
-            assert_eq!(reply.error.unwrap().code, v1::ErrorCode::Fenced as i32);
+        for epoch in [0, 7] {
+            let mut rig = Rig::new();
+            assert!(rig
+                .uploads
+                .serve(&rig.platform, &request(start(b"hello"), epoch), &|| true)
+                .error
+                .is_none());
+            for op in [
+                start(b"hello"),
+                chunk(0, 0, b"hello", true),
+                Op::OpQuery(v1::OpQuery { op_id: ID.into() }),
+                Op::OpCancel(v1::OpCancel { op_id: ID.into() }),
+            ] {
+                let reply = rig
+                    .uploads
+                    .serve(&rig.platform, &request(op, epoch), &|| false);
+                assert_eq!(reply.error.unwrap().code, v1::ErrorCode::Fenced as i32);
+            }
+            assert!(!rig.dir.path().join("document").exists());
         }
-        assert!(!rig.dir.path().join("document").exists());
     }
 
     #[test]

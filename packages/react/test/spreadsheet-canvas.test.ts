@@ -149,6 +149,20 @@ describe("spreadsheet retained canvas", () => {
     expect(revised!.paintedTiles).toBeGreaterThan(0);
   });
 
+  test("discarding fallback-font tiles repaints an otherwise unchanged generation", () => {
+    const renderer = new SpreadsheetCanvasRenderer();
+    const input = paintInput(fakeCanvas());
+    const first = renderer.paint(input)!;
+    expect(first.paintedTiles).toBeGreaterThan(0);
+    expect(renderer.paint(input)!.reusedTiles).toBe(first.cacheSize);
+
+    renderer.dispose();
+    const refreshed = renderer.paint(input)!;
+    expect(refreshed.reusedTiles).toBe(0);
+    expect(refreshed.paintedTiles).toBe(first.paintedTiles);
+    expect(renderer.paint(input)!.reusedTiles).toBe(refreshed.cacheSize);
+  });
+
   test("never retains a tile assembled from a partial bounded projection", () => {
     const canvas = fakeCanvas();
     const renderer = new SpreadsheetCanvasRenderer();

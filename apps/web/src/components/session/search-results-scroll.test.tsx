@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { act } from "react";
-import { SearchResultsView, SearchPreviewView } from "./search-results-view";
+import {
+  SearchResultsView,
+  SearchPreviewView,
+} from "@opengeni/react/app/components/session/search-results-view";
 import {
   registerDom,
   renderComponent,

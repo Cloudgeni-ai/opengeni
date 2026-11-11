@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { FileSystemRouteIdentity } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
@@ -35,7 +36,7 @@ export type WorkspaceEditConflict = {
   live: string;
 };
 
-export type UseWorkspaceEditOptions = ClientOverride & {
+export type UseWorkspaceEditOptions = ClientOverride<ChatClient> & {
   /** The file being edited (workspace-relative). null disables the machine. */
   path?: string | null | undefined;
   /** The capture-served content loaded into the editor — the flush base (C2). */

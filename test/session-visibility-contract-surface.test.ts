@@ -12,15 +12,24 @@ import { join } from "node:path";
 // literals, and a `session.visibility.changed` event type. The surrounding
 // database authority (owner derivation on insert, the capability-fenced direct
 // write guard, and the restrictive `session_visibility_isolation` policies) is
-// ACTIVE for organizations carrying the durable activation receipt. The first
-// public caller is deliberately narrow: one core application service reached
-// by the two HTTP routes and the framework-neutral SDK, with the activation-
-// gated web control using only that SDK boundary. Worker, MCP, runtime, React,
+// ACTIVE for every organization: rolling migration 0611 retired the
+// per-organization activation receipt prerequisite. The first public caller is
+// deliberately narrow: one core application service reached by the two HTTP
+// routes and the framework-neutral SDK, with the web control using only that
+// SDK boundary. Worker, MCP, runtime, React,
 // cross-workspace, attachment, and personal-grant callers remain forbidden.
 // ---------------------------------------------------------------------------
 
 const repo = join(import.meta.dir, "..");
 
+/** Owner-only preview reads, named by the visibility-work reader instead of the adapter. */
+const OWNER_PREVIEW_ROUTINES = [
+  // 0768's preview of a standing block; since 0769 it always answers NULL and
+  // stays granted only for older releases.
+  "session_visibility_change_blocker",
+  // Owner-only counts of other people's access a private change drops (0769).
+  "session_visibility_foreign_authority_items",
+] as const;
 const SQL_ENTRY_POINTS = [
   "transition_session_visibility",
   "fork_session_content",
@@ -30,11 +39,14 @@ const SQL_ENTRY_POINTS = [
   // functions: it is granted to `opengeni_app`, so any new importer would
   // otherwise pass every guard in the tree.
   "replay_applied_session_fork",
+  ...OWNER_PREVIEW_ROUTINES,
 ] as const;
 const ADAPTER_ENTRY_POINTS = [
   "transitionSessionVisibility",
   "forkSessionContent",
   "replayAppliedSessionFork",
+  "inspectSessionVisibilityChange",
+  "stopSessionWorkForVisibilityChange",
 ] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
 const ADAPTER_CALLER_ALLOWLIST = new Set(["packages/core/src/application/session-tenancy.ts"]);
@@ -46,29 +58,6 @@ const AUTHORIZATION_CALLER_ALLOWLIST = new Set([
 /** Files allowed to name the SQL entry points: origin definition, later body
  * replacements that only copy newly required session columns, grants, posture,
  * adapter. Product callers remain forbidden. */
-const SQL_ENTRY_POINT_ALLOWLIST = new Set([
-  "packages/db/drizzle/0225_session_visibility_fork_activation.sql",
-  "packages/db/drizzle/0289_session_composer_policy_authority.sql",
-  "packages/db/drizzle/0303_session_tenancy_product_activation.sql",
-  "packages/db/drizzle/0336_atomic_session_fork_visibility.sql",
-  "packages/db/drizzle/0345_tenant_scoped_session_tenancy_fence.sql",
-  "packages/db/drizzle/0352_session_variable_set_attachments.sql",
-  "packages/db/drizzle/0429_message_boundary_session_forks.sql",
-  "packages/db/drizzle/0434_ordered_model_history.sql",
-  "packages/db/drizzle/0486_reasoning_configuration_message_forks.sql",
-  "packages/db/drizzle/0487_skill_catalog_message_forks.sql",
-  // Copies only accepted session attachment grants at the existing fork boundary.
-  "packages/db/drizzle/0499_session_attachment_access.sql",
-  // Changes audience without revoking accepted execution; same owner-only boundary.
-  "packages/db/drizzle/0501_session_sharing_execution.sql",
-  // Allows active message-prefix copies under the unchanged authority/writer locks.
-  "packages/db/drizzle/0502_active_message_boundary_forks.sql",
-  // Check only copied history for compaction when forking at a retained message.
-  "packages/db/drizzle/0513_message_fork_prefix_compaction.sql",
-  "packages/db/src/session-tenancy.ts",
-  "packages/db/src/provision-roles.ts",
-  "packages/db/src/runtime-posture.ts",
-]);
 
 async function sourceFiles(root: string, pattern = "**/*.{ts,tsx}"): Promise<string[]> {
   const files: string[] = [];
@@ -105,45 +94,26 @@ describe("session visibility and fork product activation stays on its exact publ
     }
   });
 
-  test("the SQL entry points are named only by their definition, grants, posture, and adapter", async () => {
-    for (const file of [
-      ...(await sourceFiles("packages/db/src")),
-      ...(await sourceFiles("packages/db/drizzle", "*.sql")),
-    ]) {
-      if (SQL_ENTRY_POINT_ALLOWLIST.has(file)) continue;
-      const content = await readFile(join(repo, file), "utf8");
-      for (const marker of SQL_ENTRY_POINTS) {
-        expect(
-          content.includes(marker),
-          `${file} must not name ${marker}; 0225 remains the origin definition, allowlisted migrations may replace the fenced database contract, and packages/db/src/session-tenancy.ts remains the sole adapter.`,
-        ).toBe(false);
-      }
-    }
-  });
-
   test("the adapter still exists so the db test lane keeps proving the fenced behaviour", async () => {
     const adapter = await readFile(join(repo, "packages/db/src/session-tenancy.ts"), "utf8");
+    const previews = new Set<string>(OWNER_PREVIEW_ROUTINES);
     for (const marker of [...SQL_ENTRY_POINTS, ...ADAPTER_ENTRY_POINTS]) {
-      expect(adapter).toContain(marker);
+      if (!previews.has(marker)) expect(adapter).toContain(marker);
     }
+    const workReader = await readFile(
+      join(repo, "packages/db/src/session-visibility-work.ts"),
+      "utf8",
+    );
+    expect(workReader).toContain("session_visibility_foreign_authority_items");
     const posture = await readFile(join(repo, "packages/db/src/runtime-posture.ts"), "utf8");
     for (const marker of SQL_ENTRY_POINTS) {
       expect(posture).toContain(marker);
     }
     expect(adapter).toContain("const SESSION_TENANCY_ACTIVATION_VERSION = 1");
-    // One probe plus the exact version supplied to visibility transition, the
+    // The exact frozen protocol version supplied to visibility transition, the
     // base and runtime-configured fork paths, and both applied-fork receipt
-    // recovery paths.
-    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(6);
-  });
-
-  test("the sole later-migration direct caller supplies the durable receipt and exact version", async () => {
-    const regression = await readFile(
-      join(repo, "packages/db/test/migration-0241-atomic-personal-resource-delegation.test.ts"),
-      "utf8",
-    );
-    expect(regression).toContain("insert into session_tenancy_activations");
-    expect(regression).toMatch(/transition_session_visibility\([\s\S]*?'a{64}',\s*1\s*\)/u);
+    // recovery paths. There is no activation probe since 0611.
+    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(5);
   });
 
   test("the two authorization operations are enforced only by core and the HTTP classifier", async () => {
@@ -181,4 +151,48 @@ describe("session visibility and fork product activation stays on its exact publ
     expect(doc).toContain("fork_session_content");
     expect(doc).toContain("session_list_snapshots");
   });
+});
+
+test("Teams message admission and private creation have exactly one trusted product caller", async () => {
+  const permitted = new Map([
+    [
+      "teamsConversation",
+      new Set(["apps/api/src/integrations/teams-bot.ts", "packages/core/src/domain/sessions.ts"]),
+    ],
+    [
+      "authorizeTeamsConversationAdmission",
+      new Set([
+        "packages/core/src/application/teams-private-session.ts",
+        "packages/core/src/domain/sessions.ts",
+      ]),
+    ],
+    [
+      "requireTeamsConversationProof",
+      new Set([
+        "packages/core/src/application/teams-private-session.ts",
+        "packages/db/src/teams-private-session.ts",
+      ]),
+    ],
+  ]);
+  for (const root of [
+    "apps/api/src",
+    "apps/worker/src",
+    "apps/web/src",
+    "packages/core/src",
+    "packages/db/src",
+    "packages/contracts/src",
+    "packages/sdk/src",
+    "packages/runtime/src",
+  ]) {
+    for (const file of await sourceFiles(root)) {
+      const source = await readFile(join(repo, file), "utf8");
+      for (const [marker, allowed] of permitted) {
+        if (source.includes(marker))
+          expect(
+            allowed.has(file),
+            `${file} expands the trusted Teams private-creation seam through ${marker}`,
+          ).toBe(true);
+      }
+    }
+  }
 });

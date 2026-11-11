@@ -2,33 +2,19 @@ import type { ObjectStorageSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import {
-  BlobSASPermissions,
-  BlobServiceClient,
-  generateBlobSASQueryParameters,
+import type {
   StorageSharedKeyCredential,
-  type BlobDownloadResponseParsed,
-  type BlobGetPropertiesResponse,
+  BlobDownloadResponseParsed,
+  BlobGetPropertiesResponse,
 } from "@azure/storage-blob";
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  HeadObjectCommand,
-  PutObjectCommand,
-  S3Client,
-  type S3ClientConfig,
-} from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import {
-  Storage as GcsClient,
-  type GetSignedUrlConfig,
-  type StorageOptions,
-} from "@google-cloud/storage";
+import type { GetObjectCommandOutput, S3ClientConfig } from "@aws-sdk/client-s3";
+import type { GetSignedUrlConfig, StorageOptions } from "@google-cloud/storage";
 
 export * from "./bounded-object-read";
 export * from "./bounded-object-write";
 export * from "./object-storage-bounded";
 export * from "./retry-while-missing";
+export * from "./compressed-json-lines";
 
 export const MAX_SINGLE_PUT_SIZE_BYTES = 5_000_000_000;
 export const UPLOAD_URL_TTL_SECONDS = 15 * 60;
@@ -44,10 +30,39 @@ export type ObjectHead = {
   VersionToken?: string;
 };
 
+/**
+ * The store found the object and began answering, but its bytes never arrived
+ * intact: the body stream failed or ended short of the declared length. A
+ * replica that lost the object's data blocks behaves this way on every read,
+ * unlike an unreachable store, which fails before answering. Callers that can
+ * do without the object may treat a repeated occurrence as the object being
+ * gone; a single occurrence can still be a dropped connection.
+ */
+export class ObjectBodyIncompleteError extends Error {
+  readonly objectKey: string;
+
+  constructor(objectKey: string, options?: { cause?: unknown; receivedBytes?: number }) {
+    // The key stays a field: messages can reach people, storage paths should not.
+    super(
+      options?.receivedBytes === undefined
+        ? "Object body could not be read completely"
+        : `Object body ended after ${options.receivedBytes} bytes`,
+      options?.cause === undefined ? undefined : { cause: options.cause },
+    );
+    this.name = "ObjectBodyIncompleteError";
+    this.objectKey = objectKey;
+  }
+}
+
 export {
   uploadWorkspaceArchiveSpool,
   downloadWorkspaceArchiveSpool,
   WorkspaceArchiveStorageError,
+} from "./workspace-archive-spool";
+export type {
+  DownloadWorkspaceArchiveSpoolOptions,
+  WorkspaceArchiveTemporaryDirectory,
+  WorkspaceArchiveSpool,
 } from "./workspace-archive-spool";
 
 export type ObjectStorage = {
@@ -88,7 +103,11 @@ export type ObjectStorage = {
     file: FileAsset,
     range: { start: number; end: number },
   ) => Promise<Uint8Array | null>;
-  /** Fetch an object by raw storage key (not a tracked FileAsset). Returns null on 404/missing. */
+  /**
+   * Fetch an object by raw storage key (not a tracked FileAsset). Returns null on
+   * 404/missing. S3 and Azure throw ObjectBodyIncompleteError when the object was
+   * found but its body failed or ended short.
+   */
   getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array; contentType?: string } | null>;
   /** Provider-versioned raw-key primitives used by bounded immutable adapters. */
   headObject?: (key: string) => Promise<ObjectHead | null>;
@@ -159,6 +178,37 @@ export type ObjectStorage = {
   deleteObject: (key: string) => Promise<void>;
 };
 
+// Literal synchronous requires remain bundle-visible, but do not initialize an
+// unselected provider. Keep imports out of request methods: service startup
+// prepares its selected SDK, and client construction remains synchronous.
+function s3Sdk(): typeof import("./provider-sdk-s3") {
+  return require("./provider-sdk-s3.js");
+}
+
+function azureSdk(): typeof import("./provider-sdk-azure") {
+  return require("./provider-sdk-azure.js");
+}
+
+function gcsSdk(): typeof import("./provider-sdk-gcs") {
+  return require("./provider-sdk-gcs.js");
+}
+
+/** Load only the selected SDK before readiness, without constructing a client. */
+export function prepareObjectStorageProvider(settings: ObjectStorageSettings): void {
+  if (settings.objectStorageBackend === "azure-blob") {
+    azureSdk();
+  } else if (settings.objectStorageBackend === "gcs") {
+    gcsSdk();
+  } else if (
+    settings.objectStorageBackend === "aws-s3" ||
+    (settings.objectStorageEndpoint &&
+      settings.objectStorageAccessKeyId &&
+      settings.objectStorageSecretAccessKey)
+  ) {
+    s3Sdk();
+  }
+}
+
 export function createObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   if (settings.objectStorageBackend === "azure-blob") {
     return createAzureBlobObjectStorage(settings);
@@ -178,6 +228,14 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
   ) {
     return null;
   }
+  const {
+    S3Client,
+    PutObjectCommand,
+    GetObjectCommand,
+    HeadObjectCommand,
+    DeleteObjectCommand,
+    getSignedUrl,
+  } = s3Sdk();
   const sharedClientConfig: S3ClientConfig = {
     region: settings.objectStorageRegion,
     forcePathStyle: settings.objectStorageForcePathStyle,
@@ -361,6 +419,7 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
         contentLength: head.ContentLength,
         contentType: head.ContentType,
         metadata: head.Metadata,
+        versionToken: head.ETag,
       });
     },
     async fileExists(file) {
@@ -440,21 +499,24 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
       }
     },
     async getObjectBytes(key) {
+      let result: GetObjectCommandOutput;
       try {
-        const result = await requestClient.send(
+        result = await requestClient.send(
           new GetObjectCommand({
             Bucket: settings.objectStorageBucket,
             Key: key,
           }),
         );
-        const bytes = await s3BodyToBytes(result.Body, key);
-        return { bytes, ...(result.ContentType ? { contentType: result.ContentType } : {}) };
       } catch (error) {
         if (isS3NotFound(error)) {
           return null;
         }
         throw error;
       }
+      const bytes = await completeObjectBody(key, result.ContentLength, () =>
+        s3BodyToBytes(result.Body, key),
+      );
+      return { bytes, ...(result.ContentType ? { contentType: result.ContentType } : {}) };
     },
     async deleteObject(key) {
       // S3 DeleteObject is idempotent — deleting an absent key returns 204.
@@ -466,6 +528,27 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
       );
     },
   };
+}
+
+/**
+ * Read a found object's whole body. Failing mid-body or ending short of the
+ * declared length is ObjectBodyIncompleteError; the store already answered.
+ */
+async function completeObjectBody(
+  objectKey: string,
+  declaredBytes: number | undefined,
+  read: () => Promise<Uint8Array>,
+): Promise<Uint8Array> {
+  let bytes: Uint8Array;
+  try {
+    bytes = await read();
+  } catch (error) {
+    throw new ObjectBodyIncompleteError(objectKey, { cause: error });
+  }
+  if (typeof declaredBytes === "number" && bytes.byteLength !== declaredBytes) {
+    throw new ObjectBodyIncompleteError(objectKey, { receivedBytes: bytes.byteLength });
+  }
+  return bytes;
 }
 
 async function s3BodyToBytes(body: unknown, objectKey: string): Promise<Uint8Array> {
@@ -534,6 +617,7 @@ function isS3VersionMismatch(error: unknown): boolean {
 }
 
 function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage {
+  const { Storage: GcsClient } = gcsSdk();
   const client = new GcsClient(gcsClientOptions(settings));
   const bucket = client.bucket(settings.objectStorageBucket);
   return {
@@ -638,6 +722,7 @@ function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage 
         contentLength: parseContentLength(metadata.size),
         contentType: metadata.contentType,
         metadata: stringMetadata(metadata.metadata),
+        versionToken: gcsGenerationToken(metadata.generation),
       });
     },
     async fileExists(file) {
@@ -672,7 +757,7 @@ function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage 
           contentLength: parseContentLength(metadata.size),
           contentType: metadata.contentType,
           metadata: stringMetadata(metadata.metadata),
-          versionToken: metadata.generation === undefined ? undefined : String(metadata.generation),
+          versionToken: gcsGenerationToken(metadata.generation),
         });
       } catch (error) {
         if (isGcsNotFound(error)) return null;
@@ -721,6 +806,7 @@ function isGcsVersionMismatch(error: unknown): boolean {
 }
 
 function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
+  const { BlobServiceClient, BlobSASPermissions, generateBlobSASQueryParameters } = azureSdk();
   const sharedKey = azureSharedKeyCredential(settings);
   const requestServiceClient = settings.objectStorageAzureConnectionString
     ? BlobServiceClient.fromConnectionString(settings.objectStorageAzureConnectionString)
@@ -890,13 +976,9 @@ function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectSt
     },
     async headObject(key) {
       try {
-        const properties = await requestContainerClient.getBlobClient(key).getProperties();
-        return objectHead({
-          contentLength: properties.contentLength,
-          contentType: properties.contentType,
-          metadata: properties.metadata,
-          versionToken: properties.etag,
-        });
+        return azureHeadToObjectHead(
+          await requestContainerClient.getBlobClient(key).getProperties(),
+        );
       } catch (error) {
         if (isAzureNotFound(error)) return null;
         throw error;
@@ -919,16 +1001,19 @@ function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectSt
       }
     },
     async getObjectBytes(key) {
+      let download: BlobDownloadResponseParsed;
       try {
-        const download = await requestContainerClient.getBlobClient(key).download();
-        const bytes = await azureDownloadToBytes(download);
-        return { bytes, ...(download.contentType ? { contentType: download.contentType } : {}) };
+        download = await requestContainerClient.getBlobClient(key).download();
       } catch (error) {
         if (isAzureNotFound(error)) {
           return null;
         }
         throw error;
       }
+      const bytes = await completeObjectBody(key, download.contentLength, () =>
+        azureDownloadToBytes(download),
+      );
+      return { bytes, ...(download.contentType ? { contentType: download.contentType } : {}) };
     },
     async deleteObject(key) {
       // deleteIfExists keeps the delete idempotent (a missing blob is a no-op).
@@ -954,6 +1039,7 @@ function isAzureVersionMismatch(error: unknown): boolean {
 }
 
 function azureSharedKeyCredential(settings: ObjectStorageSettings): StorageSharedKeyCredential {
+  const { StorageSharedKeyCredential } = azureSdk();
   if (settings.objectStorageAzureConnectionString) {
     const parsed = parseConnectionString(settings.objectStorageAzureConnectionString);
     if (parsed.AccountName && parsed.AccountKey) {
@@ -1050,7 +1136,12 @@ function azureHeadToObjectHead(head: BlobGetPropertiesResponse): ObjectHead {
     contentLength: head.contentLength,
     contentType: head.contentType,
     metadata: head.metadata,
+    versionToken: head.etag,
   });
+}
+
+function gcsGenerationToken(generation: unknown): string | undefined {
+  return generation === undefined || generation === null ? undefined : String(generation);
 }
 
 async function azureDownloadToBytes(download: BlobDownloadResponseParsed): Promise<Uint8Array> {

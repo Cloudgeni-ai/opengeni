@@ -1,7 +1,7 @@
 /**
  * Host-native Connected Machine workspace paths.
  *
- * The connected agent reports its launch root in Hello. OpenGeni persists that
+ * The connected agent reports its launch root in Hello. Opengeni persists that
  * value and uses it as the manifest/session root; there is no virtual alias and
  * no command rewriting. Relative paths resolve lexically from that root while
  * absolute paths retain their host meaning.
@@ -176,7 +176,10 @@ export function resolveConnectedMachinePath(
 }
 
 /** Resolve a configured session cwd. Tilde is intentionally not guessed: the
- * server has a launch root, not an authenticated service-user home directory. */
+ * server has a launch root, not an authenticated service-user home directory.
+ * A filesystem root or the Windows system directory is never a usable working
+ * directory (old agents reported them as service launch roots, and chats saved
+ * them); the machine's reported root applies instead. */
 export function resolveConnectedMachineWorkspaceRoot(
   reportedRoot: string,
   configuredWorkingDir: string | null | undefined,
@@ -187,5 +190,20 @@ export function resolveConnectedMachineWorkspaceRoot(
       'Connected Machine working directory must be absolute or relative to the reported workspace root; "~" is not supported',
     );
   }
-  return resolveConnectedMachinePath(reportedRoot, configuredWorkingDir);
+  const resolved = resolveConnectedMachinePath(reportedRoot, configuredWorkingDir);
+  return isUnusableConnectedMachineWorkspace(resolved, reportedRoot) ? reportedRoot : resolved;
+}
+
+const WINDOWS_SYSTEM_DIRECTORY = /^(?:[a-z]:)?\/windows(?:\/|$)/u;
+
+/** True for a resolved path that must never serve as a working directory: a
+ * filesystem or drive root, or anything inside the Windows directory. On a
+ * Windows machine a current-drive-rooted path such as `\Windows\System32`
+ * resolves to `/Windows/System32` and is treated the same way. */
+export function isUnusableConnectedMachineWorkspace(path: string, reportedRoot: string): boolean {
+  const portable = path.replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (portable === "" || /^[A-Za-z]:$/u.test(portable)) return true;
+  const windows =
+    isWindowsConnectedMachinePath(reportedRoot) || isWindowsConnectedMachinePath(path);
+  return windows && WINDOWS_SYSTEM_DIRECTORY.test(portable.toLowerCase());
 }

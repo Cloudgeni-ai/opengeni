@@ -7,15 +7,11 @@ import AxeBuilder from "@axe-core/playwright";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { createDb, getWorkspace, withWorkspaceRls } from "@opengeni/db";
 import { sql } from "drizzle-orm";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  freePort,
-  startProcess,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const shots = process.env.OPENGENI_TIMER_SCREENSHOTS ?? "/tmp/opengeni-pause-timer-screenshots";
 const workflowClient: SessionWorkflowClient = {
@@ -136,7 +132,10 @@ async function dueAndFire() {
     wakeSessionWorkflow: null,
     observability: { info() {}, warn() {}, incrementCounter() {}, observeHistogram() {} },
   } as unknown as ControlActivityServices;
-  await createWorkflowWakeActivities(async () => service).dispatchSessionWorkflowWakes();
+  // Mirror the maintenance cadence: fire due timers, then deliver their wakes.
+  const activities = createWorkflowWakeActivities(async () => service);
+  await activities.maintainSessionWorkflowWakes();
+  await activities.dispatchSessionWorkflowWakes();
 }
 
 async function setTimer(timer: { pauseInSeconds: number; pauseForSeconds?: number | null }) {
@@ -188,7 +187,7 @@ test("all timer states through the real settings UI and API", async () => {
   await submit().click();
   await dialog().waitFor({ state: "hidden" });
   await runtime()
-    .getByText("New sessions and scheduled runs wait until someone resumes.", { exact: true })
+    .getByText("New sessions and automation runs wait until someone resumes.", { exact: true })
     .waitFor();
   expect(await inferenceControl()).toMatchObject({ state: "paused", timer: null });
   await capture("07-paused-indefinite");
@@ -206,7 +205,7 @@ test("all timer states through the real settings UI and API", async () => {
   await dialog().getByRole("button", { name: "Cancel scheduled pause", exact: true }).click();
   await dialog().waitFor({ state: "hidden" });
   await runtime()
-    .getByText("Agents can start new sessions and scheduled runs.", { exact: true })
+    .getByText("Agents can start new sessions and automation runs.", { exact: true })
     .waitFor();
   expect(await inferenceControl()).toMatchObject({ state: "active", timer: null });
   // The default editor, a picked time, and an invalid picked time.

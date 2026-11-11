@@ -20,12 +20,9 @@ import {
   type ApiRouteDeps,
   type SessionWorkflowClient,
 } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerSessionRoutes } from "../src/routes/sessions";
@@ -137,7 +134,7 @@ async function fixture() {
         slackTeamName: "Slack private authorization",
         botId: `B_${suffix}`,
         botUserId: `U_${suffix}`,
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
         verifiedAt: new Date().toISOString(),
       })}
     ) returning id`;
@@ -195,6 +192,18 @@ async function fixture() {
 }
 
 describe("private Slack session authorization without an embedding-host port", () => {
+  test("configuration remains private to the owner within the same workspace", async () => {
+    if (!available) return;
+    const value = await fixture();
+    for (const sessionId of [value.root.id, value.child.id]) {
+      const path = `/v1/workspaces/${value.owner.workspaceId}/sessions/${sessionId}/configuration`;
+      expect((await app().request(path, { headers: headers(value.otherBearer) })).status).toBe(404);
+      const own = await app().request(path, { headers: headers(value.ownerBearer) });
+      expect(own.status).toBe(200);
+      expect(Object.hasOwn(await own.json(), "instructions")).toBe(true);
+    }
+  });
+
   test("Codex account projection cannot expose a private session to another workspace member", async () => {
     if (!available) return;
     const value = await fixture();

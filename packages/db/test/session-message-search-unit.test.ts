@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import { SessionMessageSearchRequest, SessionMessageSearchResponse } from "@opengeni/contracts";
 import {
+  sessionMessageCaseClasses,
   sessionMessageLiteralPattern,
+  sessionMessagePostgresPattern,
   sessionMessageSearchSnippet,
 } from "../src/session-message-search";
 
@@ -32,6 +34,37 @@ test("literal whitespace, NUL, lone UTF-16 and emoji remain searchable", () => {
   }
 });
 
+test("database case classes are exactly the JavaScript matcher's equivalences", () => {
+  const classes = sessionMessageCaseClasses();
+  let everything = "";
+  for (let cp = 0; cp <= 0x1ffff; cp++)
+    if (cp < 0xd800 || cp > 0xdfff) everything += String.fromCodePoint(cp);
+  for (const [cp, members] of classes) {
+    const found = [
+      ...everything.matchAll(
+        new RegExp(sessionMessageLiteralPattern(String.fromCodePoint(cp)), "giu"),
+      ),
+    ].map((match) => match[0].codePointAt(0)!);
+    expect(found).toEqual([...members]);
+  }
+  // No case mapping exists beyond the precomputed range.
+  for (let cp = 0x20000; cp <= 0x10ffff; cp++) {
+    const char = String.fromCodePoint(cp);
+    if (char.toLowerCase() !== char || char.toUpperCase() !== char)
+      throw new Error(cp.toString(16));
+  }
+  expect(classes.get(0x6b)).toEqual([0x4b, 0x6b, 0x212a]);
+  expect(classes.get(0x3c2)).toEqual([0x3a3, 0x3c2, 0x3c3]);
+  expect(classes.get(0x73)).toEqual([0x53, 0x73, 0x17f]);
+});
+
+test("database patterns escape every character and refuse unstorable ones", () => {
+  expect(sessionMessagePostgresPattern("k%")).toBe("[\\u004b\\u006b\\u212a]\\u0025");
+  expect(sessionMessagePostgresPattern("🙂")).toBe("\\U0001f642");
+  expect(sessionMessagePostgresPattern("a\u0000")).toBeNull();
+  expect(sessionMessagePostgresPattern("\ud800")).toBeNull();
+});
+
 test("snippet boundaries do not split surrogate pairs", () => {
   const text = "🙂".repeat(200) + "MATCH" + "🙂".repeat(200);
   const snippet = sessionMessageSearchSnippet(text, 400, 5);
@@ -47,7 +80,11 @@ test("strict bounded request and explicit advancing empty response", () => {
     { query: "x", includeTools: true },
     { query: "x", cursor: "x".repeat(4097) },
     { query: "x", groupBy: "message" },
-    { query: "x", groupBy: "session", sessionId: "11111111-1111-4111-8111-111111111111" },
+    {
+      query: "x",
+      groupBy: "session",
+      sessionId: "11111111-1111-4111-8111-111111111111",
+    },
   ]) {
     expect(SessionMessageSearchRequest.safeParse(request).success).toBe(false);
   }

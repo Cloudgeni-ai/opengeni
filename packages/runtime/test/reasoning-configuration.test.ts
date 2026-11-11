@@ -91,7 +91,8 @@ test("both explicit compaction strategies restore selected effort and original b
 
 test("SDK run-state serialization preserves projected controls and does not leak private baseline metadata", async () => {
   const { Agent, Runner, RunState, tool } = await import("@openai/agents");
-  const { ScriptedModel, functionCall: scriptedFunctionCall } = await import("@opengeni/testing");
+  const { ScriptedModel, functionCall: scriptedFunctionCall } =
+    await import("@opengeni/testing/scripted-model");
   const { z } = await import("zod");
   const agent = new Agent({
     name: "configuration restore",

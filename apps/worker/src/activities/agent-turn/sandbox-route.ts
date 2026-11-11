@@ -5,11 +5,13 @@ import {
   type SandboxRecord,
 } from "@opengeni/db";
 import {
+  assertHostSandboxBackendServed,
   ensureModalRegistryImage,
   swapTargetEstablishability,
   type BackendUnresolvableCode,
 } from "@opengeni/runtime";
-import { type Settings } from "@opengeni/config";
+import { deploymentSandboxBackend, type Settings } from "@opengeni/config";
+import { managedSessionGroupBackend } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
   sandboxLeaseHolderIdForAttempt,
@@ -18,6 +20,31 @@ import {
 import { type TurnSandboxEstablishReason } from "../../observability-metrics";
 import { type SessionEventType } from "@opengeni/contracts";
 import { safeErrorDiagnostic } from "./errors";
+
+/**
+ * Refuse a turn whose session would build its box on a host backend (`local`,
+ * `docker`) this deployment does not serve, before anything else touches a
+ * sandbox: no box, repository clone, setup, Rig or hydration hook, credential
+ * or Codemode materialization. Session creation already rejects such backends
+ * (`sandboxBackendServed`), but rows stored before that gate, and shared-box
+ * children that inherit a parent's backend, still name one. `deploymentSettings`
+ * should be the worker's own settings; the deployment default is read from
+ * `deploymentSandboxBackend`, so a session-rebound copy cannot serve itself.
+ *
+ * The backend checked is the one the turn would build (`selfhosted` falls back
+ * to the deployment default; `none` builds nothing). Throws
+ * SandboxBackendNotServedError, a non-retryable configuration failure.
+ */
+export function assertTurnSandboxBackendServed(
+  deploymentSettings: Settings,
+  sessionBackend: Settings["sandboxBackend"],
+): void {
+  const built = managedSessionGroupBackend(
+    deploymentSandboxBackend(deploymentSettings),
+    sessionBackend,
+  );
+  if (built) assertHostSandboxBackendServed(deploymentSettings, built);
+}
 
 export async function resolveActiveSandboxBackend(
   routingOn: boolean,
@@ -29,21 +56,43 @@ export async function resolveActiveSandboxBackend(
   if (!routingOn) {
     return undefined;
   }
-  try {
-    const pointer = await loadPointer();
-    // A null pointer (no swap) means "use the session's own cloud group box" — the
-    // home backend already governs that path, so leave the override unset.
-    if (!pointer?.activeSandboxId) {
-      return undefined;
-    }
-    const kind = await loadSandboxKind(pointer.activeSandboxId);
-    return kind === "selfhosted" ? "selfhosted" : undefined;
-  } catch (error) {
-    console.error(
-      "active sandbox backend resolution failed (turn proceeds on home backend)",
-      safeErrorDiagnostic(error),
-    );
+  // A load failure propagates. It is not "no machine": answering undefined would
+  // start this turn on the managed home while the chat's route names a machine.
+  const pointer = await loadPointer();
+  // A null pointer (no swap) means "use the session's own cloud group box" — the
+  // home backend already governs that path, so leave the override unset.
+  if (!pointer?.activeSandboxId) {
     return undefined;
+  }
+  const kind = await loadSandboxKind(pointer.activeSandboxId);
+  return kind === "selfhosted" ? "selfhosted" : undefined;
+}
+
+/** Short pauses before re-reading a turn-start route fact after a failed read. */
+export const TURN_ROUTE_READ_RETRY_DELAYS_MS: readonly number[] = [100, 400];
+
+/**
+ * Read one fact that decides WHICH sandbox this turn starts on (the session's
+ * active pointer, or the row it names). A failed read is never treated as an
+ * absent route: it is retried briefly (a connection dropped by a restart or a
+ * redeploy usually recovers within this window) and then rethrown unchanged, so
+ * the attempt stops before any box is touched and the database recovery lane
+ * retries it. Starting on the managed home instead would run setup, credential
+ * seeding and file downloads on a box the chat did not choose.
+ */
+export async function readTurnRouteFact<T>(
+  read: () => Promise<T>,
+  delaysMs: readonly number[] = TURN_ROUTE_READ_RETRY_DELAYS_MS,
+): Promise<T> {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      const delayMs = delaysMs[retry];
+      if (delayMs === undefined) throw error;
+      console.warn("turn route read failed; retrying", safeErrorDiagnostic(error));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   }
 }
 
@@ -127,10 +176,11 @@ export function sandboxEstablishPolicyDecision(input: {
 }
 
 /**
- * Repo-backed workspace skills bind into the first-request prompt-cache prefix
- * (`WorkspaceSkillsCapability.instructions()` listDirs the live box). Starting
- * the managed-box establish as soon as its inputs exist lets Modal create overlap
- * tools/history/agent; `get()` still owns clone/setup after `buildAgent`.
+ * A repository turn's box is likely to be used by a tool (see
+ * `shouldDeferRepositorySkillIndex`). Starting the managed-box establish as
+ * soon as its inputs exist lets the provider create overlap
+ * tools/history/agent and the model's first response; `get()` still owns
+ * clone/setup, at the first sandbox operation.
  *
  * Do not flip those turns to eager: that serializes create BEFORE tools and
  * increases first-token latency. Chat-only turns without a repository still
@@ -152,6 +202,37 @@ export function shouldPrefetchManagedSandbox(input: {
     return false;
   }
   return input.hasRepositoryResources || input.automaticRecoveryPending === true;
+}
+
+/**
+ * On a lazily provisioned managed box, indexing a repository's skills would
+ * be the turn's first workspace operation: the first model request would wait
+ * for the box, its environment setup and the clone, even when the turn needs
+ * no tool. Such sessions leave the index out and prepare the workspace at the
+ * first sandbox tool call instead. Connected Machines and deployments without
+ * lazy provisioning keep the live index.
+ *
+ * Only inputs that hold for the whole session decide this. A single turn can
+ * be established eagerly for its own reasons (attached files, generated
+ * video); deciding per turn would flip this section of the system prompt
+ * between turns and miss the model's prompt cache on both.
+ */
+export function shouldDeferRepositorySkillIndex(input: {
+  lazyEnabled: boolean;
+  machinePrimary: boolean;
+  groupBoxBackend: Settings["sandboxBackend"];
+  hasRepositoryResources: boolean;
+}): boolean {
+  return (
+    input.lazyEnabled &&
+    input.hasRepositoryResources &&
+    shouldPrefetchManagedSandbox({
+      establishPolicy: "on-demand",
+      machinePrimary: input.machinePrimary,
+      groupBoxBackend: input.groupBoxBackend,
+      hasRepositoryResources: true,
+    })
+  );
 }
 
 /**
@@ -203,12 +284,13 @@ export type LoadedActivePointer = {
  * higher epoch, so re-read + honor it rather than clobber a newer, user-directed pointer. The
  * event publish is best-effort — a publish failure never fails the turn.
  *
- * FAIL-OPEN on a lookup failure (issue #341 review): the sandbox row is fetched HERE via the
- * caller's NON-swallowing `loadRecord`, so a null decision means the row is genuinely absent,
- * never a suppressed transient DB error. If `loadRecord` THROWS, reconciliation is skipped
- * entirely this turn — the pointer is left UNTOUCHED (record null → the turn runs
- * machinePrimary:false on the group box exactly as before reconcile existed), no CAS, no
- * event — and the next turn retries. A TRANSIENT LOOKUP FAILURE MUST NEVER MUTATE THE POINTER.
+ * FAIL-CLOSED on a lookup failure: the sandbox row is fetched HERE via the caller's
+ * NON-swallowing `loadRecord`, so a null decision means the row is genuinely absent, never a
+ * suppressed transient DB error. If `loadRecord`, the reset CAS or the re-read THROWS, the
+ * error propagates: the pointer is left UNTOUCHED (no CAS, no event) AND the turn does not
+ * start on the group box while its pointer still names another sandbox. The attempt stops
+ * before any box is touched and is retried. A TRANSIENT LOOKUP FAILURE MUST NEVER MUTATE THE
+ * POINTER, AND MUST NEVER PICK THE ROUTE.
  */
 export async function reconcileActiveSandboxPointer(
   db: ActivityServices["db"],
@@ -221,13 +303,8 @@ export async function reconcileActiveSandboxPointer(
     return { pointer, record: null };
   }
   // Re-fetch the row WITHOUT error swallowing. A throw here (a transient DB blip) is NOT
-  // "row absent": fail open — skip reconciliation, leave the pointer untouched.
-  let record: SandboxRecord | null;
-  try {
-    record = await loadRecord(pointer.activeSandboxId);
-  } catch {
-    return { pointer, record: null };
-  }
+  // "row absent": it propagates, leaving the pointer untouched and the route undecided.
+  const record = await loadRecord(pointer.activeSandboxId);
   const reason = pointerReconcileReason(record);
   if (!reason) {
     return { pointer, record };
@@ -239,9 +316,7 @@ export async function reconcileActiveSandboxPointer(
     sessionId: ids.sessionId,
     targetSandboxId: null,
     expectedEpoch: fromEpoch,
-  }).catch(
-    () => ({ swapped: false, pointer: null }) as Awaited<ReturnType<typeof setActiveSandbox>>,
-  );
+  });
   if (reset.swapped && reset.pointer) {
     await Promise.resolve(
       publish?.([
@@ -253,21 +328,16 @@ export async function reconcileActiveSandboxPointer(
     ).catch(() => undefined);
     return { pointer: reset.pointer, record: null };
   }
-  // The fence was lost: a concurrent higher-epoch swap won. Honor the newer pointer; its
-  // record is re-fetched fail-open too (a transient failure leaves record null, never a
-  // mutation — we already did not win the CAS).
-  const reread = await readActiveSandbox(db, ids.workspaceId, ids.sessionId).catch(() => null);
+  // The fence was lost: a concurrent higher-epoch swap won. Honor the newer pointer and its
+  // record (a failed read propagates like the first one; we did not win the CAS, so nothing
+  // was mutated).
+  const reread = await readTurnRouteFact(() =>
+    readActiveSandbox(db, ids.workspaceId, ids.sessionId),
+  );
   if (!reread) {
-    return { pointer, record: null };
+    return { pointer: null, record: null };
   }
-  let rereadRecord: SandboxRecord | null = null;
-  if (reread.activeSandboxId) {
-    try {
-      rereadRecord = await loadRecord(reread.activeSandboxId);
-    } catch {
-      rereadRecord = null;
-    }
-  }
+  const rereadRecord = reread.activeSandboxId ? await loadRecord(reread.activeSandboxId) : null;
   return { pointer: reread, record: rereadRecord };
 }
 
