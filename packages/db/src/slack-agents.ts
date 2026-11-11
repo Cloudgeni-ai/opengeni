@@ -369,7 +369,10 @@ export async function touchSlackAgentUserState(
  * When the person's record for this agent is another installation's (the
  * legacy per-agent key, Enterprise Grid), this installation can't record the
  * claim, so the notice is shown: telling someone again that the workspace can
- * see the chat is harmless, never telling them is not.
+ * see the chat is harmless, never telling them is not. By design, it is then
+ * shown on each new chat that person starts in the second Slack workspace,
+ * until the legacy drop removes the per-agent key and that installation can
+ * record its own claim.
  */
 export async function claimSlackAgentOpenNotice(
   db: Database,
