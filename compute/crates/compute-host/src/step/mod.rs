@@ -38,6 +38,7 @@ use compute_engine::{
 };
 use serde::{Deserialize, Serialize};
 
+use self::guest::Synced;
 use crate::image::{Images, Made, Parts, Suspect, Verified};
 use crate::layout::{Paths, link_kernel, remove_if_present};
 #[cfg(target_os = "linux")]
@@ -495,14 +496,20 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// time from the record. Recorded first, so a pause that fails to be
     /// recorded leaves the VM as it was.
     async fn pause(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
-        if !self.sync_guest().await {
-            return (Outcome::Cancelled, After::Kept(live));
-        }
-        if self
-            .record
-            .last_used_ms
-            .is_none_or(|was| was < self.last_used_ms)
-            && let Err(error) = self.commit(Change::new()).await
+        // A guest that did not say it wrote its files out is paused all the
+        // same, and recorded so: until it runs again, its VM is not ended
+        // without its memory saved (see `Record::unsynced`).
+        let unsynced = match self.sync_guest().await {
+            Synced::Cancelled => return (Outcome::Cancelled, After::Kept(live)),
+            Synced::Written => false,
+            Synced::Unanswered => true,
+        };
+        if (self.record.unsynced != unsynced
+            || self
+                .record
+                .last_used_ms
+                .is_none_or(|was| was < self.last_used_ms))
+            && let Err(error) = self.commit(Change::new().unsynced(unsynced)).await
         {
             return (state_failure(&error), After::Kept(live));
         }

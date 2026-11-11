@@ -929,6 +929,99 @@ fn memory_pressure_ends_a_sandbox_whose_memory_is_not_kept_with_nothing_saved() 
     assert_eq!(only_start(&rig.touch(1)).0, Step::Boot);
 }
 
+/// A guest that did not say it wrote its files out as its VM paused may
+/// hold writes in its memory alone. Where its rules would end its VM with
+/// nothing saved, its memory is saved first; once it has run again, its
+/// rules apply as they are.
+#[test]
+fn a_sandbox_whose_guest_left_writes_in_memory_is_saved_before_its_vm_ends() {
+    let mut rig = pressured_rig();
+    let rules = SleepRules {
+        compress_under_pressure: false,
+        ..SleepRules::RECOMMENDED
+    };
+    rig.add(
+        1,
+        paused(Durability::Volatile),
+        SleepPolicy::new(rules).unwrap(),
+    );
+    rig.send(Input::Unsynced {
+        sandbox: SandboxId(1),
+    });
+    rig.send(Input::Resident {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    let (step, op) = only_start(&rig.send(Input::Memory { available: GIB }));
+    assert_eq!(step, Step::Save);
+    let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(step, Step::Drop);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), saved());
+
+    // Asked to go without its programs, as an idle one handed off, it is
+    // saved all the same.
+    let mut rig = Rig::new(&HostPolicy::default());
+    rig.add(2, paused(Durability::Volatile), unsaved());
+    rig.send(Input::Unsynced {
+        sandbox: SandboxId(2),
+    });
+    let away = Input::Sleep {
+        sandbox: SandboxId(2),
+        level: Level::Archived,
+        keep: false,
+    };
+    let mut actions = rig.send(away);
+    let mut steps = Vec::new();
+    while let [(_, step, op)] = started(&actions)[..] {
+        steps.push(step);
+        actions = rig.finish(2, op, Outcome::Done);
+    }
+    assert_eq!(steps, [Step::Save, Step::Drop, Step::Archive]);
+
+    // It wakes with what it held, and its next pause asks its guest
+    // again: one that answers ends unsaved, as its rules say.
+    let (step, op) = only_start(&rig.touch(2));
+    assert_eq!(step, Step::Restore);
+    rig.finish(2, op, Outcome::Done);
+    rig.send(Input::LetGo {
+        sandbox: SandboxId(2),
+    });
+    let mut actions = rig.send(away);
+    let mut steps = Vec::new();
+    while let [(_, step, op)] = started(&actions)[..] {
+        steps.push(step);
+        actions = rig.finish(2, op, Outcome::Done);
+    }
+    assert_eq!(steps, [Step::Pause, Step::End, Step::Archive]);
+    assert_eq!(
+        rig.state(2),
+        state(Level::Archived, Durability::Remote, false)
+    );
+}
+
+/// Only a paused VM can have been paused unasked: the word of an earlier
+/// pause means nothing for one that runs, or has no VM.
+#[test]
+fn unwritten_files_are_only_heard_of_a_paused_vm() {
+    let mut rig = Rig::new(&HostPolicy::default());
+    rig.add(1, State::RUNNING, unsaved());
+    rig.send(Input::Unsynced {
+        sandbox: SandboxId(1),
+    });
+    let mut actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+        keep: false,
+    });
+    let mut steps = Vec::new();
+    while let [(_, step, op)] = started(&actions)[..] {
+        steps.push(step);
+        actions = rig.finish(1, op, Outcome::Done);
+    }
+    assert_eq!(steps, [Step::Pause, Step::End]);
+}
+
 #[test]
 fn a_sleep_asked_with_its_programs_saves_a_sandbox_whose_memory_is_not_kept() {
     let mut rig = Rig::new(&HostPolicy::default());

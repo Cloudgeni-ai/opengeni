@@ -132,6 +132,9 @@ struct Truth {
     /// A restart is under way: its VM must end without a save and its
     /// memory image be forgotten before it runs again.
     restarting: bool,
+    /// Its guest did not say it wrote its files out as its VM paused:
+    /// that VM must not end with nothing of its memory saved.
+    unsynced: bool,
 }
 
 impl Truth {
@@ -310,6 +313,13 @@ impl World {
                     .expect("start for a live sandbox");
                 assert!(truth.op.is_none(), "two steps at once for {sandbox:?}");
                 assert!(!truth.broken, "step for a broken sandbox");
+                // Only the VM that was paused so: one that ran since, or a
+                // new one, was asked again.
+                truth.unsynced &= matches!(truth.state.level, Level::Paused | Level::Compressed);
+                assert!(
+                    step != Step::End || !truth.unsynced,
+                    "{sandbox:?} ended unsaved with files it never wrote out"
+                );
                 assert!(
                     step.can_start(truth.state),
                     "{step:?} cannot start from {:?}",
@@ -472,12 +482,31 @@ impl World {
                 truth.requested = None;
             }
         }
-        self.send(Input::Finished {
+        let finished = Input::Finished {
             sandbox: pending.sandbox,
             op: pending.op,
             outcome,
             wrote: true,
-        });
+        };
+        // Now and then a guest does not say it wrote its files out as its
+        // VM pauses; the core hears of it with the pause.
+        let unsynced = pending.step == Step::Pause
+            && outcome == Outcome::Done
+            && self.rng.chance(10)
+            && self.live.get_mut(&pending.sandbox).is_some_and(|truth| {
+                truth.unsynced = truth.state.level == Level::Paused;
+                truth.unsynced
+            });
+        if unsynced {
+            self.send_all(vec![
+                finished,
+                Input::Unsynced {
+                    sandbox: pending.sandbox,
+                },
+            ]);
+        } else {
+            self.send(finished);
+        }
     }
 
     /// Processes completions and timers in time order up to `to`.
@@ -566,6 +595,7 @@ impl World {
                 copied: (state.durability == Durability::Remote).then_some(self.now),
                 running_since: self.now,
                 restarting: false,
+                unsynced: false,
             },
         );
         self.send(Input::Add {

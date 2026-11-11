@@ -278,6 +278,15 @@ pub enum Input {
         /// The sandbox.
         sandbox: SandboxId,
     },
+    /// The sandbox's guest did not say it wrote its files out as its VM
+    /// was paused: writes may live in its memory alone. Until it runs
+    /// again its VM does not end unsaved, whatever its rules say: where
+    /// they would end it, its memory is saved first, as for a sandbox
+    /// whose memory is kept. Ignored unless its VM is paused.
+    Unsynced {
+        /// The sandbox.
+        sandbox: SandboxId,
+    },
     /// The sandbox's VM did not take the [`Action::Balloon`] of `request`,
     /// or it was not asked, as when the VM had paused or ended: what its
     /// balloon takes is not known. It is asked again after a backoff.
@@ -977,6 +986,7 @@ impl Host {
                     self.unsavable(sandbox, out);
                 }
             }
+            Input::Unsynced { sandbox } => self.unsynced(sandbox),
             Input::Memory { available } => self.memory_read(now, available),
             Input::Disk { available } => self.disk_read(available),
             Input::CpuBudget { millis } => self.set_cpu_budget(millis),

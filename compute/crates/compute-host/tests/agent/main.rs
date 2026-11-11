@@ -208,6 +208,9 @@ struct World {
     /// While set, a guest asked to write its disks out answers only once
     /// it is cleared, as one still trimming its disk.
     syncs_held: AtomicBool,
+    /// While set, a guest asked to write its disks out does not say it
+    /// did, as one that cannot.
+    syncs_refused: AtomicBool,
     /// While set, a paused VM's guest takes no connection, as with a real
     /// VMM, whose guest's processors do not run while it is paused.
     paused_take_nothing: AtomicBool,
@@ -551,6 +554,12 @@ async fn guest(listener: UnixListener, state: GuestState) {
                     state.world.syncs.fetch_add(1, Ordering::SeqCst);
                     while state.world.syncs_held.load(Ordering::SeqCst) {
                         sleep(Duration::from_millis(5)).await;
+                    }
+                    if state.world.syncs_refused.load(Ordering::SeqCst) {
+                        if write.write_all(b"cannot\n").await.is_err() {
+                            break;
+                        }
+                        continue;
                     }
                 }
                 let Some(reply) = state.answer(&line, &mut flood) else {

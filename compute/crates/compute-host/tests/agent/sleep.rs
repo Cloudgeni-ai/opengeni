@@ -932,6 +932,60 @@ async fn a_sandbox_whose_memory_is_not_kept_ends_unsaved_and_boots_with_its_file
     lab.assert_clean();
 }
 
+/// A guest that does not say it wrote its files out as its VM pauses may
+/// hold writes in its memory alone, so its VM is not ended with nothing
+/// saved: its memory is saved first, and it wakes with what it held. Once
+/// it has run again and its guest answers, it ends unsaved as its rules
+/// say. An agent that starts while it is paused so reads it from its
+/// record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_that_did_not_write_its_files_out_is_saved_before_its_vm_ends() {
+    let asks = |config: &mut super::HostConfig| config.restore_notice_port = Some(53);
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        asks,
+    )
+    .await;
+    let sandbox = id(33);
+    let ends = SleepConfig {
+        save_after_ms: Some(1_000),
+        drop_after_ms: Some(1_000),
+        ..END_QUICKLY
+    };
+    lab.world.syncs_refused.store(true, Ordering::SeqCst);
+    lab.create(sandbox, ends).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert_eq!(lab.record(sandbox)["unsynced"], true);
+    let (root, world) = lab.stop().await;
+    let lab =
+        Lab::start_configured(root, world, Delays::default(), HostPolicy::default(), asks).await;
+    lab.wait_until("its VM process to end", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.level == LevelName::Saved && view.step.is_none()
+    })
+    .await;
+    assert!(lab.current(sandbox).await.memory_saved);
+    assert!(lab.image(sandbox));
+
+    lab.world.syncs_refused.store(false, Ordering::SeqCst);
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    lab.wait_until("its VM process to end again", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.level == LevelName::Saved && view.step.is_none() && !view.memory_saved
+    })
+    .await;
+    assert!(!lab.image(sandbox));
+    assert!(lab.record(sandbox).get("unsynced").is_none());
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["", "kept"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    lab.assert_clean();
+}
+
 /// Asked to sleep with its programs, a sandbox whose memory is not kept
 /// is saved all the same: the request outranks its rules until it wakes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

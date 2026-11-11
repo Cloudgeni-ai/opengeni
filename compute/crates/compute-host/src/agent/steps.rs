@@ -866,8 +866,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             && self.records.get(id).is_some_and(|record| record.handed_off);
         let remove = dropped.then_some(Input::Remove { sandbox: id.0 });
         let step = finished_step.as_ref().map(|running| running.step);
+        // A pause whose guest did not say it wrote its files out: the core
+        // hears of it with the pause, before it picks the next step.
+        let unsynced = step == Some(Step::Pause)
+            && outcome == Outcome::Done
+            && self.records.get(id).is_some_and(|record| record.unsynced);
+        let unsynced = unsynced.then_some(Input::Unsynced { sandbox: id.0 });
         let gave_up = self.gave_up_copy(id.0, step, outcome);
-        self.inputs(std::iter::once(finished).chain(activity).chain(remove));
+        self.inputs(
+            std::iter::once(finished)
+                .chain(unsynced)
+                .chain(activity)
+                .chain(remove),
+        );
         if let Some(relieved) = gave_up {
             self.copy_freed(id.0, relieved);
         }

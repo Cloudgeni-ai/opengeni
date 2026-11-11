@@ -874,6 +874,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // It still runs and wakes, but is never saved.
             inputs.push(Input::Unsavable { sandbox: id.0 });
         }
+        if adopted && record.unsynced {
+            // Paused by an agent before this one, its guest unanswering:
+            // the core ignores it for a VM that runs again since.
+            inputs.push(Input::Unsynced { sandbox: id.0 });
+        }
         inputs.extend(self.restore_holds(id));
         self.inputs(inputs);
         Ok(adopted)

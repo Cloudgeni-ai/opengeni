@@ -40,19 +40,29 @@ sandbox it held.
   and a sandbox created with `keep_memory`. An idle sandbox handed off or
   drained goes with its files alone.
 - **Such a sandbox books no save on disk.**
+- **A guest that did not say it wrote its files out keeps its memory.**
+  A pause asks the guest to write its disks out and goes ahead without
+  an answer after ten seconds. That guest may hold writes in its memory
+  alone, so until it has run again it is treated as one whose memory is
+  kept: where its rules would end its VM process, its memory is saved
+  first, and it books that save. Its record says so, for an agent that
+  starts meanwhile. On the same fleet about one pause in a hundred went
+  unanswered over nine days, all of them in two days of a stalling host.
 
 ## Consequences
 
 - A sandbox pushed out of RAM loses its programs and anything it kept in
   memory alone, such as a tmpfs or a `/tmp` cleared at boot; its files
   are whole. It wakes in about a second instead of resuming at once.
-- A guest that did not answer the request to write its disks out within
-  the limit is paused anyway, and ended later it loses what it had not
-  yet written, as on a power cut.
+- What a guest writes between its answer and the pause, milliseconds of
+  a sandbox nothing uses, ends with its VM process as on a power cut. So
+  does all it had not written on a host with no port to ask its guests
+  on (`--restore-notice-port`), which asks none.
 - Idle sandboxes cost the store and the hosts' disks their files only, and
   a host admits by memory and disk without room for memory images.
 - Hosts take the release first: an older host refuses `keep_memory`, so
   the service must not send it before every host knows it. Existing
-  sandboxes follow the new default from their host's upgrade, and memory
+  sandboxes follow the new default from their host's upgrade, those
+  created to pause through the E2B API too, and memory
   images already stored are deleted by the existing rule, up to 30 days
   after their last use.

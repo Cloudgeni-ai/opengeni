@@ -79,6 +79,10 @@ pub(crate) struct Sandbox {
     /// Whether that depth was asked for with its programs; see
     /// [`crate::Input::Sleep`].
     pub requested_keeps: bool,
+    /// Its guest did not say it wrote its files out as its VM was last
+    /// paused (see [`crate::Input::Unsynced`]): writes may live in its
+    /// memory alone, so until it runs again its VM never ends unsaved.
+    pub unsynced: bool,
     /// Latest reported resident memory in bytes of the current VM process;
     /// `None` until one is reported, except for a VM found running, which
     /// counts at its full size until then.
@@ -186,6 +190,7 @@ impl Sandbox {
             floor_relief: 0,
             requested: Level::Running,
             requested_keeps: false,
+            unsynced: false,
             // Until it is measured, a VM found running may hold all of it.
             resident: state.level.has_process().then_some(size.limit),
             paging: crate::host::outgrowth::Paging::default(),
@@ -265,6 +270,8 @@ impl Sandbox {
                 if step.wakes() && self.state.level == Level::Running {
                     self.touch(now);
                     self.running_since = now;
+                    // Its guest runs: its next pause asks it again.
+                    self.unsynced = false;
                 }
                 if matches!(step, Step::Archive | Step::Checkpoint) {
                     self.copied = Some(now);
@@ -367,6 +374,7 @@ impl Sandbox {
         if self.health == Health::Unsavable {
             self.health = Health::Sound;
         }
+        self.unsynced = false;
         self.resident = None;
         self.paging = crate::host::outgrowth::Paging::default();
         self.shrink = crate::host::outgrowth::Shrink::Open;
@@ -425,10 +433,18 @@ impl Sandbox {
         self.requested >= Level::Saved && self.requested_keeps
     }
 
+    /// Whether its memory is saved before its VM process ends, whatever
+    /// its rules say: its programs were asked for, or its memory may hold
+    /// writes its guest never wrote out (see [`crate::Input::Unsynced`]).
+    pub fn keeps(&self) -> bool {
+        self.keeps_asked() || self.unsynced
+    }
+
     /// Whether its VM process, once it must end, ends with no memory of it
-    /// saved: its rules give its programs up, and nothing asked for them.
+    /// saved: its rules give its programs up, nothing asked for them, and
+    /// its files are all on its disk.
     pub fn ends_unsaved(&self) -> bool {
-        self.policy().ends_unsaved() && !self.keeps_asked()
+        self.policy().ends_unsaved() && !self.keeps()
     }
 
     /// Whether ending the VM process right now would free its memory without
@@ -485,7 +501,7 @@ impl Sandbox {
         let idle = now.saturating_since(self.last_activity);
         let floor = self.floor.max(self.requested);
         self.policy()
-            .next_step(self.state, idle, floor, self.keeps_asked())
+            .next_step(self.state, idle, floor, self.keeps())
             .or_else(|| self.first_copy(floor))
             .or_else(|| self.checkpoint_due(now).then_some(Step::Checkpoint))
     }
