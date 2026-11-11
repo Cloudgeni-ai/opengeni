@@ -807,6 +807,17 @@ describe("decide", () => {
     expect(kept[2]).toMatchObject({ kind: "build", pending: [[4, 5], [6]] });
     expect(kept[2]?.kind === "build" && kept[2].members.map((p) => p.number)).toEqual([7, 8]);
 
+    // Nor did a Version PR built alone in between.
+    const release = batch(
+      [9],
+      { runs: [run({ conclusion: "failure", attempt: 2, failedJobs: ["B"] })] },
+      [[4, 5], [6], [7, 8]],
+    );
+    release.manifest.members[0]!.version = true;
+    const held = decide(observe(pulls, [release]));
+    expect(held[1]).toMatchObject({ kind: "eject", number: 9 });
+    expect(held[2]).toMatchObject({ kind: "build", pending: [[4, 5], [6]] });
+
     // Two PRs adding the same migration number still never share a batch.
     const clash = [3, 4, 5, 6].map((n) =>
       pull(n, { slots: n === 4 || n === 6 ? ["packages/db/migrations/0042"] : [] }),

@@ -647,9 +647,10 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
           // split off only on the way to that PR, so they are retested
           // together again rather than one group per round; a group that
           // still fails is split again as any batch is. A PR ejected ahead
-          // of a bisection found nothing about its groups, so they stay as
-          // they are.
-          if (manifest.aheadOfBisection === true) pending = manifest.pending;
+          // of a bisection, or a Version PR (built alone in between), found
+          // nothing about its groups, so they stay as they are.
+          if (manifest.aheadOfBisection === true || manifest.members[0]?.version === true)
+            pending = manifest.pending;
           else {
             pending = rejoined(manifest.pending, (n) => byNumber.get(n));
             blame = [];
