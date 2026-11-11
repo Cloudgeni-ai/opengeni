@@ -669,6 +669,45 @@ export const CASES: readonly EvalCase[] = [
     servedBy: ["onedrive"],
   },
 
+  // ── Microsoft Dynamics (Dataverse / Dynamics 365 Sales) ───────────────────
+  ...notConnected("microsoft_dynamics", [
+    {
+      slug: "opportunities",
+      prompt: "What open opportunities do we have in Dynamics 365?",
+      forbid: [i("bluefin logistics renewal")],
+    },
+  ]),
+  {
+    id: "microsoft_dynamics.read.opportunity",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt:
+      "In Dynamics 365, what's the estimated revenue of the Bluefin Logistics renewal opportunity, and who is the account's primary contact?",
+    expectAnswer: [i("18,?000|18k"), i("ada")],
+  },
+  {
+    id: "microsoft_dynamics.read.account-city",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt: "Which city is Copperleaf Dental's account in, according to Dynamics 365?",
+    expectAnswer: [i("bergen")],
+  },
+  {
+    id: "microsoft_dynamics.write.account",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    prompt: 'Create an account in Dynamics 365 named "Halcyon eval {RUN}".',
+    verify: "receipts_only",
+  },
+  {
+    id: "microsoft_dynamics.write.denied",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    decision: "reject",
+    prompt: 'Create an account in Dynamics 365 named "Halcyon eval {RUN} denied".',
+    verify: "receipts_only",
+  },
+
   // ── Choosing between integrations ─────────────────────────────────────────
   {
     id: "routing.linear-vs-jira.urgent",

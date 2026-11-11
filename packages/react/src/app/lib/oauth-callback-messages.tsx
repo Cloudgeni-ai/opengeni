@@ -36,6 +36,8 @@ export function oauthCallbackReasonMessage(reason: string | null): string | null
       return `You cancelled at the provider, so nothing was connected.${RETRY}`;
     case "provider_error":
       return `The provider didn't approve the connection.${RETRY}`;
+    case "admin_consent_required":
+      return "Your organization requires an administrator to approve this app first. Ask an administrator to connect once and approve it for the organization, then try again.";
     case "missing_code":
       return `The provider didn't finish authorization.${RETRY}`;
     case "state_expired":

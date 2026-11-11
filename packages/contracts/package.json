@@ -369,6 +369,10 @@
     "./workspace-control-event": {
       "types": "./src/workspace-control-event.ts",
       "default": "./src/workspace-control-event.ts"
+    },
+    "./microsoft-dynamics": {
+      "types": "./src/microsoft-dynamics.ts",
+      "default": "./src/microsoft-dynamics.ts"
     }
   },
   "publishConfig": {

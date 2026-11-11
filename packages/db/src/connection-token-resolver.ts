@@ -19,6 +19,7 @@ import type {
 } from "@opengeni/contracts";
 
 import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
+import { dataverseWebApiBase } from "@opengeni/contracts/microsoft-dynamics";
 import {
   PERSONAL_GITHUB_REQUESTED_SCOPES,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -1011,7 +1012,8 @@ function connectionBindingMatches(
         !(
           binding === canonicalHttpUrl(OFFICIAL_SLACK_MCP_URL) &&
           isOfficialSlackRestDestination(destination, ref)
-        ))
+        ) &&
+        !isDataverseWebApiDestination(destination, binding, ref))
     ) {
       return false;
     }
@@ -1041,6 +1043,30 @@ export function connectionMetadataMatchesBinding(
     connectionBindingMatches({ ...connection, credential: {} }, ref, destinationUrl) &&
     missingRequestedScopes(ref.scopes, connection.grantedScopes, connection.providerDomain)
       .length === 0
+  );
+}
+
+/**
+ * The Dataverse bridge runs a Dataverse MCP connection's tools against the same
+ * environment's Web API: same origin as the bound MCP endpoint, under the Web
+ * API root only.
+ */
+function isDataverseWebApiDestination(
+  destinationUrl: string,
+  binding: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  const base = dataverseWebApiBase(binding);
+  if (!base || ref.kind !== "oauth2") return false;
+  const url = new URL(destinationUrl);
+  const root = new URL(base);
+  return (
+    url.origin === root.origin &&
+    ref.providerDomain.toLowerCase() === root.hostname &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    url.pathname.startsWith(root.pathname)
   );
 }
 
@@ -1407,8 +1433,13 @@ export async function refreshOAuthConnectionCredential(
   const scopeParameterSupported =
     (cred.credential as { scope_parameter_supported?: unknown }).scope_parameter_supported !==
     false;
+  // A grant whose provider needs the scope again on refresh (Microsoft Entra
+  // ID refresh tokens span resources) recorded it when it was authorized.
+  const refreshScope = stringValue((cred.credential as { refresh_scope?: unknown }).refresh_scope);
   if (ref.scopes?.length && scopeParameterSupported) {
     body.set("scope", ref.scopes.join(" "));
+  } else if (refreshScope && scopeParameterSupported) {
+    body.set("scope", refreshScope);
   }
   const requestBody: BodyInit =
     tokenRequestEncoding === "json" ? JSON.stringify(Object.fromEntries(body.entries())) : body;

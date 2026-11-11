@@ -104,6 +104,8 @@ import {
   type PinnableAuthorizationServer,
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
+import { microsoftAuthorizationNotGranted } from "./microsoft-admin-consent";
+import { microsoftAdminConsentUrl } from "@opengeni/contracts/connect";
 import {
   ACCOUNT_FAILURES,
   decideOAuthAccountConnection,
@@ -528,9 +530,13 @@ async function startMcpOAuthWithinDeadline(
     throw new HTTPException(403, { message: "external OAuth actor mismatch" });
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
   const urlProfile = builtInOAuthProfileFor({ mcpUrl });
+  // A per-customer endpoint profile names each environment by its own host.
   const providerDomain =
     urlProfile?.canonicalProviderDomain ??
-    canonicalProviderDomain(context.payload.providerDomain ?? new URL(mcpUrl).hostname);
+    canonicalProviderDomain(
+      (urlProfile?.match.mcpUrl ? undefined : context.payload.providerDomain) ??
+        new URL(mcpUrl).hostname,
+    );
   const builtInProfile = urlProfile ?? builtInOAuthProfileFor({ mcpUrl, providerDomain });
   const profile =
     builtInProfile ??
@@ -581,7 +587,9 @@ async function startMcpOAuthWithinDeadline(
 
   const discovery = profile.providerOAuthDiscovery
     ? await discoverProviderOAuth(mcpUrl, settings, deadline, profile)
-    : await discoverMcpOAuth(mcpUrl, settings, deadline);
+    : profile.fixedAuthorizationServer
+      ? await discoverFixedAuthorizationServerOAuth(mcpUrl, settings, deadline, profile)
+      : await discoverMcpOAuth(mcpUrl, settings, deadline);
   assertDiscoveredAuthorizationServer(settings, discovery.as, profile, providerDomain);
   const resourceParameterSupported =
     discovery.mode === "rfc9728_protected_resource" && profile.sendResourceParameter;
@@ -806,6 +814,10 @@ function assertOAuthStartProfile(
   ) {
     throw new HTTPException(503, { message: profile.requireDeploymentClient.message });
   }
+  const unavailable = profile.unavailableMessage?.(settings, mcpUrl);
+  if (unavailable) {
+    throw new HTTPException(503, { message: unavailable });
+  }
 }
 
 /**
@@ -841,6 +853,8 @@ export async function completeMcpOAuthCallback(
     state?: string | undefined;
     /** The provider's `error` parameter, for example `access_denied` on Cancel. */
     error?: string | undefined;
+    /** Read only for recognized provider error codes; never echoed. */
+    errorDescription?: string | undefined;
     requestUrl: string;
   },
 ): Promise<OAuthCallbackResult> {
@@ -860,6 +874,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
     code?: string | undefined;
     state?: string | undefined;
     error?: string | undefined;
+    errorDescription?: string | undefined;
     requestUrl: string;
   },
   deadline: OAuthCallbackDeadline,
@@ -961,6 +976,13 @@ async function completeMcpOAuthCallbackWithinDeadline(
       // clicks Cancel) instead of a code. Report that as a refusal, not as an
       // expired attempt, and never echo the provider's own text.
       const cancelled = input.error === "access_denied";
+      const microsoft = input.error
+        ? microsoftAuthorizationFailure(settings, state, {
+            error: input.error,
+            description: input.errorDescription,
+            requestUrl: input.requestUrl,
+          })
+        : null;
       if (connectOperation) {
         await finishConnectOperation(db, state, {
           ...connectOperation,
@@ -969,9 +991,9 @@ async function completeMcpOAuthCallbackWithinDeadline(
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
-            state: cancelled ? "cancelled" : "failed",
+            state: microsoft?.state ?? (cancelled ? "cancelled" : "failed"),
             nextAction: { type: "none" },
-            error: {
+            error: microsoft?.error ?? {
               code: input.error ? "provider_denied" : "missing_code",
               message: "Authorization was not completed. Start a new connection attempt.",
               retryable: false,
@@ -983,7 +1005,15 @@ async function completeMcpOAuthCallbackWithinDeadline(
         state,
         "error",
         input.error
-          ? { stage: "authorize", reason: cancelled ? "access_denied" : "provider_error" }
+          ? {
+              stage: "authorize",
+              reason:
+                microsoft?.error.code === "admin_consent_required"
+                  ? "admin_consent_required"
+                  : cancelled
+                    ? "access_denied"
+                    : "provider_error",
+            }
           : { stage: "state_verify", reason: "missing_code" },
       );
     }
@@ -1430,6 +1460,36 @@ function callbackStateResult(
   };
 }
 
+/**
+ * A Microsoft Entra ID sign-in that came back without a code. Microsoft sends
+ * a Cancel and its "Need admin approval" dead end the same way, so the person
+ * gets the organization-wide approval link for exactly the scopes asked for.
+ * Only recognized AADSTS codes are read from Microsoft's description.
+ */
+function microsoftAuthorizationFailure(
+  settings: Settings,
+  state: OAuthStatePayload,
+  input: { error: string; description: string | undefined; requestUrl: string },
+): ReturnType<typeof microsoftAuthorizationNotGranted> | null {
+  let origin: string;
+  try {
+    origin = new URL(state.tokenEndpoint).origin;
+  } catch {
+    return null;
+  }
+  if (origin !== "https://login.microsoftonline.com") return null;
+  const redirectUri = `${integrationBaseUrl(settings.publicBaseUrl, input.requestUrl)}/v1/integrations/oauth/callback`;
+  return microsoftAuthorizationNotGranted({
+    error: input.error,
+    description: input.description,
+    adminConsentUrl: microsoftAdminConsentUrl({
+      clientId: state.clientId,
+      redirectUri,
+      scopes: state.authorizeScopes,
+    }),
+  });
+}
+
 export function integrationBaseUrl(publicBaseUrl: string | undefined, requestUrl: string): string {
   return (publicBaseUrl ?? new URL(requestUrl).origin).replace(/\/+$/, "");
 }
@@ -1728,6 +1788,85 @@ async function discoverProviderOAuth(
   };
 }
 
+/**
+ * Discovery for a profile with one fixed authorization server serving many
+ * per-customer resources (Microsoft Entra ID for Microsoft Dynamics). The
+ * authorization server and the delegated scopes come only from the profile:
+ * one grant serves the provider's REST API as well as its MCP server, so the
+ * scopes a resource advertises for MCP alone are not used.
+ */
+async function discoverFixedAuthorizationServerOAuth(
+  resource: string,
+  settings: Settings,
+  deadline: OAuthStartDeadline,
+  profile: OAuthProviderProfile,
+) {
+  const fixed = profile.fixedAuthorizationServer;
+  if (!fixed || !profile.match.mcpUrl?.(resource))
+    throw new HTTPException(422, { message: "invalid provider OAuth resource" });
+  const scopes = uniqueStrings([...fixed.defaultScopes(resource)]);
+  const fetched = await deadline.run("authorization_server_metadata", (signal) =>
+    fetchOAuthMetadata(fixed.metadataUrl, settings, signal),
+  );
+  if (fetched.status !== "present")
+    throw new HTTPException(422, { message: "provider OAuth metadata is unavailable" });
+  const raw = fetched.document;
+  if (raw.issuer !== fixed.issuer)
+    throw new HTTPException(422, { message: "provider OAuth issuer did not match its profile" });
+  const as: AuthorizationServerMetadata = {
+    issuer: fixed.issuer,
+    authorizationServer: fixed.issuer,
+    authorizationEndpoint: oauthEndpointUrl(
+      requiredString(raw.authorization_endpoint, "OAuth authorization endpoint"),
+      settings,
+      "OAuth authorization endpoint",
+    ),
+    tokenEndpoint: oauthEndpointUrl(
+      requiredString(raw.token_endpoint, "OAuth token endpoint"),
+      settings,
+      "OAuth token endpoint",
+    ),
+    clientIdMetadataDocumentSupported: false,
+    tokenEndpointAuthMethodsSupported: stringArray(raw.token_endpoint_auth_methods_supported),
+    codeChallengeMethodsSupported: uniqueStrings([
+      ...stringArray(raw.code_challenge_methods_supported),
+      "S256",
+    ]),
+    raw,
+    metadataUrl: fetched.url,
+  };
+  return {
+    challenge: { scheme: null, scope: [] } as WwwAuthenticateChallenge,
+    prm: {
+      resource,
+      authorizationServers: [fixed.issuer],
+      scopesSupported: scopes,
+      raw: {},
+      metadataUrl: "",
+    } as ProtectedResourceMetadata,
+    as,
+    mode: "provider_oauth_metadata" as const,
+    resource,
+    // The profile's scopes are bound through the metadata digest; this mode
+    // records only the profile's own authorization-server metadata URL.
+    provenance: {
+      protectedResourceMetadataUrl: null,
+      authorizationServerMetadataUrl: fetched.url,
+      metadataSha256: createHash("sha256")
+        .update(
+          stableJson({
+            profile: profile.key,
+            resource,
+            scopes,
+            metadataUrl: fetched.url,
+            raw,
+          }),
+        )
+        .digest("hex"),
+    },
+  };
+}
+
 async function probeMcpChallenge(
   resource: string,
   settings: Settings,
@@ -1793,6 +1932,18 @@ async function registerOAuthClient(
   signal: AbortSignal,
   acquisition: Pick<OAuthStartContext, "accountId" | "workspaceId" | "integrationKey">,
 ): Promise<OAuthClientRegistration> {
+  // A profile that names its deployment client uses exactly that client.
+  const deploymentClient = profile.requireDeploymentClient
+    ? deploymentManagedClientFor(settings, profile.requireDeploymentClient.key)
+    : null;
+  if (deploymentClient) {
+    return {
+      method: "operator",
+      issuer: as.issuer,
+      authorizationServer: as.authorizationServer,
+      ...deploymentClient,
+    };
+  }
   const operator = operatorClientForAs(settings, as);
   if (operator) {
     return operator;
@@ -2505,7 +2656,27 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   ) {
     throw new HTTPException(400, { message: "invalid OAuth discovery binding state" });
   }
-  if (parsed.discoveryMode === "provider_oauth_metadata") {
+  const fixedProfile = builtInOAuthProfileFor(parsed);
+  const fixed = fixedProfile?.fixedAuthorizationServer;
+  if (parsed.discoveryMode === "provider_oauth_metadata" && fixed) {
+    if (
+      !fixedProfile.match.mcpUrl?.(parsed.mcpUrl) ||
+      parsed.resource !== parsed.mcpUrl ||
+      parsed.providerDomain !== new URL(parsed.mcpUrl).hostname ||
+      tenantIssuerTemplate(parsed.issuer) !== fixed.issuer ||
+      tenantIssuerTemplate(parsed.authorizationServer) !== fixed.issuer ||
+      parsed.authorizationServerMetadataUrl !== fixed.metadataUrl ||
+      parsed.resourceParameterSupported
+    ) {
+      throw new HTTPException(400, { message: "invalid provider OAuth discovery binding state" });
+    }
+    assertDiscoveredAuthorizationServer(
+      settings,
+      { ...parsed, authorizationEndpoint: parsed.tokenEndpoint },
+      fixedProfile,
+      parsed.providerDomain,
+    );
+  } else if (parsed.discoveryMode === "provider_oauth_metadata") {
     const profile = builtInOAuthProfileFor(parsed);
     const discovery = profile?.providerOAuthDiscovery;
     if (
@@ -2529,7 +2700,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   }
   return {
     ...parsed,
-    ...(parsed.discoveryMode === "provider_oauth_metadata"
+    ...(parsed.discoveryMode === "provider_oauth_metadata" && !fixed
       ? { issuer: normalizedIssuerKey(parsed.issuer) }
       : {}),
     ...(connectionId ? { connectionId } : {}),
@@ -2617,7 +2788,12 @@ async function clientForState(
       ),
     };
   }
-  const entry = operatorClientEntryFor(settings, state);
+  // A profile that names its deployment client finishes with that same client.
+  const deploymentKey = builtInOAuthProfileFor(state)?.requireDeploymentClient?.key;
+  const entry = deploymentKey
+    ? (deploymentManagedClientFor(settings, deploymentKey) ??
+      operatorClientEntryFor(settings, state))
+    : operatorClientEntryFor(settings, state);
   if (!entry || entry.clientId !== state.clientId) {
     throw new HTTPException(400, {
       message: "operator OAuth client credentials are no longer available",
@@ -3213,6 +3389,13 @@ export function oidcIdentityEligible(
   );
 }
 
+const TENANT_ISSUER_PLACEHOLDER = "{tenantid}";
+
+/** An issuer with its `{tenantid}` template restored after URL normalization encoded it. */
+function tenantIssuerTemplate(issuer: string): string {
+  return issuer.replace(/%7Btenantid%7D/giu, TENANT_ISSUER_PLACEHOLDER);
+}
+
 const ID_TOKEN_ALGORITHMS = [
   "RS256",
   "RS384",
@@ -3265,12 +3448,21 @@ async function verifiedIdTokenIdentity(
     "OpenID Connect keys",
     { signal },
   );
-  const issuer = state.issuer.replace(/\/+$/u, "");
+  const issuer = tenantIssuerTemplate(state.issuer).replace(/\/+$/u, "");
+  // A multi-tenant issuer (Microsoft Entra ID's `{tenantid}` template) is
+  // checked after the signature, against the token's own tenant.
+  const tenantTemplate = issuer.includes(TENANT_ISSUER_PLACEHOLDER);
   const { payload } = await jwtVerify(idToken, createLocalJWKSet(jwks), {
-    issuer: [issuer, `${issuer}/`],
+    ...(tenantTemplate ? {} : { issuer: [issuer, `${issuer}/`] }),
     audience: state.clientId,
     algorithms: ID_TOKEN_ALGORITHMS,
   });
+  if (tenantTemplate) {
+    const tenant = typeof payload.tid === "string" ? payload.tid : "";
+    const expected = issuer.replace(TENANT_ISSUER_PLACEHOLDER, tenant);
+    if (!/^[0-9a-f-]{36}$/iu.test(tenant) || payload.iss?.replace(/\/+$/u, "") !== expected)
+      throw new Error("OpenID Connect account verification failed");
+  }
   // A nonce we sent must come back, so an id_token from another sign-in can't be replayed.
   if (state.oidcNonce && payload.nonce !== state.oidcNonce)
     throw new Error("OpenID Connect account verification failed");
@@ -3477,6 +3669,9 @@ function credentialBundle(
         ? { scope: state.authorizeScopes.join(" ") }
         : {}),
     token_endpoint: state.tokenEndpoint,
+    ...(builtInOAuthProfileFor(state)?.sendScopeOnRefresh && state.authorizeScopes.length
+      ? { refresh_scope: state.authorizeScopes.join(" ") }
+      : {}),
     client_id: client.clientId,
     ...(client.clientSecret
       ? {

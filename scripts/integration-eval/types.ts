@@ -56,7 +56,8 @@ export type IntegrationId =
   | "outlook_calendar"
   | "clickup"
   | "onedrive"
-  | "sharepoint";
+  | "sharepoint"
+  | "microsoft_dynamics";
 
 export type IntegrationSpec = {
   id: IntegrationId;
