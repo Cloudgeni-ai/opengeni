@@ -428,6 +428,73 @@ function isRetryableComposeStartupError(error: unknown): boolean {
   );
 }
 
+const SANDBOX_BUILD_BUDGET_MS = 600_000;
+// A retry is only worth starting with at least this much of the budget left.
+const SANDBOX_BUILD_MIN_RETRY_MS = 120_000;
+const SANDBOX_BUILD_ATTEMPTS = 3;
+
+type SandboxBuildResult = {
+  exitCode: number;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+};
+
+/**
+ * The sandbox image downloads from GitHub releases, Debian snapshots and
+ * package mirrors. Those fail for a moment now and then: a corrupt download
+ * fails its pinned checksum, a mirror answers 503 or 429, a connection drops.
+ * Such a build is worth one more try; a Dockerfile error, a full disk or a
+ * timeout is not.
+ */
+export function isTransientSandboxBuildFailure(result: SandboxBuildResult): boolean {
+  if (result.exitCode === 0 || result.timedOut) return false;
+  const output = `${result.stderr}\n${result.stdout}`;
+  if (/no space left on device/iu.test(output)) return false;
+  return [
+    /digest mismatch/iu,
+    /blob sha256:[0-9a-f]+: not found/iu,
+    /E: Failed to fetch /u,
+    /TooManyRequests|Too Many Requests/iu,
+    /\b(?:500|502|503|504) (?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)/iu,
+    /connection reset by peer|unexpected EOF|TLS handshake timeout|i\/o timeout/iu,
+    /Temporary failure resolving|Could not resolve host/iu,
+  ].some((pattern) => pattern.test(output));
+}
+
+/**
+ * Runs a sandbox image build, retrying network failures within one overall
+ * budget so a caller's own timeout still holds.
+ */
+export async function buildSandboxImageWithRetry(
+  build: (timeoutMs: number) => Promise<SandboxBuildResult>,
+  options: {
+    budgetMs?: number;
+    minRetryMs?: number;
+    attempts?: number;
+    now?: () => number;
+    log?: (message: string) => void;
+  } = {},
+): Promise<SandboxBuildResult> {
+  const budgetMs = options.budgetMs ?? SANDBOX_BUILD_BUDGET_MS;
+  const minRetryMs = options.minRetryMs ?? SANDBOX_BUILD_MIN_RETRY_MS;
+  const attempts = options.attempts ?? SANDBOX_BUILD_ATTEMPTS;
+  const now = options.now ?? Date.now;
+  const log = options.log ?? ((message: string) => console.warn(message));
+  const deadline = now() + budgetMs;
+  for (let attempt = 1; ; attempt++) {
+    const result = await build(Math.max(1, deadline - now()));
+    if (result.exitCode === 0) return result;
+    const remaining = deadline - now();
+    if (attempt >= attempts || remaining < minRetryMs || !isTransientSandboxBuildFailure(result)) {
+      return result;
+    }
+    log(
+      `sandbox image build attempt ${attempt} failed on a network error; retrying (${Math.round(remaining / 1000)}s of budget left)`,
+    );
+  }
+}
+
 export async function buildSandboxImage(
   tag = "opengeni-sandbox:local",
   cwd = process.cwd(),
@@ -440,22 +507,21 @@ export async function buildSandboxImage(
   if (source.exitCode !== 0 || !/^[0-9a-f]{40}$/u.test(sourceSha)) {
     throw new Error(`sandbox image source resolution failed\n${source.stdout}\n${source.stderr}`);
   }
-  const result = await runCommand(
-    [
-      "docker",
-      "build",
-      "-f",
-      "docker/sandbox.Dockerfile",
-      "--build-arg",
-      `OPENGENI_SOURCE_SHA=${sourceSha}`,
-      "-t",
-      tag,
-      ".",
-    ],
-    {
-      cwd,
-      timeoutMs: 600_000,
-    },
+  const result = await buildSandboxImageWithRetry((timeoutMs) =>
+    runCommand(
+      [
+        "docker",
+        "build",
+        "-f",
+        "docker/sandbox.Dockerfile",
+        "--build-arg",
+        `OPENGENI_SOURCE_SHA=${sourceSha}`,
+        "-t",
+        tag,
+        ".",
+      ],
+      { cwd, timeoutMs },
+    ),
   );
   if (result.exitCode !== 0) {
     throw new Error(sandboxBuildFailureMessage(result));
