@@ -424,7 +424,11 @@ jobs:
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+          # The exact runtime inputs were downloaded above; missing inputs must
+          # fail the candidate instead of shipping an image without the runtime.
+          build-args: |
+            OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+            OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
           labels: |
             org.opencontainers.image.revision=${{ inputs.source_sha }}
@@ -551,7 +555,11 @@ jobs:
           file: docker/desktop.Dockerfile
           platforms: linux/amd64
           push: true
-          build-args: OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+          # The exact runtime inputs were downloaded above; missing inputs must
+          # fail the candidate instead of shipping an image without the runtime.
+          build-args: |
+            OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+            OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}
           labels: |
             org.opencontainers.image.revision=${{ inputs.source_sha }}

@@ -134,7 +134,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "ddb650a7269af260c0cab925bd42ce22061b9e75b2c59e893ae0e6dfb9730022"
+      "sha256": "4465da9f8af60b9e7b1edf6a49eb730764a6784207934094212c1d29da2e0226"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
