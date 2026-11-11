@@ -59,7 +59,9 @@ const PAGE_FRAMES = ["error", "hopping", "posted"] as const;
 // during that search.
 // "menu-open": another tab of the same site, with the password manager's
 // menu open; no agent drives it.
-type PageMode = "agent" | "adding" | "menu-open" | "nested-data";
+// "loading": the page holds a frame of its own that never finishes loading,
+// as an ad or tracker frame whose server does not answer.
+type PageMode = "agent" | "adding" | "menu-open" | "nested-data" | "loading";
 
 function page(
   menu: "src" | "blank",
@@ -106,6 +108,7 @@ setTimeout(() => document.getElementById("email").dispatchEvent(new FocusEvent("
 <iframe id="widget" title="Widget"></iframe>
 ${frames}
 ${mode === "nested-data" ? '<iframe id="holder" title="Page-owned container" src="/holder"></iframe>' : ""}
+${mode === "loading" ? `<iframe id="loading" title="Loading" src="${otherOrigin}/never"></iframe>` : ""}
 ${adding}
 <script>
 // The page's own frame, created blank and loaded from another origin by script.
@@ -173,8 +176,9 @@ async function launch(
   const other = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: (request) => {
+    fetch: async (request) => {
       const path = new URL(request.url).pathname;
+      if (path === "/never") return await new Promise<Response>(() => {});
       const body =
         path === "/hop"
           ? "<!doctype html><title>Hop</title><script>setTimeout(() => location.replace('/hop?' + Date.now()), 200)</script>"
@@ -640,6 +644,36 @@ e2e(
       observation = await observe();
       expect(shows(observation, "Verify")).toBe(true);
     });
+  },
+  90_000,
+);
+
+e2e(
+  "the menu is removed while the page holds a frame that never finishes loading",
+  async () => {
+    await withFixture(
+      "src",
+      async ({ observe, act }) => {
+        let observation = await observe();
+        const arm = await act(observation, {
+          type: "click",
+          locator: ref(observation, "button", "Focus the email field"),
+        });
+        expect(arm.state).toBe("completed");
+        // The field gets focus and the menu appears.
+        await Bun.sleep(2_000);
+        observation = await observe();
+        const send = await act(observation, {
+          type: "click",
+          locator: ref(observation, "button", "Send code"),
+        });
+        expect(send.error?.message ?? "").not.toContain("could not be removed");
+        observation = await observe();
+        expect(ref(observation, "textbox", "Code")).toBeDefined();
+      },
+      false,
+      { mode: "loading" },
+    );
   },
   90_000,
 );
