@@ -141,12 +141,18 @@ const RULES: Rule[] = [
     method: "GET",
     pattern: /\/(codex|claude)\/accounts\/:accountId\/usage$/,
     text: ({ provider }) =>
-      `Read live usage for one ${provider} account: usage-limit windows (5-hour, weekly), when they reset, extra-credit balance and, for Codex, available usage-limit resets.`,
+      `Read live usage for one ${provider} account: usage-limit windows (5-hour, weekly), when they reset, extra-credit balance and available usage-limit resets (for Claude, limitResets: each reset's grantId, the limits it clears, how many are left, its expiry and whether it is usable now).`,
   },
   {
     method: "POST",
     pattern: /\/(claude)\/accounts\/:accountId\/usage\/refresh$/,
     text: ({ provider }) => `Fetch fresh usage for one ${provider} account from the provider.`,
+  },
+  {
+    method: "POST",
+    pattern: /\/claude\/accounts\/:accountId\/limit-resets\/claim$/,
+    text: () =>
+      "Use one Claude limit reset on a Claude account: the grantId of a reset the account's usage lists as usable now, and a new requestId. It clears the limits the reset names right away and uses it up, so only do it when the person asked for it. If the answer is retryable, send the same requestId again, never a new one for the same reset. Returns Claude's answer and the account's usage right after.",
   },
   {
     method: "PATCH",
