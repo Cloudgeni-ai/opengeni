@@ -728,7 +728,11 @@ export function useMcpCapabilityConnect({
     setOwnership,
     /** The sign-in button says "Try signing in again" rather than continuing. */
     retrySignIn:
-      retryFresh || (Boolean(error || notice) && view.attempt?.nextAction.type === "authorize"),
+      retryFresh ||
+      // The card already knows the last sign-in ended (it recovers the
+      // finished attempt), so the next one starts afresh.
+      (!!attemptState && RESTART_STATES.includes(attemptState)) ||
+      (Boolean(error || notice) && view.attempt?.nextAction.type === "authorize"),
     approval,
     open: () => void open(),
     signIn,
