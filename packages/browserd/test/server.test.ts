@@ -1632,6 +1632,98 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("a download upload outlives one request window and a later ask joins it", async () => {
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    let uploads = 0;
+    const release = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    await withServer(
+      async ({ server, reference }) => {
+        try {
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          const download = await browserContext!.downloadEvents!.begin({
+            guid: "slow-download",
+            targetId: null,
+            suggestedFilename: "large.bin",
+          });
+          await writeFile(join(browserContext!.downloadDirectory, "slow-download"), "bytes");
+          await browserContext!.downloadEvents!.progress({
+            guid: "slow-download",
+            state: "completed",
+            receivedBytes: 5,
+            totalBytes: 5,
+          });
+          const path = `/v1/browser-sessions/${reference.browserSessionId}/downloads/${download.id}/uploads`;
+          const body = {
+            operationId: randomUUID(),
+            downloadId: download.id,
+            waitMs: 10,
+            upload: {
+              url: "https://storage.test/large.bin?signature=first",
+              requiredHeaders: {},
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          };
+          expect(
+            (await request(server, path, { method: "POST", token: viewToken, body })).status,
+          ).toBe(401);
+          // Lose a response after browserd has started the transfer. Aborting
+          // this HTTP wait must not cancel the PUT or poison the operation.
+          const deadline = new AbortController();
+          const timedOut = request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, waitMs: 1_000 },
+            signal: deadline.signal,
+          }).then(
+            () => null,
+            (error: unknown) => error,
+          );
+          await started.promise;
+          deadline.abort(new DOMException("Request timed out", "TimeoutError"));
+          expect(await timedOut).toBeInstanceOf(Error);
+          const first = await request(server, path, { method: "POST", token: controlToken, body });
+          expect(first.status).toBe(200);
+          expect((await json(first)).data).toEqual({
+            operationId: body.operationId,
+            downloadId: download.id,
+            receipt: null,
+          });
+          expect(uploads).toBe(1);
+          body.upload.url = "https://storage.test/large.bin?signature=renewed";
+          const second = await request(server, path, { method: "POST", token: controlToken, body });
+          expect((await json(second)).data.receipt).toBeNull();
+          expect(uploads).toBe(1);
+          release.resolve();
+          body.waitMs = 1_000;
+          const last = await request(server, path, { method: "POST", token: controlToken, body });
+          expect((await json(last)).data.receipt).toMatchObject({
+            operationId: body.operationId,
+            downloadId: download.id,
+            sizeBytes: 5,
+          });
+          expect(uploads).toBe(1);
+        } finally {
+          release.resolve();
+        }
+      },
+      {
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+        uploadDownload: async () => {
+          uploads++;
+          started.resolve();
+          await release.promise;
+        },
+      },
+    );
+  });
+
   test("enrolls exact browser origins monotonically through admin authority", async () => {
     await withServer(
       async ({ server }) => {
@@ -2576,6 +2668,7 @@ async function request(
     token?: string;
     origin?: string;
     body?: unknown;
+    signal?: AbortSignal;
   } = {},
 ): Promise<Response> {
   const headers: Record<string, string> = {};
@@ -2585,6 +2678,7 @@ async function request(
   return await fetch(`${server.url}${path}`, {
     method: options.method ?? "GET",
     headers,
+    ...(options.signal ? { signal: options.signal } : {}),
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
   });
 }

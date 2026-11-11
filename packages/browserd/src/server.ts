@@ -22,6 +22,8 @@ import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
+  BrowserDownloadUploadRequest,
+  BrowserDownloadUploadStatus,
   BrowserRecordingExportReceipt,
   BrowserRecordingExportRequest,
   BrowserRecordingStartRequest,
@@ -928,6 +930,28 @@ export class BrowserControlServer {
         );
       }
       return success(await this.supervisor.exportDownload(reference, exported.data));
+    }
+    if (segments.length === 6 && segments[3] === "downloads" && segments[5] === "uploads") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const downloadId = requireUuid(segments[4], "download id");
+      const uploading = BrowserDownloadUploadRequest.safeParse(await readJson(request));
+      if (!uploading.success) {
+        throw new ProtocolError("invalid_action", "download export authority is invalid", 400);
+      }
+      if (uploading.data.downloadId !== downloadId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "download export targets another resource",
+          409,
+        );
+      }
+      return success(
+        BrowserDownloadUploadStatus.parse(
+          await this.supervisor.uploadDownload(reference, uploading.data),
+        ),
+      );
     }
     if (segments.length === 5 && segments[3] === "operations") {
       if (request.method !== "GET") {
@@ -2653,7 +2677,7 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
   if (
     segments[3] === "actions" ||
     segments[3] === "external-auth" ||
-    (segments[3] === "downloads" && segments[5] === "exports") ||
+    (segments[3] === "downloads" && (segments[5] === "exports" || segments[5] === "uploads")) ||
     (segments[3] === "recordings" && request.method === "POST") ||
     (segments[3] === "operations" && request.method === "POST")
   ) {

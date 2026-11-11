@@ -25,6 +25,8 @@ import type {
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
   BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
+  BrowserDownloadUploadRequest as BrowserDownloadUploadRequestValue,
+  BrowserDownloadUploadStatus as BrowserDownloadUploadStatusValue,
   BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
@@ -33,6 +35,7 @@ import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_WAIT_HOLD_MAX_MS,
   BrowserDownloadExportRequest,
+  BrowserDownloadUploadRequest,
   BrowserRevisionMaterialization as BrowserRevisionMaterializationSchema,
   NetworkRouteConsistency,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
@@ -583,7 +586,7 @@ export class BrowserSupervisor {
     artifactPath: string,
     authority: BrowserStateUploadAuthority,
   ) => Promise<void>;
-  private readonly uploadDownload: typeof uploadBrowserDownload;
+  private readonly uploadFile: typeof uploadBrowserDownload;
   private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
   private readonly stopEndedProcess: typeof stopEndedManagedBrowserProcess;
   private readonly assertProfileUnused: typeof assertManagedBrowserProfileUnused;
@@ -646,7 +649,7 @@ export class BrowserSupervisor {
               this.connectAttachedBridge,
             )));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
-    this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
+    this.uploadFile = options.uploadDownload ?? uploadBrowserDownload;
     this.inspectOwnedProcess = options.inspectOwnedProcess ?? inspectOwnedManagedBrowserProcess;
     this.stopEndedProcess = options.stopEndedProcess ?? stopEndedManagedBrowserProcess;
     this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
@@ -1827,7 +1830,26 @@ export class BrowserSupervisor {
         "browser placement cannot publish device-local downloads",
       );
     }
-    return await store.export(request, this.uploadDownload);
+    return await store.export(request, this.uploadFile);
+  }
+
+  async uploadDownload(
+    reference: BrowserSessionReference,
+    requestInput: BrowserDownloadUploadRequestValue,
+  ): Promise<BrowserDownloadUploadStatusValue> {
+    const { waitMs, ...request } = BrowserDownloadUploadRequest.parse(requestInput);
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement cannot publish device-local downloads",
+      );
+    }
+    return {
+      operationId: request.operationId,
+      downloadId: request.downloadId,
+      receipt: await store.upload(request, this.uploadFile, waitMs),
+    };
   }
 
   /** Starts recording the session's tab; the recording follows the agent to
@@ -1922,7 +1944,7 @@ export class BrowserSupervisor {
     return recording.transferTo(
       target.toString(),
       async () => {
-        await this.uploadDownload(bundle.path, upload, {
+        await this.uploadFile(bundle.path, upload, {
           sizeBytes: bundle.sizeBytes,
           sha256: bundle.sha256,
         });
