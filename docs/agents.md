@@ -240,12 +240,13 @@ and other integrations (Teams) read the same way.
 - Storage: `agents.organization_access` (migration 1363, default false, a
   rolling column the previous release ignores) on a `workspace` agent; the API
   says `organization`. No backfill (FORCE RLS would hide the rows from the
-  migration principal): until the contract step, an agent counts as open to
-  its organization when the column is true or any of its
-  `agent_slack_installs.open` is, and every write keeps `open` on each of its
-  installations (and the legacy `slack_agents.open`) equal to it, so a server
-  on the previous release behaves the same during the rollout. A change made
-  through such a server's old switch is still honoured.
+  migration principal). Every write keeps `open` on each of its installations
+  (and the legacy `slack_agents.open`) equal to the column, and until the
+  contract step, while an agent is in Slack its installations' `open`
+  decides; the column decides only for an agent in no Slack installation. So
+  a server on the previous release behaves the same during the rollout, and a
+  change made through its old switch (including closing it) holds, also after
+  a rollback.
 
 ### Dual write
 

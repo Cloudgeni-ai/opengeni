@@ -207,7 +207,11 @@ export const AgentSlackAvailability = /* @__PURE__ */ defineSchema(() =>
     slackTeamName: z.string().nullable(),
     /** What people may type after `+`, for example `data-team`. */
     handle: z.string(),
-    /** Open use: people outside the agent's workspace can use it there too. */
+    /**
+     * Open use: people outside the agent's workspace can use it there too.
+     * This is the agent's own "Anyone in <organization>" (`visibility:
+     * "organization"`), the same in every Slack workspace.
+     */
     open: z.boolean(),
     enabledBySubjectId: z.string().nullable(),
     version: z.number().int().positive(),

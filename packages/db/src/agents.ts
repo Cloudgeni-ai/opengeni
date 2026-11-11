@@ -101,8 +101,9 @@ export type AgentRecord = {
   memoryCollectionId: string | null;
   /**
    * Who can use it: anyone in the organization from chat integrations, not
-   * only the workspace. Always false for an Only me agent. True too while
-   * any of its Slack installations is still open from before this setting.
+   * only the workspace. Always false for an Only me agent. While the agent is
+   * in Slack, its installations' `open` decides (see
+   * AGENT_ORGANIZATION_ACCESS_SQL).
    */
   organizationAccess: boolean;
   currentRevision: number;
@@ -250,11 +251,25 @@ function mapInstall(row: InstallRow): AgentSlackInstallRecord {
   };
 }
 
+/**
+ * Whether anyone in the organization can use agent `a`, until the contract
+ * step. This release writes `agents.organization_access` and the same value
+ * as `open` on every Slack installation; the previous release only reads and
+ * writes each installation's `open`. So while the agent is in Slack, its
+ * installations decide, and a narrowing the previous release made there
+ * (during the rollout or after a rollback) holds. The flag decides only for
+ * an agent in no Slack installation, which the previous release can't open.
+ */
+const AGENT_ORGANIZATION_ACCESS_SQL = `(case when exists (select 1 from agent_slack_installs oi
+    where oi.agent_id = a.id and oi.account_id = a.account_id)
+  then exists (select 1 from agent_slack_installs oi
+    where oi.agent_id = a.id and oi.account_id = a.account_id and oi.open)
+  else a.organization_access end)`;
+
 const AGENT_COLUMNS = sql.raw(`a.id::text as id, a.account_id::text as account_id,
   a.workspace_id::text as workspace_id, a.visibility, a.owner_subject_id, a.name, a.description,
   a.avatar, a.memory_enabled, a.memory_collection_id::text as memory_collection_id,
-  (a.organization_access or exists (select 1 from agent_slack_installs oi
-    where oi.agent_id = a.id and oi.account_id = a.account_id and oi.open)) as organization_access,
+  ${AGENT_ORGANIZATION_ACCESS_SQL} as organization_access,
   a.current_revision, a.origin, a.source_session_id::text as source_session_id,
   a.created_by_subject_id, a.version, a.created_at, a.updated_at`);
 
@@ -1378,9 +1393,9 @@ function mapProjection(row: ProjectionRow, fallbackHome: string | null): SlackAg
     instructions: row.instructions ?? "",
     knowledgeCollectionId: row.memory_enabled ? row.memory_collection_id : null,
     memoryEnabled: row.memory_enabled,
-    // Anyone in the organization: the agent's own setting, or this
-    // installation's switch from before it (until the contract step).
-    open: row.agent_organization_access || row.open,
+    // Anyone in the organization (see AGENT_ORGANIZATION_ACCESS_SQL): the
+    // agent is in Slack here, so its installations decide.
+    open: row.agent_organization_access,
     createdBySubjectId: row.agent_created_by_subject_id ?? row.enabled_by_subject_id ?? "",
     version: Number(row.agent_version),
     createdAt: date(row.agent_created_at),
@@ -1434,7 +1449,7 @@ function readableIds(rows: readonly ProjectionRow[]): Set<string> {
 function projectionQuery(where: SQL): SQL {
   return sql`select ${INSTALL_COLUMNS},
       a.account_id::text as agent_account_id, a.workspace_id::text as agent_workspace_id,
-      a.organization_access as agent_organization_access,
+      ${sql.raw(AGENT_ORGANIZATION_ACCESS_SQL)} as agent_organization_access,
       a.name, a.description, a.avatar, a.memory_enabled,
       a.memory_collection_id::text as memory_collection_id,
       a.created_by_subject_id as agent_created_by_subject_id,

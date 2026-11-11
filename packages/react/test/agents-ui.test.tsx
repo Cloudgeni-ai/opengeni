@@ -998,6 +998,11 @@ test("Export writes an .agent.json that Import reads back with its Instructions"
   expect(older.ok && older.request.firstMessage).toBe("Which repositories?");
   const onlyMe = parseAgentFile(JSON.stringify({ ...file, visibility: "private" }));
   expect(onlyMe.ok && onlyMe.request.visibility).toBe("private");
+  // An organization agent's file imports as a shared one: opening it to the
+  // organization stays an organization admin's choice.
+  const organization = parseAgentFile(JSON.stringify({ ...file, visibility: "organization" }));
+  expect(organization.ok).toBe(true);
+  expect(organization.ok && organization.request.visibility).toBeUndefined();
   expect(parseAgentFile(JSON.stringify({ ...file, visibility: "team" })).ok).toBe(false);
   expect(parseAgentFile(JSON.stringify({ ...file, version: 2 })).ok).toBe(false);
   expect(parseAgentFile(JSON.stringify({ ...file, instructions: 3 })).ok).toBe(false);

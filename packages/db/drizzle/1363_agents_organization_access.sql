@@ -6,9 +6,10 @@
 --
 -- Rolling: a column with a default that the previous release never reads or
 -- writes. No backfill here (FORCE RLS would hide the rows from the migration
--- principal): the new code treats an agent as open to its organization when
--- this is true or any of its Slack installations is still open, and keeps
--- writing `open` on every installation, so the previous release behaves the
--- same during the rollout. A later contract step backfills this from `open`
--- and stops reading `open`.
+-- principal). The new code writes this and the same value as `open` on every
+-- Slack installation; while an agent is in Slack, its installations' `open`
+-- decides, so a change the previous release makes there holds during the
+-- rollout and after a rollback. This decides only for an agent in no Slack
+-- installation. A later contract step backfills this from `open` and stops
+-- reading `open`.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS organization_access boolean NOT NULL DEFAULT false;
