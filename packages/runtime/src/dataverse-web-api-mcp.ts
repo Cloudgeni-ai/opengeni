@@ -521,7 +521,7 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
     const resource = decodeUriComponentSafe(path.split("?")[0]!);
     if (
       !/^[A-Za-z_]/u.test(path) ||
-      /(^|[\/\\])\.\.?([\/\\]|$)/u.test(resource) ||
+      /(^|[/\\])\.\.?([/\\]|$)/u.test(resource) ||
       /^\$batch/iu.test(path) ||
       path.includes("#")
     )
