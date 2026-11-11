@@ -102,7 +102,7 @@ describe("session admission notice", () => {
       ),
     );
     expect(container.textContent).toContain("Starting on the new machine");
-    expect(container.textContent).toContain("Your message starts by itself.");
+    expect(container.textContent).toContain("The message starts by itself.");
     // One line under the title: where it starts is already said once.
     expect(container.textContent!.split("new machine")).toHaveLength(2);
     expect(container.querySelector("button")).toBeNull();
@@ -123,7 +123,7 @@ describe("session admission notice", () => {
     expect(container.textContent).toContain("Alex’s personal machine");
     expect(container.textContent).not.toMatch(/saved/i);
     expect(container.textContent).toContain(
-      "Your message starts by itself once the chat is on a machine you can use",
+      "The message starts by itself once the chat is on a machine its sender can use",
     );
     expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toEqual([
       "Choose machine",
@@ -495,7 +495,7 @@ describe("session admission notice", () => {
     expect(container.textContent).toContain("Permission needed");
     expect(container.textContent).toContain("machine or resources");
     expect(container.textContent).toContain(
-      "or a workspace admin, can fix this. Your message starts by itself once they do.",
+      "or a workspace admin, can fix this. The message starts by itself once they do.",
     );
     expect(container.querySelector("button")).toBeNull();
     expect(onRecheck).not.toHaveBeenCalled();
