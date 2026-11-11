@@ -884,10 +884,46 @@ describe("compute sandbox client", () => {
       nowMs: Date.now() + 11 * 60_000,
     });
     expect(asked).toEqual([session.state.sandboxId]);
-    expect(result).toEqual({ examined: 1, deleted: [], failed: 0 });
+    expect(result).toEqual({ examined: 1, deleted: [], ended: [], failed: 0 });
     expect([...control.boxes.keys()].sort()).toEqual(["sbx-other", session.state.sandboxId].sort());
     // The sweep never messages an agent.
     expect(plane.sent).toHaveLength(sentBefore);
+  });
+
+  test("a named sandbox nothing uses has its group's end asked for; the sweep deletes nothing", async () => {
+    const { control, plane, client } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    control.addOrphan("sbx-orphan", crypto.randomUUID());
+    const asked: string[] = [];
+    const result = await sweepComputeOrphans({
+      control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
+      gateway: GATEWAY,
+      named: async (sandbox) => sandbox.enrollmentId === session.state.enrollmentId,
+      // Only a sandbox the records name is asked about: an orphan is deleted.
+      endIfUnused: async (sandbox) => {
+        asked.push(sandbox.sandboxId);
+        return true;
+      },
+      revokeEnrollment: (input) => plane.revokeEnrollment(input),
+      nowMs: Date.now() + 11 * 60_000,
+    });
+    expect(asked).toEqual([session.state.sandboxId]);
+    expect(result.ended.map((sandbox) => sandbox.sandboxId)).toEqual([session.state.sandboxId]);
+    expect(result.deleted.map((sandbox) => sandbox.sandboxId)).toEqual(["sbx-orphan"]);
+    // Its lease's drain deletes it; the sweep left the sandbox and its enrollment.
+    expect([...control.boxes.keys()]).toEqual([session.state.sandboxId]);
+    expect(plane.active()).toEqual([session.state.enrollmentId]);
+
+    // One still in use is asked about and kept.
+    const kept = await sweepComputeOrphans({
+      control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
+      gateway: GATEWAY,
+      named: async () => true,
+      endIfUnused: async () => false,
+      revokeEnrollment: (input) => plane.revokeEnrollment(input),
+      nowMs: Date.now() + 11 * 60_000,
+    });
+    expect(kept).toEqual({ examined: 1, deleted: [], ended: [], failed: 0 });
   });
 
   test("an orphan whose delete fails is revoked, counted and kept for the next sweep", async () => {
@@ -990,7 +1026,7 @@ describe("compute sandbox client", () => {
       revokeEnrollment: async () => {},
       signal: budget.signal,
     });
-    expect(after).toEqual({ examined: 0, deleted: [], failed: 0 });
+    expect(after).toEqual({ examined: 0, deleted: [], ended: [], failed: 0 });
     expect(control.boxes.has("sbx-stuck")).toBe(true);
   });
 
@@ -1085,7 +1121,7 @@ describe("compute sandbox client", () => {
       signal: stop.signal,
     });
     setTimeout(() => stop.abort(), 50);
-    expect(await sweeping).toEqual({ examined: 1, deleted: [], failed: 0 });
+    expect(await sweeping).toEqual({ examined: 1, deleted: [], ended: [], failed: 0 });
     expect(Date.now() - started).toBeLessThan(3_000);
     expect(control.boxes.has("sbx-waiting")).toBe(true);
   });

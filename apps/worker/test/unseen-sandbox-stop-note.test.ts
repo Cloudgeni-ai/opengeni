@@ -9,6 +9,14 @@ test("an idle stop names the time and what may be gone, in one sentence", () => 
   );
 });
 
+test("a sandbox deleted while its chats were archived is told as gone, /workspace too", () => {
+  expect(
+    unseenSandboxStopNote({ kind: "stopped", at: "2026-11-10T12:05:19Z", reason: "group_end" }),
+  ).toBe(
+    "Sandbox note: this chat's sandbox was deleted at 2026-11-10 12:05 UTC while the chat was archived, after your last action; the chat now runs in a new sandbox, and the old one's files (including /workspace) and programs are gone.",
+  );
+});
+
 test("other stops and losses do not guess a reason", () => {
   expect(
     unseenSandboxStopNote({ kind: "stopped", at: "2026-11-10T12:05:19Z", reason: "operator" }),

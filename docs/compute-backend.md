@@ -162,6 +162,20 @@ skips sandbox enrollments, and machine routes list machines only.
   messages an agent, so it wakes nothing. One control service team serves one Opengeni
   deployment's gateway; the gateway tag keeps a misconfigured second
   deployment's sandboxes out of the sweep.
+- **Archived chats**: a sandbox is kept for the chats that work in it. In the
+  same pass the sweep asks, for every sandbox the records still name, whether
+  every chat of its sandbox group is archived (`endComputeGroupOfArchivedChats`:
+  archived by the Archive action or stored by the idle archiver, a sub-chat
+  with its root; a chat with work under way counts as in use). If so it ends
+  the group exactly as deleting those chats does: the idle lease drains now and
+  the reaper deletes the sandbox without a capture and revokes its enrollment.
+  There is no waiting period, and a sandbox shared by several chats stays
+  while any of them is live. A lease that is held (a turn, a viewer, a running
+  command) is left alone, and a turn that arrives before the reaper claims the
+  sandbox keeps it. A chat restored later starts on a new sandbox: the old
+  one's files are gone, the chat's timeline says so, and the model is told on
+  its next turn (`sandbox.box.terminated` with `drainReason: "group_end"`).
+  A group no chat names is never ended this way.
 - **Stale enrollments**: an enrollment whose sandbox is already gone (a delete
   whose revoke failed, a create that never made a sandbox) is in no listing from the control service
   listing, so the same maintenance also revokes, from Opengeni's own records,

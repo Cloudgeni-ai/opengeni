@@ -11,7 +11,8 @@
 // session then asks the control service to wake the sandbox, which places and adopts
 // it, and resends the request under its replay identity until the agent
 // answers. Opengeni never tears a compute sandbox down for idleness; it is
-// deleted (and its enrollment revoked) only when its group ends.
+// deleted (and its enrollment revoked) only when its group ends: its chats
+// are deleted, or every one of them is archived.
 
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";

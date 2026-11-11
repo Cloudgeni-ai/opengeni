@@ -1409,7 +1409,16 @@ export function buildTimeline(
         // Most shutdowns save the workspace and say nothing. Only a shutdown
         // that could not save it, or saved it without rebuildable folders,
         // is worth telling the person.
-        if (payload.captureAbandoned === true) {
+        if (payload.drainReason === "group_end") {
+          // Deleted with nothing saved, because every chat of it was archived.
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text: t("timeline.projection.sandboxDeletedWhileArchived"),
+            occurredAt: event.occurredAt,
+          });
+        } else if (payload.captureAbandoned === true) {
           const unsavedSince =
             typeof payload.unsavedSince === "string" ? new Date(payload.unsavedSince) : null;
           items.push({

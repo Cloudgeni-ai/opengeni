@@ -5763,6 +5763,8 @@ export const englishMessages = {
   "timeline.projection.restoredFromOlderSave":
     "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
+  "timeline.projection.sandboxDeletedWhileArchived":
+    "This chat's workspace machine was deleted while the chat was archived. The chat continues on a new one, without the old one's files.",
   "timeline.projection.savedWithoutRebuildableFolders":
     "This chat's files were saved without folders that can be rebuilt: {folders}.",
   "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",

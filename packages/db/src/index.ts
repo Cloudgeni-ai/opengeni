@@ -57271,8 +57271,8 @@ function computeLeaseStaysWarmWhenIdle(
 async function requestComputeGroupEndTx(
   tx: Database,
   input: { workspaceId: string; sandboxGroupIds?: readonly string[] },
-): Promise<void> {
-  if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return;
+): Promise<number> {
+  if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return 0;
   const groupFilter = input.sandboxGroupIds
     ? sql`and lease.sandbox_group_id in (${sql.join(
         input.sandboxGroupIds.map((id) => sql`${id}::uuid`),
@@ -57423,7 +57423,9 @@ async function requestComputeGroupEndTx(
       `);
     }
   }
-  await tx.execute(sql`
+  const ended = await rawRows<{ id: string }>(
+    tx,
+    sql`
     update sandbox_leases lease set
       liveness = 'draining',
       group_end_requested_at = now(),
@@ -57437,7 +57439,80 @@ async function requestComputeGroupEndTx(
       and lease.reaper_hold_id is null
       and lease.archive_capture_id is null
       and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
-  `);
+    returning lease.id
+  `,
+  );
+  return ended.length;
+}
+
+/**
+ * End the compute group of a sandbox every chat of which is archived, as
+ * deleting those chats would: its idle lease drains now, and the reaper
+ * deletes the sandbox and revokes its agent's enrollment without a capture.
+ * A sandbox is kept for the chats that work in it, and an archived chat does
+ * no work. One restored later starts on a new sandbox, as a chat does whose
+ * sandbox was never created.
+ *
+ * A chat is archived with its root (see `sessionArchivedSql`), and one that
+ * still has work under way counts as in use whatever its archive state. A
+ * group no chat names is left alone: it is not a chat's sandbox. True when the
+ * group's end was asked for now; false when a chat still uses the sandbox,
+ * its lease is held, or its end was already asked for. A turn that arrives
+ * before the reaper claims the sandbox keeps it (the lease is re-armed).
+ */
+export async function endComputeGroupOfArchivedChats(
+  db: Database,
+  input: { workspaceId: string; sandboxGroupId: string },
+  bound?: DatabaseWorkBound,
+): Promise<boolean> {
+  const chat = sql`chat`;
+  const root = sql`root`;
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statements below get only the time left.
+      await limit(scopedDb);
+      const rows = await rawRows<{ unused: boolean }>(
+        scopedDb,
+        sql`
+        select exists (
+          select 1 from sessions chat
+          where chat.workspace_id = ${input.workspaceId}
+            and chat.sandbox_group_id = ${input.sandboxGroupId}
+        ) and not exists (
+          select 1 from sessions chat
+          left join sessions root
+            on root.workspace_id = chat.workspace_id
+           and root.id = chat.root_session_id
+          where chat.workspace_id = ${input.workspaceId}
+            and chat.sandbox_group_id = ${input.sandboxGroupId}
+            and (
+              chat.status in ('queued', 'running', 'requires_action', 'recovering',
+                'waiting_capacity')
+              or not (
+                ${sessionArchivedSql(chat)}
+                or (root.id is not null and ${sessionArchivedSql(root)})
+              )
+            )
+        ) as unused
+      `,
+      );
+      if (rows[0]?.unused !== true) return false;
+      const ended = await requestComputeGroupEndTx(scopedDb, {
+        workspaceId: input.workspaceId,
+        sandboxGroupIds: [input.sandboxGroupId],
+      });
+      return ended > 0;
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    // A deleted workspace took its chats and leases with it.
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 /** The SQL twin of {@link computeLeaseStaysWarmWhenIdle} over alias `L`. */

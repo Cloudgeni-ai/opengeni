@@ -1040,7 +1040,7 @@ Link renewal locks the enrollment before sampling the database clock, checking
 the owner/instance and extending its lease in one statement; a longer heartbeat
 lease is preserved. Refusal codes and renewal cadence are unchanged.
 Compute sleeps idle sandboxes, so compute leases never idle-drain; group end
-(chat/workspace deletion) drains them and the reaper deletes the sandbox and
+(chat/workspace deletion, or every chat of the group archived) drains them and the reaper deletes the sandbox and
 revokes its `sandbox` enrollment. See [compute backend](compute-backend.md).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile

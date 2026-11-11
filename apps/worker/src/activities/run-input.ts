@@ -1036,6 +1036,11 @@ export function unseenSandboxStopNote(stop: {
   const when = Number.isFinite(at.getTime())
     ? ` at ${at.toISOString().slice(0, 16).replace("T", " ")} UTC`
     : "";
+  // A sandbox every chat of which was archived is deleted, not saved: the
+  // chat goes on in a new one, and nothing of the old one came back.
+  if (stop.kind === "stopped" && stop.reason === "group_end") {
+    return `Sandbox note: this chat's sandbox was deleted${when} while the chat was archived, after your last action; the chat now runs in a new sandbox, and the old one's files (including /workspace) and programs are gone.`;
+  }
   const what =
     stop.kind === "lost"
       ? `stopped unexpectedly${when}`

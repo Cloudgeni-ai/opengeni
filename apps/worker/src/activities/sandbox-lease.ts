@@ -38,6 +38,7 @@ import {
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
   computeSandboxNamed,
+  endComputeGroupOfArchivedChats,
   computeSandboxOfEnrollment,
   leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
@@ -4344,6 +4345,10 @@ async function sweepComputeOrphansForConfiguredBackend(
     }),
     gateway: settings.computeLinkUrl,
     named: async (identity) => await computeSandboxNamed(db, identity, itemBound(bound)),
+    // A sandbox every chat of which is archived has no use left: end its
+    // group, and the drain deletes it as it does for a deleted chat.
+    endIfUnused: async (identity) =>
+      await endComputeGroupOfArchivedChats(db, identity, itemBound(bound)),
     revokeEnrollment: async (input) => {
       await revokeSandboxEnrollment(db, input, itemBound(bound));
     },
@@ -4354,10 +4359,16 @@ async function sweepComputeOrphansForConfiguredBackend(
   for (const deleted of result.deleted) {
     observability.warn("sandbox reaper: deleted compute orphan sandbox", { ...deleted });
   }
+  for (const ended of result.ended) {
+    observability.info("sandbox reaper: ending the compute sandbox of archived chats", {
+      ...ended,
+    });
+  }
   if (result.examined > 0) {
     observability.info("sandbox reaper: compute orphan sweep completed", {
       examined: result.examined,
       deleted: result.deleted.length,
+      ended: result.ended.length,
       failed: result.failed,
       stoppedEarly: signal.aborted,
     });
@@ -4517,15 +4528,20 @@ export type SandboxDrainReason =
   | "provider_deadline"
   | "operator"
   | "teardown_claim"
-  | "rotation_requested";
+  | "rotation_requested"
+  | "group_end";
 
-/** The bounded drain reason carried on `sandbox.box.terminated`: the lease's
- * rotation reason when a rotation was requested, otherwise the ordinary idle
- * drain. A requested rotation without a recorded reason (legacy rows) is
- * reported as `rotation_requested` rather than guessed. */
+/** The bounded drain reason carried on `sandbox.box.terminated`: `group_end`
+ * for a compute sandbox deleted without a capture because its group ended
+ * (nothing was saved, so a chat that goes on starts on a new sandbox), the
+ * lease's rotation reason when a rotation was requested, otherwise the
+ * ordinary idle drain. A requested rotation without a recorded reason (legacy
+ * rows) is reported as `rotation_requested` rather than guessed. */
 export function sandboxDrainReason(
   lease: Pick<LeaseSnapshot, "rotationRequestedAt" | "rotationReason">,
+  captureDisposition?: DrainCaptureDisposition,
 ): SandboxDrainReason {
+  if (captureDisposition === "discard") return "group_end";
   if (lease.rotationRequestedAt === null) return "idle";
   return lease.rotationReason ?? "rotation_requested";
 }
@@ -5171,7 +5187,7 @@ async function terminateDrainableBox(
     // was requested (provider deadline, operator/image conflict, teardown
     // claim), otherwise the ordinary idle drain. Additive diagnostic
     // fact; no identifiers beyond the ones already carried above.
-    drainReason: sandboxDrainReason(lease),
+    drainReason: sandboxDrainReason(lease, captureDisposition),
     // False when only the lease drained and no box was stopped (a
     // Connected Machine keeps running), so chats aren't told it stopped.
     providerStopped:
