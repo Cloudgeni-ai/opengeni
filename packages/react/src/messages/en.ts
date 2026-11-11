@@ -3982,6 +3982,7 @@ export const englishMessages = {
   "native.timeline.sessionScreen.removeName": "Remove {name}",
   "native.timeline.sessionScreen.retryName": "Retry {name}",
   "native.timeline.sessionScreen.tapToRetrySuffix": " · tap to retry",
+  "native.timeline.sessionScreen.uploadingNamePercent": "{name}, uploading, {percent}%",
   "native.timeline.sessionSignals.doneWhen": "DONE WHEN",
   "native.timeline.sessionSignals.evidence": "EVIDENCE",
   "native.timeline.sessionSignals.noCommandsAreRunning": "No commands are running.",

@@ -36291,6 +36291,8 @@
       "FileSystemCapability": "type",
       "FileSystemRouteIdentity": "type",
       "FileUploadData": "type",
+      "FileUploadSource": "type",
+      "FileUploadTarget": "type",
       "FirstPartyMcpToolName": "type",
       "ForkSessionRequest": "type",
       "ForkSessionResponse": "type",
