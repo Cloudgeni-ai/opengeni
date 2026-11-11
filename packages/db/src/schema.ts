@@ -8002,6 +8002,13 @@ export const sessionTurns = pgTable(
       table.status,
       table.position,
     ),
+    // Next turn position, max(position) + 1, as one backward probe instead of
+    // a row-security check of every earlier turn (migration 1355).
+    sessionPosition: index("session_turns_session_position_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.position,
+    ),
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
@@ -9229,6 +9236,13 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    // Attempt-claim recovery-warning guards probe one action of one session
+    // (migration 1356).
+    targetAction: index("session_command_receipts_target_action_idx").on(
+      table.workspaceId,
+      table.targetSessionId,
+      table.action,
+    ),
     promptActorOperation: index("session_command_receipts_prompt_actor_operation_idx")
       .on(
         table.workspaceId,
@@ -9686,6 +9700,17 @@ export const sessionSystemUpdateOutbox = pgTable(
       table.dedupeKey,
     ),
     pending: index("session_system_update_outbox_pending_idx").on(table.status, table.createdAt),
+    // The newest terminal notice a child wrote for its parent, which decides
+    // whether that child's failure is already the parent agent's (migration 1360).
+    childTerminalSource: index("session_system_update_outbox_child_terminal_source_idx")
+      .on(
+        table.workspaceId,
+        table.sourceSessionId,
+        table.targetSessionId,
+        table.createdAt,
+        table.id,
+      )
+      .where(sql`${table.kind} = 'child_terminal_result'`),
   }),
 );
 

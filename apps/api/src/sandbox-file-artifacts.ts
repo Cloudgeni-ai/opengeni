@@ -176,6 +176,7 @@ export type FileAccessReceipt = {
  * generated image or video, download or upload), on the owner's behalf. An
  * agent acts for the person whose turn it runs and sees only what its chat's
  * own audience lets it see, so it can never reach another chat's private file.
+ * Null when no such file has this id, so the caller can try a Site.
  */
 export async function changeWorkspaceFileVisibility(
   deps: ApiRouteDeps,
@@ -184,7 +185,7 @@ export async function changeWorkspaceFileVisibility(
     artifactId: string;
     visibility: WorkspaceArtifactVisibility;
   },
-): Promise<FileAccessReceipt> {
+): Promise<FileAccessReceipt | null> {
   const actor =
     input.grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, input.grant, "files:upload")
@@ -195,7 +196,7 @@ export async function changeWorkspaceFileVisibility(
       (await getFile(deps.db, input.grant.workspaceId, input.artifactId))?.id ??
       (await getGeneratedVideoArtifact(deps.db, input.grant.workspaceId, input.artifactId))?.file
         .id;
-    if (!fileId) throw new HTTPException(404, { message: "file not found" });
+    if (!fileId) return null;
     const { file } = await changeFileVisibility({
       db: deps.db,
       settings: deps.settings,

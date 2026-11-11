@@ -183,7 +183,7 @@ export type {
   UseTranscriptionOptions,
   UseTranscriptionResult,
 } from "./hooks/use-transcription";
-export { useFileAttachments } from "./hooks/use-file-attachments";
+export { uploadScopeForSession, useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
   UseFileAttachmentsOptions,

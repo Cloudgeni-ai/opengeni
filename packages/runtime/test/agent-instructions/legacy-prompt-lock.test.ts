@@ -13,7 +13,8 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
  * variable_set_list / variableSetIds wording, and proceeding past blocked
  * routine, reversible steps, the Skill index reading Skills by name, and
  * answering privacy questions from `privacy_facts`, and the shorter Codemode
- * directive, and the search rule that no longer assumes `rg`, and the wait rules
+ * directive and its background-process credential lifetime, and the search
+ * rule that no longer assumes `rg`, and the wait rules
  * that the `wait_for_input` description now states once; `unattended` pins the
  * unattended-session CORE paragraph, which no other case carries. Reviewed
  * instruction changes update their locks; Modular composition must never
@@ -41,14 +42,14 @@ const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> 
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
-    chars: 37804,
-    sha256: "5fb786b8622cbfcb517d62e0605a27e01e023293d606cec07580b66cc92cbcc2",
+    chars: 38065,
+    sha256: "66681fd516e90ee3807a6a302fea31a79b4040f5ffa6c53826fc7d37419f6692",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
-    chars: 36818,
-    sha256: "848f8cfee823334f622d0be1cb4c5b50d551b448f0af150a128d80f3fd9cc322",
+    chars: 37079,
+    sha256: "0393593326c5feb83f7e8ca7125b1b7bfd1f4a7f4e3473b9e0d667d0dd769ff4",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },

@@ -7,18 +7,12 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
-import {
-  bootstrapWorkspace,
-  createDb,
-  createSession,
-  initializeSessionStartAtomically,
-  registerHostExportConsumer,
-  type DbClient,
-} from "../src";
+import { bootstrapWorkspace, createDb, registerHostExportConsumer, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 import { postureBeforeMigration, postureThroughMigration } from "./predecessor-runtime-posture";
+import { seedPrefixLedgerSession } from "./helpers/prefix-ledger-session";
 
 const migration = "1286_drop_retired_subscription_pools.sql";
 const providers = ["codex", "claude", "xai"] as const;
@@ -57,7 +51,6 @@ let exporter: DbClient | null = null;
 let owner: postgres.Sql | null = null;
 let prefix: string | null = null;
 let scope: { accountId: string; workspaceId: string };
-let sessionId: string;
 let turnId: string;
 let before: Awaited<ReturnType<typeof definitions>> = [];
 const credentialIds = new Map<string, string>();
@@ -104,28 +97,10 @@ beforeAll(async () => {
   });
   const grant = access.workspaceGrants[0]!;
   scope = { accountId: grant.accountId, workspaceId: grant.workspaceId! };
-  const session = await createSession(client.db, {
+  ({ turnId } = await seedPrefixLedgerSession(owned.admin, {
     ...scope,
     initialMessage: "current queued work",
-    resources: [],
-    metadata: {},
-    model: "test-model",
-    reasoningEffort: "medium",
-    latencyMode: "standard",
-    sandboxBackend: "none",
-  });
-  sessionId = session.id;
-  await initializeSessionStartAtomically(client.db, {
-    ...scope,
-    sessionId,
-    reasoningEffortFallback: "medium",
-    createdEventPayload: {},
-  });
-  const [turn] = await owned.admin<
-    { id: string }[]
-  >`select id from session_turns where session_id = ${sessionId} order by position limit 1`;
-  if (!turn) throw new Error("Current session admission did not enqueue its turn");
-  turnId = turn.id;
+  }));
   // Synthetic old records, not an invocation of the deleted runtime. All real
   // migration checks below run as the restricted owner with FORCE RLS enabled.
   await owned.admin.begin(async (tx) => {
@@ -331,15 +306,9 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
         personal_fallback_allowed: false,
       },
     ]);
-    await createSession(client!.db, {
+    await seedPrefixLedgerSession(owned!.admin, {
       ...scope,
       initialMessage: "post-contract session",
-      resources: [],
-      metadata: {},
-      model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
     });
     const after = await definitions();
     await applyContract();

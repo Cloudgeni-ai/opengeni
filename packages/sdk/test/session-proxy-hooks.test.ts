@@ -123,6 +123,19 @@ describe("session proxy hooks", () => {
     ]);
   });
 
+  test("a record-only async afterForward needs no return and passes Opengeni's answer on", async () => {
+    const statuses: number[] = [];
+    // Declared on its own, as a product module would: its type is
+    // `Promise<void>`, which the option must accept.
+    async function recordStatus(_route: SessionProxyRoute, response: Response) {
+      statuses.push(response.status);
+    }
+    const { handler } = setup({ afterForward: recordStatus });
+    const read = await handler(new Request(`${SESSION}/queue`));
+    expect(read.status).toBe(200);
+    expect(statuses).toEqual([200]);
+  });
+
   test("afterForward does not run when a host hook refuses the action", async () => {
     let after = 0;
     const { handler, forwarded } = setup({

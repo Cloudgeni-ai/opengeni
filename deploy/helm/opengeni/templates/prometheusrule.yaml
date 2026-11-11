@@ -280,6 +280,21 @@ spec:
             headline: 'Session-recovery monitor not reporting'
             user_impact: 'No user-visible impact by itself; we just cannot see stuck sessions until it recovers.'
             next_step: 'Check that the worker-control pods are running and being scraped; restore the monitor before trusting session-recovery alerts.'
+        # Readiness stays up when only a required runtime EXECUTE grant is
+        # missing (an unsafe posture still fails readiness), so this alert is
+        # what makes the broken feature visible.
+        - alert: OpenGeniRuntimeDatabaseGrantMissing
+          expr: max by (component) (opengeni_runtime_database_degraded_findings{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The runtime database role is missing an EXECUTE grant that this release needs; pods stay ready, but the features behind those routines fail.'
+            headline: 'Runtime database grant missing'
+            value: '{{ "{{ printf `%.0f` $value }}" }} finding(s)'
+            user_impact: 'Features that call the affected database routines fail with a permission error; everything else keeps working.'
+            next_step: 'Read the "Runtime database posture is degraded" warning for the routine names, then apply the migration or grant that provides them.'
+            description: Startup and readiness report a missing required runtime EXECUTE grant as degraded instead of failing. The strict posture check in the migration job and the compatibility workflow still rejects it.
         # Runnable prompts, not prompts held behind a running turn, a Pause,
         # a capacity wait or a required human action. Time queued behind an
         # active turn in the same chat is normal serialization and never pages.
@@ -473,7 +488,7 @@ spec:
         - alert: OpenGeniTurnRecoveryRatioHigh
           expr: |
             (
-              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!="provider"}[10m]))
+              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!~"provider|route_change"}[10m]))
               /
               clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
@@ -483,12 +498,12 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider over the last 10 minutes.'
+            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider or a deliberate sandbox move over the last 10 minutes.'
             headline: 'Many agent turns needing automatic retries'
             value: '{{ "{{ $value | humanizePercentage }}" }} of turns retried (10 min)'
             user_impact: 'Replies are slower and may pause briefly while turns retry automatically; no work is lost.'
             next_step: 'Split opengeni_turn_recoveries_total by cause (sandbox, tool, worker, database, control, other) and follow the matching sandbox, MCP, worker or Postgres evidence.'
-            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Inspect the dominant non-provider cause.
+            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Deliberate active-sandbox moves mid-turn (cause route_change) continue on the new route by design and are excluded too. Inspect the dominant remaining cause.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerRestarted
           expr: |
@@ -1996,7 +2011,7 @@ spec:
         - alert: OpenGeniTurnCapacityMonitorStale
           expr: |
             absent(opengeni:turn_capacity_monitor:fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
-          for: 30s
+          for: 5m
           labels:
             severity: warning
             notification_policy: investigate
@@ -2005,7 +2020,7 @@ spec:
             headline: 'Turn-capacity monitoring is blind'
             user_impact: 'No direct user impact, but queue backlog alerts cannot fire until this recovers.'
             next_step: 'Check worker-turns pods and their metrics scrape, and their connection to Temporal.'
-            description: No complete healthy ready-worker projection is available for 30 seconds; at least one scrape is down/absent, a monitor value/timestamp is missing, a successful queue sample is at least 60 seconds old, or deployment availability cannot be verified. Queue threshold alerts fail closed to unknown until all required observations recover; absence is not zero backlog or zero load.
+            description: No complete healthy ready-worker projection has been available for 5 minutes, longer than a worker rollout leaves new or draining pods unreported; at least one scrape is down/absent, a monitor value/timestamp is missing, a successful queue sample is at least 60 seconds old, or deployment availability cannot be verified. Queue threshold alerts fail closed to unknown until all required observations recover; absence is not zero backlog or zero load.
             action: Check worker-turns ServiceMonitor targets, ready deployment replicas, monitor errors and Temporal DescribeTaskQueue connectivity; restore evidence before acting on queue values.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerPodPending
