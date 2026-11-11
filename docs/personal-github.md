@@ -317,7 +317,7 @@ Repository owners follow GitHub's login rules, including enterprise managed
 users, whose logins carry an underscore suffix (`octocat_acme`): 1 to 39
 letters, digits, `-` or `_`, starting with a letter or digit
 (`GITHUB_OWNER_LOGIN_PATTERN` in `packages/contracts/src/personal-github.ts`;
-migration 1361 widens the stored selection check the same way).
+migration 1370 widens the stored selection check the same way).
 
 Managed sandboxes consume this authority through Opengeni's dedicated personal
 GitHub smart-HTTP broker. The worker mints a five-minute encrypted bearer bound

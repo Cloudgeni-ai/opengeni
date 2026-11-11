@@ -5,7 +5,7 @@
 -- (docs/personal-github.md).
 --
 -- 1. personal_github_repository_selections_shape_chk is re-added NOT VALID
---    with the owner pattern widened to allow "_"; 1362 validates it. Every
+--    with the owner pattern widened to allow "_"; 1371 validates it. Every
 --    existing row already matches the narrower pattern.
 -- 2. mutate_self_personal_github_repository_selection (as 1298 left it) is
 --    replaced with the same widened owner pattern and no other change.

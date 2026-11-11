@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Validates the check 1361 re-added NOT VALID. Every existing row matched the
+-- Validates the check 1370 re-added NOT VALID. Every existing row matched the
 -- narrower owner pattern, which the widened one includes.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
