@@ -49,7 +49,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
@@ -85,7 +85,7 @@ jobs:
         working-directory: .
         shell: bash
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
@@ -114,7 +114,7 @@ jobs:
     timeout-minutes: 6
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Compile and exercise native protocol and failure cases
         timeout-minutes: 5
         run: make -C native/command-supervisor test CFLAGS='-O2 -g'
@@ -132,7 +132,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.82.0
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust 1.82
         uses: dtolnay/rust-toolchain@40a9285135951116a4a08e10a723a42b12d721d3 # 1.82.0
@@ -155,7 +155,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -194,7 +194,7 @@ jobs:
         os: [ubuntu-24.04, macos-26, windows-latest]
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Bun for the macOS desktop adapter and the Linux NATS install
         if: runner.os != 'Windows'
@@ -299,7 +299,7 @@ jobs:
         os: [ubuntu-24.04, macos-26, windows-latest]
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable

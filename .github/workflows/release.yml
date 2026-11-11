@@ -97,7 +97,7 @@ jobs:
       actions: write # dispatch trusted main CI for the token-authored Version PR
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -241,7 +241,7 @@ jobs:
       candidateSourceTreeSha: ${{ steps.preflight.outputs.candidate_source_tree_sha }}
     steps:
       - name: Check out evidence-bound source
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 1
@@ -296,7 +296,7 @@ jobs:
             exit 1
           fi
       - name: Check out exact retained release controller
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.controller_sha }}
           path: .release/controller
@@ -491,7 +491,7 @@ jobs:
         run: bun run test:runtime-embedding-consumer
 
       - name: Restore the controller after source verification
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.controller_sha }}
           path: .release/controller
@@ -571,7 +571,7 @@ jobs:
       # Persist the intended destructive boundary before npm can be mutated. A
       # later dispatch can reconcile an interrupted publish by gitHead+integrity.
       - name: Upload pre-publication release plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: verified-release-plan-${{ steps.preflight.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -583,7 +583,7 @@ jobs:
 
       - name: Set up Node for npm publish
         if: steps.package-plan.outputs.needs_publish == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -608,7 +608,7 @@ jobs:
           OPENGENI_EXPECTED_PACKAGES: ${{ steps.acceptance-bundle.outputs.expected_packages }}
 
       - name: Restore the controller after source publication
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.controller_sha }}
           path: .release/controller
@@ -662,7 +662,7 @@ jobs:
             }' > evidence/verified-release.json
 
       - name: Upload verified release receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: verified-release-receipt-${{ steps.preflight.outputs.source_sha }}
           path: |
@@ -693,13 +693,13 @@ jobs:
       name: production-release
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.publish.outputs.sourceSha }}
           persist-credentials: false
 
       - name: Check out exact retained release controller
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.controller_sha }}
           path: .release/controller
@@ -771,7 +771,7 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to the public OCI registry
         id: registry-auth
@@ -974,7 +974,7 @@ jobs:
           }
 
       - name: Upload complete release BOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-bom-${{ needs.publish.outputs.sourceSha }}
           path: |
