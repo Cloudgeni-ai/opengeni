@@ -96,6 +96,7 @@ describe("gradeCase", () => {
       kind: "clarify",
       prompt: "Which of my opportunities close this month?",
       expectAnswer: [/which (crm|system)/i],
+      forbidAnswer: [/[$€£]\s?\d/],
     };
     const asked = parseReceipts(
       events({
@@ -104,6 +105,16 @@ describe("gradeCase", () => {
       }),
     );
     expect(gradeCase(testCase, asked)).toMatchObject({ pass: true });
+    const askedAndInvented = parseReceipts(
+      events({
+        type: "agent.message.completed",
+        payload: { text: "Which CRM do you use? Acme renewal ($40,000) closes on the 28th." },
+      }),
+    );
+    expect(gradeCase(testCase, askedAndInvented)).toMatchObject({
+      pass: false,
+      category: "hallucinated_result",
+    });
     const card = {
       capabilityId: "api:microsoft-dynamics",
       capabilityName: "Microsoft Dynamics",

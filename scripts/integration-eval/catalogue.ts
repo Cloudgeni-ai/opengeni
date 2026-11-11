@@ -717,6 +717,8 @@ export const CASES: readonly EvalCase[] = [
     expectAnswer: [
       i("which (crm|system|tool|app|platform)|what (crm|system|tool)|hubspot|salesforce|pipedrive"),
     ],
+    // Opportunity names, amounts or close dates would be invented: nothing is connected.
+    forbidAnswer: [i("\\b(closes?|closing) (on )?(\\w+ )?\\d{1,2}(st|nd|rd|th)?\\b"), i("[$€£]\\s?\\d")],
     note: "No system is named: the agent must not pick Dynamics (or any one CRM) by itself.",
   },
 

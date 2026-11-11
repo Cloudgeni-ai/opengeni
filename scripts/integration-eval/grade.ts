@@ -302,6 +302,10 @@ export function gradeCase(
   }
 
   if (testCase.kind === "clarify") {
+    // Asking is right only when nothing was made up while asking.
+    const invented = matchesAny(receipts.finalAnswer, testCase.forbidAnswer);
+    if (invented)
+      return fail("hallucinated_result", [...reasons, `answer invents ${invented}`]);
     // One system's connect card alone means the agent picked for the person.
     const offered = new Set(
       receipts.cards.map((card) => card.integration ?? card.capabilityName ?? card.capabilityId),
