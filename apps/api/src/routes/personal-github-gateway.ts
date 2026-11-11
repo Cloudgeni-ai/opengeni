@@ -29,6 +29,7 @@ import {
   type GitHubGatewayAction,
   type GitHubGatewayRepositoryRef,
 } from "../integrations/github-gateway-requests";
+import { gatewayRequestBodyIdentity } from "../integrations/github-gateway-request-identity";
 import {
   assertCurrentPersonalGitHubConnection,
   authorizePersonalGitHubProviderRequest,
@@ -829,7 +830,7 @@ export async function handlePersonalGitHubGatewayRequest(
           target,
           method,
           path,
-          bodyBytes,
+          gatewayRequestBodyIdentity(method, pathname, bodyBytes, parsedBody),
           bodyStream ? { contentLength, contentType: request.headers.get("content-type") } : null,
         ]),
         reviewArguments: reviewArgumentsFor(method, path, parsedBody ?? null, {
