@@ -5,7 +5,7 @@ import {
   parseNativeIncomingCall,
   type RawNativeCallEvent,
 } from "./call-events";
-import type { NativeCallAdapter } from "./native-call";
+import type { NativeCallAdapter, NativeCallCommand, NativeCallStartRequest } from "./native-call";
 
 type OpenGeniCallNativeModule = {
   configure(includeInRecents: boolean): void;
@@ -14,7 +14,11 @@ type OpenGeniCallNativeModule = {
   endCall(callId: string, failed: boolean): Promise<void>;
   setMuted(callId: string, muted: boolean): Promise<void>;
   setSpeaker(on: boolean): Promise<void>;
-  takePendingStartRequest(): Promise<{ target: string | null } | null>;
+  takePendingStartRequest(): Promise<NativeCallStartRequest | null>;
+  // Voice commands (absent in builds before them).
+  setCallCommands?(commands: NativeCallCommand[]): Promise<void>;
+  /** Android: pin a voice command to the home screen; false where the launcher can't. */
+  pinCallCommand?(command: NativeCallCommand): Promise<boolean>;
   /**
    * Android: whether calls are system calls and agents can ring (absent
    * before them), and whether a ring may show full screen now (absent before
@@ -36,6 +40,17 @@ type OpenGeniCallNativeModule = {
 };
 
 export { parseNativeCallEvent };
+
+/** A command as the native module takes it: plain fields only. */
+function nativeCommand(command: NativeCallCommand): NativeCallCommand {
+  return {
+    id: command.id,
+    workspaceId: command.workspaceId,
+    sessionId: command.sessionId,
+    name: command.name,
+    synonyms: [...(command.synonyms ?? [])],
+  };
+}
 
 /**
  * Calls for Expo hosts, from the native module this package ships (linked by
@@ -82,7 +97,28 @@ export function createExpoCallAdapter(
     endCall: (callId, reason = "ended") => native.endCall(id(callId), reason === "failed"),
     setMuted: (callId, muted) => native.setMuted(id(callId), muted),
     setSpeaker: (on) => native.setSpeaker(on),
-    takePendingStartRequest: () => native.takePendingStartRequest(),
+    takePendingStartRequest: async () => {
+      const pending = await native.takePendingStartRequest();
+      if (!pending) return null;
+      const target = pending.target ?? null;
+      return {
+        target,
+        workspaceId: target ? (pending.workspaceId ?? null) : null,
+        ...(pending.requestId ? { requestId: pending.requestId } : {}),
+      };
+    },
+    ...(native.setCallCommands
+      ? {
+          setCallCommands: (commands: readonly NativeCallCommand[]) =>
+            native.setCallCommands!(commands.map(nativeCommand)),
+        }
+      : {}),
+    ...(!ios && native.pinCallCommand
+      ? {
+          pinCallCommand: (command: NativeCallCommand) =>
+            native.pinCallCommand!(nativeCommand(command)),
+        }
+      : {}),
     incoming:
       canRing && native.getVoipToken && native.takeIncomingCalls && native.endIncomingCall
         ? {

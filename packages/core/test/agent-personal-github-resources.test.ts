@@ -265,11 +265,20 @@ describe("agent-named personal GitHub repositories", () => {
     ]) {
       expect(personalGitHubRepositoryFullNameFromUri(uri)).toBe("Acme/Listed");
     }
+    // Enterprise managed users' logins carry an underscore suffix.
+    for (const uri of [
+      "https://github.com/octocat_acme/tools.git",
+      "git@github.com:octocat_acme/tools.git",
+      "octocat_acme/tools",
+    ]) {
+      expect(personalGitHubRepositoryFullNameFromUri(uri)).toBe("octocat_acme/tools");
+    }
     for (const uri of [
       "https://gitlab.com/acme/listed",
       "https://github.com/acme",
       "https://github.com/acme/listed/tree/main",
       "https://user:pw@github.com/acme/listed",
+      "https://github.com/_octocat/tools",
     ]) {
       expect(personalGitHubRepositoryFullNameFromUri(uri)).toBeNull();
     }

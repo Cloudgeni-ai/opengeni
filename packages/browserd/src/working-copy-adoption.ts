@@ -18,6 +18,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { BROWSER_CACHE_DIRECTORY } from "./browser-cache";
 import type {
   BrowserWorkingCopyAdoption,
   BrowserWorkingRuntimeAuthority,
@@ -171,6 +172,8 @@ const BROWSER_JOURNALS = [
  *   merely reading a journal rewrites it, so it is derived, not state;
  * - the per-launch launcher directory `chrome-launch` (scripts and FIFOs),
  *   which the controller recreates for every launch and reaps on startup.
+ * - the browser's cache directory `browser-cache` (HTTP and code caches),
+ *   which the controller removes whenever the browser stops.
  * Any other entry, including a user file or folder whose name merely ends in
  * "-shm" or sits elsewhere, is part of the copy. Excluded paths are reported
  * with the manifest. */
@@ -185,7 +188,10 @@ function excludedEntry(
 ): boolean {
   if (metadata.isSymbolicLink()) return false;
   if (EXCLUDED_JOURNAL_INDEXES.has(relativePath)) return metadata.isFile();
-  return relativePath === LAUNCHER_DIRECTORY && metadata.isDirectory();
+  return (
+    (relativePath === LAUNCHER_DIRECTORY || relativePath === BROWSER_CACHE_DIRECTORY) &&
+    metadata.isDirectory()
+  );
 }
 
 type ManifestLine = [path: string, kind: string, mode: number, size: number, content: string];

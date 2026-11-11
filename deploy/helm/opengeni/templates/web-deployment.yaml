@@ -105,6 +105,12 @@ spec:
               value: /var/run/secrets/opengeni-demo
             {{- end }}
             {{- end }}
+            {{- if .Values.api.enabled }}
+            # The console's Content-Security-Policy sources come from this
+            # deployment's own API (apps/web/src/csp.ts).
+            - name: OPENGENI_WEB_CONTENT_SECURITY_API_URL
+              value: {{ printf "http://%s-api:%d" (include "opengeni.fullname" .) (.Values.api.service.port | int) | quote }}
+            {{- end }}
             {{- if $previousAssetImages }}
             - name: OPENGENI_WEB_PREVIOUS_ASSET_ROOTS
               value: {{ join "," $previousAssetRoots | quote }}

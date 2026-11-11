@@ -15,6 +15,8 @@ export type TeamsBotStatus = {
 };
 
 export type TeamsMicrosoftSignInStart = { authorizationUrl: string | null };
+/** The Microsoft sign-in that proves the Teams user an account link names. */
+export type TeamsLinkSignInStart = { authorizationUrl: string };
 /** The `code` and `state` Microsoft returned to the setup page. */
 export type TeamsMicrosoftSignInResult = { code: string; state: string };
 /**
@@ -36,9 +38,11 @@ export function teamsApi(client: Pick<OpenGeniClient, "requestJson">, workspaceI
         signal ? { signal } : {},
       ),
     /**
-     * Starts the Microsoft sign-in that proves a tenant administrator for
-     * self-serve setup. `authorizationUrl` is null when the operator has
-     * already approved this Teams identity, so `installBot` needs no sign-in.
+     * Starts the Microsoft sign-in that setup needs: as a tenant administrator
+     * for self-serve setup, or as the Teams user the setup link names when the
+     * operator approved them. Servers before that requirement return a null
+     * `authorizationUrl` for an approved installer, so `installBot` needs no
+     * sign-in there.
      */
     startMicrosoftSignIn: (setupToken: string) =>
       client.requestJson<TeamsMicrosoftSignInStart>("POST", `${base}/bot/microsoft-sign-in`, {
@@ -55,8 +59,20 @@ export function teamsApi(client: Pick<OpenGeniClient, "requestJson">, workspaceI
         ...(options.replaceOwnLink ? { replaceOwnLink: true } : {}),
       }),
     disconnectBot: () => client.requestJson<{ ok: true }>("DELETE", `${base}/bot`),
-    linkAccount: (token: string) =>
-      client.requestJson<{ ok: true }>("POST", `${base}/link`, { token }),
+    /**
+     * Starts the Microsoft sign-in that proves the person opening an account
+     * link is the Teams user it names. Microsoft returns to the setup page.
+     */
+    startLinkSignIn: (token: string) =>
+      client.requestJson<TeamsLinkSignInStart>("POST", `${base}/link/microsoft-sign-in`, {
+        token,
+      }),
+    /** Links the account once `microsoft` proves the Teams user the link names. */
+    linkAccount: (token: string, microsoft?: TeamsMicrosoftSignInResult) =>
+      client.requestJson<{ ok: true }>("POST", `${base}/link`, {
+        token,
+        ...(microsoft ? { microsoft } : {}),
+      }),
     unlinkAccount: () => client.requestJson<{ ok: true }>("DELETE", `${base}/link`),
   };
 }

@@ -342,6 +342,17 @@ describe("native call events and models", () => {
     expect(parseNativeCallEvent({ type: "startRequested" })).toEqual({
       type: "startRequested",
       target: null,
+      workspaceId: null,
+    });
+    // A voice command names the chat's workspace with its session.
+    expect(
+      parseNativeCallEvent({ type: "startRequested", target: "s1", workspaceId: "w2" }),
+    ).toEqual({ type: "startRequested", target: "s1", workspaceId: "w2" });
+    // A workspace without a session is no target.
+    expect(parseNativeCallEvent({ type: "startRequested", workspaceId: "w2" })).toEqual({
+      type: "startRequested",
+      target: null,
+      workspaceId: null,
     });
     expect(parseNativeCallEvent({ type: "mystery" })).toBeNull();
   });

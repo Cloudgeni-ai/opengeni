@@ -40,7 +40,16 @@ const rejection = (at = "messages.7.content.0") => ({
     message: `${at}: Invalid \`signature\` in \`thinking\` block. The block is bound to a different conversation. Remove the block, or set \`thinking.block_binding.prefix_mismatch_behavior\` to "drop_block" (requires anthropic-beta thinking-binding-controls-2026-08-01). The \`system\` prompt differs from the one this block was created with.`,
   },
 });
-const HISTORICAL = "[Historical reasoning from another model]\\n";
+/**
+ * Claude's own thinking that cannot go back natively is left out, never resent
+ * as readable assistant text: shown back to Claude that way it can trip
+ * Claude's safety systems, which refuse the request and every retry.
+ */
+function expectOmitted(messages: unknown, thought: string) {
+  const sent = JSON.stringify(messages);
+  expect(sent).not.toContain(thought);
+  expect(sent).not.toContain("Historical reasoning");
+}
 
 const SKILLS = "Opengeni instructions.\n\n## Skills\n- documents\n\n## Repository skills\n";
 const BASE_SYSTEM = `${SKILLS}- {"id":"repository:.agents/skills/release/SKILL.md"}`;
@@ -252,7 +261,7 @@ type Leg = { endpoint: Endpoint; model: string; system: string };
 beforeEach(() => clearRefusedOpaqueReasoning());
 
 describe("Claude to Claude: every switch a chat can make", () => {
-  const rows: Array<[string, Leg, Leg, "native" | "readable"]> = [];
+  const rows: Array<[string, Leg, Leg, "native" | "omitted"]> = [];
   for (const [name, endpoint] of Object.entries(ENDPOINTS)) {
     const same = { endpoint, model: "claude-opus-5-5", system: BASE_SYSTEM };
     rows.push(
@@ -261,15 +270,15 @@ describe("Claude to Claude: every switch a chat can make", () => {
         `${name}: a repository Skill added mid-chat changes the system prompt (ae0245f3)`,
         same,
         { ...same, system: WITH_NEW_SKILL },
-        "readable",
+        "omitted",
       ],
       [
         `${name}: a restored sandbox changes the Repository skills section`,
         { ...same, system: WORKSPACE_UNREACHABLE },
         same,
-        "readable",
+        "omitted",
       ],
-      [`${name}: a model switch`, { ...same, model: "claude-sonnet-5-5" }, same, "readable"],
+      [`${name}: a model switch`, { ...same, model: "claude-sonnet-5-5" }, same, "omitted"],
     );
   }
   const opus55 = (endpoint: Endpoint, system = BASE_SYSTEM) => ({
@@ -278,20 +287,20 @@ describe("Claude to Claude: every switch a chat can make", () => {
     system,
   });
   rows.push(
-    ["account switch: another API key", opus55(API), opus55(API_OTHER_KEY), "readable"],
+    ["account switch: another API key", opus55(API), opus55(API_OTHER_KEY), "omitted"],
     [
       "account switch: Claude subscription to API key",
       opus55(SUBSCRIPTION),
       opus55(API),
-      "readable",
+      "omitted",
     ],
     [
       "account switch: API key to Claude subscription",
       opus55(API),
       opus55(SUBSCRIPTION),
-      "readable",
+      "omitted",
     ],
-    ["transport switch: Anthropic API to a gateway", opus55(API), opus55(GATEWAY), "readable"],
+    ["transport switch: Anthropic API to a gateway", opus55(API), opus55(GATEWAY), "omitted"],
     [
       "a model whose thinking is not prefix-bound keeps it across a system prompt change",
       { endpoint: API, model: "claude-opus-4-6", system: BASE_SYSTEM },
@@ -327,7 +336,9 @@ describe("Claude to Claude: every switch a chat can make", () => {
         } else {
           expect(thinkingBlocks(body)).toEqual([]);
           expect(JSON.stringify(body)).not.toContain(block.signature);
-          expect(JSON.stringify(body.messages)).toContain(`${HISTORICAL}Reasoning 1.`);
+          expectOmitted(body.messages, `Reasoning 1.`);
+          // Only the thinking is left out; the earlier reply itself goes back.
+          expect(JSON.stringify(body.messages)).toContain("Answer 1.");
         }
         // Nothing reaches the wire that the provider did not issue.
         expect(JSON.stringify(body)).not.toContain("opengeni.artifact_origin");
@@ -361,7 +372,7 @@ describe("Claude to Claude: every switch a chat can make", () => {
 describe("history stored before bindings were recorded (the exact ae0245f3 state)", () => {
   for (const streamed of [false, true])
     for (const [name, endpoint] of Object.entries(ENDPOINTS))
-      test(`${name}: one refusal, one retry with the stale thinking as text, then straight through (stream=${streamed})`, async () => {
+      test(`${name}: one refusal, one retry without the stale thinking, then straight through (stream=${streamed})`, async () => {
         const platform = claudePlatform({ streamed });
         const provider = claudeProvider(endpoint);
         const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
@@ -396,9 +407,7 @@ describe("history stored before bindings were recorded (the exact ae0245f3 state
         const retry = platform.sent[1]!.body;
         expect(thinkingBlocks(retry)).toEqual([]);
         expect(JSON.stringify(retry)).not.toContain(stale.signature);
-        expect(JSON.stringify(retry.messages)).toContain(
-          `${HISTORICAL}The delete action belongs in the agent tools.`,
-        );
+        expectOmitted(retry.messages, `The delete action belongs in the agent tools.`);
         expect(JSON.stringify(history)).toBe(canonical);
 
         // The next turn goes straight through; the thinking issued since stays native.
@@ -507,7 +516,7 @@ describe("the fallback chain always ends in a successful request", () => {
       const output = await run(model, request(history, BASE_SYSTEM), streamed);
 
       expect(JSON.stringify(output)).toContain("Answer 1.");
-      // Refused natively, refused with the named and unbound blocks as text,
+      // Refused natively, refused with the named and unbound blocks left out,
       // then accepted with no opaque state at all.
       expect(platform.sent.map(({ refused }) => refused)).toEqual([true, true, false]);
       expect(thinkingBlocks(platform.sent[1]!.body).map((block) => block.signature)).toEqual([
@@ -518,10 +527,10 @@ describe("the fallback chain always ends in a successful request", () => {
       expect(thinkingBlocks(plain)).toEqual([]);
       expect(JSON.stringify(plain)).not.toContain("signature");
       for (const thought of ["Bound one.", "Bound two.", "Stored before bindings."])
-        expect(JSON.stringify(plain.messages)).toContain(`${HISTORICAL}${thought}`);
+        expectOmitted(plain.messages, `${thought}`);
     });
 
-  test("a refusal converts the block it names and every signed block after it", async () => {
+  test("a refusal leaves out the block it names and every signed block after it", async () => {
     const platform = claudePlatform({ streamed: false, refusesAllThinking: true });
     const provider = claudeProvider(API);
     const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
@@ -546,11 +555,42 @@ describe("the fallback chain always ends in a successful request", () => {
     ];
     await model.getResponse(request(history, BASE_SYSTEM));
     // The refusal names the first block; the second was signed with it native
-    // before it, so one retry with both as text succeeds.
+    // before it, so one retry with both left out succeeds.
     expect(platform.sent.map(({ refused }) => refused)).toEqual([true, false]);
     expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([]);
     for (const thought of ["Bound one.", "Bound two."])
-      expect(JSON.stringify(platform.sent[1]!.body.messages)).toContain(`${HISTORICAL}${thought}`);
+      expectOmitted(platform.sent[1]!.body.messages, `${thought}`);
+  });
+
+  test("an earlier reply that held only thinking leaves no empty message behind", async () => {
+    const platform = claudePlatform({ streamed: false });
+    const provider = claudeProvider(API);
+    const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
+    // Issued under the earlier system prompt; the next turn lists a new Skill.
+    const earlierScope = claudeReplayScope(
+      { systemInstructions: BASE_SYSTEM },
+      "claude-opus-5-5",
+      provider,
+    );
+    const history = [
+      user("One"),
+      signedReasoning("Only a thought.", "bound-1", earlierScope),
+      user("Two"),
+    ];
+    await model.getResponse(request(history, WITH_NEW_SKILL));
+    expect(platform.sent.map(({ refused }) => refused)).toEqual([false]);
+    const { messages } = platform.sent[0]!.body;
+    expectOmitted(messages, "Only a thought.");
+    // The two person messages it separated go back as one turn, as Claude joins them.
+    expect(messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "One" },
+          expect.objectContaining({ type: "text", text: "Two" }),
+        ],
+      },
+    ]);
   });
 
   test("operators see each fallback; the person sees nothing", async () => {
@@ -576,7 +616,7 @@ describe("the fallback chain always ends in a successful request", () => {
       JSON.stringify([{ ...visible[0], content: [{ type: "output_text", text: "Answer 1." }] }]),
     );
 
-    // Remembered: the next request replays it as text straight away, which is
+    // Remembered: the next request leaves it out straight away, which is
     // the steady-state projection, not a fallback, so nothing is recorded.
     const next = await model.getResponse(request(history, BASE_SYSTEM));
     expect(platform.sent).toHaveLength(3);
@@ -642,15 +682,13 @@ describe("the fallback chain always ends in a successful request", () => {
       // On the next turn it is earlier history and follows the binding check:
       // the first block was issued under the title directive, and the turn's
       // later thinking was signed with it native before it, so both go back
-      // as text rather than under a prefix Claude never signed.
+      // left out rather than under a prefix Claude never signed.
       const next = [...loop, ...persisted(second), user("Next.")];
       await run(model, { ...request(next, BASE_SYSTEM), tools }, streamed);
       expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false, false]);
       expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([]);
       for (const thought of ["Reasoning 1.", "Reasoning 2."])
-        expect(JSON.stringify(platform.sent[2]!.body.messages)).toContain(
-          `${HISTORICAL}${thought}`,
-        );
+        expectOmitted(platform.sent[2]!.body.messages, `${thought}`);
     });
 
   for (const streamed of [false, true])
@@ -676,9 +714,7 @@ describe("the fallback chain always ends in a successful request", () => {
       expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([reasoningBlock(first)]);
       expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([]);
       for (const thought of ["Reasoning 1.", "Reasoning 2."])
-        expect(JSON.stringify(platform.sent[2]!.body.messages)).toContain(
-          `${HISTORICAL}${thought}`,
-        );
+        expectOmitted(platform.sent[2]!.body.messages, `${thought}`);
     });
 
   test("redacted thinking stored before bindings follows the same chain", async () => {

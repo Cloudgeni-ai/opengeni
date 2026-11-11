@@ -25,7 +25,8 @@
     "./mcp": "./src/mcp.ts",
     "./screenshot": "./src/screenshot.ts",
     "./mcp-elicitation-server": "./src/mcp-elicitation-server.ts",
-    "./mcp-events-server": "./src/mcp-events-server.ts"
+    "./mcp-events-server": "./src/mcp-events-server.ts",
+    "./quarantine": "./src/quarantine.ts"
   },
   "scripts": {
     "typecheck": "tsrs --noEmit"

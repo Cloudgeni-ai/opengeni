@@ -109,6 +109,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Event::ImageSized { image, length } => self.image_sized(image, length),
             Event::ImageFetched { image, result } => self.fetch_ended(image, &result),
             Event::ReliefMeasured(measured) => self.relief_measured(*measured),
+            Event::DisksMeasured(measured) => self.disks_measured(*measured),
             Event::CacheGone { cache, removed } => self.cache_gone(cache, removed),
             Event::Claimed {
                 id,
