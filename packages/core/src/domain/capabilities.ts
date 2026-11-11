@@ -26,14 +26,8 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
-import {
-  legacyMcpClientError,
-  withMcpStreamableHttpClient,
-} from "./mcp-streamable-http-client";
-import {
-  storeMcpServerLogo,
-  type McpServerLogoStorage,
-} from "./mcp-server-logo";
+import { legacyMcpClientError, withMcpStreamableHttpClient } from "./mcp-streamable-http-client";
+import { storeMcpServerLogo, type McpServerLogoStorage } from "./mcp-server-logo";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
@@ -114,14 +108,8 @@ import {
 
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listOwnConnectionMetadata } from "./personal-connection-delegations";
-import {
-  isOnePasswordConnection,
-  onePasswordConnectionMetadata,
-} from "./vaults/provider-registry";
-import {
-  listSkillLibraryEntries,
-  type SkillLibraryEntry,
-} from "@opengeni/runtime/skill-library";
+import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
+import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -151,8 +139,7 @@ export async function buildCapabilityCatalog(input: {
   const reads = [
     () => listCapabilityCatalogItems(input.db, input.workspaceId),
     () => listCapabilityInstallations(input.db, input.workspaceId),
-    () =>
-      listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
+    () => listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
     () => listConnectionsMetadata(input.db, input.workspaceId, null),
     () => discoverCuratedSkillLibraryItems(),
     () => listInstalledSkills(input.db, input.workspaceId),
@@ -165,8 +152,7 @@ export async function buildCapabilityCatalog(input: {
           )
         : Promise.resolve(null),
     () => listEnabledMcpCapabilityServers(input.db, input.workspaceId),
-    () =>
-      listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId),
+    () => listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId),
   ] as const;
   const [
     persistedItems,
@@ -201,20 +187,13 @@ export async function buildCapabilityCatalog(input: {
         reads[7](),
         reads[8](),
       ]);
-  const runnableCapabilityIds = new Set(
-    runnableMcpServers.map((server) => server.capabilityId),
-  );
-  const operatorOAuthClientConfigured = operatorOAuthClientResolver(
-    input.settings,
-  );
+  const runnableCapabilityIds = new Set(runnableMcpServers.map((server) => server.capabilityId));
+  const operatorOAuthClientConfigured = operatorOAuthClientResolver(input.settings);
   const catalogInstallations = capabilityInstallations.filter(
     (installation) => installation.kind === "mcp",
   );
   const capabilityInstallationById = new Map(
-    catalogInstallations.map((installation) => [
-      installation.capabilityId,
-      installation,
-    ]),
+    catalogInstallations.map((installation) => [installation.capabilityId, installation]),
   );
   const installedSkillById = new Map(
     installedSkills
@@ -232,8 +211,7 @@ export async function buildCapabilityCatalog(input: {
     ...installedSkills
       .filter(
         (skill) =>
-          skill.source !== "library" &&
-          skill.owners.some((owner) => owner.kind === "direct"),
+          skill.source !== "library" && skill.owners.some((owner) => owner.kind === "direct"),
       )
       .map(installedSkillCatalogItem),
   ];
@@ -256,10 +234,7 @@ export async function buildCapabilityCatalog(input: {
     const projected =
       item.kind === "skill"
         ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
-        : applyCapabilityEnablement(
-            item,
-            capabilityInstallationById.get(item.id),
-          );
+        : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id));
     // An installed connector can become unrunnable after a lifecycle or
     // ownership change. Use the execution registry rather than presenting
     // its stale catalog definition as a selectable tool.
@@ -274,17 +249,13 @@ export async function buildCapabilityCatalog(input: {
             runtime: {
               ...projected.runtime,
               available: false,
-              notes:
-                "This installed connection is unavailable. Review its connection settings.",
+              notes: "This installed connection is unavailable. Review its connection settings.",
             },
           }
         : projected;
     return applyCapabilityLifecycle(
       applyGoogleConnectorSetupAvailability(
-        applyOperatorOAuthClientRequirement(
-          runtimeProjected,
-          operatorOAuthClientConfigured,
-        ),
+        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
         input.settings,
       ),
     );
@@ -307,9 +278,9 @@ export async function buildCapabilityCatalog(input: {
     : [];
   return {
     items: carried.length
-      ? (
-          await withPersonalWorkspaceCarriedItems(input.db, items, carried)
-        ).sort(compareCatalogItems)
+      ? (await withPersonalWorkspaceCarriedItems(input.db, items, carried)).sort(
+          compareCatalogItems,
+        )
       : items,
     installations: catalogInstallations,
   };
@@ -338,12 +309,9 @@ function withOrganizationConnectorItems(
   const result = [...items];
   for (const connector of input.connectors) {
     const installation = input.installations.get(connector.capabilityId);
-    const turnedOff =
-      !!installation && isOrganizationConnectorOverride(installation);
+    const turnedOff = !!installation && isOrganizationConnectorOverride(installation);
     if (installation && !turnedOff) continue;
-    const index = result.findIndex(
-      (item) => item.id === connector.capabilityId,
-    );
+    const index = result.findIndex((item) => item.id === connector.capabilityId);
     const base = connector.customDefinition
       ? organizationConnectorCatalogItem(connector, input.workspaceId)
       : index >= 0
@@ -360,11 +328,8 @@ function withOrganizationConnectorItems(
         source: connector.customDefinition ? "custom" : "catalog",
       },
     };
-    const ready =
-      !turnedOff && input.runnableCapabilityIds.has(connector.capabilityId);
-    const connectionRef = ready
-      ? installationConnectionRef(connector.config)
-      : null;
+    const ready = !turnedOff && input.runnableCapabilityIds.has(connector.capabilityId);
+    const connectionRef = ready ? installationConnectionRef(connector.config) : null;
     const detail = turnedOff
       ? "From your organization. Turned off in this workspace."
       : ready
@@ -374,35 +339,17 @@ function withOrganizationConnectorItems(
         : "Your organization's setup of this connector is unavailable. Ask an organization admin to review it.";
     const projected: CapabilityCatalogItem = {
       ...base,
-      authKind:
-        base.authKind ?? (connectionRef?.kind === "oauth2" ? "oauth2" : null),
+      authKind: base.authKind ?? (connectionRef?.kind === "oauth2" ? "oauth2" : null),
       enabled: ready,
       enabledReason: ready ? detail : null,
       connectionRef,
       runtime:
-        ready || turnedOff
-          ? base.runtime
-          : { ...base.runtime, available: false, notes: detail },
+        ready || turnedOff ? base.runtime : { ...base.runtime, available: false, notes: detail },
       lifecycle: turnedOff
-        ? {
-            status: "available",
-            readiness: "setup_required",
-            detail,
-            managedBy: "organization",
-          }
+        ? { status: "available", readiness: "setup_required", detail, managedBy: "organization" }
         : ready
-          ? {
-              status: "ready",
-              readiness: "ready",
-              detail,
-              managedBy: "organization",
-            }
-          : {
-              status: "unavailable",
-              readiness: "unavailable",
-              detail,
-              managedBy: "organization",
-            },
+          ? { status: "ready", readiness: "ready", detail, managedBy: "organization" }
+          : { status: "unavailable", readiness: "unavailable", detail, managedBy: "organization" },
       actions: turnedOff ? ["connect", "inspect"] : ["disconnect", "inspect"],
       metadata,
     };
@@ -447,12 +394,7 @@ async function withPersonalWorkspaceCarriedItems(
         subjectScope: "subject",
       },
       runtime: { ...item.runtime, available: true, mcpServerId: server.id },
-      lifecycle: {
-        status: "ready",
-        readiness: "ready",
-        detail,
-        managedBy: "workspace",
-      },
+      lifecycle: { status: "ready", readiness: "ready", detail, managedBy: "workspace" },
       actions: ["inspect"],
       metadata: {
         ...item.metadata,
@@ -475,20 +417,15 @@ async function withPersonalWorkspaceCarriedItems(
  * fact, so the catalog projects it rather than every surface guessing. The
  * matcher is the one the OAuth start uses to find an operator client.
  */
-function operatorOAuthClientResolver(
-  settings: Settings,
-): (issuer: string) => boolean {
+function operatorOAuthClientResolver(settings: Settings): (issuer: string) => boolean {
   let configured: ReturnType<typeof parseIntegrationsOauthClientsJson> = {};
   try {
-    configured = parseIntegrationsOauthClientsJson(
-      settings.integrationsOauthClientsJson,
-    );
+    configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   } catch {
     // Startup validates this setting; a malformed value can configure nothing.
   }
   return (issuer) =>
-    (issuer !== "https://accounts.google.com" ||
-      settings.googleConnectorSetupEnabled) &&
+    (issuer !== "https://accounts.google.com" || settings.googleConnectorSetupEnabled) &&
     findIntegrationsOauthClient(configured, [issuer]) !== null;
 }
 
@@ -526,9 +463,7 @@ export function applyOperatorOAuthClientRequirement(
   if (item.kind !== "mcp") return item;
   const requirement = item.metadata.oauthClientRequirement;
   const issuer =
-    requirement &&
-    typeof requirement === "object" &&
-    !Array.isArray(requirement)
+    requirement && typeof requirement === "object" && !Array.isArray(requirement)
       ? (requirement as Record<string, unknown>).issuer
       : undefined;
   if (typeof issuer !== "string" || !issuer) return item;
@@ -538,10 +473,7 @@ export function applyOperatorOAuthClientRequirement(
   if (isConfigured || item.enabled) {
     return {
       ...item,
-      runtime: {
-        ...item.runtime,
-        operatorOAuthClient: { configured: isConfigured },
-      },
+      runtime: { ...item.runtime, operatorOAuthClient: { configured: isConfigured } },
     };
   }
   return {
@@ -573,14 +505,12 @@ export async function createCatalogItem(input: {
 
   if (id.startsWith("skill:")) {
     throw new HTTPException(422, {
-      message:
-        "Skills are installed through the Skill library or source import flow",
+      message: "Skills are installed through the Skill library or source import flow",
     });
   }
   if (id.startsWith("api:")) {
     throw new HTTPException(422, {
-      message:
-        "API Integrations are installed from typed Integration Definitions",
+      message: "API Integrations are installed from typed Integration Definitions",
     });
   }
   if (id.startsWith("plugin:")) {
@@ -610,9 +540,7 @@ export async function createCatalogItem(input: {
       input.payload.metadata.mcpServerId !== undefined &&
       input.payload.metadata.mcpServerId !== mcpServerIdForCapability(id, {})
     )
-      throw new HTTPException(403, {
-        message: "Only an admin can choose a server's tool ID",
-      });
+      throw new HTTPException(403, { message: "Only an admin can choose a server's tool ID" });
     await requireMemberIntegrationSetupAllowed(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -625,13 +553,9 @@ export async function createCatalogItem(input: {
     const existing =
       catalog.items.find((candidate) => candidate.id === id) ??
       (await getCapabilityCatalogItem(input.db, input.workspaceId, id));
-    if (
-      existing &&
-      !sameMemberCatalogEntry(existing, input.workspaceId, input.payload)
-    )
+    if (existing && !sameMemberCatalogEntry(existing, input.workspaceId, input.payload))
       throw new HTTPException(409, {
-        message:
-          "A connection with this ID already exists. Only an admin can change it.",
+        message: "A connection with this ID already exists. Only an admin can change it.",
       });
     if (existing) return existing;
     // Nor may the new server take the tool ID another connection runs under.
@@ -641,16 +565,12 @@ export async function createCatalogItem(input: {
         (candidate) =>
           candidate.kind === "mcp" &&
           candidate.id !== id &&
-          mcpServerIdForCapability(candidate.id, candidate.metadata) ===
-            serverId,
+          mcpServerIdForCapability(candidate.id, candidate.metadata) === serverId,
       ) ||
-      input.memberCreate.settings.mcpServers.some(
-        (server) => server.id === serverId,
-      )
+      input.memberCreate.settings.mcpServers.some((server) => server.id === serverId)
     )
       throw new HTTPException(409, {
-        message:
-          "A connection with this ID already exists. Only an admin can change it.",
+        message: "A connection with this ID already exists. Only an admin can change it.",
       });
   }
   const metadata = {
@@ -679,13 +599,9 @@ export async function createCatalogItem(input: {
     ...(input.memberCreate ? { createOnly: true } : {}),
   });
   // Another request created this id first: a member never rewrites it.
-  if (
-    input.memberCreate &&
-    !sameMemberCatalogEntry(saved, input.workspaceId, input.payload)
-  )
+  if (input.memberCreate && !sameMemberCatalogEntry(saved, input.workspaceId, input.payload))
     throw new HTTPException(409, {
-      message:
-        "A connection with this ID already exists. Only an admin can change it.",
+      message: "A connection with this ID already exists. Only an admin can change it.",
     });
   return saved;
 }
@@ -747,13 +663,10 @@ export async function enableCapability(
 }
 
 /** Personal and member setup never turn back on what an admin turned off. */
-function assertSetupLeftInstallationOn(
-  installation: CapabilityInstallation,
-): void {
+function assertSetupLeftInstallationOn(installation: CapabilityInstallation): void {
   if (installation.status !== "active")
     throw new HTTPException(409, {
-      message:
-        "An admin turned this integration off; ask them to turn it back on",
+      message: "An admin turned this integration off; ask them to turn it back on",
     });
 }
 
@@ -795,9 +708,7 @@ function assertPersonalIntegrationSetupRequest(
  * admins. An explicit `requireApproval` overrides the catalog's recommendation,
  * so only asking for every tool (which can never widen it) is accepted.
  */
-function assertMemberIntegrationSetupRequest(
-  payload: EnableCapabilityRequest,
-): void {
+function assertMemberIntegrationSetupRequest(payload: EnableCapabilityRequest): void {
   if (
     Object.hasOwn(payload.config ?? {}, "requireApproval") &&
     payload.config.requireApproval !== true
@@ -811,9 +722,7 @@ function assertMemberIntegrationSetupRequest(
  * Personal and member setup both need the organization to let members turn on
  * integrations (`personalIntegrationSetup: "members"`, the default).
  */
-export function assertMemberIntegrationSetupAllowed(
-  policy: OrganizationIntegrationPolicy,
-): void {
+export function assertMemberIntegrationSetupAllowed(policy: OrganizationIntegrationPolicy): void {
   if (policy.personalIntegrationSetup !== "members")
     throw new HTTPException(403, {
       message: "Your organization lets only admins turn on integrations",
@@ -853,8 +762,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   }
   if (item.kind === "api") {
     throw new HTTPException(409, {
-      message:
-        "Install API Integrations through the Integration Definitions flow",
+      message: "Install API Integrations through the Integration Definitions flow",
     });
   }
   if (item.kind === "plugin") {
@@ -865,8 +773,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
 
   if (item.kind === "mcp" && !item.runtime.available) {
     throw new HTTPException(422, {
-      message:
-        "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
+      message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
     });
   }
   if (input.personalSetup) {
@@ -895,8 +802,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
         Object.keys(input.payload.headers ?? {}).length > 0)
     ) {
       throw new HTTPException(422, {
-        message:
-          "Google connector requires a personal-owned connection reference",
+        message: "Google connector requires a personal-owned connection reference",
       });
     }
     // This generic, potentially workspace-authored catalog is not proof of a
@@ -905,8 +811,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       input.db,
       input,
       async (tx, policy) => {
-        if (input.personalSetup || input.memberSetup)
-          assertMemberIntegrationSetupAllowed(policy);
+        if (input.personalSetup || input.memberSetup) assertMemberIntegrationSetupAllowed(policy);
         const existing = await unchangedMcpInstallation(
           { ...input, db: tx },
           item,
@@ -928,12 +833,10 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
             );
             if (!current || !isDeepStrictEqual(current, unchanged)) {
               throw new HTTPException(409, {
-                message:
-                  "Capability installation changed; reload before reconciling",
+                message: "Capability installation changed; reload before reconciling",
               });
             }
-            if (input.personalSetup || input.memberSetup)
-              assertSetupLeftInstallationOn(current);
+            if (input.personalSetup || input.memberSetup) assertSetupLeftInstallationOn(current);
             return current;
           }),
       };
@@ -942,11 +845,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       ? null
       : await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
-      ? await validateMcpCapabilityConnectionRef(
-          input,
-          item,
-          input.payload.connectionRef,
-        )
+      ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
     // An Opengeni API key reads its organization: EU-only content stays in
@@ -956,8 +855,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       url: item.endpointUrl,
       headers,
     });
-    if (input.verifiedConnection)
-      await validateVerifiedMcpConnection(input, item);
+    if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
     let serverInfo: unknown;
     installationMetadata = {
       ...installationMetadata,
@@ -975,21 +873,14 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
               },
             )),
     };
-    mcpServerLogoAssetPath = await workspaceMcpServerLogo(
-      input,
-      item,
-      serverInfo,
-    );
+    mcpServerLogoAssetPath = await workspaceMcpServerLogo(input, item, serverInfo);
     if (connectionRef) {
       installationConfig.connectionRef = connectionRef;
     }
     if (headers) {
       const key = requireCapabilityHeaderEncryption(input.settings);
       installationConfig.headersEncrypted = Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [
-          name,
-          encryptEnvironmentValue(key, value),
-        ]),
+        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(key, value)]),
       );
     }
   }
@@ -1004,10 +895,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     // Whoever turns it on or changes it; a member removes only their own.
     installedBySubjectId: input.grant.subjectId,
   };
-  const withServerLogo = async (
-    tx: Database,
-    enabled: CapabilityInstallation,
-  ) => {
+  const withServerLogo = async (tx: Database, enabled: CapabilityInstallation) => {
     if (mcpServerLogoAssetPath)
       await setWorkspaceCapabilityCatalogItemLogo(tx, {
         accountId: input.accountId,
@@ -1020,39 +908,21 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   return {
     commit: (db: Database) =>
       item.kind === "mcp" && (input.personalSetup || input.memberSetup)
-        ? withOrganizationIntegrationPolicyFence(
-            db,
-            installation,
-            async (tx, policy) => {
-              assertMemberIntegrationSetupAllowed(policy);
-              assertOrganizationIntegrationAllowed(policy, "custom:mcp");
+        ? withOrganizationIntegrationPolicyFence(db, installation, async (tx, policy) => {
+            assertMemberIntegrationSetupAllowed(policy);
+            assertOrganizationIntegrationAllowed(policy, "custom:mcp");
+            if (input.verifiedConnection)
+              await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+            const enabled = await enableCapabilityInstallation(tx, installation);
+            assertSetupLeftInstallationOn(enabled);
+            return withServerLogo(tx, enabled);
+          })
+        : item.kind === "mcp"
+          ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
               if (input.verifiedConnection)
                 await validateVerifiedMcpConnection({ ...input, db: tx }, item);
-              const enabled = await enableCapabilityInstallation(
-                tx,
-                installation,
-              );
-              assertSetupLeftInstallationOn(enabled);
-              return withServerLogo(tx, enabled);
-            },
-          )
-        : item.kind === "mcp"
-          ? withOrganizationIntegrationAcquisition(
-              db,
-              installation,
-              ["custom:mcp"],
-              async (tx) => {
-                if (input.verifiedConnection)
-                  await validateVerifiedMcpConnection(
-                    { ...input, db: tx },
-                    item,
-                  );
-                return withServerLogo(
-                  tx,
-                  await enableCapabilityInstallation(tx, installation),
-                );
-              },
-            )
+              return withServerLogo(tx, await enableCapabilityInstallation(tx, installation));
+            })
           : enableCapabilityInstallation(db, installation),
   };
 }
@@ -1083,15 +953,10 @@ export function mcpEndpointRequiresPersonalConnection(
  */
 async function organizationConnectorEnableShortcut(
   input: EnableCapabilityInput,
-): Promise<{
-  commit: (db: Database) => Promise<CapabilityInstallation>;
-} | null> {
+): Promise<{ commit: (db: Database) => Promise<CapabilityInstallation> } | null> {
   if (input.verifiedConnection) return null;
   const connector = (
-    await listOrganizationConnectorsReachingWorkspace(
-      input.db,
-      input.workspaceId,
-    )
+    await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId)
   ).find((candidate) => candidate.capabilityId === input.capabilityId);
   if (!connector) return null;
   const existing = await getCapabilityInstallation(
@@ -1102,10 +967,7 @@ async function organizationConnectorEnableShortcut(
   if (existing && !isOrganizationConnectorOverride(existing)) return null;
   const ownSetup =
     (!!input.payload.connectionRef &&
-      !isOwnSignInToOrganizationConnector(
-        input.payload.connectionRef,
-        connector,
-      )) ||
+      !isOwnSignInToOrganizationConnector(input.payload.connectionRef, connector)) ||
     Object.keys(input.payload.headers ?? {}).length > 0 ||
     Object.keys(input.payload.config ?? {}).length > 0 ||
     Object.keys(input.payload.metadata ?? {}).length > 0;
@@ -1119,8 +981,7 @@ async function organizationConnectorEnableShortcut(
   }
   if (existing && input.personalSetup)
     throw new HTTPException(409, {
-      message:
-        "An admin turned this integration off; ask them to turn it back on",
+      message: "An admin turned this integration off; ask them to turn it back on",
     });
   return {
     commit: async (db: Database) => {
@@ -1156,8 +1017,7 @@ function isOwnSignInToOrganizationConnector(
     !ref.connectionId &&
     ref.authoritySource !== "host" &&
     !ref.selectedResources &&
-    canonicalDomain(ref.providerDomain) ===
-      canonicalDomain(organizationRef.providerDomain)
+    canonicalDomain(ref.providerDomain) === canonicalDomain(organizationRef.providerDomain)
   );
 }
 
@@ -1167,15 +1027,11 @@ function isOwnSignInToOrganizationConnector(
  * catalog logo.
  */
 export async function workspaceMcpServerLogo(
-  input: {
-    settings: Settings;
-    mcpServerLogoStorage?: McpServerLogoStorage | null | undefined;
-  },
+  input: { settings: Settings; mcpServerLogoStorage?: McpServerLogoStorage | null | undefined },
   item: Pick<CapabilityCatalogItem, "source" | "endpointUrl">,
   serverInfo: unknown,
 ): Promise<string | null> {
-  if (item.source !== "manual" || !item.endpointUrl || serverInfo === undefined)
-    return null;
+  if (item.source !== "manual" || !item.endpointUrl || serverInfo === undefined) return null;
   return await storeMcpServerLogo({
     serverInfo,
     endpointUrl: item.endpointUrl,
@@ -1200,9 +1056,7 @@ async function validateVerifiedMcpConnection(
     item.endpointUrl !== proof.endpointUrl ||
     ref.resource !== proof.endpointUrl
   )
-    throw new HTTPException(409, {
-      message: "MCP verification no longer matches the connection",
-    });
+    throw new HTTPException(409, { message: "MCP verification no longer matches the connection" });
   const connection = await getConnectionMetadata(
     input.db,
     input.workspaceId,
@@ -1215,13 +1069,10 @@ async function validateVerifiedMcpConnection(
     connection.status !== "active" ||
     connection.providerDomain !== ref.providerDomain ||
     connection.kind !== ref.kind ||
-    connection.subjectId !==
-      (ref.subjectScope === "subject" ? input.grant.subjectId : null) ||
+    connection.subjectId !== (ref.subjectScope === "subject" ? input.grant.subjectId : null) ||
     connection.metadata.mcpUrl !== proof.endpointUrl
   )
-    throw new HTTPException(409, {
-      message: "MCP connection changed after verification",
-    });
+    throw new HTTPException(409, { message: "MCP connection changed after verification" });
 }
 
 /** A no-effect reconciliation is not a new acquisition. Validate ordinary
@@ -1233,11 +1084,7 @@ async function unchangedMcpInstallation(
   requestedConfig: Record<string, unknown>,
 ): Promise<CapabilityInstallation | null> {
   const connectionRef = input.payload.connectionRef
-    ? await validateMcpCapabilityConnectionRef(
-        input,
-        item,
-        input.payload.connectionRef,
-      )
+    ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
     : null;
   const existing = await withLockedCapabilityInstallation(
     input.db,
@@ -1245,22 +1092,16 @@ async function unchangedMcpInstallation(
     item.id,
     (tx) => getCapabilityInstallation(tx, input.workspaceId, item.id),
   );
-  if (!existing || existing.kind !== "mcp" || existing.status !== "active")
-    return null;
+  if (!existing || existing.kind !== "mcp" || existing.status !== "active") return null;
   const {
     headerNames: _names,
     headersEncrypted: _encrypted,
     headers: _headers,
     ...storedConfig
   } = existing.config;
-  const config = {
-    ...requestedConfig,
-    ...(connectionRef ? { connectionRef } : {}),
-  };
-  const { mcpConnectivity: _storedConnectivity, ...storedMetadata } =
-    existing.metadata;
-  const { mcpConnectivity: _requestedConnectivity, ...requestedMetadata } =
-    input.payload.metadata;
+  const config = { ...requestedConfig, ...(connectionRef ? { connectionRef } : {}) };
+  const { mcpConnectivity: _storedConnectivity, ...storedMetadata } = existing.metadata;
+  const { mcpConnectivity: _requestedConnectivity, ...requestedMetadata } = input.payload.metadata;
   if (
     !isDeepStrictEqual(config, storedConfig) ||
     !isDeepStrictEqual(requestedMetadata, storedMetadata)
@@ -1350,10 +1191,7 @@ export function normalizedMcpCredentialHeaders(
       });
     }
     seen.add(lower);
-    if (
-      value.length === 0 ||
-      value.length > maxMcpCredentialHeaderValueLength
-    ) {
+    if (value.length === 0 || value.length > maxMcpCredentialHeaderValueLength) {
       throw new HTTPException(422, {
         message: `credential header ${name} must be 1-${maxMcpCredentialHeaderValueLength} characters`,
       });
@@ -1371,12 +1209,7 @@ export function normalizedMcpCredentialHeaders(
 }
 
 async function validateMcpCapabilityConnectionRef(
-  input: {
-    db: Database;
-    grant: AccessGrant;
-    workspaceId: string;
-    settings: Settings;
-  },
+  input: { db: Database; grant: AccessGrant; workspaceId: string; settings: Settings },
   item: CapabilityCatalogItem,
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
@@ -1386,9 +1219,7 @@ async function validateMcpCapabilityConnectionRef(
     subjectScope,
     ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
     ...(ref.accountSelection ? { accountSelection: ref.accountSelection } : {}),
-    ...(ref.authoritySource === "host"
-      ? { authoritySource: "host" as const }
-      : {}),
+    ...(ref.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
     ...(ref.provider ? { provider: ref.provider.trim() } : {}),
     ...(ref.kind ? { kind: ref.kind } : {}),
     ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
@@ -1428,8 +1259,7 @@ async function validateMcpCapabilityConnectionRef(
   if (
     !connection &&
     !normalized.connectionId &&
-    (subjectScope === "subject" ||
-      normalized.accountSelection === "all_eligible")
+    (subjectScope === "subject" || normalized.accountSelection === "all_eligible")
   ) {
     const visible = await listConnectionsMetadata(
       input.db,
@@ -1439,8 +1269,7 @@ async function validateMcpCapabilityConnectionRef(
     connection =
       visible.find(
         (candidate) =>
-          candidate.subjectId ===
-            (subjectScope === "subject" ? input.grant.subjectId : null) &&
+          candidate.subjectId === (subjectScope === "subject" ? input.grant.subjectId : null) &&
           candidate.providerDomain === normalized.providerDomain &&
           (!normalized.kind || candidate.kind === normalized.kind) &&
           candidate.status === "active",
@@ -1481,8 +1310,7 @@ async function validateMcpCapabilityConnectionRef(
     });
   }
   if (
-    (subjectScope === "subject" &&
-      connection.subjectId !== input.grant.subjectId) ||
+    (subjectScope === "subject" && connection.subjectId !== input.grant.subjectId) ||
     (subjectScope === "workspace" && connection.subjectId !== null)
   ) {
     throw new HTTPException(422, {
@@ -1496,8 +1324,7 @@ async function validateMcpCapabilityConnectionRef(
   }
   if (connection.providerDomain !== normalized.providerDomain) {
     throw new HTTPException(422, {
-      message:
-        "connectionRef.providerDomain does not match the referenced connection",
+      message: "connectionRef.providerDomain does not match the referenced connection",
     });
   }
   if (normalized.kind && connection.kind !== normalized.kind) {
@@ -1569,8 +1396,7 @@ function isPerPersonOAuthRefForItem(
     return false;
   const domain = canonicalDomain(ref.providerDomain);
   return [item.providerDomain, hostOf(item.mcpUrl ?? item.endpointUrl)].some(
-    (candidate) =>
-      typeof candidate === "string" && canonicalDomain(candidate) === domain,
+    (candidate) => typeof candidate === "string" && canonicalDomain(candidate) === domain,
   );
 }
 
@@ -1592,9 +1418,7 @@ export function assertRequiredMcpCredentialHeaders(
     return;
   }
   const required = requiredCapabilityHeaders(item.metadata);
-  const names = new Set(
-    Object.keys(headers ?? {}).map((name) => name.toLowerCase()),
-  );
+  const names = new Set(Object.keys(headers ?? {}).map((name) => name.toLowerCase()));
   const missing = required.filter((name) => !names.has(name.toLowerCase()));
   if (missing.length > 0) {
     throw new HTTPException(422, {
@@ -1608,29 +1432,21 @@ export function assertRequiredMcpCredentialHeaders(
   }
 }
 
-function requiredCapabilityHeaders(
-  metadata: Record<string, unknown>,
-): string[] {
+function requiredCapabilityHeaders(metadata: Record<string, unknown>): string[] {
   const value = metadata.requiredHeaders;
   if (!Array.isArray(value)) {
     return [];
   }
   return value
-    .filter(
-      (name): name is string =>
-        typeof name === "string" && name.trim().length > 0,
-    )
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
     .map((name) => name.trim());
 }
 
-export function requireCapabilityHeaderEncryption(
-  settings: Settings,
-): Uint8Array {
+export function requireCapabilityHeaderEncryption(settings: Settings): Uint8Array {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
     throw new HTTPException(503, {
-      message:
-        "MCP credential headers require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+      message: "MCP credential headers require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
     });
   }
   return key;
@@ -1667,8 +1483,7 @@ export async function validateMcpCapabilityConnection(
   }
   if (!item.endpointUrl || !item.runtime.mcpServerId) {
     throw new HTTPException(422, {
-      message:
-        "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
+      message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
     });
   }
   try {
@@ -1699,8 +1514,7 @@ async function probeStreamableHttpMcpServer(
   input: McpCapabilityProbeInput,
 ): Promise<McpCapabilityProbeResult> {
   const settings = input.settings;
-  if (!settings)
-    throw new Error("Network policy is unavailable for MCP validation");
+  if (!settings) throw new Error("Network policy is unavailable for MCP validation");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
   try {
@@ -1729,10 +1543,7 @@ async function probeStreamableHttpMcpServer(
           .catch((error: unknown) => {
             throw legacyMcpClientError(error);
           });
-        return {
-          toolCount: tools.tools.length,
-          serverInfo: client.getServerVersion(),
-        };
+        return { toolCount: tools.tools.length, serverInfo: client.getServerVersion() };
       },
     );
   } finally {
@@ -1797,16 +1608,11 @@ export async function disableCapability(input: {
         "built-in and configured capabilities are always available; remove them from configuration to disable them",
     });
   }
-  if (
-    !(await getCapabilityInstallation(input.db, input.workspaceId, item.id))
-  ) {
+  if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
     // A connector only the organization serves here is turned off here by a
     // turned-off installation of the workspace's own, which wins (OR-11).
     const organization = (
-      await listOrganizationConnectorsReachingWorkspace(
-        input.db,
-        input.workspaceId,
-      )
+      await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId)
     ).some((connector) => connector.capabilityId === item.id);
     if (organization)
       return await turnOffOrganizationConnectorInWorkspace(input.db, {
@@ -1818,11 +1624,7 @@ export async function disableCapability(input: {
       message: "capability is not currently enabled",
     });
   }
-  return await disableCapabilityInstallation(
-    input.db,
-    input.workspaceId,
-    item.id,
-  );
+  return await disableCapabilityInstallation(input.db, input.workspaceId, item.id);
 }
 
 /**
@@ -1832,10 +1634,7 @@ export async function disableCapability(input: {
  * organization serves here (managed in its settings, turned off here instead).
  */
 export function isWorkspaceCustomMcpServer(
-  item: Pick<
-    CapabilityCatalogItem,
-    "kind" | "workspaceId" | "source" | "provenance" | "metadata"
-  >,
+  item: Pick<CapabilityCatalogItem, "kind" | "workspaceId" | "source" | "provenance" | "metadata">,
   workspaceId: string,
 ): boolean {
   return (
@@ -1861,19 +1660,12 @@ export async function customMcpServerRemovability(input: {
   canRemove: (installerSubjectId: string | null) => boolean;
   admin: boolean;
 }): Promise<(item: CapabilityCatalogItem) => boolean> {
-  const installers = await listCapabilityInstallationInstallers(
-    input.db,
-    input.workspaceId,
-  );
+  const installers = await listCapabilityInstallationInstallers(input.db, input.workspaceId);
   return (item) => {
     const installation = installers.get(item.id);
-    if (!installation || !isWorkspaceCustomMcpServer(item, input.workspaceId))
-      return false;
+    if (!installation || !isWorkspaceCustomMcpServer(item, input.workspaceId)) return false;
     if (input.admin) return true;
-    return (
-      installation.status === "active" &&
-      input.canRemove(installation.installedBySubjectId)
-    );
+    return installation.status === "active" && input.canRemove(installation.installedBySubjectId);
   };
 }
 
@@ -1902,17 +1694,13 @@ export async function removeCustomMcpServer(input: {
   );
   if (!isWorkspaceCustomMcpServer(item, input.workspaceId))
     throw new HTTPException(409, {
-      message:
-        "Only a custom MCP server added in this workspace is removed here",
+      message: "Only a custom MCP server added in this workspace is removed here",
     });
   // The organization serving the same server here would take its place.
   if (
-    (
-      await listOrganizationConnectorsReachingWorkspace(
-        input.db,
-        input.workspaceId,
-      )
-    ).some((connector) => connector.capabilityId === item.id)
+    (await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId)).some(
+      (connector) => connector.capabilityId === item.id,
+    )
   )
     throw new HTTPException(409, {
       message: "Your organization serves this server here; turn it off instead",
@@ -1924,10 +1712,7 @@ export async function removeCustomMcpServer(input: {
     subjectId: input.subjectId,
     ...(input.memberRemoval ? { memberRemoval: true } : {}),
   });
-  if (!removed)
-    throw new HTTPException(409, {
-      message: "capability is not currently enabled",
-    });
+  if (!removed) throw new HTTPException(409, { message: "capability is not currently enabled" });
   return removed;
 }
 
@@ -1938,19 +1723,14 @@ export async function settingsWithEnabledCapabilityMcpServers(
   options?: {
     subjectId?: string;
     personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
-    onResolvedApiIntegrations?: (
-      integrations: readonly ApiIntegrationRuntime[],
-    ) => void;
+    onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
     /** Every enabled capability server read, before static-id shadowing. */
-    onResolvedCapabilityServers?: (
-      servers: readonly EnabledMcpCapabilityServer[],
-    ) => void;
+    onResolvedCapabilityServers?: (servers: readonly EnabledMcpCapabilityServer[]) => void;
     /**
      * The Codex Apps designation the caller already resolves (a claim reads
      * its cutover once), or what it knows for resolving it here.
      */
-    codexApps?:
-      Promise<CodexAppsDesignationForRun | null> | CodexAppsRunContext;
+    codexApps?: Promise<CodexAppsDesignationForRun | null> | CodexAppsRunContext;
     /**
      * `db` is one bounded transaction: run the reads one after another, since
      * its RLS scopes must not overlap.
@@ -1980,16 +1760,10 @@ export async function settingsWithEnabledCapabilityMcpServers(
       ? Promise.resolve(null)
       : options?.codexApps instanceof Promise
         ? options.codexApps
-        : resolveCodexAppsDesignationForRun(
-            db,
-            workspaceId,
-            options?.codexApps ?? {},
-          );
+        : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {});
   let enabled: Awaited<ReturnType<typeof listEnabledMcpCapabilityServers>>;
   let apiIntegrations: Awaited<ReturnType<typeof readApiIntegrations>>;
-  let codexAppsDesignation: Awaited<
-    ReturnType<typeof readCodexAppsDesignation>
-  >;
+  let codexAppsDesignation: Awaited<ReturnType<typeof readCodexAppsDesignation>>;
   if (options?.oneReadAtATime) {
     enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
     apiIntegrations = await readApiIntegrations();
@@ -2031,19 +1805,18 @@ export async function settingsWithEnabledCapabilityMcpServers(
           ownServers: [...settings.mcpServers, ...enabled],
         })),
       ];
-      const carriedApiIntegrations =
-        await personalWorkspaceExtensionApiIntegrations(db, {
-          workspaceId,
-          subjectId: extensionSubject,
-          accountId,
-          origins,
-          ownIntegrations: apiIntegrations,
-          takenServerIds: [
-            ...settings.mcpServers.map((server) => server.id),
-            ...enabled.map((server) => server.id),
-            ...apiIntegrations.map((integration) => integration.serverId),
-          ],
-        });
+      const carriedApiIntegrations = await personalWorkspaceExtensionApiIntegrations(db, {
+        workspaceId,
+        subjectId: extensionSubject,
+        accountId,
+        origins,
+        ownIntegrations: apiIntegrations,
+        takenServerIds: [
+          ...settings.mcpServers.map((server) => server.id),
+          ...enabled.map((server) => server.id),
+          ...apiIntegrations.map((integration) => integration.serverId),
+        ],
+      });
       // A turn acting only through frozen delegations keeps exactly those.
       apiIntegrations = [
         ...apiIntegrations,
@@ -2084,9 +1857,7 @@ export function carriedConnectorCandidateIds(
   const resolved = new Set(resolvedIds);
   return [...serverIds].filter(
     (id) =>
-      !resolved.has(id) &&
-      id !== CODEX_APPS_MCP_SERVER_ID &&
-      !/^account-[0-9a-f]{64}$/u.test(id),
+      !resolved.has(id) && id !== CODEX_APPS_MCP_SERVER_ID && !/^account-[0-9a-f]{64}$/u.test(id),
   );
 }
 
@@ -2108,9 +1879,7 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     accountId: string;
     serverIds: readonly string[];
     capabilityIds: readonly string[];
-    onResolvedApiIntegrations?: (
-      integrations: readonly ApiIntegrationRuntime[],
-    ) => void;
+    onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
     /** Checked between reads: a stopped caller starts no further read. */
     signal?: AbortSignal;
   },
@@ -2125,12 +1894,8 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
   ).filter((server) => serverIds.has(server.id));
   options.signal?.throwIfAborted();
   const apiIntegrations = (
-    await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [
-      ...serverIds,
-    ])
-  ).filter((integration) =>
-    apiIntegrationIsExecutable(integration, settings, workspaceId),
-  );
+    await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
+  ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId));
   options.signal?.throwIfAborted();
   // The fence re-derives a Personal workspace's carried connectors live: a
   // lost origin membership or removed connection drops them here too. Only a
@@ -2178,28 +1943,19 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
             takenServerIds: async () => [
               ...ownMcp.map((server) => server.id),
               ...enabled.map((server) => server.id),
-              ...(
-                await listInstalledApiIntegrations(
-                  db,
-                  workspaceId,
-                  options.subjectId,
-                )
-              ).map((integration) => integration.serverId),
+              ...(await listInstalledApiIntegrations(db, workspaceId, options.subjectId)).map(
+                (integration) => integration.serverId,
+              ),
             ],
           })
-        ).filter((integration) =>
-          apiIntegrationIsExecutable(integration, settings, workspaceId),
-        ),
+        ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId)),
       );
       options.signal?.throwIfAborted();
     }
   }
   const codexAppsDesignation =
-    settings.codexConnectedAppsEnabled &&
-    serverIds.has(CODEX_APPS_MCP_SERVER_ID)
-      ? await resolveCodexAppsDesignationForRun(db, workspaceId, {
-          accountId: options.accountId,
-        })
+    settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
+      ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })
       : null;
   options.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
@@ -2228,8 +1984,7 @@ export function apiIntegrationsMatchingDelegations(
   );
   return integrations.filter((integration) => {
     const ref = integration.connectionRef;
-    if (!ref || ref.subjectScope !== "subject" || !ref.connectionId)
-      return false;
+    if (!ref || ref.subjectScope !== "subject" || !ref.connectionId) return false;
     return exact.has(
       [
         integration.serverId,
@@ -2248,22 +2003,16 @@ async function listInstalledApiIntegrationsForDelegations(
 ): Promise<ApiIntegrationRuntime[]> {
   const workspace = await listInstalledApiIntegrations(db, workspaceId);
   if (delegations.length === 0) return workspace;
-  const owners = [
-    ...new Set(delegations.map((delegation) => delegation.ownerSubjectId)),
-  ];
+  const owners = [...new Set(delegations.map((delegation) => delegation.ownerSubjectId))];
   const delegatedByOwner = await Promise.all(
     owners.map(async (subjectId) =>
       apiIntegrationsMatchingDelegations(
         await listInstalledApiIntegrations(db, workspaceId, subjectId),
-        delegations.filter(
-          (delegation) => delegation.ownerSubjectId === subjectId,
-        ),
+        delegations.filter((delegation) => delegation.ownerSubjectId === subjectId),
       ),
     ),
   );
-  const byServerId = new Map(
-    workspace.map((integration) => [integration.serverId, integration]),
-  );
+  const byServerId = new Map(workspace.map((integration) => [integration.serverId, integration]));
   for (const integration of delegatedByOwner.flat())
     byServerId.set(integration.serverId, integration);
   return [...byServerId.values()];
@@ -2280,10 +2029,7 @@ function apiIntegrationIsExecutable(
       teamsAllowedWorkspaceIds: settings.microsoftTeamsAllowedWorkspaceIds,
       ...(workspaceId ? { workspaceId } : {}),
     }) &&
-    !(
-      integration.definitionProvenance === "curated" &&
-      integration.definitionId === "google-drive"
-    )
+    !(integration.definitionProvenance === "curated" && integration.definitionId === "google-drive")
   );
 }
 
@@ -2310,9 +2056,7 @@ export function settingsWithApiIntegrationServers(
       allowedTools: [...integration.allowedTools],
       cacheToolsList: true,
       requireApproval: integration.requireApproval,
-      ...(integration.connectionRef
-        ? { connectionRef: integration.connectionRef }
-        : {}),
+      ...(integration.connectionRef ? { connectionRef: integration.connectionRef } : {}),
     }));
   return dynamicServers.length
     ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] }
@@ -2347,18 +2091,13 @@ export async function resolveCodexAppsDesignationForRun(
   known: CodexAppsRunContext = {},
 ): Promise<CodexAppsDesignationForRun | null> {
   const coreAccountId =
-    known.accountId ??
-    (await rlsContextForWorkspace(db, workspaceId)).accountId;
+    known.accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
   const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
     accountId: coreAccountId,
     workspaceId,
   });
   return designation?.status === "active"
-    ? {
-        source: "core",
-        accountId: coreAccountId,
-        connectionId: designation.connectionId,
-      }
+    ? { source: "core", accountId: coreAccountId, connectionId: designation.connectionId }
     : null;
 }
 
@@ -2466,9 +2205,7 @@ export function settingsWithMcpCapabilityServers(
             ? { requireApproval: server.requireApproval }
             : {}),
           ...(headers && headers !== "unavailable" ? { headers } : {}),
-          ...(server.connectionRef
-            ? { connectionRef: server.connectionRef }
-            : {}),
+          ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
         },
       ];
     });
@@ -2520,10 +2257,7 @@ export async function discoverMcpRegistryCapabilities(input: {
         break;
       }
     }
-    cursor =
-      typeof page.metadata?.nextCursor === "string"
-        ? page.metadata.nextCursor
-        : undefined;
+    cursor = typeof page.metadata?.nextCursor === "string" ? page.metadata.nextCursor : undefined;
     // Return usable results promptly rather than fetching more pages merely
     // to fill the requested limit. The registry already applies the search.
     if (items.length > 0 || !cursor) {
@@ -2592,9 +2326,7 @@ async function requireCatalogItem(
   return item;
 }
 
-function configuredMcpCatalogItems(
-  settings: Settings,
-): CapabilityCatalogItem[] {
+function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
   return (
     settings.mcpServers
       // Opengeni, Files, and Document Search are native runtime surfaces. They
@@ -2602,8 +2334,7 @@ function configuredMcpCatalogItems(
       // user installs, connects, or enables in the Capabilities control center.
       .filter(
         (server) =>
-          server.id !== CODEX_APPS_MCP_SERVER_ID &&
-          !firstPartyMcpServerIds.has(server.id),
+          server.id !== CODEX_APPS_MCP_SERVER_ID && !firstPartyMcpServerIds.has(server.id),
       )
       .map((server) =>
         CapabilityCatalogItem.parse({
@@ -2613,10 +2344,7 @@ function configuredMcpCatalogItems(
           name: server.name ?? server.id,
           description: null,
           category: "configured",
-          tags: [
-            "mcp",
-            ...(server.allowedTools?.length ? ["limited-tools"] : []),
-          ],
+          tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
           endpointUrl: server.url,
           authKind:
             server.connectionRef?.authoritySource !== "host" &&
@@ -2626,19 +2354,15 @@ function configuredMcpCatalogItems(
           // Deployment-managed personal selectors need the same account picker
           // as installed connectors. Fixed bindings remain server-resolved.
           connectionRef:
-            server.connectionRef?.subjectScope === "subject" &&
-            !server.connectionRef.connectionId
-              ? installationConnectionRef({
-                  connectionRef: server.connectionRef,
-                })
+            server.connectionRef?.subjectScope === "subject" && !server.connectionRef.connectionId
+              ? installationConnectionRef({ connectionRef: server.connectionRef })
               : null,
           tools: [{ kind: "mcp", id: server.id }],
           runtime: {
             available: true,
             mcpServerId: server.id,
             transport: "streamable-http",
-            notes:
-              "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
+            notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
           },
           metadata: {
             mcpServerId: server.id,
@@ -2650,9 +2374,7 @@ function configuredMcpCatalogItems(
   );
 }
 
-export function isReservedCodexAppsCatalogItem(
-  item: CapabilityCatalogItem,
-): boolean {
+export function isReservedCodexAppsCatalogItem(item: CapabilityCatalogItem): boolean {
   return (
     item.id === `mcp:${CODEX_APPS_MCP_SERVER_ID}` ||
     (item.kind === "mcp" &&
@@ -2667,9 +2389,7 @@ export function isReservedCodexAppsCatalogItem(
  * so project it into the same catalog the web picker already consumes while
  * keeping its authorization state server-derived and explicit.
  */
-export function codexAppsCatalogItem(
-  available: boolean,
-): CapabilityCatalogItem {
+export function codexAppsCatalogItem(available: boolean): CapabilityCatalogItem {
   return CapabilityCatalogItem.parse({
     id: `mcp:${CODEX_APPS_MCP_SERVER_ID}`,
     kind: "mcp",
@@ -2694,9 +2414,7 @@ export function codexAppsCatalogItem(
         : "Unavailable until an active Codex Apps credential is designated for this workspace.",
     },
     enabled: available,
-    enabledReason: available
-      ? "designated Apps credential"
-      : "no active Apps designation",
+    enabledReason: available ? "designated Apps credential" : "no active Apps designation",
     metadata: {
       mcpServerId: CODEX_APPS_MCP_SERVER_ID,
       authorization: "workspace_designation",
@@ -2713,27 +2431,26 @@ type SocialProviderIntegrationDefinition = {
   tags: string[];
 };
 
-const SOCIAL_PROVIDER_INTEGRATIONS: readonly SocialProviderIntegrationDefinition[] =
-  [
-    {
-      provider: "x",
-      name: "X",
-      description:
-        "Connect one or more X accounts for live search, mentions, thread context, post sync, and permission-controlled replies.",
-      providerDomain: "x.com",
-      homepageUrl: "https://x.com",
-      tags: ["api", "x", "twitter", "social", "marketing"],
-    },
-    {
-      provider: "reddit",
-      name: "Reddit",
-      description:
-        "Connect one or more Reddit accounts for search, mentions, thread context, account sync, and permission-controlled replies.",
-      providerDomain: "reddit.com",
-      homepageUrl: "https://www.reddit.com",
-      tags: ["api", "reddit", "social", "community", "marketing"],
-    },
-  ];
+const SOCIAL_PROVIDER_INTEGRATIONS: readonly SocialProviderIntegrationDefinition[] = [
+  {
+    provider: "x",
+    name: "X",
+    description:
+      "Connect one or more X accounts for live search, mentions, thread context, post sync, and permission-controlled replies.",
+    providerDomain: "x.com",
+    homepageUrl: "https://x.com",
+    tags: ["api", "x", "twitter", "social", "marketing"],
+  },
+  {
+    provider: "reddit",
+    name: "Reddit",
+    description:
+      "Connect one or more Reddit accounts for search, mentions, thread context, account sync, and permission-controlled replies.",
+    providerDomain: "reddit.com",
+    homepageUrl: "https://www.reddit.com",
+    tags: ["api", "reddit", "social", "community", "marketing"],
+  },
+];
 
 const SOCIAL_PROVIDER_TOOL_NAMES = {
   x: [
@@ -2762,9 +2479,7 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
  * operator's own and carry no known brand.
  */
 export function builtInConnectorCatalogItems(input: {
-  settings: Parameters<typeof excelAddin>[0] & {
-    socialOauthClientsJson?: string | undefined;
-  };
+  settings: Parameters<typeof excelAddin>[0] & { socialOauthClientsJson?: string | undefined };
   socialConnections: SocialConnection[];
   workspaceConnections: ConnectionMetadata[];
 }): CapabilityCatalogItem[] {
@@ -2774,9 +2489,7 @@ export function builtInConnectorCatalogItems(input: {
       socialOAuthClientConfigured(input.settings),
     ),
     fikenCatalogItem(input.workspaceConnections.filter(isFikenConnection)),
-    onePasswordCatalogItem(
-      input.workspaceConnections.filter(isOnePasswordConnection),
-    ),
+    onePasswordCatalogItem(input.workspaceConnections.filter(isOnePasswordConnection)),
     excelAddinCatalogItem(excelAddin(input.settings)),
   ];
 }
@@ -2786,13 +2499,10 @@ export function builtInConnectorCatalogItems(input: {
  * the workspace-shared verified Fiken connection (either lane), mirroring how
  * the social provider tiles derive theirs from social connections.
  */
-function fikenCatalogItem(
-  fikenConnections: ConnectionMetadata[],
-): CapabilityCatalogItem {
+function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCatalogItem {
   const fikenConnection = preferredFikenConnection(fikenConnections);
   const fikenEnabled =
-    fikenConnection?.status === "active" ||
-    fikenConnection?.status === "needs_reauth";
+    fikenConnection?.status === "active" || fikenConnection?.status === "needs_reauth";
   return CapabilityCatalogItem.parse({
     id: "api:fiken",
     kind: "api",
@@ -2811,8 +2521,7 @@ function fikenCatalogItem(
     runtime: {
       available: true,
       mcpServerId: "opengeni",
-      notes:
-        "Fiken access is provided through Opengeni's first-party fiken tools.",
+      notes: "Fiken access is provided through Opengeni's first-party fiken tools.",
     },
     enabled: fikenEnabled,
     enabledReason: fikenEnabled
@@ -2826,9 +2535,7 @@ function fikenCatalogItem(
       connectionStatus: fikenConnection?.status ?? null,
       // Derived from the contracts catalog so a new fiken_* tool cannot be
       // registered without also appearing on the capability tile.
-      firstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter((name) =>
-        name.startsWith("fiken_"),
-      ),
+      firstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("fiken_")),
     },
   });
 }
@@ -2839,12 +2546,8 @@ function fikenCatalogItem(
  * then reached through secret references and the secrets tools, not MCP.
  * Enabled while a workspace-shared 1Password connection is active.
  */
-function onePasswordCatalogItem(
-  connections: ConnectionMetadata[],
-): CapabilityCatalogItem {
-  const active = connections.filter(
-    (connection) => connection.status === "active",
-  );
+function onePasswordCatalogItem(connections: ConnectionMetadata[]): CapabilityCatalogItem {
+  const active = connections.filter((connection) => connection.status === "active");
   const enabled = active.length > 0;
   return CapabilityCatalogItem.parse({
     id: "api:1password",
@@ -2863,8 +2566,7 @@ function onePasswordCatalogItem(
     tools: [],
     runtime: {
       available: true,
-      notes:
-        "1Password vaults are used through secret references and the secrets tools.",
+      notes: "1Password vaults are used through secret references and the secrets tools.",
     },
     enabled,
     enabledReason: enabled
@@ -2876,8 +2578,7 @@ function onePasswordCatalogItem(
       planTiers: [
         ...new Set(
           connections.map(
-            (connection) =>
-              onePasswordConnectionMetadata(connection.metadata)?.planTier,
+            (connection) => onePasswordConnectionMetadata(connection.metadata)?.planTier,
           ),
         ),
       ].filter(Boolean),
@@ -2895,8 +2596,7 @@ export function browserExtension(settings: {
 }): BrowserExtension {
   return {
     name: settings.browserExtensionName ?? "Opengeni Browser",
-    installUrl:
-      settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
+    installUrl: settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
   };
 }
 
@@ -2917,8 +2617,7 @@ export function excelAddin(settings: {
   return {
     name: settings.officeAddinName ?? "Opengeni",
     installUrl:
-      settings.officeAddinInstallUrl ??
-      (web ? `${web.replace(/\/+$/u, "")}/excel` : null),
+      settings.officeAddinInstallUrl ?? (web ? `${web.replace(/\/+$/u, "")}/excel` : null),
   };
 }
 
@@ -2928,9 +2627,7 @@ export function excelAddin(settings: {
  * to enable for the workspace: the tile explains it and links to the install
  * page, and `excel_run` reaches the person's connected workbooks.
  */
-export function excelAddinCatalogItem(
-  addin: ExcelAddin,
-): CapabilityCatalogItem {
+export function excelAddinCatalogItem(addin: ExcelAddin): CapabilityCatalogItem {
   return CapabilityCatalogItem.parse({
     id: EXCEL_ADDIN_CAPABILITY_ID,
     kind: "api",
@@ -2995,15 +2692,10 @@ function socialOAuthClientConfigured(settings: {
 
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
-  oauthClientConfigured: (
-    provider: SocialProviderIntegrationDefinition["provider"],
-  ) => boolean,
+  oauthClientConfigured: (provider: SocialProviderIntegrationDefinition["provider"]) => boolean,
 ): CapabilityCatalogItem[] {
   return SOCIAL_PROVIDER_INTEGRATIONS.map((definition) => {
-    const counts = socialConnectionCounts(
-      socialConnections,
-      definition.provider,
-    );
+    const counts = socialConnectionCounts(socialConnections, definition.provider);
     const enabled = counts.connected + counts.needsReauth > 0;
     const clientConfigured = oauthClientConfigured(definition.provider);
     return CapabilityCatalogItem.parse({
@@ -3073,10 +2765,7 @@ export {
  * named in the description only.
  */
 const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
-  Record<
-    string,
-    { description: string; category: string; tags: readonly string[] }
-  >
+  Record<string, { description: string; category: string; tags: readonly string[] }>
 > = {
   "microsoft-outlook-mail": {
     description:
@@ -3098,27 +2787,13 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
     description:
       "Read and manage events, meetings and availability in the person's own Outlook calendar (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
     category: "productivity",
-    tags: [
-      "outlook",
-      "calendar",
-      "exchange",
-      "microsoft",
-      "microsoft-365",
-      "office-365",
-    ],
+    tags: ["outlook", "calendar", "exchange", "microsoft", "microsoft-365", "office-365"],
   },
   "microsoft-outlook-contacts": {
     description:
       "Read and manage contacts and people in the person's own Outlook address book (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
     category: "productivity",
-    tags: [
-      "outlook",
-      "contacts",
-      "exchange",
-      "microsoft",
-      "microsoft-365",
-      "office-365",
-    ],
+    tags: ["outlook", "contacts", "exchange", "microsoft", "microsoft-365", "office-365"],
   },
   "microsoft-onedrive": {
     description:
@@ -3136,13 +2811,7 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
     description:
       "Read and search the person's teams, channels and chats, send messages as them, and look up colleagues with their role, manager and reports, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
     category: "communication",
-    tags: [
-      "teams",
-      "microsoft-teams",
-      "microsoft",
-      "microsoft-365",
-      "office-365",
-    ],
+    tags: ["teams", "microsoft-teams", "microsoft", "microsoft-365", "office-365"],
   },
 };
 
@@ -3150,9 +2819,7 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
  * The catalog category chosen for a reviewed integration definition, if one
  * was. Its catalog entry shows "productivity" when none was chosen.
  */
-export function integrationDefinitionCategory(
-  definitionId: string,
-): string | undefined {
+export function integrationDefinitionCategory(definitionId: string): string | undefined {
   return INTEGRATION_DEFINITION_DISCOVERY[definitionId]?.category;
 }
 
@@ -3169,8 +2836,7 @@ export function integrationDefinitionCapabilityRecommendations(
 ): CapabilityCatalogItem[] {
   return definitions.map((definition) => {
     const discovery = INTEGRATION_DEFINITION_DISCOVERY[definition.id];
-    const provider =
-      definition.provider.id === "microsoft" ? "Microsoft" : "Google";
+    const provider = definition.provider.id === "microsoft" ? "Microsoft" : "Google";
     return CapabilityCatalogItem.parse({
       id: integrationDefinitionCapabilityId(definition.id),
       kind: "api",
@@ -3180,8 +2846,7 @@ export function integrationDefinitionCapabilityRecommendations(
       category: integrationDefinitionCategory(definition.id) ?? "productivity",
       tags: [...(discovery?.tags ?? [definition.provider.id])],
       homepageUrl: null,
-      providerDomain:
-        definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",
+      providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",
       authModel: "oauth2_authorization_code",
       authKind: "oauth2",
       surfaceType: "integration_definition",
@@ -3217,8 +2882,7 @@ export function nativeConnectionCapabilityRecommendations(
     integrationDefinitions?: readonly IntegrationDefinition[];
   } = {},
 ): CapabilityCatalogItem[] {
-  const extensionUrl =
-    options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
+  const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
   const items = [
     CapabilityCatalogItem.parse({
       id: "api:github-app",
@@ -3228,14 +2892,7 @@ export function nativeConnectionCapabilityRecommendations(
       description:
         "The Opengeni GitHub App: work appears as the Opengeni bot, shared with the workspace, installed per organization or account. Use for 'install the GitHub app' or giving Opengeni access to an org's repositories.",
       category: "source-control",
-      tags: [
-        "github",
-        "repositories",
-        "source-control",
-        "github app",
-        "install",
-        "bot",
-      ],
+      tags: ["github", "repositories", "source-control", "github app", "install", "bot"],
       homepageUrl: "https://github.com",
       providerDomain: "github.com",
       authModel: "github_app_owner_consent",
@@ -3298,8 +2955,7 @@ export function nativeConnectionCapabilityRecommendations(
         lifecycle: {
           status: "available",
           readiness: "setup_required",
-          detail:
-            "The person connects their GitHub account from the chat card.",
+          detail: "The person connects their GitHub account from the chat card.",
           managedBy: "platform",
         },
         actions: ["connect", "inspect"],
@@ -3370,9 +3026,7 @@ export function nativeConnectionCapabilityRecommendations(
     );
   }
   items.push(
-    ...integrationDefinitionCapabilityRecommendations(
-      options.integrationDefinitions ?? [],
-    ),
+    ...integrationDefinitionCapabilityRecommendations(options.integrationDefinitions ?? []),
   );
   return items;
 }
@@ -3388,9 +3042,9 @@ export function userSetupCardPayload(
   blocker: UserSetupBlocker,
   options: { toolName: string; requestedSandboxId?: string | null },
 ): ToolAuthNeededPayload | null {
-  const item = nativeConnectionCapabilityRecommendations({
-    connectedMachines: true,
-  }).find((candidate) => candidate.id === blocker.capabilityId);
+  const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+    (candidate) => candidate.id === blocker.capabilityId,
+  );
   if (!item) return null;
   return ToolAuthNeededPayload.parse({
     serverId: "opengeni",
@@ -3407,9 +3061,7 @@ export function userSetupCardPayload(
       rationale: blocker.rationale,
       requiredVariables: [],
     },
-    ...(options.requestedSandboxId
-      ? { requestedSandboxId: options.requestedSandboxId }
-      : {}),
+    ...(options.requestedSandboxId ? { requestedSandboxId: options.requestedSandboxId } : {}),
     ...(blocker.purpose ? { purpose: blocker.purpose } : {}),
   });
 }
@@ -3418,30 +3070,19 @@ function socialConnectionCounts(
   connections: SocialConnection[],
   provider: "x" | "reddit",
 ): { connected: number; needsReauth: number; disabled: number; total: number } {
-  const matching = connections.filter(
-    (connection) => connection.provider === provider,
-  );
+  const matching = connections.filter((connection) => connection.provider === provider);
   return {
-    connected: matching.filter(
-      (connection) => connection.status === "connected",
-    ).length,
-    needsReauth: matching.filter(
-      (connection) => connection.status === "needs_reauth",
-    ).length,
-    disabled: matching.filter((connection) => connection.status === "disabled")
-      .length,
+    connected: matching.filter((connection) => connection.status === "connected").length,
+    needsReauth: matching.filter((connection) => connection.status === "needs_reauth").length,
+    disabled: matching.filter((connection) => connection.status === "disabled").length,
     total: matching.length,
   };
 }
 
-function socialConnectionSummary(
-  counts: ReturnType<typeof socialConnectionCounts>,
-): string | null {
+function socialConnectionSummary(counts: ReturnType<typeof socialConnectionCounts>): string | null {
   const parts: string[] = [];
   if (counts.connected > 0) {
-    parts.push(
-      `${counts.connected} connected account${counts.connected === 1 ? "" : "s"}`,
-    );
+    parts.push(`${counts.connected} connected account${counts.connected === 1 ? "" : "s"}`);
   }
   if (counts.needsReauth > 0) {
     parts.push(
@@ -3451,9 +3092,7 @@ function socialConnectionSummary(
     );
   }
   if (counts.disabled > 0) {
-    parts.push(
-      `${counts.disabled} disconnected account${counts.disabled === 1 ? "" : "s"}`,
-    );
+    parts.push(`${counts.disabled} disconnected account${counts.disabled === 1 ? "" : "s"}`);
   }
   return parts.length > 0 ? parts.join("; ") : null;
 }
@@ -3464,17 +3103,11 @@ function socialConnectionSummary(
  * so a deployment that omits optional library assets does not advertise a
  * skill it cannot materialize.
  */
-async function discoverCuratedSkillLibraryItems(): Promise<
-  CapabilityCatalogItem[]
-> {
-  return listSkillLibraryEntries().map((entry) =>
-    curatedSkillCatalogItem(entry),
-  );
+async function discoverCuratedSkillLibraryItems(): Promise<CapabilityCatalogItem[]> {
+  return listSkillLibraryEntries().map((entry) => curatedSkillCatalogItem(entry));
 }
 
-function curatedSkillCatalogItem(
-  entry: SkillLibraryEntry,
-): CapabilityCatalogItem {
+function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogItem {
   return CapabilityCatalogItem.parse({
     id: `skill:${entry.id}`,
     kind: "skill",
@@ -3506,9 +3139,7 @@ function curatedSkillCatalogItem(
   });
 }
 
-function installedSkillCatalogItem(
-  skill: InstalledSkillSummary,
-): CapabilityCatalogItem {
+function installedSkillCatalogItem(skill: InstalledSkillSummary): CapabilityCatalogItem {
   return CapabilityCatalogItem.parse({
     id: skill.capabilityId,
     kind: "skill",
@@ -3539,9 +3170,7 @@ function installedSkillCatalogItem(
   });
 }
 
-function installedSkillMetadata(
-  skill: InstalledSkillSummary,
-): Record<string, unknown> {
+function installedSkillMetadata(skill: InstalledSkillSummary): Record<string, unknown> {
   return {
     pluginKey: skill.pluginKey,
     installationVersion: skill.installationVersion,
@@ -3558,16 +3187,13 @@ function installedSkillMetadata(
 }
 
 function stringMetadata(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : null;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function isSocialProviderIntegration(item: CapabilityCatalogItem): boolean {
   return (
     item.surfaceType === "first_party_social" ||
-    (item.surfaceType === "provider_integration" &&
-      item.metadata.providerAdapter === "social")
+    (item.surfaceType === "provider_integration" && item.metadata.providerAdapter === "social")
   );
 }
 
@@ -3578,8 +3204,7 @@ function socialProviderConnectionCounts(item: CapabilityCatalogItem): {
   const value = item.metadata.connectionCounts;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {
-      connected:
-        item.enabled && !item.enabledReason?.includes("reconnection") ? 1 : 0,
+      connected: item.enabled && !item.enabledReason?.includes("reconnection") ? 1 : 0,
       needsReauth: item.enabledReason?.includes("reconnection") ? 1 : 0,
     };
   }
@@ -3590,8 +3215,7 @@ function socialProviderConnectionCounts(item: CapabilityCatalogItem): {
         ? Math.max(0, record.connected)
         : 0,
     needsReauth:
-      typeof record.needsReauth === "number" &&
-      Number.isInteger(record.needsReauth)
+      typeof record.needsReauth === "number" && Number.isInteger(record.needsReauth)
         ? Math.max(0, record.needsReauth)
         : 0,
   };
@@ -3601,21 +3225,13 @@ export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
 ): CapabilityCatalogItem {
-  if (
-    item.surfaceType === "first_party_fiken" ||
-    item.surfaceType === "first_party_onepassword"
-  ) {
+  if (item.surfaceType === "first_party_fiken" || item.surfaceType === "first_party_onepassword") {
     // Fiken and 1Password are API items with connection-derived state, not
     // generic API installations. Preserve that state before the non-MCP fallback below.
     return { ...item, connectionRef: null };
   }
   if (item.kind === "skill" || item.kind === "api" || item.kind === "plugin") {
-    return {
-      ...item,
-      enabled: false,
-      enabledReason: null,
-      connectionRef: null,
-    };
+    return { ...item, enabled: false, enabledReason: null, connectionRef: null };
   }
   if (isSocialProviderIntegration(item)) {
     // Provider-integration state is derived from every authoritative visible
@@ -3644,29 +3260,22 @@ export function applyCapabilityEnablement(
     return { ...item, connectionRef: null };
   }
   const activeInstallation = installation?.status === "active";
-  const enabled =
-    !!activeInstallation &&
-    capabilityInstallationRuntimeReady(item, installation);
+  const enabled = !!activeInstallation && capabilityInstallationRuntimeReady(item, installation);
   const connectionRef =
-    enabled && installation
-      ? installationConnectionRef(installation.config)
-      : null;
+    enabled && installation ? installationConnectionRef(installation.config) : null;
   return {
     ...item,
     // Older custom entries recorded the native credential kind on the
     // installation only. Project it without guessing from a URL or overwriting
     // an explicit catalog authentication contract.
-    authKind:
-      item.authKind ?? (connectionRef?.kind === "oauth2" ? "oauth2" : null),
+    authKind: item.authKind ?? (connectionRef?.kind === "oauth2" ? "oauth2" : null),
     enabled,
     enabledReason: enabled ? "enabled" : null,
     connectionRef,
   };
 }
 
-function applyCapabilityLifecycle(
-  item: CapabilityCatalogItem,
-): CapabilityCatalogItem {
+function applyCapabilityLifecycle(item: CapabilityCatalogItem): CapabilityCatalogItem {
   if (item.source === "configured") {
     return {
       ...item,
@@ -3703,16 +3312,8 @@ function applyCapabilityLifecycle(
     return {
       ...item,
       lifecycle: {
-        status: needsAttention
-          ? "needs_attention"
-          : connected
-            ? "connected"
-            : "available",
-        readiness: needsAttention
-          ? "attention"
-          : connected
-            ? "ready"
-            : "setup_required",
+        status: needsAttention ? "needs_attention" : connected ? "connected" : "available",
+        readiness: needsAttention ? "attention" : connected ? "ready" : "setup_required",
         detail: item.enabledReason,
         managedBy: null,
       },
@@ -3733,9 +3334,7 @@ function applyCapabilityLifecycle(
         detail: item.enabledReason,
         managedBy: "platform",
       },
-      actions: item.enabled
-        ? ["configure", "disconnect", "inspect"]
-        : ["connect", "inspect"],
+      actions: item.enabled ? ["configure", "disconnect", "inspect"] : ["connect", "inspect"],
     };
   }
 
@@ -3768,19 +3367,13 @@ function applyInstalledSkillEnablement(
   installation: InstalledSkillSummary | undefined,
 ): CapabilityCatalogItem {
   if (!installation) {
-    return {
-      ...item,
-      enabled: false,
-      enabledReason: null,
-      connectionRef: null,
-    };
+    return { ...item, enabled: false, enabledReason: null, connectionRef: null };
   }
   const catalogVersion = stringMetadata(item.metadata.version);
   const current =
     catalogVersion === null ||
     (catalogVersion === installation.version &&
-      stringMetadata(item.metadata.contentSha256) ===
-        installation.contentSha256 &&
+      stringMetadata(item.metadata.contentSha256) === installation.contentSha256 &&
       stringMetadata(item.metadata.sourceCommit) === installation.sourceCommit);
   return {
     ...item,
@@ -3810,14 +3403,8 @@ function installationConnectionRef(
   if (!ref || typeof ref !== "object") {
     return null;
   }
-  const {
-    authoritySource,
-    connectionId,
-    providerDomain,
-    kind,
-    subjectScope,
-    accountSelection,
-  } = ref as Record<string, unknown>;
+  const { authoritySource, connectionId, providerDomain, kind, subjectScope, accountSelection } =
+    ref as Record<string, unknown>;
   if (typeof providerDomain !== "string" || typeof kind !== "string") {
     return null;
   }
@@ -3851,19 +3438,13 @@ function installationConnectionRef(
   return { connectionId, providerDomain, kind };
 }
 
-function dedupeCatalogItems(
-  items: CapabilityCatalogItem[],
-): CapabilityCatalogItem[] {
+function dedupeCatalogItems(items: CapabilityCatalogItem[]): CapabilityCatalogItem[] {
   const byId = new Map<string, CapabilityCatalogItem>();
   for (const item of items) {
     // Curated library entries are runtime-managed and must not be replaced by
     // stale/manual rows with the same reserved skill id. Other catalog sources
     // retain the historical last-write-wins behavior below.
-    if (
-      item.kind === "skill" &&
-      item.source === "library" &&
-      byId.has(item.id)
-    ) {
+    if (item.kind === "skill" && item.source === "library" && byId.has(item.id)) {
       byId.set(item.id, item);
       continue;
     }
@@ -3876,21 +3457,14 @@ function dedupeCatalogItems(
   return [...byId.values()];
 }
 
-function compareCatalogItems(
-  a: CapabilityCatalogItem,
-  b: CapabilityCatalogItem,
-): number {
-  return `${a.kind}:${a.category}:${a.name}`.localeCompare(
-    `${b.kind}:${b.category}:${b.name}`,
-  );
+function compareCatalogItems(a: CapabilityCatalogItem, b: CapabilityCatalogItem): number {
+  return `${a.kind}:${a.category}:${a.name}`.localeCompare(`${b.kind}:${b.category}:${b.name}`);
 }
 
 export type CapabilityCatalogSearchMatch = {
   item: CapabilityCatalogItem;
   score: number;
-  matchedOn: Array<
-    "name" | "provider" | "tag" | "category" | "description" | "id"
-  >;
+  matchedOn: Array<"name" | "provider" | "tag" | "category" | "description" | "id">;
   /**
    * True when the item matched only through the typo-tolerant tier (an edit
    * distance hit), never through an exact, prefix, or substring hit.
@@ -3913,9 +3487,11 @@ const FUZZY_MAX_COMPARED_LENGTH = 48;
 const FUZZY_MAX_TOKENS = 8;
 /** Above any sum of ordinary word hits a search sentence can collect. */
 const NAMED_ENTRY_BONUS = 10_000;
-const FUZZY_FIELDS = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>(
-  ["name", "provider", "tag"],
-);
+const FUZZY_FIELDS = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>([
+  "name",
+  "provider",
+  "tag",
+]);
 
 /**
  * Deterministically rank the already-merged workspace catalog for an agent.
@@ -3938,30 +3514,22 @@ export function searchCapabilityCatalogItems(
   if (tokens.length === 0) return [];
   const compactPhrase = phrase.replaceAll(" ", "");
   const fuzzyTokens = tokens.slice(0, FUZZY_MAX_TOKENS);
-  const trusted = items.filter((item) =>
-    capabilityCatalogItemIsTrustedForExposure(item),
-  );
+  const trusted = items.filter((item) => capabilityCatalogItemIsTrustedForExposure(item));
   const providerDomains = new Map(
-    trusted.map(
-      (item) => [item, capabilityCatalogSearchProviderDomain(item)] as const,
-    ),
+    trusted.map((item) => [item, capabilityCatalogSearchProviderDomain(item)] as const),
   );
   // A vendor word names an entry only when its domain is one product's.
   const mentionsOf = integrationMentionMatcher(query, {
     sharedDomains: sharedVendorDomains(
-      trusted.map((item) => ({
-        name: item.name,
-        providerDomain: providerDomains.get(item),
-      })),
+      trusted.map((item) => ({ name: item.name, providerDomain: providerDomains.get(item) })),
     ),
   });
   // Entries the query names distinctively ("dictate this note with
   // whisperflow"); "send a message" does not name Send.
   const namedNames = trusted.flatMap((item) =>
-    mentionsOf({
-      name: item.name,
-      providerDomain: providerDomains.get(item),
-    }).some((mention) => isDistinctiveIntegrationMention(mention, item.name))
+    mentionsOf({ name: item.name, providerDomain: providerDomains.get(item) }).some((mention) =>
+      isDistinctiveIntegrationMention(mention, item.name),
+    )
       ? [item.name]
       : [],
   );
@@ -3980,9 +3548,7 @@ export function searchCapabilityCatalogItems(
     .flatMap((item): CapabilityCatalogSearchMatch[] => {
       let score = 0;
       let approximate = true;
-      const matchedOn = new Set<
-        CapabilityCatalogSearchMatch["matchedOn"][number]
-      >();
+      const matchedOn = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>();
       const hit = (
         field: CapabilityCatalogSearchMatch["matchedOn"][number],
         points: number,
@@ -3999,10 +3565,7 @@ export function searchCapabilityCatalogItems(
         const fuzzyField = FUZZY_FIELDS.has(field);
         if (value.includes(phrase)) {
           hit(field, Math.round(weight * 1.5));
-        } else if (
-          fuzzyField &&
-          compactPhrase.length >= FUZZY_MIN_TOKEN_LENGTH
-        ) {
+        } else if (fuzzyField && compactPhrase.length >= FUZZY_MIN_TOKEN_LENGTH) {
           // Compare with separators removed so "wispr flow" meets "WisprFlow"
           // and "wisprflow" meets "Wispr Flow"; a near miss is typo-tolerant.
           const compactValue = value.replaceAll(" ", "");
@@ -4010,11 +3573,7 @@ export function searchCapabilityCatalogItems(
           if (compactValue.includes(compactPhrase)) {
             hit(field, weight);
           } else {
-            const distance = boundedEditDistance(
-              compactPhrase,
-              compactValue,
-              budget,
-            );
+            const distance = boundedEditDistance(compactPhrase, compactValue, budget);
             if (distance.whole <= budget) {
               hit(field, Math.round(weight * 0.5), true);
             } else if (
@@ -4028,19 +3587,14 @@ export function searchCapabilityCatalogItems(
         for (const token of tokens) {
           if (words.includes(token)) {
             hit(field, weight);
-          } else if (
-            words.some(
-              (word) => word.startsWith(token) || token.startsWith(word),
-            )
-          ) {
+          } else if (words.some((word) => word.startsWith(token) || token.startsWith(word))) {
             hit(field, Math.round(weight * 0.7));
           } else if (value.includes(token)) {
             hit(field, Math.round(weight * 0.4));
           } else if (fuzzyField && fuzzyTokens.includes(token)) {
             const fuzzy = fuzzyWordMatch(token, words);
             if (fuzzy === "word") hit(field, Math.round(weight * 0.3), true);
-            else if (fuzzy === "prefix")
-              hit(field, Math.round(weight * 0.2), true);
+            else if (fuzzy === "prefix") hit(field, Math.round(weight * 0.2), true);
           }
         }
       }
@@ -4088,19 +3642,12 @@ export function suggestCapabilityCatalogItems(
     .map((item): CapabilityCatalogSuggestion => {
       if (!compactPhrase) return { item, similarity: 0 };
       let best = 0;
-      for (const raw of [
-        item.name,
-        capabilityCatalogSearchProviderDomain(item) ?? "",
-      ]) {
+      for (const raw of [item.name, capabilityCatalogSearchProviderDomain(item) ?? ""]) {
         const candidate = normalizeCapabilitySearchText(raw)
           .replaceAll(" ", "")
           .slice(0, FUZZY_MAX_COMPARED_LENGTH);
         if (!candidate) continue;
-        const distance = boundedEditDistance(
-          compactPhrase,
-          candidate,
-          FUZZY_MAX_COMPARED_LENGTH,
-        );
+        const distance = boundedEditDistance(compactPhrase, candidate, FUZZY_MAX_COMPARED_LENGTH);
         best = Math.max(
           best,
           1 - distance.whole / Math.max(compactPhrase.length, candidate.length),
@@ -4129,13 +3676,10 @@ export function suggestCapabilityCatalogItems(
  * a search-only projection and never changes the stored item or any
  * connection/authority matching.
  */
-export function capabilityCatalogSearchProviderDomain(
-  item: CapabilityCatalogItem,
-): string | null {
+export function capabilityCatalogSearchProviderDomain(item: CapabilityCatalogItem): string | null {
   const stored = item.providerDomain?.trim();
   if (stored) return stored;
-  if (item.source === "registry" || item.source === "public_registry")
-    return null;
+  if (item.source === "registry" || item.source === "public_registry") return null;
   for (const candidate of [item.endpointUrl, item.mcpUrl, item.homepageUrl]) {
     if (!candidate) continue;
     const domain = registrableDomain(candidate);
@@ -4159,18 +3703,14 @@ function fuzzyEditBudget(length: number): number {
   return length >= 8 ? 2 : 1;
 }
 
-function fuzzyWordMatch(
-  token: string,
-  words: readonly string[],
-): "word" | "prefix" | null {
+function fuzzyWordMatch(token: string, words: readonly string[]): "word" | "prefix" | null {
   const budget = fuzzyEditBudget(token.length);
   if (budget === 0 || token.length > FUZZY_MAX_COMPARED_LENGTH) return null;
   let prefixHit = false;
   for (const word of words) {
     const lengthGap = Math.abs(word.length - token.length);
     const prefixCandidate =
-      token.length >= FUZZY_PREFIX_MIN_TOKEN_LENGTH &&
-      word.length > token.length;
+      token.length >= FUZZY_PREFIX_MIN_TOKEN_LENGTH && word.length > token.length;
     if (lengthGap > budget && !prefixCandidate) continue;
     const distance = boundedEditDistance(token, word, budget);
     if (lengthGap <= budget && distance.whole <= budget) return "word";
@@ -4202,11 +3742,7 @@ function boundedEditDistance(
     let rowMinimum = current[0];
     for (let j = 1; j <= b.length; j += 1) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      let value = Math.min(
-        previous[j]! + 1,
-        current[j - 1]! + 1,
-        previous[j - 1]! + cost,
-      );
+      let value = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + cost);
       if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
         value = Math.min(value, previousPrevious[j - 2]! + 1);
       }
@@ -4214,19 +3750,11 @@ function boundedEditDistance(
       if (value < rowMinimum) rowMinimum = value;
     }
     if (rowMinimum > budget) return { whole: over, prefix: over };
-    [previousPrevious, previous, current] = [
-      previous,
-      current,
-      previousPrevious,
-    ];
+    [previousPrevious, previous, current] = [previous, current, previousPrevious];
   }
   let prefix = previous[0]!;
-  for (let j = 1; j <= b.length; j += 1)
-    prefix = Math.min(prefix, previous[j]!);
-  return {
-    whole: Math.min(previous[b.length]!, over),
-    prefix: Math.min(prefix, over),
-  };
+  for (let j = 1; j <= b.length; j += 1) prefix = Math.min(prefix, previous[j]!);
+  return { whole: Math.min(previous[b.length]!, over), prefix: Math.min(prefix, over) };
 }
 
 function normalizeCapabilitySearchText(value: string): string {
@@ -4238,9 +3766,7 @@ function normalizeCapabilitySearchText(value: string): string {
     .trim();
 }
 
-function generatedCapabilityId(
-  payload: CreateCapabilityCatalogItemRequest,
-): string {
+function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): string {
   const source = [
     payload.kind,
     payload.name,
@@ -4261,11 +3787,7 @@ export function organizationCustomCapabilityId(definition: {
   return `mcp:organization-${slugify(definition.name)}-${shortHash(`organization:mcp:${definition.name}:${definition.endpointUrl}`)}`;
 }
 
-function publicRegistryCapabilityId(
-  name: string,
-  version: string,
-  endpointUrl: string,
-): string {
+function publicRegistryCapabilityId(name: string, version: string, endpointUrl: string): string {
   return `mcp-registry:${slugify(name)}-${shortHash(`${name}:${version}:${endpointUrl}`)}`;
 }
 
@@ -4334,13 +3856,9 @@ type McpRegistryEntry = {
   };
 };
 
-type McpRegistryRemote = NonNullable<
-  NonNullable<McpRegistryEntry["server"]>["remotes"]
->[number];
+type McpRegistryRemote = NonNullable<NonNullable<McpRegistryEntry["server"]>["remotes"]>[number];
 
-function mcpRegistryEntryToCatalogItem(
-  entry: McpRegistryEntry,
-): CapabilityCatalogItem | null {
+function mcpRegistryEntryToCatalogItem(entry: McpRegistryEntry): CapabilityCatalogItem | null {
   const server = entry.server;
   if (!server?.name) {
     return null;
@@ -4361,8 +3879,7 @@ function mcpRegistryEntryToCatalogItem(
   }
   const version = server.version ?? "latest";
   const id = publicRegistryCapabilityId(server.name, version, endpointUrl);
-  const homepageUrl =
-    validUrl(server.websiteUrl) ?? validUrl(server.repository?.url);
+  const homepageUrl = validUrl(server.websiteUrl) ?? validUrl(server.repository?.url);
   const requiredHeaders = requiredRemoteHeaders(remote);
   const mcpServerId = mcpServerIdForCapability(id, {});
   return CapabilityCatalogItem.parse({
@@ -4455,10 +3972,7 @@ function storedCredentialHeadersSatisfy(
     return true;
   }
   const storedNames = new Set(
-    (Array.isArray(installation.config.headerNames)
-      ? installation.config.headerNames
-      : []
-    )
+    (Array.isArray(installation.config.headerNames) ? installation.config.headerNames : [])
       .filter((name): name is string => typeof name === "string")
       .map((name) => name.toLowerCase()),
   );

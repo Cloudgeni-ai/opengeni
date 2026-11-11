@@ -1,18 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import {
-  findIntegrationsOauthClient,
-  parseIntegrationsOauthClientsJson,
-} from "@opengeni/config";
+import { findIntegrationsOauthClient, parseIntegrationsOauthClientsJson } from "@opengeni/config";
 import {
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   type CapabilityCatalogItem as CatalogItem,
 } from "@opengeni/contracts";
 import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
-import {
-  applyOperatorOAuthClientRequirement,
-  builtInConnectorCatalogItems,
-} from "../src";
+import { applyOperatorOAuthClientRequirement, builtInConnectorCatalogItems } from "../src";
 
 function item(input: Partial<CatalogItem> = {}): CatalogItem {
   return CapabilityCatalogItem.parse({
@@ -23,10 +17,7 @@ function item(input: Partial<CatalogItem> = {}): CatalogItem {
     category: "project-management",
     runtime: { available: true, notes: null },
     metadata: {
-      oauthClientRequirement: {
-        issuer: "https://app.asana.com",
-        reason: "no_self_registration",
-      },
+      oauthClientRequirement: { issuer: "https://app.asana.com", reason: "no_self_registration" },
     },
     ...input,
   });
@@ -34,49 +25,35 @@ function item(input: Partial<CatalogItem> = {}): CatalogItem {
 
 function resolver(json: string) {
   const configured = parseIntegrationsOauthClientsJson(json);
-  return (issuer: string) =>
-    findIntegrationsOauthClient(configured, [issuer]) !== null;
+  return (issuer: string) => findIntegrationsOauthClient(configured, [issuer]) !== null;
 }
 
 describe("operator OAuth client connectability", () => {
   test("projects configured=false when the deployment has no client for the issuer", () => {
     const projected = applyOperatorOAuthClientRequirement(
       item(),
-      resolver(
-        JSON.stringify({
-          "https://accounts.google.com": { clientId: "google" },
-        }),
-      ),
+      resolver(JSON.stringify({ "https://accounts.google.com": { clientId: "google" } })),
     );
-    expect(projected.runtime.operatorOAuthClient).toEqual({
-      configured: false,
-    });
+    expect(projected.runtime.operatorOAuthClient).toEqual({ configured: false });
     // The agent's setup tools report this note instead of offering a card.
     expect(projected.runtime.notes).toBe(
       "New connections are unavailable until this deployment registers an OAuth client with the provider.",
     );
     // The projection survives the public response contract.
     expect(
-      CapabilityCatalogResponse.parse({ items: [projected], installations: [] })
-        .items[0]?.runtime.operatorOAuthClient,
+      CapabilityCatalogResponse.parse({ items: [projected], installations: [] }).items[0]?.runtime
+        .operatorOAuthClient,
     ).toEqual({ configured: false });
     // An installed row keeps its own status note.
     const installed = applyOperatorOAuthClientRequirement(
       item({
         enabled: true,
-        runtime: {
-          available: false,
-          notes: "This installed connection is unavailable.",
-        },
+        runtime: { available: false, notes: "This installed connection is unavailable." },
       }),
       resolver("{}"),
     );
-    expect(installed.runtime.operatorOAuthClient).toEqual({
-      configured: false,
-    });
-    expect(installed.runtime.notes).toBe(
-      "This installed connection is unavailable.",
-    );
+    expect(installed.runtime.operatorOAuthClient).toEqual({ configured: false });
+    expect(installed.runtime.notes).toBe("This installed connection is unavailable.");
   });
 
   test("matches the issuer key the OAuth start uses, ignoring a trailing slash", () => {
@@ -91,9 +68,7 @@ describe("operator OAuth client connectability", () => {
     expect(
       applyOperatorOAuthClientRequirement(
         item(),
-        resolver(
-          JSON.stringify({ "https://app.asana.com": { clientId: "asana" } }),
-        ),
+        resolver(JSON.stringify({ "https://app.asana.com": { clientId: "asana" } })),
       ).runtime.notes,
     ).toBeNull();
   });
@@ -133,9 +108,7 @@ describe("X and Reddit operator OAuth client connectability", () => {
   });
 
   test("connects each provider only when its own client is configured", () => {
-    const { x, reddit } = socialItems(
-      JSON.stringify({ x: { clientId: "x-client" } }),
-    );
+    const { x, reddit } = socialItems(JSON.stringify({ x: { clientId: "x-client" } }));
     expect(x.runtime.operatorOAuthClient).toEqual({ configured: true });
     expect(deploymentCannotConnect(x)).toBe(false);
     expect(x.runtime.notes).not.toContain("New connections are unavailable");
