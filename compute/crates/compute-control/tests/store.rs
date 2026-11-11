@@ -218,6 +218,63 @@ async fn registrations_are_answered_once_refused_while_live_and_renewed_by_their
     each(registration, registration).await;
 }
 
+/// Whether `host` serves, and its restarts, as the store holds them.
+async fn restarts<S: Store>(store: &S, host: HostId) -> (bool, u64) {
+    let row = row_of(store, host).await;
+    (row.serving, row.restarts)
+}
+
+async fn agent_restarts<S: Store>(store: S) {
+    let name = name();
+    let first = register(&name, random(), Vec::new());
+    let (host, epoch) = registered(&store, &first).await;
+    assert_eq!(
+        restarts(&store, host).await,
+        (true, 0),
+        "a registration serves"
+    );
+    // Its agent stops, and the one started again renews the lease it held
+    // while it takes its sandboxes back: one restart, and another later.
+    let capacities = [
+        Some(capacity()),
+        None,
+        None,
+        Some(capacity()),
+        None,
+        Some(capacity()),
+    ];
+    for (seq, capacity) in (1..).zip(capacities) {
+        let renew = Renew {
+            host: host.0,
+            epoch,
+            seq,
+            capacity,
+        };
+        assert!(
+            store
+                .renew(&renew, std::slice::from_ref(&name))
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        restarts(&store, host).await,
+        (true, 2),
+        "each stop counted once"
+    );
+    // Given up on and registered afresh, it keeps its count.
+    let count = renewals(&store, host).await.expect("counted");
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
+    let again = register(&name, random(), Vec::new());
+    assert_eq!(registered(&store, &again).await.0, host);
+    assert_eq!(restarts(&store, host).await, (true, 2));
+}
+
+#[tokio::test]
+async fn a_hosts_agent_stopping_while_it_holds_its_lease_is_counted() {
+    each(agent_restarts, agent_restarts).await;
+}
+
 /// What a host can take on, telling that it is `info`.
 fn telling(info: &HostInfo) -> Capacity {
     Capacity {
@@ -1582,7 +1639,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))

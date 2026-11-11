@@ -44,6 +44,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             sets_aside: true,
             info: None,
         },
+        restarts: 3,
         tally: Tally::default(),
     }
 }
@@ -124,6 +125,10 @@ fn only_the_leader_reports_the_fleet() {
     assert_eq!(
         value(&text, "compute_fleet_host_epoch{host_name=\"hosts-a\"}"),
         Some(1.0)
+    );
+    assert_eq!(
+        value(&text, "compute_fleet_host_agent_restarts{host_name=\"hosts-a\"}"),
+        Some(3.0)
     );
 
     // The count moves after standing still 12 s: one gap of 12 s, and

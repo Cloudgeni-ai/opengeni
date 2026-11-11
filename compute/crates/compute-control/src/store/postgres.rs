@@ -47,7 +47,8 @@ const SANDBOX_READ: &str = "id, team, spec, metadata, owner, epoch, taken, \
      unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
      class, created_ms, version, whole_epoch, lost";
 
-const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, changed";
+const HOST_COLUMNS: &str =
+    "id, info, epoch, state, renewals, seq, capacity, serving, restarts, changed";
 
 /// Whether the owner a sandbox write names, its parameter `param`, is
 /// lost: given up on, or not a host the store has (one given up on and
@@ -181,6 +182,8 @@ fn host_row(row: &Row) -> Result<HostRow> {
         renewals: small(row.try_get("renewals").map_err(corrupt)?)?,
         seq: small(row.try_get("seq").map_err(corrupt)?)?,
         capacity,
+        serving: row.try_get("serving").map_err(corrupt)?,
+        restarts: small(row.try_get("restarts").map_err(corrupt)?)?,
         changed: small(row.try_get("changed").map_err(corrupt)?)?,
     })
 }
@@ -521,7 +524,7 @@ impl PostgresStore {
              on conflict (id) do update set info = excluded.info, epoch = excluded.epoch, \
              state = case when compute_hosts.drained then 'draining' else 'live' end, \
              renewals = compute_hosts.renewals + 1, seq = 0, \
-             attempt = excluded.attempt, answer = excluded.answer, \
+             serving = true, attempt = excluded.attempt, answer = excluded.answer, \
              capacity = excluded.capacity, changed = excluded.changed, gone_ms = null",
             &[
                 &id,

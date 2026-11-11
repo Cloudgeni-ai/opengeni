@@ -405,7 +405,7 @@ fn render_tallies(out: &mut Text, hosts: &[Known]) {
     out.family(
         "compute_control_host_registrations_total",
         "counter",
-        "Fresh registrations of a host this replica read while it held the host, each under a new epoch: the host's agent started again (a crash, a watchdog's stop, a restart or a reboot), or its lease lapsed and it registered once more.",
+        "Fresh registrations of a host this replica read while it held the host, each under a new epoch: the host rebooted, or it was given up on (its lease lapsed) and registered once more. An agent restarted in place keeps its registration (compute_fleet_host_agent_restarts counts those).",
     );
     for host in hosts {
         out.sample(
@@ -449,12 +449,17 @@ fn bytes(mib: u64) -> Num {
 }
 
 /// The gauges each host the service counts on has.
-fn host_gauges() -> [HostGauge; 12] {
+fn host_gauges() -> [HostGauge; 13] {
     [
         (
             "compute_fleet_host_epoch",
-            "The registration a host holds: a number that rises each time it registers afresh (its agent started again or its lease lapsed). Its changes count fresh registrations whichever replica leads, across restarts of the service.",
+            "The registration a host holds: a number that rises each time it registers afresh (after a reboot, or once it was given up on). Its changes count fresh registrations whichever replica leads, across restarts of the service.",
             |host| Num::Whole(host.target.epoch.0),
+        ),
+        (
+            "compute_fleet_host_agent_restarts",
+            "Times a host's agent stopped serving while the host held a registration: each stop or restart of its agent (by its watchdog, a crash, an upgrade or a reboot), counted once, as the fleet's store keeps it. Its changes count restarts whichever replica leads, across restarts of the service.",
+            |host| Num::Whole(host.restarts),
         ),
         (
             "compute_fleet_host_memory_bytes",

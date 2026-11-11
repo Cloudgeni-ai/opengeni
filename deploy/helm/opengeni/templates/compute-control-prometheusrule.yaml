@@ -208,14 +208,14 @@ spec:
             next_step: 'Check compute_control_requests_total for POST /v1/sandboxes by outcome, and the replicas'' logs.'
         - alert: OpenGeniComputeHostAgentRestarting
           expr: |
-            changes((max by (host_name) (compute_fleet_host_epoch{ {{- $scope }}}))[6h:1m]) >= {{ $agentRestarts }}
+            changes((max by (host_name) (compute_fleet_host_agent_restarts{ {{- $scope }}}))[6h:1m]) >= {{ $agentRestarts }}
           for: 1m
           labels:
             severity: warning
           annotations:
-            summary: 'A compute host registered afresh at least {{ $agentRestarts }} times in six hours: its agent keeps starting again (stopped by its watchdog when stuck, crashed or rebooted), or its lease keeps lapsing.'
+            summary: 'A compute host''s agent stopped serving at least {{ $agentRestarts }} times in six hours while the host held its lease: it keeps being stopped by its watchdog when stuck, crashing, or being restarted.'
             headline: 'Compute host {{ "{{ $labels.host_name }}" }} agent keeps restarting'
-            value: '{{ "{{ printf `%.0f` $value }}" }} fresh registration(s) (6 h)'
+            value: '{{ "{{ printf `%.0f` $value }}" }} restart(s) (6 h)'
             user_impact: 'While its agent restarts, the host''s sandboxes do not answer and their wakes wait or fail.'
             next_step: 'Read the host''s journal in Cloud Logging for why the agent stopped, and check its free memory on the compute dashboard.'
             runbook_url: {{ printf "%s#observing" $runbook }}

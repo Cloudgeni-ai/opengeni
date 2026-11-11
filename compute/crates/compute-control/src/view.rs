@@ -121,6 +121,9 @@ pub struct Known {
     pub info: Described,
     pub state: HostState,
     pub capacity: Reported,
+    /// Times its agent stopped serving while it held a registration, as
+    /// the store counts them ([`HostRow::restarts`]).
+    pub restarts: u64,
     /// What this replica counted of it while it held it.
     pub tally: Tally,
 }
@@ -129,9 +132,9 @@ pub struct Known {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tally {
     /// Fresh registrations it read, each under a new host epoch: the
-    /// host's agent started again (a restart or a reboot), or its lease
-    /// lapsed and it registered once more. The first read of a host is
-    /// not counted.
+    /// host rebooted, or it was given up on (its lease lapsed) and
+    /// registered once more; an agent restarted in place keeps its lease.
+    /// The first read of a host is not counted.
     pub registrations: u64,
     /// Wakes of its sandboxes it refused as full.
     pub refused_wakes: u64,
@@ -404,8 +407,8 @@ impl View {
                 inner.full.remove(&row.id);
             }
             inner.fleet.upsert(row.id, info, row.state, capacity);
-            // A later epoch is a fresh registration: its agent started
-            // again, or its lease lapsed. The first read is not one.
+            // A later epoch is a fresh registration: the host rebooted, or
+            // its lease lapsed. The first read is not one.
             let tally = inner
                 .hosts
                 .get(&row.id)
@@ -430,6 +433,7 @@ impl View {
                     info: row.info.clone(),
                     state: row.state,
                     capacity: row.capacity.clone(),
+                    restarts: row.restarts,
                     tally,
                 },
             );
@@ -783,6 +787,8 @@ mod tests {
                 disk_free_mib: 100 * 1024,
                 ..Reported::default()
             },
+            serving: true,
+            restarts: 0,
             changed: renewals,
         }
     }

@@ -1023,23 +1023,28 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     `observability.prometheusRule.enabled`), scoping each host to its
     release through the leader's `compute_fleet_host_info`, and the
     **Opengeni · Compute** dashboard shows them.
-- **What the control service counts of each host.** Every replica
-  reports, for each host it holds, its fresh registrations
-  (`compute_control_host_registrations_total`): each is the host
-  registering under a new epoch, which its agent does when it starts
-  again (stopped by its watchdog when stuck, crashed, restarted or
-  rebooted) or after its lease lapsed. It also reports the requests the
-  host refused as full (`compute_control_host_refusals_total`, by `kind`:
-  `wake` of a sandbox it holds, `place` of one created on it or given to
-  it to adopt). These need no host metrics, so they alert with
-  `computeControl.metrics.port` alone:
-  - `OpenGeniComputeHostAgentRestarting`: a host's epoch, which the
-    leader reports from the fleet table (`compute_fleet_host_epoch`),
-    changed at least `computeControl.alerts.agentRestarts` (2) times in
-    six hours, for a minute. It survives compute-control rollouts, since
-    the epoch is durable. One in-place upgrade restarts each agent once
-    and does not fire it; raise the threshold where agents are upgraded
-    in place more often.
+- **What the control service counts of each host.** The leader reports,
+  from the fleet's store, each host's agent restarts
+  (`compute_fleet_host_agent_restarts`): the times its agent stopped
+  serving while the host held its lease, which its renewals say by
+  carrying no capacity (an agent stopping, stopped by its watchdog when
+  stuck, crashed or upgraded, or one started again that takes back what
+  the previous run left). A restarted agent keeps the lease it held, so
+  its epoch (`compute_fleet_host_epoch`) moves only when the host
+  registers afresh: after a reboot, or once it was given up on. Every
+  replica also reports, for each host it holds, those fresh
+  registrations (`compute_control_host_registrations_total`) and the
+  requests the host refused as full
+  (`compute_control_host_refusals_total`, by `kind`: `wake` of a sandbox
+  it holds, `place` of one created on it or given to it to adopt). These
+  need no host metrics, so they alert with `computeControl.metrics.port`
+  alone:
+  - `OpenGeniComputeHostAgentRestarting`: a host's agent restarts changed
+    at least `computeControl.alerts.agentRestarts` (2) times in six hours,
+    for a minute. The count is kept in the store, so it survives
+    compute-control rollouts and changes of leader. One in-place upgrade
+    or reboot restarts each agent once and does not fire it; raise the
+    threshold where agents are upgraded in place more often.
   - `OpenGeniComputeHostRefusingWakes`: a host refused
     `computeControl.alerts.refusedWakes` (3) wakes or more as full in half
     an hour, and refused one in the last ten minutes, for a quarter of an

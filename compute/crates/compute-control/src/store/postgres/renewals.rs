@@ -44,6 +44,8 @@ impl PostgresStore {
                 &format!(
                     "update compute_hosts set renewals = renewals + 1, \
                      seq = greatest(seq, $3), capacity = coalesce($4, capacity), \
+                     restarts = restarts + case when serving and not $7 then 1 else 0 end, \
+                     serving = $7, \
                      info = {}, changed = nextval('compute_changes') \
                      where id = $1 and epoch = $2 and state <> 'lost' and name = any($5)",
                     told(6)
@@ -55,6 +57,9 @@ impl PostgresStore {
                     &capacity.as_ref().map(Json),
                     &names,
                     &described.as_ref().map(Json),
+                    // An agent that served and renews without a capacity
+                    // stopped or started again.
+                    &renew.capacity.is_some(),
                 ],
             )
             .await

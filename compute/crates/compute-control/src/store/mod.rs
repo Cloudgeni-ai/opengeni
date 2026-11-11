@@ -82,6 +82,16 @@ pub struct HostRow {
     pub seq: u64,
     /// What it last said it can take on.
     pub capacity: Capacity,
+    /// Whether its agent serves: it registered, or its last renewal said
+    /// what it can take on. A renewal without a capacity
+    /// ([`Renew::capacity`]) comes from an agent stopping, or one started
+    /// again still taking back what the previous run left.
+    pub serving: bool,
+    /// Times its agent stopped serving while it held a registration (a
+    /// renewal without a capacity after one with): each stop or restart of
+    /// its agent, by its watchdog, a crash, an upgrade or a reboot, counted
+    /// once. Kept across its registrations.
+    pub restarts: u64,
     /// When the row last changed, by the store's change counter: replicas
     /// read the rows changed since they last looked.
     pub changed: u64,

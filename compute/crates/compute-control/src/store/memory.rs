@@ -235,10 +235,10 @@ impl MemoryStore {
                 sandbox.version += 1;
             }
         }
-        let (renewals, drained) = inner
+        let (renewals, restarts, drained) = inner
             .hosts
             .get(&id)
-            .map_or((0, false), |host| (host.row.renewals, host.drained));
+            .map_or((0, 0, false), |host| (host.row.renewals, host.row.restarts, host.drained));
         let renewals = renewals + 1;
         let changed = inner.change();
         inner.by_name.insert(register.info.name.clone(), id);
@@ -257,6 +257,8 @@ impl MemoryStore {
                     renewals,
                     seq: 0,
                     capacity: register.capacity.split().0,
+                    serving: true,
+                    restarts,
                     changed,
                 },
                 attempt: register.attempt,
@@ -290,6 +292,13 @@ impl MemoryStore {
         };
         row.renewals += 1;
         row.seq = row.seq.max(renew.seq);
+        // An agent that served and renews without a capacity stopped or
+        // started again.
+        let serving = renew.capacity.is_some();
+        if row.serving && !serving {
+            row.restarts += 1;
+        }
+        row.serving = serving;
         // A renewal without a capacity keeps the one last heard.
         if let Some(capacity) = &renew.capacity {
             row.told(capacity);
