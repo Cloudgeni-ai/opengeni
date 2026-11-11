@@ -92,6 +92,11 @@ export type PersonalGitHubGatewayServices = {
     destinationUrl: string,
     toolName: string,
     repositories: GatewayRepositoryCheck[],
+    /**
+     * The write went through only because every repository was allowed for
+     * writing; the re-check refuses it if that is no longer so.
+     */
+    options?: { everyRepository?: boolean },
   ) => Promise<string>;
   decide: GatewayDecider;
   complete: GatewayCompleter;
@@ -836,9 +841,11 @@ export async function handlePersonalGitHubGatewayRequest(
   action = await applyRefRewritePolicy(services, authority, action, restRepository, checks);
   // With every repository allowed for writing, there is no allowlist an
   // unconfirmed write could step around: the person's policy decides.
+  let everyRepository = false;
   if (action.kind === "write" && action.unscoped && allowlistCoversEveryRepository(authority)) {
     const { unscoped: _covered, ...scoped } = action;
     action = scoped;
+    everyRepository = true;
   }
 
   let requestId: string | null = null;
@@ -892,6 +899,7 @@ export async function handlePersonalGitHubGatewayRequest(
       upstreamUrl.toString(),
       action.kind === "write" ? (action.tools[0] ?? "github_request") : "github_read",
       checks,
+      { everyRepository },
     );
   } catch (error) {
     await complete("not_executed");
@@ -1093,7 +1101,7 @@ export function personalGitHubGatewayServices(deps: ApiRouteDeps): PersonalGitHu
   return {
     openClaims,
     resolveAuthority,
-    authorizeProviderRequest: async (authority, destinationUrl, toolName, repositories) =>
+    authorizeProviderRequest: async (authority, destinationUrl, toolName, repositories, options) =>
       await authorizePersonalGitHubProviderRequest(deps, {
         claims: authority.claims,
         providerPrincipalId: authority.providerPrincipalId,
@@ -1102,6 +1110,11 @@ export function personalGitHubGatewayServices(deps: ApiRouteDeps): PersonalGitHu
         recheck: async () => {
           const current = await resolveAuthority(authority.claims);
           assertRepositories(current, repositories);
+          if (options?.everyRepository && !allowlistCoversEveryRepository(current)) {
+            throw new GatewayRepositoryDeniedError(
+              "The repositories this chat can write to changed. Run the command again.",
+            );
+          }
           return current;
         },
       }),
