@@ -92,7 +92,8 @@ Initial setup and account linking require a verified managed browser session.
 Only shared workspaces administered by that human can be selected. Confirming
 setup also links that verified Teams actor to the signed-in human atomically;
 the installer does not need a second account-link confirmation. Other people
-follow their own signed account-link flow. The installer
+follow their own account-link flow, which proves their Teams identity with a
+Microsoft sign-in (see [Account linking](#account-linking)). The installer
 allowlist is explicit operator approval of a Teams actor, not proof that the
 actor holds a Microsoft tenant administrator role. Keep it empty until the
 operator has independently approved the intended installer. Personal messages use
@@ -272,9 +273,12 @@ replies. Its redelivery then gets the short reminder. An install's welcome is al
 
 ### Entra app configuration
 
-Self-serve sign-in uses the bot's own Entra application
-(`OPENGENI_TEAMS_BOT_CLIENT_ID`) and its existing client secret. Do not reuse
-the Microsoft 365 tools connector app. On that app registration:
+Self-serve sign-in and the account-link sign-in use the bot's own Entra
+application (`OPENGENI_TEAMS_BOT_CLIENT_ID`) and its existing client secret. Do
+not reuse the Microsoft 365 tools connector app. Account linking needs the
+redirect URI and API permissions below on every deployment, including one that
+connects organizations only through operator-approved installers. On that app
+registration:
 
 - **Supported account types**: accounts in any organizational directory
   (multi-tenant).
@@ -307,6 +311,68 @@ Staging acceptance for self-serve, in the dedicated test tenant:
    link.
 7. After disconnecting, a Teams Administrator can reconnect only in the original
    workspace; a Global Administrator can move it to another shared workspace.
+8. A person without an administrator role opens their own account link, signs in
+   to Microsoft with their Teams account and is linked.
+9. A workspace member opens someone else's account link and signs in to
+   Microsoft as themselves: the link is refused with a message naming the Teams
+   account it is for, and nothing is linked.
+10. A guest from another organization messages the bot, opens their link and
+    signs in to Microsoft with their home account. Microsoft signs them in to
+    the connected tenant as its guest, and they are linked.
+
+## Account linking
+
+A person in a connected organization who isn't linked yet gets a **Link
+account** card in their 1:1 chat. Its URL opens the workspace's integrations
+page with a signed link proof in the fragment: the tenant, the Teams user
+(`aadObjectId`), their Teams display name, the workspace and installation
+generation, a single-use nonce and a 10-minute expiry. The proof is not enough
+to link: someone it is forwarded to could otherwise link the sender's Teams
+account to their own Opengeni account, and the sender's Teams messages would
+then run with their access.
+
+1. The page asks **Link your Teams account?** and explains that the person
+   signs in to Microsoft with the account they use in Teams. **Sign in with
+   Microsoft** sends the proof to
+   `POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in`
+   in the person's own authenticated browser request. The API checks the proof
+   against the workspace's current installation and returns a Microsoft sign-in
+   URL, exactly as for setup (bot Entra app, tenant-specific authority of the
+   Teams tenant, authorization code with PKCE, `openid profile`, the
+   `/teams/connect` redirect URI). Its signed state has the purpose
+   `teams-account-link` and binds the proof nonce, tenant, Teams user, Opengeni
+   person and workspace.
+2. The proof and workspace wait in the tab's session storage, never in a URL
+   Microsoft sees. Microsoft returns to `/teams/connect`, which recognizes the
+   link sign-in by its state and sends the proof with the code and state to
+   `POST …/teams/link`.
+3. The API checks the state's purpose and binding against the proof and the
+   browser session and verifies the ID token as for setup: Microsoft's keys,
+   issuer for the Teams tenant, audience, expiry and nonce. `tid` must equal the
+   proof's tenant and `oid` its Teams user; no administrator role is needed.
+   Only then does it link, so link conflicts are never revealed before the
+   identity is proven.
+
+A guest signs in to the connected (resource) tenant, because the authority
+names it. Their ID token carries that tenant's `tid` and the object ID of their
+guest account there, which is the `aadObjectId` Teams sends for them, so they
+link like anyone else. Microsoft personal accounts (consumer tenant) can't
+link (`link_consumer_tenant`).
+
+A Microsoft account other than the link's Teams user, by `oid` or `tid`, is
+refused with `link_identity_mismatch`. The message names the Teams account the
+link is for (its display name; links issued before the name was added say "a
+different Teams account") and the Microsoft account that signed in
+(`preferred_username`, else `name`), and says to open the link again with that
+account or get a link for one's own account. A refused or abandoned sign-in
+doesn't use up the link, so its owner can retry within the 10 minutes. A link
+request without a Microsoft sign-in is refused with `link_sign_in_required`; a
+sign-in state for another link, person or workspace, or a setup sign-in, with
+`link_sign_in_expired`.
+
+An organization that blocks user consent to the bot's Entra app must have an
+administrator consent to it once before people can link; the page then explains
+that a Global Administrator needs to approve Opengeni.
 
 ## Generate a package
 
