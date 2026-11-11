@@ -183,7 +183,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// file reads as its whole bound.
     fn resting_disk(&mut self, id: SandboxId, now: bool) -> Option<Input> {
         let slot = self.slots.get(&id)?;
-        if slot.op.is_some() || slot.destroy || self.tearing_down.contains_key(&id) {
+        // The whole bound never books too little, so only a reading waits
+        // for the disk to be left alone.
+        if slot.destroy || (now && (slot.op.is_some() || self.tearing_down.contains_key(&id))) {
             return None;
         }
         let record = self.records.get(Id(id))?;
@@ -224,12 +226,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Input::Finished {
                     sandbox, outcome, ..
                 } if self.core.sandbox(*sandbox).is_some_and(|view| {
-                    // A pause done, or a step of a stopped disk that leaves
-                    // no VM; a disk a step leaves running is read with the
-                    // running disks.
+                    // A pause done, or any step of a stopped disk that
+                    // leaves it with no VM, a wake that failed included; a
+                    // disk a step leaves running is read with the running
+                    // disks.
                     (*outcome == Outcome::Done && view.step == Some(Step::Pause))
                         || (matches!(view.state.level, Level::Saved | Level::Archived)
-                            && !matches!(view.step, Some(Step::Restore | Step::Boot)))
+                            && self.slots.get(sandbox).is_some_and(|slot| slot.vm.is_none()))
                 }) =>
                 {
                     (Some(*sandbox), false)

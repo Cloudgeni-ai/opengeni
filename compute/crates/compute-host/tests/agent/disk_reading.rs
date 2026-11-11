@@ -663,6 +663,7 @@ async fn a_wake_after_a_capture_never_books_the_reading_from_before() {
         ),
         "{refused:?}"
     );
+    lab.assert_clean();
 }
 
 /// A disk that cannot be read as the disk reading is taken, or whose VM's

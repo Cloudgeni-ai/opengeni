@@ -277,6 +277,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(path) = self.slots.get(&id).map(|slot| slot.paths.disk.clone()) else {
             return whole;
         };
+        // While a late read runs, or with the budget spent, even a reading
+        // that may still stand goes unused: only a stat can tell it stands,
+        // and that may wait as long as the read. The whole bound may refuse
+        // a wake that would fit, but never admits one that does not.
         if let Some(late) = &self.disks.now {
             if !late.load(Ordering::Acquire) {
                 return whole;

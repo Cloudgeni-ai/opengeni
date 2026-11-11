@@ -796,6 +796,7 @@ async fn scale(
                 tracing::info!(
                     from = described.target_size,
                     to,
+                    draining = seen.draining,
                     draining_allowance = draining,
                     stalled = seen.stalled,
                     free_mib = seen.free_memory_mib,
