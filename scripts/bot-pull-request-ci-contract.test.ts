@@ -71,6 +71,8 @@ describe("pull requests opened with GITHUB_TOKEN", () => {
       expect(dispatchesPrCi(step), id).toBe(true);
       const permissions = job.permissions ?? workflow.permissions ?? {};
       expect(permissions.actions, id).toBe("write");
+      // Reads PR CI check runs to decide whether a kept head needs a run.
+      if (/check-runs/.test(step.run ?? "")) expect(permissions.checks, id).toBe("read");
     }
     expect(openers.map(({ id }) => id)).toEqual([
       "browser-engine-pins.yml:update",
@@ -118,15 +120,12 @@ describe("pull requests opened with GITHUB_TOKEN", () => {
 const STUB_GH = `#!/usr/bin/env bash
 echo "$*" >> "$STUB_DIR/gh.log"
 case "$1 $2" in
-  "pr view")
-    if [[ "$*" == *"state,labels"* ]]; then
-      [ -f "$STUB_DIR/pr_state" ] || exit 1
-      cat "$STUB_DIR/pr_state"
-    else
-      echo 42
-    fi ;;
+  "pr view") echo 42 ;;
   "pr create") printf 'OPEN ' > "$STUB_DIR/pr_state" ;;
-  "api "*) cat "$STUB_DIR/checks" 2>/dev/null || echo 0 ;;
+  "api "*pulls*)
+    [ -f "$STUB_DIR/lookup_fails" ] && exit 1
+    cat "$STUB_DIR/pr_state" 2>/dev/null || echo ;;
+  "api "*check-runs*) cat "$STUB_DIR/checks" 2>/dev/null || printf '0\\t0\\t0\\n' ;;
 esac
 `;
 const STUB_BUN = `#!/usr/bin/env bash
@@ -195,6 +194,8 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
       await writeFile(join(bin, "bun"), STUB_BUN);
       await chmod(join(bin, "gh"), 0o755);
       await chmod(join(bin, "bun"), 0o755);
+      await writeFile(join(bin, "sleep"), "#!/usr/bin/env bash\n");
+      await chmod(join(bin, "sleep"), 0o755);
       const seed = join(root, "seed");
       for (const path of SEEDED) {
         await mkdir(dirname(join(seed, path)), { recursive: true });
@@ -210,11 +211,12 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
         ...identity,
         STUB_DIR: stub,
         GITHUB_REPOSITORY: "o/r",
+        GITHUB_REPOSITORY_OWNER: "o",
         PATH: `${bin}:${process.env.PATH}`,
       };
 
       // One scheduled run: a fresh shallow checkout of main with the given pin edits.
-      async function refresh(edits: Record<string, string>) {
+      async function refresh(edits: Record<string, string>, exitCode = 0) {
         await rm(join(root, "work"), { recursive: true, force: true });
         const clone = await sh(
           root,
@@ -226,7 +228,7 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
           await writeFile(join(root, "work", path), content);
         await rm(join(stub, "gh.log"), { force: true });
         const result = await sh(join(root, "work"), await stepScript(file), env);
-        expect(result.code, result.stderr).toBe(0);
+        expect(result.code, result.stderr).toBe(exitCode);
         const log = await readFile(join(stub, "gh.log"), "utf8").catch(() => "");
         const head = await sh(
           root,
@@ -235,8 +237,11 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
         return { log, head: head.stdout };
       }
       const setPr = (state: string) => writeFile(join(stub, "pr_state"), state);
-      const setChecks = (count: number) => writeFile(join(stub, "checks"), `${count}\n`);
-      return { root, refresh, setPr, setChecks };
+      // PR CI check runs on the kept head: all of them, those still running, those that passed.
+      const setChecks = (runs: number, active = 0, passed = 0) =>
+        writeFile(join(stub, "checks"), `${runs}\t${active}\t${passed}\n`);
+      const failLookup = () => writeFile(join(stub, "lookup_fails"), "");
+      return { root, refresh, setPr, setChecks, failLookup };
     }
 
     test("opens the pull request and dispatches PR CI on the pushed head", async () => {
@@ -256,7 +261,7 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
       try {
         const first = await refresh({ [pin]: "pin=2\n" });
         await setPr("OPEN queue-ready,in-batch");
-        await setChecks(1);
+        await setChecks(1, 0, 1);
         const unchanged = await refresh({ [pin]: "pin=2\n" });
         expect(unchanged.head).toBe(first.head);
         expect(unchanged.log).not.toContain("workflow run");
@@ -268,6 +273,16 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
         const dispatched = await refresh({ [pin]: "pin=2\n" });
         expect(dispatched.head).toBe(first.head);
         expect(dispatched.log).toContain(`head_sha=${first.head}`);
+
+        // A running PR CI is left alone; a failed one is re-run, up to three runs.
+        await setChecks(1, 1, 0);
+        expect((await refresh({ [pin]: "pin=2\n" })).log).not.toContain("workflow run");
+        await setChecks(2, 0, 0);
+        const rerun = await refresh({ [pin]: "pin=2\n" });
+        expect(rerun.head).toBe(first.head);
+        expect(rerun.log).toContain(`head_sha=${first.head}`);
+        await setChecks(3, 0, 0);
+        expect((await refresh({ [pin]: "pin=2\n" })).log).not.toContain("workflow run");
       } finally {
         await rm(root, { recursive: true, force: true });
       }
@@ -277,7 +292,7 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
       const { root, refresh, setChecks, setPr } = await fixture();
       try {
         const first = await refresh({ [pin]: "pin=2\n" });
-        await setChecks(1);
+        await setChecks(1, 0, 1);
         await setPr("OPEN queue-ready,in-batch");
         const held = await refresh({ [pin]: "pin=3\n" });
         expect(held.head).toBe(first.head);
@@ -293,6 +308,20 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
       }
     });
 
+    test("fails without pushing when the pull request state cannot be read", async () => {
+      const { root, refresh, setPr, failLookup } = await fixture();
+      try {
+        const first = await refresh({ [pin]: "pin=2\n" });
+        await setPr("OPEN queue-ready,in-batch");
+        await failLookup();
+        const failed = await refresh({ [pin]: "pin=3\n" }, 1);
+        expect(failed.head).toBe(first.head);
+        expect(failed.log).not.toContain("workflow run");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
     // Only the browser engine refresh commits more than one pin file.
     test.if(file === "browser-engine-pins.yml")(
       "pushes when the open pull request changes files this refresh no longer changes",
@@ -301,7 +330,7 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
         try {
           const first = await refresh({ [pin]: "pin=2\n", "docker/sandbox.Dockerfile": "pin=2\n" });
           await setPr("OPEN ");
-          await setChecks(1);
+          await setChecks(1, 0, 1);
           const narrowed = await refresh({ [pin]: "pin=2\n" });
           expect(narrowed.head).not.toBe(first.head);
           expect(narrowed.log).toContain(`head_sha=${narrowed.head}`);
