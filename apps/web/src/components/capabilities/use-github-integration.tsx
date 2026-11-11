@@ -9,7 +9,7 @@ import type {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
   GitHubActionPolicyDecision,
-  GitHubActionPolicyGroup,
+  PersonalGitHubActionPolicyGroup,
   GitHubInstallationBinding,
 } from "@opengeni/sdk";
 
@@ -54,12 +54,15 @@ export const GITHUB_APP_SECTION = {
 export const GITHUB_LOGO_URL = "/capability-logos/github.svg";
 
 const GITHUB_ACTION_POLICY_GROUPS: Array<{
-  id: GitHubActionPolicyGroup;
+  id: PersonalGitHubActionPolicyGroup;
   label: string;
 }> = [
   { id: "routine", label: "Create and update work" },
   { id: "review", label: "Submit reviews" },
   { id: "merge", label: "Merge pull requests" },
+  // Only Your GitHub has it: settings, secrets, deletions and other
+  // hard-to-undo or unrecognised changes made with gh or Git.
+  { id: "sensitive", label: "Settings and deletions" },
 ];
 
 const GITHUB_ACTION_POLICY_CHOICES = [
@@ -315,7 +318,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   async function updateActionPolicies(
     changes: Array<{
       actor: GitHubActionPolicyActorState;
-      group: GitHubActionPolicyGroup;
+      group: PersonalGitHubActionPolicyGroup;
       decision: GitHubActionPolicyDecision;
     }>,
     busyKey: string,
@@ -685,20 +688,21 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   ];
   const policyCell = (
     actors: GitHubActionPolicyActorState[],
-    groups: GitHubActionPolicyGroup[],
+    groups: PersonalGitHubActionPolicyGroup[],
     editable: boolean,
     busyKey: string,
   ): IntegrationPolicyCell | undefined =>
-    actors.length === 0
-      ? undefined
-      : {
+    // Settings and deletions applies to Your GitHub only: no cell for the app.
+    actors.some((actor) => groups.some((group) => actor.groups[group] !== undefined))
+      ? {
           value: commonGitHubActionPolicyDecision(actors, groups),
           disabled: !editable || actionPolicyBusy !== null,
           busy: actionPolicyBusy === busyKey,
-        };
+        }
+      : undefined;
   const setPolicies = (
     actors: GitHubActionPolicyActorState[],
-    groups: GitHubActionPolicyGroup[],
+    groups: PersonalGitHubActionPolicyGroup[],
     value: string,
     busyKey: string,
   ) => {
@@ -706,25 +710,30 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     void updateActionPolicies(
       actors.flatMap((actor) =>
         groups
-          .filter((group) => actor.groups[group] !== value)
+          .filter((group) => actor.groups[group] !== undefined && actor.groups[group] !== value)
           .map((group) => ({ actor, group, decision: value })),
       ),
       busyKey,
     );
   };
   const policyGroupIds = GITHUB_ACTION_POLICY_GROUPS.map((group) => group.id);
-  const isPolicyGroup = (id: string): id is GitHubActionPolicyGroup =>
-    policyGroupIds.includes(id as GitHubActionPolicyGroup);
+  const isPolicyGroup = (id: string): id is PersonalGitHubActionPolicyGroup =>
+    policyGroupIds.includes(id as PersonalGitHubActionPolicyGroup);
   const columnFor = (columnId: string) => policyColumns.find((column) => column.id === columnId);
   const installationName = (actor: GitHubActionPolicyActorState) =>
     actor.kind === "workspace_app"
       ? (installations.find((installation) => installation.installationId === actor.installationId)
           ?.accountLogin ?? actor.label)
       : actor.label;
-  const appPoliciesDiffer = policyGroupIds.some(
-    (group) => commonGitHubActionPolicyDecision(appPolicyActors, [group]) === "mixed",
+  const rowsFor = (actors: GitHubActionPolicyActorState[]) =>
+    GITHUB_ACTION_POLICY_GROUPS.filter(({ id }) =>
+      actors.some((actor) => actor.groups[id] !== undefined),
+    ).map(({ id, label }) => ({ id, label }));
+  const appPolicyRows = rowsFor(appPolicyActors);
+  const appPoliciesDiffer = appPolicyRows.some(
+    ({ id }) => commonGitHubActionPolicyDecision(appPolicyActors, [id]) === "mixed",
   );
-  const policyRows = GITHUB_ACTION_POLICY_GROUPS.map(({ id, label }) => ({ id, label }));
+  const policyRows = rowsFor(policyActors);
   const policies: IntegrationPolicyTable | undefined = actionPolicyFailed
     ? {
         title: "Approvals",
@@ -784,7 +793,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
                     id: githubActionPolicyActorId(actor),
                     label: installationName(actor),
                   })),
-                  rows: policyRows,
+                  rows: appPolicyRows,
                   choices: GITHUB_ACTION_POLICY_CHOICES,
                   otherValueLabels: { mixed: "Mixed" },
                   cell: (rowId, columnId) => {
@@ -1038,12 +1047,19 @@ function githubActionPolicyActorId(actor: GitHubActionPolicyActorState): string 
     : `personal-${actor.connectionId}`;
 }
 
-/** The one decision every actor has for every group, or "mixed". */
+/** The one decision every actor has for every group it has, or "mixed". */
 function commonGitHubActionPolicyDecision(
   actors: GitHubActionPolicyActorState[],
-  groups: GitHubActionPolicyGroup[],
+  groups: PersonalGitHubActionPolicyGroup[],
 ): string {
-  const values = new Set(actors.flatMap((actor) => groups.map((group) => actor.groups[group])));
+  const values = new Set(
+    actors.flatMap((actor) =>
+      groups.flatMap((group) => {
+        const value = actor.groups[group];
+        return value === undefined ? [] : [value];
+      }),
+    ),
+  );
   return values.size === 1 ? [...values][0]! : "mixed";
 }
 

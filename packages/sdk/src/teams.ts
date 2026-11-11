@@ -38,9 +38,11 @@ export function teamsApi(client: Pick<OpenGeniClient, "requestJson">, workspaceI
         signal ? { signal } : {},
       ),
     /**
-     * Starts the Microsoft sign-in that proves a tenant administrator for
-     * self-serve setup. `authorizationUrl` is null when the operator has
-     * already approved this Teams identity, so `installBot` needs no sign-in.
+     * Starts the Microsoft sign-in that setup needs: as a tenant administrator
+     * for self-serve setup, or as the Teams user the setup link names when the
+     * operator approved them. Servers before that requirement return a null
+     * `authorizationUrl` for an approved installer, so `installBot` needs no
+     * sign-in there.
      */
     startMicrosoftSignIn: (setupToken: string) =>
       client.requestJson<TeamsMicrosoftSignInStart>("POST", `${base}/bot/microsoft-sign-in`, {

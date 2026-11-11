@@ -42,7 +42,8 @@ pub struct ScalePolicy {
     pub host_memory_mib: u64,
     /// Fewest hosts the group keeps.
     pub min_hosts: u32,
-    /// Most hosts the group may have.
+    /// Most hosts that take sandboxes the group may have. Draining hosts
+    /// take none and come on top (see compute-control's leader).
     pub max_hosts: u32,
 }
 

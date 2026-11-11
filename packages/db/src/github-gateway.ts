@@ -67,12 +67,27 @@ export async function githubGatewayApprovalIdForRequest(
   input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
   digest: string,
 ): Promise<string> {
+  return (await githubGatewayApprovalForRequest(db, input, digest)).approvalId;
+}
+
+/**
+ * Like `githubGatewayApprovalIdForRequest`, plus the policy action the reused
+ * request was recorded under (null for a new round). Running it again must
+ * use that action: whether a request counts as sensitive can depend on
+ * lookups that differ between tries.
+ */
+export async function githubGatewayApprovalForRequest(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+  digest: string,
+): Promise<{ approvalId: string; toolName: string | null }> {
   const base = `${GITHUB_GATEWAY_APPROVAL_PREFIX}${digest}`;
   return await withRlsContext(db, input, async (scoped) => {
     const rows = await scoped
       .select({
         approvalId: schema.connectorActionRequests.approvalId,
         status: schema.connectorActionRequests.status,
+        toolName: schema.connectorActionRequests.toolName,
       })
       .from(schema.connectorActionRequests)
       .where(
@@ -88,16 +103,16 @@ export async function githubGatewayApprovalIdForRequest(
       )
       .orderBy(desc(schema.connectorActionRequests.createdAt))
       .limit(256);
-    if (rows.length === 0) return base;
+    if (rows.length === 0) return { approvalId: base, toolName: null };
     const roundOf = (approvalId: string) =>
       approvalId === base ? 0 : Number(approvalId.slice(base.length + 1)) || 0;
     const latest = rows.reduce((best, row) =>
       roundOf(row.approvalId) > roundOf(best.approvalId) ? row : best,
     );
     if (["pending", "approved", "rejected", "blocked"].includes(latest.status)) {
-      return latest.approvalId;
+      return { approvalId: latest.approvalId, toolName: latest.toolName };
     }
-    return `${base}:${roundOf(latest.approvalId) + 1}`;
+    return { approvalId: `${base}:${roundOf(latest.approvalId) + 1}`, toolName: null };
   });
 }
 

@@ -19253,6 +19253,7 @@
         "$|kind=personal.groups.merge": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.groups.review": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.groups.routine": "ref(GitHubActionPolicyEffectiveDecision)!",
+        "$|kind=personal.groups.sensitive": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.kind": "const!=[\"\\\"personal\\\"\"]",
         "$|kind=personal.label": "string!"
       }
@@ -19263,14 +19264,6 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"allow\\\"\",\"\\\"ask\\\"\",\"\\\"block\\\"\",\"\\\"mixed\\\"\"]"
-      }
-    },
-    "GitHubActionPolicyGroup": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\"]"
       }
     },
     "GitHubAppInfo": {
@@ -25127,6 +25120,14 @@
         "$.owner.name": "string!",
         "$.owner.subjectId": "string!",
         "$.prefix": "string!"
+      }
+    },
+    "PersonalGitHubActionPolicyGroup": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\",\"\\\"sensitive\\\"\"]"
       }
     },
     "PersonalGitHubConnectionStatusResponse": {
@@ -32531,7 +32532,7 @@
         "$": "object",
         "$.actor": "ref(GitHubActionPolicyActor)!",
         "$.decision": "ref(AtlassianReadPolicy)!",
-        "$.group": "ref(GitHubActionPolicyGroup)!"
+        "$.group": "ref(PersonalGitHubActionPolicyGroup)!"
       }
     },
     "UpdateMachineAgentResponse": {
@@ -37078,6 +37079,7 @@
       "PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING": "value",
       "PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION": "value",
       "PersonalApiKey": "type",
+      "PersonalGitHubActionPolicyGroup": "type",
       "PersonalGitHubConnectionMetadata": "type",
       "PersonalGitHubConnectionStatusResponse": "type",
       "PersonalGitHubDisconnectRequest": "type",
