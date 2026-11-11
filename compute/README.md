@@ -356,8 +356,10 @@ A team may also save a sandbox as a template
 the disk (sharing its blocks, so in milliseconds) and store the copy as an
 image in the background, and records a template naming it; a create names
 it with `template`, by id or name, and boots afresh on that disk. Only the
-filesystem is kept. Images no template, sandbox or built image has used
-for an hour are forgotten.
+filesystem is kept. Images no template or sandbox names, and no name
+starts new sandboxes from, are forgotten after an hour, built ones too
+([ADR 35](docs/adr/0035-built-images-nothing-uses-are-forgotten.md)): an
+earlier release's image is built again if a rollback needs it.
 
 ## The fleet
 

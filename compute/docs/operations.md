@@ -190,7 +190,10 @@ enabling it changes no session's backend.
    once most live hosts run it, so new sandboxes get the new programs
    without an app release; the control service's log says `new creates
    start from the image built with the fleet's guest programs`. Existing
-   sandboxes keep theirs. A host builds into its state directory's `prepare/`
+   sandboxes keep theirs. A built image is kept while a name starts new
+   sandboxes from it or a sandbox or template names it; an hour after
+   nothing does it is forgotten (`forgot a stored image nothing uses`),
+   and a rollback to its release builds it again (ADR 35). A host builds into its state directory's `prepare/`
    scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
    for a private registry. `computeControl.storedImages` (`name: <image
    id>`) still pins an image by hand, and is what a name starts from
