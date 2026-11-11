@@ -19,7 +19,7 @@ export const AUTH_FUNNEL_EVENTS = ["sign_up", "email_verified", "sign_in"] as co
 export type AuthFunnelEvent = (typeof AUTH_FUNNEL_EVENTS)[number];
 export const AUTH_FUNNEL_METHODS = ["email", "google", "github", "other"] as const;
 export type AuthFunnelMethod = (typeof AUTH_FUNNEL_METHODS)[number];
-export const ORGANIZATION_SETUP_OUTCOMES = ["created", "failed"] as const;
+export const ORGANIZATION_SETUP_OUTCOMES = ["created", "failed", "rate_limited"] as const;
 export type OrganizationSetupOutcome = (typeof ORGANIZATION_SETUP_OUTCOMES)[number];
 
 const AUTH_EVENTS_METRIC = {

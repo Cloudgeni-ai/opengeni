@@ -20,6 +20,7 @@
  * every retry.
  */
 
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
 import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 
 /**
@@ -92,10 +93,21 @@ export function stripProviderCitationMarkers(text: string): string {
  *   renders it as code.
  * - Provider citation handles are removed, and Claude citation tags outside code
  *   become their quoted text (`rewriteClaudeCiteTags`).
+ * - Source links outside code lose the tracking a hosted web search tagged onto
+ *   them (`withoutProviderTrackingInText`); the page's own parameters stay.
  *
  * Text that uses none of this syntax comes back unchanged.
  */
 export function slackMrkdwnFromMarkdown(markdown: string): string {
+  return slackMrkdwn(withoutProviderTrackingInText(rewriteClaudeCiteTags(markdown)));
+}
+
+/**
+ * The rendering from before source links lost hosted-search tracking. An
+ * operation an earlier release bound to these bytes keeps them on retry
+ * (`deliverSlackModelText`); nothing else should use it.
+ */
+export function slackMrkdwnKeepingProviderTracking(markdown: string): string {
   return slackMrkdwn(rewriteClaudeCiteTags(markdown));
 }
 

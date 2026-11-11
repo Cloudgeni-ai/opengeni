@@ -291,7 +291,7 @@ function claudeWorkspaceConfig(
         : "Calls use this workspace connection's Claude subscription limits.",
     connectionManagerDescription:
       "Members with connection-management access manage this workspace connection.",
-    keyPlaceholder: () => (kind === "anthropic" ? "sk-ant-api…" : "sk-ant-oat…"),
+    keyPlaceholder: () => (kind === "anthropic" ? "sk-ant-…" : "sk-ant-oat…"),
     customModelsDescription:
       "Choose models for this workspace. Availability depends on the connected account.",
     customModelConnectedHelp:

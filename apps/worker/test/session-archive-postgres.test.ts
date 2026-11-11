@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import {
   SESSION_ARCHIVE_FORMAT_VERSION,
+  SESSION_ARCHIVE_PURGE_TABLES,
   SESSION_ARCHIVE_RESTORE_TABLES,
   SESSION_ARCHIVE_TRANSCRIPT_FORMAT,
   applySessionTurnSettlement,
@@ -23,7 +24,12 @@ import {
 import { writeCompressedJsonLines } from "@opengeni/storage";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
-import { createSessionArchiveActivities } from "../src/activities/session-archive";
+import postgres from "postgres";
+import {
+  SESSION_ARCHIVE_PURGE_BATCH_ROWS,
+  createSessionArchiveActivities,
+  type ArchiveIdleSessionsResult,
+} from "../src/activities/session-archive";
 import type { ActivityServices } from "../src/activities/types";
 
 let shared: SharedTestDatabase;
@@ -428,6 +434,79 @@ describe("idle-session archive worker", () => {
     }
   }, 120_000);
 
+  test("kept events appended after the bundle read its events are still in the transcript", async () => {
+    const scope = await idleSession();
+    const objects = new Map<string, Uint8Array>();
+    const before = await rereadTranscript(scope);
+    // Hold the export at session_history_items, the table after session_events,
+    // and append events there, as a session can while it is being archived.
+    const holder = postgres(shared.adminUrl, { max: 1, onnotice: () => undefined });
+    let archiving: Promise<{ result?: ArchiveIdleSessionsResult; error?: unknown }> | undefined;
+    try {
+      await holder.begin(async (sql) => {
+        await sql`lock table session_history_items in access exclusive mode`;
+        archiving = inMemoryArchive(objects)
+          .archiveIdleSessions()
+          .then(
+            (result) => ({ result }),
+            (error: unknown) => ({ error }),
+          );
+        for (let waited = 0; ; waited += 1) {
+          const [blocked] = await shared.admin<{ count: number }[]>`
+            select count(*)::int as count from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock'
+              and query like '%session_history_items%'`;
+          if (blocked!.count > 0) break;
+          if (waited > 2_000) throw new Error("the archive never reached session_history_items");
+          await Bun.sleep(10);
+        }
+        // More than one page (500) of kept events, with purged ones between them.
+        await shared.admin.begin(async (inject) => {
+          await inject`set local session_replication_role = replica`;
+          await inject`insert into session_events (account_id, workspace_id, session_id, sequence,
+              type, payload, occurred_at)
+            select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+              case when n % 3 = 0 then 'agent.message.delta' else 'user.message' end,
+              jsonb_build_object('text', 'appended ' || n), now() + n * interval '1 millisecond'
+            from (select max(sequence) as last from session_events
+              where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+              generate_series(1, 900) n`;
+        });
+      });
+    } finally {
+      await holder.end();
+    }
+    const { result, error } = await archiving!;
+    if (error) throw error;
+    expect(result!.failed).toBe(0);
+    const [row] =
+      await shared.admin`select content_archive from sessions where id = ${scope.sessionId}`;
+    const manifest = row!.content_archive as {
+      bundle: { key: string };
+      transcript: { key: string; events: number };
+      rowCounts: Record<string, number>;
+    };
+    // The bundle read its events before the append: none of them are in it.
+    const bundleEvents = lines(objects.get(manifest.bundle.key)!).filter(
+      (line) => line.table === "session_events",
+    );
+    expect(bundleEvents.length).toBe(manifest.rowCounts.session_events!);
+    expect(
+      bundleEvents.filter((line) =>
+        String((line.row as { payload: { text?: unknown } }).payload.text).startsWith("appended "),
+      ),
+    ).toEqual([]);
+    // The transcript lists every kept event, appended ones included, exactly as
+    // a read of the kept events (which stay live) does.
+    const text = new TextDecoder().decode(
+      zstdDecompressSync(objects.get(manifest.transcript.key)!),
+    );
+    const after = await rereadTranscript(scope);
+    expect(after.events).toBe(before.events + 600);
+    expect(text).toBe(after.text);
+    expect(manifest.transcript.events).toBe(after.events);
+  }, 120_000);
+
   test("one pass keeps taking batches until no idle session is left", async () => {
     const scopes = [await idleSession(), await idleSession(), await idleSession()];
     const activities = createSessionArchiveActivities(
@@ -446,6 +525,59 @@ describe("idle-session archive worker", () => {
       const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
       expect(session?.retention?.archive?.state).toBe("archived");
     }
+  }, 120_000);
+
+  test("the purge resumes at the table still in progress instead of starting over each batch", async () => {
+    const scope = await idleSession();
+    // Two full purge batches and a partial one of deltas in the last table.
+    const deltas = 2 * SESSION_ARCHIVE_PURGE_BATCH_ROWS + 500;
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`insert into session_events
+          (account_id, workspace_id, session_id, sequence, type, payload, occurred_at)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+          'agent.message.delta', jsonb_build_object('delta', n), now() - interval '40 days'
+        from (select max(sequence) as last from session_events
+          where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+          generate_series(1, ${deltas}) n`;
+    });
+    // Count this session's purge calls on the wire.
+    const counted = createDb(shared.appUrl);
+    let calls = 0;
+    (counted.db as unknown as { $client: { options: { debug: unknown } } }).$client.options.debug =
+      (_id: number, query: string, parameters: unknown[]) => {
+        if (
+          query.includes("purge_archived_session_content") &&
+          parameters.includes(scope.sessionId)
+        )
+          calls += 1;
+      };
+    try {
+      const activities = createSessionArchiveActivities(
+        async () =>
+          ({
+            db: counted.db,
+            objectStorage: { deleteObject: async () => undefined } as never,
+            observability: { info: () => undefined, warn: () => undefined } as never,
+            settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+          }) as unknown as ActivityServices,
+        { upload: async () => undefined },
+      );
+      expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    } finally {
+      await counted.close();
+    }
+
+    const [row] = await shared.admin`select content_archive_purged_at from sessions
+      where id = ${scope.sessionId}`;
+    expect(row!.content_archive_purged_at).not.toBeNull();
+    const [left] = await shared.admin`select count(*)::int as count from session_events
+      where session_id = ${scope.sessionId} and type = 'agent.message.delta'`;
+    expect((left as { count: number }).count).toBe(0);
+    // Starting at the first table on every step would visit every table for
+    // each of the three delta batches and again for the confirming pass.
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThan(4 * SESSION_ARCHIVE_PURGE_TABLES.length);
   }, 120_000);
 
   test("an archived chat whose goal is still active is stopped, then stored", async () => {

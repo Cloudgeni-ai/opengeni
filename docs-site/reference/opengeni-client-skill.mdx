@@ -147,7 +147,9 @@ read it in `resolve`.
 Workspaces and memberships are created on first use (the key needs
 `members:manage`, which full-access keys have). To remove a user, stop
 resolving them. Chats are private to the user who started them;
-`chats: "shared"` on the handler shares them with the workspace. A tenant is
+`chats: "shared"` on the handler shares them with the workspace. Files attached
+in a private chat are the uploader's own (Only me), read by them and that chat's
+agent; in shared chats they are workspace files. A tenant is
 the product's team, organization, or customer: the group that shares data and
 tools. Derive `user` and `tenant` from the product's session, never from the
 request body or path. Anonymous visitors on a public site share one fixed
@@ -172,9 +174,12 @@ Per-message facts such as today's date or the current page go in
 Without `reasoningEffort`, chats use the deployment default, which can be high:
 deeper answers, slower replies. A lighter effort (`"medium"` or `"low"`) suits
 quick end-user chat; keep the default where answer quality matters more than
-speed. End users do not choose models unless the handler sets
-`modelSelection: true`; the picker then lists the workspace's model catalog, so
-the workspace's allowed-model settings decide which models appear.
+speed. The stock UI shows end users a model picker only when the handler sets
+`modelSelection: true`; the component's `modelPicker` prop overrides this
+either way. The picker lists the workspace's model catalog, so the workspace's
+allowed-model settings decide which models appear. The option itself defaults
+to `true`, so the relay accepts model choices a custom browser client sends;
+set `modelSelection: false` to remove them.
 
 ### The product's tools
 
@@ -368,6 +373,8 @@ One `agent` object sets who the agent is and what it can do. The proxy's
 `createSession` hook, `og.client.createSession`, scheduled tasks, and the chat
 facade all accept it, and every session reports it back as `session.agent`.
 
+<!-- doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" -->
+
 ```ts
 agent: {
   identity: "You are Acme Analytics' assistant. You help customers read their dashboards.",
@@ -454,8 +461,15 @@ await og.client.updateSessionAgent(workspaceId, sessionId, {
 ## Check the result
 
 `session.agent` is the resolved configuration, including `unavailable`
-capabilities. `session.effectiveTools.tools` lists every tool the agent can
-use, each with its `capability`. Errors: 422 `agent_capability_unavailable`
+capabilities. The packaged chat UI selects compact responses, which omit
+instructions, Skill bodies and the full tool catalog. SDK defaults retain the
+full response; custom chat clients can select `client.withSessionResponse("chat")`.
+For an authorized settings or backend read, use
+`const configuration = await og.client.getSessionConfiguration(workspaceId, sessionId)`.
+This requires `sessions:control` and access to that session;
+`configuration.effectiveTools?.tools` lists the tools, each with its `capability`.
+Server-owned browser relays refuse this read; keep it on the backend.
+Errors: 422 `agent_capability_unavailable`
 (the deployment does not offer it), `agent_config_conflict` (contradictory
 fields), and `agent_config_widening` (a child session asked for more than its
 parent).

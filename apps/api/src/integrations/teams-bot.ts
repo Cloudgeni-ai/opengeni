@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { Settings } from "@opengeni/config";
 import type { AccessGrant } from "@opengeni/contracts";
 import { turnCompletedReply } from "@opengeni/contracts";
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
 import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import {
   requireAccessGrant,
@@ -1443,6 +1444,7 @@ async function status(deps: ApiRouteDeps, workspaceId: string, subjectId: string
   return {
     enabled,
     configured,
+    appName: deps.settings.teamsAppName,
     setupAvailable:
       configured &&
       enabled &&
@@ -1850,11 +1852,12 @@ async function catalogDeps(deps: ApiRouteDeps, grant: AccessGrant): Promise<ApiR
 /**
  * An agent's reply as Teams message parts. Claude citation tags left in the
  * text become their quoted text instead of raw markup; links the Claude
- * transport already made from them stay Markdown links. Markdown Teams can't
- * show in a text message is rewritten into what it can (see teamsMarkdown).
+ * transport already made from them stay Markdown links. Source links lose the
+ * tracking a hosted web search tagged onto them. Markdown Teams can't show in a
+ * text message is rewritten into what it can (see teamsMarkdown).
  */
 export function teamsReplyParts(text: string): string[] {
-  return teamsTextParts(teamsMarkdown(rewriteClaudeCiteTags(text)));
+  return teamsTextParts(teamsMarkdown(withoutProviderTrackingInText(rewriteClaudeCiteTags(text))));
 }
 
 /** Message parts within the Teams size limit; code blocks survive a split. */
@@ -2004,7 +2007,7 @@ async function drainRoute(
             idempotencyKey: `teams:${r.route_id}`,
             clientEventId: inbound.event_id,
             instructions:
-              "This conversation is delivered through Microsoft Teams. Reply clearly. Human approvals and private information requests must be completed in the authenticated Opengeni chat.",
+              "This conversation is delivered through Microsoft Teams. Replies are short by default: lead with the answer or outcome and any essential next step in a few sentences. Avoid headers, long lists, repeated conclusions, and detailed investigation logs unless the person asks for detail or the task requires it. Summarize completed work rather than narrating every step; preserve information needed to act or understand a material limitation. Human approvals and private information requests must be completed in the authenticated Opengeni chat.",
           },
           undefined,
           {

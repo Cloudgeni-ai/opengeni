@@ -18,6 +18,7 @@ import type {
   ComputerNativeCallRequest,
   ComputerNativeReceipt,
   McpElicitationContent,
+  BrowserDownloadSaveProgress,
 } from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import {
@@ -858,6 +859,8 @@ import type {
   MemberDefaultExecutionTarget,
   WorkspaceDefaultExecutionTarget,
   SetWorkspaceDefaultRigRequest,
+  FileUploadData,
+  FileUploadSource,
   UploadFileInput,
   Channel,
   CreateChannelRequest,
@@ -1004,8 +1007,11 @@ export type SessionListPageOptions = {
   search?: string;
   /** Restrict rows to one workspace project; null selects unfiled rows. */
   channelId?: string | null;
-  /** Restrict rows to the exact frozen session creator identity. */
-  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /**
+   * Restrict rows to the exact frozen session creator identity. Omit `kind` to
+   * include every session the subject created, whichever kind it was frozen as.
+   */
+  createdBy?: { kind?: "subject" | "service"; subjectId: string };
   /** Inclusive ISO-8601 activity lower bound. */
   updatedFrom?: string;
   /** Exclusive ISO-8601 activity upper bound. */
@@ -2288,7 +2294,7 @@ export class OpenGeniClient {
       if (search) query.search = search;
       if (options.channelId !== undefined) query.channelId = options.channelId ?? "null";
       if (options.createdBy) {
-        query.createdByKind = options.createdBy.kind;
+        if (options.createdBy.kind) query.createdByKind = options.createdBy.kind;
         query.createdBySubjectId = options.createdBy.subjectId;
       }
       for (const key of SESSION_PAGE_STRING_QUERY_KEYS) {
@@ -5089,6 +5095,9 @@ export class OpenGeniClient {
     );
   }
 
+  /** Save exact download bytes to the source workspace. Slow exports are
+   * polled with the same operationId; only the final materialized receipt is
+   * returned. Aborting stops waiting, not the controller's running upload. */
   async saveBrowserDownload(
     workspaceId: string,
     browserSessionId: string,
@@ -5096,13 +5105,22 @@ export class OpenGeniClient {
     request: BrowserDownloadSaveRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<BrowserDownloadSaveResponse> {
-    return await this.requestJson<BrowserDownloadSaveResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}/save`,
-      request,
-      {},
-      options,
-    );
+    for (;;) {
+      const response = await this.requestJson<
+        BrowserDownloadSaveResponse | BrowserDownloadSaveProgress
+      >(
+        "POST",
+        `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}/save`,
+        request,
+        { respondAsync: "true" },
+        options,
+      );
+      if (!("state" in response)) return response;
+      if (response.operationId !== request.operationId || response.downloadId !== downloadId) {
+        throw new Error("Browser download save returned another operation binding");
+      }
+      await abortableReadRetryDelay(response.retryAfterMs, options.signal);
+    }
   }
 
   /** Starts recording one tab of a browser session as a video. The recording
@@ -8936,40 +8954,39 @@ export class OpenGeniClient {
       throw new Error("File upload timeout must be a positive number");
     }
     assertBrowserFileUploadSecureContext();
+    const cancelledError = () => new Error("File upload was cancelled.");
+    if (input.signal?.aborted) throw cancelledError();
     const withTimeout = async <T>(
       timeoutMs: number,
       operation: (signal: AbortSignal) => Promise<T>,
     ): Promise<T> => {
       const controller = new AbortController();
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      let onCancel: (() => void) | undefined;
       const timedOut = new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(() => {
           controller.abort();
           reject(new Error("File upload timed out. Retry the upload."));
         }, timeoutMs);
+        // The caller's signal stops the step in flight the same way.
+        onCancel = () => {
+          controller.abort();
+          reject(cancelledError());
+        };
+        if (input.signal?.aborted) onCancel();
+        else input.signal?.addEventListener("abort", onCancel, { once: true });
       });
       try {
         return await Promise.race([operation(controller.signal), timedOut]);
       } finally {
         if (timeout !== undefined) clearTimeout(timeout);
+        if (onCancel) input.signal?.removeEventListener("abort", onCancel);
       }
     };
-    // Snapshot mutable inputs before hashing so the digest always describes the
-    // exact bytes later sent to object storage. Copy Uint8Array views into a
-    // Blob so byte offsets/shared buffers can't leak surrounding bytes.
-    const body: Blob | ArrayBuffer | string =
-      input.data instanceof Uint8Array
-        ? new Blob([input.data.slice()])
-        : input.data instanceof ArrayBuffer
-          ? input.data.slice(0)
-          : input.data;
-    const sizeBytes =
-      typeof body === "string"
-        ? new TextEncoder().encode(body).byteLength
-        : body instanceof Blob
-          ? body.size
-          : body.byteLength;
-    const sha256 = input.sha256 ?? (await sha256ForUpload(body));
+    const payload = fileUploadPayload(input.data);
+    const sizeBytes = payload.sizeBytes;
+    const sha256 =
+      input.sha256 ?? (payload.kind === "bytes" ? await sha256ForUpload(payload.body) : undefined);
     const upload = await withTimeout(
       30_000,
       async (signal) =>
@@ -8980,7 +8997,7 @@ export class OpenGeniClient {
             contentType: input.contentType,
             ...(input.scope ? { scope: input.scope } : {}),
             sizeBytes,
-            sha256,
+            ...(sha256 ? { sha256 } : {}),
             ...(input.appShot ? { appShot: input.appShot } : {}),
           },
           { signal },
@@ -8990,6 +9007,26 @@ export class OpenGeniClient {
     // still bounding an object-storage request that never settles.
     const transferTimeoutMs =
       input.timeoutMs ?? Math.max(120_000, Math.ceil(sizeBytes / (256 * 1024)) * 1_000);
+    if (payload.kind === "source") {
+      const sent = await withTimeout(
+        transferTimeoutMs,
+        async (signal) =>
+          await payload.source.send({
+            url: upload.putUrl,
+            headers: { ...upload.requiredHeaders },
+            sizeBytes,
+            signal,
+          }),
+      );
+      if (sent.status < 200 || sent.status > 299) {
+        // Object-storage error bodies are not API errors; report the status alone.
+        throw new OpenGeniApiError(sent.status, "", { mutation: true });
+      }
+      return await withTimeout(
+        30_000,
+        async (signal) => await this.completeFileUpload(workspaceId, upload.uploadId, { signal }),
+      );
+    }
     const putResponse = await withTimeout(
       transferTimeoutMs,
       async (signal) =>
@@ -9007,7 +9044,7 @@ export class OpenGeniClient {
           // which the object store persists verbatim and COMPLETE then rejects (422),
           // and which breaks S3's presigned-URL signature.
           headers: { ...upload.requiredHeaders },
-          body,
+          body: payload.body,
           signal,
         }),
     );
@@ -13592,6 +13629,48 @@ function assertBrowserFileUploadSecureContext(): void {
   ) {
     throw new OpenGeniSecureContextRequiredError("web_crypto_unavailable");
   }
+}
+
+type FileUploadPayload =
+  | { kind: "bytes"; body: Blob | ArrayBuffer | string; sizeBytes: number }
+  | { kind: "source"; source: FileUploadSource; sizeBytes: number };
+
+function isFileUploadSource(data: FileUploadData): data is FileUploadSource {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    !(data instanceof Blob) &&
+    !(data instanceof ArrayBuffer) &&
+    !ArrayBuffer.isView(data) &&
+    typeof (data as { send?: unknown }).send === "function"
+  );
+}
+
+function fileUploadPayload(data: FileUploadData): FileUploadPayload {
+  // A caller-sent source (for example a native upload from disk) is never
+  // read here: the SDK opens and completes the upload around its PUT.
+  if (isFileUploadSource(data)) {
+    if (!Number.isSafeInteger(data.sizeBytes) || data.sizeBytes <= 0) {
+      throw new Error("File upload size must be a positive whole number of bytes");
+    }
+    return { kind: "source", source: data, sizeBytes: data.sizeBytes };
+  }
+  // Snapshot mutable inputs before hashing so the digest always describes the
+  // exact bytes later sent to object storage. Copy Uint8Array views into a
+  // Blob so byte offsets/shared buffers can't leak surrounding bytes.
+  const body =
+    data instanceof Uint8Array
+      ? new Blob([data.slice()])
+      : data instanceof ArrayBuffer
+        ? data.slice(0)
+        : data;
+  const sizeBytes =
+    typeof body === "string"
+      ? new TextEncoder().encode(body).byteLength
+      : body instanceof Blob
+        ? body.size
+        : body.byteLength;
+  return { kind: "bytes", body, sizeBytes };
 }
 
 async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<string> {

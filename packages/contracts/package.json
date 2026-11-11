@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.13.0",
+  "version": "6.14.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -21,6 +21,10 @@
     "./machine-access": {
       "types": "./src/machine-access.ts",
       "default": "./src/machine-access.ts"
+    },
+    "./encrypted-reasoning-refusal": {
+      "types": "./src/encrypted-reasoning-refusal.ts",
+      "default": "./src/encrypted-reasoning-refusal.ts"
     },
     "./browser-response-headers": {
       "types": "./src/browser-response-headers.ts",
@@ -89,6 +93,10 @@
     "./json-safe": {
       "types": "./src/json-safe.ts",
       "default": "./src/json-safe.ts"
+    },
+    "./citation-urls": {
+      "types": "./src/citation-urls.ts",
+      "default": "./src/citation-urls.ts"
     },
     "./claude-cite-tags": {
       "types": "./src/claude-cite-tags.ts",

@@ -16,40 +16,111 @@ import { showPart } from "./chat-shared";
 /* ----------------------------------------------------------------------------
    The GitHub integration page with personal sign-in on: the production
    adapter (useGitHubIntegration) and IntegrationPage against a fake app
-   context. Each state is one person's view of the same workspace.
+   context. Each state is one person's view of the same workspace. Approvals
+   and the repair dialog run against in-memory fakes, so changing a select or
+   pressing a fix works without a backend.
    -------------------------------------------------------------------------- */
 
 const WORKSPACE_ID = "ws-kit";
 const NOW = "2026-10-30T09:00:00.000Z";
 
-const installation = {
+type Issue =
+  | "uninstalled"
+  | "suspended"
+  | "no_repositories"
+  | "owner_unconfirmed"
+  | "github_unreachable"
+  | "account_changed";
+
+type KitInstallation = {
+  installationId: number;
+  accountLogin: string;
+  accountType: "Organization" | "User";
+  repositoryCount: number;
+  issue?: Issue;
+};
+
+const LIFECYCLE: Record<Issue, string> = {
+  uninstalled: "deleted",
+  suspended: "suspended",
+  no_repositories: "unverified",
+  owner_unconfirmed: "unverified",
+  github_unreachable: "unverified",
+  account_changed: "unverified",
+};
+
+function binding(installation: KitInstallation) {
+  return {
+    installationId: installation.installationId,
+    githubAccountId: installation.installationId + 1,
+    accountLogin: installation.accountLogin,
+    accountType: installation.accountType,
+    lifecycle: installation.issue ? LIFECYCLE[installation.issue] : "active",
+    issue: installation.issue ?? null,
+    repositoryScope: "selected",
+    repositoryCount: installation.repositoryCount,
+    configureUrl: `https://github.com/settings/installations/${installation.installationId}`,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+const ACME: KitInstallation = {
   installationId: 71,
-  githubAccountId: 72,
   accountLogin: "acme",
   accountType: "Organization",
-  lifecycle: "active",
-  repositoryScope: "selected",
   repositoryCount: 2,
-  configureUrl: "https://github.com/organizations/acme/settings/installations/71",
-  createdAt: NOW,
-  updatedAt: NOW,
 };
-const appStatus = (bound: boolean) => ({
-  configured: true,
-  status: bound ? "bound" : "unbound",
-  setupMode: "platform",
-  appId: null,
-  clientId: null,
-  appSlug: "opengeni",
-  installUrl: "https://github.com/apps/opengeni/installations/new",
-  linkUrl: "https://github.com/apps/opengeni/installations/new",
-  installations: bound ? [installation] : [],
-  missing: [],
-});
-const appRepos = [
-  { id: 1, installationId: 71, fullName: "acme/web", private: true },
-  { id: 2, installationId: 71, fullName: "acme/api", private: true },
+const OCTOCAT: KitInstallation = {
+  installationId: 81,
+  accountLogin: "octocat",
+  accountType: "User",
+  repositoryCount: 3,
+};
+
+const SERVICES = [
+  "billing",
+  "search",
+  "auth",
+  "notifications",
+  "payments",
+  "analytics",
+  "checkout",
+  "catalog",
+  "inventory",
+  "shipping",
+  "reviews",
+  "recommendations",
+  "gateway",
+  "scheduler",
+  "exports",
+  "reports",
+  "webhooks",
+  "sync",
+  "audit",
+  "pricing",
 ];
+/** 60 acme repositories plus two of octocat's: a long list. */
+const MANY_REPOSITORIES = [
+  ...SERVICES.flatMap((service) =>
+    ["service", "worker", "web"].map((part) => `acme/${service}-${part}`),
+  ),
+  "octocat/dotfiles",
+  "octocat/notes",
+];
+
+function appRepositories(installations: KitInstallation[], many: boolean) {
+  const names = many ? MANY_REPOSITORIES : ["acme/web", "acme/api"];
+  return installations.some((installation) => !installation.issue)
+    ? names.map((fullName, index) => ({
+        id: index + 1,
+        installationId: fullName.startsWith("octocat/") ? 81 : 71,
+        fullName,
+        private: index % 4 !== 0,
+      }))
+    : [];
+}
+
 const personalConnection = {
   id: "connection-kit",
   version: 1,
@@ -63,9 +134,13 @@ type State = {
   key: string;
   label: string;
   permissions: string[];
-  bound: boolean;
+  installations: KitInstallation[];
   connected: boolean;
   repositories: number;
+  /** The app's repository list is long (62). */
+  manyRepositories?: boolean;
+  /** Approvals are on, with these saved decisions. */
+  approvals?: boolean;
   /** The stored grant's status; GitHub refusing a refresh makes it needs_reauth. */
   connectionStatus?: "active" | "needs_reauth";
   /** False when the repository selection could not be read. */
@@ -104,10 +179,90 @@ const PERSONAL_REPOSITORIES = [
 const MANAGER = ["github:use", "github:manage", "connections:read", "connections:write"];
 const STATES: State[] = [
   {
+    key: "many-repositories",
+    label: "Two installations, 62 repositories: approvals stay above the list",
+    permissions: MANAGER,
+    installations: [ACME, OCTOCAT],
+    connected: true,
+    repositories: 3,
+    manyRepositories: true,
+    approvals: true,
+  },
+  {
+    key: "uninstalled",
+    label: "One installation was removed on GitHub: Reinstall, or Remove in ⋯",
+    permissions: MANAGER,
+    installations: [
+      { ...ACME, repositoryCount: 60 },
+      { ...OCTOCAT, issue: "uninstalled" },
+    ],
+    connected: true,
+    repositories: 3,
+    manyRepositories: true,
+    approvals: true,
+  },
+  {
+    key: "needs-authorization",
+    label: "No owner proof for the link: Authorize opens the sign-in that confirms it",
+    permissions: MANAGER,
+    installations: [ACME, { ...OCTOCAT, issue: "owner_unconfirmed" }],
+    connected: true,
+    repositories: 3,
+    approvals: true,
+  },
+  {
+    key: "every-fix",
+    label: "Every cause, each with its one fix",
+    permissions: MANAGER,
+    installations: [
+      { ...ACME, accountLogin: "acme", issue: "suspended" },
+      {
+        installationId: 91,
+        accountLogin: "acme-labs",
+        accountType: "Organization",
+        repositoryCount: 0,
+        issue: "no_repositories",
+      },
+      {
+        installationId: 92,
+        accountLogin: "acme-archive",
+        accountType: "Organization",
+        repositoryCount: 4,
+        issue: "owner_unconfirmed",
+      },
+      {
+        installationId: 93,
+        accountLogin: "acme-eu",
+        accountType: "Organization",
+        repositoryCount: 7,
+        issue: "github_unreachable",
+      },
+      {
+        installationId: 94,
+        accountLogin: "acme-old",
+        accountType: "Organization",
+        repositoryCount: 2,
+        issue: "account_changed",
+      },
+      { ...OCTOCAT, issue: "uninstalled" },
+    ],
+    connected: true,
+    repositories: 3,
+  },
+  {
+    key: "healthy",
+    label: "One healthy installation: no status anywhere",
+    permissions: MANAGER,
+    installations: [ACME],
+    connected: true,
+    repositories: 3,
+    approvals: true,
+  },
+  {
     key: "not-connected",
     label: "Not connected, app not installed",
     permissions: MANAGER,
-    bound: false,
+    installations: [],
     connected: false,
     repositories: 0,
   },
@@ -115,23 +270,15 @@ const STATES: State[] = [
     key: "connected-zero",
     label: "Just connected: Choose repos is the next step",
     permissions: MANAGER,
-    bound: false,
+    installations: [],
     connected: true,
     repositories: 0,
-  },
-  {
-    key: "both",
-    label: "Your GitHub connected and the Opengeni app installed",
-    permissions: MANAGER,
-    bound: true,
-    connected: true,
-    repositories: 3,
   },
   {
     key: "all-repositories",
     label: "All my repositories: anything @octocat can reach on GitHub",
     permissions: MANAGER,
-    bound: true,
+    installations: [ACME],
     connected: true,
     repositories: 2,
     allRepositoriesAccess: "write",
@@ -140,36 +287,112 @@ const STATES: State[] = [
     key: "needs-reconnect",
     label: "GitHub refused the stored grant: Reconnect is the one action",
     permissions: MANAGER,
-    bound: true,
+    installations: [ACME],
     connected: true,
     repositories: 0,
     connectionStatus: "needs_reauth",
     selectionLoaded: false,
   },
   {
-    key: "selection-unread",
-    label: "Connected, but the repository list could not be read yet",
-    permissions: MANAGER,
-    bound: true,
-    connected: true,
-    repositories: 0,
-    selectionLoaded: false,
-  },
-  {
     key: "member",
-    label: "A member without GitHub management",
+    label: "A member without GitHub management: approvals read-only for the app",
     permissions: ["github:use", "connections:read", "connections:write"],
-    bound: true,
-    connected: false,
-    repositories: 0,
+    installations: [ACME, { ...OCTOCAT, issue: "uninstalled" }],
+    connected: true,
+    repositories: 3,
+    approvals: true,
   },
 ];
 
+type Decision = "allow" | "ask" | "block" | "mixed";
+type Actor = {
+  kind: "workspace_app" | "personal";
+  installationId?: number;
+  connectionId?: string;
+  label: string;
+  groups: Record<"routine" | "review" | "merge", Decision>;
+};
+
+function approvalActors(state: State): Actor[] {
+  return [
+    ...state.installations.map((installation) => ({
+      kind: "workspace_app" as const,
+      installationId: installation.installationId,
+      label: `Opengeni bot on ${installation.accountLogin}`,
+      groups: { routine: "allow", review: "ask", merge: "ask" } as Actor["groups"],
+    })),
+    ...(state.connected
+      ? [
+          {
+            kind: "personal" as const,
+            connectionId: personalConnection.id,
+            label: "@octocat",
+            groups: { routine: "allow", review: "allow", merge: "ask" } as Actor["groups"],
+          },
+        ]
+      : []),
+  ];
+}
+
+/** The GitHub App connect flow, up to the sign-in step. */
+function repairTransport() {
+  let current: Record<string, unknown> | null = null;
+  const attempt = () => {
+    current = {
+      id: "attempt-github-app-kit",
+      workspaceId: WORKSPACE_ID,
+      providerId: "github-app",
+      ownership: "workspace",
+      revision: 1,
+      state: "requires_user_action",
+      nextAction: { type: "authorize", url: "https://github.com/login/oauth/authorize?kit" },
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      completionRequirement: "integration",
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    };
+    return structuredClone(current);
+  };
+  return {
+    catalog: async () => [],
+    accounts: async () => [],
+    pending: async () => [],
+    begin: async () => attempt(),
+    recover: async () => structuredClone(current),
+    get: async () => structuredClone(current),
+    advance: async () => structuredClone(current),
+    cancel: async () => structuredClone(current),
+    disconnect: async () => {},
+  };
+}
+
 function fakeContext(state: State) {
+  const actors = approvalActors(state);
+  const transport = repairTransport();
   const client = new Proxy(
     {
-      connectTransport: () => ({}),
-      getGitHubActionPolicies: async () => ({ enabled: false, actors: [] }),
+      connectTransport: () => transport,
+      getGitHubActionPolicies: async () => ({
+        enabled: state.approvals === true,
+        actors: structuredClone(actors),
+      }),
+      updateGitHubActionPolicy: async (
+        _workspaceId: string,
+        input: {
+          actor: { kind: string; installationId?: number; connectionId?: string };
+          group: keyof Actor["groups"];
+          decision: Decision;
+        },
+      ) => {
+        const actor = actors.find((candidate) =>
+          input.actor.kind === "workspace_app"
+            ? candidate.installationId === input.actor.installationId
+            : candidate.connectionId === input.actor.connectionId,
+        )!;
+        actor.groups[input.group] = input.decision;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return structuredClone(actor);
+      },
     } as Record<string, unknown>,
     {
       get(target, key) {
@@ -180,6 +403,8 @@ function fakeContext(state: State) {
       },
     },
   );
+  const installations = state.installations.map(binding);
+  const bound = installations.some((installation) => installation.lifecycle === "active");
   return new Proxy(
     {
       client,
@@ -187,8 +412,19 @@ function fakeContext(state: State) {
         subjectId: "kit-person",
         workspaceGrants: [{ workspaceId: WORKSPACE_ID, permissions: state.permissions }],
       },
-      githubStatus: appStatus(state.bound),
-      githubRepos: state.bound ? appRepos : [],
+      githubStatus: {
+        configured: true,
+        status: bound ? "bound" : "unbound",
+        setupMode: "platform",
+        appId: null,
+        clientId: null,
+        appSlug: "opengeni",
+        installUrl: "https://github.com/apps/opengeni/installations/new",
+        linkUrl: "https://github.com/apps/opengeni/installations/new",
+        installations,
+        missing: [],
+      },
+      githubRepos: appRepositories(state.installations, state.manyRepositories === true),
       githubStatusFailed: false,
       githubCatalogReady: true,
       repoBusy: false,
@@ -292,10 +528,15 @@ const CARD_REQUEST = {
   },
 } as unknown as AuthNeededItem;
 
+const stateByKey = (key: string) => STATES.find((state) => state.key === key)!;
 const CARD_STATES: State[] = [
-  { ...STATES[0]!, key: "card-not-connected", label: "Chat card: not connected" },
-  { ...STATES[1]!, key: "card-connected-zero", label: "Chat card: connected, no repos yet" },
-  { ...STATES[2]!, key: "card-connected", label: "Chat card: connected with repos" },
+  { ...stateByKey("not-connected"), key: "card-not-connected", label: "Chat card: not connected" },
+  {
+    ...stateByKey("connected-zero"),
+    key: "card-connected-zero",
+    label: "Chat card: connected, no repos yet",
+  },
+  { ...stateByKey("healthy"), key: "card-connected", label: "Chat card: connected with repos" },
 ];
 
 export default function GitHubIntegrationPageSection() {

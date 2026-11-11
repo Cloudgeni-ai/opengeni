@@ -273,18 +273,41 @@ export class ComposerWorkspaceControlUnavailableError extends Error {
  * another model, and the typed message stays recoverable via Edit message.
  */
 export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
+  "This chat's model is no longer available. Choose another model to continue.";
+
+/** The earlier wording, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
   "This chat's model is no longer available. Choose another model to continue. Your message is saved.";
 
 /** A rejected account is never silently replaced or retried with new authority. */
 export const COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE =
+  "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your message.";
+
+/** The earlier wording, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE =
   "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.";
+
+/**
+ * A model- or account-unavailable refusal in any wording it has had: its own
+ * next step, so a restored copy gets no support reference appended.
+ */
+export function isComposerSelectionRefusalMessage(message: string): boolean {
+  return (
+    message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    message === LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE ||
+    message === LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE
+  );
+}
 
 export function isConnectionAccountSubmissionError(error: unknown): boolean {
   return (
     (error instanceof OpenGeniApiError &&
       !error.outcomeUnknown &&
       error.details?.code === "connection_account_selection_unavailable") ||
-    (error instanceof Error && error.message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE)
+    (error instanceof Error &&
+      (error.message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE ||
+        error.message === LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE))
   );
 }
 
@@ -381,12 +404,13 @@ export function sessionCreateRefusalMessage(t: OpenGeniText, error: Error): stri
  * recovery action (raise or remove the limit, resume a goal) belongs to the
  * composer's `SessionUsageLimitNotice`, so this line only says what happened.
  */
-export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
-  "This task's usage limit is reached. Your message is saved.";
+export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE = "This task's usage limit is reached.";
 
-/** The earlier wording, still recognized in refusals restored from storage. */
-const LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
-  "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.";
+/** Earlier wordings, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGES: readonly string[] = [
+  "This task's usage limit is reached. Your message is saved.",
+  "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.",
+];
 
 /**
  * Is this send refusal the task's usage limit? Reads the typed SDK error code
@@ -397,7 +421,7 @@ export function isSessionUsageLimitSubmissionError(error: Error): boolean {
   return (
     (error instanceof OpenGeniApiError && error.code === "session_usage_limit_reached") ||
     error.message === COMPOSER_SESSION_USAGE_LIMIT_MESSAGE ||
-    error.message === LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE
+    LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGES.includes(error.message)
   );
 }
 
@@ -412,6 +436,7 @@ export function isModelUnavailableSubmissionError(error: Error): boolean {
   }
   return (
     error.message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    error.message === LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
     /^(?:Opengeni|OpenGeni) API 422: model is not available: /.test(error.message)
   );
 }
@@ -729,6 +754,8 @@ const AUTHORED_ONLY_FAILURE_CODES: ReadonlySet<string> = new Set([
   "sandbox_service_refused",
   // The detail is the machine agent's own text (the program, the OS error).
   "sandbox_process_start_failed",
+  // The detail is Claude's own wording about thinking signatures (operator-only).
+  "anthropic_reasoning_replay_rejected",
 ]);
 
 /** Server failure codes whose recorded text is operator English, not end-user copy. */

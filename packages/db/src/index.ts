@@ -45,6 +45,7 @@ export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
 export * from "./model-call-timing";
+export * from "./sandbox-stop-notice";
 export * from "./turn-timing-profile";
 export * from "./turn-timing-profile-store";
 export * from "./model-provider-execution-inputs";
@@ -443,6 +444,9 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  REPOSITORY_SKILLS_CONTEXT_PREFIX,
+  readRepositorySkillsContext,
+  repositorySkillsContextItem,
   WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
   WORKSPACE_GOVERNANCE_NONE,
   readWorkspaceGovernanceContext,
@@ -545,6 +549,7 @@ export * from "./subscription-core-xai";
 // track C2a); every caller reads the Claude provider route first.
 export * from "./subscription-core-claude-usage";
 export * from "./subscription-core-claude-reads";
+export * from "./subscription-core-claude-limit-resets";
 // Provider-neutral operations outside chat (media, transcription, realtime,
 // usage and catalog probes), bound per provider by the caller.
 export {
@@ -1289,6 +1294,7 @@ import {
 } from "./child-lifecycle-notices";
 import {
   CAPACITY_WAIT_NOTICE_KEY,
+  CAPACITY_WAIT_PARENT_NOTICE_KEY,
   capacityWaitAttention,
   capacityWaitNoticeMarker,
   capacityWaitNoticeNeedsRestating,
@@ -1405,6 +1411,7 @@ export * from "./session-share-links";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
+export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
 export * from "./organization-membership-backfill";
@@ -27560,15 +27567,22 @@ export async function armSubscriptionCoreCapacityWait(
                 }),
               )
             : null;
-        const waitingMetadata = personNotice
-          ? {
-              ...recoveryMetadata,
-              [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                personNotice.key,
-                attention!.resetsAt,
-              ),
-            }
-          : recoveryMetadata;
+        // A worker's turn remembers the reset its parent is told below (set
+        // once the waiter exists), so a later check can restate it; a short
+        // wait tells the parent nothing.
+        const { [CAPACITY_WAIT_PARENT_NOTICE_KEY]: _toldParent, ...unannouncedMetadata } =
+          recoveryMetadata as Record<string, unknown>;
+        const waitingMetadata = {
+          ...unannouncedMetadata,
+          ...(personNotice
+            ? {
+                [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                  personNotice.key,
+                  attention!.resetsAt,
+                ),
+              }
+            : {}),
+        };
         const waitingPrompt = stopped
           ? await runnableQueuedTurnExists(tx, {
               accountId: input.accountId,
@@ -27762,7 +27776,19 @@ export async function armSubscriptionCoreCapacityWait(
           .set({
             status: stopped ? "failed" : "waiting_capacity",
             activeAttemptId: null,
-            metadata: waitingMetadata,
+            metadata:
+              attention && session.parentSessionId && waiter
+                ? {
+                    ...waitingMetadata,
+                    [CAPACITY_WAIT_PARENT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                      childWaitingCapacityDedupeKey({
+                        childSessionId: input.sessionId,
+                        waiterId: waiter.waiterId,
+                      }),
+                      attention.resetsAt,
+                    ),
+                  }
+                : waitingMetadata,
             version: turn.version + 1,
             finishedAt: stopped ? now : null,
             updatedAt: now,
@@ -27943,14 +27969,32 @@ export async function reconcileSubscriptionCoreCapacityWait(
           return { action: "stale", events: [] } as const;
         }
         const vocabulary = subscriptionCoreWaitVocabulary(waiterRead.provider);
+        // A worker's parent is locked with it, as for every child lifecycle
+        // notice: the wait below may restate its reset to the parent.
+        const [preview] = await tx
+          .select({ parentSessionId: schema.sessions.parentSessionId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
         const locks = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
           controlLock: "already_locked",
           workspaceLock: "already_locked",
-          sessionIds: [input.sessionId],
+          sessionIds: [
+            input.sessionId,
+            ...(preview?.parentSessionId ? [preview.parentSessionId] : []),
+          ],
           turnIds: [waiterRead.blockedTurnId],
         });
-        const session = locks.sessions[0];
+        const session = locks.sessions.find((row) => row.id === input.sessionId);
+        if (session && session.parentSessionId !== (preview?.parentSessionId ?? null)) {
+          throw new Error(`Session parent changed while locking: ${input.sessionId}`);
+        }
         const blockedTurn = locks.turns[0];
         const effectiveControl = session
           ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
@@ -28102,14 +28146,16 @@ export async function reconcileSubscriptionCoreCapacityWait(
             waiter.waitReason !== waitEvaluation.waitReason
               ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
               : null;
-          // A top-level chat's person is told again, in place, once the reset
-          // their notification named no longer holds (it passed without
-          // capacity, or a longer limit binds), and told for the first time
-          // when a short wait has become a long one. Only an evaluation that
-          // found no capacity says when it returns; a held false-resumption
-          // delay or legacy evaluation leaves the notice as it is.
+          // Whoever was told when the wait ends (a top-level chat's person,
+          // or a worker's parent) is told again once the reset they heard no
+          // longer holds (it passed without capacity, or a longer limit
+          // binds), and told for the first time when a short wait has become
+          // a long one; the session's timeline gets a waiting event naming
+          // the reset that now holds. Only an evaluation that found no
+          // capacity says when it returns; a held false-resumption delay or
+          // legacy evaluation restates nothing.
           const attention =
-            session.parentSessionId || evaluation.kind !== "wait"
+            evaluation.kind !== "wait"
               ? null
               : capacityWaitAttention({
                   waitReason: waitEvaluation.waitReason,
@@ -28117,29 +28163,56 @@ export async function reconcileSubscriptionCoreCapacityWait(
                   healthRetryAt: waitEvaluation.healthRetryAt,
                   now,
                 });
-          const openNotice = readCapacityWaitNotice(blockedTurn.metadata);
+          const toldKey = session.parentSessionId
+            ? CAPACITY_WAIT_PARENT_NOTICE_KEY
+            : CAPACITY_WAIT_NOTICE_KEY;
+          const told = readCapacityWaitNotice(blockedTurn.metadata, toldKey);
+          const restate =
+            attention !== null &&
+            (!told || capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
+          // What agents see (a worker's parent woken by a notice, the
+          // session's own timeline) is restated only for a real change: the
+          // first long wait, a told time that passed without capacity, a
+          // limit's reset that now binds later, or a reset that became
+          // unknown. A health-retry time that moves later at each check while
+          // the told time still lies ahead would otherwise wake the parent at
+          // every check; the person's silent in-place notification still
+          // follows it.
+          const toldTimePassed =
+            typeof told?.resetsAt === "string" && Date.parse(told.resetsAt) <= now.getTime();
+          const restateToAgents =
+            restate &&
+            (!told ||
+              toldTimePassed ||
+              waitEvaluation.earliestResetAt !== null ||
+              attention!.resetsAt === null);
+          const openNotice = session.parentSessionId ? null : told;
           const personNotice =
-            attention &&
-            (!openNotice || capacityWaitNoticeNeedsRestating(openNotice, attention.resetsAt))
+            restate && !session.parentSessionId
               ? SessionNotificationPostedPayload.parse({
                   ...capacityWaitNotificationPayload({
                     turnId: blockedTurn.id,
                     provider: waiter.provider,
-                    resetsAt: attention.resetsAt,
+                    resetsAt: attention!.resetsAt,
                   }),
                   // Same key: the open notification is updated in place, silently.
                   replaced: openNotice !== null,
                 })
               : null;
+          const waitingText =
+            changedReasonText ??
+            (restateToAgents
+              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
+              : null);
           const restated = [
-            ...(changedReasonText
+            ...(waitingText
               ? [
                   {
                     type: vocabulary.waitingEventType,
                     payload: {
                       ...vocabulary.waitingPayload,
                       code: "subscription_capacity_unavailable",
-                      error: changedReasonText,
+                      error: waitingText,
                       waitReason: waitEvaluation.waitReason,
                       actionRequired: subscriptionCapacityWaitNeedsAction(
                         waitEvaluation.waitReason,
@@ -28191,18 +28264,37 @@ export async function reconcileSubscriptionCoreCapacityWait(
               );
             restatedEvents = insertedEvents.map(mapEvent);
           }
-          if (personNotice) {
-            // The turn remembers what the notification now says, and its key
-            // for the withdrawal when the wait ends.
+          // A worker's parent hears the restated reset in a new notice (the
+          // system-update outbox delivers it), keyed by that reset so it never
+          // collides with the arm's notice or an earlier restatement.
+          const parentNoticeKey =
+            restateToAgents && session.parentSessionId
+              ? childWaitingCapacityDedupeKey({
+                  childSessionId: session.id,
+                  waiterId: waiter.waiterId,
+                  restatedResetsAt: attention!.resetsAt?.toISOString() ?? null,
+                })
+              : null;
+          if (parentNoticeKey) {
+            await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+              turnId: blockedTurn.id,
+              waiterId: waiter.waiterId,
+              provider: waiter.provider,
+              nextCheckAt,
+              resetsAt: attention!.resetsAt,
+              restated: true,
+            });
+          }
+          const noticeKey = personNotice?.key ?? parentNoticeKey;
+          if (noticeKey) {
+            // The turn remembers what it said and to whom; the person's
+            // notification key also serves its withdrawal when the wait ends.
             const [noticedTurn] = await tx
               .update(schema.sessionTurns)
               .set({
                 metadata: {
                   ...blockedTurn.metadata,
-                  [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                    personNotice.key,
-                    attention!.resetsAt,
-                  ),
+                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt),
                 },
                 version: blockedTurn.version + 1,
                 updatedAt: now,
@@ -35361,8 +35453,8 @@ export type SessionListFilterOptions = {
   siteConversations?: "include" | "group";
   /** Exact workspace project; null selects unfiled sessions. */
   channelId?: string | null;
-  /** Exact frozen creator identity. */
-  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /** Exact frozen creator identity; without a kind, every session the subject created. */
+  createdBy?: { kind?: "subject" | "service"; subjectId: string };
   /** Inclusive activity lower bound. */
   updatedFrom?: Date;
   /** Exclusive activity upper bound. */
@@ -35612,6 +35704,8 @@ function mapSessionPin(
 type SessionRow = typeof schema.sessions.$inferSelect & {
   currentInputWait?: Session["inputWait"];
   meaningfulSequence?: number;
+  /** See sessionFailureHandledByParentSql. */
+  failureHandled?: boolean;
 };
 
 /**
@@ -35833,6 +35927,7 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
+  const handledFailures = await sessionIdsWithHandledFailure(db, workspaceId, rows);
   const canonical = (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
     const cursor = cursorBySessionId.get(row.id);
     if (
@@ -35847,6 +35942,7 @@ async function canonicalSessionRowsFromEventCursors(
       ...row,
       lastSequence: cursor.lastSequence,
       meaningfulSequence: cursor.meaningfulSequence,
+      ...(handledFailures.has(row.id) ? { failureHandled: true } : {}),
     };
   });
   return includeEffectivePolicy
@@ -35957,6 +36053,89 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   attentionSince: null,
   truncated: false,
 };
+
+/**
+ * Whether a failed session's failure already belongs to an agent rather than a
+ * person. The check is bound to the failure episode itself: the newest terminal
+ * outbox row the child wrote for its parent (committed in the same transaction
+ * as the failure) must be a failure, and the parent's copy of that exact notice
+ * (same dedupe key) must have been claimed into a parent turn (`delivered`).
+ * The parent agent then owns the follow-up (retry, restart or replace), so the
+ * rail does not ask a person to review it.
+ *
+ * Everything else stays unhandled, so a failure nobody took on keeps its red
+ * marker: a root session; a notice not yet delivered, still pending (parent
+ * paused or not yet run), dropped because the parent was cancelled or archived,
+ * or settled without the parent seeing it (`superseded`, `cancelled`,
+ * `failed`); and a child that finished another turn after that notice (for
+ * example one retired without a new notice), whose newer failure is not the
+ * one the parent saw. Viewer-independent by design.
+ */
+function sessionFailureHandledByParentSql(
+  workspaceId: string,
+  sessionId: SQL,
+  parentSessionId: SQL,
+): SQL {
+  return sql`(${parentSessionId} is not null and coalesce((
+    select episode.classification = 'failure'
+      and exists (
+        select 1
+        from ${schema.sessionSystemUpdates} notice
+        where notice.workspace_id = ${workspaceId}
+          and notice.session_id = ${parentSessionId}
+          and notice.dedupe_key = episode.dedupe_key
+          and notice.state = 'delivered'
+      )
+      and not exists (
+        select 1
+        from ${schema.sessionTurns} later
+        where later.workspace_id = ${workspaceId}
+          and later.session_id = ${sessionId}
+          and later.finished_at is not null
+          and later.finished_at > episode.created_at
+          -- The failed turn's own notice is keyed by that turn; any other
+          -- turn is newer work.
+          and episode.dedupe_key <> ${childFailedTurnDedupeKeySql(sessionId, sql`later.id`)}
+      )
+    from ${schema.sessionSystemUpdateOutbox} episode
+    where episode.workspace_id = ${workspaceId}
+      and episode.source_session_id = ${sessionId}
+      and episode.target_session_id = ${parentSessionId}
+      and episode.kind = 'child_terminal_result'
+    order by episode.created_at desc, episode.id desc
+    limit 1
+  ), false))`;
+}
+
+/** Failed sessions among `rows` whose failure their parent agent consumed. */
+async function sessionIdsWithHandledFailure(
+  db: Database,
+  workspaceId: string,
+  rows: readonly Pick<SessionRow, "id" | "status" | "parentSessionId">[],
+): Promise<Set<string>> {
+  const failedChildIds = [
+    ...new Set(
+      rows.filter((row) => row.status === "failed" && row.parentSessionId).map((row) => row.id),
+    ),
+  ];
+  if (failedChildIds.length === 0) return new Set();
+  const handled = await rawRows<{ id: string }>(
+    db,
+    sql`
+      select child.id
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and ${anyOf(sql`child.id`, failedChildIds, "uuid")}
+        and child.status = 'failed'
+        and ${sessionFailureHandledByParentSql(
+          workspaceId,
+          sql`child.id`,
+          sql`child.parent_session_id`,
+        )}
+    `,
+  );
+  return new Set(handled.map((row) => row.id));
+}
 
 /**
  * Remove control metadata derived from sessions other than the exact target.
@@ -36140,6 +36319,7 @@ export async function sessionTreeStatsForSessions(
         -- without carrying a path, and the depth bound caps the work.
         with recursive descendants(
           id,
+          parent_session_id,
           status,
           active_turn_id,
           input_wait_until,
@@ -36150,6 +36330,7 @@ export async function sessionTreeStatsForSessions(
         ) as (
           select
             root.id,
+            root.parent_session_id,
             root.status,
             root.active_turn_id,
             root.input_wait_until,
@@ -36178,6 +36359,7 @@ export async function sessionTreeStatsForSessions(
 
           select
             child.id,
+            child.parent_session_id,
             child.status,
             child.active_turn_id,
             child.input_wait_until,
@@ -36215,8 +36397,8 @@ export async function sessionTreeStatsForSessions(
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, active_turn_id, input_wait_until, input_wait_turn_id,
-            last_sequence, effective_pause_revision, depth
+          select id, parent_session_id, status, active_turn_id, input_wait_until,
+            input_wait_turn_id, last_sequence, effective_pause_revision, depth
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
@@ -36235,7 +36417,21 @@ export async function sessionTreeStatsForSessions(
                 else personal.acknowledged_sequence
               end,
               0
-            ) as unread
+            ) as unread,
+            -- Probed only for unread failed descendants, the only ones a
+            -- handled verdict changes; see sessionFailureHandledByParentSql.
+            case when numbered.status = 'failed' and ${subjectId ?? null}::text is not null
+              and numbered.last_sequence > coalesce(
+                case
+                  when personal.manually_unread_through is not null then -1
+                  else personal.acknowledged_sequence
+                end,
+                0
+              ) then ${sessionFailureHandledByParentSql(
+                workspaceId,
+                sql`numbered.id`,
+                sql`numbered.parent_session_id`,
+              )} else false end as failure_handled
           from numbered
           left join ${schema.sessionPins} personal
             on ${subjectId ?? null}::text is not null
@@ -36289,8 +36485,13 @@ export async function sessionTreeStatsForSessions(
               )
           )::int as "pausedWorkDescendants",
           count(*) filter (where status = 'failed')::int as "failedDescendants",
-          count(*) filter (where status = 'failed' and unread)::int as "unreadFailedDescendants",
-          count(*) filter (where unread)::int as "unreadDescendants",
+          -- A failure its parent agent already consumed is that agent's to handle,
+          -- including anything the failed session logs after it (for example a
+          -- late workspace capture): neither asks the person through an ancestor.
+          count(*) filter (
+            where status = 'failed' and unread and not failure_handled
+          )::int as "unreadFailedDescendants",
+          count(*) filter (where unread and not failure_handled)::int as "unreadDescendants",
           count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
           -- Oldest still-open requires_action turn among the counted attention
           -- descendants. The correlated lookup runs only for rows passing the
@@ -36660,10 +36861,10 @@ async function sessionListTotalsInScope(
       ) personal on true
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
-    ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
+    ), nodes(root_id, channel_id, id, parent_session_id, account_id, status, active_turn_id,
         input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
         acknowledged_sequence, actively_working) as (
-      select root.id, root.channel_id, root.id, root.account_id, root.status,
+      select root.id, root.channel_id, root.id, null::uuid, root.account_id, root.status,
         root.active_turn_id, root.input_wait_until, root.input_wait_turn_id,
         greatest(
           case when control.workspace_state = 'paused' and
@@ -36676,7 +36877,8 @@ async function sessionListTotalsInScope(
       from roots root join ${schema.workspaceInferenceControls} control
         on control.workspace_id = ${workspaceId}
       union all
-      select parent.root_id, parent.channel_id, child.id, child.account_id, child.status,
+      select parent.root_id, parent.channel_id, child.id, child.parent_session_id,
+        child.account_id, child.status,
         child.active_turn_id, child.input_wait_until, child.input_wait_turn_id,
         greatest(
           case when child.subtree_run_override_revision is null or
@@ -36703,6 +36905,14 @@ async function sessionListTotalsInScope(
         root.updated_at as root_updated_at, root.created_at as root_created_at,
         root.origin_title as root_origin_title,
         cursor.last_meaningful_sequence > nodes.acknowledged_sequence as unread,
+        -- Probed only for unread failures, the only ones it changes.
+        case when nodes.status = 'failed'
+          and cursor.last_meaningful_sequence > nodes.acknowledged_sequence
+        then ${sessionFailureHandledByParentSql(
+          workspaceId,
+          sql`nodes.id`,
+          sql`nodes.parent_session_id`,
+        )} else false end as failure_handled,
         nodes.actively_working as active_work,
         case when nodes.status = 'requires_action' then (
           select min(turn.updated_at) from ${schema.sessionTurns} turn
@@ -36749,13 +36959,13 @@ async function sessionListTotalsInScope(
       select channel_id as "channelId", count(*)::int as total,
         count(*) filter (where status = 'requires_action')::int as attention,
         min(attention_since) as "attentionSince",
-        count(*) filter (where status = 'failed' and unread)::int as failed,
+        count(*) filter (where status = 'failed' and unread and not failure_handled)::int as failed,
         count(*) filter (where pause_revision is null and
           (status in ('running', 'recovering') or input_wait))::int as active,
         count(*) filter (where pause_revision is null and
           status in ('queued', 'waiting_capacity'))::int as queued,
         count(*) filter (where pause_revision is null and input_wait)::int as waiting,
-        count(*) filter (where unread)::int as unread,
+        count(*) filter (where unread and not failure_handled)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured group by channel_id
     ), site_conv as (
@@ -36883,13 +37093,14 @@ async function sessionListTotalsInScope(
       select conv.site_id, conv.row_channel_id, count(*)::int as total,
         count(*) filter (where node.status = 'requires_action')::int as attention,
         min(node.attention_since) as "attentionSince",
-        count(*) filter (where node.status = 'failed' and node.unread)::int as failed,
+        count(*) filter (where node.status = 'failed' and node.unread
+          and not node.failure_handled)::int as failed,
         count(*) filter (where node.pause_revision is null and
           (node.status in ('running', 'recovering') or node.input_wait))::int as active,
         count(*) filter (where node.pause_revision is null and
           node.status in ('queued', 'waiting_capacity'))::int as queued,
         count(*) filter (where node.pause_revision is null and node.input_wait)::int as waiting,
-        count(*) filter (where node.unread)::int as unread,
+        count(*) filter (where node.unread and not node.failure_handled)::int as unread,
         count(*) filter (where node.active_work)::int as "activeWork"
       from measured node join site_conv conv on conv.id = node.root_id
       group by conv.site_id, conv.row_channel_id
@@ -37096,7 +37307,11 @@ function sessionFilters(
   }
   if (options.createdBy) {
     filters.push(
-      eq(schema.sessions.createdByKind, options.createdBy.kind),
+      // Without a kind, keep both kinds explicit so the creator index's
+      // leading kind column still bounds the scan.
+      options.createdBy.kind
+        ? eq(schema.sessions.createdByKind, options.createdBy.kind)
+        : inArray(schema.sessions.createdByKind, ["subject", "service"]),
       eq(schema.sessions.createdBySubjectId, options.createdBy.subjectId),
     );
   }
@@ -37316,7 +37531,9 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     // `group` returns the same rows as the default; only `include` changes them.
     ...(options.siteConversations === "include" ? [["siteConversations", "include"]] : []),
     hasChannel ? ["channel", options.channelId] : null,
-    options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
+    options.createdBy
+      ? ["creator", options.createdBy.kind ?? null, options.createdBy.subjectId]
+      : null,
     options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
     options.updatedBefore ? ["updatedBefore", options.updatedBefore.toISOString()] : null,
     options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
@@ -38500,11 +38717,15 @@ export async function getSessionForSubject(
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
     // mapSessionWithControl projects the effective policy below, once.
+    const handledFailure = (
+      await sessionIdsWithHandledFailure(scopedDb, workspaceId, [row.session])
+    ).has(sessionId);
     const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
       {
         ...row.session,
         lastSequence: row.cursor.lastSequence,
         meaningfulSequence: row.cursor.lastMeaningfulSequence,
+        ...(handledFailure ? { failureHandled: true } : {}),
       },
     ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
@@ -44388,6 +44609,14 @@ const SKILL_CATALOG_CHANNEL: SessionContextChannel = {
   item: skillCatalogContextItem,
 };
 
+const REPOSITORY_SKILLS_CHANNEL: SessionContextChannel = {
+  label: "Repository skills",
+  metadataKey: "opengeniRepositorySkillsHistoryId",
+  contentPrefix: REPOSITORY_SKILLS_CONTEXT_PREFIX,
+  read: readRepositorySkillsContext,
+  item: repositorySkillsContextItem,
+};
+
 const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
   label: "Workspace governance",
   metadataKey: "opengeniWorkspaceGovernanceHistoryId",
@@ -44430,6 +44659,41 @@ export async function ensureSessionSkillCatalog(
       { ...scope, text: catalog, ...(omitWhenEmpty ? { omitWhenAbsent: true } : {}) },
       SKILL_CATALOG_CHANNEL,
     )) ?? ""
+  );
+}
+
+/**
+ * Persist the repository Skill index the run discovered in the live
+ * workspace, once per logical turn, as a history item before the turn's first
+ * history item (with that turn's id). Retries reuse the turn's snapshot even
+ * when the workspace changed meanwhile. Nothing is written while the newest
+ * item already shows the same index. Null means this run did not index the
+ * workspace (a deferred run): nothing is written, and the turn keeps what the
+ * model already reads, so a later attempt of the turn cannot add an item
+ * between its requests. Returns the model-visible index, or null when there
+ * is none.
+ *
+ * Discovery runs inside the model run, after this turn's history was loaded,
+ * so the run shows the returned item at the same place itself (see the
+ * runtime's `publishRepositorySkills`).
+ */
+export async function ensureSessionRepositorySkills(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    index: string | null;
+  },
+): Promise<string | null> {
+  const { index, ...scope } = input;
+  return await ensureSessionContextSnapshot(
+    db,
+    { ...scope, text: index },
+    REPOSITORY_SKILLS_CHANNEL,
   );
 }
 
@@ -90997,6 +91261,8 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
+    /** A later notice restating the reset of a wait the parent already heard of. */
+    restated?: boolean;
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -91012,6 +91278,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     dedupeKey: childWaitingCapacityDedupeKey({
       childSessionId: session.id,
       waiterId: input.waiterId,
+      ...(input.restated ? { restatedResetsAt: payload.resetsAt } : {}),
     }),
     kind: "child_waiting_capacity",
     classification: "info",
@@ -91089,8 +91356,22 @@ async function enqueueFailedChildOutboxForTurnTx(
   }
   await enqueueFailedChildOutboxTx(tx, workspaceId, session, {
     turnId: turn.id,
-    dedupeKey: `child-completion:${turn.sessionId}:turn:${turn.id}`,
+    dedupeKey: childFailedTurnDedupeKey(turn.sessionId, turn.id),
   });
+}
+
+/**
+ * Dedupe key of the notice a child's failed turn sends its parent. The SQL twin
+ * below must build the same string: sessionFailureHandledByParentSql relies on
+ * it to tell the failed turn itself from later work.
+ */
+export function childFailedTurnDedupeKey(childSessionId: string, turnId: string): string {
+  return `child-completion:${childSessionId}:turn:${turnId}`;
+}
+
+/** SQL form of childFailedTurnDedupeKey; keep the two in step. */
+function childFailedTurnDedupeKeySql(childSessionId: SQL, turnId: SQL): SQL {
+  return sql`('child-completion:' || (${childSessionId})::text || ':turn:' || (${turnId})::text)`;
 }
 
 async function enqueueFailedChildOutboxWithoutTurnTx(
@@ -96624,6 +96905,7 @@ function mapSession(
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,
+    ...(row.failureHandled ? { failureHandled: true } : {}),
     nestedAgentDepth: row.nestedAgentDepth,
     maxNestedAgentDepthOverride: row.maxNestedAgentDepthOverride ?? null,
     effectiveMaxNestedAgentDepth: row.effectiveMaxNestedAgentDepth,
@@ -97773,6 +98055,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
+export * from "./session-content-garbage";
 export * from "./session-secret-redaction";
 export * from "./session-archive";
 export * from "./session-unattended";

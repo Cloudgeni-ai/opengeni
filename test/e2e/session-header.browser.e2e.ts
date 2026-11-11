@@ -415,7 +415,7 @@ describe("responsive production session header", () => {
         // Startup feedback for a queued turn lives in the conversation (#3530):
         // a failed dispatch says so at once, and its details carry the error.
         const startup = page.locator(".og-genie-loading");
-        await startup.getByText("Unable to start yet. Your messages are saved.").first().waitFor();
+        await startup.getByText("Unable to start yet.").first().waitFor();
         await startup.getByRole("button", { name: /Behind the magic/ }).click();
         const status = page.locator("[data-og-startup-dispatch-details]");
         await status.waitFor();

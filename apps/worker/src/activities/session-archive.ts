@@ -20,6 +20,7 @@ import {
   readSessionArchiveTablePages,
   readSessionArchiveTree,
   readSessionArchiveSessionRow,
+  readSessionArchiveTranscriptEvents,
   sessionArchiveTranscriptEvent,
   readPendingSessionContentRestore,
   restoreArchivedSessionContent,
@@ -74,6 +75,8 @@ export const SESSION_ARCHIVE_CANDIDATES_PER_PASS = 25;
 export const SESSION_ARCHIVE_TIME_BUDGET_MS = 10 * 60 * 1_000;
 export const SESSION_ARCHIVE_STALE_SECONDS = 2 * 60 * 60;
 export const SESSION_ARCHIVE_EXPORT_PAGE_ROWS = 200;
+/** Page size for kept events appended after the bundle read its events. */
+export const SESSION_ARCHIVE_TRANSCRIPT_TAIL_PAGE_EVENTS = 500;
 export const SESSION_ARCHIVE_PURGE_BATCH_ROWS = 2_000;
 
 /**
@@ -119,6 +122,14 @@ async function writeBundle(
  * export reads, in the same sequence order, instead of a second read.
  * Each kept event goes straight into the transcript's compressed stream, which
  * waits for it to drain and fails the export if writing the file fails.
+ *
+ * Nothing stops new events while a session archives, so a kept event can be
+ * appended after the bundle has read its events. Such events are not in the
+ * bundle, but they stay live (kept types are never purged), and the transcript
+ * still lists them: once the bundle is written, one more read takes the kept
+ * events after the last sequence it saw, normally none. Each session's events
+ * commit in sequence order (every insert must exactly continue the session's
+ * locked event cursor), so a later event never has a lower sequence.
  */
 async function writeBundleAndTranscript(
   db: Database,
@@ -136,13 +147,28 @@ async function writeBundleAndTranscript(
         sessionId: scope.sessionId,
       }),
     );
+    let lastEventRow: string | undefined;
     bundle = await writeBundle(db, scope, paths.bundle, async (table, row) => {
       if (table !== "session_events") return;
+      lastEventRow = row;
       const event = sessionArchiveTranscriptEvent(row);
       if (!event) return;
       await write(JSON.stringify({ event }));
       events += 1;
     });
+    let afterSequence = lastEventRow
+      ? (JSON.parse(lastEventRow) as { sequence: number }).sequence
+      : 0;
+    for (;;) {
+      const page = await readSessionArchiveTranscriptEvents(db, scope, {
+        afterSequence,
+        limit: SESSION_ARCHIVE_TRANSCRIPT_TAIL_PAGE_EVENTS,
+      });
+      for (const event of page) await write(JSON.stringify({ event }));
+      events += page.length;
+      if (page.length < SESSION_ARCHIVE_TRANSCRIPT_TAIL_PAGE_EVENTS) break;
+      afterSequence = page.at(-1)!.sequence;
+    }
     await write(JSON.stringify({ end: true, events }));
   });
   return { bundle: bundle!, transcript: { spool, events } };
@@ -310,12 +336,17 @@ export function createSessionArchiveActivities(
     deadline: number,
   ): Promise<number> {
     let purged = 0;
+    // Resume at the table the last step left unfinished; the step itself
+    // ends with a full pass that confirms every table is empty.
+    let fromTable = 0;
     while (now() < deadline) {
       const step = await purgeArchivedSessionContent(db, scope, {
         batchSize: SESSION_ARCHIVE_PURGE_BATCH_ROWS,
+        fromTable,
       });
       purged += step.deleted;
       if (step.complete) break;
+      fromTable = step.nextTable;
     }
     return purged;
   }

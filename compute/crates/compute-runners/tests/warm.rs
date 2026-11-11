@@ -507,3 +507,207 @@ fn the_refresh_ran_as_it_should(world: &fake::World) {
         .collect();
     assert!(builders.is_empty());
 }
+
+/// Starts keeping `settings`' template warm against `fake`, leading.
+fn keep_warm(
+    fake: &Fake,
+    settings: warm::Settings,
+) -> (
+    watch::Receiver<String>,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    let github = Arc::new(Github::new(
+        reqwest::Client::new(),
+        &fake.base,
+        &fake.base,
+        Scope::parse("acme/web").unwrap(),
+        Credentials::Token("the-token".into()),
+    ));
+    let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
+    let (current_tx, current) = watch::channel("runner-base".to_owned());
+    let (leading_tx, leading) = watch::channel(true);
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let keeping = tokio::spawn(async move {
+        let _leading = leading_tx;
+        warm::keep(
+            settings,
+            github,
+            compute,
+            free_room(),
+            current_tx,
+            leading,
+            stopping,
+        )
+        .await;
+    });
+    (current, stop, keeping)
+}
+
+/// Settings whose next refresh, after a failed one, is hours away.
+fn rarely() -> warm::Settings {
+    warm::Settings {
+        every: Duration::from_secs(6 * 3600),
+        ..settings()
+    }
+}
+
+/// The control service restarting while a command runs cuts its stream
+/// and is away for a moment: the command runs on in the builder, is
+/// followed again by its tag and the refresh goes on, nothing run twice.
+#[tokio::test]
+async fn a_refresh_follows_its_commands_through_a_restart_of_compute() {
+    let fake = Fake::start().await;
+    {
+        let mut world = fake.world();
+        world.head = "b".repeat(40);
+        world.process_delay = Duration::from_millis(1500);
+        // The clone's stream is cut, and the first follow finds the
+        // front door away.
+        world.stream_cuts = 1;
+    }
+    let (mut current, stop, keeping) = keep_warm(&fake, rarely());
+    fake.until("the clone's stream cut", |world| world.processes.len() == 1)
+        .await;
+    fake.world().envd_away = 1;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        current.wait_for(|name| name.ends_with("-bbbbbbbbbbbb")),
+    )
+    .await
+    .expect("the refresh survives compute restarting")
+    .unwrap();
+    {
+        let world = fake.world();
+        assert_eq!(world.processes.len(), 3, "each command ran once");
+        assert!(world.follows >= 1, "the clone was followed again");
+        assert_eq!(world.envd_away, 0);
+        let builder = &world.processes[0].sandbox;
+        assert!(
+            world
+                .processes
+                .iter()
+                .all(|process| process.sandbox == *builder)
+        );
+        assert_eq!(world.templates.len(), 1);
+        assert_eq!(world.templates[0].2, *builder);
+        assert!(world.killed.contains(builder), "the builder goes");
+    }
+    stop.cancel();
+    keeping.await.unwrap();
+}
+
+/// A command that never started because compute was away is started; one
+/// that ended while its stream was cut, after envd forgot it, ends as its
+/// record in the guest says.
+#[tokio::test]
+async fn a_command_that_ended_while_compute_was_away_ends_as_recorded() {
+    let fake = Fake::start().await;
+    {
+        let mut world = fake.world();
+        world.head = "b".repeat(40);
+        world.process_delay = Duration::from_millis(200);
+        world.envd_away = 1;
+        world.stream_cuts = 1;
+    }
+    let (mut current, stop, keeping) = keep_warm(&fake, rarely());
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        current.wait_for(|name| name.ends_with("-bbbbbbbbbbbb")),
+    )
+    .await
+    .expect("the refresh survives compute restarting")
+    .unwrap();
+    {
+        let world = fake.world();
+        assert_eq!(world.processes.len(), 3, "each command started once");
+        assert!(world.record_reads >= 2, "never started, then ended");
+        assert_eq!(world.templates.len(), 1);
+    }
+    stop.cancel();
+    keeping.await.unwrap();
+}
+
+/// A command that failed while its stream was cut fails the refresh with
+/// the exit code it recorded: nothing more runs and nothing is saved.
+#[tokio::test]
+async fn a_command_that_failed_while_compute_was_away_fails_the_refresh() {
+    let fake = Fake::start().await;
+    {
+        let mut world = fake.world();
+        world.head = "b".repeat(40);
+        world.process_delay = Duration::from_millis(200);
+        world.stream_cuts = 1;
+        world.failing = Some("git fetch".into());
+    }
+    let (current, stop, keeping) = keep_warm(&fake, rarely());
+    fake.until("the failed clone's builder gone", |world| {
+        world.record_reads >= 1 && !world.killed.is_empty()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    {
+        let world = fake.world();
+        assert_eq!(world.processes.len(), 1, "nothing ran after the clone");
+        assert!(world.templates.is_empty(), "nothing saved");
+        assert!(world.sandboxes.is_empty(), "the builder goes");
+    }
+    assert_eq!(*current.borrow(), "runner-base");
+    stop.cancel();
+    keeping.await.unwrap();
+}
+
+/// A builder's create and the template's save cut short by a restart are
+/// asked again: the builder a lost answer made goes, a save cut before it
+/// was made is made, and one made whose answer was lost is found by its
+/// name. One template is made.
+#[tokio::test]
+async fn a_create_and_a_save_cut_short_are_made_once() {
+    let fake = Fake::start().await;
+    {
+        let mut world = fake.world();
+        world.head = "b".repeat(40);
+        world.create_cuts = 1;
+        world.snapshot_cuts = 1;
+        world.snapshot_answers_lost = 1;
+    }
+    let (mut current, stop, keeping) = keep_warm(&fake, rarely());
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        current.wait_for(|name| name.ends_with("-bbbbbbbbbbbb")),
+    )
+    .await
+    .expect("the refresh survives compute restarting")
+    .unwrap();
+    {
+        let world = fake.world();
+        assert_eq!(
+            (
+                world.create_cuts,
+                world.snapshot_cuts,
+                world.snapshot_answers_lost
+            ),
+            (0, 0, 0)
+        );
+        let builder = &world.processes[0].sandbox;
+        assert!(
+            world
+                .processes
+                .iter()
+                .all(|process| process.sandbox == *builder)
+        );
+        assert_eq!(
+            world.killed.len(),
+            2,
+            "both builders go: {:?}",
+            world.killed
+        );
+        assert!(world.killed.contains(builder));
+        assert_eq!(world.templates.len(), 1, "{:?}", world.templates);
+        assert_eq!(world.templates[0].1, *current.borrow());
+        assert!(world.sandboxes.is_empty());
+    }
+    stop.cancel();
+    keeping.await.unwrap();
+}

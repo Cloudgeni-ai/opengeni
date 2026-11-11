@@ -7,6 +7,7 @@ import {
   FIKEN_CREDENTIAL_ROLE,
   type AccessGrant,
   type FirstPartyMcpToolName,
+  type SessionToolPolicy,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -1405,7 +1406,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         await Promise.all([mcp.close(), server.close()]);
       }
     });
-  test("legacy missing tools do not manufacture reconnect requests; explicit empty account selection requests setup", async () => {
+  test("discovery distinguishes missing accounts from connectors left out of this chat", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const capabilityId = "mcp:gmail-consent-test";
     const serverId = "gmail-consent-test";
@@ -1434,9 +1435,22 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       },
     });
-    for (const exposed of ["none", "other-server", serverId, "no-accepted-account"]) {
-      const knownEmpty = exposed === "no-accepted-account";
-      const attempt = await seedAttempt(knownEmpty);
+    for (const exposed of [
+      "none",
+      "other-server",
+      serverId,
+      "no-accepted-account",
+      "fixed-list",
+      "excluded",
+    ]) {
+      const leftOut = exposed === "fixed-list" || exposed === "excluded";
+      const needsAccount = exposed === "no-accepted-account";
+      const knownEmpty = needsAccount || leftOut;
+      const attempt = await seedAttempt(knownEmpty, undefined, undefined, {
+        mode: exposed === "fixed-list" ? "explicit" : "workspace_default",
+        inheritedFromSessionId: null,
+        ...(exposed === "excluded" ? { excludedMcpServerIds: [serverId] } : {}),
+      });
       const ready = exposed === serverId;
       if (exposed !== "none") {
         await persistAttemptToolCatalog(
@@ -1497,24 +1511,28 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         expect(
           body.matches.find((entry) => entry.capabilityId === capabilityId)?.setup,
         ).toMatchObject({
-          status: ready ? "ready" : knownEmpty ? "authorization_required" : "unavailable",
-          action: knownEmpty ? "connect" : null,
-          nextAction: knownEmpty
+          status: ready ? "ready" : needsAccount ? "authorization_required" : "unavailable",
+          action: needsAccount ? "connect" : null,
+          nextAction: needsAccount
             ? { toolName: "capability_authorization_request", capabilityId }
             : null,
         });
+        if (leftOut) {
+          expect(JSON.stringify(body)).toContain("this chat's tool selection leaves it out");
+          expect(JSON.stringify(body)).not.toContain("no account was selected");
+        }
         const request = await mcp.callTool({
           name: "capability_authorization_request",
           arguments: { capabilityId, rationale: "Read the requested Gmail labels." },
         });
         expect(request.isError).not.toBe(true);
         expect(mcpJson(request)).toMatchObject({
-          status: ready ? "ready" : knownEmpty ? "authorization_requested" : "unavailable",
+          status: ready ? "ready" : needsAccount ? "authorization_requested" : "unavailable",
         });
         const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
         const notices = events.filter((event) => event.type === "tool.auth_needed");
-        expect(notices).toHaveLength(knownEmpty ? 1 : 0);
-        if (knownEmpty)
+        expect(notices).toHaveLength(needsAccount ? 1 : 0);
+        if (needsAccount)
           expect(notices[0]).toMatchObject({
             turnId: attempt.turnId,
             turnAttemptId: attempt.attemptId,
@@ -1593,7 +1611,10 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
 
     const session = async () => {
       // An explicitly empty account selection: no account is ready this turn.
-      const attempt = await seedAttempt(true);
+      const attempt = await seedAttempt(true, undefined, undefined, {
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+      });
       await persistAttemptToolCatalog(
         client.db,
         createAttemptToolEnvironment({
@@ -1732,6 +1753,7 @@ async function seedAttempt(
     "capability_authorization_request",
   ],
   initiatorSubjectId: string = workspace.subjectId,
+  toolPolicy?: SessionToolPolicy,
 ): Promise<{
   sessionId: string;
   turnId: string;
@@ -1744,6 +1766,7 @@ async function seedAttempt(
     initialMessage: "Use GitHub for this task",
     resources: [],
     tools: [],
+    ...(toolPolicy ? { toolPolicy } : {}),
     metadata: {},
     model: "gpt-5.6-sol",
     reasoningEffort: "medium",

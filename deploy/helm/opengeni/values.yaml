@@ -300,6 +300,10 @@ api:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
+  # After SIGTERM the API drains: responses close their keep-alive connections, idle
+  # ones close, live streams end and in-flight requests finish, all within the grace
+  # left after preStop (rendered as OPENGENI_API_SHUTDOWN_GRACE_MS). It must exceed
+  # preStopDrainSeconds.
   terminationGracePeriodSeconds: 30
   # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
   # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).

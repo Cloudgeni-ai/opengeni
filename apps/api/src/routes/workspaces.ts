@@ -211,6 +211,7 @@ import {
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
+import { liveStreamSignal } from "../http/server-drain";
 import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
 export function canonicalWorkspacePolicyModelIds(
@@ -1712,7 +1713,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       deps.bus,
       workspaceId,
       after,
-      c.req.raw.signal,
+      liveStreamSignal(c),
       {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,

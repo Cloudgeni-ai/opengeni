@@ -22,11 +22,44 @@ import {
   tryParseJson,
 } from "../src/lib/format";
 import { OpenGeniApiError } from "@opengeni/sdk";
+import { englishMessages } from "../src/messages/en";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
+// A refused or waiting message stays visible in the chat or composer, so no
+// refusal or status line reassures that it is saved. (The admission notice's
+// own copy has the same rule in its tests.)
+test("no send refusal or chat status says the message is saved", () => {
+  const saying = Object.entries(englishMessages).filter(
+    ([key, value]) =>
+      !key.startsWith("sessionAdmission.") &&
+      /\b(?:your|the|their) messages?(?: and attachments)? (?:is|are|stays?) saved\b/i.test(value),
+  );
+  expect(saying).toEqual([]);
+});
+
 describe("failure presentation", () => {
+  test("a refused Claude reasoning replay never shows Claude's signature text", () => {
+    // The transport falls back to plain history, so this failure is not
+    // expected to reach a person; if it ever does, only the generic line shows.
+    const error = "Claude request failed (HTTP 400)";
+    const payload = {
+      error,
+      code: "anthropic_reasoning_replay_rejected",
+      retryable: false,
+      // The ae0245f3 failure detail, kept on the event for operators.
+      detail:
+        'invalid_request_error: messages.7.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block".',
+      requestId: "req_011CguQf5TQuNQgLey4zxpQp",
+    };
+    expect(presentFailure(englishText, payload)).toEqual({
+      reason: error,
+      safetyRefusal: false,
+      diagnostic: false,
+    });
+  });
+
   test("database failures show a safe explanation without altering stored diagnostics", () => {
     for (const classification of [
       { code: "db_deadlock" },
@@ -303,7 +336,7 @@ describe("composer own-key and API refusals", () => {
           action: { type: "add_credits", href: "/billing" },
         }),
       ),
-    ).toBe("Add credits to use your own key. Your message and attachments are saved.");
+    ).toBe("Add credits to use your own key.");
     expect(
       composerSubmissionErrorMessage(
         englishText,
@@ -312,7 +345,7 @@ describe("composer own-key and API refusals", () => {
           action: { type: "upgrade_plan", href: "/billing" },
         }),
       ),
-    ).toBe("Upgrade to Pro to use your own key. Your message and attachments are saved.");
+    ).toBe("Upgrade to Pro to use your own key.");
     expect(
       composerSubmissionErrorMessage(
         englishText,
@@ -321,7 +354,7 @@ describe("composer own-key and API refusals", () => {
           action: { type: "upgrade_plan", href: "/billing" },
         }),
       ),
-    ).toBe("Upgrade to Pro to use your own subscription. Your message and attachments are saved.");
+    ).toBe("Upgrade to Pro to use your own subscription.");
     const api = composerSubmissionErrorMessage(
       englishText,
       refusal("API usage uses credits, not your plan credit.", {
@@ -329,9 +362,7 @@ describe("composer own-key and API refusals", () => {
         action: { type: "add_credits", href: "/billing" },
       }),
     );
-    expect(api).toBe(
-      "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
-    );
+    expect(api).toBe("API usage uses credits, not your plan credit. Add credits to continue.");
     expect(api).not.toContain("another model");
   });
 
@@ -343,32 +374,26 @@ describe("composer own-key and API refusals", () => {
         code: "byok_paid_credit_required",
         action: { type: "add_credits", href: "/billing" },
       }),
-    ).toBe(
-      "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
-    );
+    ).toBe("Ask an organization owner to add credits to use your own key.");
     expect(
       member("Upgrade to Pro to use your own key.", {
         code: "byok_paid_credit_required",
         action: { type: "upgrade_plan", href: "/billing" },
       }),
-    ).toBe(
-      "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
-    );
+    ).toBe("Ask an organization owner to upgrade to Pro to use your own key.");
     expect(
       member("Upgrade to Pro to use your own subscription.", {
         code: "subscription_plan_required",
         action: { type: "upgrade_plan", href: "/billing" },
       }),
-    ).toBe(
-      "Ask an organization owner to upgrade to Pro to use your own subscription. Your message and attachments are saved.",
-    );
+    ).toBe("Ask an organization owner to upgrade to Pro to use your own subscription.");
     expect(
       member("API usage uses credits, not your plan credit.", {
         code: "api_credits_required",
         action: { type: "add_credits", href: "/billing" },
       }),
     ).toBe(
-      "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
+      "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
     );
   });
 });
@@ -471,6 +496,8 @@ describe("composerSubmissionErrorMessage", () => {
     // Only the stored text survives a reload, and older APIs omit the detail code.
     for (const text of [
       COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+      // The earlier wording, from before the line stopped saying the message is saved.
+      "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
       "Opengeni API 422: model is not available: gpt-old Reference: abc.",
     ]) {
       expect(composerSubmissionErrorMessage(englishText, new Error(text))).toBe(
@@ -524,7 +551,7 @@ describe("composerSubmissionErrorMessage", () => {
     const generic = "The request could not be accepted. Check your input and try again.";
     const one = composerSubmissionErrorMessage(englishText, refusal(["benyhh/grocery-bot"]));
     expect(one).toBe(
-      "benyhh/grocery-bot is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
+      "benyhh/grocery-bot is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry.",
     );
     expect(
       composerSubmissionErrorMessage(
@@ -532,10 +559,10 @@ describe("composerSubmissionErrorMessage", () => {
         refusal(["acme/a", "acme/b", "acme/c", "acme/d"]),
       ),
     ).toBe(
-      "These repositories are no longer available to this workspace: acme/a, acme/b, acme/c, …. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
+      "These repositories are no longer available to this workspace: acme/a, acme/b, acme/c, …. Remove them from this chat, or restore their GitHub access, then retry.",
     );
     expect(composerSubmissionErrorMessage(englishText, refusal())).toBe(
-      "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
+      "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry.",
     );
     expect(one).not.toBe(generic);
     // Removing the repository or restoring its access makes the same Send succeed.

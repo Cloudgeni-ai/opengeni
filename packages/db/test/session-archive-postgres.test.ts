@@ -510,7 +510,199 @@ describe("idle-session archive lifecycle", () => {
     expect(items.map((row) => row.id)).toEqual([evidenceItem]);
     expect(await countRows("session_pending_tool_calls", scope)).toBe(0);
   }, 120_000);
+
+  test("purge resumes at the table in progress and leaves exactly what restarting from the first table leaves", async () => {
+    const restarted = await archivedSessionWithBulkContent();
+    const resumed = await archivedSessionWithBulkContent();
+    const before = await purgeTableCounts(resumed);
+    let calls = 0;
+    const wire = postgres(shared.appUrl, {
+      max: 1,
+      debug: (_connection, query) => {
+        if (query.includes("purge_archived_session_content")) calls += 1;
+      },
+    });
+    const observed = drizzle(wire, { schema }) as unknown as Database;
+    try {
+      // Every step starting again at the first table.
+      let step = await purgeArchivedSessionContent(observed, restarted, { batchSize: 2 });
+      while (!step.complete)
+        step = await purgeArchivedSessionContent(observed, restarted, { batchSize: 2 });
+      const restartCalls = calls;
+      calls = 0;
+      // Every step resuming at the table the previous step left unfinished.
+      step = await purgeArchivedSessionContent(observed, resumed, { batchSize: 2 });
+      while (!step.complete)
+        step = await purgeArchivedSessionContent(observed, resumed, {
+          batchSize: 2,
+          fromTable: step.nextTable,
+        });
+      const resumeCalls = calls;
+
+      expect(await remainingContent(resumed)).toEqual(await remainingContent(restarted));
+      const after = await purgeTableCounts(resumed);
+      // One call per full batch and one that finds the table short, for each
+      // table once, then one confirming pass over every table.
+      const expected =
+        SESSION_ARCHIVE_PURGE_TABLES.reduce(
+          (sum, table) => sum + Math.floor((before[table]! - after[table]!) / 2) + 1,
+          0,
+        ) + SESSION_ARCHIVE_PURGE_TABLES.length;
+      expect(resumeCalls).toBe(expected);
+      expect(restartCalls).toBeGreaterThan(resumeCalls);
+      for (const scope of [restarted, resumed]) {
+        const [row] = await shared.admin`select content_archive_purged_at from sessions
+          where id = ${scope.sessionId}`;
+        expect(row!.content_archive_purged_at).not.toBeNull();
+      }
+    } finally {
+      await wire.end();
+    }
+  }, 120_000);
+
+  test("a purge given an invalid fromTable starts at the first table and is not recorded complete", async () => {
+    const scope = await archivedSessionWithBulkContent();
+    let calls = 0;
+    const wire = postgres(shared.appUrl, {
+      max: 1,
+      debug: (_connection, query) => {
+        if (query.includes("purge_archived_session_content")) calls += 1;
+      },
+    });
+    const observed = drizzle(wire, { schema }) as unknown as Database;
+    try {
+      for (const fromTable of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        -1,
+        1.5,
+        SESSION_ARCHIVE_PURGE_TABLES.length,
+      ]) {
+        calls = 0;
+        const step = await purgeArchivedSessionContent(observed, scope, {
+          batchSize: 1,
+          fromTable,
+        });
+        // A call from the first table visits every table up to the one whose
+        // full batch stopped it.
+        expect({ fromTable, deleted: step.deleted, complete: step.complete, calls }).toEqual({
+          fromTable,
+          deleted: 1,
+          complete: false,
+          calls: step.nextTable + 1,
+        });
+        const [row] = await shared.admin`select content_archive_purged_at from sessions
+          where id = ${scope.sessionId}`;
+        expect(row!.content_archive_purged_at).toBeNull();
+      }
+    } finally {
+      await wire.end();
+    }
+  }, 120_000);
+
+  test("a purge that skipped the first table is not recorded complete even when nothing is left", async () => {
+    const scope = await archivedSessionWithBulkContent();
+    expect(await countRows(SESSION_ARCHIVE_PURGE_TABLES[0], scope)).toBe(0);
+    // Empty every table after the first without ever starting at the first.
+    let step = await purgeArchivedSessionContent(client.db, scope, {
+      batchSize: 100,
+      fromTable: 1,
+    });
+    while (step.deleted > 0)
+      step = await purgeArchivedSessionContent(client.db, scope, { batchSize: 100, fromTable: 1 });
+    expect(step).toEqual({ deleted: 0, complete: false, nextTable: 0 });
+    const [skipped] = await shared.admin`select content_archive_purged_at from sessions
+      where id = ${scope.sessionId}`;
+    expect(skipped!.content_archive_purged_at).toBeNull();
+
+    // Only a pass from the first table records the purge complete.
+    expect(await purgeArchivedSessionContent(client.db, scope, { batchSize: 100 })).toEqual({
+      deleted: 0,
+      complete: true,
+      nextTable: 0,
+    });
+    const [purged] = await shared.admin`select content_archive_purged_at from sessions
+      where id = ${scope.sessionId}`;
+    expect(purged!.content_archive_purged_at).not.toBeNull();
+  }, 120_000);
 });
+
+/**
+ * An archived session with several purge batches in most tables, plus rows
+ * the purge keeps: a scheduled run's evidence update and the item it delivered.
+ */
+async function archivedSessionWithBulkContent(): Promise<SessionArchiveScope> {
+  const { scope } = await idleSession();
+  const [turn] = await shared.admin`select id from session_turns
+    where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId} limit 1`;
+  const json = shared.admin.json;
+  await shared.admin.begin(async (sql) => {
+    await sql`set local session_replication_role = replica`;
+    const items: string[] = [];
+    for (let position = 20; position < 33; position += 1) {
+      const id = crypto.randomUUID();
+      items.push(id);
+      await sql`insert into session_history_items
+        (id, account_id, workspace_id, session_id, turn_id, position, item, created_at, active)
+        values (${id}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${turn!.id},
+          ${position}, ${json({ type: "message", role: "user", position })}, now(), true)`;
+    }
+    // Five ordinary delivered updates, then the scheduled run's evidence.
+    for (const [index, itemId] of items.slice(0, 6).entries()) {
+      const id = crypto.randomUUID();
+      const evidence = index === 5;
+      await sql`insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload,
+          state, delivered_history_item_id, scheduled_task_run_id)
+        values (${id}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
+          ${evidence ? "scheduled_occurrence" : "agent_message"}, ${id}, ${`update-${index}`},
+          'update', ${json({ index })}, 'delivered', ${itemId},
+          ${evidence ? crypto.randomUUID() : null})`;
+    }
+    for (let index = 0; index < 9; index += 1) {
+      const digest = new Bun.CryptoHasher("sha256").update(`blob-${index}`).digest("hex");
+      await sql`insert into session_content_blobs (account_id, workspace_id, session_id, digest, value)
+        values (${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${digest},
+          ${json({ text: `blob ${index}` })})`;
+    }
+    await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+      select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+        case when n % 4 = 0 then 'agent.message.completed' else 'agent.message.delta' end,
+        jsonb_build_object('n', n)
+      from (select max(sequence) as last from session_events
+        where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+        generate_series(1, 15) n`;
+  });
+  const keys = [`archive/${scope.sessionId}/bundle`, `archive/${scope.sessionId}/transcript`];
+  expect(
+    await beginSessionArchive(client.db, scope, { idleSeconds: IDLE_SECONDS, objectKeys: keys }),
+  ).toBe(true);
+  expect(await completeSessionArchive(client.db, scope, manifest(keys))).toBe(true);
+  return scope;
+}
+
+async function purgeTableCounts(scope: SessionArchiveScope): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const table of SESSION_ARCHIVE_PURGE_TABLES) counts[table] = await countRows(table, scope);
+  return counts;
+}
+
+/** Every purge table's remaining rows, by the columns two identical fixtures share. */
+async function remainingContent(scope: SessionArchiveScope) {
+  const where = { workspace: scope.workspaceId, session: scope.sessionId };
+  return {
+    counts: await purgeTableCounts(scope),
+    events: await shared.admin`select sequence, type from session_events
+      where workspace_id = ${where.workspace} and session_id = ${where.session} order by sequence`,
+    items: await shared.admin`select position, item from session_history_items
+      where workspace_id = ${where.workspace} and session_id = ${where.session} order by position`,
+    updates: await shared.admin`select kind, dedupe_key, payload from session_system_updates
+      where workspace_id = ${where.workspace} and session_id = ${where.session} order by dedupe_key`,
+    blobs: await shared.admin`select digest from session_content_blobs
+      where workspace_id = ${where.workspace} and session_id = ${where.session} order by digest`,
+  };
+}
 
 describe("idle-session archive export reads", () => {
   test("every foreign key into a purged table is checked by an index seek", async () => {

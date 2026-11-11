@@ -43,6 +43,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { offerClaudeDefaultModels } from "../claude-default-models";
+import { assertAnthropicApiKey } from "../claude-workspace-connection";
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestBody } from "../http/request-body";
@@ -200,11 +201,8 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       throw new HTTPException(422, {
         message: "Only an Azure OpenAI connection signs in with Microsoft Entra ID.",
       });
-    const apiKey = payload.apiKey ?? "";
-    if (kind === "anthropic" && !/^sk-ant-api[0-9]+-\S+$/.test(apiKey))
-      throw new HTTPException(422, {
-        message: "Enter an Anthropic API key. Use Claude subscription for setup tokens.",
-      });
+    const apiKey =
+      kind === "anthropic" ? assertAnthropicApiKey(payload.apiKey ?? "") : (payload.apiKey ?? "");
     const opperProblem = kind === "opper" ? opperCredentialProblem(apiKey) : null;
     if (opperProblem) throw new HTTPException(422, { message: opperProblem });
     if (kind === "azure_openai" && !payload.endpoint)

@@ -649,9 +649,89 @@ describe("BrowserControlClient", () => {
       expect(await browser.action(command())).not.toHaveProperty("targets");
       expect(requests).toEqual(
         Array(2).fill(
-          `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=2`,
+          `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=2&receiptFailureReason=1`,
         ),
       );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("keeps the controller's failure reason beside the receipt or error, never in it", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    let sent: unknown = "destination_not_answered";
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/targets")) {
+          return Response.json(
+            {
+              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+              ok: false,
+              error: { code: "timeout", message: "server did not respond", retryable: false },
+              failureReason: sent,
+            },
+            { status: 504 },
+          );
+        }
+        const body = (await request.json()) as { operationId: string };
+        return success({
+          protocolVersion: 1,
+          operationId: body.operationId,
+          ...reference,
+          targetId: "target-1",
+          state: "outcome_unknown",
+          dispatchedAt: "2026-08-10T12:00:00.000Z",
+          settledAt: "2026-08-10T12:00:01.000Z",
+          observation: null,
+          error: { code: "outcome_unknown", message: "server did not respond", retryable: false },
+          ...(sent === undefined ? {} : { failureReason: sent }),
+        });
+      },
+    });
+    const browser = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+      },
+      { adminToken },
+    ).sessionClient({ reference, controlToken, viewToken });
+    const command = () => ({
+      protocolVersion: 1 as const,
+      operationId: randomUUID(),
+      ...reference,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+      actor: { kind: "system" as const, subjectId: "test" },
+      observationMode: "none" as const,
+      action: { type: "navigate" as const, url: "https://down.example.test/" },
+    });
+    try {
+      const receipt = await browser.action(command());
+      expect(receipt.failureReason).toBe("destination_not_answered");
+      expect(receipt.error).toEqual({
+        code: "outcome_unknown",
+        message: "server did not respond",
+        retryable: false,
+      });
+      await expect(browser.openTarget("https://down.example.test/")).rejects.toMatchObject<
+        Partial<BrowserControlRequestError>
+      >({
+        status: 504,
+        error: { code: "timeout", message: "server did not respond", retryable: false },
+        failureReason: "destination_not_answered",
+      });
+      // Anything outside the closed set is dropped, and the receipt still parses.
+      sent = "https://down.example.test/";
+      expect(await browser.action(command())).not.toHaveProperty("failureReason");
+      await expect(browser.openTarget("https://down.example.test/")).rejects.toMatchObject({
+        failureReason: null,
+      });
+      // A controller that predates the field sends none.
+      sent = undefined;
+      expect(await browser.action(command())).not.toHaveProperty("failureReason");
     } finally {
       server.stop(true);
     }
@@ -716,8 +796,8 @@ describe("BrowserControlClient", () => {
         `GET ${base}/targets/target-1/observation?notices=1`,
         `POST ${base}/targets/target-1/select`,
         `POST ${base}/targets/target-1/select?notices=1`,
-        `POST ${base}/actions?receiptTargets=1&receiptNotes=2`,
-        `POST ${base}/actions?receiptTargets=1&receiptNotes=2&notices=1`,
+        `POST ${base}/actions?receiptTargets=1&receiptNotes=2&receiptFailureReason=1`,
+        `POST ${base}/actions?receiptTargets=1&receiptNotes=2&receiptFailureReason=1&notices=1`,
       ]);
     } finally {
       server.stop(true);
@@ -830,6 +910,75 @@ describe("BrowserControlClient", () => {
         },
       });
       expect(requests).toHaveLength(8);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("joins bounded download uploads and falls back only for an absent route", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const downloadId = randomUUID(),
+      operationId = randomUUID();
+    let mode: "uploading" | "completed" | "legacy" | "mismatch" | "missing" = "uploading";
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(new URL(request.url).pathname).toBe(
+          `/v1/browser-sessions/${reference.browserSessionId}/downloads/${downloadId}/uploads`,
+        );
+        expect(request.headers.get("authorization")).toBe(`Bearer ${controlToken}`);
+        expect(await request.json()).toMatchObject({ downloadId, operationId, waitMs: 10 });
+        if (mode === "legacy") return failure(404, "resource_not_found", "route not found");
+        if (mode === "missing") return failure(404, "resource_not_found", "download not found");
+        return success({
+          operationId,
+          downloadId,
+          receipt:
+            mode === "uploading"
+              ? null
+              : {
+                  operationId: mode === "mismatch" ? randomUUID() : operationId,
+                  downloadId,
+                  sizeBytes: 294 * 1024 * 1024,
+                  sha256: "a".repeat(64),
+                  replayed: false,
+                },
+        });
+      },
+    });
+    const client = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+      },
+      { adminToken },
+    );
+    const browser = client.sessionClient({ reference, controlToken, viewToken });
+    const request = {
+      downloadId,
+      operationId,
+      waitMs: 10,
+      upload: {
+        url: "https://storage.example/file?signature=synthetic",
+        requiredHeaders: {},
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    };
+    try {
+      expect(await browser.uploadDownload(request)).toEqual({
+        operationId,
+        downloadId,
+        receipt: null,
+      });
+      mode = "completed";
+      expect((await browser.uploadDownload(request))?.receipt?.sizeBytes).toBe(294 * 1024 * 1024);
+      mode = "mismatch";
+      await expect(browser.uploadDownload(request)).rejects.toBeInstanceOf(
+        BrowserControlProtocolError,
+      );
+      mode = "legacy";
+      expect(await browser.uploadDownload(request)).toBeNull();
+      mode = "missing";
+      await expect(browser.uploadDownload(request)).rejects.toMatchObject({ status: 404 });
     } finally {
       server.stop(true);
     }

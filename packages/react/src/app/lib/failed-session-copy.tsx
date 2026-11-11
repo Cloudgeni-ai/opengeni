@@ -2,6 +2,10 @@ import {
   MACHINE_ACCESS_REQUIRED_CODE,
   machineAccessNeededMessage,
 } from "@opengeni/contracts/machine-access";
+import {
+  ENCRYPTED_CONTENT_REJECTION_CODE,
+  isEncryptedReasoningRefusalText,
+} from "@opengeni/contracts/encrypted-reasoning-refusal";
 import { t } from "./console-text";
 import {
   creditRefusalHeadline,
@@ -44,7 +48,8 @@ export type KnownFailureKind =
   | "monthly_limit"
   | "provider_quota"
   | "rate_limited"
-  | "provider_error";
+  | "provider_error"
+  | "model_history";
 
 const CREDENTIALS: KnownFailure = {
   kind: "provider_credentials",
@@ -104,6 +109,30 @@ const PROVIDER_ERROR: KnownFailure = {
   retryUnhelpful: false,
   suggestModel: true,
 };
+/**
+ * The provider refused encrypted reasoning another model or account left in
+ * this chat. Retry stays: the worker resends that reasoning as readable text
+ * where it can, and failures recorded before it did succeed on Retry.
+ */
+const UNREADABLE_HISTORY: KnownFailure = {
+  kind: "model_history",
+  message: "This model can’t read earlier reasoning in this chat.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
+
+/**
+ * The same HTTP 400 refusal the runtime recovers from
+ * (`classifyEncryptedArtifactRejection`). Recorded with no failure code: a coded
+ * failure keeps its own copy and retry decision.
+ */
+function isUnreadableHistory(recorded: string, status: string | null): boolean {
+  return (
+    status === "400" &&
+    (new RegExp(`\\b${ENCRYPTED_CONTENT_REJECTION_CODE}\\b`).test(recorded) ||
+      isEncryptedReasoningRefusalText(recorded))
+  );
+}
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
 const SANDBOX_START_FAILURE = "The sandbox didn’t start.";
@@ -167,6 +196,7 @@ export function classifyProviderFailure(
   // status alone classifies only 401/402/403/429; other statuses do not prove
   // a cause and use the generic headline with recorded diagnostics.
   const status = /^\s*(4\d\d)\b/.exec(recorded)?.[1] ?? null;
+  if (!failureCode && isUnreadableHistory(recorded, status)) return UNREADABLE_HISTORY;
   if (
     status === "401" ||
     /\b(?:incorrect|invalid)[ _-]?(?:api[ _-]?key|x-api-key|subscription key)\b/.test(text) ||
@@ -249,6 +279,8 @@ export function failedSessionCopy(
       reason: recorded || MACHINE_ACCESS_REQUIRED,
       unavailableModel: false,
       machineAccess: true,
+      // The owner's Allow headline names the machine instead of this text.
+      ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
   if (code === "codex_request_rejected") {
@@ -398,7 +430,15 @@ export function failedSessionCopy(
             ? `${recorded.slice(0, 157)}…`
             : recorded
           : "This session failed.";
-  return { reason, unavailableModel };
+  // The banner is where a current failure is shown (the timeline keeps only
+  // a quiet status), so recorded text the headline shortened or replaced stays
+  // reachable behind Details. A credit stop's recorded text adds nothing.
+  const detail = creditExhausted ? undefined : diagnostic?.trim();
+  return {
+    reason,
+    unavailableModel,
+    ...(detail && detail.replace(/\s+/g, " ") !== reason ? { detail } : {}),
+  };
 }
 
 /**
@@ -427,6 +467,24 @@ export function chatComposerPlaceholder(input: {
       : "Your free credits don't cover this model — choose another model or add credits.";
   }
   return "Out of Opengeni credits — add credits to continue.";
+}
+
+/**
+ * The recorded text to keep behind Details under a failure headline, or
+ * nothing when the headline already says exactly that. The timeline leaves a
+ * presented failure's text to the banner, so text the headline replaced must
+ * stay reachable here.
+ */
+export function detailBeyondHeadline(
+  headline: unknown,
+  detail: string | null | undefined,
+): string | undefined {
+  const text = detail?.trim();
+  if (!text) return undefined;
+  return typeof headline === "string" &&
+    text.replace(/\s+/g, " ") === headline.replace(/\s+/g, " ").trim()
+    ? undefined
+    : text;
 }
 
 /**

@@ -58,9 +58,69 @@ Operators can drain the backlog faster with the same code path:
 OPENGENI_DATABASE_URL=... bun run --cwd packages/db compact-session-content --batch-size=200
 ```
 
+### Collecting unreferenced blobs
+
+An attempt keeps one model-request snapshot, and every later request of the
+attempt replaces it. Each request writes the body chunks the session does not
+hold yet, so the chunks only a replaced snapshot named are left behind. In a
+long attempt that is most of what `session_content_blobs` holds, and before
+migration 1359 it stayed until the session was archived.
+
+The same session storage maintenance pass now collects them after legacy
+compaction, within the same deadline. Discovery is the SECURITY DEFINER
+`opengeni_private.session_content_garbage_candidates_v1(limit)`, which returns
+routing ids of live sessions whose snapshots changed since their last
+collection (never-collected sessions first, each revisited at most every ten
+minutes). For each one the worker calls
+`opengeni_private.collect_session_content_garbage_v1(workspace, session, limit)`
+in the session's workspace scope. It deletes up to `limit` blobs of the live
+session that no model-context snapshot (`instructions`, `layers`, `tools`,
+`skills`, `body` chunks) or tool catalog entry of the session names and that
+are older than ten minutes, and records how far the session is collected in
+`opengeni_private.session_content_collections` once a call deletes fewer than
+`limit` rows.
+
+Collection is lossless. Every blob writer and every snapshot reader holds the
+session's content advisory lock shared for its whole transaction; the collector
+takes it exclusively, and only if it is free, otherwise it returns 0 and tries
+again on a later pass. A writer that found a blob present therefore always
+commits its reference before the blob can be judged unreferenced, and a reader
+never sees a snapshot whose blobs were deleted between two statements. Archived
+and archiving sessions are skipped; their blobs leave with the archive purge.
+
+Migration 1359 creates both routines without runtime `EXECUTE`, because the
+previous release rejects a grant on a definer it does not know. Until a later
+migration grants them, the maintenance pass reports the collector unavailable
+and collects nothing. An operator can run the same routines as the table owner,
+one transaction per call, for example:
+
+```sql
+DO $$
+DECLARE
+  c record;
+  n integer;
+BEGIN
+  FOR c IN SELECT * FROM opengeni_private.session_content_garbage_candidates_v1(200) LOOP
+    LOOP
+      PERFORM set_config('opengeni.account_id', c.account_id::text, true),
+        set_config('opengeni.workspace_id', c.workspace_id::text, true);
+      n := opengeni_private.collect_session_content_garbage_v1(c.workspace_id, c.session_id, 2000);
+      COMMIT;
+      EXIT WHEN n < 2000;
+    END LOOP;
+  END LOOP;
+END
+$$;
+```
+
+Run it outside an explicit transaction (it commits per call) with the
+database's data schema first on `search_path`, and repeat until a run finds no
+candidates. Deleted rows free space inside the table for later blob writes; see
+below for returning it to the operating system.
+
 ### Returning disk space
 
-Compaction frees space inside PostgreSQL; it does not shrink table files. Plain
+Compaction and collection free space inside PostgreSQL; they do not shrink table files. Plain
 `VACUUM` (autovacuum) makes the freed TOAST pages reusable for new writes. To
 return the space to the operating system, rewrite the two tables after the
 backlog is drained, for example with `pg_repack`, which rewrites online and
@@ -192,7 +252,9 @@ archived by a person qualifies when all of these hold for the idle period:
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's
      internal tables to interpret. It is made from the event rows the bundle
-     export reads, so kept events are not read a second time.
+     export reads, so kept events are not read a second time. Kept events
+     added while the session archives, after the bundle read its events, are
+     not in the bundle but still appear in the transcript.
 3. The manifest (object keys, sizes, SHA-256 digests, row counts) is recorded
    and the state becomes `archived`.
 4. Only then are the bulky tables purged in bounded batches: realtime entries,
@@ -201,6 +263,9 @@ archived by a person qualifies when all of these hold for the idle period:
    executing session or a debugger needs (streamed fragments, model-request
    telemetry, update bookkeeping, startup phases, credential selection and
    late-rejected events).
+   Each step resumes at the table the previous step left unfinished, and the
+   purge is recorded complete only after one pass over every table finds
+   nothing left.
    Every foreign key into these tables has an index led by its key columns,
    so the check each deleted row fires is an index seek rather than a scan of
    the referencing table across all workspaces (enforced by

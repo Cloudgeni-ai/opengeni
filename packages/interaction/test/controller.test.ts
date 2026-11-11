@@ -919,4 +919,45 @@ describe("resolved action targets", () => {
     expect(receipt.notes).toEqual([note]);
     for (const record of records) expect(record.receipt).not.toHaveProperty("notes");
   });
+
+  test("returns a driver error's failure reason beside the receipt, outside the journal and error", async () => {
+    for (const failure of [
+      new InteractionDefiniteDriverError("timeout", "fixture server did not answer"),
+      new InteractionOutcomeUnknownDriverError("outcome_unknown", "fixture unknown"),
+    ]) {
+      failure.failureReason = "destination_not_answered";
+      const records: Array<{ receipt: BrowserActionReceipt }> = [];
+      const controller = tracedController(async (_command, trace) => {
+        trace?.record(headerClose);
+        throw failure;
+      }, records);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe(
+        failure instanceof InteractionDefiniteDriverError ? "failed" : "outcome_unknown",
+      );
+      expect(receipt.failureReason).toBe("destination_not_answered");
+      // What callers and models are shown is unchanged.
+      expect(receipt.error).toEqual({
+        code: failure.code,
+        message: failure.message,
+        retryable: false,
+      });
+      expect(receipt.targets).toEqual([headerClose]);
+      // An older controller reading this journal must parse every record.
+      expect(records.length).toBeGreaterThan(0);
+      for (const record of records) expect(record.receipt).not.toHaveProperty("failureReason");
+      expect(controller.receipt(operationId(1))).not.toHaveProperty("failureReason");
+    }
+
+    // A typed error without a reason, or an untyped one, adds none.
+    for (const failure of [
+      new InteractionDefiniteDriverError("invalid_action", "fixture refusal"),
+      new Error("fixture transport loss"),
+    ]) {
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      expect(await controller.run(command(1))).not.toHaveProperty("failureReason");
+    }
+  });
 });

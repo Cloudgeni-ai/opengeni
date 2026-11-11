@@ -16,6 +16,7 @@ import {
   deliverPendingSandboxRestoreNotice,
   getSandboxRecoveryDiscontinuity,
   readSandboxReducedSave,
+  readUnseenSandboxStop,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
@@ -95,7 +96,7 @@ import {
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials, type MintedSandboxCodemodeToken } from "../environment";
 import { withFirstPartyTools } from "../goals";
-import { reducedWorkspaceSaveNote, turnInput } from "../run-input";
+import { reducedWorkspaceSaveNote, turnInput, unseenSandboxStopNote } from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
@@ -361,6 +362,8 @@ export type TurnStreamAttemptDeps = {
   turnTools: ReturnType<typeof withFirstPartyTools>;
   generateSessionTitleInParallel: boolean;
   sessionTitlePrompt: string;
+  /** The host's `agent.titleInstructions`, if any. */
+  sessionTitleInstructions: string | undefined;
   compactSummarizer: CompactionSummarizer;
   settleDeferredSteerAfterCompaction: () => Promise<RunAgentTurnResult | null>;
   compactionModelHistoryProjector: (
@@ -513,6 +516,7 @@ export async function runTurnStreamAttempt(
     turnTools,
     generateSessionTitleInParallel,
     sessionTitlePrompt,
+    sessionTitleInstructions,
     compactSummarizer,
     settleDeferredSteerAfterCompaction,
     compactionModelHistoryProjector,
@@ -697,6 +701,31 @@ export async function runTurnStreamAttempt(
       const reducedSave = await (async () =>
         await readSandboxReducedSave(db, input.workspaceId, input.sessionId))().catch(() => null);
       const workspaceSaveNote = reducedSave ? reducedWorkspaceSaveNote(reducedSave) : undefined;
+      // A managed sandbox stopped (or lost) since the model's last output is
+      // replaced from its saved /workspace: say so once, before the model
+      // relies on anything outside it. Not for compaction maintenance, which
+      // writes no model output. Optional: never fails a turn.
+      const stopBackend = activeSandboxBackend ?? groupBoxBackend;
+      const unseenStop =
+        stopBackend !== "none" &&
+        stopBackend !== "selfhosted" &&
+        stopBackend !== "local" &&
+        turn.source !== "compaction"
+          ? await readUnseenSandboxStop(db, input.workspaceId, input.sessionId).catch(
+              (error: unknown) => {
+                try {
+                  observability.warn?.("sandbox stop notice read failed", {
+                    ...safeErrorDiagnostic(error),
+                    origin: "worker",
+                  });
+                } catch {
+                  // Diagnostics only.
+                }
+                return null;
+              },
+            )
+          : null;
+      const sandboxStopNote = unseenStop ? unseenSandboxStopNote(unseenStop) : undefined;
       const prepared = await turnInput(db, runtime, agent, trigger, {
         turnId: activeTurnId,
         fileAuthority: {
@@ -706,6 +735,7 @@ export async function runTurnStreamAttempt(
         recovering: turn.executionGeneration > 1,
         ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
         ...(workspaceSaveNote ? { workspaceSaveNote } : {}),
+        ...(sandboxStopNote ? { sandboxStopNote } : {}),
         programmaticApprovalAcknowledged,
         ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
@@ -2951,6 +2981,7 @@ export async function runTurnStreamAttempt(
             route: titleRoute,
             policy: turnExecutionPolicy,
             prompt: sessionTitlePrompt,
+            titleInstructions: sessionTitleInstructions,
             subscriptionConnectionId: subscription?.connectionId ?? null,
             subscriptionProvider: providerTurn.codexSubscriptionCore
               ? "codex"
@@ -2985,6 +3016,7 @@ export async function runTurnStreamAttempt(
                 resolvedModel: titleRoute.resolvedModel,
                 modelName: titleRoute.modelName,
                 serviceTier,
+                titleInstructions: sessionTitleInstructions,
                 signal,
               }),
             ),

@@ -56,16 +56,65 @@ function stringField(value: unknown): string {
 }
 
 /**
+ * The Codex backend's refusal of a model gated above the client version this
+ * transport presents: HTTP 400 "The '<model>' model requires a newer version
+ * of Codex. Please upgrade to the latest app or CLI and try again." It says
+ * nothing about the account or its plan; every account answers the same way
+ * until the presented version is raised. So it is never plan-entitlement
+ * evidence, never walks the pool and never cools an account or model down.
+ * Its "upgrade" wording must not read as a plan upgrade, whatever code it
+ * carries.
+ */
+const CLIENT_VERSION_MESSAGE = /\brequires a newer version of codex\b/i;
+
+export type CodexClientVersionRejection = {
+  status: number;
+  /** The provider's own explanation, verbatim. */
+  message: string;
+};
+
+/** Classify a Codex transport refusal of the presented client version. */
+export function classifyCodexClientVersionRejection(
+  error: unknown,
+): CodexClientVersionRejection | null {
+  if (!isCodexTransportError(error)) return null;
+  const seen = new Set<object>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as Record<string, unknown>;
+    const body =
+      value.error && typeof value.error === "object"
+        ? (value.error as Record<string, unknown>)
+        : null;
+    const status = Number(value.status ?? value.statusCode ?? body?.status);
+    for (const text of [
+      stringField(body?.message),
+      stringField(body?.detail),
+      stringField(value.message),
+    ]) {
+      if (Number.isFinite(status) && status >= 400 && CLIENT_VERSION_MESSAGE.test(text)) {
+        return { status, message: text.trim().slice(0, 500) };
+      }
+    }
+    current = value.cause;
+  }
+  return null;
+}
+
+/**
  * Classify a Codex transport refusal that may mean the serving ChatGPT account
  * no longer includes the requested model. Only errors produced by this Codex
  * transport qualify, and the opaque-artifact (encrypted content) 400 family and
- * usage-limit refusals keep their own paths.
+ * usage-limit and client-version refusals keep their own paths.
  */
 export function classifyCodexEntitlementRejection(
   error: unknown,
 ): CodexEntitlementRejection | null {
   if (!isCodexTransportError(error)) return null;
   if (classifyCodexEncryptedArtifactRejection(error)) return null;
+  if (classifyCodexClientVersionRejection(error)) return null;
   // Quota refusals keep their path unless an exact plan code outranks them
   // (Codex reports "usage not included in your plan" as a 429 too).
   const usageLimit = classifyCodexUsageLimitError(error) !== null;

@@ -13,7 +13,7 @@ import {
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
 } from "../src/input-wait-yield";
-import { projectHistoryForProvider } from "../src/provider-history-adapter";
+import { ARTIFACT_ORIGIN_KEY, projectHistoryForProvider } from "../src/provider-history-adapter";
 import { AssistantMessagePhaseTracker, normalizeSdkEvent } from "../src/run-events";
 
 // Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool
@@ -173,6 +173,15 @@ const expectedOutput = [
   },
 ];
 
+/** Output with its recorded replay binding removed (see opaque-reasoning-replay-matrix.test.ts). */
+function withoutReplayOrigin(output: readonly unknown[]): unknown[] {
+  return output.map((item: any) => {
+    if (!item?.providerData?.[ARTIFACT_ORIGIN_KEY]) return item;
+    const { [ARTIFACT_ORIGIN_KEY]: _origin, ...providerData } = item.providerData;
+    return { ...item, providerData };
+  });
+}
+
 describe("Claude progress updates before a tool call", () => {
   test("every model asks for reasoning summaries, so thinking stays readable", async () => {
     expect(anthropicWritesProgressUpdates("claude-fable-5-2")).toBe(true);
@@ -193,7 +202,7 @@ describe("Claude progress updates before a tool call", () => {
       await claude.getResponse(request());
     }
     for (const { body, betas } of sent) {
-      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect(body.thinking).toMatchObject({ type: "adaptive", display: "summarized" });
       expect(betas).not.toContain("thinking-display-updates-2026-08-18");
     }
   });
@@ -202,7 +211,7 @@ describe("Claude progress updates before a tool call", () => {
     const claude = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async () =>
       Response.json(response(updatesContent))) as typeof fetch);
     const result = await claude.getResponse(request());
-    expect(result.output).toEqual(expectedOutput as never);
+    expect(withoutReplayOrigin(result.output)).toEqual(expectedOutput as never);
     // The wait_for_input guard and every other visible-reply check read
     // messages: a summary must not satisfy them, so the model is asked again.
     expect(modelResponseHasVisibleText(result)).toBe(false);
@@ -220,7 +229,7 @@ describe("Claude progress updates before a tool call", () => {
         .filter((event) => event.event?.type === "anthropic.thinking.delta")
         .map((event) => event.event.delta),
     ).toEqual([UPDATE.slice(0, 40), UPDATE.slice(40)]);
-    expect(events.at(-1).response.output).toEqual(expectedOutput);
+    expect(withoutReplayOrigin(events.at(-1).response.output)).toEqual(expectedOutput);
   });
 
   test("text the model wrote is kept verbatim, and a summarized update beside it never replaces it", async () => {

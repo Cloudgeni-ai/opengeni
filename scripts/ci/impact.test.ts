@@ -251,6 +251,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toEqual([
       "format",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       "subscription-contract",
@@ -279,6 +280,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-deployment-mode");
     expect(plan.guards).toContain("migration-online-safety");
     expect(plan.guards).toContain("migration-immutability");
+    expect(plan.guards).toContain("migration-previous-release");
     expect(plan.guards).toContain("migration-test-budgets");
     expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");

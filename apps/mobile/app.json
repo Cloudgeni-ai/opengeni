@@ -37,9 +37,9 @@
       [
         "expo-image-picker",
         {
-          "cameraPermission": "Opengeni uses the camera so you can take a photo and send it to your agent.",
-          "photosPermission": "Opengeni lets you pick photos to send to your agent.",
-          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent and to dictate your messages."
+          "cameraPermission": "Opengeni uses the camera so you can take photos and videos and send them to your agent.",
+          "photosPermission": "Opengeni lets you pick photos and videos to send to your agent.",
+          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent, to dictate your messages and to record sound with videos you send."
         }
       ],
       [
@@ -51,7 +51,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent and to dictate your messages.",
+          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent, to dictate your messages and to record sound with videos you send.",
           "recordAudioAndroid": true
         }
       ],

@@ -574,7 +574,13 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       return json({ integrations: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
-      return json({ configured: false, missing: [], installUrl: null });
+      return json({
+        configured: false,
+        status: "disabled",
+        missing: [],
+        installUrl: null,
+        installations: [],
+      });
     }
     if (
       url.pathname === `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents` &&

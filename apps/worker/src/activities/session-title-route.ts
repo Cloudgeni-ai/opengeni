@@ -4,7 +4,7 @@ import {
   type Settings,
   type ResolvedModelProvider,
 } from "@opengeni/config";
-import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { AgentTitleInstructions, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import {
   getOrganizationModelProviderExecutionConnectionId,
   getWorkspaceProviderApiKeyConnectionMetadata,
@@ -23,6 +23,8 @@ import { sessionTitleReasoningEffort, type SessionTitleRoute } from "./agent-tur
 export const SessionTitleRequest = z.object({
   version: z.literal(1),
   prompt: z.string().max(16_000),
+  /** The host's `agent.titleInstructions`; requests admitted before it existed omit it. */
+  titleInstructions: AgentTitleInstructions.optional(),
   policy: TurnExecutionPolicyV1,
   providerId: z.string(),
   modelId: z.string(),

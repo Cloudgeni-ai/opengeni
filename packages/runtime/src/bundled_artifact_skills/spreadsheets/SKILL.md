@@ -74,7 +74,8 @@ Excel add-in lets you work in it live: `capability_authorization_request` with
 5. Inspect the affected viewport after mutation and reconcile key totals and
    formula errors. If concurrent work invalidates an assumption, re-inspect and
    recompute; never force a stale range rewrite.
-6. Share the result as the live artifact's `artifactReference` link. Export
+6. Share the result as the live artifact's `artifactReference` link:
+   `[Title](artifact:<artifactId>)`, using the exact returned ID. Export
    only when the user needs a file, and only formats the
    `opengeni__editable_artifact_export` tool description lists (currently XLSX;
    no PDF or image export). `opengeni__editable_artifact_export_status` returns

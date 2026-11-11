@@ -61,7 +61,7 @@ function Preview() {
         >
           <textarea
             aria-label="Message"
-            placeholder="What should the agent do?"
+            placeholder="Ask anything, or describe what you need…"
             className="h-24 w-full resize-none bg-transparent text-sm outline-none"
           />
           <div className="flex items-center gap-3">
