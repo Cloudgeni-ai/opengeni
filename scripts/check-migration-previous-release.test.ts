@@ -341,11 +341,19 @@ describe("migration previous-release guard", () => {
     expect(
       check("REVOKE EXECUTE ON FUNCTION opengeni_private.owner_trigger_v1() FROM opengeni_app;"),
     ).toEqual(["unannotated-removal"]);
-    // Without a readable owner-internal list, legacy routines stay annotation-only.
-    expect(
-      previousReleaseContract("x", posture, { private: ["legacy_routine_v1(uuid)"] }, "")
-        .revokeRequiredRoutines.size,
-    ).toBe(0);
+    // An owner-internal list it cannot read in full fails the guard.
+    for (const unreadable of [
+      "const OTHER_ROUTINES = [];",
+      source.replace('"owner_trigger_v1()"', "`owner_${name}()`"),
+    ])
+      expect(() =>
+        previousReleaseContract(
+          "release x",
+          posture,
+          { private: ["legacy_routine_v1(uuid)"] },
+          unreadable,
+        ),
+      ).toThrow("OWNER_INTERNAL_PRIVATE_ROUTINES");
   });
 
   test("grants back count only for the role that lost the privilege", () => {

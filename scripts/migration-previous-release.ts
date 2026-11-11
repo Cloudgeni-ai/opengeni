@@ -334,7 +334,7 @@ export function previousReleaseContract(
         );
     }
   const revokeRequiredRoutines = postureSource
-    ? declaredPrivateRoutines(posture, postureSource, legacyRoutines?.private, deferred)
+    ? declaredPrivateRoutines(label, posture, postureSource, legacyRoutines?.private, deferred)
     : new Map<string, string>();
   for (const signature of requiredRoutines.keys()) revokeRequiredRoutines.delete(signature);
   const publicRoutines = new Set(
@@ -409,7 +409,12 @@ function bracketBody(source: string, open: number): string | null {
   return null;
 }
 
-type SourceList = { items: string[]; complete: boolean };
+type SourceList = {
+  items: string[];
+  complete: boolean;
+  /** Items that are neither string literals nor spreads of readable lists. */
+  unreadable: string[];
+};
 
 /**
  * The string items of a list declared in a release's posture source, as
@@ -427,7 +432,11 @@ export function sourceList(
   if (Array.isArray(exported) || exported instanceof Set) {
     const values = [...exported];
     const items = values.filter((value): value is string => typeof value === "string");
-    return { items, complete: items.length === values.length };
+    return {
+      items,
+      complete: items.length === values.length,
+      unreadable: values.filter((value) => typeof value !== "string").map(String),
+    };
   }
   const declaration = new RegExp(
     String.raw`\bconst ${name}\b[^=;]*=\s*(?:new\s+Set\s*(?:<[^>()]*>)?\s*\(\s*)?\[`,
@@ -435,7 +444,7 @@ export function sourceList(
   if (!declaration || depth > 4) return null;
   const body = bracketBody(source, declaration.index + declaration[0].length - 1);
   if (body === null) return null;
-  const result: SourceList = { items: [], complete: true };
+  const result: SourceList = { items: [], complete: true, unreadable: [] };
   const uncommented = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   for (const item of splitTopLevel(uncommented)) {
     const text = item.trim();
@@ -446,8 +455,12 @@ export function sourceList(
     if (literal) result.items.push(literal[1]!);
     else if (nested) {
       result.items.push(...nested.items);
+      result.unreadable.push(...nested.unreadable);
       result.complete &&= nested.complete;
-    } else result.complete = false;
+    } else {
+      result.complete = false;
+      result.unreadable.push(text);
+    }
   }
   return result;
 }
@@ -494,10 +507,12 @@ export function retiringRoutinesFromSource(
 /**
  * Private routines readiness requires the runtime to EXECUTE whenever they
  * exist (`DECLARED_PRIVATE_ROUTINES`): the frozen legacy inventory, less the
- * owner-internal, retired and deferred routines. Without a readable
- * owner-internal list they are left to the annotation rule.
+ * owner-internal, retired and deferred routines. It throws when the
+ * owner-internal list cannot be read in full, so the guard fails instead of
+ * silently treating every legacy routine as revocable.
  */
 function declaredPrivateRoutines(
+  label: string,
   posture: Record<string, unknown>,
   source: string,
   legacyPrivate: unknown,
@@ -505,7 +520,11 @@ function declaredPrivateRoutines(
 ): Map<string, string> {
   const routines = new Map<string, string>();
   const ownerInternal = sourceList(source, posture, "OWNER_INTERNAL_PRIVATE_ROUTINES");
-  if (!Array.isArray(legacyPrivate) || !ownerInternal?.complete) return routines;
+  if (!Array.isArray(legacyPrivate) || legacyPrivate.length === 0) return routines;
+  if (!ownerInternal?.complete)
+    throw new Error(
+      `${label}: cannot read runtime posture list OWNER_INTERNAL_PRIVATE_ROUTINES${ownerInternal ? ` (unreadable item ${ownerInternal.unreadable[0] ?? "?"})` : ""}; update scripts/migration-previous-release.ts to read it`,
+    );
   const excluded = new Set([...ownerInternal.items, ...deferred].map(normalizeRoutineSignature));
   for (const [name, field] of [
     ["SUBSCRIPTION_RETIRED_ROUTINES", "signature"],

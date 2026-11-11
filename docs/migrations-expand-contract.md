@@ -511,9 +511,9 @@ creates with an unconditional top-level `CREATE` (not `CREATE OR REPLACE`), and
 `RETIRING_*_ROUTINES` sets may be dropped (not revoked) when every table of its
 `RETIRING_FEATURE_TABLES` feature is gone once the migration commits, counting
 tables that earlier migrations of the same change drop: readiness skips it then.
-Maintenance migrations run with the fleet stopped
-and are exempt. The guard fails closed when a release's posture module no
-longer has the exports it reads.
+Maintenance migrations run with the fleet stopped and are exempt. The guard
+fails closed when a release's posture module no longer has the exports it
+reads, or when it cannot read `OWNER_INTERNAL_PRIVATE_ROUTINES` in full.
 
 The fix is the contract phase. Release N stops needing the object: for a
 definer, add it to `DEFERRED_RUNTIME_PRIVATE_ROUTINES` and make its callers
