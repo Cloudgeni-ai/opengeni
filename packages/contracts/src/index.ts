@@ -21615,6 +21615,23 @@ export const GitHubInstallationLifecycle = /* @__PURE__ */ defineSchema(() =>
 );
 export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
 
+/**
+ * Why an installation is not active, in terms of the fix: removed or
+ * suspended on GitHub, no repositories shared, no owner proof for the link,
+ * GitHub could not be checked, or the installation's account changed.
+ */
+export const GitHubInstallationIssue = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "uninstalled",
+    "suspended",
+    "no_repositories",
+    "owner_unconfirmed",
+    "github_unreachable",
+    "account_changed",
+  ]),
+);
+export type GitHubInstallationIssue = z.infer<typeof GitHubInstallationIssue>;
+
 export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
   z.object({
     installationId: primitives.positiveInteger,
@@ -21622,6 +21639,8 @@ export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
     accountLogin: primitives.nullableString,
     accountType: primitives.nullableString,
     lifecycle: GitHubInstallationLifecycle,
+    /** Null while active. Older servers omit it. */
+    issue: GitHubInstallationIssue.nullable().optional(),
     repositoryScope: GitHubRepositoryScope,
     repositoryCount: primitives.nonnegativeInteger,
     configureUrl: z.string().url().nullable(),

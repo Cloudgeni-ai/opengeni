@@ -242,6 +242,65 @@ test("resuming a single attempt retains the choice to start another account", as
   }
 });
 
+test("a new connection never resumes the repair of a linked account, and a repair resumes only its own", async () => {
+  const account = {
+    id: "github-installation:81",
+    providerId: "github-app",
+    ownership: "workspace" as const,
+    label: "benyhh",
+    status: "auth_needed" as const,
+  };
+  // An unfinished repair of benyhh is still pending.
+  const repair = { ...attempt, id: "repair", providerId: "github-app", account };
+  const request = {
+    providerId: "github-app",
+    ownership: "workspace" as const,
+    returnUrl: "http://localhost/integrations/github",
+    idempotencyKey: "install-another",
+  };
+  const fresh = transport([repair]);
+  let view = await renderComponent(
+    <NativeConnectSetup
+      transport={fresh}
+      workspaceId="workspace"
+      request={{ ...request, scope: { workspaceId: "workspace", transport: fresh } }}
+      onClose={() => {}}
+      onComplete={() => {}}
+    />,
+  );
+  try {
+    await flush(20);
+    expect(fresh.get).not.toHaveBeenCalled();
+    expect(fresh.begin).toHaveBeenCalledTimes(1);
+  } finally {
+    await view.unmount();
+  }
+  const again = transport([repair]);
+  view = await renderComponent(
+    <NativeConnectSetup
+      transport={again}
+      workspaceId="workspace"
+      request={{
+        ...request,
+        scope: { workspaceId: "workspace", transport: again },
+        reconnectAccountId: account.id,
+      }}
+      onClose={() => {}}
+      onComplete={() => {}}
+    />,
+  );
+  try {
+    await flush(20);
+    expect(again.get).toHaveBeenCalledTimes(1);
+    expect(again.begin).not.toHaveBeenCalled();
+    // Starting again repeats this repair; it is not another account.
+    expect(document.body.textContent).toContain("Start over");
+    expect(document.body.textContent).not.toContain("Connect a different account");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("closing the dialog while a built-in integration finishes setup still completes it", async () => {
   // The account is saved; the tools are still being added ("Finishing setup…").
   const connected: ConnectAttempt = {

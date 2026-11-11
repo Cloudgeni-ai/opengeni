@@ -10511,12 +10511,25 @@ export type GitHubAppSetupMode = "platform" | "operator";
 
 export type GitHubInstallationLifecycle = "active" | "suspended" | "deleted" | "unverified";
 
+/**
+ * Why an installation is not active, in terms of the fix. Null while active;
+ * servers before this field omit it.
+ */
+export type GitHubInstallationIssue =
+  | "uninstalled"
+  | "suspended"
+  | "no_repositories"
+  | "owner_unconfirmed"
+  | "github_unreachable"
+  | "account_changed";
+
 export type GitHubInstallationBinding = {
   installationId: number;
   githubAccountId: number | null;
   accountLogin: string | null;
   accountType: string | null;
   lifecycle: GitHubInstallationLifecycle;
+  issue?: GitHubInstallationIssue | null | undefined;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
   /** Opengeni-owned entry point for changing the installation's repository allowlist. */
