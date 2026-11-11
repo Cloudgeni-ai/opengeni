@@ -169,8 +169,10 @@ skips sandbox enrollments, and machine routes list machines only.
   with its root; a chat with work under way counts as in use). If so it ends
   the group exactly as deleting those chats does: the idle lease drains now and
   the reaper deletes the sandbox without a capture and revokes its enrollment.
-  There is no waiting period, and a sandbox shared by several chats stays
-  while any of them is live. A lease that is held (a turn, a viewer, a running
+  The only wait is the Archive action's Undo window: until Undo is no longer
+  accepted the chat still counts as live, so an Undo returns it with the
+  sandbox it had. A sandbox shared by several chats stays while any of them
+  is live. A lease that is held (a turn, a viewer, a running
   command) is left alone, and a turn that arrives before the reaper claims the
   sandbox keeps it. A chat restored later starts on a new sandbox: the old
   one's files are gone, the chat's timeline says so, and the model is told on

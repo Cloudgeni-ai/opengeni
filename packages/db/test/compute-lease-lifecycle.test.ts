@@ -494,10 +494,24 @@ describe("the compute sandbox of archived chats", () => {
     });
   }
 
+  /** Archived a minute ago: past the window in which Undo takes it back. */
   async function archive(workspaceId: string, sessionId: string) {
-    await admin`update sessions set archived_at = now()
+    await admin`update sessions set archived_at = now() - interval '1 minute'
       where workspace_id = ${workspaceId} and id = ${sessionId}`;
   }
+
+  test("an Archive that Undo can still take back keeps the sandbox", async () => {
+    if (!available) return;
+    const { session, ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    await admin`update sessions set archived_at = now()
+      where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(false);
+    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+    await admin`update sessions set archived_at = now() - interval '14 seconds'
+      where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(true);
+  }, 60_000);
 
   test("ends once its only chat is archived, and not before", async () => {
     if (!available) return;
@@ -558,7 +572,7 @@ describe("the compute sandbox of archived chats", () => {
 
     const working = await fixture("compute");
     await releaseLastHolder(working.ids);
-    await admin`update sessions set archived_at = now(), status = 'queued'
+    await admin`update sessions set archived_at = now() - interval '1 minute', status = 'queued'
       where workspace_id = ${working.ids.workspaceId} and id = ${working.session.id}`;
     expect(await endComputeGroupOfArchivedChats(db, working.ids)).toBe(false);
   }, 60_000);
