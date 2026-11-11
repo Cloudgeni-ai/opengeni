@@ -7,6 +7,7 @@ import {
   withSearchRecordsAfterOpenCalls,
   type SearchRecordForm,
 } from "./hosted-search-evidence";
+import { withItemsAfterOpenCalls } from "./items-after-open-calls";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -600,7 +601,15 @@ function projectWireHistory(
       changed ||= next !== item;
       return next;
     });
-    return changed ? projected : items;
+    // Claude accepts other assistant content inside its reply, after its tool
+    // calls, but nothing between two results of one step. Anything else that
+    // reaches Claude as assistant content (another provider's records and
+    // replies become readable facts) and falls there waits for the step's
+    // last result.
+    return withItemsAfterOpenCalls(changed ? projected : items, isClaudeAssistantContent, {
+      resultTypeByCallType: FUNCTION_RESULT_TYPE_BY_CALL_TYPE,
+      onlyAmongResults: true,
+    });
   }
   const incompatibleCallIds = new Set<string>();
   for (const item of items) {
@@ -645,5 +654,24 @@ function projectWireHistory(
     }
     return item;
   });
-  return changed ? projected : items;
+  // Chat Completions ends an assistant tool_calls message at any other
+  // assistant message, and a tool result must answer the message right before
+  // it. Historical facts, and any other assistant message, inside an
+  // unfinished step wait for its last result.
+  return withItemsAfterOpenCalls(changed ? projected : items, isAssistantMessage, {
+    resultTypeByCallType: FUNCTION_RESULT_TYPE_BY_CALL_TYPE,
+  });
+}
+
+/** After wire projection, only function calls are executable on Chat and Claude. */
+const FUNCTION_RESULT_TYPE_BY_CALL_TYPE = { function_call: "function_call_result" } as const;
+
+function isAssistantMessage(item: Record<string, unknown>): boolean {
+  return (item.type === undefined || item.type === "message") && item.role === "assistant";
+}
+
+/** An item `anthropicMessages` sends as Claude's own content, other than a tool call. */
+function isClaudeAssistantContent(item: Record<string, unknown>): boolean {
+  if (item.type === undefined || item.type === "message") return item.role === "assistant";
+  return item.type !== "function_call" && item.type !== "function_call_result";
 }

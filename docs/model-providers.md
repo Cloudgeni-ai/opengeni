@@ -1558,8 +1558,14 @@ newer replies with a separate reasoning item do not duplicate it.
 Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
 never persisted. Historical `tool_search` calls/outputs remain inert completed
-facts. A session frozen to `remote_v2` compaction admits only Codex models;
-portable sessions may use any supported route whose request adapter can express
+facts. A historical fact (or any other assistant message) never separates a
+function call from its result: one that falls inside an unfinished parallel
+step moves to just after the step's last result, keeping its order, because
+Chat Completions requires each tool result to follow the assistant message that
+made the call. Native Claude keeps such text inside its reply and moves it only
+from between two results of one step (`withItemsAfterOpenCalls`). A session
+frozen to `remote_v2` compaction admits only Codex models; portable sessions
+may use any supported route whose request adapter can express
 their canonical history. Responses output items may carry `status`
 (`completed` / `in_progress` / `incomplete`); that field is not conversation
 meaning for function/message annotations — pairing is `call_id` — and Codex's input schema rejects it
