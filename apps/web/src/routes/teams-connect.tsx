@@ -381,8 +381,9 @@ function TeamsSetupPage({ arrival }: { arrival: Extract<Arrival, { kind: "setup"
             </p>
           ) : null}
           <p className="text-sm text-fg-muted">
-            You may be asked to sign in to Microsoft as a Global Administrator or Teams
-            Administrator. This also links your Teams account so you can start work right away.
+            Next, you'll sign in to Microsoft with the account you use in Teams, usually as a
+            Global Administrator or Teams Administrator. This also links your Teams account so you
+            can start work right away.
           </p>
         </FieldStack>
       </FormPage>
