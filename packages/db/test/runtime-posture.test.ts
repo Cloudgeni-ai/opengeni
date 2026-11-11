@@ -4319,7 +4319,11 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant wh
     "slack_agent_update_settings",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
-  const definerPrivateTables = ["native_push_devices", "native_push_deliveries"];
+  const definerPrivateTables = [
+    "native_push_devices",
+    "native_push_deliveries",
+    "session_content_collections",
+  ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
@@ -4390,6 +4394,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant wh
       "list_organization_compute_v1(uuid, uuid, text)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
       "end_agent_call_rings_v1(uuid)",
+      "session_content_garbage_candidates_v1(integer)",
+      "collect_session_content_garbage_v1(uuid, uuid, integer)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4399,6 +4405,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant wh
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
       "end_agent_call_rings_v1(uuid)",
+      "session_content_garbage_candidates_v1(integer)",
+      "collect_session_content_garbage_v1(uuid, uuid, integer)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4480,6 +4488,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant wh
       "list_organization_compute_v1(uuid, uuid, text)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
       "end_agent_call_rings_v1(uuid)",
+      "session_content_garbage_candidates_v1(integer)",
+      "collect_session_content_garbage_v1(uuid, uuid, integer)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
@@ -4527,5 +4537,272 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant wh
     expect(eventViolations(presentRingEnd, laterRingEnd)).toContain(
       "runtime definer end_agent_call_rings_v1(uuid) is not SECURITY DEFINER",
     );
+  });
+});
+
+describe("runtime readiness: a missing required EXECUTE grant degrades a feature, unsafe posture stays fatal", () => {
+  const missing = "runtime role lacks EXECUTE on private routine current_account_id()";
+  function revoked(): RuntimeDatabasePosture {
+    const posture = safePosture();
+    // A declared, non-deferred private routine whose runtime EXECUTE was revoked.
+    posture.privateRoutines.push({
+      name: "current_account_id()",
+      owner: "opengeni_migrator",
+      execute: false,
+      publicExecute: false,
+      securityDefiner: false,
+    });
+    return posture;
+  }
+
+  test("the strict evaluation keeps the finding; readiness reports it as degraded", () => {
+    const posture = revoked();
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([missing]);
+    expect(runtimePosture.classifyRuntimeDatabasePosture(posture, options)).toEqual({
+      fatal: [],
+      degraded: [missing],
+    });
+    expect(runtimePosture.classifyRuntimeDatabasePosture(safePosture(), options)).toEqual({
+      fatal: [],
+      degraded: [],
+    });
+  });
+
+  test("a revoked target-schema capability is degraded too", () => {
+    const posture = safePosture();
+    const capability = posture.targetRoutines.find(
+      (routine) => routine.name === RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES[0],
+    )!;
+    capability.execute = false;
+    const strict = evaluateRuntimeDatabasePosture(posture, options);
+    expect(strict).toContain(`runtime role lacks target-schema capability ${capability.name}`);
+    const classified = runtimePosture.classifyRuntimeDatabasePosture(posture, options);
+    expect(classified.fatal).toEqual([]);
+    expect(classified.degraded).toEqual(strict);
+  });
+
+  test("excess, PUBLIC and forbidden EXECUTE stay fatal next to a degraded finding", () => {
+    const forbidden = revoked();
+    forbidden.privateRoutines.push({
+      name: "read_sender_connection(uuid, uuid, uuid, text)",
+      owner: "opengeni_migrator",
+      execute: true,
+      publicExecute: false,
+      securityDefiner: true,
+    });
+    expect(runtimePosture.classifyRuntimeDatabasePosture(forbidden, options)).toEqual({
+      fatal: ["runtime or PUBLIC can call the internal sender connection reader"],
+      degraded: [missing],
+    });
+
+    const unknownDefiner = revoked();
+    unknownDefiner.privateRoutines.push({
+      name: "future_definer()",
+      owner: "opengeni_migrator",
+      execute: false,
+      publicExecute: true,
+      securityDefiner: true,
+      triggerCallable: false,
+      hasDependents: false,
+    });
+    expect(runtimePosture.classifyRuntimeDatabasePosture(unknownDefiner, options)).toEqual({
+      fatal: [
+        "unknown routine opengeni_private.future_definer() exposes SECURITY DEFINER execution",
+      ],
+      degraded: [missing],
+    });
+
+    // PUBLIC EXECUTE on a declared runtime definer whose runtime grant is
+    // missing: the PUBLIC grant is fatal, only the missing grant is degraded.
+    // (PostgreSQL itself reports runtime EXECUTE once PUBLIC has it; this
+    // pins the evaluator, the real-PostgreSQL test covers the catalog shape.)
+    const publicDefiner = safePosture();
+    publicDefiner.privateRoutines.push({
+      name: "list_due_event_trigger_tasks_v1(integer)",
+      owner: "opengeni_migrator",
+      execute: false,
+      publicExecute: true,
+      securityDefiner: true,
+      triggerCallable: false,
+      hasDependents: false,
+      configuration: ["search_path=pg_catalog"],
+    });
+    const classified = runtimePosture.classifyRuntimeDatabasePosture(publicDefiner, options);
+    expect(classified.fatal).toContain(
+      "PUBLIC can execute runtime definer list_due_event_trigger_tasks_v1(integer)",
+    );
+    expect(classified.degraded).toEqual([
+      "runtime role lacks EXECUTE on private routine list_due_event_trigger_tasks_v1(integer)",
+    ]);
+  });
+
+  test("a combined check that also finds unsafe posture stays fatal", () => {
+    const posture = safePosture();
+    const capability = posture.targetRoutines.find(
+      (routine) => routine.name === RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES[0],
+    )!;
+    // Missing runtime EXECUTE and PUBLIC EXECUTE on the same capability.
+    Object.assign(capability, { execute: false, publicExecute: true });
+    const strict = evaluateRuntimeDatabasePosture(posture, options);
+    const classified = runtimePosture.classifyRuntimeDatabasePosture(posture, options);
+    expect(classified.fatal.length).toBeGreaterThan(0);
+    expect(classified.fatal.every((finding) => strict.includes(finding))).toBe(true);
+    expect(classified.degraded).toEqual([
+      `runtime role lacks target-schema capability ${capability.name}`,
+    ]);
+  });
+
+  test("a missing grant whose grant would raise another finding stays fatal", () => {
+    // A contract that both requires and forbids runtime EXECUTE on one
+    // routine: granting it would raise a finding the catalog lacks, so the
+    // missing grant cannot be shown to be harmless and nothing is degraded.
+    const forbidden = RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES[0]!;
+    const contradictory: RuntimeDatabasePostureOptions = {
+      ...options,
+      targetSchemaCapabilityRoutines: [...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES, forbidden],
+    };
+    const posture = safePosture();
+    const strict = evaluateRuntimeDatabasePosture(posture, contradictory);
+    expect(strict).toContain(`runtime role lacks target-schema capability ${forbidden}`);
+    expect(runtimePosture.classifyRuntimeDatabasePosture(posture, contradictory)).toEqual({
+      fatal: strict,
+      degraded: [],
+    });
+  });
+
+  test("revoking any single granted routine is degraded only; unsafe changes next to it never are", () => {
+    const base = safePosture();
+    const revocable = [
+      ...base.privateRoutines
+        .filter((routine) => routine.execute)
+        .map((routine) => ({ schema: "privateRoutines" as const, name: routine.name })),
+      ...base.targetRoutines
+        .filter((routine) => routine.execute)
+        .map((routine) => ({ schema: "targetRoutines" as const, name: routine.name })),
+    ];
+    expect(revocable.length).toBeGreaterThan(100);
+    // Unsafe changes to the same routine. Whatever the strict evaluator finds
+    // for them must stay fatal: the degraded findings stay within those of the
+    // revocation alone. This catches a check gated on `execute`.
+    const unsafeChanges: Record<
+      string,
+      Partial<RuntimeDatabasePosture["privateRoutines"][number]>
+    > = {
+      "runtime owner": { owner: "opengeni_app" },
+      "another owner": { owner: "someone_else" },
+      "PUBLIC EXECUTE": { publicExecute: true },
+      "flipped SECURITY DEFINER": {},
+      "no search_path": { configuration: null },
+      "trigger-callable": { triggerCallable: true },
+      "catalog dependents": { hasDependents: true },
+    };
+    for (const { schema, name } of revocable) {
+      const revoke = () => {
+        const posture = safePosture();
+        const routine = posture[schema].find((entry) => entry.name === name)!;
+        routine.execute = false;
+        return { posture, routine };
+      };
+      const { posture } = revoke();
+      const revocation = runtimePosture.classifyRuntimeDatabasePosture(posture, options);
+      expect(revocation.fatal, name).toEqual([]);
+      expect(revocation.degraded, name).toEqual(evaluateRuntimeDatabasePosture(posture, options));
+      for (const [label, change] of Object.entries(unsafeChanges)) {
+        const unsafe = revoke();
+        Object.assign(unsafe.routine, change);
+        if (label === "flipped SECURITY DEFINER") {
+          unsafe.routine.securityDefiner = !unsafe.routine.securityDefiner;
+        }
+        const classified = runtimePosture.classifyRuntimeDatabasePosture(unsafe.posture, options);
+        // A combined finding may move to fatal; nothing may become degraded.
+        expect(
+          classified.degraded.filter((finding) => !revocation.degraded.includes(finding)),
+          `${name}: ${label}`,
+        ).toEqual([]);
+      }
+    }
+    const owned = safePosture();
+    const ownedRoutine = owned.privateRoutines.find((entry) => entry.execute)!;
+    Object.assign(ownedRoutine, { execute: false, owner: "opengeni_app" });
+    expect(runtimePosture.classifyRuntimeDatabasePosture(owned, options).fatal).toContain(
+      `runtime role owns private routine ${ownedRoutine.name}`,
+    );
+  }, 180_000);
+
+  test("a missing object stays fatal", () => {
+    const posture = safePosture();
+    const capability = RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES[0];
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => routine.name !== capability,
+    );
+    const strict = evaluateRuntimeDatabasePosture(posture, options);
+    expect(strict).toContain(
+      `target-schema runtime capability ${capability} is missing or ambiguous`,
+    );
+    expect(runtimePosture.classifyRuntimeDatabasePosture(posture, options)).toEqual({
+      fatal: strict,
+      degraded: [],
+    });
+  });
+
+  test("CONNECT, schema USAGE and identity findings stay fatal", () => {
+    const noConnect = revoked();
+    noConnect.identity.canConnectDatabase = false;
+    expect(runtimePosture.classifyRuntimeDatabasePosture(noConnect, options)).toEqual({
+      fatal: ["runtime role lacks CONNECT on the current database"],
+      degraded: [missing],
+    });
+
+    const noUsage = revoked();
+    noUsage.schemas.find((schema) => schema.name === "opengeni_private")!.usage = false;
+    const usage = runtimePosture.classifyRuntimeDatabasePosture(noUsage, options);
+    expect(usage.fatal).toContain("runtime role lacks USAGE on schema opengeni_private");
+    expect(usage.degraded).toEqual([missing]);
+
+    const bypass = revoked();
+    bypass.identity.bypassRls = true;
+    expect(runtimePosture.classifyRuntimeDatabasePosture(bypass, options)).toEqual({
+      fatal: ["runtime role has BYPASSRLS"],
+      degraded: [missing],
+    });
+  });
+
+  test("the degraded reporter sets the gauge, warns on change and records recovery", () => {
+    const gauges: number[] = [];
+    const logs: { level: string; message: string; attributes: Record<string, unknown> }[] = [];
+    let clock = 0;
+    const report = runtimePosture.reportRuntimeDatabaseDegraded(
+      {
+        setGauge: (input) => gauges.push(input.value),
+        warn: (message, attributes) => logs.push({ level: "warn", message, attributes }),
+        info: (message, attributes) => logs.push({ level: "info", message, attributes }),
+      },
+      "test",
+      { logIntervalMs: 1_000, now: () => clock },
+    );
+    report([]);
+    report([missing]);
+    report([missing]);
+    clock = 1_000;
+    report([missing]);
+    report([]);
+    report([]);
+    expect(gauges).toEqual([0, 1, 1, 1, 0, 0]);
+    expect(logs.map((log) => log.level)).toEqual(["warn", "warn", "info"]);
+    expect(logs[0]!.attributes).toEqual({ source: "test", findingCount: 1, findings: missing });
+    expect(logs[2]!.attributes).toEqual({ source: "test", previousFindingCount: 1 });
+
+    // A blanket revoke names a bounded number of findings and keeps the count.
+    const many = Array.from(
+      { length: 25 },
+      (_, index) => `finding ${String(index).padStart(2, "0")}`,
+    );
+    report(many);
+    expect(gauges.at(-1)).toBe(25);
+    expect(logs.at(-1)!.attributes).toEqual({
+      source: "test",
+      findingCount: 25,
+      findings: `${many.slice(0, 20).join("; ")}; and 5 more`,
+    });
   });
 });

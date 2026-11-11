@@ -9,6 +9,10 @@
 // - When the app uses expo-notifications, the Firebase messaging service that
 //   lets agents ring this phone. It hands every other push to
 //   expo-notifications, whose own service it takes precedence over.
+//   With `call.androidMessagingService: "app"` the app keeps its own Firebase
+//   messaging service, which hands each push to OpenGeniCallPush.handle
+//   first: the plugin then declares no messaging service and sets the
+//   meta-data flag that tells the module agents can ring this phone.
 // - The meta-data flag the module reads to use system calls at all; without
 //   it, calls only set up the phone's call audio.
 //
@@ -22,6 +26,8 @@ const RECEIVER = `${PACKAGE}.CallActionReceiver`;
 const ACTIVITY = `${PACKAGE}.IncomingCallActivity`;
 const MESSAGING_SERVICE = `${PACKAGE}.OpenGeniCallMessagingService`;
 const META_ENABLED = `${PACKAGE}.SYSTEM_CALLS`;
+const META_APP_MESSAGING_SERVICE = `${PACKAGE}.APP_MESSAGING_SERVICE`;
+const MESSAGING_SERVICE_MODES = ["opengeni", "app"];
 const PERMISSIONS = [
   "android.permission.MANAGE_OWN_CALLS",
   "android.permission.FOREGROUND_SERVICE",
@@ -38,11 +44,40 @@ function upsert(list, name, entry) {
   else list[index] = entry;
 }
 
+function remove(list, name) {
+  return list.filter((entry) => entry.$?.["android:name"] !== name);
+}
+
+/**
+ * Which Firebase messaging service delivers agents' call rings:
+ * `"opengeni"` (the default) declares this package's own service when the app
+ * uses expo-notifications; `"app"` leaves it to the app's own service, which
+ * calls OpenGeniCallPush.handle first.
+ */
+function resolveAndroidMessagingService(call = {}) {
+  const value = call.androidMessagingService;
+  if (value === undefined) return "opengeni";
+  if (!MESSAGING_SERVICE_MODES.includes(value)) {
+    throw new Error(
+      `@opengeni/react-native: call.androidMessagingService must be "opengeni" or "app" (got ${JSON.stringify(value)}).`,
+    );
+  }
+  if (value === "app" && call.androidSystemCall !== true) {
+    throw new Error(
+      '@opengeni/react-native: call.androidMessagingService: "app" needs call.androidSystemCall: true.',
+    );
+  }
+  return value;
+}
+
 /**
  * Add system calls to a parsed AndroidManifest.xml. `push` declares the
  * messaging service that rings agents' calls; it needs expo-notifications.
+ * `messagingService: "app"` declares none and instead marks the app's own
+ * messaging service as the one that hands rings to OpenGeniCallPush.handle.
  */
-function addSystemCallToManifest(manifest, { push }) {
+function addSystemCallToManifest(manifest, { push, messagingService = "opengeni" }) {
+  const appService = messagingService === "app";
   const root = manifest.manifest;
   root["uses-permission"] ??= [];
   for (const name of PERMISSIONS) {
@@ -56,6 +91,13 @@ function addSystemCallToManifest(manifest, { push }) {
   upsert(application["meta-data"], META_ENABLED, {
     $: { "android:name": META_ENABLED, "android:value": "true" },
   });
+  if (appService) {
+    upsert(application["meta-data"], META_APP_MESSAGING_SERVICE, {
+      $: { "android:name": META_APP_MESSAGING_SERVICE, "android:value": "true" },
+    });
+  } else {
+    application["meta-data"] = remove(application["meta-data"], META_APP_MESSAGING_SERVICE);
+  }
   application.service ??= [];
   upsert(application.service, SERVICE, {
     $: {
@@ -64,7 +106,7 @@ function addSystemCallToManifest(manifest, { push }) {
       "android:foregroundServiceType": "phoneCall|microphone",
     },
   });
-  if (push) {
+  if (push && !appService) {
     // Lint cannot follow the service's superclass into a prebuilt
     // expo-notifications and calls it not a Service.
     root.$ ??= {};
@@ -80,9 +122,7 @@ function addSystemCallToManifest(manifest, { push }) {
       ],
     });
   } else {
-    application.service = application.service.filter(
-      (entry) => entry.$?.["android:name"] !== MESSAGING_SERVICE,
-    );
+    application.service = remove(application.service, MESSAGING_SERVICE);
   }
   application.receiver ??= [];
   upsert(application.receiver, RECEIVER, {
@@ -114,10 +154,11 @@ function hasExpoNotifications(projectRoot) {
   }
 }
 
-function withAndroidSystemCall(config) {
+function withAndroidSystemCall(config, { messagingService = "opengeni" } = {}) {
   return withAndroidManifest(config, (mod) => {
     addSystemCallToManifest(mod.modResults, {
-      push: hasExpoNotifications(mod.modRequest.projectRoot),
+      push: messagingService === "opengeni" && hasExpoNotifications(mod.modRequest.projectRoot),
+      messagingService,
     });
     return mod;
   });
@@ -126,9 +167,11 @@ function withAndroidSystemCall(config) {
 module.exports = {
   withAndroidSystemCall,
   addSystemCallToManifest,
+  resolveAndroidMessagingService,
   SERVICE,
   RECEIVER,
   ACTIVITY,
   MESSAGING_SERVICE,
   META_ENABLED,
+  META_APP_MESSAGING_SERVICE,
 };

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import type { SessionWorkflowClient } from "@opengeni/core";
+import type { ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
 import {
   createDb,
   createOrganizationApiKey,
@@ -17,7 +17,10 @@ import { uuidV5 } from "../../../packages/sdk/src/chat/ids";
 import { OpenGeniClient } from "../../../packages/sdk/src/client";
 import { OpenGeniEmbeddingClient } from "../../../packages/sdk/src/embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "../../../packages/sdk/src/errors";
-import { createSessionProxyHandler } from "../../../packages/sdk/src/session-proxy";
+import {
+  createSessionProxyHandler,
+  type SessionProxyHandlerOptions,
+} from "../../../packages/sdk/src/session-proxy";
 import { createApp, type AppDependencies } from "../src/app";
 
 let shared: SharedTestDatabase;
@@ -73,7 +76,14 @@ const FIRST_USE_PERMISSIONS = [
 const noop = async () => undefined;
 const productUrl = "https://product.example.test/api/opengeni";
 
-async function fixture(privateSessionsEnabled: boolean) {
+async function fixture(
+  privateSessionsEnabled: boolean,
+  options: {
+    memberPermissions?: Array<(typeof FIRST_USE_PERMISSIONS)[number]>;
+    chats?: SessionProxyHandlerOptions["chats"];
+    objectStorage?: boolean;
+  } = {},
+) {
   const [account] = await shared.admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('SDK chats proxy fixture') returning id`;
   const accountId = account!.id;
@@ -113,6 +123,19 @@ async function fixture(privateSessionsEnabled: boolean) {
       signalSessionControl: noop,
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
+    ...(options.objectStorage
+      ? {
+          objectStorage: {
+            bucket: "fixture",
+            maxSinglePutSizeBytes: 5_000_000_000,
+            createPutUrl: async (input: { key: string }) => ({
+              url: `https://storage.example.test/${input.key}`,
+              expiresAt: new Date(Date.now() + 60_000),
+              requiredHeaders: {},
+            }),
+          } as unknown as ObjectStorageDependency,
+        }
+      : {}),
   } as unknown as AppDependencies);
   const fetch: typeof globalThis.fetch = async (input, init) =>
     await app.fetch(new Request(input, init));
@@ -135,7 +158,12 @@ async function fixture(privateSessionsEnabled: boolean) {
   for (const identity of [owner, other]) {
     await service.addExternalWorkspaceMember(workspace.id, {
       identity: { externalId: identity.externalId, source },
-      permissions: ["workspace:read", "sessions:read", "sessions:create", "sessions:control"],
+      permissions: options.memberPermissions ?? [
+        "workspace:read",
+        "sessions:read",
+        "sessions:create",
+        "sessions:control",
+      ],
       operationId: crypto.randomUUID(),
     });
   }
@@ -153,7 +181,7 @@ async function fixture(privateSessionsEnabled: boolean) {
     on conflict (account_id) do update set enabled = excluded.enabled`;
 
   const handler = createSessionProxyHandler(service, {
-    chats: "private",
+    chats: options.chats ?? "private",
     resolve: () => ({ workspaceId: workspace.id, user: owner.externalId, source }),
     createSession: (input) => ({ ...input, model: "scripted-model" }),
   });
@@ -442,6 +470,87 @@ test("chats: private creates an external asUser-owned user_private session throu
       .asUser(f.other.externalId, { source: f.source })
       .getSession(f.workspace.id, created.id),
   ).rejects.toMatchObject({ status: 404 });
+}, 60_000);
+
+const UPLOAD_MEMBER_PERMISSIONS: Array<(typeof FIRST_USE_PERMISSIONS)[number]> = [
+  "workspace:read",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+];
+
+test("a private chat's uploads through the proxy are the uploader's alone; shared chats keep workspace files", async () => {
+  const f = await fixture(true, {
+    memberPermissions: UPLOAD_MEMBER_PERMISSIONS,
+    objectStorage: true,
+  });
+  const otherUser = f.service.asUser(f.other.externalId, { source: f.source });
+  const ownerUser = f.service.asUser(f.owner.externalId, { source: f.source });
+  // What older stock UIs and custom browsers send: no scope.
+  const begin = await f.browser.beginFileUpload(f.workspace.id, {
+    filename: "private.txt",
+    contentType: "text/plain",
+    sizeBytes: 4,
+  });
+  expect(begin.access?.visibility).toBe("private");
+  const [stored] = await shared.admin<{ private_owner_subject_ids: string[] | null }[]>`
+    select private_owner_subject_ids from files where id = ${begin.fileId}`;
+  expect(stored?.private_owner_subject_ids).toEqual([f.owner.subjectId]);
+  await shared.admin`update files set status = 'ready' where id = ${begin.fileId}`;
+
+  // Its owner reads it and attaches it to their private chat (where the agent
+  // reads it as the chat's attachment); another member of the workspace can't.
+  expect(await ownerUser.getFile(f.workspace.id, begin.fileId)).toMatchObject({
+    id: begin.fileId,
+  });
+  await expect(otherUser.getFile(f.workspace.id, begin.fileId)).rejects.toMatchObject({
+    status: 404,
+  });
+  const created = await f.handler(
+    new Request(f.endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        initialMessage: "Read my file",
+        idempotencyKey: crypto.randomUUID(),
+        resources: [{ kind: "file", fileId: begin.fileId }],
+      }),
+    }),
+  );
+  expect(created.status, await created.clone().text()).toBe(202);
+  const session = (await created.json()) as { id: string };
+  expect((await f.browser.getSession(f.workspace.id, session.id)).resources ?? []).toContainEqual(
+    expect.objectContaining({ kind: "file", fileId: begin.fileId }),
+  );
+
+  // An explicit workspace choice is the uploader's own and is kept.
+  const chosen = await f.browser.beginFileUpload(f.workspace.id, {
+    filename: "team.txt",
+    contentType: "text/plain",
+    sizeBytes: 4,
+    scope: "workspace",
+  });
+  expect(chosen.access?.visibility).toBe("workspace");
+
+  // A shared-chats proxy keeps Opengeni's default: a workspace file.
+  const sharedProxy = createSessionProxyHandler(f.service, {
+    chats: "shared",
+    resolve: () => ({ workspaceId: f.workspace.id, user: f.owner.externalId, source: f.source }),
+  });
+  const sharedBrowser = new OpenGeniClient({
+    baseUrl: productUrl,
+    fetch: async (input, init) => await sharedProxy(new Request(input, init)),
+  });
+  const team = await sharedBrowser.beginFileUpload(f.workspace.id, {
+    filename: "shared.txt",
+    contentType: "text/plain",
+    sizeBytes: 4,
+  });
+  expect(team.access?.visibility).toBe("workspace");
+  await shared.admin`update files set status = 'ready' where id = ${team.fileId}`;
+  expect(await otherUser.getFile(f.workspace.id, team.fileId)).toMatchObject({ id: team.fileId });
 }, 60_000);
 
 test("a disabled organization private-chat setting returns actionable OpenGeniSetupError JSON", async () => {

@@ -179,6 +179,8 @@ export type TurnInputOptions = {
   workspaceRecoveryNote?: string;
   /** The latest save left rebuildable folders out (see `reducedWorkspaceSaveNote`). */
   workspaceSaveNote?: string;
+  /** The managed sandbox stopped since the model's last output (see `unseenSandboxStopNote`). */
+  sandboxStopNote?: string;
   /** The chat's attendance differs from how it started (see `attendanceChangeNote`). */
   attendanceNote?: string;
   /**
@@ -918,6 +920,7 @@ export async function turnInput(
     options.knowledgeSourcePreparationNote,
     options.workspaceRecoveryNote,
     options.workspaceSaveNote,
+    options.sandboxStopNote,
     options.attendanceNote,
   );
   if (trigger.type === "user.message") {
@@ -1016,6 +1019,29 @@ export function reducedWorkspaceSaveNote(save: {
   const more = save.omittedPaths.length - shown.length;
   const paths = `${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
   return `Workspace note: this workspace was last saved at ${save.capturedAt} without these folders, which can be rebuilt: ${paths}. If they are missing, reinstall dependencies or rebuild before relying on them.`;
+}
+
+/** Turn notice after the chat's managed sandbox stopped since the model's last
+ * output: its replacement starts from the saved /workspace, so what the model
+ * set up elsewhere may be gone, and it would otherwise find out only from
+ * failing commands. One factual sentence: whether /workspace itself came back
+ * from an older save is told by the existing restore notices. */
+export function unseenSandboxStopNote(stop: {
+  kind: "stopped" | "lost";
+  at: string;
+  reason: string | null;
+}): string {
+  const at = new Date(stop.at);
+  const when = Number.isFinite(at.getTime())
+    ? ` at ${at.toISOString().slice(0, 16).replace("T", " ")} UTC`
+    : "";
+  const what =
+    stop.kind === "lost"
+      ? `stopped unexpectedly${when}`
+      : stop.reason === "idle"
+        ? `was stopped for being idle${when}`
+        : `was stopped${when}`;
+  return `Sandbox note: this chat's sandbox ${what}, after your last action; files outside /workspace and programs that were running may be gone.`;
 }
 
 async function openSuffixMessageInput(

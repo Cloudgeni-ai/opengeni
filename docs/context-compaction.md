@@ -242,12 +242,18 @@ only on that image, never the number of later images. Originals stay retained;
 coordinate-mapping notes describe the request-local rendition. A per-image
 limit alone cannot bound an accumulating conversation.
 
-On models with prefix-bound thinking, a checkpoint or resized-image projection
-opts into the documented `thinking-binding-controls-2026-08-01` beta with
-`prefix_mismatch_behavior: "drop_block"`. The provider, not the client, may omit
-only reasoning invalidated by the changed prefix. Signed blocks remain verbatim
-in durable history and in requests. The retained checkpoint/image makes that
-choice stable after restart; ordinary unchanged prefixes keep strict behavior.
+On models with prefix-bound thinking, every request that asks for thinking opts
+into the documented `thinking-binding-controls-2026-08-01` beta with
+`prefix_mismatch_behavior: "drop_block"`. A request without thinking is moved
+into it only while its input carries a checkpoint summary or a resized image,
+and never when it forces a tool, which Claude refuses together with thinking. The prefix can change
+between ordinary turns too: the system prompt follows live workspace state,
+such as the repository Skills index after a branch checkout, and a strict
+request would then be rejected on every retry. The provider, not the client,
+may omit only reasoning invalidated by the changed prefix; an unchanged prefix
+drops nothing. Signed blocks remain verbatim in durable history and in
+requests. The setting is the same on every request, so it never changes the
+cached prefix inside a conversation.
 Responses expose only counts of dropped blocks by closed reason, not signatures
 or prompt data. This reset can lose old reasoning and cost new reasoning tokens;
 it is not a claim that a client-generated checkpoint preserves prefix binding.

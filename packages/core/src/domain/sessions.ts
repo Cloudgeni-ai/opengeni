@@ -345,6 +345,10 @@ import {
   validateToolRefs,
   withWorkspaceDefaultMcpTools,
 } from "./resources";
+import {
+  agentPersonalGitHubRepositoryServices,
+  resolveAgentPersonalGitHubRepositoryResources,
+} from "./agent-personal-github-resources";
 
 const reservedSessionMcpServerIds = new Set(["opengeni", "files", "docs", "codex_apps"]);
 const maxSessionMcpCredentialHeaders = 16;
@@ -3336,10 +3340,25 @@ async function createSessionForRequestInFileScope(
     }
   }
   const resources = normalizeResources(
-    hasOwnProperty(rawPayload, "resources")
-      ? payload.resources
-      : (parentSession?.resources.filter((resource) => resource.kind === "repository") ??
+    // An agent may name a repository as the person with just uri, ref and
+    // connectionType; its own turn's Your GitHub delegation fills in the rest.
+    await resolveAgentPersonalGitHubRepositoryResources({
+      grant,
+      workspaceId,
+      settings,
+      resources: hasOwnProperty(rawPayload, "resources")
+        ? payload.resources
+        : (parentSession?.resources.filter((resource) => resource.kind === "repository") ??
           payload.resources),
+      turnDelegations: inheritedPersonalConnectionDelegations,
+      services: agentPersonalGitHubRepositoryServices({
+        db,
+        settings,
+        workspaceId,
+        accountId: grant.accountId,
+        githubPersonalFetch: unresolvedDeps.githubPersonalFetch,
+      }),
+    }),
   );
   const inheritedOrSubmittedSkills = hasOwnProperty(rawPayload, "skills")
     ? payload.skills

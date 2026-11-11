@@ -809,6 +809,9 @@ function fullPlan(
       "migration-online-safety",
       // Shipped migrations are applied once by name: a head may only add them.
       "migration-immutability",
+      // A rolling migration runs while the previous release serves: it must not
+      // revoke, drop or rename what that release's runtime posture requires.
+      "migration-previous-release",
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
@@ -1049,6 +1052,7 @@ export function createImpactPlan(
       "migration-deployment-mode",
       "migration-online-safety",
       "migration-immutability",
+      "migration-previous-release",
     );
   }
   if (

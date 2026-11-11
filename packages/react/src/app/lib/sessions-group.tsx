@@ -3,8 +3,10 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { t } from "./console-text";
+import { creatorIdentityKey, creatorType, machineCreatorLabel } from "./creator-initials";
 import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
+import { failureHandledByAgent, needsFailureReview } from "./session-failure";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
 import type { SessionListTotals, SiteConversationGroup } from "@opengeni/sdk";
@@ -24,6 +26,8 @@ import {
   sessionActivityTime,
   type SessionRecencyGroup,
 } from "../../session-list-model";
+
+export { failureHandledByAgent, needsFailureReview };
 
 export {
   compareSessionActivity,
@@ -164,9 +168,10 @@ function ownRailStatusCounts(
     attention: awaitsPerson(session) ? 1 : 0,
     attentionSince: awaitsPerson(session) ? (session.requiresActionSince ?? null) : null,
     // Failed is a review signal in the rail, not a permanent copy of the
-    // lifecycle badge. Opening the session (or a parent agent consuming its
-    // result) acknowledges the failure together with the unread frontier.
-    failed: session.status === "failed" && session.unread ? 1 : 0,
+    // lifecycle badge. Opening the session acknowledges the failure together
+    // with the unread frontier; a failure its parent agent consumed is that
+    // agent's to handle and never asks the person (`failureHandled`).
+    failed: needsFailureReview(session) ? 1 : 0,
     active:
       hasActiveEffectiveControl(session) &&
       (session.status === "running" || session.status === "recovering")
@@ -289,7 +294,9 @@ function railStatusCounts(
     }
   } else {
     for (const child of node.children) {
-      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+      const childCounts = railStatusCounts(child, localDeliveryAttention);
+      if (failureHandledByAgent(child.session) && child.session.unread) childCounts.unread -= 1;
+      addRailStatusCounts(counts, childCounts);
     }
   }
   return counts;
@@ -556,10 +563,13 @@ export type SessionBrowseDateField = "activity" | "created";
 export type SessionBrowseDateRange = "any" | "today" | "week" | "month";
 
 export function sessionCreatorKey(session: Session): string {
-  return `${session.createdBy.kind}:${session.createdBy.subjectId}`;
+  return creatorIdentityKey(session.createdBy);
 }
 
 export function sessionCreatorLabel(session: Session): string {
+  // API keys and services: a friendly name and kind, never a raw id.
+  const machine = machineCreatorLabel(session.createdBy);
+  if (machine) return machine;
   const explicit = session.createdBy.label?.trim();
   if (explicit) return explicit;
   if (session.createdBy.subjectId === "unattributed-legacy") return "Unattributed";
@@ -576,7 +586,8 @@ export type SessionCreatorOption = {
 
 /**
  * Loaded creator choices with identity-specific labels only when frozen display
- * labels collide. The subject ID remains opaque; it is displayed, not parsed.
+ * labels collide. A person's subject ID remains opaque; it is displayed, not
+ * parsed. API keys and services are told apart by number, never by a raw id.
  */
 export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string, string> {
   const byKey = new Map<
@@ -584,27 +595,41 @@ export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string,
     { label: string; kind: Session["createdBy"]["kind"]; subjectId: string }
   >();
   for (const session of sessions) {
-    byKey.set(sessionCreatorKey(session), {
+    const key = sessionCreatorKey(session);
+    // One API key's older subject-frozen and newer service-frozen sessions are
+    // one creator; prefer a session that carries the key's name.
+    if (
+      byKey.has(key) &&
+      creatorType(session.createdBy) === "api_key" &&
+      !session.createdBy.label?.trim()
+    ) {
+      continue;
+    }
+    byKey.set(key, {
       label: sessionCreatorLabel(session),
       kind: session.createdBy.kind,
       subjectId: session.createdBy.subjectId,
     });
   }
 
-  const labelCounts = new Map<string, number>();
-  for (const creator of byKey.values()) {
-    labelCounts.set(creator.label, (labelCounts.get(creator.label) ?? 0) + 1);
+  const sharedLabels = new Map<string, string[]>();
+  for (const [key, creator] of [...byKey].sort(([left], [right]) => left.localeCompare(right))) {
+    sharedLabels.set(creator.label, [...(sharedLabels.get(creator.label) ?? []), key]);
   }
 
   return new Map(
     [...byKey.entries()]
-      .map(([value, creator]) => ({
-        value,
-        label:
-          labelCounts.get(creator.label) === 1
-            ? creator.label
+      .map(([value, creator]) => {
+        const shared = sharedLabels.get(creator.label) ?? [value];
+        if (shared.length === 1) return { value, label: creator.label };
+        const machine = machineCreatorLabel({ kind: creator.kind, subjectId: creator.subjectId });
+        return {
+          value,
+          label: machine
+            ? `${creator.label} (${shared.indexOf(value) + 1})`
             : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
-      }))
+        };
+      })
       .sort(
         (left, right) =>
           left.label.localeCompare(right.label) || left.value.localeCompare(right.value),
@@ -1221,8 +1246,8 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     pausedWork: hasPausedWork(node.session) ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
-    unreadFailed: status === "failed" && node.session.unread ? 1 : 0,
-    unread: node.session.unread ? 1 : 0,
+    unreadFailed: needsFailureReview(node.session) ? 1 : 0,
+    unread: node.session.unread && !failureHandledByAgent(node.session) ? 1 : 0,
     activeWork: node.session.activelyWorking ? 1 : 0,
   };
   const stats = node.session.treeStats;

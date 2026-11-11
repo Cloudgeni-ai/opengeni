@@ -193,7 +193,7 @@ describe("Claude progress updates before a tool call", () => {
       await claude.getResponse(request());
     }
     for (const { body, betas } of sent) {
-      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect(body.thinking).toMatchObject({ type: "adaptive", display: "summarized" });
       expect(betas).not.toContain("thinking-display-updates-2026-08-18");
     }
   });

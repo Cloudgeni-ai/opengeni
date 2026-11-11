@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import { parseRequestBody } from "../http/request-body";
+import { liveStreamSignal } from "../http/server-drain";
 import { approvalForbiddenHttpError } from "../http/api-error";
 import {
   AuthRun,
@@ -95,7 +96,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       workspaceId,
       nonnegativeSafeIntegerQuery(context, "controlAfter", 0),
       nonnegativeSafeIntegerQuery(context, "interactionAfter", 0),
-      context.req.raw.signal,
+      liveStreamSignal(context),
       {
         ...browserSseDeliveryOptions(context.req.query("transport")),
         observability: deps.observability,
@@ -148,7 +149,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       grant.accountId,
       workspaceId,
       after,
-      context.req.raw.signal,
+      liveStreamSignal(context),
       {
         ...browserSseDeliveryOptions(context.req.query("transport")),
         observability: deps.observability,
