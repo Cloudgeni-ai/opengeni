@@ -470,6 +470,7 @@ import { settleExitedWorkerAdmissions } from "./exited-worker-admissions";
 import {
   crashedWorkerOrphanAdmissionSql,
   sessionAttemptPendingWritersSql,
+  sessionMayAwaitQuiescenceSql,
   sessionPendingWriterAttemptIdsSql,
   sessionQuiescenceCandidateAttemptIdsSql,
 } from "./session-attempt-writers";
@@ -61233,6 +61234,23 @@ async function lockWorkspaceMutationSessionTx(
   return session;
 }
 
+/**
+ * False only when no attempt of the session can await its physical-quiescence
+ * receipt (see `sessionMayAwaitQuiescenceSql`). It lets the hot peek and claim
+ * paths skip the exact quiescence and writer queries, which cost tens of
+ * milliseconds of planning on every call, for the sessions that have none of
+ * their rows.
+ */
+async function sessionMayAwaitQuiescence(
+  db: Database,
+  scope: { workspaceId: string; sessionId: string },
+): Promise<boolean> {
+  const [row] = await db.execute<{ possible: boolean }>(
+    sql`select ${sessionMayAwaitQuiescenceSql(scope)} as possible`,
+  );
+  return row?.possible === true;
+}
+
 /** True while an exact closed attempt still owns the physical-quiescence gate.
  * Both user control interruptions and activity-owned recoverable shutdowns use
  * this predicate so wake delivery cannot turn an unfinished writer drain into
@@ -61248,6 +61266,7 @@ async function hasPendingSessionAttemptQuiescenceTx(
     writerMode?: "physical" | "containment";
   },
 ): Promise<boolean> {
+  if (!(await sessionMayAwaitQuiescence(tx, input))) return false;
   const [row] = await tx.execute<{ pending: boolean }>(sql`
     select exists (
       select 1
@@ -80389,17 +80408,25 @@ export async function claimSessionWorkForAttempt(
           )
           .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1);
-        const [unsettledWriters] = await tx.execute<{ pending: boolean }>(sql`
-          select exists (
-            select 1 from session_turn_attempts attempt
-            where attempt.workspace_id = ${workspaceId}
-              and attempt.session_id = ${sessionId}
-              and attempt.state = 'closed'
-              and attempt.quiesced_at is null
-              and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
-              and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
-          ) as pending
+        // Only a session with an unsettled admission or an active retained
+        // process can have a pending writer. Most have neither, and then the
+        // exact predicate below (mostly planning cost) need not run.
+        const [writerCandidates] = await tx.execute<{ present: boolean }>(sql`
+          select exists ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })} as present
         `);
+        const [unsettledWriters] = writerCandidates?.present
+          ? await tx.execute<{ pending: boolean }>(sql`
+              select exists (
+                select 1 from session_turn_attempts attempt
+                where attempt.workspace_id = ${workspaceId}
+                  and attempt.session_id = ${sessionId}
+                  and attempt.state = 'closed'
+                  and attempt.quiesced_at is null
+                  and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
+                  and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
+              ) as pending
+            `)
+          : [];
         if (unquiescedInterruption || unsettledWriters?.pending) {
           return { action: "unclaimed", reason: "control-pending" };
         }
@@ -83647,6 +83674,7 @@ async function nextSessionAttemptAwaitingQuiescence(
 ): Promise<{
   attemptId: string;
 } | null> {
+  if (!(await sessionMayAwaitQuiescence(db, { workspaceId, sessionId }))) return null;
   const [row] = await db
     .select({
       attemptId: schema.sessionTurnAttempts.id,
