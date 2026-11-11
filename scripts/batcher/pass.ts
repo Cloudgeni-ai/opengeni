@@ -109,6 +109,8 @@ interface Context {
   log: (line: string) => void;
   randomId: () => string;
   modelRequestPatterns: string[];
+  /** The author of each queued PR, as last observed, for the model request review. */
+  authors: Map<number, string | null>;
   /** GraphQL node IDs of queued PRs with auto-merge on, for ejection. */
   autoMerge: Map<number, string>;
   /** Head, branch and changed files of each queued PR whose migration the pass moves. */
@@ -133,6 +135,7 @@ function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Conte
     log: options.log ?? ((line) => console.log(line)),
     randomId: options.randomId ?? (() => crypto.randomUUID().replaceAll("-", "").slice(0, 12)),
     modelRequestPatterns: options.modelRequestPatterns ?? loadGuardedPatterns(),
+    authors: new Map(),
     autoMerge: new Map(),
     renumbering: new Map(),
     regenerating: new Map(),
@@ -152,6 +155,7 @@ async function observe(ctx: Context): Promise<Observation> {
   ctx.renumbering.clear();
   ctx.regenerating.clear();
   ctx.queuedSlots.clear();
+  ctx.authors.clear();
   // Main's numbered files per directory, read once a pass and only when needed.
   const mainNumbered = new Map<string, Promise<NumberedFile[]>>();
   const onMain = (directory: string) => {
@@ -165,6 +169,7 @@ async function observe(ctx: Context): Promise<Observation> {
   for (const pull of await gh.queuedPulls(QUEUE_LABEL)) {
     if (pull.draft || !pull.sameRepository) continue;
     if (pull.autoMergeAt !== null) ctx.autoMerge.set(pull.number, pull.id);
+    ctx.authors.set(pull.number, pull.author ?? null);
     const check = await gh.check(pull.headSha, PR_CHECK);
     const ownRun = check?.workflow === PR_WORKFLOW && check.runHeadSha === pull.headSha;
     const current = ownRun && check?.status === "completed";
@@ -176,13 +181,7 @@ async function observe(ctx: Context): Promise<Observation> {
     // whose CI has not passed, until the maintainer approves its current head.
     // Too many files to list needs that approval too.
     const modelReview = green
-      ? await evaluate({
-          patterns: ctx.modelRequestPatterns,
-          files,
-          headSha: pull.headSha,
-          author: pull.author,
-          reviews: () => gh.reviews(pull.number),
-        })
+      ? await modelRequestReview(ctx, pull.number, pull.headSha, files)
       : null;
     const awaitingModelReview = modelReview !== null && !modelReview.pass;
     if (awaitingModelReview)
@@ -302,6 +301,32 @@ async function observe(ctx: Context): Promise<Observation> {
     batches.push(batch);
   }
   return { now, mainSha, pulls, batches };
+}
+
+/**
+ * The model request review verdict for a PR head (scripts/ci/model-request-review.ts).
+ * `files` are its changed paths with renamed-from paths, or null when too many
+ * to list; read here when not given.
+ */
+async function modelRequestReview(
+  ctx: Context,
+  number: number,
+  headSha: string,
+  files?: string[] | null,
+) {
+  const paths =
+    files !== undefined
+      ? files
+      : ((await ctx.gh.pullFiles(number))?.flatMap((f) =>
+          f.previous ? [f.path, f.previous] : [f.path],
+        ) ?? null);
+  return evaluate({
+    patterns: ctx.modelRequestPatterns,
+    files: paths,
+    headSha,
+    author: ctx.authors.get(number) ?? null,
+    reviews: () => ctx.gh.reviews(number),
+  });
 }
 
 /**
@@ -745,6 +770,21 @@ async function land(ctx: Context, batch: Batch) {
     return;
   }
   if ((await gh.mainSha()) !== manifest.base) return;
+  // The model request review, once more on the exact heads about to land: a
+  // member's new head with the tested tree lands even before PR CI ran on it,
+  // so the hold at observation never saw that head.
+  for (const member of manifest.members) {
+    const head = batch.sameTree?.[member.number] ?? member.head;
+    if (!(await modelRequestReview(ctx, member.number, head)).pass) {
+      await abandon(
+        ctx,
+        batch,
+        `#${member.number} needs the maintainer's approval of its model request changes on ${head.slice(0, 10)}`,
+        member.number,
+      );
+      return;
+    }
+  }
   for (const member of manifest.members) {
     const sha = await gh.mergePull(member.number, {
       sha: batch.sameTree?.[member.number] ?? member.head,

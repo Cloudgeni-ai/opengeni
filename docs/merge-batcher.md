@@ -42,6 +42,8 @@ from `main` and decides, and the batcher and the status below share it.
 - **The batcher** holds such a PR, queued and without a comment, as it holds a
   PR whose PR CI has not passed. If a member of the running batch loses its
   approval, the batch is cancelled and rebuilt without it, so it cannot land.
+  Right before landing it checks every member again on the exact head it
+  lands, which covers a new head with the tested tree.
   Any new head, including one the batcher writes itself to renumber a
   migration or regenerate files, needs a new approval.
 - **On the PR**, `.github/workflows/model-request-review.yml` (running main's

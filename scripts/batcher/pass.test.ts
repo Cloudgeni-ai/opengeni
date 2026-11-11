@@ -1702,6 +1702,29 @@ describe("model request review", () => {
     );
   });
 
+  test("a member's new head with the tested tree lands only with an approval of that head", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED] });
+    gh.addPull(2);
+    const old = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [review(old)];
+    await run(gh, options());
+    const built = gh.batch();
+    expect(built.manifest.members.map((m) => m.number)).toEqual([1, 2]);
+
+    // Rebased: the same tree, a new head whose PR CI has not finished yet.
+    const fresh = hash("head:1 rebased");
+    gh.sameContent.set(fresh, old);
+    gh.pulls.get(1)!.head = fresh;
+    gh.pulls.get(1)!.ci = "running";
+    gh.finishCi(built.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeUndefined();
+    expect(gh.pulls.get(2)!.merged).toBeUndefined();
+    expect(gh.comments.map((c) => c.number)).toEqual([1]);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+  });
+
   test("too many files to list needs the approval too", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1);
