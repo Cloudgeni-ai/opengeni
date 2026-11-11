@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "d2deb040167bafb505b4912745a1e098defca924d6a292227b1b26e221596aa9"
+      "sha256": "bf4de3f3c3284facf2a36ad54a7cee940f7d832233ebbde6ecccad215ce60bf4"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -723,6 +723,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "batch-api-image",
+      "step": "Free runner disk before the image build",
+      "sha256": "d8f9184feb8a942825a8a893afa7c9bcef1255534237e0326aa34959f3c321b5"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "batch-receipt",
       "step": "Classify this main push",
       "sha256": "5ed236c5cf2860a870d2efa2e72fce973455bd44cc24104a5f08cfa1ecd5dfdd"
@@ -863,7 +869,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Require every workload image build",
-      "sha256": "a3af46be51b64462bbe19dfc3a19f52773b66ef09f962bf3a1b68d9bafa03c00"
+      "sha256": "7dd936b50bc98589bbf72a264dae3f087a293dd60d5fb433e1b3eb42e5fdf45e"
     },
     {
       "workflow": ".github/workflows/ci.yml",
