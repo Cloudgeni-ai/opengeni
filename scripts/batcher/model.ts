@@ -180,6 +180,19 @@ export interface Manifest {
    * after it is that group, so priority PRs and a bisection take turns.
    */
   aheadOfBisection?: true;
+  /**
+   * A failed batch whose CI failure probably was not its PRs' doing (see
+   * `heldFailure`): `members` are tested again whole instead of being split,
+   * for the `count`-th time in a row, after failing in the lane jobs `jobs`.
+   * Carried with the bisection's groups until that group is built again.
+   */
+  held?: Hold;
+}
+
+export interface Hold {
+  members: number[];
+  count: number;
+  jobs: string[];
 }
 
 export interface BatchRun {
@@ -200,6 +213,8 @@ export interface BatchRun {
    * failure is final and is judged without a retry.
    */
   final?: true;
+  /** When it last changed (epoch ms), so when a finished run finished. */
+  updatedAt?: number;
 }
 
 export interface Batch {
@@ -220,6 +235,22 @@ export interface Observation {
   mainSha: string;
   pulls: QueuedPull[];
   batches: Batch[];
+  /**
+   * What else fails in CI right now, read only when the running batch failed;
+   * absent when it was not read or GitHub could not tell.
+   */
+  external?: ExternalFailures;
+}
+
+/** Lane jobs failing outside the running batch, which its PRs cannot have broken. */
+export interface ExternalFailures {
+  /** Lane jobs whose latest result in main's recent CI runs is a failure. */
+  main: string[];
+  /**
+   * The latest other batch of several PRs that failed also after a retry,
+   * when none of its PRs is in the running batch, with the lane jobs it failed in.
+   */
+  batch?: { id: string; members: number[]; jobs: string[] };
 }
 
 export type Action =
@@ -241,7 +272,15 @@ export type Action =
       pending: number[][];
       blame?: string[];
       aheadOfBisection?: true;
+      held?: Hold;
     }
+  /**
+   * A failed batch probably broken by something outside it waits out its
+   * backoff before it is tested again whole; nothing else builds meanwhile.
+   */
+  | { kind: "backoff"; batch: Batch; until: number; hold: Hold; evidence: string }
+  /** Tell a held batch's PRs, once, why it is tested again instead of split. */
+  | { kind: "notifyHold"; id: string; hold: Hold; evidence: string }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
   | {
       kind: "hold";
@@ -324,6 +363,91 @@ function repeatsBlame(batch: Batch, failed: BatchRun[]): boolean {
 /** The jobs a failed verdict confirms, added to what the bisection blamed before. */
 function blamed(before: string[], runs: BatchRun[]): string[] {
   return [...new Set([...before, ...runs.flatMap((run) => run.failedJobs ?? [])])].sort();
+}
+
+/**
+ * CI jobs that only collect the results of the jobs they need, so they fail
+ * whenever one of those fails. What broke a run is in its other jobs, the
+ * lanes; `Deployment artifacts` does its own work and is a lane.
+ */
+export const AGGREGATE_JOBS: ReadonlySet<string> = new Set([
+  "Typecheck and unit tests",
+  "Workload image builds",
+  "Validation before release image",
+  "Publish fully green main SHA",
+  "Report exact-head automation CI",
+]);
+
+/** How many times in a row a failed batch is tested again whole before it is split. */
+export const MAX_HOLDS = 2;
+
+/** How long a held batch waits before it is tested again; it doubles with each hold. */
+export const HOLD_BACKOFF_MS = 10 * 60_000;
+
+export function holdBackoff(count: number): number {
+  return HOLD_BACKOFF_MS * 2 ** Math.max(0, count - 1);
+}
+
+/**
+ * The lane jobs failed runs failed in, without the aggregate jobs; null when
+ * GitHub could not list one run's jobs or one failed in no lane job.
+ */
+export function failedLanes(runs: Pick<BatchRun, "failedJobs">[]): string[] | null {
+  if (!runs.length) return null;
+  const lanes = new Set<string>();
+  for (const run of runs) {
+    const own = (run.failedJobs ?? []).filter((job) => !AGGREGATE_JOBS.has(job));
+    if (!run.failedJobs || !own.length) return null;
+    for (const job of own) lanes.add(job);
+  }
+  return [...lanes].sort();
+}
+
+function sameMembers(a: number[], b: number[]): boolean {
+  return a.length === b.length && a.every((n) => b.includes(n));
+}
+
+/**
+ * Whether a failed batch's CI failure was probably not caused by its PRs, so
+ * it is tested again whole instead of being split: every lane job it failed
+ * in is also failing in main's latest CI, or failed also after a retry in the
+ * latest other failed batch, which shares none of its PRs. A bisection then
+ * would test every half against the same failure and could eject an innocent
+ * PR. A genuinely broken PR is still found: a batch is held at most MAX_HOLDS
+ * times in a row, and a retest that fails in a lane job it did not fail in
+ * before is split at once. Version PRs and batches built ahead of a bisection
+ * are never held: a Version PR holds the queue already, and a priority batch's
+ * failure is split into its priority PRs and fill at once.
+ */
+export function heldFailure(
+  batch: Pick<Batch, "manifest">,
+  runs: Pick<BatchRun, "failedJobs">[],
+  external: ExternalFailures | undefined,
+): { hold: Hold; evidence: string } | null {
+  const { manifest } = batch;
+  if (!external || manifest.aheadOfBisection || manifest.members.some((m) => m.version))
+    return null;
+  const jobs = failedLanes(runs);
+  if (!jobs) return null;
+  const members = manifest.members.map((m) => m.number);
+  const before =
+    manifest.held && sameMembers(manifest.held.members, members) ? manifest.held : undefined;
+  if (before && (before.count >= MAX_HOLDS || jobs.some((job) => !before.jobs.includes(job))))
+    return null;
+  const onMain = new Set(external.main);
+  const other = external.batch?.members.some((n) => members.includes(n))
+    ? undefined
+    : external.batch;
+  const elsewhere = new Set(other?.jobs ?? []);
+  if (!jobs.every((job) => onMain.has(job) || elsewhere.has(job))) return null;
+  const evidence = jobs
+    .map((job) =>
+      onMain.has(job)
+        ? `\`${job}\` (failing on main)`
+        : `\`${job}\` (failed also after a retry in batch \`${other!.id}\`: ${other!.members.map((n) => `#${n}`).join(", ")})`,
+    )
+    .join(", ");
+  return { hold: { members, count: (before?.count ?? 0) + 1, jobs }, evidence };
 }
 
 function fifo(a: QueuedPull, b: QueuedPull) {
@@ -549,6 +673,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   // A finished priority batch that went ahead of a bisection hands the next
   // turn to the bisection.
   let halvesFirst = false;
+  // A held batch's members, tested again whole when their group is built next.
+  let held: Hold | undefined;
+  let holding: ReturnType<typeof heldFailure> = null;
   const byNumber = new Map(pulls.map((p) => [p.number, p]));
 
   for (const pull of pulls)
@@ -580,6 +707,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     // An interrupted batch is tested again first, keeping any bisection.
     pending = [numbers, ...manifest.pending];
     blame = manifest.blame ?? [];
+    held = manifest.held;
     // A new head that tests to the same tree (main merged in again, a rebase)
     // changes nothing this batch tests, so it does not restart it.
     const left = manifest.members.find(
@@ -620,6 +748,24 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         const landed = new Set(numbers);
         pulls = pulls.filter((p) => !landed.has(p.number));
         pending = manifest.pending;
+      } else if ((holding = heldFailure(batch, result.runs, observation.external))) {
+        // Probably not its PRs' doing: test it again whole after a backoff,
+        // instead of splitting it. It stays (and nothing else builds) until then.
+        const failedAt = Math.max(batch.createdAt, ...result.runs.map((r) => r.updatedAt ?? 0));
+        const until = failedAt + holdBackoff(holding.hold.count);
+        if (now < until) {
+          actions.push({ kind: "backoff", batch, until, ...holding });
+          return actions;
+        }
+        actions.push({
+          kind: "abandon",
+          batch,
+          reason: `its CI failed only in lane jobs that fail outside it too: ${holding.evidence}. It is tested again whole instead of being split (hold ${holding.hold.count} of ${MAX_HOLDS})`,
+        });
+        if (holding.hold.count === 1)
+          actions.push({ kind: "notifyHold", id: manifest.id, ...holding });
+        // `pending` already starts with it, ahead of the bisection's groups.
+        held = holding.hold;
       } else {
         actions.push({
           kind: "abandon",
@@ -693,6 +839,18 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     blame,
     halvesFirst,
   );
+  // A hold stays with its group: the build that tests it again, or one that
+  // carries it as a group still to test. A group that changed is a new one.
+  if (
+    next?.kind === "build" &&
+    held &&
+    (sameMembers(
+      next.members.map((p) => p.number),
+      held.members,
+    ) ||
+      next.pending.some((group) => sameMembers(group, held!.members)))
+  )
+    next.held = held;
   if (next) actions.push(next);
   return actions;
 }
@@ -728,7 +886,16 @@ export function parseManifest(message: string): Manifest | null {
       value.pending.some((g) => !Array.isArray(g) || g.some((n) => !Number.isSafeInteger(n))) ||
       (value.blame !== undefined &&
         (!Array.isArray(value.blame) || value.blame.some((job) => typeof job !== "string"))) ||
-      (value.aheadOfBisection !== undefined && value.aheadOfBisection !== true)
+      (value.aheadOfBisection !== undefined && value.aheadOfBisection !== true) ||
+      (value.held !== undefined &&
+        (typeof value.held !== "object" ||
+          value.held === null ||
+          !Array.isArray(value.held.members) ||
+          value.held.members.some((n) => !Number.isSafeInteger(n)) ||
+          !Number.isSafeInteger(value.held.count) ||
+          value.held.count < 1 ||
+          !Array.isArray(value.held.jobs) ||
+          value.held.jobs.some((job) => typeof job !== "string")))
     )
       return null;
     return value;

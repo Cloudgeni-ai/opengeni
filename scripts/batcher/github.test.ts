@@ -226,6 +226,74 @@ describe("RestGitHub compare", () => {
   });
 });
 
+describe("RestGitHub CI history", () => {
+  test("ciRuns lists finished CI runs of one branch, or failed ones on every branch", async () => {
+    const { gh, requests } = client(() => ({
+      workflow_runs: [
+        {
+          id: 5,
+          path: ".github/workflows/ci.yml",
+          event: "push",
+          head_branch: "main",
+          status: "completed",
+          conclusion: "failure",
+          run_attempt: 2,
+          html_url: "https://github.com/owner/repo/actions/runs/5",
+          updated_at: "2026-11-10T21:37:44Z",
+          head_commit: { message: "Change (#1)" },
+        },
+        {
+          id: 6,
+          path: ".github/workflows/ci.yml",
+          event: "push",
+          head_branch: "main-other",
+          status: "completed",
+          conclusion: "success",
+          run_attempt: 1,
+          html_url: "https://github.com/owner/repo/actions/runs/6",
+          updated_at: "2026-11-10T21:37:44Z",
+          head_commit: null,
+        },
+      ],
+    }));
+    expect(await gh.ciRuns({ branch: "main" })).toEqual([
+      {
+        id: 5,
+        workflow: ".github/workflows/ci.yml",
+        status: "completed",
+        conclusion: "failure",
+        attempt: 2,
+        url: "https://github.com/owner/repo/actions/runs/5",
+        branch: "main",
+        event: "push",
+        message: "Change (#1)",
+        updatedAt: Date.parse("2026-11-10T21:37:44Z"),
+      },
+    ]);
+    expect((await gh.ciRuns({ failed: true })).map((r) => r.id)).toEqual([5, 6]);
+    expect(
+      requests.map((r) => r.url.replace("https://api.github.com/repos/owner/repo/", "")),
+    ).toEqual([
+      "actions/workflows/ci.yml/runs?status=completed&branch=main&per_page=50",
+      "actions/workflows/ci.yml/runs?status=failure&per_page=50",
+    ]);
+  });
+
+  test("jobResults lists every job page by page; failedJobs keeps the failed and timed out", async () => {
+    const jobs = Array.from({ length: 130 }, (_, i) => ({
+      name: `job ${i}`,
+      conclusion: i === 3 ? "failure" : i === 120 ? "timed_out" : i === 5 ? "skipped" : "success",
+    }));
+    const { gh, requests } = client(({ url }) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      return { total_count: jobs.length, jobs: jobs.slice((page - 1) * 100, page * 100) };
+    });
+    expect(await gh.jobResults(9, 2)).toEqual(jobs);
+    expect(await gh.failedJobs(9, 2)).toEqual(["job 3", "job 120"]);
+    expect(requests[0]!.url).toContain("actions/runs/9/attempts/2/jobs?per_page=100&page=1");
+  });
+});
+
 const event = (name: string, at: string) => ({ createdAt: at, label: { name } });
 
 describe("queuedTime", () => {

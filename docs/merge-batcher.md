@@ -181,6 +181,26 @@ and members of the running batch are never regenerated.
    A half with more PRs than fit in one batch tests the first `BATCHER_MAX_BATCH`
    and keeps the others next in line as their own group, so none of them
    drops out of the bisection.
+6. **Failures from outside the batch.** Before splitting a failed batch, the
+   batcher checks whether its PRs probably broke it. It compares the lane jobs
+   the batch failed in (not the aggregate jobs such as `Typecheck and unit
+   tests`, `Workload image builds` or `Validation before release image`, which
+   fail whenever a lane fails; see `AGGREGATE_JOBS` in `scripts/batcher/model.ts`)
+   with two signals: the latest result of each lane job in `main`'s CI runs of
+   the last 24 hours (a deferred push that cancelled itself or an attested push
+   that skipped its lanes has none), and the lane jobs the latest other batch
+   of several PRs failed in also after a retry in the last 6 hours, when that
+   batch shares none of this batch's PRs. When every lane job the batch failed
+   in fails in one of those as well, the batch is **held**: it stays as it is
+   for a backoff (10 minutes, doubling with each hold), then is built and
+   tested again whole instead of being split. Its PRs get one comment saying
+   why; the manifest's `held` records the count and the jobs. A priority PR,
+   such as a fix for a broken `main`, goes ahead of the held batch as it would
+   go ahead of a bisection's half. A genuinely broken PR is still found: a
+   batch is held at most twice in a row (`MAX_HOLDS`), and a retest that
+   fails in a lane job it did not fail in before, or that GitHub could not
+   tell about, is split at once. A Version PR, and a batch built ahead of a
+   bisection, are never held.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
 the queue, or a member gets a new head that changes what the batch tests. The

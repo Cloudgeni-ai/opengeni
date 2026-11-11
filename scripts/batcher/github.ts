@@ -2,6 +2,7 @@
 // queued PRs, the batch/* branch with its manifest commit, and its CI runs.
 
 import type { RepoFile, TreeEntry } from "./renumber";
+import { CI_WORKFLOW } from "./model";
 import { REGENERATE_WORKFLOW, regenerationTitle, unzipText } from "./regenerate";
 
 export class GitHubError extends Error {
@@ -74,6 +75,21 @@ export interface RunSummary {
   conclusion: string | null;
   attempt: number;
   url: string;
+  /** When the run last changed (epoch ms); for a finished run, when it finished. */
+  updatedAt?: number;
+}
+
+/** A run of the CI workflow on any branch, with its head commit's message. */
+export interface CiRun extends RunSummary {
+  branch: string;
+  event: string;
+  message: string;
+  updatedAt: number;
+}
+
+export interface JobResult {
+  name: string;
+  conclusion: string | null;
 }
 
 export interface CommitSummary {
@@ -107,6 +123,13 @@ export interface GitHub {
   runs(branch: string, sha: string): Promise<RunSummary[]>;
   /** Names of the jobs that failed or timed out in this attempt of a run. */
   failedJobs(runId: number, attempt: number): Promise<string[]>;
+  /** Every job of this attempt of a run, with its conclusion. */
+  jobResults(runId: number, attempt: number): Promise<JobResult[]>;
+  /**
+   * The latest finished runs of the CI workflow, newest first: on `branch`, or
+   * on every branch, and only failed ones when `failed` is set.
+   */
+  ciRuns(query: { branch?: string; failed?: boolean }): Promise<CiRun[]>;
   /** Runs of the regeneration workflow for exactly this PR head, newest first. */
   regenerations(pull: number, head: string): Promise<RunSummary[]>;
   /** Start the regeneration workflow from main: merge `main` into the PR head and regenerate. */
@@ -517,6 +540,7 @@ export class RestGitHub implements GitHub {
         conclusion: string | null;
         run_attempt: number;
         html_url: string;
+        updated_at?: string;
       }[];
     }>(`actions/runs?branch=${encodeURIComponent(branch)}&head_sha=${sha}&event=push&per_page=100`);
     return data.workflow_runs
@@ -528,22 +552,64 @@ export class RestGitHub implements GitHub {
         conclusion: r.conclusion,
         attempt: r.run_attempt,
         url: r.html_url,
+        updatedAt: time(r.updated_at) ?? 0,
       }));
   }
 
   async failedJobs(runId: number, attempt: number) {
-    const failed: string[] = [];
+    return (await this.jobResults(runId, attempt))
+      .filter((job) => job.conclusion === "failure" || job.conclusion === "timed_out")
+      .map((job) => job.name);
+  }
+
+  async jobResults(runId: number, attempt: number) {
+    const jobs: JobResult[] = [];
     // CI has about 65 jobs; the cap only bounds a runaway listing.
     for (let page = 1; page <= 5; page++) {
       const data = await this.get<{
         total_count: number;
         jobs: { name: string; conclusion: string | null }[];
       }>(`actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`);
-      for (const job of data.jobs)
-        if (job.conclusion === "failure" || job.conclusion === "timed_out") failed.push(job.name);
-      if (page * 100 >= data.total_count || !data.jobs.length) return failed;
+      for (const job of data.jobs) jobs.push({ name: job.name, conclusion: job.conclusion });
+      if (page * 100 >= data.total_count || !data.jobs.length) return jobs;
     }
     throw new Error(`Run ${runId} has more jobs than the batcher lists`);
+  }
+
+  async ciRuns(query: { branch?: string; failed?: boolean }) {
+    const workflow = CI_WORKFLOW.slice(CI_WORKFLOW.lastIndexOf("/") + 1);
+    const filter = [
+      `status=${query.failed ? "failure" : "completed"}`,
+      ...(query.branch === undefined ? [] : [`branch=${encodeURIComponent(query.branch)}`]),
+    ].join("&");
+    const data = await this.get<{
+      workflow_runs: {
+        id: number;
+        path: string;
+        event: string;
+        head_branch: string;
+        status: string;
+        conclusion: string | null;
+        run_attempt: number;
+        html_url: string;
+        updated_at: string;
+        head_commit: { message: string } | null;
+      }[];
+    }>(`actions/workflows/${workflow}/runs?${filter}&per_page=50`);
+    return data.workflow_runs
+      .filter((r) => query.branch === undefined || r.head_branch === query.branch)
+      .map((r) => ({
+        id: r.id,
+        workflow: r.path,
+        status: r.status,
+        conclusion: r.conclusion,
+        attempt: r.run_attempt,
+        url: r.html_url,
+        branch: r.head_branch,
+        event: r.event,
+        message: r.head_commit?.message ?? "",
+        updatedAt: time(r.updated_at) ?? 0,
+      }));
   }
 
   async regenerations(pull: number, head: string) {

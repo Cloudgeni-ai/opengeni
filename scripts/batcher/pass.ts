@@ -15,15 +15,18 @@ import {
 } from "./regenerate";
 import { planMigrationMoves, type TreeEntry } from "./renumber";
 import {
+  AGGREGATE_JOBS,
   BATCH_PREFIX,
   BUILD_PREFIX,
   DEFAULT_SETTINGS,
   IN_BATCH_LABEL,
+  MAX_HOLDS,
   PRIORITY_LABEL,
   PRODUCTION_BRANCH,
   QUEUE_LABEL,
   VERSION_BRANCH,
   decide,
+  failedLanes,
   failedRun,
   inBatchChanges,
   isControlPlane,
@@ -35,8 +38,11 @@ import {
   runningBatch,
   squashTitle,
   takenNumbers,
+  verdict,
   type Action,
   type Batch,
+  type ExternalFailures,
+  type Hold,
   type Manifest,
   type Member,
   type NumberedFile,
@@ -274,7 +280,79 @@ async function observe(ctx: Context): Promise<Observation> {
     if (manifest.base === mainSha) batch.sameTree = await sameTree(ctx, batch, commit, pulls);
     batches.push(batch);
   }
-  return { now, mainSha, pulls, batches };
+  // What else fails is read only for a failed batch, to judge whether its PRs broke it.
+  const running = runningBatch(batches);
+  const external =
+    running &&
+    running.manifest.base === mainSha &&
+    verdict(running, now, ctx.settings).kind === "failed"
+      ? await externalFailures(ctx, running)
+      : undefined;
+  return { now, mainSha, pulls, batches, ...(external ? { external } : {}) };
+}
+
+/** Main's CI runs read for the latest result of each lane job, at most. */
+export const MAIN_RUNS_READ = 6;
+/** Main's CI results older than this say nothing about what fails now. */
+export const MAIN_LOOKBACK_MS = 24 * 60 * 60_000;
+/** Another batch's failure older than this says nothing about what fails now. */
+export const BATCH_LOOKBACK_MS = 6 * 60 * 60_000;
+
+/**
+ * The lane jobs failing outside a failed batch: those whose latest result in
+ * main's recent CI runs is a failure (a deferred run that cancelled itself,
+ * or an attested push whose lanes were skipped, has none), and those another
+ * recent batch of several PRs, sharing none of this batch's, failed in also
+ * after a retry. Undefined when GitHub could not tell: the batch is then
+ * split as before.
+ */
+async function externalFailures(ctx: Context, batch: Batch): Promise<ExternalFailures | undefined> {
+  const { gh } = ctx;
+  const now = ctx.now();
+  const newest = <T extends { updatedAt: number }>(runs: T[]) =>
+    [...runs].sort((a, b) => b.updatedAt - a.updatedAt);
+  try {
+    const latest = new Map<string, boolean>();
+    let read = 0;
+    for (const ciRun of newest(await gh.ciRuns({ branch: "main" }))) {
+      if (read >= MAIN_RUNS_READ || now - ciRun.updatedAt > MAIN_LOOKBACK_MS) break;
+      if (ciRun.conclusion !== "success" && ciRun.conclusion !== "failure") continue;
+      read++;
+      for (const job of await gh.jobResults(ciRun.id, ciRun.attempt)) {
+        if (AGGREGATE_JOBS.has(job.name) || latest.has(job.name)) continue;
+        if (job.conclusion === "success") latest.set(job.name, false);
+        else if (job.conclusion === "failure" || job.conclusion === "timed_out")
+          latest.set(job.name, true);
+      }
+    }
+    const main = [...latest].flatMap(([job, failing]) => (failing ? [job] : [])).sort();
+    const own = new Set(batch.manifest.members.map((m) => m.number));
+    for (const ciRun of newest(await gh.ciRuns({ failed: true }))) {
+      if (now - ciRun.updatedAt > BATCH_LOOKBACK_MS) break;
+      if (
+        !ciRun.branch.startsWith(BATCH_PREFIX) ||
+        ciRun.branch === batch.branch ||
+        ciRun.event !== "push" ||
+        ciRun.attempt < 2
+      )
+        continue;
+      const manifest = parseManifest(ciRun.message);
+      // A single PR that failed was ejected for it; a batch sharing a PR
+      // with this one may have failed for that PR.
+      if (!manifest || manifest.members.length < 2) continue;
+      if (manifest.members.some((m) => own.has(m.number))) continue;
+      const jobs = failedLanes([{ failedJobs: await gh.failedJobs(ciRun.id, ciRun.attempt) }]);
+      if (!jobs) continue;
+      return {
+        main,
+        batch: { id: manifest.id, members: manifest.members.map((m) => m.number), jobs },
+      };
+    }
+    return { main };
+  } catch (error) {
+    ctx.log(`Could not read what fails outside ${batch.branch}: ${String(error)}`);
+    return undefined;
+  }
 }
 
 /**
@@ -771,6 +849,7 @@ async function build(
   pending: number[][],
   blame: string[] = [],
   aheadOfBisection?: true,
+  held?: Hold,
 ) {
   const { gh } = ctx;
   const base = await gh.mainSha();
@@ -829,6 +908,7 @@ async function build(
       pending,
       ...(blame.length ? { blame } : {}),
       ...(aheadOfBisection ? { aheadOfBisection } : {}),
+      ...(held ? { held } : {}),
     };
     const tip = await gh.createCommit(built.at(-1)!.tree, [head], renderManifest(manifest));
     await gh.createBranch(`${BATCH_PREFIX}${id}`, tip);
@@ -856,12 +936,43 @@ async function act(ctx: Context, action: Action) {
     case "regenerate":
       return regenerateGenerated(ctx, action.number);
     case "build":
-      return build(ctx, action.members, action.pending, action.blame, action.aheadOfBisection);
+      return build(
+        ctx,
+        action.members,
+        action.pending,
+        action.blame,
+        action.aheadOfBisection,
+        action.held,
+      );
     case "hold":
       await noteVersionHold(ctx, action);
       return;
+    case "backoff":
+      return;
+    case "notifyHold":
+      return notifyHold(ctx, action);
     case "wait":
       return;
+  }
+}
+
+/**
+ * Tell the PRs of a batch held for the first time why it is tested again
+ * instead of split. Best effort: never fails the pass.
+ */
+async function notifyHold(ctx: Context, action: Extract<Action, { kind: "notifyHold" }>) {
+  const { id, hold, evidence } = action;
+  const others = (number: number) => hold.members.filter((n) => n !== number).map((n) => `#${n}`);
+  for (const number of hold.members) {
+    const together = others(number).length ? ` with ${others(number).join(", ")}` : "";
+    try {
+      await ctx.gh.comment(
+        number,
+        `Merge batch \`${id}\` failed in ${evidence}. Those jobs fail outside the batch as well, so its PRs probably did not break them (a broken \`main\`, a flaky test or CI infrastructure). Instead of being split, the batch is tested again whole${together} after a short wait, up to ${MAX_HOLDS} times. If it fails again in other jobs, or after that, it is split as usual to find the PR that broke it. Nothing needs to change on this PR.`,
+      );
+    } catch (error) {
+      ctx.log(`Could not comment on #${number}: ${String(error)}`);
+    }
   }
 }
 
@@ -925,7 +1036,11 @@ export function describe(action: Action): string {
     case "regenerate":
       return `regenerate #${action.number}'s conflicting generated files, or eject it if other files conflict`;
     case "build":
-      return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}${action.blame?.length ? `, bisecting a failure in ${action.blame.join(", ")}` : ""}`;
+      return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}${action.blame?.length ? `, bisecting a failure in ${action.blame.join(", ")}` : ""}${action.held ? `, holding ${action.held.members.map((n) => `#${n}`).join(", ")} (hold ${action.held.count} of ${MAX_HOLDS})` : ""}`;
+    case "backoff":
+      return `keep ${action.batch.branch} until ${new Date(action.until).toISOString()}, then test it again whole (hold ${action.hold.count} of ${MAX_HOLDS}): it failed only in ${action.evidence}`;
+    case "notifyHold":
+      return `tell ${action.hold.members.map((n) => `#${n}`).join(", ")} that batch ${action.id} is tested again whole`;
     case "hold":
       return action.behind
         ? `hold the queue for Version PR #${action.number}: main changed files it also changes, so it waits to be regenerated`
@@ -964,7 +1079,7 @@ export async function run(
       let waitUntil: number | null = null;
       const unretryable = ctx.unretryable.size;
       for (const action of actions) {
-        if (action.kind === "wait") waitUntil = action.until;
+        if (action.kind === "wait" || action.kind === "backoff") waitUntil = action.until;
         else await act(ctx, action);
         done.push(action);
       }
