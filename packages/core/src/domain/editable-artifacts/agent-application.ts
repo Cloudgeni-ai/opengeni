@@ -667,7 +667,7 @@ function commandProtocolVersion(modality: EditableArtifactModality): number {
 function projectArtifact(artifact: EditableArtifact): EditableArtifactAgentMetadata {
   return Object.freeze({
     id: artifact.id,
-    artifactReference: `[Open report](/workspaces/${artifact.scope.workspaceId}/artifacts/editable/${artifact.id})`,
+    artifactReference: `[Open report](artifact:${artifact.id})`,
     modality: artifact.modality,
     title: artifact.title,
     lifecycle: artifact.lifecycle,

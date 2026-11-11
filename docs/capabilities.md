@@ -1141,6 +1141,12 @@ authorization/token origins are pinned, and the RFC 8707 `resource` parameter
 is omitted from Google's authorization, token, and refresh requests. The MCP
 resource remains stored in the encrypted bundle and bound to the runtime
 connection.
+Gmail, Drive and Calendar share one Google client per deployment, so none of
+them sends `include_granted_scopes`: a Gmail token holds only Gmail scopes, and
+the consent screen lists only what that connector asks for. A first connection
+shows Google's account picker (`prompt=consent select_account`); reconnecting
+an account sends its verified email as `login_hint` with `prompt=consent`, so
+Google signs in that account rather than the one the browser used last.
 
 Gmail connections are personal-only; every member connects their own mailbox.
 Personal account selection is frozen for the initiating user's accepted work,

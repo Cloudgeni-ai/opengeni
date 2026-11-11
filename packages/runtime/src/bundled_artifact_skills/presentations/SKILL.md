@@ -81,7 +81,8 @@ in your context lists that format), so do not load artifact tools just to check:
 5. Inspect every affected slide after mutation. Reconcile bounds, paint order,
    text, chart/table data, notes, and inheritance. If concurrent work invalidates
    an assumption, re-inspect and recompute; never force a stale rewrite.
-6. Share the result as the live artifact's `artifactReference` link. Export
+6. Share the result as the live artifact's `artifactReference` link:
+   `[Title](artifact:<artifactId>)`, using the exact returned ID. Export
    only formats the `opengeni__editable_artifact_export` tool description lists
    (current deployments serve spreadsheet XLSX only, so no presentation PPTX/
    PDF/image export); never attempt or promise an unlisted format. When a format

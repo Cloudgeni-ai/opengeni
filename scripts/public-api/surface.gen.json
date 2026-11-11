@@ -3019,6 +3019,7 @@
         "BrowserDownloadSaveRequest"
       ],
       "response": [
+        "BrowserDownloadSaveProgress",
         "BrowserDownloadSaveResponse"
       ]
     },
@@ -11630,6 +11631,7 @@
         "$.identity": "string? null",
         "$.instructions": "string?",
         "$.renderer": "ref(AgentRenderer)?",
+        "$.titleInstructions": "string? null",
         "$.vaultPolicy": "ref(VaultPolicy)?"
       }
     },
@@ -13385,6 +13387,18 @@
         "$.controllerGeneration": "string!",
         "$.downloads": "array!",
         "$.downloads[]": "ref(BrowserDownload)"
+      }
+    },
+    "BrowserDownloadSaveProgress": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.downloadId": "string!",
+        "$.operationId": "string!",
+        "$.retryAfterMs": "integer!",
+        "$.state": "const!=[\"\\\"uploading\\\"\"]"
       }
     },
     "BrowserDownloadSaveRequest": {
@@ -19152,10 +19166,19 @@
         "$.createdAt": "string!",
         "$.githubAccountId": "integer! null",
         "$.installationId": "integer!",
+        "$.issue": "ref(GitHubInstallationIssue)? null",
         "$.lifecycle": "ref(GitHubInstallationLifecycle)!",
         "$.repositoryCount": "integer!",
         "$.repositoryScope": "ref(GitHubRepositoryScope)!",
         "$.updatedAt": "string!"
+      }
+    },
+    "GitHubInstallationIssue": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"account_changed\\\"\",\"\\\"github_unreachable\\\"\",\"\\\"no_repositories\\\"\",\"\\\"owner_unconfirmed\\\"\",\"\\\"suspended\\\"\",\"\\\"uninstalled\\\"\"]"
       }
     },
     "GitHubInstallationLifecycle": {
@@ -26643,6 +26666,7 @@
         "$.identity": "string! null",
         "$.renderer": "ref(AgentRenderer)!",
         "$.source": "ref(ResolvedAgentConfigSource)!",
+        "$.titleInstructions": "string?",
         "$.unavailable": "array!",
         "$.unavailable[]": "ref(AgentCapabilityId)",
         "$.unavailableReasons": "object?",
@@ -36355,6 +36379,7 @@
       "GitHubAppSetupMode": "type",
       "GitHubBindingStatus": "type",
       "GitHubInstallationBinding": "type",
+      "GitHubInstallationIssue": "type",
       "GitHubInstallationLifecycle": "type",
       "GitHubRepositoriesResponse": "type",
       "GitHubRepository": "type",
