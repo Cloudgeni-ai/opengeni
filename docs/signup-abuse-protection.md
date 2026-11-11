@@ -250,7 +250,7 @@ session networks (newest 200 sessions in the last 90 days) and remembers the
 owner (`opengeni_private.signup_network_flagged_owners`), so the networks
 outlast the sessions. Sign-ins after the decision are captured when the capture
 runs again (`--network-capture-flagged`). Setup itself only writes the new
-account's own rows. `1362_signup_denied_network_backfill.sql`, in its own
+account's own rows. `1366_signup_denied_network_backfill.sql`, in its own
 transaction so 1361's settings lock is not held meanwhile, captures every
 account already denied or held, account by account, including those decided
 before 1354; a failure is a migration warning with counts, and
