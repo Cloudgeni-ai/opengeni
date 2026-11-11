@@ -56,6 +56,7 @@ const {
   INSTRUCTIONS_LONG_HINT,
   INSTRUCTIONS_OVER_LIMIT_HINT,
   ONLY_ME_UNAVAILABLE,
+  ORGANIZATION_ACCESS_ADMIN_ONLY,
   agentChanges,
   lengthCount,
   lengthError,
@@ -875,6 +876,59 @@ test("an agent over the limit as stored still saves other changes, and says why 
     | undefined;
   expect(update).toMatchObject({ name: "Long desk" });
   expect(update && "instructions" in update).toBe(false);
+});
+
+test("Anyone in the organization takes an organization admin, and says who can then see the chat", async () => {
+  const radio = (container: HTMLElement, label: string) =>
+    [...container.querySelectorAll<HTMLElement>("[role='radio']")].find(
+      (element) => element.textContent?.trim() === label,
+    );
+  const member = await render(
+    <AgentsTestHost context={appContext(fakeAgentsClient([]))}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const memberOption = radio(member, "Anyone in Acme");
+  expect(memberOption).toBeDefined();
+  expect(
+    memberOption?.getAttribute("aria-disabled") ?? memberOption?.getAttribute("disabled"),
+  ).not.toBeNull();
+  expect(ORGANIZATION_ACCESS_ADMIN_ONLY).toBe("Only an organization admin can choose this.");
+  const first = mounted!;
+  await act(async () => first.unmount());
+  first.container.remove();
+
+  const client = fakeAgentsClient([]);
+  const orgAdmin = appContext(client, {
+    accessContext: {
+      subjectId: "user-me",
+      subjectLabel: "Maja",
+      workspaceGrants: [],
+      accountGrants: [
+        {
+          accountId: "account-1",
+          subjectId: "user-me",
+          permissions: ["account:admin"],
+          metadata: { accountName: "Acme" },
+        },
+      ],
+    },
+  });
+  const container = await render(
+    <AgentsTestHost context={orgAdmin}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Help desk"));
+  await act(async () => radio(container, "Anyone in Acme")!.click());
+  expect(container.textContent).toContain("People in your organization can ask Help desk");
+  await act(async () => button(container, "Create agent").click());
+  await flush();
+  const created = client.calls.find((call) => call[0] === "createAgent")?.[2] as
+    | Record<string, unknown>
+    | undefined;
+  expect(created?.visibility).toBe("organization");
 });
 
 test("Only me is off with a reason where Only me chats aren't available", async () => {

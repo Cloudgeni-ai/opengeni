@@ -307,13 +307,12 @@ describe("agents data layer (restricted runtime role)", () => {
   test("Slack availability: one installation, the legacy row, names and projections", async () => {
     const org = await organization();
     const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
-    const put = (agentId: string, connectionId: string, open?: boolean) =>
+    const put = (agentId: string, connectionId: string) =>
       putAgentSlackInstall(app.db, org.homeScope, {
         agentId,
         connectionId,
         slackTeamId: "T0AGENTS",
         installWorkspaceId: org.install,
-        ...(open !== undefined ? { open } : {}),
         actorSubjectId: org.owner,
       });
 
@@ -403,9 +402,16 @@ describe("agents data layer (restricted runtime role)", () => {
     expect(clash).toMatchObject({ kind: "slack_name_taken", connectionId: org.connectionId });
     expect((await getAgent(app.db, org.homeScope, other.id))?.name).toBe("Ops desk");
 
-    // Changes reach the legacy row; open mirrors the agent's version.
-    const opened = await put(agent.id, org.connectionId, true);
-    expect(opened).toMatchObject({ kind: "saved", install: { open: true } });
+    // Anyone in the organization is the agent's own; the previous release
+    // reads it from each installation's `open` and the legacy row.
+    const opened = await updateAgent(app.db, org.homeScope, {
+      agentId: agent.id,
+      expectedVersion: null,
+      actorSubjectId: org.owner,
+      patch: { organizationAccess: true },
+    });
+    expect(opened).toMatchObject({ kind: "updated", agent: { organizationAccess: true } });
+    expect((await listAgentSlackInstalls(app.db, org.homeScope, [agent.id]))[0]?.open).toBe(true);
     const revised = await updateAgent(app.db, org.homeScope, {
       agentId: agent.id,
       expectedVersion: null,

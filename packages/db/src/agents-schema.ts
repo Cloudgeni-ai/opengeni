@@ -39,6 +39,12 @@ export const agents = pgTable(
     avatar: jsonb("avatar").$type<SessionAvatar>(),
     memoryEnabled: boolean("memory_enabled").notNull().default(false),
     memoryCollectionId: uuid("memory_collection_id"),
+    /**
+     * Who can use it: anyone in the organization (from chat integrations),
+     * not only the workspace. Only meaningful on a shared agent. Read
+     * together with `agent_slack_installs.open` until the contract step.
+     */
+    organizationAccess: boolean("organization_access").notNull().default(false),
     currentRevision: integer("current_revision").notNull().default(1),
     origin: text("origin").$type<"slack_agent" | "bot_template" | "app" | "slack">().notNull(),
     sourceSessionId: uuid("source_session_id"),

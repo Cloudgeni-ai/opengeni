@@ -278,7 +278,8 @@ export type AgentFile = {
   instructions: string;
   memoryEnabled: boolean;
   /** Who can use it; an import keeps an Only me agent Only me where it can. */
-  visibility: "private" | "workspace";
+  /** Older files say only "private" or "workspace". */
+  visibility: Agent["visibility"];
 };
 
 export function agentFile(agent: Agent): AgentFile {
@@ -355,7 +356,8 @@ export function parseAgentFile(
         (file.memoryEnabled !== undefined && typeof file.memoryEnabled !== "boolean") ||
         (file.visibility !== undefined &&
           file.visibility !== "private" &&
-          file.visibility !== "workspace") ||
+          file.visibility !== "workspace" &&
+          file.visibility !== "organization") ||
         (avatar !== null && !avatar.success)
       ) {
         return { ok: false, error: UNREADABLE };
@@ -369,6 +371,8 @@ export function parseAgentFile(
           ...(instructions !== undefined ? { instructions } : {}),
           ...(firstMessage !== undefined ? { firstMessage } : {}),
           ...(typeof file.memoryEnabled === "boolean" ? { memoryEnabled: file.memoryEnabled } : {}),
+          // An imported agent is never opened to the organization on its own:
+          // that is an organization admin's choice, made in the form.
           ...(file.visibility === "private" ? { visibility: "private" as const } : {}),
         },
       };

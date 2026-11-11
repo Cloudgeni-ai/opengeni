@@ -7,6 +7,7 @@ import {
   type AgentRevision,
   type AgentSlackAvailability,
   type AgentSummary,
+  type AgentVisibility,
   type AccessGrant,
 } from "@opengeni/contracts";
 import type {
@@ -22,12 +23,14 @@ import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
 /**
  * Agents (docs/agents.md): who may see and change one, and how it reads.
  *
- * A shared (`workspace`) agent is for everyone in its home workspace; an Only
- * me (`private`) one exists only for its owner, like an Only me chat. Whoever
- * made an agent and the admins of its workspace may change it (a
- * workspace-level caller without a person may too, as with bot templates).
- * Making it available in Slack needs a workspace admin; open use in Slack
- * needs an organization admin, decided by the caller from the request.
+ * A shared (`workspace`) agent is for everyone in its home workspace and
+ * works in every Slack workspace linked to it; an Only me (`private`) one
+ * exists only for its owner, like an Only me chat. "Anyone in <organization>"
+ * (`organization`) is a shared agent that full members of its organization may
+ * also use from chat integrations; choosing it needs an organization admin,
+ * decided by the caller from the request. Whoever made an agent and the admins
+ * of its workspace may change it (a workspace-level caller without a person
+ * may too, as with bot templates).
  */
 
 /**
@@ -87,6 +90,27 @@ export function agentViewerCanMakePrivate(
   return viewer.admin || viewer.subjectId === agent.createdBySubjectId;
 }
 
+/** Who can use an agent, as the API says it. */
+export function agentVisibilityValue(
+  agent: Pick<AgentRecord, "visibility" | "organizationAccess">,
+): AgentVisibility {
+  if (agent.visibility === "private") return "private";
+  return agent.organizationAccess ? "organization" : "workspace";
+}
+
+/**
+ * A requested "Who can use it" as stored: the visibility, and whether anyone
+ * in the organization can use it.
+ */
+export function agentVisibilityRecord(visibility: AgentVisibility): {
+  visibility: "private" | "workspace";
+  organizationAccess: boolean;
+} {
+  return visibility === "private"
+    ? { visibility: "private", organizationAccess: false }
+    : { visibility: "workspace", organizationAccess: visibility === "organization" };
+}
+
 export type AgentViewContext = {
   viewer: AgentViewer;
   installs: readonly AgentSlackInstallRecord[];
@@ -111,7 +135,8 @@ function slackAvailability(
       slackAgentNameKey(agent.name) === install.nameKey
         ? slackAgentHandle(agent.name)
         : install.nameKey,
-    open: install.open,
+    // Anyone in the organization is the agent's own setting now.
+    open: agent.organizationAccess || install.open,
     enabledBySubjectId: install.enabledBySubjectId,
     version: install.version,
     createdAt: install.createdAt.toISOString(),
@@ -137,7 +162,7 @@ export function agentSummaryView(agent: AgentRecord, context: AgentViewContext):
     name: agent.name,
     description: agent.description,
     avatar: avatar.success ? avatar.data : null,
-    visibility: agent.visibility,
+    visibility: agentVisibilityValue(agent),
     ownerSubjectId: agent.ownerSubjectId,
     origin: agent.origin,
     sourceSessionId: agent.sourceSessionId,

@@ -11546,7 +11546,7 @@
         "$.updatedAt": "string!",
         "$.version": "integer!",
         "$.viewer": "ref(AgentViewerAccess)!",
-        "$.visibility": "ref(SessionVisibility)!",
+        "$.visibility": "ref(AgentVisibility)!",
         "$.workspaceId": "string!"
       }
     },
@@ -11996,7 +11996,7 @@
         "$.updatedAt": "string!",
         "$.version": "integer!",
         "$.viewer": "ref(AgentViewerAccess)!",
-        "$.visibility": "ref(SessionVisibility)!",
+        "$.visibility": "ref(AgentVisibility)!",
         "$.workspaceId": "string!"
       }
     },
@@ -12067,6 +12067,15 @@
         "$.canEdit": "boolean!",
         "$.canManageSlack": "boolean!",
         "$.canOpenInSlack": "boolean!"
+      }
+    },
+    "AgentVisibility": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"organization\\\"\",\"\\\"private\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "ApiIntegrationAuthPreview": {
@@ -16346,7 +16355,7 @@
         "$.memoryEnabled": "boolean?",
         "$.name": "string!",
         "$.sourceSessionId": "string? null",
-        "$.visibility": "enum?=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]"
+        "$.visibility": "enum?=[\"\\\"organization\\\"\",\"\\\"private\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "CreateApiKeyRequest": {
@@ -32360,7 +32369,7 @@
         "$.instructions": "string?",
         "$.memoryEnabled": "boolean?",
         "$.name": "string?",
-        "$.visibility": "ref(SessionVisibility)?"
+        "$.visibility": "ref(AgentVisibility)?"
       }
     },
     "UpdateAutomationTemplateRequest": {

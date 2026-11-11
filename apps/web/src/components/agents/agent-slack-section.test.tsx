@@ -1,6 +1,6 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { SLACK_AGENT_OPEN_LABEL, SLACK_AGENT_OPEN_NARROWED_NOTICE } from "@opengeni/contracts";
+import { SLACK_AGENT_OPEN_LABEL } from "@opengeni/contracts";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -67,9 +67,6 @@ async function render(
   return container;
 }
 
-const toggle = (container: HTMLElement, label: string) =>
-  container.querySelector<HTMLButtonElement>(`[role='switch'][aria-label='${label}']`)!;
-
 function installs(rows: Record<string, unknown>[]) {
   return async () => ({ installs: rows, routingEnabled: true });
 }
@@ -97,49 +94,28 @@ test("a shared agent is in each linked Slack workspace, with how people ask it a
     "@Opengeni Data team",
   );
   expect(container.querySelector("[role='switch'][aria-label='Available in Acme']")).toBeNull();
-  expect(container.textContent).toContain(SLACK_AGENT_OPEN_LABEL);
+  // Who can use it, including anyone in the organization, is the agent's own setting.
+  expect(container.querySelector("[role='switch']")).toBeNull();
+  expect(container.textContent).not.toContain(SLACK_AGENT_OPEN_LABEL);
   expect(container.textContent).toContain("Introduce in channels");
 });
 
-test("open use needs an organization admin and is saved at the version shown", async () => {
-  const onAgent = makeAgent({
+test("introducing it in channels goes to that Slack workspace", async () => {
+  const agent = makeAgent({
     slack: [availability()],
     viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: false },
   });
   let introduced = "";
   const container = await render(
-    onAgent,
+    agent,
     { listAgentSlackInstalls: installs([row()]) },
     (id) => (introduced = id),
   );
-  expect(toggle(container, SLACK_AGENT_OPEN_LABEL).getAttribute("aria-disabled")).toBe("true");
   const introduce = [...container.querySelectorAll("button")].find(
     (element) => element.textContent?.trim() === "Introduce",
   )!;
   await act(async () => introduce.click());
   expect(introduced).toBe(CONNECTION_ID);
-  expect(container.textContent).not.toContain(SLACK_AGENT_OPEN_NARROWED_NOTICE);
-  await cleanup?.();
-
-  const orgAdmin = makeAgent({
-    slack: [availability()],
-    viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: true },
-  });
-  const calls: unknown[][] = [];
-  const opened = await render(orgAdmin, {
-    listAgentSlackInstalls: installs([row()]),
-    putAgentSlackAvailability: async (...args: unknown[]) => {
-      calls.push(args);
-      const open = availability({ open: true, version: 4 });
-      return { agent: { ...orgAdmin, slack: [open] }, availability: open };
-    },
-  });
-  await act(async () => toggle(opened, SLACK_AGENT_OPEN_LABEL).click());
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-  expect(calls).toEqual([
-    [WORKSPACE_ID, orgAdmin.id, CONNECTION_ID, { expectedVersion: 3, open: true }],
-  ]);
-  expect(opened.textContent).toContain(SLACK_AGENT_OPEN_NARROWED_NOTICE);
 });
 
 test("a row says why the agent isn't in that Slack workspace", async () => {

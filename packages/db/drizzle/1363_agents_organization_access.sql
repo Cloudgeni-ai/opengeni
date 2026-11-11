@@ -1,0 +1,14 @@
+-- deployment-mode: rolling
+-- "Who can use it: Anyone in <organization>": a shared agent that full
+-- members of its organization may also use from chat integrations (Slack
+-- today), not only its workspace's members. Until now this was the
+-- per-installation `agent_slack_installs.open` switch.
+--
+-- Rolling: a column with a default that the previous release never reads or
+-- writes. No backfill here (FORCE RLS would hide the rows from the migration
+-- principal): the new code treats an agent as open to its organization when
+-- this is true or any of its Slack installations is still open, and keeps
+-- writing `open` on every installation, so the previous release behaves the
+-- same during the rollout. A later contract step backfills this from `open`
+-- and stops reading `open`.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS organization_access boolean NOT NULL DEFAULT false;

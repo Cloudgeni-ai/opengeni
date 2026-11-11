@@ -189,6 +189,8 @@ export async function updateSlackAgent(
         ...(patch.description !== undefined ? { description: patch.description } : {}),
         ...(patch.avatar !== undefined ? { avatar: patch.avatar } : {}),
         ...(patch.instructions !== undefined ? { instructions: patch.instructions } : {}),
+        // Open use is now the agent's own "Anyone in the organization".
+        ...(patch.open !== undefined ? { organizationAccess: patch.open } : {}),
       };
       if (Object.keys(fields).length > 0) {
         const updated = await updateAgent(tx, target, {
@@ -199,17 +201,6 @@ export async function updateSlackAgent(
         });
         if (updated.kind === "slack_name_taken") throw new SlackAgentWriteAbort("name_taken");
         if (updated.kind !== "updated") throw new SlackAgentWriteAbort("not_found");
-      }
-      if (patch.open !== undefined) {
-        const saved = await putAgentSlackInstall(tx, target, {
-          agentId: current.id,
-          connectionId: current.connectionId,
-          slackTeamId: current.slackTeamId,
-          installWorkspaceId: home.workspaceId,
-          open: patch.open,
-          actorSubjectId: input.actorSubjectId ?? current.createdBySubjectId,
-        });
-        if (saved.kind !== "saved") throw new SlackAgentWriteAbort("not_found");
       }
       if (patch.knowledgeCollectionId) {
         await setAgentMemoryCollection(tx, target, {

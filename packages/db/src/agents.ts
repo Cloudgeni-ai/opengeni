@@ -99,6 +99,12 @@ export type AgentRecord = {
   avatar: unknown;
   memoryEnabled: boolean;
   memoryCollectionId: string | null;
+  /**
+   * Who can use it: anyone in the organization from chat integrations, not
+   * only the workspace. Always false for an Only me agent. True too while
+   * any of its Slack installations is still open from before this setting.
+   */
+  organizationAccess: boolean;
   currentRevision: number;
   origin: AgentOriginValue;
   sourceSessionId: string | null;
@@ -154,6 +160,7 @@ type AgentRow = {
   avatar: unknown;
   memory_enabled: boolean;
   memory_collection_id: string | null;
+  organization_access?: boolean | null;
   current_revision: number;
   origin: string;
   source_session_id: string | null;
@@ -196,6 +203,7 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     avatar: row.avatar ?? null,
     memoryEnabled: row.memory_enabled,
     memoryCollectionId: row.memory_collection_id,
+    organizationAccess: row.visibility !== "private" && row.organization_access === true,
     currentRevision: Number(row.current_revision),
     origin: row.origin as AgentOriginValue,
     sourceSessionId: row.source_session_id,
@@ -245,6 +253,8 @@ function mapInstall(row: InstallRow): AgentSlackInstallRecord {
 const AGENT_COLUMNS = sql.raw(`a.id::text as id, a.account_id::text as account_id,
   a.workspace_id::text as workspace_id, a.visibility, a.owner_subject_id, a.name, a.description,
   a.avatar, a.memory_enabled, a.memory_collection_id::text as memory_collection_id,
+  (a.organization_access or exists (select 1 from agent_slack_installs oi
+    where oi.agent_id = a.id and oi.account_id = a.account_id and oi.open)) as organization_access,
   a.current_revision, a.origin, a.source_session_id::text as source_session_id,
   a.created_by_subject_id, a.version, a.created_at, a.updated_at`);
 
@@ -451,6 +461,8 @@ export type CreateAgentInput = {
   instructions: string;
   firstMessage: string;
   memoryEnabled: boolean;
+  /** Anyone in the organization can use it (shared agents only). */
+  organizationAccess?: boolean;
   origin: AgentOriginValue;
   sourceSessionId: string | null;
   createdBySubjectId: string | null;
@@ -515,18 +527,20 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
   const [row] = await rawRows<AgentRow>(
     tx,
     sql`insert into agents (${sql.raw(input.id ? "id, " : "")}account_id, workspace_id, visibility,
-        owner_subject_id, name, name_key, description, avatar, memory_enabled, current_revision,
-        origin, source_session_id, created_by_subject_id)
+        owner_subject_id, name, name_key, description, avatar, memory_enabled, organization_access,
+        current_revision, origin, source_session_id, created_by_subject_id)
       values (${input.id ? sql`${input.id}::uuid, ` : sql``}${home.accountId}::uuid,
         ${home.workspaceId}::uuid, ${input.visibility}, ${input.ownerSubjectId}, ${input.name},
         lower(btrim(${input.name})), ${input.description},
         ${input.avatar === null ? sql`null` : sql`${JSON.stringify(input.avatar)}::jsonb`},
-        ${input.memoryEnabled}, 1, ${input.origin}, ${input.sourceSessionId}::uuid,
+        ${input.memoryEnabled},
+        ${input.visibility === "workspace" && input.organizationAccess === true}, 1,
+        ${input.origin}, ${input.sourceSessionId}::uuid,
         ${input.createdBySubjectId})
       returning ${sql.raw(`id::text as id, account_id::text as account_id,
         workspace_id::text as workspace_id, visibility, owner_subject_id, name, description, avatar,
-        memory_enabled, memory_collection_id::text as memory_collection_id, current_revision,
-        origin, source_session_id::text as source_session_id, created_by_subject_id, version,
+        memory_enabled, memory_collection_id::text as memory_collection_id, organization_access,
+        current_revision, origin, source_session_id::text as source_session_id, created_by_subject_id, version,
         created_at, updated_at`)}`,
   );
   if (!row) throw new Error("Agent insert returned no row");
@@ -608,6 +622,12 @@ export type AgentPatch = {
   instructions?: string;
   firstMessage?: string;
   memoryEnabled?: boolean;
+  /**
+   * Anyone in the organization can use it. Written to the agent and, for the
+   * previous release during the rollout, as `open` on every Slack
+   * installation it is in. Making the agent Only me turns it off.
+   */
+  organizationAccess?: boolean;
   /** Forget the current Memory collection (for example after a visibility change). */
   clearMemoryCollection?: boolean;
 };
@@ -730,6 +750,8 @@ export async function updateAgent(
       const visibility = patch.visibility ?? current.visibility;
       const ownerSubjectId =
         patch.visibility !== undefined ? (patch.ownerSubjectId ?? null) : current.ownerSubjectId;
+      const organizationAccess =
+        visibility === "workspace" && (patch.organizationAccess ?? current.organizationAccess);
       const avatar = patch.avatar !== undefined ? patch.avatar : current.avatar;
       await tx.execute(sql`update agents set
           name = ${name},
@@ -740,10 +762,20 @@ export async function updateAgent(
           owner_subject_id = ${ownerSubjectId},
           memory_enabled = ${patch.memoryEnabled ?? current.memoryEnabled},
           memory_collection_id = ${patch.clearMemoryCollection ? null : current.memoryCollectionId}::uuid,
+          organization_access = ${organizationAccess},
           current_revision = ${nextRevision}::integer,
           version = version + 1,
           updated_at = now()
         where id = ${current.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
+      // The previous release reads who can use it from each Slack
+      // installation's `open` during the rollout: keep them the same.
+      for (const install of installs) {
+        if (install.open === organizationAccess) continue;
+        await tx.execute(sql`update agent_slack_installs set open = ${organizationAccess},
+            version = version + 1, updated_at = now()
+          where id = ${install.id}::uuid`);
+        install.open = organizationAccess;
+      }
       if (revised) {
         await tx.execute(sql`insert into agent_revisions (agent_id, account_id, workspace_id,
             revision, name, description, instructions, first_message, created_by_subject_id)
@@ -925,10 +957,10 @@ export type PutAgentSlackInstallOutcome =
   | { kind: "requires_workspace_visibility" };
 
 /**
- * Make an agent available in one Slack installation, or change its open
- * setting there. Also writes the legacy Slack agent row under the
- * installation's own workspace. Callers check the name rules, visibility and
- * permissions first.
+ * Make an agent available in one Slack installation. Its `open` there is the
+ * agent's own "Anyone in the organization" (change that with `updateAgent`).
+ * Also writes the legacy Slack agent row under the installation's own
+ * workspace. Callers check the name rules, visibility and permissions first.
  */
 export async function putAgentSlackInstall(
   db: Database,
@@ -939,21 +971,20 @@ export async function putAgentSlackInstall(
     slackTeamId: string;
     /** The installation's own workspace (its binding's workspace). */
     installWorkspaceId: string;
-    open?: boolean;
     expectedVersion?: number;
     /** Null when Opengeni made it available on its own (every linked Slack workspace). */
     actorSubjectId: string | null;
     /**
      * Opengeni adds it on its own (a shared agent is in every linked Slack
      * workspace): the agent's version stays, so nobody's open edit of it
-     * conflicts. A person turning it on or changing open use bumps it.
+     * conflicts. A person turning it on bumps it.
      */
     automatic?: boolean;
     /**
      * While an agent is in one Slack installation at a time: move it here from
      * the other one in the same transaction, so it is never in neither and a
-     * concurrent catch-up can't put it back in between. Its open use, channel
-     * settings and intros there go with it.
+     * concurrent catch-up can't put it back in between. Its channel settings
+     * and intros there go with it.
      */
     moveFromOther?: boolean;
   },
@@ -982,27 +1013,15 @@ export async function putAgentSlackInstall(
         if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
           return { kind: "version_conflict" as const, install: existing };
         }
-        if (input.open === undefined || input.open === existing.open) {
-          return { kind: "saved" as const, install: existing, agent, created: false };
-        }
-        await tx.execute(sql`update agent_slack_installs set open = ${input.open},
-            version = version + 1, updated_at = now()
-          where id = ${existing.id}::uuid`);
-        // The legacy API's version is the agent's.
-        await tx.execute(sql`update agents set version = version + 1, updated_at = now()
-          where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
-        const updated = (await getAgent(tx, home, agent.id)) ?? agent;
-        const saved = (await installsOf(tx, home, agent.id)).find(
-          (install) => install.id === existing.id,
-        )!;
-        await syncLegacySlackRows(tx, updated, [saved]);
-        return { kind: "saved" as const, install: saved, agent: updated, created: false };
+        return { kind: "saved" as const, install: existing, agent, created: false };
       }
+      // The previous release reads who can use it here from `open`.
+      const open = agent.organizationAccess;
       const nameKey = slackAgentNameKey(agent.name);
       await tx.execute(sql`insert into agent_slack_installs (agent_id, account_id, workspace_id,
           connection_id, slack_team_id, name_key, open, enabled_by_subject_id)
         values (${agent.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid,
-          ${input.connectionId}::uuid, ${input.slackTeamId}, ${nameKey}, ${input.open ?? false},
+          ${input.connectionId}::uuid, ${input.slackTeamId}, ${nameKey}, ${open},
           ${input.actorSubjectId})`);
       // A person turning Slack on changes the agent, so a stale edit of it
       // conflicts; Opengeni adding it on its own changes nothing they edit.
@@ -1025,7 +1044,7 @@ export async function putAgentSlackInstall(
               ${JSON.stringify(legacySlackAgentAvatar(agent))}::jsonb,
               ${legacySlackInstructions(agent)},
               ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
-              ${input.open ?? false},
+              ${open},
               ${agent.createdBySubjectId ?? input.actorSubjectId ?? AUTOMATIC_SLACK_CREATOR},
               ${enabled.version}::integer)`);
         },
@@ -1330,6 +1349,7 @@ export type SlackAgentProjection = {
 type ProjectionRow = InstallRow & {
   agent_account_id: string;
   agent_workspace_id: string;
+  agent_organization_access: boolean;
   name: string;
   description: string;
   avatar: unknown;
@@ -1358,7 +1378,9 @@ function mapProjection(row: ProjectionRow, fallbackHome: string | null): SlackAg
     instructions: row.instructions ?? "",
     knowledgeCollectionId: row.memory_enabled ? row.memory_collection_id : null,
     memoryEnabled: row.memory_enabled,
-    open: row.open,
+    // Anyone in the organization: the agent's own setting, or this
+    // installation's switch from before it (until the contract step).
+    open: row.agent_organization_access || row.open,
     createdBySubjectId: row.agent_created_by_subject_id ?? row.enabled_by_subject_id ?? "",
     version: Number(row.agent_version),
     createdAt: date(row.agent_created_at),
@@ -1412,6 +1434,7 @@ function readableIds(rows: readonly ProjectionRow[]): Set<string> {
 function projectionQuery(where: SQL): SQL {
   return sql`select ${INSTALL_COLUMNS},
       a.account_id::text as agent_account_id, a.workspace_id::text as agent_workspace_id,
+      a.organization_access as agent_organization_access,
       a.name, a.description, a.avatar, a.memory_enabled,
       a.memory_collection_id::text as memory_collection_id,
       a.created_by_subject_id as agent_created_by_subject_id,

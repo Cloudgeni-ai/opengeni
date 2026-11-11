@@ -158,12 +158,20 @@ const AgentFirstMessage = /* @__PURE__ */ defineSchema(() =>
 
 /**
  * Who can use an agent: `private` (Only me) is its owner; `workspace` is
- * everyone in its home workspace. The same two words, and the same schema
- * shape, a chat uses; kept unexported so the public surface keeps naming it
- * `SessionVisibility`.
+ * everyone in its home workspace; `organization` is also anyone in its
+ * organization, from chat integrations such as Slack (their chats run in
+ * the agent's workspace, which its members can see). Clients must tolerate
+ * values added later.
  */
-const AgentVisibility = /* @__PURE__ */ defineSchema(() => z.enum(["private", "workspace"]));
+export const AgentVisibility = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["private", "workspace", "organization"]),
+);
 export type AgentVisibility = z.infer<typeof AgentVisibility>;
+
+/** Shared with its workspace, and maybe beyond: anything but Only me. */
+export function agentVisibilityIsShared(visibility: AgentVisibility): boolean {
+  return visibility !== "private";
+}
 
 /** What an agent was made from. Display and support only; grants nothing. */
 export const AgentOrigin = /* @__PURE__ */ defineSchema(() =>
@@ -219,7 +227,10 @@ export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
     canEdit: z.boolean(),
     /** Make it available in Slack, or not: an admin of its workspace. */
     canManageSlack: z.boolean(),
-    /** Turn open use in Slack on: an organization admin. Turning it off needs `canManageSlack`. */
+    /**
+     * Choose "Anyone in <organization>" under who can use it: an organization
+     * admin. Narrowing it back needs `canEdit`.
+     */
     canOpenInSlack: z.boolean(),
   }),
 );

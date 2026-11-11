@@ -4,10 +4,12 @@ An agent is one channel-independent record that replaces two older concepts:
 [Slack agents](slack-bot.md#slack-agents) and [bot templates](bots.md#bot-templates).
 It has a name, an icon, a description, Instructions (the one text saying
 what it does and how), Memory, a home workspace (where its chats run) and a
-visibility: Only me (`private`) or the home workspace (`workspace`). An agent
-works wherever its workspace is connected: a shared agent is available in the
-app and in every Slack workspace linked to its home workspace, with no
-separate step, and who can use it there is still its own access
+visibility, its **Who can use it**: Only me (`private`), people in the home
+workspace (`workspace`), or anyone in the organization (`organization`,
+[Anyone in the organization](#anyone-in-the-organization)). An agent works
+wherever its workspace is connected: a shared agent is available in the app
+and in every Slack workspace linked to its home workspace, with no separate
+step, and who can use it there is still its own access
 ([Available everywhere](#available-everywhere)).
 
 The change ships as expand, migrate and contract releases
@@ -25,7 +27,8 @@ Slack routes, interactions, proposals, intro posts, suggestions, the
   `visibility`, `owner_subject_id` (required for Only me), `name`, `name_key`
   (`lower(btrim(name))`, a clash hint, deliberately not unique), `description`,
   `avatar` (optional; initials otherwise), `memory_enabled` and
-  `memory_collection_id`, `current_revision`, `origin` (`slack_agent`,
+  `memory_collection_id`, `organization_access` (migration 1363; anyone in
+  the organization, on a shared agent), `current_revision`, `origin` (`slack_agent`,
   `bot_template`, `app` or `slack`), `source_session_id`, creator, `version`
   for optimistic concurrency. `UNIQUE (id, account_id)` anchors the composite
   foreign keys below.
@@ -120,12 +123,12 @@ path is the agent's home.
 | Route | Permission |
 | --- | --- |
 | `GET /agents?filter=all\|yours`, `GET /agents/:id` | `sessions:read`; Only me agents only for their owner |
-| `POST /agents` | `sessions:create`; Only me needs a person who is a member of the organization |
-| `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin (a workspace API key without a person counts as an admin, as for bot templates) |
+| `POST /agents` | `sessions:create`; Only me needs a person who is a member of the organization; `organization` needs an organization admin |
+| `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin (a workspace API key without a person counts as an admin, as for bot templates); changing it to `organization` also needs an organization admin |
 | `GET /agents/:id/revisions?cursor&limit` | `sessions:read` |
 | `GET /agents/:id/chats?filter=yours\|everyone&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner |
 | `GET /agents/:id/slack` | `sessions:read`; also catches the agent up in the linked Slack workspaces |
-| `PUT /agents/:id/slack/:connectionId` (open use) | `workspace:admin`; turning `open` on also needs an organization admin |
+| `PUT /agents/:id/slack/:connectionId` | `workspace:admin`; the older `open` field sets **Anyone in the organization** for the agent (turning it on needs an organization admin) |
 | `DELETE /agents/:id/slack/:connectionId` | always `409 agent_slack_always_available`: there is nothing to turn off |
 | `GET /agents/:id/slack/:connectionId/channels`, `POST .../intro` | `workspace:admin` |
 
@@ -197,9 +200,9 @@ turns availability on or off; any member who may make a shared agent
 (`sessions:create`) makes one people can ask in every linked Slack workspace,
 including Slack apps the organization shares. Before, that took a workspace
 admin. The older `/bot-templates` API still accepts names Slack can't use or
-that clash; such an agent stays out of Slack and its page says why. Who may use it there is unchanged: members of its
-workspace, or linked organization members while it is open (an organization
-admin's switch). No migration: these are the rows turning Slack on always
+that clash; such an agent stays out of Slack and its page says why. Who may use it there is the agent's own
+**Who can use it**: members of its workspace, or also linked organization
+members when it is set to anyone in the organization. No migration: these are the rows turning Slack on always
 wrote, and an older release reads them as turned on. During a rolling deploy,
 servers on the previous release still refuse Only me for an agent in Slack
 and show the old switch, which can turn Slack off; a server on this release
@@ -207,6 +210,42 @@ adds the agent back within a minute.
 - Memory (`memoryEnabled`) creates the collection when switched on: workspace
   scope for a shared agent, the owner's personal scope for an Only me one. It
   is best effort and may wait for review under Review-first.
+
+### Anyone in the organization
+
+**Who can use it: Anyone in <organization>** (`visibility: "organization"`)
+lets every linked, full member of the organization use a shared agent from
+chat integrations, even without access to its workspace. It replaces Slack's
+per-installation "Organization members can use this agent in Slack" switch:
+one setting on the agent, which Slack follows in every linked Slack workspace
+and other integrations (Teams) read the same way.
+
+- Choosing it, through the form, `POST`/`PATCH /agents` or the older `open`
+  field of `PUT /agents/:id/slack/:connectionId` and the Slack agents API,
+  needs an organization admin (the request's verified `account:admin`), as
+  the switch did. Narrowing it back needs only the usual edit rights. Making
+  an agent Only me turns it off. Personal workspaces don't offer it, and an
+  imported `.agent.json` is never opened on its own.
+- Who may use it from an integration is unchanged from Slack's open agents
+  ([slack-bot.md](slack-bot.md#open-agents)): on every message the
+  integration must positively say the person is a full member of the
+  connected team in a conversation only that team can see, their account
+  there must be linked to an Opengeni person, and that person must be an
+  active, full member of the agent's organization, read live. They are told
+  once that the workspace's members can see what they say, and their chat
+  runs as the agent's read-only service principal. The integration-neutral
+  checks are in `apps/api/src/integrations/organization-agents.ts`
+  (`agentOpenToOrganization`, `organizationAgentAskerPerson`); Slack's own
+  team and conversation check stays in `slack-open-agents.ts`.
+- Storage: `agents.organization_access` (migration 1363, default false, a
+  rolling column the previous release ignores) on a `workspace` agent; the API
+  says `organization`. No backfill (FORCE RLS would hide the rows from the
+  migration principal): until the contract step, an agent counts as open to
+  its organization when the column is true or any of its
+  `agent_slack_installs.open` is, and every write keeps `open` on each of its
+  installations (and the legacy `slack_agents.open`) equal to it, so a server
+  on the previous release behaves the same during the rollout. A change made
+  through such a server's old switch is still honoured.
 
 ### Dual write
 
@@ -363,6 +402,9 @@ is migrated and the column stays:
   comes from the legacy `slack_agents.workspace_id`).
 - Make the old Slack agent `DELETE` turn Slack off instead of deleting the
   agent, once nothing older depends on it.
+- Backfill `agents.organization_access` from `agent_slack_installs.open`
+  (with the owner-only posture window), then stop reading and writing
+  `open` (keep the column until a later drop).
 
 ## App
 
@@ -381,15 +423,17 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   the Instructions on import), its chats (Yours / Everyone's, each marked with
   where it started), Instructions, **Remember across chats**, who can use it,
   and **Available in**: the app always, and one row per linked Slack workspace
-  with no switch: how people ask it (`@Opengeni <Name>`), open use and
+  with no switch: how people ask it (`@Opengeni <Name>`) and
   **Introduce in channels** at `/agents/:agentId/introduce/:connectionId`, or
   why it isn't there (Only me, its name, or "for now an agent works in one
   Slack workspace", with **Move here** for those who manage it). Controls
   follow the agent's `viewer` access. Choosing Only me in the form says it
   stops answering in Slack; a Slack name refusal shows at the name.
 - Form: icon, name, what it helps with, Instructions, **Remember across
-  chats** (a switch, on for a new agent) and who can use it. Only the name is
-  required. Lengths are checked on save with a count
+  chats** (a switch, on for a new agent) and who can use it: Only me, people
+  in the workspace, or anyone in the organization (offered for an
+  organization's workspaces, chosen only by an organization admin, with a hint
+  saying what it opens). Only the name is required. Lengths are checked on save with a count
   near each limit, never cut while typing. **Only me** is off with a reason
   where Only me chats aren't available.
 - Composer: an agent chip ("Opengeni ▾" with a **Chat with** list and

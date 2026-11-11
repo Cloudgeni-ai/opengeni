@@ -260,6 +260,92 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     expect(reshared.json.agent.slack).toHaveLength(1);
   }, 120_000);
 
+  test("Anyone in the organization: an organization admin chooses it, Slack follows it, older open use counts", async () => {
+    if (!available) return;
+    const install = await installation(`org-${Date.now()}`);
+    const openRows = async (agentId: string) => ({
+      installs: (
+        await shared!.admin<{ open: boolean }[]>`
+          select open from agent_slack_installs where agent_id = ${agentId}`
+      ).map((row) => row.open),
+      legacy: (
+        await shared!.admin<{ open: boolean }[]>`
+          select open from slack_agents where id = ${agentId}`
+      ).map((row) => row.open),
+      flag: (
+        await shared!.admin<{ organization_access: boolean }[]>`
+          select organization_access from agents where id = ${agentId}`
+      )[0]?.organization_access,
+    });
+
+    // Only an organization admin opens an agent to the whole organization.
+    const refused = await call(install.admin, "POST", install.base, {
+      name: "Org desk",
+      visibility: "organization",
+    });
+    expect(refused.status).toBe(403);
+    const created = await call(install.orgAdmin, "POST", install.base, {
+      name: "Org desk",
+      visibility: "organization",
+    });
+    expect(created.status).toBe(201);
+    const agent = created.json.agent;
+    expect(agent.visibility).toBe("organization");
+    expect(agent.slack).toEqual([expect.objectContaining({ open: true })]);
+    // Older releases read Slack's open flag, so it is kept in step.
+    expect(await openRows(agent.id)).toEqual({ installs: [true], legacy: [true], flag: true });
+
+    // Narrowing it back needs no organization admin; widening again does.
+    const narrowed = await call(install.admin, "PATCH", `${install.base}/${agent.id}`, {
+      expectedVersion: agent.version,
+      visibility: "workspace",
+    });
+    expect(narrowed.status).toBe(200);
+    expect(narrowed.json.agent).toMatchObject({
+      visibility: "workspace",
+      slack: [expect.objectContaining({ open: false })],
+    });
+    expect(await openRows(agent.id)).toEqual({ installs: [false], legacy: [false], flag: false });
+    const widen = await call(install.admin, "PATCH", `${install.base}/${agent.id}`, {
+      expectedVersion: narrowed.json.agent.version,
+      visibility: "organization",
+    });
+    expect(widen.status).toBe(403);
+    const widened = await call(install.orgAdmin, "PATCH", `${install.base}/${agent.id}`, {
+      expectedVersion: narrowed.json.agent.version,
+      visibility: "organization",
+    });
+    expect(widened.status).toBe(200);
+    expect(widened.json.agent.visibility).toBe("organization");
+
+    // Only me clears it everywhere.
+    const madePrivate = await call(install.orgAdmin, "PATCH", `${install.base}/${agent.id}`, {
+      expectedVersion: widened.json.agent.version,
+      visibility: "private",
+    });
+    expect(madePrivate.status).toBe(200);
+    expect((await openRows(agent.id)).flag).toBe(false);
+
+    // An agent an older release opened through Slack's switch is open to the
+    // organization, and the older Slack field still changes it.
+    const older = await call(install.admin, "POST", install.base, { name: "Older desk" });
+    expect(older.status).toBe(201);
+    await shared!.admin`
+      update agent_slack_installs set open = true where agent_id = ${older.json.agent.id}`;
+    const read = await call(install.admin, "GET", `${install.base}/${older.json.agent.id}`);
+    expect(read.json.agent.visibility).toBe("organization");
+    const slackPath = `${install.base}/${older.json.agent.id}/slack/${install.connectionId}`;
+    const closed = await call(install.admin, "PUT", slackPath, { open: false });
+    expect(closed.status).toBe(200);
+    expect(closed.json.availability.open).toBe(false);
+    expect(closed.json.agent.visibility).toBe("workspace");
+    expect(await openRows(older.json.agent.id)).toEqual({
+      installs: [false],
+      legacy: [false],
+      flag: false,
+    });
+  }, 120_000);
+
   test("Slack name rules and clashes are refused when a shared agent is made, renamed or shared", async () => {
     if (!available) return;
     const label = `rules-${Date.now()}`;
