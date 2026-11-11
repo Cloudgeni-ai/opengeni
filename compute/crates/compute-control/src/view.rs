@@ -37,6 +37,11 @@
 //! meanwhile. Without this, a fleet with no room asks the same full host
 //! the same thing four times a second per waiting caller, and each ask
 //! writes the sandbox's row first.
+//!
+//! The view also tallies, for each host it holds, what its metrics report
+//! ([`Tally`]): how often the host registered afresh while this replica
+//! held it, which is its agent starting again or its lease lapsing, and
+//! how often it refused a wake or a placement as full.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -116,6 +121,22 @@ pub struct Known {
     pub info: Described,
     pub state: HostState,
     pub capacity: Reported,
+    /// What this replica counted of it while it held it.
+    pub tally: Tally,
+}
+
+/// What a replica counted of one host since it first read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    /// Fresh registrations it read, each under a new host epoch: the
+    /// host's agent started again (a restart or a reboot), or its lease
+    /// lapsed and it registered once more. The first read of a host is
+    /// not counted.
+    pub registrations: u64,
+    /// Wakes of its sandboxes it refused as full.
+    pub refused_wakes: u64,
+    /// Sandboxes placed on it, created or adopted, it refused as full.
+    pub refused_places: u64,
 }
 
 /// What a host refused as full ([`View::refused`]).
@@ -383,6 +404,15 @@ impl View {
                 inner.full.remove(&row.id);
             }
             inner.fleet.upsert(row.id, info, row.state, capacity);
+            // A later epoch is a fresh registration: its agent started
+            // again, or its lease lapsed. The first read is not one.
+            let tally = inner.hosts.get(&row.id).map_or_else(Tally::default, |known| {
+                let mut tally = known.tally;
+                if row.epoch > known.target.epoch {
+                    tally.registrations += 1;
+                }
+                tally
+            });
             inner.hosts.insert(
                 row.id,
                 Known {
@@ -397,6 +427,7 @@ impl View {
                     info: row.info.clone(),
                     state: row.state,
                     capacity: row.capacity.clone(),
+                    tally,
                 },
             );
         }
@@ -427,13 +458,18 @@ impl View {
     /// Notes that host `host` refused `refused` as full: placement passes
     /// it over for that, and for anything it covers, and
     /// [`Self::refuses`] says so, until the host reports anything other
-    /// than what the view holds of it now, or [`FULL_FOR`] at most.
+    /// than what the view holds of it now, or [`FULL_FOR`] at most. Each
+    /// refusal is counted in the host's [`Tally`].
     pub fn refused(&self, host: HostId, refused: Refused) {
         let mut inner = self.write();
         let inner = &mut *inner;
-        let Some(known) = inner.hosts.get(&host) else {
+        let Some(known) = inner.hosts.get_mut(&host) else {
             return;
         };
+        match refused {
+            Refused::Wake(_) => known.tally.refused_wakes += 1,
+            Refused::Place(_) => known.tally.refused_places += 1,
+        }
         let report = (
             known.target.epoch,
             known.state,
@@ -983,5 +1019,65 @@ mod tests {
         // A host forgotten forgets what it refused.
         view.apply_all(&[]);
         assert!(!view.refuses(HostId(1), &Refused::Wake(refused)));
+    }
+
+    fn tally(view: &View) -> Tally {
+        view.hosts()
+            .into_iter()
+            .find(|known| known.target.host == HostId(1))
+            .map(|known| known.tally)
+            .unwrap()
+    }
+
+    /// A host's fresh registrations, which a restarted agent makes, are
+    /// counted as the view reads them under a later epoch, renewals and
+    /// reports under the same one are not, and neither is the first
+    /// read; each refusal as full is counted by its kind.
+    #[test]
+    fn a_host_s_fresh_registrations_and_refusals_are_tallied() {
+        let view = View::new(1, Duration::from_secs(60));
+        // Read first under a later epoch than 1: not a registration.
+        let mut first = host(1);
+        first.epoch = HostEpoch(5);
+        view.apply_all(&[first.clone()]);
+        assert_eq!(tally(&view), Tally::default());
+
+        // Renewals and reports under the same epoch.
+        for renewals in 2..5 {
+            let mut row = host(renewals);
+            row.epoch = HostEpoch(5);
+            view.apply(&[row]);
+        }
+        assert_eq!(tally(&view).registrations, 0);
+
+        // The agent starts again: a new epoch, twice.
+        let mut again = host(5);
+        again.epoch = HostEpoch(9);
+        view.apply(&[again.clone()]);
+        // Read again, as the next read's overlap or a full read does.
+        view.apply_all(&[again]);
+        let mut third = host(6);
+        third.epoch = HostEpoch(12);
+        view.apply(&[third]);
+        assert_eq!(tally(&view).registrations, 2);
+
+        view.refused(HostId(1), Refused::Wake(Id(compute_fleet::SandboxId(7))));
+        view.refused(HostId(1), Refused::Wake(Id(compute_fleet::SandboxId(8))));
+        view.refused(HostId(1), Refused::Place(demand()));
+        // A host the view does not hold counts nothing.
+        view.refused(HostId(2), Refused::Place(demand()));
+        assert_eq!(
+            tally(&view),
+            Tally {
+                registrations: 2,
+                refused_wakes: 2,
+                refused_places: 1,
+            }
+        );
+
+        // A host forgotten and read again starts its tally afresh.
+        view.apply_all(&[]);
+        view.apply_all(&[first]);
+        assert_eq!(tally(&view), Tally::default());
     }
 }

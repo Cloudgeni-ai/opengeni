@@ -13,6 +13,8 @@ compute_fleet_host_info, which is how every host alert is scoped.
 {{- $hosts := printf "compute_fleet_host_info{%s}" $scope }}
 {{- $liveHosts := printf "compute_fleet_host_info{%s,state=\"live\"}" $scope }}
 {{- $runbook := "https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md" }}
+{{- $spareBytes := mul (int (default 4096 (($cc.alerts).spareMemoryMib))) 1048576 }}
+{{- $createFailures := "no_capacity|unavailable|unknown_outcome|host|internal|init_failed" }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -177,6 +179,82 @@ spec:
             value: '{{ "{{ $value | humanizePercentage }}" }} failing'
             user_impact: 'Some sandbox commands, file operations or wakes fail.'
             next_step: 'Check compute_control_requests_total by route and outcome, and the replicas'' logs.'
+        - alert: OpenGeniComputeCreatesFailing
+          expr: |
+            (
+              sum(rate(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"{{ $createFailures }}"}[30m]))
+              /
+              sum(rate(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"ok|{{ $createFailures }}"}[30m]))
+            ) > 0.1
+            and
+            sum(increase(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"ok|{{ $createFailures }}"}[30m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'More than 10% of new compute sandboxes fail to be created, for lack of room or in the service, a host or the store.'
+            headline: 'Compute sandbox creates failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} failing (30 min)'
+            user_impact: 'New chats on compute get no sandbox, so they cannot run commands.'
+            next_step: 'Check compute_control_requests_total for POST /v1/sandboxes by outcome, and the replicas'' logs.'
+        - alert: OpenGeniComputeHostAgentRestarting
+          expr: |
+            max by (host_name) (increase(compute_control_host_registrations_total{ {{- $scope }}}[6h])) >= 2
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A compute host registered afresh at least twice in six hours: its agent keeps starting again (stopped by its watchdog when stuck, crashed or rebooted), or its lease keeps lapsing.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} agent keeps restarting'
+            value: '{{ "{{ printf `%.0f` $value }}" }} fresh registration(s) (6 h)'
+            user_impact: 'While its agent restarts, the host''s sandboxes do not answer and their wakes wait or fail.'
+            next_step: 'Read the host''s journal in Cloud Logging for why the agent stopped, and check its free memory on the compute dashboard.'
+            runbook_url: {{ printf "%s#observing" $runbook }}
+        - alert: OpenGeniComputeHostRefusingWakes
+          expr: |
+            sum by (host_name) (increase(compute_control_host_refusals_total{ {{- $scope }},kind="wake"}[30m])) >= 3
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A compute host keeps refusing to wake its own sandboxes as full: it has no memory or disk left to promise them.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} full, refusing wakes'
+            value: '{{ "{{ printf `%.0f` $value }}" }} refusal(s) (30 min)'
+            user_impact: 'Chats whose sandboxes sleep on this host wait for them to wake, or fail when the wait runs out.'
+            next_step: 'Check the host''s free memory and sandboxes on the compute dashboard; drain it or add hosts so its sandboxes can move.'
+        - alert: OpenGeniComputeHostUnreachable
+          expr: |
+            max by (host_name) (compute_fleet_host_renewal_age_seconds{ {{- $scope }}}) > 20
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: 'A compute host has not renewed its 30-second lease for over 20 seconds: its agent is stuck or the host is cut off from the control service.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} unreachable'
+            value: '{{ "{{ printf `%.0f` $value }}" }}s since a renewal'
+            user_impact: 'Its sandboxes do not answer; if it stays silent, its VMs stop and lose their running programs.'
+            next_step: 'Check the host''s instance and its journal in Cloud Logging; the control service gives it up once its lease runs out.'
+            runbook_url: {{ printf "%s#hosts" $runbook }}
+        - alert: OpenGeniComputeFleetFull
+          expr: |
+            max(
+              (
+                compute_fleet_host_memory_free_bytes{ {{- $scope }}}
+                + compute_fleet_host_memory_reclaimable_bytes{ {{- $scope }}}
+              )
+              and on (host_name)
+              {{ $liveHosts }}
+            ) < {{ $spareBytes }}
+            and
+            max(compute_fleet_group_size{ {{- $scope }}}) >= max(compute_fleet_group_max_size{ {{- $scope }}})
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The compute host group is at its maximum size and no live host can promise another sandbox''s memory, so the fleet can neither place nor grow.'
+            headline: 'Compute fleet full at its maximum size'
+            value: '{{ "{{ $value | humanize }}" }}B free on the roomiest host'
+            user_impact: 'New sandboxes and wakes are refused or wait, so chats on compute cannot run commands.'
+            next_step: 'Raise the group''s maximum (computeControl.scaling.max) or the hosts'' size, or drain a host whose sandboxes can move.'
         {{- if ($cc.metrics).hostsTo }}
         - alert: OpenGeniComputeHostMetricsFailing
           expr: |

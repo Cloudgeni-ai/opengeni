@@ -3,7 +3,10 @@
 //!
 //! Every replica reports its own work: the public API's requests by route
 //! and outcome, with their latency; the hosts' metrics it passed on
-//! ([`crate::hostapi`], `--host-metrics-to`); and whether it leads. Only
+//! ([`crate::hostapi`], `--host-metrics-to`); whether it leads; and what
+//! it counted of each host it holds ([`crate::view::Tally`]): the host's
+//! fresh registrations, each its agent starting again or its lease
+//! lapsing, and the wakes and placements it refused as full. Only
 //! the replica that leads reports the fleet, so a Prometheus that scrapes
 //! every replica stores each fleet series once: each host as the
 //! replica's view last read it (its state, what it has for sandboxes and
@@ -280,6 +283,7 @@ impl Metrics {
             "1 while this replica leads: it alone reports the compute_fleet_ series.",
         );
         out.sample("compute_control_leader", &[], u64::from(leading));
+        render_tallies(&mut out, hosts);
         if let Some((imported, waiting)) = *locked(&self.pointers) {
             out.family(
                 "compute_control_pointers_imported",
@@ -394,6 +398,40 @@ fn state_label(state: HostState) -> &'static str {
 }
 
 const MIB: u64 = 1 << 20;
+
+/// What this replica counted of each host it holds, which every replica
+/// reports: each sees its own refusals, and reads every registration.
+fn render_tallies(out: &mut Text, hosts: &[Known]) {
+    out.family(
+        "compute_control_host_registrations_total",
+        "counter",
+        "Fresh registrations of a host this replica read while it held the host, each under a new epoch: the host's agent started again (a crash, a watchdog's stop, a restart or a reboot), or its lease lapsed and it registered once more.",
+    );
+    for host in hosts {
+        out.sample(
+            "compute_control_host_registrations_total",
+            &[("host_name", &host.target.name)],
+            host.tally.registrations,
+        );
+    }
+    out.family(
+        "compute_control_host_refusals_total",
+        "counter",
+        "Requests from this replica a host refused as full, by host and kind: wake (of a sandbox it holds) or place (a sandbox created on it or given to it to adopt).",
+    );
+    for host in hosts {
+        for (kind, count) in [
+            ("wake", host.tally.refused_wakes),
+            ("place", host.tally.refused_places),
+        ] {
+            out.sample(
+                "compute_control_host_refusals_total",
+                &[("host_name", &host.target.name), ("kind", kind)],
+                count,
+            );
+        }
+    }
+}
 
 /// A gauge's value, written exactly.
 #[derive(Clone, Copy, Debug)]

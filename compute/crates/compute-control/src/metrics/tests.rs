@@ -2,7 +2,7 @@ use compute_fleet::HostEpoch;
 use compute_protocol::fleet::{Capacity as Reported, HostInfo as Described};
 
 use super::*;
-use crate::view::Target;
+use crate::view::{Tally, Target};
 
 fn host(id: u64, name: &str, state: HostState) -> Known {
     Known {
@@ -44,6 +44,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             sets_aside: true,
             info: None,
         },
+        tally: Tally::default(),
     }
 }
 
@@ -158,6 +159,46 @@ fn only_the_leader_reports_the_fleet() {
         !text.contains("compute_fleet_host_renewal_gap_seconds_count{"),
         "{text}"
     );
+}
+
+#[test]
+fn every_replica_reports_each_host_s_registrations_and_refusals() {
+    let metrics = Metrics::default();
+    let mut restarted = host(1, "hosts-a", HostState::Live);
+    restarted.tally = Tally {
+        registrations: 3,
+        refused_wakes: 131,
+        refused_places: 2,
+    };
+    let hosts = [restarted, host(2, "hosts-b", HostState::Draining)];
+    // A replica that does not lead reports them all the same.
+    for leads in [false, true] {
+        metrics.leads(leads);
+        let text = metrics.render(&hosts);
+        let sample = |series: &str| value(&text, series);
+        assert_eq!(
+            sample("compute_control_host_registrations_total{host_name=\"hosts-a\"}"),
+            Some(3.0),
+            "{text}"
+        );
+        assert_eq!(
+            sample("compute_control_host_registrations_total{host_name=\"hosts-b\"}"),
+            Some(0.0)
+        );
+        assert_eq!(
+            sample("compute_control_host_refusals_total{host_name=\"hosts-a\",kind=\"wake\"}"),
+            Some(131.0)
+        );
+        assert_eq!(
+            sample("compute_control_host_refusals_total{host_name=\"hosts-a\",kind=\"place\"}"),
+            Some(2.0)
+        );
+        assert_eq!(
+            sample("compute_control_host_refusals_total{host_name=\"hosts-b\",kind=\"wake\"}"),
+            Some(0.0)
+        );
+        assert!(text.contains("# TYPE compute_control_host_refusals_total counter"));
+    }
 }
 
 #[test]

@@ -1023,6 +1023,54 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     `observability.prometheusRule.enabled`), scoping each host to its
     release through the leader's `compute_fleet_host_info`, and the
     **Opengeni · Compute** dashboard shows them.
+- **What the control service counts of each host.** Every replica
+  reports, for each host it holds, its fresh registrations
+  (`compute_control_host_registrations_total`): each is the host
+  registering under a new epoch, which its agent does when it starts
+  again (stopped by its watchdog when stuck, crashed, restarted or
+  rebooted) or after its lease lapsed. It also reports the requests the
+  host refused as full (`compute_control_host_refusals_total`, by `kind`:
+  `wake` of a sandbox it holds, `place` of one created on it or given to
+  it to adopt). These need no host metrics, so they alert with
+  `computeControl.metrics.port` alone:
+  - `OpenGeniComputeHostAgentRestarting`: a host registered afresh at
+    least twice in six hours. One in-place upgrade restarts each agent
+    once and does not fire it.
+  - `OpenGeniComputeHostRefusingWakes`: a host refused three wakes or more
+    as full in half an hour, for a quarter of an hour.
+  - `OpenGeniComputeHostUnreachable` (critical): a host has not renewed
+    its 30-second lease for over 20 seconds, for a minute. Once its lease
+    runs out, `OpenGeniComputeHostGivenUp` follows, and
+    `OpenGeniComputeHostGiveUpFailing` if its fence keeps failing.
+  - `OpenGeniComputeFleetFull`: the host group is at its maximum size
+    (`compute_fleet_group_size` against `compute_fleet_group_max_size`)
+    and no live host can promise `computeControl.alerts.spareMemoryMib`
+    more (free plus reclaimable memory; 4096 by default, about one
+    sandbox's memory request), for a quarter of an hour.
+  - `OpenGeniComputeCreatesFailing`: over a tenth of `POST /v1/sandboxes`
+    that did not fail for the caller's own mistake failed, for lack of
+    room or in the service, a host or the store, over half an hour with
+    five or more.
+- **Read a host's journal in Cloud Logging.** The host's journal reaches
+  its serial console, and the Terraform module turns on the instance's
+  serial port logging (`journal_to_cloud_logging`, on by default), so
+  Cloud Logging keeps it (30 days by default) with nothing running on
+  the host, and it stays readable after the host is gone:
+
+  ```sh
+  gcloud logging read --project <project> --freshness 1h \
+    'logName="projects/<project>/logs/serialconsole.googleapis.com%2Fserial_port_1_output"
+     AND labels."compute.googleapis.com/resource_name"="<host name>"
+     AND textPayload:"compute-host"'
+  ```
+
+  Search for `wake refused: host full`, `is stuck`, or `compute.alarm` the
+  same way. Hosts made from an earlier template ship theirs once the
+  project's or the instance's metadata has `serial-port-logging-enable`
+  set to `TRUE`, without a restart. An organization policy
+  (`compute.disableSerialPortLogging`) can forbid it; then set
+  `journal_to_cloud_logging` to false and read the console with
+  `gcloud compute instances get-serial-port-output`.
 - **Distinguish booking headroom from filesystem space.**
   `compute_fleet_host_disk_booking_headroom_bytes` is what more wakes may book after
   subtracting worst-case sandbox growth and the host's reserve from available

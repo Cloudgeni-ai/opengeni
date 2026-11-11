@@ -1631,6 +1631,12 @@ computeControl:
     # rules must admit this endpoint. Empty: the service refuses hosts'
     # metrics, and the host alerts are left out.
     hostsTo: ""
+  alerts:
+    # OpenGeniComputeFleetFull fires when the host group is at its maximum
+    # size and no live host can promise this much more memory (free plus
+    # reclaimable): about one sandbox's memory request
+    # (OPENGENI_COMPUTE_MEMORY_REQUEST_MIB).
+    spareMemoryMib: 4096
   hostsService:
     # Hosts dial this endpoint from outside the cluster: a LoadBalancer
     # (annotations for an internal one) or a NodePort.

@@ -535,6 +535,213 @@ describe("compute alerts", () => {
         at: "20m",
         fires: [],
       },
+      {
+        name: "a lost host whose fence keeps failing",
+        series: [
+          { series: `compute_control_give_up_failures_total{${own},pod="a"}`, values: "0+1x60" },
+          { series: `compute_control_give_up_failures_total{${other},pod="b"}`, values: "0+5x60" },
+        ],
+        alert: "OpenGeniComputeHostGiveUpFailing",
+        at: "21m",
+        fires: [{ value: 20 }],
+      },
+      {
+        name: "a give-up that failed once and then fenced",
+        series: [
+          { series: `compute_control_give_up_failures_total{${own},pod="a"}`, values: "0x5 1x60" },
+        ],
+        alert: "OpenGeniComputeHostGiveUpFailing",
+        at: "25m",
+        fires: [],
+      },
+    ]);
+  }, 180_000);
+
+  // The alerts the November 2026 memory-exhaustion incident needed: agents
+  // stuck under memory pressure, stopped by their watchdog and registering
+  // again, hosts refusing wakes as full, and a fleet at its maximum size.
+  test("fire on what compute's incidents look like", async () => {
+    const groups = await render(enabled);
+    const sixHours = 6 * 120;
+    const restarts = (values: string) => ({
+      series: `compute_control_host_registrations_total{${own},pod="a",host_name="h1"}`,
+      values,
+    });
+    const createsBy = (outcome: string, values: string) => ({
+      series: `compute_control_requests_total{${own},pod="a",method="POST",route="/v1/sandboxes",outcome="${outcome}"}`,
+      values,
+    });
+    const fleetSeries = (free: number, size: number, max: number, state = "live") => [
+      { series: `compute_fleet_host_info{${own},pod="a",host_name="h1",state="${state}"}`, values: "1x60" },
+      { series: `compute_fleet_host_info{${own},pod="a",host_name="h2",state="draining"}`, values: "1x60" },
+      {
+        series: `compute_fleet_host_memory_free_bytes{${own},pod="a",host_name="h1"}`,
+        values: `${free}x60`,
+      },
+      {
+        series: `compute_fleet_host_memory_reclaimable_bytes{${own},pod="a",host_name="h1"}`,
+        values: "0x60",
+      },
+      // A draining host's free memory is no room for new sandboxes.
+      {
+        series: `compute_fleet_host_memory_free_bytes{${own},pod="a",host_name="h2"}`,
+        values: `${16 * 2 ** 30}x60`,
+      },
+      {
+        series: `compute_fleet_host_memory_reclaimable_bytes{${own},pod="a",host_name="h2"}`,
+        values: "0x60",
+      },
+      { series: `compute_fleet_group_size{${own},pod="a"}`, values: `${size}x60` },
+      { series: `compute_fleet_group_max_size{${own},pod="a"}`, values: `${max}x60` },
+    ];
+    await evaluate(groups, [
+      {
+        name: "an agent restarting twice in six hours",
+        series: [restarts(`0x100 1x200 2x${sixHours}`)],
+        alert: "OpenGeniComputeHostAgentRestarting",
+        at: "3h",
+        fires: [{ labels: { host_name: "h1" }, value: 2 }],
+      },
+      {
+        name: "one restart, as an in-place upgrade makes, is no alert",
+        series: [restarts(`0x100 1x${sixHours}`)],
+        alert: "OpenGeniComputeHostAgentRestarting",
+        at: "3h",
+        fires: [],
+      },
+      {
+        name: "restarts counted by a replica that started since still count",
+        series: [
+          restarts(`0x100 1x40`),
+          {
+            series: `compute_control_host_registrations_total{${own},pod="b",host_name="h1"}`,
+            values: `_x140 0x20 2x${sixHours}`,
+          },
+        ],
+        alert: "OpenGeniComputeHostAgentRestarting",
+        at: "3h",
+        fires: [{ labels: { host_name: "h1" }, value: 2 }],
+      },
+      {
+        name: "another release's host restarting",
+        series: [
+          {
+            series: `compute_control_host_registrations_total{${other},pod="b",host_name="h1"}`,
+            values: `0+1x${sixHours}`,
+          },
+        ],
+        alert: "OpenGeniComputeHostAgentRestarting",
+        at: "3h",
+        fires: [],
+      },
+      {
+        name: "a host refusing wakes as full, counted on two replicas",
+        series: [
+          {
+            series: `compute_control_host_refusals_total{${own},pod="a",host_name="h1",kind="wake"}`,
+            values: "0+1x80",
+          },
+          {
+            series: `compute_control_host_refusals_total{${own},pod="b",host_name="h1",kind="wake"}`,
+            values: "0+1x80",
+          },
+          {
+            series: `compute_control_host_refusals_total{${own},pod="a",host_name="h1",kind="place"}`,
+            values: "0+9x80",
+          },
+        ],
+        alert: "OpenGeniComputeHostRefusingWakes",
+        at: "40m",
+        fires: [{ labels: { host_name: "h1" }, value: 120 }],
+      },
+      {
+        name: "refused placements alone go elsewhere and do not page as wakes",
+        series: [
+          {
+            series: `compute_control_host_refusals_total{${own},pod="a",host_name="h1",kind="wake"}`,
+            values: "0x80",
+          },
+          {
+            series: `compute_control_host_refusals_total{${own},pod="a",host_name="h1",kind="place"}`,
+            values: "0+9x80",
+          },
+        ],
+        alert: "OpenGeniComputeHostRefusingWakes",
+        at: "40m",
+        fires: [],
+      },
+      {
+        name: "a host silent for half a minute",
+        series: [
+          {
+            series: `compute_fleet_host_renewal_age_seconds{${own},pod="a",host_name="h1"}`,
+            values: "1x10 30x10",
+          },
+        ],
+        alert: "OpenGeniComputeHostUnreachable",
+        at: "7m",
+        fires: [{ labels: { host_name: "h1" }, value: 30 }],
+      },
+      {
+        name: "renewals a few seconds late are not unreachable",
+        series: [
+          {
+            series: `compute_fleet_host_renewal_age_seconds{${own},pod="a",host_name="h1"}`,
+            values: "1x10 9x10",
+          },
+        ],
+        alert: "OpenGeniComputeHostUnreachable",
+        at: "7m",
+        fires: [],
+      },
+      {
+        name: "a fleet at its maximum with no room on any live host",
+        series: fleetSeries(2 * 2 ** 30, 4, 4),
+        alert: "OpenGeniComputeFleetFull",
+        at: "20m",
+        fires: [{ value: 2 * 2 ** 30 }],
+      },
+      {
+        name: "a fleet with no room that can still grow",
+        series: fleetSeries(2 * 2 ** 30, 3, 4),
+        alert: "OpenGeniComputeFleetFull",
+        at: "20m",
+        fires: [],
+      },
+      {
+        name: "a fleet at its maximum with room for another sandbox",
+        series: fleetSeries(6 * 2 ** 30, 4, 4),
+        alert: "OpenGeniComputeFleetFull",
+        at: "20m",
+        fires: [],
+      },
+      {
+        name: "creates failing for lack of room and in hosts",
+        series: [
+          createsBy("ok", "0+4x80"),
+          createsBy("no_capacity", "0+1x80"),
+          createsBy("host", "0+1x80"),
+          // A caller's own mistake is not a failing fleet.
+          createsBy("invalid", "0+20x80"),
+        ],
+        alert: "OpenGeniComputeCreatesFailing",
+        at: "40m",
+        fires: [{ value: 2 / 6 }],
+      },
+      {
+        name: "a create failure rate above a tenth",
+        series: [createsBy("ok", "0+4x80"), createsBy("unknown_outcome", "0+1x80")],
+        alert: "OpenGeniComputeCreatesFailing",
+        at: "40m",
+        fires: [{ value: 0.2 }],
+      },
+      {
+        name: "a single failed create among few",
+        series: [createsBy("ok", "0x20 1x80"), createsBy("host", "0x10 1x80")],
+        alert: "OpenGeniComputeCreatesFailing",
+        at: "40m",
+        fires: [],
+      },
     ]);
   }, 180_000);
 });

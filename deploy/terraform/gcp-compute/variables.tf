@@ -193,6 +193,12 @@ variable "host_startup_prelude" {
   default     = ""
 }
 
+variable "journal_to_cloud_logging" {
+  description = "Ship each host's journal, which its serial console carries, to Cloud Logging (serial port logging), so the host agent's log outlives the host and can be read without its console: `gcloud logging read 'logName=\"projects/<project>/logs/serialconsole.googleapis.com%2Fserial_port_1_output\"'` (compute/docs/operations.md, Observing). It runs nothing on the host. Set false where an organization policy (compute.disableSerialPortLogging) forbids it."
+  type        = bool
+  default     = true
+}
+
 variable "advertise_interface" {
   description = "Network interface whose IPv4 address each host gives the control service to dial (port 7443), waiting up to two minutes for it: for example tailscale0 when the service reaches hosts over an overlay network. Empty: the host's VPC address."
   type        = string

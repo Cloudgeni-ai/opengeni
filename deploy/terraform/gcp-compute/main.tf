@@ -301,6 +301,10 @@ resource "google_compute_instance_template" "host" {
     compute-advertise        = var.advertise_interface
     compute-advertise-public = var.advertise_public_address ? "true" : "false"
     startup-script           = file("${path.module}/host-startup.sh")
+
+    # The journal reaches the serial console; this sends the console to
+    # Cloud Logging, with nothing running on the host.
+    serial-port-logging-enable = var.journal_to_cloud_logging ? "TRUE" : "FALSE"
   }
 
   lifecycle {

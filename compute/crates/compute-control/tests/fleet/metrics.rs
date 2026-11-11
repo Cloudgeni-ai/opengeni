@@ -10,10 +10,11 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use compute_protocol::host::{ErrorCode, Reply, Request};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
-use crate::support::{Fleet, OPERATOR_KEY, given_up, until};
+use crate::support::{Act, Fleet, OPERATOR_KEY, given_up, until};
 
 /// A metrics store that keeps what it is sent and answers `status`,
 /// with `retry_after` when set.
@@ -317,6 +318,62 @@ async fn the_leader_reports_the_fleet_and_every_replica_its_requests() {
         ) && !line.contains("outcome=\"ok\"")),
         "{text}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_registering_afresh_and_refusing_as_full_is_counted() {
+    let fleet = Fleet::start().await;
+    let host = fleet.host("hosts-a").await;
+    let registrations = "compute_control_host_registrations_total{host_name=\"hosts-a\"}";
+    let refused_places =
+        "compute_control_host_refusals_total{host_name=\"hosts-a\",kind=\"place\"}";
+    let mut text = String::new();
+    until(Duration::from_secs(5), "the host is listed", async || {
+        text = fleet.scrape().await;
+        value(&text, registrations).is_some()
+    })
+    .await;
+    // Its first registration is not counted.
+    assert_eq!(value(&text, registrations), Some(0.0), "{text}");
+    assert_eq!(value(&text, refused_places), Some(0.0), "{text}");
+
+    // Its agent stops answering, as one stuck under memory pressure, and
+    // registers again once it is given up on.
+    let old = host.epoch();
+    host.renewing(false);
+    given_up(&fleet, &host).await;
+    host.renewing(true);
+    until(
+        Duration::from_secs(10),
+        "its fresh registration is counted",
+        async || {
+            text = fleet.scrape().await;
+            host.epoch() > old && value(&text, registrations) == Some(1.0)
+        },
+    )
+    .await;
+
+    // It refuses a create as full: counted, and answered as no capacity.
+    host.behave(|envelope| match envelope.request {
+        Request::Create { .. } => Act::Reply(Reply::Error {
+            message: "full".into(),
+            code: ErrorCode::HostFull,
+        }),
+        _ => Act::Ordinary,
+    });
+    let (status, body) = fleet.post("/v1/sandboxes", json!({})).await;
+    assert_eq!(status, 503, "{body}");
+    let text = fleet.scrape().await;
+    assert_eq!(value(&text, refused_places), Some(1.0), "{text}");
+    assert_eq!(
+        value(
+            &text,
+            "compute_control_host_refusals_total{host_name=\"hosts-a\",kind=\"wake\"}"
+        ),
+        Some(0.0),
+        "{text}"
+    );
+    assert_eq!(value(&text, registrations), Some(1.0), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
