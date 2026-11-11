@@ -9,11 +9,13 @@ import { opaqueProviderArtifactFingerprint } from "@opengeni/codex";
  * blocks. Each such item records the binding it was issued under (its origin,
  * see `withArtifactOrigin`): the provider for encrypted content; the platform,
  * account, model and (for prefix-bound models) the instruction prefix for
- * Claude. A request whose binding differs replays the item as readable
- * historical text (`projectHistoryForProvider` with `artifactScope`). Items
- * stored before origins were recorded stay native until the provider refuses
- * them; the refusal is remembered here so the one retry, and every later
- * request in this process, sends them as text instead.
+ * Claude. A request whose binding differs replays encrypted content as
+ * readable historical text (`projectHistoryForProvider` with `artifactScope`)
+ * and leaves Claude's own thinking out (its own reasoning shown back to Claude
+ * as text can trip Claude's safety systems). Items stored before origins were recorded stay
+ * native until the provider refuses them; the refusal is remembered here so
+ * the one retry, and every later request in this process, leaves them out
+ * (Claude) or sends them as text (encrypted content).
  */
 
 /** Claude's signed thinking block on a reasoning item, when it has one. */

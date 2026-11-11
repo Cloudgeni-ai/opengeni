@@ -84,14 +84,17 @@ export {
   type UseNativeSessionRealtimeOptions,
 } from "./realtime/use-native-session-realtime";
 export {
+  nativeCallHandle,
   nativeRealtimeModelSupported,
   useNativeRealtimeCall,
   type NativeCallAdapter,
   type NativeCallAudioRoute,
+  type NativeCallCommand,
   type NativeCallEvent,
   type NativeCallPhase,
   type NativeCallRealtime,
   type NativeCallRouteChangeReason,
+  type NativeCallStartRequest,
   type NativeIncomingCall,
   type NativeIncomingCallAdapter,
   type NativeIncomingCallEndReason,

@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
+import { quarantineTest } from "@opengeni/testing/quarantine";
 import { mkdir, writeFile } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
 import type { SessionWorkflowClient } from "@opengeni/core";
@@ -71,6 +72,9 @@ import {
 import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-search";
 
 // Signup first asks how to use Opengeni; these flows take the cloud path.
+// Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
+const test = quarantineTest(bunTest, import.meta.path);
+
 const USE_CASE_HEADING = "How do you want to use Opengeni?";
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it

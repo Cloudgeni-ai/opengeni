@@ -1468,6 +1468,112 @@ describe("BrowserSupervisor", () => {
   });
 });
 
+describe("caches of a browser whose session ends or stops", () => {
+  const state = ["opengeni", "agent", "browserd", "scopes", "s", "state"];
+
+  /** A supervisor whose state lives under ~/.config, as the native agent's
+   * does on Linux, so Chromium's ~/.cache counterpart applies. */
+  async function withHomeSupervisor(
+    callback: (fixture: {
+      supervisor: BrowserSupervisor;
+      contexts: Map<string, BrowserSupervisorDriverContext>;
+      mirror: (browserSessionId: string) => string;
+    }) => Promise<void>,
+  ): Promise<void> {
+    const previousHome = process.env.HOME;
+    let home = "";
+    try {
+      await withSupervisor(
+        async (fixture) =>
+          await callback({
+            ...fixture,
+            mirror: (browserSessionId) =>
+              join(home, ".cache", ...state, "sessions", browserSessionId),
+          }),
+        {
+          rootDirectory: (directory) => {
+            home = directory;
+            process.env.HOME = directory;
+            return join(directory, ".config", ...state);
+          },
+        },
+      );
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  }
+
+  async function put(path: string): Promise<void> {
+    await mkdir(join(path, ".."), { recursive: true });
+    await writeFile(path, "x");
+  }
+
+  async function present(path: string): Promise<boolean> {
+    return await stat(path).then(
+      () => true,
+      () => false,
+    );
+  }
+
+  /** What a browser leaves: state a resume needs and caches it does not. */
+  async function browse(context: BrowserSupervisorDriverContext, mirror: string): Promise<void> {
+    await put(join(context.profileDirectory, "Default", "Cookies"));
+    await put(join(context.profileDirectory, "Default", "Local Storage", "leveldb", "000003.log"));
+    await put(join(context.downloadDirectory, "report.pdf"));
+    await put(join(context.sessionDirectory, "browser-cache", "Default", "Cache", "data_0"));
+    await put(join(context.profileDirectory, "Default", "Code Cache", "js", "index"));
+    await put(join(mirror, "profile", "Default", "Cache", "Cache_Data", "data_1"));
+  }
+
+  test("an end that keeps the session keeps only its state; a removing end leaves nothing", async () => {
+    await withHomeSupervisor(async ({ supervisor, contexts, mirror }) => {
+      const kept = { ...reference(91), headed: false };
+      const removed = { ...reference(92), headed: false };
+      await supervisor.createSession(kept);
+      await supervisor.createSession(removed);
+      for (const session of [kept, removed]) {
+        await browse(contexts.get(session.browserSessionId)!, mirror(session.browserSessionId));
+      }
+      const keptContext = contexts.get(kept.browserSessionId)!;
+      await supervisor.endSession(kept, { removeState: false });
+      expect(await present(join(keptContext.profileDirectory, "Default", "Cookies"))).toBe(true);
+      expect(
+        await present(join(keptContext.profileDirectory, "Default", "Local Storage", "leveldb")),
+      ).toBe(true);
+      expect(await present(join(keptContext.downloadDirectory, "report.pdf"))).toBe(true);
+      expect(await present(join(keptContext.sessionDirectory, "browser-cache"))).toBe(false);
+      expect(await present(join(keptContext.profileDirectory, "Default", "Code Cache"))).toBe(
+        false,
+      );
+      expect(await present(mirror(kept.browserSessionId))).toBe(false);
+      // The other browser still runs and keeps its caches.
+      const removedContext = contexts.get(removed.browserSessionId)!;
+      expect(await present(join(removedContext.sessionDirectory, "browser-cache"))).toBe(true);
+      expect(await present(mirror(removed.browserSessionId))).toBe(true);
+
+      await supervisor.endSession(removed, { removeState: true });
+      expect(await present(removedContext.sessionDirectory)).toBe(false);
+      expect(await present(mirror(removed.browserSessionId))).toBe(false);
+    });
+  });
+
+  test("startup cleanup leaves a browser this controller holds alone", async () => {
+    await withHomeSupervisor(async ({ supervisor, contexts, mirror }) => {
+      const held = { ...reference(93), headed: false };
+      await supervisor.createSession(held);
+      const context = contexts.get(held.browserSessionId)!;
+      await browse(context, mirror(held.browserSessionId));
+      const ended = "11111111-1111-4111-8111-000000000094";
+      await put(join(mirror(ended), "profile", "Default", "Cache", "Cache_Data", "data_0"));
+      expect(await supervisor.releaseStoppedBrowserCaches()).toEqual([ended]);
+      expect(await present(mirror(ended))).toBe(false);
+      expect(await present(join(context.sessionDirectory, "browser-cache"))).toBe(true);
+      expect(await present(mirror(held.browserSessionId))).toBe(true);
+    });
+  });
+});
+
 describe("which Chromium build continues a saved profile", () => {
   test("the build that saved it or a newer one, compared by dotted number", () => {
     expect(engineContinuesProfile("140.0.7339.80", "140.0.7339.80")).toBe(true);
@@ -1746,13 +1852,15 @@ async function withSupervisor(
     };
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
     now?: () => number;
+    /** The state root inside the fixture's temporary directory. */
+    rootDirectory?: (directory: string) => string;
   } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-supervisor-");
   const contexts = new Map<string, BrowserSupervisorDriverContext>();
   let driverInstance = 0;
   const supervisor = await BrowserSupervisor.open({
-    rootDirectory: join(directory, "state"),
+    rootDirectory: options.rootDirectory?.(directory) ?? join(directory, "state"),
     ...(options.maxSessions ? { maxSessions: options.maxSessions } : {}),
     ephemeralContextPoolEnabled: options.ephemeralContextPoolEnabled ?? false,
     createDriver: async (context) => {

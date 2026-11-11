@@ -213,6 +213,7 @@ export async function runSavedMessageOnMachine({
 export type SessionAdmissionCopy = {
   title: string;
   body: string;
+  /** What happens next; empty when the body already says it. */
   next: string;
   /**
    * The one action that fixes it here ("Try again", "Allow for this chat"),
@@ -288,25 +289,53 @@ export function sessionAdmissionNeedsMachineAccess(
 }
 
 /**
+ * The blocked-message notice is showing the machine-access words: the message
+ * waits for approval to use the chat's personal machine, and other people's
+ * waiting updates aren't explained instead (`SessionWaitingWorkNotice`).
+ */
+export function sessionAdmissionShowsMachineAccess(
+  reason: SessionAdmissionReason | null,
+  access: SessionMachineAccess | null | undefined,
+): boolean {
+  if (!sessionAdmissionNeedsMachineAccess(reason, access)) return false;
+  return !(access?.waitingWork?.length && sessionWaitingWorkExplainsBlock(reason));
+}
+
+/**
  * Words for a saved message waiting for approval to use the chat's personal
- * machine. The owner gets "Allow for this chat", which starts it right away;
- * everyone else learns who can allow it and that it then starts by itself.
+ * machine. The owner gets "Allow for this chat", which starts it right away
+ * (or when a paused chat is resumed); everyone else learns who can allow it
+ * and that it then starts by itself.
  */
 export function sessionAdmissionMachineAccessCopy(
   t: OpenGeniText,
   access: Pick<SessionMachineAccess, "machineName" | "ownerName" | "isOwner">,
-  options: { canAllowHere?: boolean } = {},
+  options: {
+    canAllowHere?: boolean;
+    /** Paused: allowing it starts nothing until the chat is resumed. */
+    paused?: boolean;
+    /**
+     * Other people in the workspace can see the chat (workspace visibility,
+     * outside a Personal workspace): allowing it shares what runs on the machine.
+     */
+    shared?: boolean;
+  } = {},
 ): SessionAdmissionCopy {
   const machine = access.machineName;
   if (access.isOwner) {
     // Without the button here, the owner allows it from the machine's settings.
     const canAllowHere = options.canAllowHere ?? true;
+    const next = canAllowHere
+      ? options.paused
+        ? t("sessionAdmission.machineAccessOwnerPausedNext")
+        : t("sessionAdmission.machineAccessOwnerNext")
+      : options.paused
+        ? t("sessionAdmission.machineAccessOwnerSettingsPausedNext")
+        : t("sessionAdmission.machineAccessOwnerSettingsNext");
     return {
       title: t("sessionAdmission.machineAccessTitle"),
       body: t("sessionAdmission.machineAccessBody", { machine }),
-      next: canAllowHere
-        ? t("sessionAdmission.machineAccessOwnerNext")
-        : t("sessionAdmission.machineAccessOwnerSettingsNext"),
+      next: options.shared ? `${next} ${t("sessionAdmission.machineAccessSharedNote")}` : next,
       action: canAllowHere ? t("sessionAdmission.allowForThisChat") : null,
     };
   }
@@ -323,8 +352,9 @@ export function sessionAdmissionMachineAccessCopy(
 export function sessionAdmissionMachineChangedCopy(t: OpenGeniText): SessionAdmissionCopy {
   return {
     title: t("sessionAdmission.machineChangedTitle"),
-    body: t("sessionAdmission.machineChangedBody"),
-    next: t("sessionAdmission.machineChangedNext"),
+    // One line: the message is already in the chat, so only where it starts.
+    body: t("sessionAdmission.machineChangedNext"),
+    next: "",
     action: null,
   };
 }

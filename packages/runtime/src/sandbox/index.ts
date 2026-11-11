@@ -565,6 +565,8 @@ export {
   type ChannelAExecResult,
   type ChannelAEmitter,
   type SandboxChannelAServiceOptions,
+  type SandboxFilePathOptions,
+  type SandboxFilePathScope,
   type FsWriteFilesRequest,
   type FsWriteFilesResponse,
   type RepositoryDiscoveryDegradedReason,

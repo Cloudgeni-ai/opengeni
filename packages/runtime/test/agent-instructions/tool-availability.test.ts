@@ -480,7 +480,7 @@ describe("buildAgent instructions: tool availability", () => {
   });
 
   test("with every prompt-named tool absent, no instruction layer names one", () => {
-    // The attempt directives are not pruned (see PROMPT_CHANGELOG); the
+    // The attempt directives are not pruned (see the prompt changelog); the
     // Codemode directive names no prompt-named tool, so nothing survives.
     const inspection = inspectPersistentAgentInstructions(settings, {
       agentConfig,

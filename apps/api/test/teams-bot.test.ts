@@ -54,6 +54,14 @@ describe("Teams actor and transport boundary", () => {
     expect(JSON.stringify(diagnostics)).not.toContain("private-");
     expect(JSON.stringify(diagnostics)).not.toContain(tenant);
   });
+  test("keeps the sender's display name only for display and never drops a message over it", () => {
+    const named = (name: unknown) =>
+      normalizeTeamsMessage({ ...activity(), from: { ...activity().from, name } });
+    expect(named("  Ada   Lovelace ")?.actorName).toBe("Ada Lovelace");
+    expect(named("x".repeat(600))?.actorName).toBe("x".repeat(256));
+    expect(named(42)).not.toBeNull();
+    expect(named(42)?.actorName ?? null).toBeNull();
+  });
   test("accepts documented inline HTML representations using canonical text only", () => {
     for (const contentUrl of [undefined, null]) {
       const diagnostics: unknown[] = [];
