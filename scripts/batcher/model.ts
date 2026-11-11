@@ -495,6 +495,19 @@ function split<T>(items: T[]): [T[], T[]] {
   return [items.slice(0, half), items.slice(half)];
 }
 
+/**
+ * A bisection's remaining groups as one group, in their order with the groups
+ * that hold a priority PR first, as they would have run. A group of more than
+ * a batch tests its first maxBatch PRs and keeps the others next in line as
+ * their own group (see nextBatch).
+ */
+function rejoined(pending: number[][], priority: (n: number) => boolean): number[][] {
+  const urgent = pending.filter((group) => group.some(priority));
+  const rest = pending.filter((group) => !group.some(priority));
+  const all = [...urgent, ...rest].flat();
+  return all.length ? [all] : [];
+}
+
 /** The running batch: the newest one, as `decide` treats any others as extra. */
 export function runningBatch<T extends { createdAt: number }>(batches: T[]): T | undefined {
   return [...batches].sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -620,7 +633,17 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
               : `it failed CI on top of main, also after a retry: ${run.url}`,
           });
           pulls = pulls.filter((p) => p.number !== numbers[0]);
-          pending = manifest.pending;
+          // The bisection found what broke it. The groups it still holds were
+          // split off only on the way to that PR, so they are retested
+          // together again rather than one group per round; a group that
+          // still fails is split again as any batch is. A PR ejected ahead
+          // of a bisection found nothing about its groups, so they stay as
+          // they are.
+          if (manifest.aheadOfBisection === true) pending = manifest.pending;
+          else {
+            pending = rejoined(manifest.pending, (n) => byNumber.get(n)?.priority === true);
+            blame = [];
+          }
         } else {
           // Bisect: test the first half now and keep the second half next in
           // line. Priority PRs among others are tested on their own first, so

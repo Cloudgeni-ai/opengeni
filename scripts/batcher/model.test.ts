@@ -770,6 +770,44 @@ describe("decide", () => {
     expect(actions[2]?.kind === "build" && actions[2].members.map((p) => p.number)).toEqual([4]);
   });
 
+  test("once a bisection ejects what broke it, its other groups are retested together", () => {
+    const pulls = [3, 4, 5, 6, 7, 8, 9].map((n) => pull(n, { priority: n === 7 }));
+    const failed = batch(
+      [3],
+      { runs: [run({ conclusion: "failure", attempt: 2, failedJobs: ["A"] })] },
+      [[4, 5], [6], [7, 8]],
+    );
+    failed.manifest.blame = ["A"];
+    const actions = decide(observe(pulls, [failed]));
+    expect(actions.map((a) => a.kind)).toEqual(["abandon", "eject", "build"]);
+    expect(actions[1]).toMatchObject({ number: 3 });
+    // One batch instead of three rounds, the priority PR's group first; it is
+    // a fresh batch, so it gets its own retry instead of the old blame.
+    expect(actions[2]).toMatchObject({ kind: "build", pending: [] });
+    expect(actions[2]).not.toHaveProperty("blame");
+    expect(actions[2]?.kind === "build" && actions[2].members.map((p) => p.number)).toEqual([
+      7, 8, 4, 5, 6,
+    ]);
+
+    // More than a batch holds: the first maxBatch PRs go now, the rest next.
+    const small = { ...DEFAULT_SETTINGS, maxBatch: 2 };
+    const capped = decide(observe(pulls, [failed]), small);
+    expect(capped[2]).toMatchObject({ kind: "build", pending: [[4, 5, 6]] });
+    expect(capped[2]?.kind === "build" && capped[2].members.map((p) => p.number)).toEqual([7, 8]);
+
+    // A PR ejected ahead of a bisection learned nothing about its groups.
+    const ahead = batch(
+      [9],
+      { runs: [run({ conclusion: "failure", attempt: 2, failedJobs: ["B"] })] },
+      [[4, 5], [6], [7, 8]],
+    );
+    ahead.manifest.aheadOfBisection = true;
+    const kept = decide(observe(pulls, [ahead]));
+    expect(kept[1]).toMatchObject({ kind: "eject", number: 9 });
+    expect(kept[2]).toMatchObject({ kind: "build", pending: [[4, 5], [6]] });
+    expect(kept[2]?.kind === "build" && kept[2].members.map((p) => p.number)).toEqual([7, 8]);
+  });
+
   test("a bisection carries what it blamed to its own groups only, and drops it when it ends", () => {
     const failure = (jobs: string[]) =>
       run({ conclusion: "failure", attempt: 2, failedJobs: jobs });
