@@ -225,13 +225,9 @@ export async function updateBotTemplateForViewer(input: {
     request.visibility !== undefined && request.visibility !== agent.visibility;
   const renamesSlackHandle =
     request.name !== undefined && slackAgentNameKey(request.name) !== slackAgentNameKey(agent.name);
-  if (makesPrivate || renamesSlackHandle) {
+  // Making it Only me takes it out of Slack (see updateAgent).
+  if (renamesSlackHandle) {
     const inSlack = (await listAgentSlackInstalls(db, home, [agent.id])).length > 0;
-    if (inSlack && makesPrivate) {
-      throw new HTTPException(409, {
-        message: "This agent is available in Slack, so it stays shared with the workspace.",
-      });
-    }
     const problem =
       inSlack && request.name !== undefined ? slackAgentNameProblem(request.name) : null;
     if (problem && request.name !== undefined) {
@@ -270,11 +266,6 @@ export async function updateBotTemplateForViewer(input: {
   if (outcome.kind === "slack_name_taken") {
     throw new HTTPException(409, {
       message: "Another agent in Slack already has this name.",
-    });
-  }
-  if (outcome.kind === "requires_workspace_visibility") {
-    throw new HTTPException(409, {
-      message: "This agent is available in Slack, so it stays shared with the workspace.",
     });
   }
   if (outcome.kind !== "updated") {

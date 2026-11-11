@@ -59,6 +59,20 @@ describe("manual repository attachment", () => {
         personalRepositories: [personalRepository],
       }),
     ).toMatchObject({ kind: "personal_github", repository: personalRepository, ref: "v1" });
+    // An enterprise managed user's own repository (owner with an underscore).
+    const managed = {
+      ...personalRepository,
+      repositoryId: "4",
+      fullName: "octocat_acme/tools",
+      canonicalUrl: "https://github.com/octocat_acme/tools",
+    };
+    expect(
+      classifyManualRepository({
+        repository: { id: 1, url: "https://github.com/octocat_acme/tools", ref: "main" },
+        workspaceRepositories: [],
+        personalRepositories: [managed],
+      }),
+    ).toMatchObject({ kind: "personal_github", repository: managed, ref: "main" });
   });
 
   test("rejects non-canonical GitHub URLs instead of treating them as generic HTTPS", () => {

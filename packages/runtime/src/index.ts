@@ -3261,7 +3261,7 @@ export function agentPromptResourcesFor(
   };
 }
 
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$/u;
 
 /**
  * Which GitHub identity each mounted GitHub repository acts as: the person's

@@ -1,5 +1,13 @@
 # @opengeni/decisions
 
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+  - @opengeni/contracts@6.16.0
+
 ## 6.15.0
 
 ### Patch Changes

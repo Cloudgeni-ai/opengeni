@@ -4,6 +4,12 @@ import {
   withOrganizationIntegrationAcquisition,
 } from "@opengeni/db/organization-integration-policy";
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
+import {
+  oauthCallbackBrowserAccepted,
+  oauthStateBrowserBinding,
+  type OAuthCallbackBrowser,
+  type OAuthStateBrowserBinding,
+} from "./oauth-browser-binding";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 
@@ -100,6 +106,9 @@ type ProviderOAuthState = {
   subjectId: string;
   ownership: ConnectionOwnership;
   personalOwnerVerified: boolean;
+  /** Absent only on states minted before browser binding. */
+  browserProof?: OAuthStateBrowserBinding["browserProof"];
+  browserBinding?: string;
   definitionId: string;
   definitionFingerprint: string;
   providerDomain: string;
@@ -135,6 +144,7 @@ type ProviderOAuthFailureReason =
   | "state_invalid"
   | "state_expired"
   | "state_replayed"
+  | "browser_mismatch"
   | "provider_denied"
   | "missing_code"
   | "client_unavailable"
@@ -166,6 +176,8 @@ export async function startApiIntegrationProviderOAuth(
      * route from the live authenticated principal, never inferred here.
      */
     personalOwnershipAllowed: boolean;
+    /** How the callback proves it finishes in the starter's browser (oauth-browser-binding.ts). */
+    browserBinding: OAuthStateBrowserBinding;
     externalContinuation?: ExternalActorContinuation;
     connectAttemptId?: string;
     /**
@@ -242,6 +254,7 @@ export async function startApiIntegrationProviderOAuth(
     // principal of its own and enforces exactly this decision.
     ...connectOwnerStateFields(input, input.personalOwnershipAllowed),
     ownership,
+    ...input.browserBinding,
     definitionId: definition.id,
     definitionFingerprint: providerDefinitionFingerprint(definition),
     providerDomain,
@@ -301,6 +314,8 @@ export async function completeApiIntegrationProviderOAuth(
     state?: string | undefined;
     error?: string | undefined;
     errorDescription?: string | undefined;
+    /** What the callback request proves about its browser; see oauth-browser-binding.ts. */
+    browser?: OAuthCallbackBrowser | undefined;
     requestUrl: string;
   },
 ): Promise<{ redirectTo: string; exactReturn?: boolean }> {
@@ -313,6 +328,10 @@ export async function completeApiIntegrationProviderOAuth(
   let curatedAttempt: ConnectAttempt | null = null;
   try {
     state = readProviderOAuthState(input.state, deps.settings);
+    // Before any attempt is claimed or nonce consumed: a consent finished in
+    // someone else's browser leaves the starter's attempt untouched (CASA 3.2.2).
+    if (!oauthCallbackBrowserAccepted(state, input.browser))
+      throw new ProviderOAuthCallbackError("browser_mismatch");
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
       if (
@@ -899,6 +918,7 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     subjectId: requiredStateString(payload.subjectId),
     ownership,
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
+    ...oauthStateBrowserBinding(payload),
     definitionId: requiredStateString(payload.definitionId),
     definitionFingerprint: requiredStateString(payload.definitionFingerprint),
     providerDomain: requiredStateString(payload.providerDomain),

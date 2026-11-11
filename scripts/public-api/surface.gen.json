@@ -11916,7 +11916,8 @@
         "$.availability": "ref(AgentSlackAvailability)! null",
         "$.connectionId": "string!",
         "$.slackTeamId": "string!",
-        "$.slackTeamName": "string! null"
+        "$.slackTeamName": "string! null",
+        "$.unavailable": "enum! null=[\"\\\"agent_child_chat\\\"\",\"\\\"agent_limit_reached\\\"\",\"\\\"agent_not_found\\\"\",\"\\\"agent_requires_private_chat\\\"\",\"\\\"agent_slack_always_available\\\"\",\"\\\"agent_slack_name_invalid\\\"\",\"\\\"agent_slack_name_taken\\\"\",\"\\\"agent_slack_personal_workspace\\\"\",\"\\\"agent_slack_requires_workspace_visibility\\\"\",\"\\\"agent_slack_single_install\\\"\",\"\\\"agent_version_conflict\\\"\",\"\\\"slack_bot_unavailable\\\"\"]"
       }
     },
     "AgentSlackIntroRequest": {
@@ -19253,6 +19254,7 @@
         "$|kind=personal.groups.merge": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.groups.review": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.groups.routine": "ref(GitHubActionPolicyEffectiveDecision)!",
+        "$|kind=personal.groups.sensitive": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.kind": "const!=[\"\\\"personal\\\"\"]",
         "$|kind=personal.label": "string!"
       }
@@ -19263,14 +19265,6 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"allow\\\"\",\"\\\"ask\\\"\",\"\\\"block\\\"\",\"\\\"mixed\\\"\"]"
-      }
-    },
-    "GitHubActionPolicyGroup": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\"]"
       }
     },
     "GitHubAppInfo": {
@@ -25127,6 +25121,14 @@
         "$.owner.name": "string!",
         "$.owner.subjectId": "string!",
         "$.prefix": "string!"
+      }
+    },
+    "PersonalGitHubActionPolicyGroup": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\",\"\\\"sensitive\\\"\"]"
       }
     },
     "PersonalGitHubConnectionStatusResponse": {
@@ -32531,7 +32533,7 @@
         "$": "object",
         "$.actor": "ref(GitHubActionPolicyActor)!",
         "$.decision": "ref(AtlassianReadPolicy)!",
-        "$.group": "ref(GitHubActionPolicyGroup)!"
+        "$.group": "ref(PersonalGitHubActionPolicyGroup)!"
       }
     },
     "UpdateMachineAgentResponse": {
@@ -37078,6 +37080,7 @@
       "PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING": "value",
       "PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION": "value",
       "PersonalApiKey": "type",
+      "PersonalGitHubActionPolicyGroup": "type",
       "PersonalGitHubConnectionMetadata": "type",
       "PersonalGitHubConnectionStatusResponse": "type",
       "PersonalGitHubDisconnectRequest": "type",
@@ -40222,8 +40225,11 @@
       "BrowserEditableArtifactWorkbenchProps": "type",
       "ChatInteractiveBlock": "value",
       "ChatInteractiveBlockProps": "type",
+      "configureContentHosting": "value",
+      "ContentHostingConfig": "type",
       "DEFAULT_ARTIFACT_LABELS": "value",
       "DeferredChatMedia": "value",
+      "displayImageSrc": "value",
       "DocumentArtifactSurface": "value",
       "DocumentArtifactSurfaceProps": "type",
       "DocumentCommit": "type",
@@ -40327,6 +40333,7 @@
       "SpreadsheetSelection": "type",
       "SpreadsheetViewport": "type",
       "useArtifactLabels": "value",
+      "useDisplayImageSrc": "value",
       "useRetainedImageObjectUrl": "value"
     },
     "@opengeni/react/artifacts/document": {

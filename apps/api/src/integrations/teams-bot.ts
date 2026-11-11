@@ -1509,19 +1509,22 @@ function teamsAdminSignInConfig(deps: ApiRouteDeps): TeamsAdminSignInConfig {
 }
 /**
  * The Microsoft sign-in must belong to this exact setup (proof nonce, tenant,
- * Teams user, Opengeni person and workspace) and prove a tenant administrator.
+ * Teams user, Opengeni person and workspace). Self-serve setup also proves a
+ * tenant administrator; an operator-approved installer proves only that they
+ * are the Teams user the setup link names.
  */
-async function requireTenantAdministrator(
+async function requireSetupSignIn(
   deps: ApiRouteDeps,
   p: TeamsLinkProof,
   grant: AccessGrant,
   microsoft: { code: string; state: string },
+  purpose: "teams-admin-setup" | "teams-installer-setup",
 ): Promise<TeamsAdminIdentity> {
   const config = teamsAdminSignInConfig(deps);
   try {
     const state = verifyTeamsAdminState(config.stateSecret, microsoft.state);
     if (
-      state.purpose !== "teams-admin-setup" ||
+      state.purpose !== purpose ||
       state.proofNonce !== p.nonce ||
       state.tenantId !== p.tenantId ||
       state.actorId !== p.actorId ||
@@ -1539,7 +1542,8 @@ async function requireTenantAdministrator(
 /**
  * Starts setup for a verified browser human who administers `grant`'s shared
  * workspace. Returns the Microsoft sign-in URL that proves a tenant
- * administrator, or null when the operator approved this Teams identity.
+ * administrator or, for an installer the operator approved, only that they
+ * are the Teams user the setup link names.
  */
 export async function startTeamsSetupSignIn(
   deps: ApiRouteDeps,
@@ -1548,11 +1552,15 @@ export async function startTeamsSetupSignIn(
 ): Promise<{ authorizationUrl: string | null }> {
   const p = setupProof(deps, setupToken);
   await requireSetupWorkspace(deps, grant.workspaceId, p.tenantId);
-  // An operator-approved installer connects without a Microsoft sign-in.
-  if (operatorApprovedInstaller(deps, p)) return { authorizationUrl: null };
-  if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId)) throw setupUnavailable(p.tenantId);
+  const approved = operatorApprovedInstaller(deps, p);
+  if (!approved && !teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
+    throw setupUnavailable(p.tenantId);
+  // Microsoft can only prove a work or school identity.
+  if (approved && !teamsSelfServeTenantAllowed(p.tenantId))
+    throw teamsConnectionRefused("consumer_tenant");
   const config = teamsAdminSignInConfig(deps);
   const { token, state } = mintTeamsAdminState(config.stateSecret, {
+    purpose: approved ? "teams-installer-setup" : "teams-admin-setup",
     proofNonce: p.nonce,
     tenantId: p.tenantId,
     actorId: p.actorId,
@@ -1564,8 +1572,9 @@ export async function startTeamsSetupSignIn(
 
 /**
  * Binds the Teams tenant to `grant`'s shared workspace for a verified browser
- * human who administers it, and links the installer. Without operator
- * approval this needs the Microsoft sign-in from `startTeamsSetupSignIn`.
+ * human who administers it, and links the installer. It needs the Microsoft
+ * sign-in from `startTeamsSetupSignIn`: as a tenant administrator, or, for an
+ * installer the operator approved, as the Teams user the setup link names.
  */
 export async function completeTeamsSetup(
   deps: ApiRouteDeps,
@@ -1585,13 +1594,18 @@ export async function completeTeamsSetup(
   const p = setupProof(deps, setupToken);
   const approved = operatorApprovedInstaller(deps, p);
   let admin: TeamsAdminIdentity | null = null;
-  if (!approved) {
+  if (approved) {
+    // The installer's Teams account is linked below, so prove who they are
+    // before anything else, as for any account link.
+    if (!microsoft) throw teamsConnectionRefused("microsoft_sign_in_required");
+    await requireSetupSignIn(deps, p, grant, microsoft, "teams-installer-setup");
+  } else {
     if (!teamsSelfServeSetupAvailable(deps.settings, p.tenantId))
       throw setupUnavailable(p.tenantId);
     if (!microsoft) throw teamsConnectionRefused("microsoft_sign_in_required");
     // Prove the tenant administrator before revealing anything about the
     // tenant's existing binding.
-    admin = await requireTenantAdministrator(deps, p, grant, microsoft);
+    admin = await requireSetupSignIn(deps, p, grant, microsoft, "teams-admin-setup");
   }
   const workspace = await getWorkspace(deps.db, grant.workspaceId);
   if (workspace?.kind !== "shared") throw teamsConnectionRefused("shared_workspace_required");
