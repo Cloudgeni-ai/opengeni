@@ -13,7 +13,9 @@ import {
   recordingDiarizationKind,
   recordingSpeakerLabels,
   recordingTextWords,
+  recordingTranscriptionFailureLogAttributes,
   RecordingTranscriptionError,
+  sendRecordingTranscriptionRequest,
   transcriptLanguages,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
@@ -29,6 +31,7 @@ import {
   type RecordingTranscriptionProvider,
   type RecordingTranscriptionProviderRegistry,
   type RecordingTranscriptionRequest,
+  type RecordingTranscriptionRequestFailure,
   type RecordingSoundRange,
   type RecordingTranscriptionResult,
   type RecordingTrackWords,
@@ -434,6 +437,8 @@ export async function transcribeTrack(input: {
   sound?: ReadonlyArray<RecordingSoundRange> | null;
   /** Adds the milliseconds of audio each piece sent to the model. */
   onSent?: (milliseconds: number) => void;
+  /** Each provider request that failed, for the operator's log. */
+  onFailedRequest?: (failure: RecordingTranscriptionRequestFailure) => void;
 }): Promise<RecordingTranscriptionResult> {
   const { source, format, maxPieceMilliseconds } = pieceShape(input.spec, input.audio.extension);
   const pieces = input.sound
@@ -504,14 +509,17 @@ export async function transcribeTrack(input: {
     let result = reused;
     if (!result) {
       result = await measureRecordingStage("transcribe", () =>
-        input.provider.transcribe(
-          {
+        sendRecordingTranscriptionRequest({
+          provider: input.provider,
+          request: {
             ...input.request,
             ...(scope ? { scope } : {}),
             audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
           },
-          input.credentials,
-        ),
+          credentials: input.credentials,
+          audioMilliseconds: piece.endMilliseconds - piece.startMilliseconds,
+          ...(input.onFailedRequest ? { onFailure: input.onFailedRequest } : {}),
+        }),
       ).catch((error: unknown) => {
         throw asRecordingTranscriptionError(error);
       });
@@ -769,7 +777,11 @@ export function createRecordingActivities(
     settings: Settings;
     service: TranscriptionService;
   } | null = null;
-  const dictationFor = (settings: Settings, db: Database) => {
+  const dictationFor = (
+    settings: Settings,
+    db: Database,
+    observability: ControlActivityServices["observability"],
+  ) => {
     if (defaultDictation?.settings !== settings) {
       defaultDictation = {
         settings,
@@ -781,6 +793,7 @@ export function createRecordingActivities(
               deployment: deploymentFor(settings, db),
               // A dictation's piece may be longer than a one-shot dictation.
               maxDurationSeconds: DICTATION_PIECES.maxMilliseconds / 1_000,
+              warn: (message, attributes) => observability.warn(message, attributes),
             }),
       };
     }
@@ -871,9 +884,12 @@ export function createRecordingActivities(
         workspaceId: input.workspaceId,
         recordingId: input.recordingId,
         versionId: input.versionId,
-        errorCode,
-        // The stored code is all the user sees; the cause is what an operator needs.
-        providerId: job.version.providerId,
+        correlationId: input.versionId,
+        // Not `errorCode`, which the observability boundary reads as an
+        // operational error and keeps nothing else of. The stored code is all
+        // the user sees; each failed provider request logs what it said.
+        reason: errorCode,
+        provider: job.version.providerId,
         model: job.version.model,
         ...(cause instanceof Error ? { error: cause.message.slice(0, 1_000) } : {}),
       });
@@ -1389,6 +1405,11 @@ export function createRecordingActivities(
                   onSent: (milliseconds) => {
                     sentMilliseconds += milliseconds;
                   },
+                  onFailedRequest: (failure) =>
+                    observability.warn(
+                      "Transcription provider request failed",
+                      recordingTranscriptionFailureLogAttributes(failure),
+                    ),
                 }),
                 runOurs(),
               ]);
@@ -1621,7 +1642,7 @@ export function createRecordingActivities(
         throw new PermanentRecordingFailure("policy_blocked");
       }
       const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
-      const { service } = dictationFor(settings, db);
+      const { service } = dictationFor(settings, db, observability);
       const track = claimed.recording.tracks[0];
       const chunks = claimed.chunks.filter((chunk) => chunk.trackNumber === track?.trackNumber);
       const signal = jobSignal();

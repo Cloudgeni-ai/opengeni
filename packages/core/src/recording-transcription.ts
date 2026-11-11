@@ -129,6 +129,14 @@ export type RecordingTranscriptionProvider = {
   funding: RecordingTranscriptionFunding;
   models: readonly RecordingTranscriptionModelSpec[];
   /**
+   * How the provider documents its requests' timing, for providers that do:
+   * a request it hasn't answered within that time has failed, and failed
+   * requests are tried again after the provider's own recommended waits
+   * (`sendRecordingTranscriptionRequest`). Without it each request is sent
+   * once and waits out its own timeout.
+   */
+  requestTiming?: RecordingTranscriptionRequestTiming;
+  /**
    * Whether the provider can serve this workspace now, for providers whose
    * credential is not a key (a subscription sign-in). Key and deployment
    * providers are available when their credential resolves. Without a
@@ -170,6 +178,33 @@ export type RecordingTranscriptionErrorCode =
   | "network"
   | "unavailable";
 
+/** A provider's documented request timing; see `RecordingTranscriptionProvider.requestTiming`. */
+export type RecordingTranscriptionRequestTiming = {
+  /**
+   * The longest a request takes, as a multiple of its audio's length: 1 for
+   * a provider that documents answering faster than real time.
+   */
+  realTimeFactor: number;
+  /** The provider's recommended waits before each retry of a failed request, in order. */
+  retryDelaysMilliseconds: readonly number[];
+};
+
+/**
+ * What the provider said about a failed request, for the operator's log:
+ * never audio or transcript text. Each field is bounded again where it is
+ * logged.
+ */
+export type RecordingTranscriptionFailureDetail = {
+  /** The HTTP status it answered with. */
+  status?: number;
+  /** Its error code, or the transport's (ECONNRESET) when no answer came. */
+  providerCode?: string;
+  /** Its error message, or the transport's. */
+  providerMessage?: string;
+  /** The provider's id for the request, from its response headers. */
+  requestId?: string;
+};
+
 /** A provider call failed. Retryable failures may succeed if tried again later. */
 export class RecordingTranscriptionError extends Error {
   readonly name = "RecordingTranscriptionError";
@@ -177,6 +212,7 @@ export class RecordingTranscriptionError extends Error {
     message: string,
     readonly code: RecordingTranscriptionErrorCode,
     readonly retryable: boolean,
+    readonly detail: RecordingTranscriptionFailureDetail = {},
   ) {
     super(message);
   }

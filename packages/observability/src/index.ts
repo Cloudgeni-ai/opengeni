@@ -553,7 +553,22 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["realtimeAdvertisedVersion", REALTIME_PROVIDER_VALUE_PATTERN],
   ["realtimeProviderModel", REALTIME_PROVIDER_VALUE_PATTERN],
   ["realtimeProviderArchitecture", REALTIME_PROVIDER_VALUE_PATTERN],
+  // Failed speech-to-text provider requests (core recording-transcription-request.ts,
+  // which also sets providerErrorCode): the provider's id for the request,
+  // and whether the audio was a meeting or a dictation.
+  ["providerRequestId", /^[A-Za-z0-9._:-]{1,128}$/],
+  ["recordingPurpose", /^(?:meeting|dictation)$/],
 ]);
+
+/**
+ * A failed provider request's own error message, the one other free-text
+ * field, reviewed as a deliberate exception so a failed speech-to-text call
+ * says why. It is the provider's error text about the request (never the
+ * audio's words), admitted only when it is already exactly what the client
+ * error projection produces: scrubbed of credentials and URL query strings
+ * and within the message byte bound.
+ */
+const PUBLIC_TELEMETRY_PROVIDER_ERROR_TEXT_ATTRIBUTES = new Set(["providerErrorMessage"]);
 
 /**
  * Web client error diagnostics: the only free-text fields allowed across the
@@ -1974,6 +1989,13 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
         const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
         if (clientErrorField) {
           return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
+        }
+        if (PUBLIC_TELEMETRY_PROVIDER_ERROR_TEXT_ATTRIBUTES.has(key)) {
+          return (
+            typeof value === "string" &&
+            value.trim() === value &&
+            isProjectedClientErrorText(value, "message")
+          );
         }
         const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
         return typeof value === "string" && pattern?.test(value) === true;

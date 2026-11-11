@@ -7,6 +7,7 @@ import {
   type RecordingTranscribedWord,
   type RecordingTranscriptionCredentials,
   type RecordingTranscriptionProvider,
+  type RecordingTranscriptionRequestTiming,
   type RecordingTranscriptionResult,
 } from "./recording-transcription";
 
@@ -23,6 +24,19 @@ export const AZURE_SPEECH_PROVIDER_ID = "azure-speech";
 const AZURE_SPEECH_API_VERSION = "2025-10-15";
 /** One hour of audio takes the model seconds; minutes means something is wrong. */
 const AZURE_SPEECH_REQUEST_TIMEOUT_MILLISECONDS = 15 * 60 * 1_000;
+/**
+ * What Microsoft documents for fast transcription
+ * (learn.microsoft.com/azure/ai-services/speech-service/fast-transcription-create):
+ * it answers faster than real time, it may accept a request and then time
+ * out without answering, and transient failures are retried up to five
+ * times after 2, 4, 8, 16 and 32 seconds. So a request unanswered after its
+ * audio's length has failed and is sent again on that schedule, instead of
+ * waiting for whatever ends the connection.
+ */
+const AZURE_SPEECH_REQUEST_TIMING: RecordingTranscriptionRequestTiming = {
+  realTimeFactor: 1,
+  retryDelaysMilliseconds: [2_000, 4_000, 8_000, 16_000, 32_000],
+};
 
 /**
  * MAI-Transcribe-2 in enhanced mode. The REST reference caps one request at
@@ -143,32 +157,41 @@ export function azureSpeechLocale(code: string): string {
 
 function azureSpeechError(
   status: number,
-  failure: { code: string | null; outOfCredit: boolean },
+  failure: AzureSpeechFailure,
 ): RecordingTranscriptionError {
   const { code } = failure;
   const message = `Azure Speech could not transcribe this audio (HTTP ${status}${code ? `: ${code}` : ""})`;
+  const detail = {
+    status,
+    ...(code ? { providerCode: code } : {}),
+    ...(failure.message ? { providerMessage: failure.message } : {}),
+    ...(failure.requestId ? { requestId: failure.requestId } : {}),
+  };
+  const error = (errorCode: RecordingTranscriptionError["code"], retryable: boolean) =>
+    new RecordingTranscriptionError(message, errorCode, retryable, detail);
   // The free tier's spent quota comes back as 403, like a rejected key.
-  if (failure.outOfCredit) return new RecordingTranscriptionError(message, "quota_exceeded", false);
-  if (status === 401 || status === 403) {
-    return new RecordingTranscriptionError(message, "unauthorized", false);
-  }
-  if (status === 413 || code === "AudioLengthLimitExceeded") {
-    return new RecordingTranscriptionError(message, "too_large", false);
-  }
-  if (status === 400 || status === 415 || status === 422) {
-    return new RecordingTranscriptionError(message, "invalid_audio", false);
-  }
-  if (status === 429) return new RecordingTranscriptionError(message, "rate_limited", true);
-  if (status === 408 || status >= 500) {
-    return new RecordingTranscriptionError(message, "unavailable", true);
-  }
-  return new RecordingTranscriptionError(message, "provider", false);
+  if (failure.outOfCredit) return error("quota_exceeded", false);
+  if (status === 401 || status === 403) return error("unauthorized", false);
+  if (status === 413 || code === "AudioLengthLimitExceeded") return error("too_large", false);
+  if (status === 400 || status === 415 || status === 422) return error("invalid_audio", false);
+  if (status === 429) return error("rate_limited", true);
+  if (status === 408 || status >= 500) return error("unavailable", true);
+  return error("provider", false);
 }
 
-/** Speech errors are JSON with a code; MAI wraps its own. Only the code is kept. */
-async function azureSpeechFailure(
-  response: Response,
-): Promise<{ code: string | null; outOfCredit: boolean }> {
+type AzureSpeechFailure = {
+  code: string | null;
+  message: string | null;
+  requestId: string | null;
+  outOfCredit: boolean;
+};
+
+/**
+ * What a failed response says: Speech errors are JSON with a code and a
+ * message, which MAI wraps in its own text. The message is the service's,
+ * never the audio's words.
+ */
+async function azureSpeechFailure(response: Response): Promise<AzureSpeechFailure> {
   const text = await response.text().catch(() => "");
   let body: unknown = text;
   try {
@@ -176,9 +199,43 @@ async function azureSpeechFailure(
   } catch {
     // Not JSON: its text is read as it is.
   }
+  const quoted = /"message"\s*:\s*("(?:[^"\\]|\\.){1,2000}")/u.exec(text)?.[1];
+  let message: string | null = null;
+  try {
+    message = quoted ? (JSON.parse(quoted) as string) : null;
+  } catch {
+    message = null;
+  }
+  // A gateway's own error page is HTML, which says nothing the status doesn't.
+  if (!message && text.trim() && !text.trimStart().startsWith("<")) message = text.trim();
   return {
     code: /"code"\s*:\s*"([A-Za-z_]{1,60})"/u.exec(text)?.[1] ?? null,
+    message: message ? message.slice(0, 2_000) : null,
+    requestId: azureSpeechRequestId(response),
     outOfCredit: transcriptionProviderOutOfCredit(body),
+  };
+}
+
+/** Azure's id for the request, which its support asks for. */
+function azureSpeechRequestId(response: Response): string | null {
+  for (const header of ["apim-request-id", "x-ms-request-id", "x-requestid", "x-request-id"]) {
+    const value = response.headers.get(header)?.trim();
+    if (value) return value.slice(0, 128);
+  }
+  return null;
+}
+
+/** What the transport said when no answer came: its code (ECONNRESET) and message. */
+function transportFailure(error: unknown): { providerCode?: string; providerMessage?: string } {
+  if (!(error instanceof Error)) return {};
+  const code = (error as { code?: unknown }).code;
+  const cause = (error as { cause?: unknown }).cause;
+  const causeCode =
+    cause && typeof cause === "object" ? (cause as { code?: unknown }).code : undefined;
+  const transportCode = typeof code === "string" ? code : causeCode;
+  return {
+    ...(typeof transportCode === "string" && transportCode ? { providerCode: transportCode } : {}),
+    providerMessage: `${error.name}: ${error.message}`.slice(0, 2_000),
   };
 }
 
@@ -210,6 +267,7 @@ export function createAzureSpeechRecordingTranscriptionProvider(options: {
     id: AZURE_SPEECH_PROVIDER_ID,
     name: "Azure Speech",
     funding: "deployment",
+    requestTiming: AZURE_SPEECH_REQUEST_TIMING,
     models: [
       {
         model: "MAI-Transcribe-2",
@@ -265,12 +323,53 @@ export function createAzureSpeechRecordingTranscriptionProvider(options: {
           throw new RecordingTranscriptionError("Azure Speech took too long", "timeout", true);
         }
         if (input.signal?.aborted) throw error;
-        throw new RecordingTranscriptionError("Could not reach Azure Speech", "network", true);
+        throw new RecordingTranscriptionError(
+          "Could not reach Azure Speech",
+          "network",
+          true,
+          transportFailure(error),
+        );
       }
       if (!response.ok) {
         throw azureSpeechError(response.status, await azureSpeechFailure(response));
       }
-      return parseAzureSpeechTranscript(await response.json().catch(() => null));
+      let text: string;
+      try {
+        text = await response.text();
+      } catch (error) {
+        if (timeout.aborted) {
+          throw new RecordingTranscriptionError("Azure Speech took too long", "timeout", true);
+        }
+        if (input.signal?.aborted) throw error;
+        // The answer was cut off on its way back.
+        const requestId = azureSpeechRequestId(response);
+        throw new RecordingTranscriptionError(
+          "Azure Speech's answer was cut off",
+          "network",
+          true,
+          {
+            status: response.status,
+            ...transportFailure(error),
+            ...(requestId ? { requestId } : {}),
+          },
+        );
+      }
+      let body: unknown = null;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        // Not a transcript: parsed as none below.
+      }
+      try {
+        return parseAzureSpeechTranscript(body);
+      } catch (error) {
+        if (!(error instanceof RecordingTranscriptionError)) throw error;
+        const requestId = azureSpeechRequestId(response);
+        throw new RecordingTranscriptionError(error.message, error.code, error.retryable, {
+          status: response.status,
+          ...(requestId ? { requestId } : {}),
+        });
+      }
     },
   };
 }

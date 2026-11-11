@@ -87,6 +87,7 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./recording-transcription";
+export * from "./recording-transcription-request";
 export * from "./xai-operation-availability";
 export * from "./recording-transcription-azure";
 export * from "./model-catalog";

@@ -28,6 +28,10 @@ import {
   type SpeechToTextDeployment,
   type SpeechToTextDeploymentOptions,
 } from "./deployment";
+import {
+  recordingTranscriptionFailureLogAttributes,
+  sendRecordingTranscriptionRequest,
+} from "../recording-transcription-request";
 import { createFfmpegAudioNormalizer, type TranscriptionAudioNormalizer } from "./normalize";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -72,6 +76,11 @@ export function createTranscriptionService(input: {
   normalizeAudio?: TranscriptionAudioNormalizer;
   /** Loud operator log for settlement failures after provider success. */
   log?: (message: string, attributes: Record<string, string | number | boolean>) => void;
+  /**
+   * Operator log for each failed provider request, with what the provider
+   * said; its attributes are made for the observability boundary.
+   */
+  warn?: (message: string, attributes: Record<string, string | number>) => void;
   /** In-process settlement retry pacing after an inline failure. */
   settlementRetryDelaysMilliseconds?: readonly number[];
 }): TranscriptionService {
@@ -98,6 +107,11 @@ export function createTranscriptionService(input: {
     input.log ??
     ((message: string, attributes: Record<string, string | number | boolean>) => {
       console.error(message, attributes);
+    });
+  const warn =
+    input.warn ??
+    ((message: string, attributes: Record<string, string | number>) => {
+      console.warn(message, attributes);
     });
   const billing =
     input.billing ??
@@ -443,8 +457,9 @@ export function createTranscriptionService(input: {
       const deadline = createProviderRequestDeadline(request.signal, remainingMilliseconds);
       let result: RecordingTranscriptionResult;
       try {
-        result = await provider.provider.transcribe(
-          {
+        result = await sendRecordingTranscriptionRequest({
+          provider: provider.provider,
+          request: {
             audio: {
               bytes: audio,
               mimeType: providerMimeType,
@@ -466,8 +481,15 @@ export function createTranscriptionService(input: {
               requestId: request.requestId,
             },
           },
-          credentials.credentials,
-        );
+          credentials: credentials.credentials,
+          // The length the call is billed for, which the server measured or trusts.
+          audioMilliseconds: (billingContext?.trustedDurationSeconds ?? audioSeconds) * 1_000,
+          onFailure: (failure) =>
+            warn(
+              "Transcription provider request failed",
+              recordingTranscriptionFailureLogAttributes(failure),
+            ),
+        });
         if (deadline.timedOut && !request.signal?.aborted) {
           throw new TranscriptionServiceError({
             code: "timeout",

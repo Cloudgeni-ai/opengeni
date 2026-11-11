@@ -738,6 +738,7 @@ export function createAppComposition(
           deployment: speechToText,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
           log: (message, attributes) => observability.error(message, attributes),
+          warn: (message, attributes) => observability.warn(message, attributes),
         })
       : deps.transcription;
   const transcriptionSegmenter =
