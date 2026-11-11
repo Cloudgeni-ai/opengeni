@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as draftPreparation from "../src/application/draft-model-preparation";
+import type { AccessGrantAuthorization } from "../src/access";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   type AccessGrant,
@@ -351,6 +352,86 @@ describe("core new-session draft hydration", () => {
     expect(session.initialTurnId).toBeString();
     expect(session.title).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
     expect(session.titleSource).toBe("agent");
+  }, 180_000);
+
+  test("creates from a draft that carries a learning choice", async () => {
+    if (!available) return;
+    // The composer saves the learning choice inside the draft options. A reset
+    // choice is saved as `{}` and left out of the create request.
+    for (const agentLearning of [{}, { knowledge: "off" as const }]) {
+      const { grant } = await fixture();
+      const saved = await saveActorNewSessionDraft(
+        { db, settings, objectStorage: null },
+        grant,
+        grant.workspaceId!,
+        {
+          expectedRevision: 0,
+          text: "Start with a learning choice",
+          resources: [],
+          tools: [],
+          toolsProvided: true,
+          model: settings.openaiModel,
+          reasoningEffort: settings.openaiReasoningEffort,
+          latencyMode: "standard",
+          selectedProjectChannelId: null,
+          options: { visibility: "workspace", agentLearning },
+        },
+      );
+      const noop = async () => undefined;
+      const deps = {
+        settings,
+        db,
+        bus: new MemoryEventBus(),
+        workflowClient: {
+          signalUserMessage: noop,
+          wakeSessionWorkflow: noop,
+          requestSessionWorkflowWakeDispatch: noop,
+          signalApprovalDecision: noop,
+          signalSessionControl: noop,
+          syncScheduledTask: noop,
+          deleteScheduledTaskSchedule: noop,
+          triggerScheduledTask: noop,
+        } as unknown as SessionWorkflowClient,
+        objectStorage: null,
+        githubStateSecret: "test",
+        documentIndexer: { indexDocument: noop },
+        getDocumentServices: () => ({}) as never,
+      } as unknown as ApiRouteDeps;
+
+      // A learning choice is accepted only from a signed-in person.
+      const human: AccessGrant = {
+        ...grant,
+        principalKind: "human_session",
+        permissions: [...grant.permissions, "sessions:control"],
+      };
+      const session = await createSessionForRequest(
+        deps,
+        human,
+        grant.workspaceId!,
+        {
+          initialMessage: saved.text,
+          visibility: "workspace",
+          resources: [],
+          tools: [],
+          model: saved.model,
+          reasoningEffort: saved.reasoningEffort,
+          latencyMode: saved.latencyMode,
+          ...(Object.keys(agentLearning).length ? { agentLearning } : {}),
+          expectedNewSessionDraftRevision: saved.revision,
+          idempotencyKey: crypto.randomUUID(),
+        },
+        {
+          grant: human,
+          authenticatedSubjectId: human.subjectId,
+          accountGrant: null,
+          contextIntegrity: true,
+          canonicalManagedHumanSession: false,
+          canonicalLocalHumanSession: false,
+        } as AccessGrantAuthorization,
+      );
+
+      expect(session.id).toBeString();
+    }
   }, 180_000);
 
   test("creates from a Customize-on draft that follows workspace connectors with exclusions", async () => {

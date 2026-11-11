@@ -553,6 +553,11 @@ async function lockExactNewSessionDraft(
     throw new NewSessionDraftConflictError(current?.revision ?? 0);
   }
   const options = publicNewSessionDraftOptions(current);
+  // The composer saves an untouched or reset learning choice as `{}` and its
+  // create request omits it. Both mean "follow the defaults".
+  if (options.agentLearning && Object.keys(options.agentLearning).length === 0) {
+    delete options.agentLearning;
+  }
   const toolsProvided = newSessionDraftCreateToolsProvided(current, options);
   if (
     stableJson({

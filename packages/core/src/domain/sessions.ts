@@ -3616,6 +3616,11 @@ async function createSessionForRequestInFileScope(
               ? { firstPartyMcpTools: payload.firstPartyMcpTools }
               : {}),
             ...(payload.agent ? { agent: payload.agent } : {}),
+            // The composer saves its learning choice with the draft and sends
+            // it on create; an empty choice is omitted from the request.
+            ...(payload.agentLearning && Object.keys(payload.agentLearning).length
+              ? { agentLearning: payload.agentLearning }
+              : {}),
           },
         }
       : null;
