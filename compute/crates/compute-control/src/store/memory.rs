@@ -235,10 +235,9 @@ impl MemoryStore {
                 sandbox.version += 1;
             }
         }
-        let (renewals, restarts, drained) = inner
-            .hosts
-            .get(&id)
-            .map_or((0, 0, false), |host| (host.row.renewals, host.row.restarts, host.drained));
+        let (renewals, restarts, drained) = inner.hosts.get(&id).map_or((0, 0, false), |host| {
+            (host.row.renewals, host.row.restarts, host.drained)
+        });
         let renewals = renewals + 1;
         let changed = inner.change();
         inner.by_name.insert(register.info.name.clone(), id);

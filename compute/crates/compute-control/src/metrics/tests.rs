@@ -127,7 +127,10 @@ fn only_the_leader_reports_the_fleet() {
         Some(1.0)
     );
     assert_eq!(
-        value(&text, "compute_fleet_host_agent_restarts{host_name=\"hosts-a\"}"),
+        value(
+            &text,
+            "compute_fleet_host_agent_restarts{host_name=\"hosts-a\"}"
+        ),
         Some(3.0)
     );
 
