@@ -97,6 +97,11 @@ import {
   apiRequestBindingsForIdleTimeout,
 } from "./http/request-idle-timeout";
 import { startApiMetricsListener } from "./http/metrics-listener";
+import {
+  apiHttpDrainDeadlineMs,
+  apiRequestBindingsForServerDrain,
+  createHttpServerDrain,
+} from "./http/server-drain";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
 import {
@@ -696,11 +701,14 @@ export async function startApi(options: StartApiOptions = {}) {
     new OfficeWorkbookWebSocketTransport(officeWorkbookRelayFor(routeDeps)),
     ...(computeGateway ? [computeGateway.gateway] : []),
   ];
+  // One drain for both listeners: from SIGTERM their responses close their
+  // connections, live streams end and WebSockets go away (http/server-drain.ts).
+  const httpDrain = createHttpServerDrain();
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
     idleTimeout: API_SERVER_IDLE_TIMEOUT_SECONDS,
-    fetch: (request, bunServer) => {
+    fetch: httpDrain.fetch((request, bunServer: Bun.Server<ApiWebSocketConnection>) => {
       const upgrade = dispatchApiWebSocketUpgrade(
         request,
         bunServer,
@@ -711,9 +719,10 @@ export async function startApi(options: StartApiOptions = {}) {
       return app.fetch(request, {
         ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
         ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
+        ...apiRequestBindingsForServerDrain(httpDrain.signal),
       });
-    },
-    websocket: {
+    }),
+    websocket: httpDrain.websocket<ApiWebSocketConnection>({
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
       backpressureLimit: 16 * 1024 * 1024,
       closeOnBackpressureLimit: true,
@@ -722,9 +731,9 @@ export async function startApi(options: StartApiOptions = {}) {
       close: (socket) => socket.data.transportClosed(),
       ping: (socket) => socket.data.heard?.(),
       pong: (socket) => socket.data.heard?.(),
-    },
+    }),
   });
-  const metricsServer = startApiMetricsListener(settings, observability);
+  const metricsServer = startApiMetricsListener(settings, observability, httpDrain);
   const billingAppUrl = settings.webBaseUrl ?? settings.publicBaseUrl;
   const stopBillingCreditNotificationDelivery =
     routeDeps.managedAuth && billingAppUrl
@@ -851,10 +860,17 @@ export async function startApi(options: StartApiOptions = {}) {
     close: async () => {
       // Prevent another charge/recovery pass while other shutdown pumps drain.
       const billingAutoTopUpsStopped = stopBillingAutoTopUps();
-      server.stop(true);
+      // Drain HTTP rather than resetting sockets: a keep-alive client still
+      // sending on a pooled socket must get the response its request produced.
+      // Requests keep the database, bus and workflow client until they finish,
+      // so those close only after the drain.
+      const httpDrainDeadline = apiHttpDrainDeadlineMs(settings.apiShutdownGraceMs);
+      const httpDrained = Promise.allSettled([
+        httpDrain.stop(server, httpDrainDeadline),
+        ...(metricsServer ? [httpDrain.stop(metricsServer, httpDrainDeadline)] : []),
+      ]);
       // Start private CLI session cleanup even if another service's drain stalls.
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
-      metricsServer?.stop(true);
       await stopBillingCreditNotificationDelivery?.();
       stopSlackInteractionPump?.();
       await stopSlackAgentUpdatePump?.();
@@ -871,6 +887,7 @@ export async function startApi(options: StartApiOptions = {}) {
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
       await billingAutoTopUpsStopped;
+      await httpDrained;
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await routeDeps.decisions?.flushUsage().catch(() => {
@@ -905,6 +922,8 @@ if (import.meta.main) {
     const api = await startApi({ settings, observability });
     installApiShutdownHandlers({
       close: api.close,
+      // The time the pod gives the process after SIGTERM.
+      timeoutMs: settings.apiShutdownGraceMs,
       onFailure: () =>
         observability.warn("Opengeni API shutdown did not finish cleanly", {
           errorCode: "api_shutdown_failed",

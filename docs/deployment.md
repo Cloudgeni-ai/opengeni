@@ -2954,6 +2954,8 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
 
 The chart defaults API, web, relay, control-worker and turn-worker deployments to surge rolling updates (`maxSurge: 1`, `maxUnavailable: 0`). API, web and relay pods drain for `preStopDrainSeconds` before SIGTERM; turn pods may take up to their termination grace to finish in-flight turns. One-node smoke clusters without spare capacity can select zero-surge updates (`maxSurge: 0`, `maxUnavailable: 1`), as the local Kubernetes and preview examples do.
 
+Removing a pod from the Service endpoints does not move connections clients already hold in a keep-alive pool, so the API keeps serving them through the preStop sleep and drains them on SIGTERM: it stops listening, closes idle keep-alive connections, marks every later response `Connection: close`, ends live event streams and closes WebSockets with 1001 (their clients resume on another replica), and lets in-flight requests finish. Requests still running when `OPENGENI_API_SHUTDOWN_GRACE_MS` less a 10-second exit margin has passed are closed, and the process then closes its database, NATS and Temporal clients and exits within that grace. The chart renders the variable as `api.terminationGracePeriodSeconds` less `api.preStopDrainSeconds` (20000 by default); without it the API assumes 30000. A deployment outside the chart should set it the same way.
+
 ### Web assets across rollouts
 
 The console loads route code and stylesheets lazily from content-hashed
