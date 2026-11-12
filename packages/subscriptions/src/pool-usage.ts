@@ -26,6 +26,14 @@ export type SubscriptionUsagePoolInput = {
       resetsAt: number | null;
       observedAt: number | null;
     }>;
+    /**
+     * Windows this account does not have, as a complete provider reading
+     * shows (a plan with only a weekly limit has no five-hour window). The
+     * account is listed in such a window as unknown and is no part of its
+     * total or forecast, even while its other limit holds it: a limit it
+     * does not have cannot run out.
+     */
+    absentWindows?: SubscriptionUsagePoolWindowId[];
   }>;
   readings: Array<{
     connectionId: string;
@@ -145,7 +153,9 @@ function hourOfWeek(at: number): number {
  * the reverse) serves nothing until that limit resets: each account keeps its own
  * reading, but the window's total counts none of it as usable now, and the forecast
  * makes it usable again only when that limit ends. A pool with nothing usable now
- * reports when capacity next returns instead of a runout.
+ * reports when capacity next returns instead of a runout. An account without the
+ * window at all (`absentWindows`) is not part of that window, so a weekly-only plan
+ * at its weekly limit never reads as five-hour exhaustion.
  * Call units never set demand magnitude: stable percentage movements include usage
  * outside this application. Calibration is only a relative proxy for usable capacity.
  */
@@ -210,6 +220,8 @@ export function buildSubscriptionUsagePool(
       const observedReset = finite(snapshot?.resetsAt) ? snapshot.resetsAt : null;
       const blockedUntil = account.blocked?.[id];
       const blocked = blockedUntil === null || (finite(blockedUntil) && blockedUntil > input.now);
+      // A refusal of this window outranks a reading that said the account has none.
+      const absent = !blocked && account.absentWindows?.includes(id) === true;
       const resetsAt = blocked ? (blockedUntil ?? null) : observedReset;
       const current =
         observedAt !== null &&
@@ -218,7 +230,7 @@ export function buildSubscriptionUsagePool(
           : observedReset > input.now && observedReset <= observedAt + duration);
       const remainingPercent = blocked
         ? 0
-        : current && snapshot && percent(snapshot.usedPercent)
+        : !absent && current && snapshot && percent(snapshot.usedPercent)
           ? 100 - snapshot.usedPercent
           : null;
       const readings = [...(readingsByAccount.get(account.id)?.get(id) ?? [])];
@@ -230,6 +242,7 @@ export function buildSubscriptionUsagePool(
         finite(account.planWeight) && account.planWeight > 0 ? account.planWeight : 1;
       return {
         account,
+        absent,
         observedAt,
         resetsAt,
         remainingPercent,
@@ -281,9 +294,12 @@ export function buildSubscriptionUsagePool(
       }, null),
     );
     // Accounts without a current reading are left out of the total and forecast
-    // (and stay listed as unknown), rather than hiding what the others report.
+    // (and stay listed as unknown), rather than hiding what the others report;
+    // so is an account without this window, whatever holds it.
     const knownIndexes = accounts.flatMap((account, index) =>
-      account.remainingPercent === null && heldUntil[index] === null ? [] : [index],
+      data[index]!.absent || (account.remainingPercent === null && heldUntil[index] === null)
+        ? []
+        : [index],
     );
     const known = knownIndexes.map((index) => accounts[index]!);
     const held = knownIndexes.map((index) => heldUntil[index]!);
@@ -323,7 +339,11 @@ export function buildSubscriptionUsagePool(
     });
     let forecast: SubscriptionUsagePoolForecast;
     if (!complete) {
-      forecast = insufficient("No account has a current observation for this window.");
+      forecast = insufficient(
+        data.length > 0 && data.every((row) => row.absent)
+          ? "No account has this limit."
+          : "No account has a current observation for this window.",
+      );
     } else if (remainingPercent === 0) {
       // Nothing is usable now: report when the first account can serve again, which
       // is when the later of its own limit and any other window's limit ends.

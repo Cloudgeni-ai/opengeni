@@ -41,10 +41,12 @@ use crate::step::{After, Live, Reading, Report};
 use crate::store::{Claimed, OwnerEpoch, Store};
 use compute_protocol::fleet::Ruling;
 
+mod busy;
 mod capture;
 mod check;
 mod config;
 mod disk;
+mod disk_meter;
 mod fetch;
 mod handle;
 mod holds;
@@ -518,6 +520,8 @@ enum Event<V> {
     },
     /// A measurement of what disk relief may free ended (see [`relief`]).
     ReliefMeasured(Box<relief::Measured>),
+    /// A measurement of disks at rest ended (see [`disk_meter`]).
+    DisksMeasured(Box<disk_meter::Measured>),
     /// The removal disk relief asked for of `cache` ended, having
     /// `removed` it or not.
     CacheGone {
@@ -775,6 +779,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     after_reading: Vec<disk::AfterReading>,
     /// What disk relief may free besides local copies (see [`relief`]).
     relief: relief::Relief,
+    /// What each disk may still grow by, read off the loop (see
+    /// [`disk_meter`]).
+    disks: disk_meter::DiskMeter,
     images: Images,
     warm: Option<Warm>,
     core: Host,
@@ -1016,6 +1023,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             preparing: HashSet::new(),
             after_reading: Vec::new(),
             relief: relief::Relief::default(),
+            disks: disk_meter::DiskMeter::default(),
             owning: HashMap::new(),
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
@@ -1240,22 +1248,38 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 biased;
                 // First, so a steady stream of events and requests cannot
                 // starve it: it is ready at most once per interval.
-                _ = sample.tick(), if acting => self.sample().await,
-                Some(event) = self.events.recv() => self.on_event(event),
+                _ = sample.tick(), if acting => {
+                    let _turn = busy::Turn::of("a sample");
+                    self.sample().await;
+                }
+                Some(event) = self.events.recv() => {
+                    let _turn = busy::Turn::of("an event");
+                    self.on_event(event);
+                }
                 command = self.commands.recv() => match command {
-                    Some(command) => self.on_command(command),
+                    Some(command) => {
+                        let _turn = busy::Turn::of("a request");
+                        self.on_command(command);
+                    }
                     None => break,
                 },
-                () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
+                () = sleep_until_some(deadline), if acting => {
+                    let _turn = busy::Turn::of("a timer");
+                    self.input(Input::Tick);
+                }
                 // Also while the lease has run out, as at start: a VM the
                 // guard froze then fails again, but one it killed is found
                 // gone. The host registers again listing the frozen ones
                 // (see `frozen_owner`), and no other blocked sandbox.
-                () = sleep_until_some(retry_at) => self.retry_recovery().await,
+                () = sleep_until_some(retry_at) => {
+                    let _turn = busy::Turn::of("a recovery retry");
+                    self.retry_recovery().await;
+                }
                 // Renewed, the core reconsiders every sandbox, and the
                 // frozen ones the service kept are taken back as the guard
                 // thaws them.
                 () = lease_changed(lease.as_ref()) => {
+                    let _turn = busy::Turn::of("a lease change");
                     self.thawing();
                     self.input(Input::Tick);
                 }

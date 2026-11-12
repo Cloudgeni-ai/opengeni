@@ -481,7 +481,8 @@ function SectionRow({ row }: { row: IntegrationSectionRow }) {
             )
           ) : null}
           {row.menu?.length ? (
-            <MoreMenu label={`More actions for ${row.title}`} quiet>
+            // Outlined like the page header's ⋯, so buttons and menus share one right edge.
+            <MoreMenu label={`More actions for ${row.title}`}>
               {row.menu.map((item) => (
                 <DropdownMenuItem
                   key={item.label}

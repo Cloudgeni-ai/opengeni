@@ -268,7 +268,8 @@ struct Serve {
     /// Fewest hosts the group keeps.
     #[arg(long, default_value_t = 1)]
     scale_min: u32,
-    /// Most hosts the group may have.
+    /// Most hosts that take sandboxes the group may have: it may grow past
+    /// it by one place for each draining host it lists.
     #[arg(long, default_value_t = 10)]
     scale_max: u32,
     /// Spare memory to keep, in thousandths of the group's.

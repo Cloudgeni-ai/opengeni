@@ -167,6 +167,12 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import {
+  CONSOLE_CONTENT_SECURITY_PATH,
+  consoleContentSecuritySources,
+  type ConsoleContentSecuritySources,
+} from "./http/console-content-security";
+import { registerImageProxyRoutes } from "./routes/image-proxy";
+import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
@@ -448,6 +454,7 @@ import { registerSessionArtifactAssociationRoutes } from "./routes/session-artif
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { adminStepUpGuard } from "./auth/admin-step-up";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
@@ -739,6 +746,7 @@ export function createAppComposition(
           deployment: speechToText,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
           log: (message, attributes) => observability.error(message, attributes),
+          warn: (message, attributes) => observability.warn(message, attributes),
         })
       : deps.transcription;
   const transcriptionSegmenter =
@@ -1339,6 +1347,10 @@ export function createAppComposition(
   // content never answers an Opengeni workspace that isn't EU-only.
   app.use("/v1/*", callingWorkspaceContentFlowGuard(routeDeps));
 
+  // Owners and admins confirm admin changes with a recent passkey; runs after
+  // personal API keys and agents acting as a person are stamped.
+  app.use("/v1/*", adminStepUpGuard(routeDeps));
+
   // These product-owned auth routes must be registered before Better Auth's
   // wildcard handler or the provider returns its own 404 first.
   registerManagedOnboardingRoutes(app, routeDeps);
@@ -1637,6 +1649,32 @@ export function createAppComposition(
   registerMcpOAuthRoutes(app, routeDeps);
 
   registerClientErrorRoutes(app, { observability, settings: deps.settings });
+
+  // The external origins the console's Content-Security-Policy must allow;
+  // the web server reads them (see http/console-content-security.ts).
+  let consoleContentSecurity: {
+    expiresAt: number;
+    value: Promise<ConsoleContentSecuritySources>;
+  } | null = null;
+  app.get(CONSOLE_CONTENT_SECURITY_PATH, async (c) => {
+    const now = Date.now();
+    if (!consoleContentSecurity || consoleContentSecurity.expiresAt <= now) {
+      const value = resolveCatalogSettings(deps.db, deps.settings)
+        .then((resolved) => resolved.settings)
+        .catch(() => undefined)
+        .then((catalogSettings) =>
+          consoleContentSecuritySources({
+            settings: deps.settings,
+            ...(catalogSettings ? { catalogSettings } : {}),
+            objectStorage: routeDeps.objectStorage,
+          }),
+        );
+      consoleContentSecurity = { expiresAt: now + 60_000, value };
+    }
+    c.header("cache-control", "no-store");
+    return c.json(await consoleContentSecurity.value);
+  });
+  registerImageProxyRoutes(app, routeDeps);
   registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
   app.get("/v1/config/client", async (c) => {
@@ -3542,6 +3580,8 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
+  { pattern: /^\/v1\/config\/content-security$/, label: "/v1/config/content-security" },
+  { pattern: /^\/v1\/image-proxy$/, label: "/v1/image-proxy" },
   { pattern: /^\/v1\/client-errors$/, label: "/v1/client-errors" },
   { pattern: /^\/v1\/analytics-consent$/, label: "/v1/analytics-consent" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },

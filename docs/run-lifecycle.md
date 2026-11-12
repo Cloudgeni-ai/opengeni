@@ -1472,11 +1472,16 @@ the worker clear its in-memory copy. Failed requests and late/zombie completion
 events cannot reset the streak. Successful inference between transient outages
 therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
-OpenAI/Azure HTTP-200 Responses `response.failed` / `response.error` terminals
-are intercepted before the SDK flattens their diagnostic. Closed server-error
-and overload codes use this recovery lane; rate-limit codes retain the pacing
-below. Invalid requests, content-policy refusals, and unknown terminal codes
-remain terminal even when their diagnostic mentions transient failures. The
+OpenAI/Azure HTTP-200 Responses `response.failed` / `response.error` / `error`
+terminals are intercepted before the SDK flattens their diagnostic. Closed
+server-error and overload codes (including Azure's CamelCase service codes and
+bare `500`/`502`/`503`/`504`) use this recovery lane; rate-limit codes retain the
+pacing below. An unrecognized code defers only to a closed status `type` (Azure
+documents mid-stream `server_error` as a 500 and `too_many_requests` as a 429;
+OpenAI's `service_unavailable_error` is its 503). Invalid requests,
+content-policy refusals, and unknown codes without such a type remain terminal
+even when their diagnostic mentions transient failures, and record the bounded
+provider code and type as `providerErrorCode` / `providerErrorType`. The
 failure/recovery `detail` preserves the exact provider message through 4 KiB;
 larger messages keep a UTF-8-safe prefix and explicit truncation marker. SDK
 error messages, tracing and worker public diagnostics stay structural.
@@ -3620,6 +3625,11 @@ New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
 their recorded `snapshot_filesystem` or tar mode and remain recoverable.
+A deployment that sets `OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar` keeps every
+save in its own object storage: a session whose latest save is a directory
+snapshot is restored from it into a tar destination, so that snapshot is the
+last one it reads and it never writes another. A box that is still live keeps
+the mode it was created in until it is next restored.
 Filesystem snapshot recovery boots the exact selected immutable Image directly,
 attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does

@@ -98,8 +98,6 @@ export function agentSaveErrorText(error: unknown): string | null {
       return AGENT_VERSION_CONFLICT;
     case "agent_limit_reached":
       return "This workspace has as many agents as it can keep. Delete one, then try again.";
-    case "agent_slack_requires_workspace_visibility":
-      return "It's available in Slack, so everyone in the workspace must be able to use it. Turn Slack off first.";
     default:
       return null;
   }
@@ -248,6 +246,12 @@ function AgentForm({
       );
       return true;
     } catch (error) {
+      // Its name is how people ask it in Slack: say so at the name.
+      const code = agentErrorCode(error);
+      if (code === "agent_slack_name_taken" || code === "agent_slack_name_invalid") {
+        setErrors((previous) => ({ ...previous, name: userErrorText(error) }));
+        return false;
+      }
       const text = agentSaveErrorText(error);
       if (text) throw new Error(text, { cause: error });
       throw error;
@@ -372,7 +376,15 @@ function AgentForm({
             />
           }
         />
-        <Field label="Who can use it" group>
+        <Field
+          label="Who can use it"
+          group
+          hint={
+            inSlack && visibility === "private"
+              ? "Only me agents stay in the app, so it stops answering in Slack."
+              : undefined
+          }
+        >
           <SegmentedControl
             size="sm"
             aria-label="Who can use it"
@@ -380,10 +392,8 @@ function AgentForm({
               {
                 value: "private",
                 label: "Only me",
-                disabled: visibility !== "private" && (inSlack || privateChats === false),
-                disabledReason: inSlack
-                  ? "It's available in Slack. Turn Slack off first."
-                  : ONLY_ME_UNAVAILABLE,
+                disabled: visibility !== "private" && privateChats === false,
+                disabledReason: ONLY_ME_UNAVAILABLE,
               },
               { value: "workspace", label: workspacePeopleLabel(workspaceName) },
             ]}

@@ -823,6 +823,120 @@ describe("decision selection", () => {
     expect(toolSelectionRequest(seen[0]!).input).not.toHaveProperty("loadedEarlier");
     expect(toolSelectionRequest(seen[1]!).input).toHaveProperty("loadedEarlier", ["a__events"]);
   });
+  describe("a streamed client search", () => {
+    const nativeDecisionRuntime = (decision: ToolSelector) => {
+      const runtime = new LazyToolRuntime(
+        "codex_native",
+        new Set(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        decision,
+      );
+      runtime.refresh([
+        candidate("a__events", "List events"),
+        candidate("b__events", "List events"),
+      ]);
+      return runtime;
+    };
+    const rawSearch = {
+      id: "tsc_1",
+      type: "tool_search_call",
+      status: "completed",
+      arguments: { query: "events" },
+      call_id: "search-1",
+      execution: "client",
+    };
+    // The SDK's converted form of the same call in the terminal response.
+    const convertedSearch = {
+      type: "tool_search_call",
+      id: "tsc_1",
+      status: "completed",
+      arguments: { query: "events" },
+      providerData: { call_id: "search-1", execution: "client" },
+    };
+    const request = {
+      input: [{ role: "user", content: "show events" }],
+      tools: [],
+      handoffs: [],
+      modelSettings: {},
+      outputType: "text",
+      tracing: false,
+    } as unknown as ModelRequest;
+
+    test("is decided while the provider is still finishing the response", async () => {
+      const seen: ToolDecisionInput[] = [];
+      const runtime = nativeDecisionRuntime(judge({ a__events: 0.9 }, seen));
+      let decidedBeforeTerminal = false;
+      const inner = {
+        async getResponse(): Promise<ModelResponse> {
+          throw new Error("streaming only");
+        },
+        async *getStreamedResponse(): AsyncIterable<StreamEvent> {
+          yield {
+            type: "model",
+            event: { type: "response.output_item.done", output_index: 0, item: rawSearch },
+          } as StreamEvent;
+          // The provider's terminal event follows well after the call is done.
+          for (let i = 0; i < 50 && seen.length === 0; i++) await Bun.sleep(2);
+          decidedBeforeTerminal = seen.length === 1;
+          yield {
+            type: "response_done",
+            response: {
+              id: "resp_1",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              output: [convertedSearch],
+            },
+          } as StreamEvent;
+        },
+      } as unknown as Model;
+      const events: StreamEvent[] = [];
+      for await (const event of runtime.wrapModel(inner).getStreamedResponse(request))
+        events.push(event);
+      expect(decidedBeforeTerminal).toBe(true);
+      // Decided once, and the call carries that decision.
+      expect(seen).toHaveLength(1);
+      const terminal = events.at(-1) as Extract<StreamEvent, { type: "response_done" }>;
+      const marker = (terminal.response.output[0] as { providerData: Record<string, unknown> })
+        .providerData["opengeni.lazy_search.v1"] as { tools?: { name: string }[] };
+      expect(marker.tools?.map((t) => t.name)).toEqual(["a__events"]);
+      // Recorded when accepted: a later search knows what this one loaded.
+      await runtime.prepareSearch({ query: "list the events" });
+      expect(seen[1]!.loadedEarlier).toEqual(["a__events"]);
+    });
+
+    test("a response that never completes leaves no record of its search", async () => {
+      const seen: ToolDecisionInput[] = [];
+      const runtime = nativeDecisionRuntime(judge({ a__events: 0.9 }, seen));
+      const inner = {
+        async getResponse(): Promise<ModelResponse> {
+          throw new Error("streaming only");
+        },
+        async *getStreamedResponse(): AsyncIterable<StreamEvent> {
+          yield {
+            type: "model",
+            event: { type: "response.output_item.done", output_index: 0, item: rawSearch },
+          } as StreamEvent;
+          for (let i = 0; i < 50 && seen.length === 0; i++) await Bun.sleep(2);
+          throw new Error("stream reset");
+        },
+      } as unknown as Model;
+      const consume = async () => {
+        for await (const _event of runtime.wrapModel(inner).getStreamedResponse(request))
+          void _event;
+      };
+      await expect(consume()).rejects.toThrow("stream reset");
+      expect(seen).toHaveLength(1);
+      await runtime.prepareSearch({ query: "list the events" });
+      expect(seen[1]!.loadedEarlier).toBeUndefined();
+    });
+  });
   test("a query naming a tool and asking for more loads the named tool plus the selector's pick", async () => {
     const seen: ToolDecisionInput[] = [];
     const runtime = decisionRuntime(judge({ mail__send: 0.9 }, seen));

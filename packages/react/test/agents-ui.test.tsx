@@ -541,7 +541,7 @@ test("the count and the error measure the same text: outer spaces don't count", 
   expect(lengthError("x".repeat(121), 120)).toBe("Shorten it to 120 characters. It has 121.");
 });
 
-test("an agent available in Slack can't be made Only me", async () => {
+test("an agent in Slack can be made Only me, and the form says it leaves Slack", async () => {
   const agent = makeAgent({ slack: [slackAvailability()] });
   const container = await render(
     <AgentsTestHost context={appContext(fakeAgentsClient([agent]))}>
@@ -552,7 +552,13 @@ test("an agent available in Slack can't be made Only me", async () => {
   const onlyMe = [...container.querySelectorAll<HTMLElement>("[role='radio']")].find(
     (element) => element.textContent?.trim() === "Only me",
   );
-  expect(onlyMe?.getAttribute("aria-disabled") ?? onlyMe?.getAttribute("disabled")).not.toBeNull();
+  expect(onlyMe?.getAttribute("aria-disabled")).not.toBe("true");
+  expect(onlyMe?.hasAttribute("disabled")).toBe(false);
+  expect(container.textContent).not.toContain("stops answering in Slack");
+  await act(async () => onlyMe!.click());
+  expect(container.textContent).toContain(
+    "Only me agents stay in the app, so it stops answering in Slack.",
+  );
 });
 
 // --- Composer chip -------------------------------------------------------------

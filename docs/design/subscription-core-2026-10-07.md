@@ -1594,7 +1594,10 @@ enabled, and one added branch in the operation-lease guard.
   request); a people-scoped shared connection is refused for the same
   reason. Provider ordering selects the initial provider only: once the
   core provider is selected, every failure is `fallbackSafe: false`, so the
-  audio is never retried through another provider. Subscription
+  audio is never retried through another provider. The one exception is a
+  refusal for lack of credit, which heard nothing: it stays fallback-safe,
+  so the workspace's fallback setting may send the audio on, and the spent
+  provider is tried last for that workspace for 15 minutes. Subscription
   transcription stays non-chargeable (the provider has no deployment
   funding). Availability is "a candidate exists"; maintenance reports
   unavailable.

@@ -85,7 +85,7 @@ pub struct SleepRules {
     pub compress_under_pressure: bool,
     /// Copy a sandbox in use to object storage once it has run this long
     /// since its newest copy there, or since it woke if that is later,
-    /// pausing it only while its memory and disk are captured; see
+    /// copying its disk alone and never pausing it; see
     /// [`Step::Checkpoint`]. Unlike the rules above this counts running
     /// time, not idle time: it bounds what losing the host costs a sandbox
     /// that never goes idle. One with no copy there yet gets its first after
@@ -248,14 +248,13 @@ impl SleepPolicy {
     }
 
     /// Whether the host may save the sandbox's VM without being asked: to
-    /// put it to sleep, to relieve memory or to checkpoint it. A policy
-    /// that only checkpoints never saves unasked, but books a save all the
-    /// same, since its checkpoints' memory images land in that booking.
-    /// One the host never saves so, such as a CI runner's, is saved only by
-    /// an [`crate::Input::Sleep`] request, as a hand-off makes.
+    /// put it to sleep or to relieve memory. A checkpoint saves no memory
+    /// image, so a policy that only checkpoints saves nothing unasked. One
+    /// the host never saves so, such as a CI runner's, is saved only by an
+    /// [`crate::Input::Sleep`] request, as a hand-off makes.
     #[must_use]
     pub const fn saves(&self) -> bool {
-        self.rules.save_after.is_some() || self.rules.checkpoint_every.is_some()
+        self.rules.save_after.is_some()
     }
 
     /// The next step that moves an unneeded sandbox in `state`, idle for

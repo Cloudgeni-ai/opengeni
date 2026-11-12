@@ -346,7 +346,12 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   (D-47). Portable sessions retain the normal failover contract.
   Verification: `packages/subscriptions/test/policy.test.ts`.
 - **SUB-FAIL-10** Voice, transcription and media generation do not fail over
-  across providers in the first release. Verification: pending (consumers).
+  across providers in the first release. One exception for transcription: a
+  subscription that answers "out of credit" heard nothing, so the workspace's
+  "try another provider" setting may send that audio to the next provider,
+  and the spent provider is tried last for that workspace for 15 minutes.
+  Verification: `packages/core/test/speech-to-text-deployment.test.ts`,
+  `apps/api/test/xai-subscription-core.test.ts`.
 - **SUB-FAIL-11** Failover within one turn is bounded and recorded per account,
   so a turn cannot alternate between failing accounts indefinitely.
   Verification: `packages/db/test/subscription-core-serving-policy-postgres.test.ts`, `apps/worker/test/claude-core-settlement.test.ts`.

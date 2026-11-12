@@ -324,6 +324,10 @@ import {
   type SlackApiRateLimiter,
   type SlackRestMcpBridgeContext,
 } from "./slack-rest-mcp";
+import {
+  DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
+  type DataverseWebApiMcpBridgeContext,
+} from "./dataverse-web-api-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -1138,6 +1142,7 @@ ensureReadableStreamFrom();
 type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
+  DataverseWebApiMcpBridgeContext &
   DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
@@ -1146,6 +1151,7 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
   GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
   SLACK_REST_MCP_BRIDGE_ADAPTER,
+  DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
 ]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
@@ -3261,7 +3267,7 @@ export function agentPromptResourcesFor(
   };
 }
 
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$/u;
 
 /**
  * Which GitHub identity each mounted GitHub repository acts as: the person's

@@ -212,6 +212,7 @@ describe("personal GitHub repository capabilities", () => {
           return pages[Number(url.searchParams.get("page")) - 1] ?? [];
         }
         if (url.pathname === "/repos/other/public") return github(900, "other/public");
+        if (url.pathname === "/repos/octocat_acme/tools") return github(901, "octocat_acme/tools");
         throw new PersonalGitHubRepositoryProviderError("repository_not_found");
       },
     };
@@ -240,6 +241,10 @@ describe("personal GitHub repository capabilities", () => {
     // An unknown exact name is an empty answer, served from the cached scan.
     expect((await search("acme/missing")).repositories).toEqual([]);
     expect(urls.filter((url) => url.startsWith("/user/repos"))).toHaveLength(2);
+    // An enterprise managed user's own repository is looked up directly too.
+    expect(
+      (await search("octocat_acme/tools")).repositories.map((repository) => repository.fullName),
+    ).toEqual(["octocat_acme/tools"]);
     clearPersonalGitHubRepositorySearchCache();
   });
 

@@ -1,5 +1,16 @@
 # @opengeni/config
 
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+- Updated dependencies [01feadc]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/xai-subscription@6.16.0
+  - @opengeni/codex@6.16.0
+
 ## 6.15.0
 
 ### Minor Changes

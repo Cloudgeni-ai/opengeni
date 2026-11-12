@@ -1,0 +1,12 @@
+-- deployment-mode: rolling
+-- When a browser session was confirmed with a passkey (CASA 3.3.1: admin
+-- interfaces use multi-factor authentication): it was signed in with one, or
+-- the person confirmed with one later in it. An organization or workspace
+-- admin's changes from a session without it are refused until they confirm
+-- once. Bound to the session row, so signing out or revoking the session
+-- removes it with the row. Null for every existing session: an admin signed in
+-- with a password before this is asked once.
+--
+-- Rolling: a nullable column the previous release never reads or writes, and
+-- Better Auth only writes the columns it is configured with.
+ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS mfa_verified_at timestamptz;

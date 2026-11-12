@@ -28,7 +28,7 @@ async fn ask(lab: &Lab, sandbox: Id, key: &str) -> Reply {
 }
 
 /// Asks until the capture `key` is stored, answering its image and length.
-async fn captured(lab: &Lab, sandbox: Id, key: &str) -> (ImageId, u64) {
+pub(super) async fn captured(lab: &Lab, sandbox: Id, key: &str) -> (ImageId, u64) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match ask(lab, sandbox, key).await {

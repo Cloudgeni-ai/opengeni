@@ -89,6 +89,8 @@ test("idle and owned observations never load unused session/turn/attempt payload
     "compact_requested",
     "input_wait_turn_id",
     "input_wait_until",
+    "content_archive_state",
+    "imported_archive_import_id",
   ];
   for (const accountId of [undefined, grant.accountId]) {
     const idle = await capture(accountId);

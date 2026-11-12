@@ -1,5 +1,23 @@
 # @opengeni/db
 
+## 6.16.0
+
+### Patch Changes
+
+- fb19875: Approval cards now read in the host's words and language. A saved review carries codes beside its English text: `reasonCode` for why it asks or is blocked, `approveLabelCode` when the button is the plain "Approve action" or "Allow", `toolName` for the action, and per field the argument it stands for (`key`) and a plain yes or no (`booleanValue`). The card, the approval list, the step in the chat (`toolDisplayName`) and the history line after a decision word these through the host's `messages`: `approvalSurface.approveAction` and `approvalSurface.allow` for the button, `toolActionReview.reason.*` for the reason, `toolActionReview.yes` and `.no` for yes or no values, and new host keys to name a connector's actions and fields the same way as `connectService.<id>.name`: `toolAction.<toolName>.title`, `toolAction.<toolName>.field.<argument>` and, for every tool, `toolField.<argument>`. Without host words nothing changes.
+- 4c84667: Free-credit farm protection by known bad network. A new owner-only setting, `deniedNetworkMode` (`off` by default; `observe` or `enforce`), holds the Free credit of a new self-serve owner whose exact network (IPv4 address or IPv6 /64) was used in the last 90 days by an account with a denied decision or a currently held account, through its signup or its owner's sign-ins, even when it is the only signup from that network. /24 and /48 prefixes never trigger it, invited members never count, manual decisions and operator releases are kept, and failures fail open. Sign-in networks are stored only as HMAC-SHA256 values under a random per-schema database key; the migration captures them for accounts already denied or held. `scripts/operator/promotion-decisions.ts` adds `--denied-network-mode` and `--rule`, and `--network-holds` lists these holds with their own reason. See `docs/signup-abuse-protection.md`.
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+- Updated dependencies [01feadc]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/xai-subscription@6.16.0
+  - @opengeni/codemode@6.16.0
+  - @opengeni/codex@6.16.0
+  - @opengeni/config@6.16.0
+  - @opengeni/observability@6.16.0
+  - @opengeni/network@6.16.0
+  - @opengeni/subscriptions@6.16.0
+
 ## 6.15.0
 
 ### Minor Changes

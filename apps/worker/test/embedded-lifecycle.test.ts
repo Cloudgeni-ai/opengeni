@@ -930,7 +930,11 @@ describe("embedded worker lifecycle contract", () => {
         callback: (tx: { execute: () => Promise<unknown> }) => Promise<unknown>,
       ) =>
         callback({
-          execute: async () => {
+          execute: async (query: { queryChunks?: { value?: string[] }[] }) => {
+            // Readiness fingerprints the catalogs before it reads them; a
+            // fresh check per probe always reads them.
+            const text = query.queryChunks?.map((chunk) => chunk.value?.join("") ?? "").join("");
+            if (text?.includes("as fingerprint")) return [{ fingerprint: "catalogs" }];
             const result = catalogResults[catalogQueries];
             catalogQueries += 1;
             return result;

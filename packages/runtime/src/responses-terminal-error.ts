@@ -35,6 +35,12 @@ const REQUEST_CODES = new Set([
   "invalid_prompt",
   "context_length_exceeded",
   "invalid_argument",
+  // Configuration errors that can never succeed on retry, even if a provider
+  // labels them with a broad server_error type.
+  "deploymentnotfound",
+  "model_not_found",
+  "invalid_value",
+  "unsupported_parameter",
 ]);
 const RATE_CODES = new Set([
   "slow_down",
@@ -43,8 +49,12 @@ const RATE_CODES = new Set([
   "rate_limited",
   "ratelimitexceeded",
   "too_many_requests",
+  "toomanyrequests",
   "429",
 ]);
+// Azure reports gateway/service failures with CamelCase codes (normalized to
+// lower case like the safety and rate sets) and some proxies put the bare HTTP
+// status in `code`. Each names a server-side 5xx, never a request problem.
 const UNAVAILABLE_CODES = new Set([
   "server_is_overloaded",
   "server_error",
@@ -55,6 +65,31 @@ const UNAVAILABLE_CODES = new Set([
   "model_overloaded",
   "engine_overloaded",
   "server_overloaded",
+  "serviceunavailable",
+  "internalservererror",
+  "badgateway",
+  "gatewaytimeout",
+  "500",
+  "502",
+  "503",
+  "504",
+]);
+/**
+ * Closed provider error `type`s that name an HTTP status class. Azure labels a
+ * mid-stream `error` event by these types and documents server_error as a 500
+ * and too_many_requests as a 429 (the stream itself is an HTTP 200); OpenAI
+ * documents service_unavailable_error as its 503 type. The provider's specific
+ * `code` beside them (Azure's no_capacity, for example) is open-ended, so an
+ * unrecognized code defers to the status its type names, exactly as a real 5xx
+ * or 429 HTTP status is authoritative before the stream opens. Recognized
+ * safety and request codes still veto, and quota codes stay terminal upstream.
+ * Quota detection needs rate evidence (a rate code or the too_many_requests
+ * type), so an unrecognized code under server_error is never read as quota.
+ */
+const STATUS_TYPES = new Map<string, "rate_limit" | "unavailable">([
+  ["server_error", "unavailable"],
+  ["service_unavailable_error", "unavailable"],
+  ["too_many_requests", "rate_limit"],
 ]);
 
 /**
@@ -110,9 +145,11 @@ export class ResponsesStreamingTerminalError extends Error {
     const codes = [this.code, this.type].map((value) => value?.toLowerCase());
     const matches = (allowed: Set<string>) =>
       codes.some((value) => value !== undefined && allowed.has(value));
-    // Type-only envelopes may classify, but an explicit unknown code must not
-    // gain retry authority from a broad server_error type. Refusal types veto.
-    const recoveryCode = codes[0] || codes[1];
+    // The code is the most specific evidence. A recognized refusal code or type
+    // vetoes; an unrecognized code falls back only to a closed status type,
+    // never to wording and never to an arbitrary type.
+    const [code, type] = codes;
+    const recoveryCode = code || type;
     this.category =
       matches(SAFETY_CODES) ||
       /\bthis request was blocked by our safety systems\b/i.test(this.detail)
@@ -123,7 +160,7 @@ export class ResponsesStreamingTerminalError extends Error {
             ? "rate_limit"
             : recoveryCode !== undefined && UNAVAILABLE_CODES.has(recoveryCode)
               ? "unavailable"
-              : "unknown";
+              : (type !== undefined && STATUS_TYPES.get(type)) || "unknown";
   }
 }
 
@@ -139,9 +176,12 @@ export function responsesStreamingTerminalError(
   ) {
     return undefined;
   }
+  const nested = value.error ?? record(value.response)?.error;
+  // A flat `error` event carries its fields beside the event's own `type`,
+  // which names the event, not a provider error type.
   return new ResponsesStreamingTerminalError(
     value.type,
-    value.error ?? record(value.response)?.error ?? value,
+    nested ?? { ...value, type: undefined },
     headers,
   );
 }

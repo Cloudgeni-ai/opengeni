@@ -82,6 +82,15 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     <title>Opengeni</title>
+    <script id="opengeni-zod-jitless">
+      // The page's Content-Security-Policy has no 'unsafe-eval'. Zod decides
+      // whether to compile object parsers with `new Function` when each
+      // schema is created, which happens while the app's modules load, so
+      // turn that off before any module runs (Zod reads this shared object).
+      globalThis.__zod_globalConfig = Object.assign(globalThis.__zod_globalConfig || {}, {
+        jitless: true,
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

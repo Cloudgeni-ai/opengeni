@@ -256,6 +256,75 @@ test("restricted credential edits cannot remove destination binding or extend fi
   expect(reduced.status, await reduced.text()).toBe(200);
 });
 
+// A product that is its own OAuth server stores each person's token for its MCP
+// server through the generic connections API, and rotates it there.
+const mcpCredential = {
+  providerDomain: "mcp.product.example",
+  kind: "oauth2",
+  subjectId,
+  credential: { accessToken: "fixture-access", refreshToken: "fixture-refresh" },
+  grantedScopes: ["mcp"],
+  metadata: {
+    mcpUrl: "https://mcp.product.example/mcp",
+    resource: "https://mcp.product.example/mcp",
+  },
+};
+
+test("an MCP server's OAuth credential counts as that MCP server, so allowing custom:mcp admits storing and rotating it", async () => {
+  const f = await fixture();
+  await f.restrict(["custom:mcp"]);
+  const created = await f.request("connections", "POST", mcpCredential);
+  expect(created.status, await created.clone().text()).toBe(201);
+  const { connection } = await created.json();
+  const rotated = await f.request(`connections/${connection.id}`, "PATCH", {
+    credential: { accessToken: "fixture-access-2", refreshToken: "fixture-refresh-2" },
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  });
+  expect(rotated.status, await rotated.text()).toBe(200);
+  await shared.admin`update connections set status = 'needs_reauth' where id = ${connection.id}`;
+  const reactivated = await f.request(`connections/${connection.id}`, "PATCH", {
+    status: "active",
+    credential: { accessToken: "fixture-access-3", refreshToken: "fixture-refresh-3" },
+  });
+  expect(reactivated.status, await reactivated.text()).toBe(200);
+
+  // Anything that is not plainly a credential for a custom MCP server is still refused.
+  const gmailMcp = "https://gmailmcp.googleapis.com/mcp/v1";
+  for (const body of [
+    { ...mcpCredential, kind: "api_key" },
+    { ...mcpCredential, metadata: { resource: mcpCredential.metadata.resource } },
+    { ...mcpCredential, metadata: { ...mcpCredential.metadata, mcpUrl: "not a url" } },
+    { ...mcpCredential, metadata: { ...mcpCredential.metadata, credentialRole: "fixture-role" } },
+    { ...mcpCredential, metadata: { mcpUrl: gmailMcp, resource: gmailMcp } },
+    { ...mcpCredential, metadata: { ...mcpCredential.metadata, resource: gmailMcp } },
+  ]) {
+    const denied = await f.request("connections", "POST", body);
+    expect(denied.status, JSON.stringify(body.metadata)).toBe(403);
+  }
+  // Moving the credential to a server the policy does not allow is refused too.
+  const moved = await f.request(`connections/${connection.id}`, "PATCH", {
+    credential: { accessToken: "fixture-access-4" },
+    metadata: { mcpUrl: gmailMcp, resource: gmailMcp },
+  });
+  expect(moved.status, await moved.text()).toBe(403);
+  const rows = await shared.admin`select id from connections where workspace_id = ${f.workspaceId}`;
+  expect(rows).toHaveLength(1);
+});
+
+test("a restricted policy without custom:mcp still refuses an MCP server's OAuth credential", async () => {
+  const f = await fixture();
+  const created = await f.request("connections", "POST", mcpCredential);
+  expect(created.status, await created.clone().text()).toBe(201);
+  const { connection } = await created.json();
+  await f.restrict(["gmail"]);
+  const denied = await f.request("connections", "POST", mcpCredential);
+  expect(denied.status, await denied.text()).toBe(403);
+  const rotation = await f.request(`connections/${connection.id}`, "PATCH", {
+    credential: { accessToken: "fixture-access-2" },
+  });
+  expect(rotation.status, await rotation.text()).toBe(403);
+});
+
 test("social acquisition honors exact supported provider keys and cleanup remains available", async () => {
   const f = await fixture();
   await f.restrict(["x"]);

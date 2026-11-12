@@ -22,7 +22,7 @@ import {
   startTeamsSetupSignIn,
   startTeamsLinkSignIn,
 } from "../src/integrations/teams-bot";
-import { mintTeamsProof } from "../src/integrations/teams-protocol";
+import { mintTeamsProof, verifyTeamsProof } from "../src/integrations/teams-protocol";
 import { TEAMS_ADMIN_ROLE_IDS, mintTeamsAdminState } from "../src/integrations/teams-admin-proof";
 import { ApiHttpError } from "../src/http/api-error";
 import { teamsLinkConflict } from "../src/integrations/teams-setup-refusals";
@@ -579,7 +579,7 @@ describe("Teams self-serve setup", () => {
     expect(second).toMatchObject({ status: 409, reason: "workspace_linked_elsewhere" });
   }, 60_000);
 
-  test("self-serve stays off by default and outside admitted tenants; operator approval still works", async () => {
+  test("self-serve stays off by default and outside admitted tenants; an operator-approved installer proves only their identity", async () => {
     const provider = microsoft();
     const admin = await person();
     const tenantId = crypto.randomUUID();
@@ -618,12 +618,49 @@ describe("Teams self-serve setup", () => {
       teamsBotSelfServeSetupEnabled: false,
       teamsBotSetupAdminIds: [`${tenantId}:${actorId}`],
     });
-    expect(await startTeamsSetupSignIn(approved, admin.grant, token)).toEqual({
-      authorizationUrl: null,
+    // The setup link alone no longer connects: the installer's Teams account
+    // is linked, so they sign in to Microsoft as that Teams user.
+    expect(
+      await refusal(completeTeamsSetup(approved, admin.grant, { setupToken: token })),
+    ).toMatchObject({ status: 400, reason: "microsoft_sign_in_required" });
+    const { authorizationUrl } = await startTeamsSetupSignIn(approved, admin.grant, token);
+    expect(new URL(authorizationUrl!).pathname).toBe(`/${tenantId}/oauth2/v2.0/authorize`);
+    // A forwarded setup link opened by someone else is refused and connects nothing.
+    expect(
+      await refusal(
+        completeTeamsSetup(approved, admin.grant, {
+          setupToken: token,
+          microsoft: await adminSignIn(provider, approved, admin, token, {
+            oid: crypto.randomUUID(),
+            wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator],
+          }),
+        }),
+      ),
+    ).toMatchObject({ status: 403, reason: "user_mismatch" });
+    expect(await getTeamsInstallation(client.db, tenantId)).toBeNull();
+    // A self-serve setup sign-in for the same link doesn't stand in for it.
+    const adminState = mintTeamsAdminState(STATE_SECRET, {
+      proofNonce: verifyTeamsProof(STATE_SECRET, token).nonce,
+      tenantId,
+      actorId,
+      subjectId: admin.grant.subjectId,
+      workspaceId: admin.grant.workspaceId,
+    }).token;
+    expect(
+      await refusal(
+        completeTeamsSetup(approved, admin.grant, {
+          setupToken: token,
+          microsoft: { code: "microsoft-code", state: adminState },
+        }),
+      ),
+    ).toMatchObject({ status: 400, reason: "state_mismatch" });
+    // The installer named by the link connects without an administrator role.
+    const status = await completeTeamsSetup(approved, admin.grant, {
+      setupToken: token,
+      microsoft: await adminSignIn(provider, approved, admin, token, { oid: actorId, wids: [] }),
     });
-    const status = await completeTeamsSetup(approved, admin.grant, { setupToken: token });
     expect(status.installation).toMatchObject({ tenantId, active: true });
-    expect(provider.tokenRequests).toHaveLength(0);
+    expect(status.linked).toBe(true);
   }, 60_000);
 
   test("an installer whose Opengeni account is linked to another Teams account is told so and can replace it", async () => {

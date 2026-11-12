@@ -1,5 +1,35 @@
 # @opengeni/react-native
 
+## 6.16.0
+
+### Minor Changes
+
+- 494d300: Voice commands: a person can call a chosen chat by name. `adapter.setCallCommands([{ id, workspaceId, sessionId, name }])` stores the chats they picked natively. On iOS the generated start-call App Intent gains an optional chat parameter whose entities are exactly those commands, with new parameterized App Shortcut phrases (`call.chatPhrases`, default `"Call {chat} in {app}"` and `"Talk to {chat} in {app}"`), and the app's App Shortcuts are refreshed whenever the commands change and at launch. On Android each command becomes a dynamic launcher shortcut, and `adapter.pinCallCommand(command)` pins one to the home screen. Start requests now carry an optional `workspaceId` (and a `requestId`), and `callFromOutside(sessionId, workspaceId)` calls a session in another workspace of the signed-in account. Pending start requests are kept until JavaScript takes them (up to a minute), so a request that launched the app is no longer lost to an early listener. The start-call intent now requires an unlocked device (`.requiresAuthentication`), and `INStartCallIntent` requests from a locked phone (Phone recents, "call … using") wait for an unlock for up to 30 seconds and are otherwise dropped (iOS reports a passcode-protected phone as locked about 10 seconds after its screen locks). CallKit handles for a named session are now `"<workspaceId>/<sessionId>"`; bare session handles from older recents still work.
+
+### Patch Changes
+
+- 55058af: The blocked-message notice reads more simply.
+
+  - A paused machine owner gets one line, "Allow it for this chat. Your message starts when the chat is resumed.", instead of "starts right away" next to a separate paused note.
+  - When other people in the workspace can see the chat (workspace visibility, outside a Personal workspace), the owner learns that allowing the machine lets them see what the agent does on it. On web the composer's shared-machine heads-up steps aside while this shows.
+  - "Your message is saved" is gone from every state, since the message is already in the chat. After the chat moves to a machine it can use, the notice shows "Starting on the new machine" and "The message starts by itself." The machine picker's note for a waiting message keeps only "Use a workspace or cloud machine for this message."
+  - Every "starts" line names the message: "Your message…" only in the machine owner's own lines, and "The message…" wherever someone else may be reading. The permission line says who can fix it first, and the machine-access lines drop "right now" and "You can".
+
+  API changes:
+
+  - `SessionAdmissionNotice` takes `sharedChat`. `useSessionStart` returns `sharedChat` while the owner is asked to allow the machine, reading the workspace kind through `getWorkspace` when the client has it; it is false otherwise and while the kind is unknown.
+  - `sessionAdmissionMachineAccessCopy` accepts `paused` and `shared` options.
+  - New message keys: `sessionAdmission.machineAccessOwnerPausedNext`, `sessionAdmission.machineAccessOwnerSettingsPausedNext` and `sessionAdmission.machineAccessSharedNote`. `sessionAdmission.machineChangedBody` is removed; drop it from custom translations.
+  - `sessionAdmissionMachineChangedCopy` now returns an empty `next`. Skip rendering an empty `next`.
+
+- Updated dependencies [55058af]
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+- Updated dependencies [86e5358]
+  - @opengeni/react@6.16.0
+  - @opengeni/contracts@6.16.0
+  - @opengeni/sdk@6.16.0
+
 ## 6.15.0
 
 ### Minor Changes

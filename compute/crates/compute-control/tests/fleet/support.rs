@@ -603,6 +603,7 @@ pub fn roomy() -> Capacity {
         pointers_in_service: true,
         reads_packs: true,
         sets_aside: true,
+        run: None,
         info: None,
     }
 }

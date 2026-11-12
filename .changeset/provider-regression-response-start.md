@@ -1,5 +1,0 @@
----
-"@opengeni/worker-bundle": patch
----
-
-`OpenGeniModelProviderTtftRegression` no longer fires when a change in request mix lengthens first tokens. Long contexts and long reasoning delay the first streamed delta without any change at the provider. Providers that report response start (`opengeni_model_request_phase_duration_seconds{phase="headers"}`: response headers, or the first provider event on a persistent socket) are now judged on that, because request shape barely moves it. Providers without that report keep first streamed content. The new `opengeni:model_provider_regression_signal_*` recording rules make the choice per provider from its headers baseline, so a window is never judged against a baseline of the other signal. The alert carries the choice as a `signal` label (`headers` or `first_content`). Ratio, floor, windows, sample minimums and the pre-dispatch suppression are unchanged. The `opengeni:model_provider_ttft_*` records stay for the Streaming Health dashboard. The alert text and runbook no longer suggest steering users away before ruling out a mix change.

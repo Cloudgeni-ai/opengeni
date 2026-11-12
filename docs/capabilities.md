@@ -835,7 +835,12 @@ GitHub's Options block includes the attempt-frozen action approval policy for
 each available acting identity. `Create and update work`, `Submit reviews`, and
 `Merge pull requests` each select Ask every time, Allow, or Block. They are
 separate so autonomous pull-request creation never implies autonomous review or
-merge. The stock UI reads and writes the public GitHub action-policy endpoints;
+merge. Your GitHub also has `Settings and deletions` (API group `sensitive`,
+default Ask): what agents do with `gh` and Git that is hard to undo, such as
+repository settings, secrets, environments, deletions and tag or
+default-branch changes (see [`personal-github.md`](personal-github.md)). The
+workspace app has no such group, and setting it for the app is a 400. The
+stock UI reads and writes the public GitHub action-policy endpoints;
 it does not mutate connector-policy rows directly.
 
 - Connections, Skills, and Plugins share `CapabilityCatalogRow` from

@@ -1,6 +1,7 @@
 // The few GitHub calls the batcher needs. All state lives in GitHub itself:
 // queued PRs, the batch/* branch with its manifest commit, and its CI runs.
 
+import { type Review, toReview } from "../ci/model-request-review";
 import type { RepoFile, TreeEntry } from "./renumber";
 import { REGENERATE_WORKFLOW, regenerationTitle, unzipText } from "./regenerate";
 
@@ -49,6 +50,8 @@ export interface PullSummary {
   labeledAt: number | null;
   /** When auto-merge was enabled, if it is. */
   autoMergeAt: number | null;
+  /** The author's login; null for a deleted account. */
+  author?: string | null;
 }
 
 export interface PullFile {
@@ -94,6 +97,8 @@ export interface GitHub {
   check(headSha: string, name: string): Promise<CheckSummary | null>;
   /** Null when the PR changes too many files to list. */
   pullFiles(number: number): Promise<PullFile[] | null>;
+  /** Every submitted review of a PR, oldest first. */
+  reviews(number: number): Promise<Review[]>;
   /** Paths of the files directly in a directory at a commit. */
   listDirectory(path: string, ref: string): Promise<string[]>;
   /** These files at a commit, keyed by path; a path that is not a file there is absent. */
@@ -273,6 +278,7 @@ export class RestGitHub implements GitHub {
               headRefName: string;
               isCrossRepository: boolean;
               isDraft: boolean;
+              author: { login: string } | null;
               mergeable: PullSummary["mergeable"];
               autoMergeRequest: { enabledAt: string } | null;
               labels: { nodes: { name: string }[] };
@@ -288,6 +294,7 @@ export class RestGitHub implements GitHub {
               pageInfo { hasNextPage endCursor }
               nodes {
                 id number title headRefOid headRefName isCrossRepository isDraft mergeable
+                author { login }
                 autoMergeRequest { enabledAt }
                 labels(first: 30) { nodes { name } }
                 timelineItems(itemTypes: [LABELED_EVENT], last: 100) {
@@ -319,6 +326,7 @@ export class RestGitHub implements GitHub {
           labels,
           labeledAt,
           autoMergeAt,
+          author: node.author?.login ?? null,
         });
       }
       if (!pageInfo.hasNextPage) break;
@@ -374,6 +382,18 @@ export class RestGitHub implements GitHub {
       if (batch.length < 100) return files;
     }
     return null;
+  }
+
+  async reviews(number: number) {
+    const reviews: Review[] = [];
+    for (let page = 1; page <= 30; page++) {
+      const batch = await this.get<Parameters<typeof toReview>[0][]>(
+        `pulls/${number}/reviews?per_page=100&page=${page}`,
+      );
+      reviews.push(...batch.map(toReview));
+      if (batch.length < 100) break;
+    }
+    return reviews;
   }
 
   async listDirectory(path: string, ref: string) {

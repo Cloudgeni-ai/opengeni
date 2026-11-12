@@ -5,6 +5,7 @@ import {
   PersonalGitHubRepository,
   canonicalPersonalGitHubRepositoryUrl,
   isPersonalGitHubConnection,
+  GITHUB_OWNER_LOGIN_PATTERN,
   personalGitHubAccessCovers,
   personalGitHubAllRepositoriesEffectiveAccess,
   personalGitHubConnectionNeedsReconnect,
@@ -324,7 +325,7 @@ export async function livePersonalGitHubRepository(input: {
       !owner ||
       !name ||
       extra !== undefined ||
-      !/^[A-Za-z0-9-]{1,39}$/u.test(owner) ||
+      !GITHUB_OWNER_LOGIN_PATTERN.test(owner) ||
       !/^[A-Za-z0-9_.-]{1,100}$/u.test(name)
     ) {
       return null;

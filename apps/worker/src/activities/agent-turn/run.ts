@@ -109,7 +109,7 @@ import {
   sandboxFileDownloadsForRun,
   objectStorageForSandboxDownloads,
 } from "./file-resources";
-import { TurnEventPublisher } from "./model-usage";
+import { publishModelRequestAudit, TurnEventPublisher } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createTurnContext, type EventingState } from "./turn-context";
 import { finalizeTurnAttempt } from "./finalization";
@@ -1053,7 +1053,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       const auditStartedAt = shouldRecordStartedAudit ? performance.now() : null;
                       let auditOutcome: "completed" | "failed" = "completed";
                       try {
-                        await eventing.publish([
+                        await publishModelRequestAudit(eventing, event.phase, [
                           ...(shouldRecordStartedAudit &&
                           eventing.firstModelRequestPreparationStartedAt !== null
                             ? [
@@ -1239,7 +1239,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 const auditStartedAt = shouldRecordStartedAudit ? performance.now() : null;
                 let auditOutcome: "completed" | "failed" = "completed";
                 try {
-                  await eventing.publish([
+                  await publishModelRequestAudit(eventing, event.phase, [
                     ...(shouldRecordStartedAudit &&
                     eventing.firstModelRequestPreparationStartedAt !== null
                       ? [

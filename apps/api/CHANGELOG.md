@@ -1,5 +1,51 @@
 # @opengeni/api-router
 
+## 6.16.0
+
+### Minor Changes
+
+- 86e5358: Linking a Teams account now requires a Microsoft sign-in as that Teams user. Before, an account-link URL from the bot worked for whoever opened it while signed in to Opengeni, so a forwarded link could link someone else's Teams account to the person who confirmed it. Confirming **Link your Teams account?** now starts a Microsoft sign-in (authorization code with PKCE, at the Teams tenant's own authority, delegated `openid profile` only) through the bot's Entra app and the existing `/teams/connect` redirect URI. On return, the API verifies the ID token as for self-serve setup, without the administrator role, and links only when its `tid` and `oid` equal the link's tenant and Teams user. A guest signs in to the connected tenant and gets its `tid` and their guest object ID, which is what Teams sends. A different Microsoft account is refused with `details.reason` `link_identity_mismatch` and a message naming the Teams account the link is for (its display name, now carried in new link URLs) and the Microsoft account that signed in. The link's 10-minute expiry and single use are unchanged, and a refused sign-in doesn't use up the link. `POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in` starts the sign-in and `POST …/teams/link` now requires `microsoft: { code, state }`; the SDK adds `teamsApi().startLinkSignIn(token)` and an optional second `microsoft` argument to `linkAccount`. Self-hosted deployments must register `<web base URL>/teams/connect` as a Web redirect URI on the bot's Entra app even without self-serve setup.
+
+### Patch Changes
+
+- 85d9f3e: Gmail, Google Calendar and Google Drive logins now recognise a Google account by Google's account ID, not only its email. After an account's address changes (for example a renamed Workspace user or domain), Reconnect works on the existing login instead of failing with "Sign in to the same account", and the login shows the new address. An address now used by a different Google account is no longer treated as the same account. To get the ID, these sign-ins also ask Google for `openid`. A login saved earlier records the ID the next time it is reconnected with the same address; one whose address changed before that still has to be removed and added again.
+- 34f6965: The Microsoft organization approval link now asks only for the Microsoft services the workspace offers. It covers the requested service plus the other Microsoft connections that share the same app registration, are rolled out to the workspace, and are allowed by the organization's integration policy. An organization that offers only Outlook Mail and Calendar no longer asks its IT administrator to grant OneDrive, SharePoint or contacts access; one approval still covers every offered service.
+- 54dc5da: `sandbox_file_publish` publishes any file the agent's own shell can read, such as scratch output in `/tmp`, on managed sandboxes and Connected Machines alike, instead of refusing every path outside the workspace root. A managed box reads the file through its shell and a Connected Machine at its host path; the workspace root is only the base for relative paths, and a workspace file keeps its existing artifact identity. Callers that cannot run the session's shell (no agent attempt of that session and no `terminal:attach`) keep the workspace scope of their file reads.
+
+  A first-party tool that refuses the caller's own arguments (a schema mismatch, a bad field combination, an unknown ID, an API 400/422) now records `outcome="rejected"` in `opengeni_mcp_tool_calls_total` instead of `provider_declared_error`, and `OpenGeniMcpToolFailureRatio` leaves rejected calls out of both its failures and its total. The server marks the result in `_meta`; the worker honors the mark only from the first-party server and removes it, so the result the caller sees is unchanged.
+
+- c59cc2d: Teams text no longer assumes that one Opengeni workspace is connected. The generated manifest's requirements now say an administrator connects the organization's Microsoft Teams to Opengeni and that people need an Opengeni account in that organization. The bot's setup card says "Connect Teams to Opengeni.", and its "can't start chats" reply refers to the organization's Opengeni workspaces and an Opengeni admin in the organization.
+- Updated dependencies [fb19875]
+- Updated dependencies [7c610c5]
+- Updated dependencies [54dc5da]
+- Updated dependencies [4c84667]
+- Updated dependencies [01feadc]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/db@6.16.0
+  - @opengeni/runtime@6.16.0
+  - @opengeni/xai-subscription@6.16.0
+  - @opengeni/artifact-tool@6.16.0
+  - @opengeni/capabilities@6.16.0
+  - @opengeni/codemode@6.16.0
+  - @opengeni/codex@6.16.0
+  - @opengeni/config@6.16.0
+  - @opengeni/core@6.16.0
+  - @opengeni/decisions@6.16.0
+  - @opengeni/documents@6.16.0
+  - @opengeni/events@6.16.0
+  - @opengeni/github@6.16.0
+  - @opengeni/interaction@6.16.0
+  - @opengeni/observability@6.16.0
+  - @opengeni/storage@6.16.0
+  - @opengeni/tool-gateway@6.16.0
+  - @opengeni/vaults@6.16.0
+  - @opengeni/vaults-bitwarden@6.16.0
+  - @opengeni/vaults-keeper@6.16.0
+  - @opengeni/vaults-onepassword@6.16.0
+  - @opengeni/vaults-protonpass@6.16.0
+  - @opengeni/agent-proto@6.16.0
+  - @opengeni/network@6.16.0
+
 ## 6.15.0
 
 ### Minor Changes

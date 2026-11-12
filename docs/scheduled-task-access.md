@@ -183,6 +183,10 @@ organization allows Only me chats.
   Machine may be Only me or Workspace. See
   [Connected Machines](connected-machines.md) for how each run re-proves the
   owner's access to the machine.
+- A schedule an agent saves with the owner's Your GitHub repositories runs as
+  them only while those repositories stay in the owner's chosen list (or All my
+  repositories) and the account stays connected; it never falls back to the
+  workspace's GitHub app. See [Personal GitHub](personal-github.md).
 - Unless the organization turns it off under Security, workspace admins see
   other people's Only me schedules only as a summary:
   the owner, how often it runs, its status, when it last ran and what its runs
