@@ -616,10 +616,12 @@ export async function createCatalogItem(input: {
     endpointUrl: input.payload.endpointUrl ?? null,
     installUrl: input.payload.installUrl ?? null,
     authModel: input.payload.authModel?.trim() || null,
+    // Not `mcpUrl`: that column is unique by (source, provider domain, MCP URL)
+    // across workspaces, so a second workspace adding the same environment
+    // would collide. Reads derive it from `endpointUrl`.
     ...(dynamicsEndpoint
       ? {
           authKind: "oauth2" as const,
-          mcpUrl: dynamicsEndpoint,
           providerDomain: new URL(dynamicsEndpoint).hostname,
         }
       : {}),

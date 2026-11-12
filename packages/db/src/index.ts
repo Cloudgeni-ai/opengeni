@@ -316,6 +316,7 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
@@ -97597,6 +97598,20 @@ function catalogExposureState(
   return "legacy_active";
 }
 
+/**
+ * A workspace's Microsoft Dynamics entry keeps its MCP address only in
+ * `endpoint_url`: `mcp_url` takes part in the registry's cross-workspace
+ * uniqueness, which two workspaces using one environment would break.
+ */
+function workspaceDynamicsMcpUrl(row: typeof schema.capabilityCatalogItems.$inferSelect) {
+  return row.workspaceId &&
+    row.kind === "mcp" &&
+    row.endpointUrl &&
+    microsoftDynamicsProductForMcpUrl(row.endpointUrl)
+    ? row.endpointUrl
+    : null;
+}
+
 function mapCapabilityCatalogItem(
   row: typeof schema.capabilityCatalogItems.$inferSelect,
   exposure: "trusted" | "legacy_active" | "unverified" = capabilityCatalogItemIsTrustedForExposure({
@@ -97662,7 +97677,7 @@ function mapCapabilityCatalogItem(
     providerDomain: row.providerDomain,
     surfaceType: row.surfaceType,
     transport: row.transport,
-    mcpUrl: row.mcpUrl,
+    mcpUrl: row.mcpUrl ?? workspaceDynamicsMcpUrl(row),
     authKind: row.authKind as CapabilityCatalogItem["authKind"],
     credentialFacts: row.credentialFacts,
     tier: row.tier as CapabilityCatalogItem["tier"],
