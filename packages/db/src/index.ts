@@ -98604,4 +98604,6 @@ export * from "./teams-conversations";
 
 export * from "./teams-private-session";
 
+export * from "./teams-routing";
+
 export { recordMachinePromotionProof } from "./promotion-abuse";
