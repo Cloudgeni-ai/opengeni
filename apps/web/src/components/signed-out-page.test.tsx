@@ -23,6 +23,7 @@ test("signed-out page sells real work in connected apps around the existing form
   expect(html).toContain("Answers your inbox and preps tomorrow&#x27;s meetings");
   expect(html).toContain("Uses its own computer and browser, day and night");
   expect(html).not.toContain("Get things done,");
+  // Model subscriptions are optional, so the general pitch does not promise them.
   expect(html).not.toContain("subscription");
   expect(html.match(/<li\b/g)).toHaveLength(3);
   expect(html.match(/<h1\b/g)).toHaveLength(1);
