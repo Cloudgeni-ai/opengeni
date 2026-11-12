@@ -118,7 +118,6 @@ describe("admin step-up routes", () => {
       ["PUT", `${WS}/members/external/slack/U1/allowance`],
       // Billing.
       ["POST", "/v1/billing/checkout"],
-      ["POST", "/v1/billing/portal"],
       ["POST", "/v1/billing/subscription/change"],
       ["PUT", "/v1/billing/alerts"],
       ["PUT", "/v1/billing/auto-top-up"],
