@@ -205,6 +205,29 @@ describe("streamed Chat tool calls keep provider fields", () => {
     expect(calls[1]!.providerData).toBeUndefined();
   });
 
+  test("parallel unindexed calls without ids stay separate", async () => {
+    const calls = await streamedCalls([
+      chunk({
+        tool_calls: [
+          {
+            id: "",
+            type: "function",
+            function: { name: "lookup", arguments: '{"q":"a"}' },
+            extra_content: EXTRA_CONTENT,
+          },
+          { type: "function", function: { name: "fetch", arguments: '{"q":"b"}' } },
+        ],
+      }),
+      chunk({}, "tool_calls"),
+    ]);
+    expect(calls.map(({ name, arguments: args }) => [name, args])).toEqual([
+      ["lookup", '{"q":"a"}'],
+      ["fetch", '{"q":"b"}'],
+    ]);
+    expect(calls[0]!.providerData.extra_content).toEqual(EXTRA_CONTENT);
+    expect(calls[1]!.providerData).toBeUndefined();
+  });
+
   test("fields that arrive before the id or in pieces are merged onto the call", async () => {
     const [first, second] = await streamedCalls([
       chunk({

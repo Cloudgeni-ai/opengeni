@@ -1,5 +1,5 @@
 diff --git a/dist/openaiChatCompletionsStreaming.js b/dist/openaiChatCompletionsStreaming.js
-index cec565f3cc5a04aa58f4c988e1acb400ceb619a1..c01f7c2d31ff655624167bcfc171bcdd1ee3cd30 100644
+index cec565f3cc5a04aa58f4c988e1acb400ceb619a1..4116a1a31ab39af067ce6f05b1caa677bddbf64a 100644
 --- a/dist/openaiChatCompletionsStreaming.js
 +++ b/dist/openaiChatCompletionsStreaming.js
 @@ -111,7 +111,12 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
@@ -36,7 +36,7 @@ index cec565f3cc5a04aa58f4c988e1acb400ceb619a1..c01f7c2d31ff655624167bcfc171bcdd
              }
          }
      }
-@@ -219,6 +237,35 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+@@ -219,6 +237,41 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
      };
      yield finalEvent;
  }
@@ -56,7 +56,13 @@ index cec565f3cc5a04aa58f4c988e1acb400ceb619a1..c01f7c2d31ff655624167bcfc171bcdd
 +}
 +function unindexedToolCallIndex(state, toolCall) {
 +    const last = state.last_unindexed_tool_call;
-+    if (last && (!toolCall.id || !last.callId || toolCall.id === last.callId)) {
++    // A delta that names a function while the last call already has a name
++    // is the next call, even when the provider sends no (or an empty) id.
++    const startsNamedCall = Boolean(toolCall.function?.name) &&
++        Boolean(last && state.function_calls[last.index]?.name);
++    if (last &&
++        ((toolCall.id && toolCall.id === last.callId) ||
++            (!startsNamedCall && (!toolCall.id || !last.callId)))) {
 +        if (toolCall.id && !last.callId) {
 +            last.callId = toolCall.id;
 +        }
@@ -73,7 +79,7 @@ index cec565f3cc5a04aa58f4c988e1acb400ceb619a1..c01f7c2d31ff655624167bcfc171bcdd
      const toolCalls = Object.entries(state.function_calls)
          .sort(([left], [right]) => Number(left) - Number(right))
 diff --git a/dist/openaiChatCompletionsStreaming.mjs b/dist/openaiChatCompletionsStreaming.mjs
-index a09ff7c37dae74f2a50ba577269a36942ac900df..a71fc57647ba393090bc12f051c0c3bc7f2eab17 100644
+index a09ff7c37dae74f2a50ba577269a36942ac900df..587c5b9f5beedaf0d8a0df50fcb7332992cd754d 100644
 --- a/dist/openaiChatCompletionsStreaming.mjs
 +++ b/dist/openaiChatCompletionsStreaming.mjs
 @@ -105,7 +105,12 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
@@ -110,7 +116,7 @@ index a09ff7c37dae74f2a50ba577269a36942ac900df..a71fc57647ba393090bc12f051c0c3bc
              }
          }
      }
-@@ -213,6 +231,35 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+@@ -213,6 +231,41 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
      };
      yield finalEvent;
  }
@@ -130,7 +136,13 @@ index a09ff7c37dae74f2a50ba577269a36942ac900df..a71fc57647ba393090bc12f051c0c3bc
 +}
 +function unindexedToolCallIndex(state, toolCall) {
 +    const last = state.last_unindexed_tool_call;
-+    if (last && (!toolCall.id || !last.callId || toolCall.id === last.callId)) {
++    // A delta that names a function while the last call already has a name
++    // is the next call, even when the provider sends no (or an empty) id.
++    const startsNamedCall = Boolean(toolCall.function?.name) &&
++        Boolean(last && state.function_calls[last.index]?.name);
++    if (last &&
++        ((toolCall.id && toolCall.id === last.callId) ||
++            (!startsNamedCall && (!toolCall.id || !last.callId)))) {
 +        if (toolCall.id && !last.callId) {
 +            last.callId = toolCall.id;
 +        }
