@@ -197,7 +197,7 @@ fn use_does_not_cancel_a_checkpoint_but_memory_pressure_does() {
     });
     let policy = SleepPolicy::new(SleepRules {
         checkpoint_every: Some(EVERY),
-        ..SleepRules::RECOMMENDED
+        ..SleepRules::RECOMMENDED.keeping_memory()
     })
     .unwrap();
     rig.add(1, State::RUNNING, policy, Size::whole(GIB));
@@ -240,6 +240,7 @@ fn a_sleep_asked_for_cancels_a_checkpoint_once_nothing_holds_its_sandbox() {
     let sleep = Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     };
     // Asked while held, the sleep waits for the hold, and so the
     // checkpoint goes on.
@@ -263,6 +264,7 @@ fn a_sleep_asked_for_cancels_a_checkpoint_once_nothing_holds_its_sandbox() {
     let actions = rig.send(Input::Sleep {
         sandbox: SandboxId(2),
         level: Level::Paused,
+        keep: true,
     });
     assert_eq!(cancelled(&actions), [op], "{actions:?}");
     let (step, _) = only_start(&rig.finish(2, op, Outcome::Cancelled));
@@ -301,7 +303,7 @@ fn work_during_a_checkpoint_keeps_its_sandbox_awake_after_it() {
     let mut rig = Rig::new(&HostPolicy::default());
     let policy = SleepPolicy::new(SleepRules {
         checkpoint_every: Some(EVERY),
-        ..SleepRules::RECOMMENDED
+        ..SleepRules::RECOMMENDED.keeping_memory()
     })
     .unwrap();
     rig.add(1, State::RUNNING, policy, Size::whole(GIB));
@@ -530,7 +532,7 @@ fn a_checkpoint_cancelled_before_it_wrote_anything_books_nothing() {
         bytes: GIB,
     });
     let saved = State::new(Level::Saved, Durability::Local, true);
-    let rules = SleepPolicy::new(SleepRules::RECOMMENDED).unwrap();
+    let rules = SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap();
     rig.add(2, saved, rules, size);
     rig.send(Input::DiskGrowth {
         sandbox: SandboxId(2),
@@ -547,6 +549,7 @@ fn a_checkpoint_cancelled_before_it_wrote_anything_books_nothing() {
     let actions = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Paused,
+        keep: true,
     });
     assert_eq!(cancelled(&actions), [op], "{actions:?}");
     // Used before the cancellation took effect: the sleep is withdrawn,
@@ -631,7 +634,7 @@ fn a_checkpoint_waits_for_disk_its_growth_can_book_and_room_is_made_for_it() {
     // whose copy is in object storage too.
     rig.send(reading(4));
     let archived = State::new(Level::Archived, Durability::Remote, true);
-    let rules = SleepPolicy::new(SleepRules::RECOMMENDED).unwrap();
+    let rules = SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap();
     rig.add(3, archived, rules, Size::whole(GIB));
     assert_eq!(rig.host.disk().unwrap().free().bytes, GIB);
     assert_eq!(rig.host.sandbox(SandboxId(3)).unwrap().step, None);

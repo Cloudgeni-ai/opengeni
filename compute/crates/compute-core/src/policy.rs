@@ -4,12 +4,19 @@
 //!
 //! Sleep follows activity, not a ladder of timers. An idle sandbox pauses
 //! almost at once, because resuming a paused VM takes a fraction of a second.
-//! Soon after, a background save copies its state to disk and then to object
-//! storage while the VM stays paused in memory, so a wake is still instant
-//! and losing the process or the host loses nothing. Memory itself is freed
-//! only when the host needs it, least recently used first: since a current
-//! copy usually exists by then, ending a VM process is instant. Days later
-//! the local copy is deleted, and after about a month the memory image too.
+//! Soon after, its files are copied to object storage while the VM stays
+//! paused in memory, so a wake is still instant and losing the host loses
+//! no file. Memory itself is freed only when the host needs it, least
+//! recently used first, by ending the VM process, which is instant. Days
+//! later the local copy is deleted.
+//!
+//! A sandbox's memory is saved nowhere unless its rules say so
+//! ([`SleepRules::keep_memory`]): a sandbox is a computer, its files are
+//! what lasts, and one whose VM process ended boots fresh from them
+//! ([ADR 36](../../../docs/adr/0036-idle-memory-stays-in-ram.md)). One that
+//! keeps its memory has it saved to local disk and object storage beside
+//! its files, wakes from there with its programs running, and has the
+//! memory image deleted after about a month.
 
 use core::fmt;
 use core::time::Duration;
@@ -62,12 +69,21 @@ pub struct SleepRules {
     /// Pause the VM. Cheap both ways, so this is short: it only has to
     /// bridge the gaps inside one burst of activity.
     pub pause_after: Option<Duration>,
-    /// Save memory and device state to local disk while the VM stays paused.
-    /// Afterwards, memory pressure can end the VM process instantly, and a
-    /// crash of the process loses nothing.
+    /// From when the sandbox may be put away: its VM process ended to free
+    /// memory, and what is kept of it copied to object storage. With
+    /// [`SleepRules::keep_memory`], memory and device state are saved to
+    /// local disk at this time while the VM stays paused; afterwards,
+    /// memory pressure can end the VM process instantly, and a crash of the
+    /// process loses nothing. Without it nothing is written: the VM stays
+    /// paused in host RAM until memory pressure or a later rule ends it,
+    /// which its programs do not survive.
     pub save_after: Option<Duration>,
-    /// Copy the saved state to object storage, so losing the host loses
-    /// nothing either.
+    /// Whether the sandbox's memory is saved, so its programs survive the
+    /// end of its VM process. `false` keeps its memory in host RAM alone:
+    /// nothing saves it unless asked ([`crate::Input::Sleep`]).
+    pub keep_memory: bool,
+    /// Copy what is kept, the files and any saved memory, to object
+    /// storage, so losing the host loses nothing of it either.
     pub archive_after: Option<Duration>,
     /// End the VM process even without memory pressure. Usually `None`: an
     /// idle VM whose state is saved costs nothing while memory is plentiful,
@@ -106,6 +122,7 @@ impl SleepRules {
     pub const NEVER: Self = Self {
         pause_after: None,
         save_after: None,
+        keep_memory: false,
         archive_after: None,
         drop_after: None,
         evict_after: None,
@@ -116,15 +133,17 @@ impl SleepRules {
 
     /// A starting point for interactive agent sandboxes.
     ///
-    /// Pause after 10 seconds without activity, save after 30 seconds and
-    /// archive after two minutes, so a typical pause between two replies
-    /// already ends protected against losing the host. Free memory only
-    /// under pressure, delete the local copy after three idle days and the
-    /// memory image after 30. No checkpoints: they need a store, and a
-    /// fleet sets them for its sandboxes.
+    /// Pause after 10 seconds without activity and copy the files to
+    /// object storage after two minutes, so a typical pause between two
+    /// replies already ends with every file safe against losing the host.
+    /// Memory stays in host RAM alone and is freed only under pressure, by
+    /// ending the VM process. Delete the local copy after three idle days,
+    /// and a memory image a request left after 30. No checkpoints: they
+    /// need a store, and a fleet sets them for its sandboxes.
     pub const RECOMMENDED: Self = Self {
         pause_after: Some(Duration::from_secs(10)),
         save_after: Some(Duration::from_secs(30)),
+        keep_memory: false,
         archive_after: Some(Duration::from_secs(120)),
         drop_after: None,
         evict_after: Some(Duration::from_secs(3 * 86_400)),
@@ -132,6 +151,16 @@ impl SleepRules {
         compress_under_pressure: true,
         checkpoint_every: None,
     };
+
+    /// These rules for a sandbox whose memory is saved; see
+    /// [`SleepRules::keep_memory`].
+    #[must_use]
+    pub const fn keeping_memory(self) -> Self {
+        Self {
+            keep_memory: true,
+            ..self
+        }
+    }
 
     const fn get(&self, rule: Rule) -> Option<Duration> {
         match rule {
@@ -172,8 +201,8 @@ impl SleepPolicy {
     ///
     /// Each rule needs the one it builds on, and must not come earlier:
     /// saving and compressing need pausing; archiving, ending the process
-    /// and forgetting memory need a saved copy; evicting needs an archived
-    /// one.
+    /// and forgetting memory need the sandbox put away
+    /// ([`SleepRules::save_after`]); evicting needs an archived copy.
     pub fn new(rules: SleepRules) -> Result<Self, PolicyError> {
         const NEEDS: [(Rule, Rule); 6] = [
             (Rule::Save, Rule::Pause),
@@ -207,14 +236,16 @@ impl SleepPolicy {
         Ok(Self { rules, end_after })
     }
 
-    /// This policy for a VM process that cannot be saved: it may pause and
-    /// compress, but never save, checkpoint or end, since ending it would
-    /// lose its programs.
+    /// This policy for a VM process no copy of which can be trusted, its
+    /// disk included: it may pause and compress, but never save, checkpoint
+    /// or end, since ending it would lose its programs and leave a disk
+    /// nothing vouches for.
     #[must_use]
     pub(crate) const fn without_saving(&self) -> Self {
         Self {
             rules: SleepRules {
                 save_after: None,
+                keep_memory: false,
                 checkpoint_every: None,
                 ..self.rules
             },
@@ -250,23 +281,44 @@ impl SleepPolicy {
     /// Whether the host may save the sandbox's VM without being asked: to
     /// put it to sleep or to relieve memory. A checkpoint saves no memory
     /// image, so a policy that only checkpoints saves nothing unasked. One
-    /// the host never saves so, such as a CI runner's, is saved only by an
-    /// [`crate::Input::Sleep`] request, as a hand-off makes.
+    /// the host never saves so, such as a CI runner's or one whose memory
+    /// is not kept, is saved only by an [`crate::Input::Sleep`] request
+    /// that asks for its programs, as the hand-off of a sandbox in use
+    /// makes.
     #[must_use]
     pub const fn saves(&self) -> bool {
-        self.rules.save_after.is_some()
+        self.rules.save_after.is_some() && self.rules.keep_memory
+    }
+
+    /// Whether the host may end the sandbox's paused VM without saving its
+    /// memory, to relieve memory or as a later rule says: its programs
+    /// end, and its files stay ([`Step::End`]).
+    #[must_use]
+    pub const fn ends_unsaved(&self) -> bool {
+        self.rules.save_after.is_some() && !self.rules.keep_memory
     }
 
     /// The next step that moves an unneeded sandbox in `state`, idle for
     /// `idle`, toward where its rules want it. `floor` is the least depth
     /// demanded regardless of the rules, by memory pressure or an explicit
     /// request; [`Level::Running`] demands nothing. Reaching
-    /// [`Level::Saved`] means ending the VM process, saving first if needed.
+    /// [`Level::Saved`] means ending the VM process: one whose memory is
+    /// not saved is saved first, unless the rules end it unsaved
+    /// ([`SleepPolicy::ends_unsaved`]) and `keep` is false. `keep` says
+    /// the floor was asked for with the sandbox's programs, which a save
+    /// then keeps whatever the rules say.
     ///
     /// The floor comes first, then saving, then archiving. An unneeded
-    /// sandbox only ever moves deeper or becomes better protected.
+    /// sandbox only ever moves deeper or becomes better protected, but for
+    /// the programs its rules give up.
     #[must_use]
-    pub fn next_step(&self, state: State, idle: Duration, floor: Level) -> Option<Step> {
+    pub fn next_step(
+        &self,
+        state: State,
+        idle: Duration,
+        floor: Level,
+        keep: bool,
+    ) -> Option<Step> {
         let due = |rule: Option<Duration>| rule.is_some_and(|after| idle >= after);
         let rules = &self.rules;
         match state.level {
@@ -274,14 +326,27 @@ impl SleepPolicy {
                 (floor > Level::Running || due(rules.pause_after)).then_some(Step::Pause)
             }
             Level::Paused | Level::Compressed => {
-                let volatile = state.durability == Durability::Volatile;
+                let ends_unsaved = self.ends_unsaved() && !keep;
                 if floor >= Level::Saved || due(self.end_after) {
-                    Some(if volatile { Step::Save } else { Step::Drop })
+                    Some(if state.memory_saved {
+                        Step::Drop
+                    } else if ends_unsaved {
+                        Step::End
+                    } else {
+                        Step::Save
+                    })
                 } else if floor == Level::Compressed && state.level == Level::Paused {
                     Some(Step::Compress)
-                } else if volatile && due(rules.save_after) {
+                } else if !state.memory_saved && self.saves() && due(rules.save_after) {
                     Some(Step::Save)
-                } else if state.durability == Durability::Local && due(rules.archive_after) {
+                } else if due(rules.archive_after)
+                    && match state.durability {
+                        // Its files alone, while it stays paused.
+                        Durability::Volatile => ends_unsaved,
+                        Durability::Local => true,
+                        Durability::Remote => false,
+                    }
+                {
                     Some(Step::Archive)
                 } else {
                     None
@@ -313,15 +378,25 @@ impl SleepPolicy {
     pub fn next_threshold(&self, state: State, idle: Duration) -> Option<Duration> {
         let rules = &self.rules;
         let forget = rules.forget_after.filter(|_| state.memory_saved);
+        // What applies to a paused VM whose memory is not saved: it is
+        // saved, or its files are archived alone.
+        let save = rules.save_after.filter(|_| self.saves());
+        let unsaved = if self.ends_unsaved() {
+            rules.archive_after
+        } else {
+            save
+        };
         let relevant = match (state.level, state.durability) {
             (Level::Running, _) => [rules.pause_after, None, None],
             (Level::Paused | Level::Compressed, Durability::Volatile) => {
-                [rules.save_after, self.end_after, None]
+                [unsaved, self.end_after, None]
             }
             (Level::Paused | Level::Compressed, Durability::Local) => {
                 [rules.archive_after, self.end_after, None]
             }
-            (Level::Paused | Level::Compressed, Durability::Remote) => [self.end_after, None, None],
+            (Level::Paused | Level::Compressed, Durability::Remote) => {
+                [save.filter(|_| !state.memory_saved), self.end_after, None]
+            }
             (Level::Saved, _) => [rules.archive_after, forget, rules.evict_after],
             (Level::Archived, _) => [forget, rules.evict_after, None],
             (Level::Remote, _) => [forget, None, None],
@@ -335,7 +410,8 @@ impl SleepPolicy {
 
     /// The next depth memory pressure may push a sandbox to from `reached`,
     /// the deeper of its level and its current floor: compressed if allowed,
-    /// otherwise the end of the VM process if a copy can be saved.
+    /// otherwise the end of the VM process if its rules put it away, saved
+    /// first or unsaved.
     #[must_use]
     pub const fn relief_target(&self, reached: Level) -> Option<Level> {
         let compress = self.rules.compress_under_pressure;
@@ -395,6 +471,7 @@ impl Default for StepLimits {
             .with(Step::Resume, 64)
             .with(Step::Pause, 64)
             .with(Step::Drop, 64)
+            .with(Step::End, 64)
             .with(Step::Fetch, 32)
             .with(Step::Restore, 32)
             .with(Step::Boot, 16)
@@ -665,7 +742,13 @@ mod tests {
         Duration::from_secs(s)
     }
 
+    /// The recommended rules for a sandbox whose memory is saved.
     fn recommended() -> SleepPolicy {
+        SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap()
+    }
+
+    /// The recommended rules as they are: memory stays in host RAM alone.
+    fn unsaved() -> SleepPolicy {
         SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
     }
 
@@ -677,47 +760,153 @@ mod tests {
     fn an_idle_sandbox_pauses_then_gets_protected_while_staying_in_memory() {
         let policy = recommended();
         let running = State::RUNNING;
-        let paused = |durability| state(Level::Paused, durability, false);
+        let paused = |durability| state(Level::Paused, durability, true);
         let none = Level::Running;
-        assert_eq!(policy.next_step(running, secs(9), none), None);
-        assert_eq!(policy.next_step(running, secs(10), none), Some(Step::Pause));
+        assert_eq!(policy.next_step(running, secs(9), none, false), None);
         assert_eq!(
-            policy.next_step(paused(Durability::Volatile), secs(29), none),
+            policy.next_step(running, secs(10), none, false),
+            Some(Step::Pause)
+        );
+        assert_eq!(
+            policy.next_step(paused(Durability::Volatile), secs(29), none, false),
             None
         );
         assert_eq!(
-            policy.next_step(paused(Durability::Volatile), secs(30), none),
+            policy.next_step(paused(Durability::Volatile), secs(30), none, false),
             Some(Step::Save)
         );
         assert_eq!(
-            policy.next_step(paused(Durability::Local), secs(119), none),
+            policy.next_step(paused(Durability::Local), secs(119), none, false),
             None
         );
         assert_eq!(
-            policy.next_step(paused(Durability::Local), secs(120), none),
+            policy.next_step(paused(Durability::Local), secs(120), none, false),
             Some(Step::Archive)
         );
         // Without memory pressure, a protected VM stays in memory for days.
         assert_eq!(
-            policy.next_step(paused(Durability::Remote), secs(2 * 86_400), none),
+            policy.next_step(paused(Durability::Remote), secs(2 * 86_400), none, false),
             None
         );
         // On the third day the process ends and the local copy goes.
         let day3 = secs(3 * 86_400);
         assert_eq!(
-            policy.next_step(paused(Durability::Remote), day3, none),
+            policy.next_step(paused(Durability::Remote), day3, none, false),
             Some(Step::Drop)
         );
         let archived = state(Level::Archived, Durability::Remote, true);
-        assert_eq!(policy.next_step(archived, day3, none), Some(Step::Evict));
-        let remote = state(Level::Remote, Durability::Remote, true);
-        assert_eq!(policy.next_step(remote, day3, none), None);
         assert_eq!(
-            policy.next_step(remote, secs(30 * 86_400), none),
+            policy.next_step(archived, day3, none, false),
+            Some(Step::Evict)
+        );
+        let remote = state(Level::Remote, Durability::Remote, true);
+        assert_eq!(policy.next_step(remote, day3, none, false), None);
+        assert_eq!(
+            policy.next_step(remote, secs(30 * 86_400), none, false),
             Some(Step::Forget)
         );
         assert_eq!(
-            policy.next_step(Step::Forget.apply(remote), secs(400 * 86_400), none),
+            policy.next_step(Step::Forget.apply(remote), secs(400 * 86_400), none, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_sandbox_whose_memory_is_not_kept_stays_in_ram_until_the_host_needs_it() {
+        let policy = unsaved();
+        assert!(!policy.saves());
+        assert!(policy.ends_unsaved());
+        let none = Level::Running;
+        let paused = state(Level::Paused, Durability::Volatile, false);
+        // Nothing saves it: only its files are copied, while it stays
+        // paused in memory with its programs.
+        assert_eq!(policy.next_step(paused, secs(30), none, false), None);
+        assert_eq!(policy.next_threshold(paused, secs(30)), Some(secs(120)));
+        assert_eq!(
+            policy.next_step(paused, secs(120), none, false),
+            Some(Step::Archive)
+        );
+        let copied = Step::Archive.apply(paused);
+        assert_eq!(copied, state(Level::Paused, Durability::Remote, false));
+        assert!(copied.keeps_programs());
+        assert_eq!(
+            policy.next_step(copied, secs(2 * 86_400), none, false),
+            None
+        );
+        // Memory pressure ends it at once, with nothing written, whether
+        // its files are copied yet or not; it then boots from them.
+        assert_eq!(policy.relief_target(Level::Compressed), Some(Level::Saved));
+        assert_eq!(
+            policy.next_step(paused, secs(11), Level::Saved, false),
+            Some(Step::End)
+        );
+        assert_eq!(
+            policy.next_step(copied, secs(200), Level::Saved, false),
+            Some(Step::End)
+        );
+        let ended = Step::End.apply(copied);
+        assert_eq!(ended, state(Level::Archived, Durability::Remote, false));
+        assert!(Step::Boot.can_start(ended));
+        let ended_early = Step::End.apply(paused);
+        assert_eq!(ended_early, state(Level::Saved, Durability::Local, false));
+        assert_eq!(
+            policy.next_step(ended_early, secs(120), none, false),
+            Some(Step::Archive)
+        );
+        // On the third day the process ends and the local copy goes.
+        let day3 = secs(3 * 86_400);
+        assert_eq!(policy.next_step(copied, day3, none, false), Some(Step::End));
+        assert_eq!(
+            policy.next_step(ended, day3, none, false),
+            Some(Step::Evict)
+        );
+        assert_eq!(
+            policy.next_step(Step::Evict.apply(ended), secs(400 * 86_400), none, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_request_for_its_programs_saves_a_sandbox_whose_memory_is_not_kept() {
+        let policy = unsaved();
+        let paused = state(Level::Paused, Durability::Volatile, false);
+        assert_eq!(
+            policy.next_step(paused, secs(11), Level::Saved, true),
+            Some(Step::Save)
+        );
+        // A copy of its files alone does not hold its programs.
+        let copied = Step::Archive.apply(paused);
+        assert_eq!(
+            policy.next_step(copied, secs(200), Level::Archived, true),
+            Some(Step::Save)
+        );
+        // The memory image such a request left is what ends its process
+        // from then on, and is forgotten like any other.
+        let saved = Step::Save.apply(copied);
+        assert_eq!(saved, state(Level::Paused, Durability::Local, true));
+        assert_eq!(
+            policy.next_step(saved, secs(200), Level::Saved, false),
+            Some(Step::Drop)
+        );
+        let remote = state(Level::Remote, Durability::Remote, true);
+        assert_eq!(
+            policy.next_step(remote, secs(30 * 86_400), Level::Running, false),
+            Some(Step::Forget)
+        );
+    }
+
+    #[test]
+    fn a_sandbox_that_only_pauses_is_never_ended() {
+        let policy = SleepPolicy::new(SleepRules {
+            pause_after: Some(secs(10)),
+            ..SleepRules::NEVER
+        })
+        .unwrap();
+        assert!(!policy.ends_unsaved());
+        assert_eq!(policy.relief_target(Level::Paused), None);
+        let paused = state(Level::Paused, Durability::Volatile, false);
+        assert_eq!(
+            policy.next_step(paused, secs(400 * 86_400), Level::Running, false),
             None
         );
     }
@@ -730,22 +919,22 @@ mod tests {
         assert_eq!(policy.relief_target(Level::Compressed), Some(Level::Saved));
         assert_eq!(policy.relief_target(Level::Saved), None);
         assert_eq!(
-            policy.next_step(State::RUNNING, secs(0), Level::Compressed),
+            policy.next_step(State::RUNNING, secs(0), Level::Compressed, false),
             Some(Step::Pause)
         );
         assert_eq!(
-            policy.next_step(paused, secs(0), Level::Compressed),
+            policy.next_step(paused, secs(0), Level::Compressed, false),
             Some(Step::Compress)
         );
         let compressed = Step::Compress.apply(paused);
         assert_eq!(
-            policy.next_step(compressed, secs(0), Level::Saved),
+            policy.next_step(compressed, secs(0), Level::Saved, false),
             Some(Step::Save)
         );
         let saved = Step::Save.apply(compressed);
         assert_eq!(saved.level, Level::Compressed);
         assert_eq!(
-            policy.next_step(saved, secs(0), Level::Saved),
+            policy.next_step(saved, secs(0), Level::Saved, false),
             Some(Step::Drop)
         );
         assert_eq!(
@@ -758,14 +947,14 @@ mod tests {
     fn pressure_skips_compression_when_it_is_not_allowed() {
         let policy = SleepPolicy::new(SleepRules {
             compress_under_pressure: false,
-            ..SleepRules::RECOMMENDED
+            ..SleepRules::RECOMMENDED.keeping_memory()
         })
         .unwrap();
         assert_eq!(policy.relief_target(Level::Running), Some(Level::Saved));
         assert_eq!(policy.relief_target(Level::Paused), Some(Level::Saved));
         let paused = state(Level::Paused, Durability::Local, true);
         assert_eq!(
-            policy.next_step(paused, secs(0), Level::Saved),
+            policy.next_step(paused, secs(0), Level::Saved, false),
             Some(Step::Drop)
         );
     }
@@ -793,7 +982,7 @@ mod tests {
         let policy = SleepPolicy::NEVER;
         assert!(!policy.sleeps());
         assert_eq!(
-            policy.next_step(State::RUNNING, Duration::MAX, Level::Running),
+            policy.next_step(State::RUNNING, Duration::MAX, Level::Running, false),
             None
         );
         assert_eq!(policy.next_threshold(State::RUNNING, Duration::ZERO), None);
@@ -807,7 +996,7 @@ mod tests {
         let mut idle = Duration::ZERO;
         let mut walk = Vec::new();
         loop {
-            if let Some(step) = policy.next_step(state, idle, Level::Running) {
+            if let Some(step) = policy.next_step(state, idle, Level::Running, false) {
                 state = step.apply(state);
                 walk.push((step, idle.as_secs()));
             } else if let Some(next) = policy.next_threshold(state, idle) {
@@ -886,7 +1075,7 @@ mod tests {
             for state in &states {
                 for floor in Level::ALL {
                     for idle in &points {
-                        if let Some(step) = policy.next_step(*state, *idle, floor) {
+                        if let Some(step) = policy.next_step(*state, *idle, floor, false) {
                             assert!(step.can_start(*state), "{step:?} from {state:?}");
                             assert!(!step.wakes());
                         }
@@ -895,7 +1084,7 @@ mod tests {
                     // the rules allow, and the steps then come to rest.
                     let mut reached = *state;
                     let mut steps = 0;
-                    while let Some(step) = policy.next_step(reached, Duration::ZERO, floor) {
+                    while let Some(step) = policy.next_step(reached, Duration::ZERO, floor, false) {
                         reached = step.apply(reached);
                         steps += 1;
                         assert!(steps <= 8, "{state:?} toward {floor:?} never rests");
@@ -906,14 +1095,17 @@ mod tests {
                     );
                 }
                 for (index, idle) in points.iter().enumerate() {
-                    if policy.next_step(*state, *idle, Level::Running).is_some() {
+                    if policy
+                        .next_step(*state, *idle, Level::Running, false)
+                        .is_some()
+                    {
                         continue;
                     }
                     let next = policy.next_threshold(*state, *idle);
                     for later in &points[index..] {
                         if next.is_none_or(|next| *later < next) {
                             assert_eq!(
-                                policy.next_step(*state, *later, Level::Running),
+                                policy.next_step(*state, *later, Level::Running, false),
                                 None,
                                 "{state:?} is due at {later:?}, but the next threshold \
                                  after {idle:?} is {next:?}"
@@ -928,7 +1120,7 @@ mod tests {
     #[test]
     fn rejects_inconsistent_rules() {
         let rules = |f: fn(&mut SleepRules)| {
-            let mut rules = SleepRules::RECOMMENDED;
+            let mut rules = SleepRules::RECOMMENDED.keeping_memory();
             f(&mut rules);
             SleepPolicy::new(rules)
         };

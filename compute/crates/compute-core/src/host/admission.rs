@@ -844,8 +844,9 @@ impl Host {
     }
 
     /// Bytes of the budget that VM processes other than `waiter`'s already
-    /// ending will free, and that ending every other idle one already saved
-    /// would free besides, ready spare VMs included. Both take milliseconds
+    /// ending will free, and that ending every other idle one already
+    /// saved, or never to be saved, would free besides, ready spare VMs
+    /// included. Both take milliseconds
     /// and no I/O; a sandbox backing off after a failed step takes no step
     /// until its backoff ends, so it counts for neither.
     fn instant_room(&self, now: At, waiter: Option<SandboxId>) -> (u64, u64) {
@@ -858,7 +859,7 @@ impl Host {
             }
             let ending = slot
                 .in_flight
-                .is_some_and(|flight| flight.step == Step::Drop)
+                .is_some_and(|flight| matches!(flight.step, Step::Drop | Step::End))
                 || (slot.floor >= Level::Saved
                     && slot.in_flight.is_none()
                     && slot.reclaimable()

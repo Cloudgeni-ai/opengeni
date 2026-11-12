@@ -40,15 +40,24 @@ impl Rng {
     }
 }
 
-fn policies() -> [SleepPolicy; 7] {
+fn policies() -> [SleepPolicy; 9] {
     let s = Duration::from_secs;
     let policy = |rules| SleepPolicy::new(rules).unwrap();
     [
+        // The default: asleep in RAM, ended with its files once the host
+        // needs the room, its memory never saved.
         policy(SleepRules::RECOMMENDED),
-        // A fleet's sandboxes: checkpointed while in use.
+        // The same on a fleet: its files are copied while it is in use.
         policy(SleepRules {
             checkpoint_every: Some(s(120)),
             ..SleepRules::RECOMMENDED
+        }),
+        // Its memory kept: saved, then copied to object storage.
+        policy(SleepRules::RECOMMENDED.keeping_memory()),
+        // A fleet's sandboxes: checkpointed while in use.
+        policy(SleepRules {
+            checkpoint_every: Some(s(120)),
+            ..SleepRules::RECOMMENDED.keeping_memory()
         }),
         // Never asleep, at a fleet's default interval: only checkpoints
         // copy it. (Shorter intervals cost the long quiet phase dearly.)
@@ -59,12 +68,13 @@ fn policies() -> [SleepPolicy; 7] {
         // A nested host: huge pages cannot be compressed.
         policy(SleepRules {
             compress_under_pressure: false,
-            ..SleepRules::RECOMMENDED
+            ..SleepRules::RECOMMENDED.keeping_memory()
         }),
         // Ends processes on a timer, without object storage.
         policy(SleepRules {
             pause_after: Some(s(5)),
             save_after: Some(s(20)),
+            keep_memory: true,
             drop_after: Some(s(60)),
             forget_after: Some(s(3600)),
             ..SleepRules::NEVER
@@ -122,6 +132,9 @@ struct Truth {
     /// A restart is under way: its VM must end without a save and its
     /// memory image be forgotten before it runs again.
     restarting: bool,
+    /// Its guest did not say it wrote its files out as its VM paused:
+    /// that VM must not end with nothing of its memory saved.
+    unsynced: bool,
 }
 
 impl Truth {
@@ -156,6 +169,19 @@ impl Truth {
             self.state.level
         };
         self.requested = (level > current).then_some(level);
+    }
+
+    /// Its process gone under no step, it is as deep as any sleep asked of
+    /// it wanted, once nobody waits for it.
+    fn meet_request(&mut self, now: At) {
+        if !self.wake_pending
+            && !self.held(now)
+            && self
+                .requested
+                .is_some_and(|level| self.state.level >= level)
+        {
+            self.requested = None;
+        }
     }
 
     /// Applies a loss computed by the model and expects it to be reported.
@@ -271,6 +297,7 @@ impl World {
         truth.settle(truth.state.without_process());
         truth.update_wake(now);
         truth.settle_restart();
+        truth.meet_request(now);
         self.restart_ends += 1;
         self.send(Input::Lost { sandbox });
     }
@@ -286,6 +313,13 @@ impl World {
                     .expect("start for a live sandbox");
                 assert!(truth.op.is_none(), "two steps at once for {sandbox:?}");
                 assert!(!truth.broken, "step for a broken sandbox");
+                // Only the VM that was paused so: one that ran since, or a
+                // new one, was asked again.
+                truth.unsynced &= matches!(truth.state.level, Level::Paused | Level::Compressed);
+                assert!(
+                    step != Step::End || !truth.unsynced,
+                    "{sandbox:?} ended unsaved with files it never wrote out"
+                );
                 assert!(
                     step.can_start(truth.state),
                     "{step:?} cannot start from {:?}",
@@ -448,12 +482,31 @@ impl World {
                 truth.requested = None;
             }
         }
-        self.send(Input::Finished {
+        let finished = Input::Finished {
             sandbox: pending.sandbox,
             op: pending.op,
             outcome,
             wrote: true,
-        });
+        };
+        // Now and then a guest does not say it wrote its files out as its
+        // VM pauses; the core hears of it with the pause.
+        let unsynced = pending.step == Step::Pause
+            && outcome == Outcome::Done
+            && self.rng.chance(10)
+            && self.live.get_mut(&pending.sandbox).is_some_and(|truth| {
+                truth.unsynced = truth.state.level == Level::Paused;
+                truth.unsynced
+            });
+        if unsynced {
+            self.send_all(vec![
+                finished,
+                Input::Unsynced {
+                    sandbox: pending.sandbox,
+                },
+            ]);
+        } else {
+            self.send(finished);
+        }
     }
 
     /// Processes completions and timers in time order up to `to`.
@@ -542,6 +595,7 @@ impl World {
                 copied: (state.durability == Durability::Remote).then_some(self.now),
                 running_since: self.now,
                 restarting: false,
+                unsynced: false,
             },
         );
         self.send(Input::Add {
@@ -562,7 +616,13 @@ impl World {
         let level = self.rng.pick(&Level::ALL);
         let now = self.now;
         self.live.get_mut(&id).unwrap().request_sleep(level, now);
-        self.send(Input::Sleep { sandbox: id, level });
+        // With or without its programs: either way it gets as deep.
+        let keep = self.rng.chance(50);
+        self.send(Input::Sleep {
+            sandbox: id,
+            level,
+            keep,
+        });
     }
 
     /// A request to sleep right behind a wake, often while a sleep step is
@@ -638,6 +698,7 @@ impl World {
                         truth.settle(truth.state.without_process());
                         truth.update_wake(now);
                         truth.settle_restart();
+                        truth.meet_request(now);
                     }
                     self.send(Input::Lost { sandbox: id });
                 }
@@ -656,9 +717,7 @@ impl World {
                 self.send(Input::Remove { sandbox: id });
             }
             90..95 => self.add(),
-            95..97 => {
-                self.request_sleep(id);
-            }
+            95..97 => self.request_sleep(id),
             97..98 => {
                 let truth = self.live.get_mut(&id).unwrap();
                 truth.restarting = !truth.broken;
@@ -730,7 +789,9 @@ fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64, u64) {
         if !truth.broken {
             let settled = Duration::from_secs(300 * 86_400);
             assert_eq!(
-                truth.policy.next_step(truth.state, settled, Level::Running),
+                truth
+                    .policy
+                    .next_step(truth.state, settled, Level::Running, false),
                 None,
                 "seed {seed}: {id:?} has not settled at {:?}",
                 truth.state

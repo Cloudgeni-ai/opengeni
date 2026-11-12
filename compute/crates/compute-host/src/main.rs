@@ -152,6 +152,11 @@ struct CreateArgs {
     /// Let memory pressure compress the sandbox's memory while paused.
     #[arg(long)]
     compress: Option<bool>,
+    /// Save the sandbox's memory, so its programs survive the end of its
+    /// VM process. Without it, memory stays in host RAM alone, and a
+    /// sandbox whose VM process ended boots fresh from its files.
+    #[arg(long)]
+    keep_memory: bool,
     /// The image its disk starts as (ADR 19), by the id `build-image`
     /// printed; defaults to the host's base image.
     #[arg(long)]
@@ -172,6 +177,7 @@ impl CreateArgs {
         if let Some(compress) = self.compress {
             settings.compress = compress;
         }
+        settings.keep_memory |= self.keep_memory;
         SandboxConfig {
             disk_mib: None,
             reach: Vec::new(),

@@ -6,8 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compute_core::{
-    CreateRoom, DiskSpace, Durability, HoldId, Host, Input, Level, Priority, SandboxId, Size,
-    SleepPolicy, Step,
+    CreateRoom, DiskSpace, HoldId, Host, Input, Level, Priority, SandboxId, Size, SleepPolicy, Step,
 };
 use compute_engine::Engine;
 
@@ -355,7 +354,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) {
         match self
             .check(id, generation)
-            .and_then(|()| self.request_sleep(id, level))
+            .and_then(|()| self.request_sleep(id, level, true))
         {
             Ok(Room::Now) => {
                 let _ = reply.send(Ok(()));
@@ -369,11 +368,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Asks sandbox `id` to sleep to `level` or deeper, unless only the
-    /// next disk reading can tell whether its save fits
-    /// ([`Room::AfterReading`]): then nothing is asked yet, and the caller
-    /// asks again after that reading.
-    pub(super) fn request_sleep(&mut self, id: Id, level: Level) -> Result<Room, HostError> {
+    /// Asks sandbox `id` to sleep to `level` or deeper, with its programs
+    /// if `keep` (see [`Input::Sleep`]), unless only the next disk reading
+    /// can tell whether its save fits ([`Room::AfterReading`]): then
+    /// nothing is asked yet, and the caller asks again after that reading.
+    pub(super) fn request_sleep(
+        &mut self,
+        id: Id,
+        level: Level,
+        keep: bool,
+    ) -> Result<Room, HostError> {
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
@@ -386,7 +390,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             && self
                 .core
                 .sandbox(id.0)
-                .is_some_and(|view| view.unsavable && view.state.durability == Durability::Volatile)
+                .is_some_and(|view| view.unsavable && !view.state.memory_saved)
         {
             return Err(cannot_save(id));
         }
@@ -399,7 +403,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // now on: a save the disk cannot take is refused before its VM is
         // paused for it, as a hand-off would pause it and then wait.
         if level >= Level::Saved {
-            match self.core.save_room(id.0) {
+            match self.core.save_room(id.0, keep) {
                 CreateRoom::Fits => {}
                 CreateRoom::AwaitsReading(..) => return Ok(Room::AfterReading),
                 CreateRoom::Short(resource, needed, free) => {
@@ -423,6 +427,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.input(Input::Sleep {
             sandbox: id.0,
             level,
+            keep,
         });
         Ok(Room::Now)
     }

@@ -94,7 +94,7 @@ fn sandbox(owner: HostId) -> SandboxRow {
                 memory_mib: 256,
                 memory_request_mib: None,
                 cpu_request_millis: None,
-                sleep: SleepConfig::RECOMMENDED,
+                sleep: SleepConfig::RECOMMENDED.keeping_memory(),
                 image: None,
                 link: None,
             },

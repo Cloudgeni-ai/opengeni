@@ -9,6 +9,7 @@ use compute_engine::{Engine, EngineError};
 
 use super::Job;
 use crate::image::Verified;
+use crate::observe::notes;
 use crate::restore_notice::{ask_sync, tell_restored};
 use crate::state::{Change, Identity};
 use crate::store::Store;
@@ -28,6 +29,18 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(30);
 /// guest to write out what it holds for its disks. One that takes longer
 /// is saved anyway, its disk then as after a power cut.
 const SYNC_LIMIT: Duration = Duration::from_secs(10);
+
+/// What came of asking a guest to write out what it holds for its disks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Synced {
+    /// It says it did; or the host has no port to ask its guests on.
+    Written,
+    /// It did not answer in [`SYNC_LIMIT`]: writes may live in its memory
+    /// alone.
+    Unanswered,
+    /// The step was cancelled meanwhile.
+    Cancelled,
+}
 
 impl<E: Engine, S: Store> Job<E, S> {
     /// Tells a guest restored from `image`, before it runs, how long its
@@ -66,20 +79,26 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// in [`SYNC_LIMIT`] is paused anyway. `false` once the step is
     /// cancelled meanwhile: the VM is not paused, though its guest may
     /// already have trimmed its disk (and so changed the disk's file).
-    pub(super) async fn sync_guest(&self) -> bool {
+    pub(super) async fn sync_guest(&self) -> Synced {
         let Some(port) = self.restore_notice_port else {
-            return true;
+            return Synced::Written;
         };
         let vsock = self.spec.vsock_path();
         let started = Instant::now();
         tokio::select! {
-            () = self.cancel.cancelled() => false,
+            () = self.cancel.cancelled() => Synced::Cancelled,
             synced = ask_sync(&vsock, port, SYNC_LIMIT) => {
                 match synced {
-                    Ok(()) => tracing::debug!(id = %self.id, us = started.elapsed().as_micros(), "guest wrote its disks out"),
-                    Err(error) => tracing::warn!(id = %self.id, %error, "guest did not write its disks out; saved as it is"),
+                    Ok(()) => {
+                        tracing::debug!(id = %self.id, us = started.elapsed().as_micros(), "guest wrote its disks out");
+                        Synced::Written
+                    }
+                    Err(error) => {
+                        tracing::warn!(id = %self.id, %error, "guest did not write its disks out; it goes on as it is");
+                        notes::detail("compute.guest.sync", "unanswered");
+                        Synced::Unanswered
+                    }
                 }
-                true
             }
         }
     }
