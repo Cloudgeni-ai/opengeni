@@ -125,8 +125,8 @@ no attempt starts: the API answers a retryable 503 `upstream_unavailable` with
 `details.code: "provider_unreachable"`, and the dialog says GitHub couldn't be
 reached and offers **Check again**, which retries the same repair. When the
 installation can't be checked for another reason (a host GitHub App API without
-`getInstallation`, or an App configuration or authentication error), checking
-again wouldn't help, so the account chooser opens instead.
+`getInstallation`, an App configuration or authentication error, or any other
+failure), checking again wouldn't help, so the account chooser opens instead.
 
 A reinstall on the same GitHub account replaces the binding it repaired, in the
 bind's transaction (`deleteGitHubInstallationBinding` with

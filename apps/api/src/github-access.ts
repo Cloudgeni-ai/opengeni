@@ -213,7 +213,8 @@ async function readWorkspaceGitHubInstallations(
  * live view of it. `live` is null when GitHub no longer has the installation
  * and undefined when it is unknown. `unreachable` says GitHub was asked and
  * didn't answer (network failure, timeout, rate limit or a GitHub 5xx), as
- * opposed to a host that can't ask or an App configuration or auth error.
+ * opposed to a host that can't ask, an App configuration or auth error, or
+ * any other failure.
  * Null when it is not linked.
  */
 export async function readGitHubInstallationForRepair(
@@ -241,9 +242,55 @@ export async function readGitHubInstallationForRepair(
         : await getGitHubAppInstallationSummary(deps.settings, installationId);
   } catch (error) {
     live = undefined;
-    unreachable = isTransientGitHubRepositoryListFailure(error);
+    unreachable = isGitHubOutage(error);
   }
   return { stored, live, unreachable };
+}
+
+const networkErrorCodes = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "ConnectionRefused",
+  "ConnectionClosed",
+  "FailedToOpenSocket",
+]);
+
+/**
+ * Only a known outage shape: GitHub answered 408, 429, 5xx or a rate-limited
+ * 403, or the request failed in the network or timed out. Anything else
+ * (configuration, authentication, a host's own error, a bug) is not one, so a
+ * repair doesn't ask the person to check again forever.
+ */
+function isGitHubOutage(error: unknown): boolean {
+  if (error instanceof GitHubAppConfigurationError) return false;
+  const candidate = error as {
+    status?: unknown;
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    cause?: { code?: unknown } | null;
+  } | null;
+  if (!candidate || typeof candidate !== "object") return false;
+  if (typeof candidate.status === "number") {
+    if (candidate.status === 403) {
+      return typeof candidate.message === "string" && /rate limit/i.test(candidate.message);
+    }
+    return candidate.status === 408 || candidate.status === 429 || candidate.status >= 500;
+  }
+  if (candidate.name === "AbortError" || candidate.name === "TimeoutError") return true;
+  if (error instanceof TypeError) return true;
+  return [candidate.code, candidate.cause?.code].some(
+    (code) => typeof code === "string" && networkErrorCodes.has(code),
+  );
 }
 
 export function githubBindingStatus(
