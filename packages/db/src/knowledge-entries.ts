@@ -28,7 +28,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { safeDatabaseErrorFacts } from "./persistence-errors";
+import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import {
   isKnowledgeLearningScopeGuardError,
   KnowledgeLearningScopeChangedError,
@@ -130,15 +130,7 @@ function resolveWriteEntryId(
 
 async function apply(db: Database, context: KnowledgeContext, request: Record<string, unknown>) {
   try {
-    return await inKnowledgeContext(db, context, async (tx) => {
-      const [row] = await rawRows<{ receipt: unknown }>(
-        tx,
-        sql`
-      SELECT knowledge_entry_apply(${context.accountId}::uuid,${context.workspaceId}::uuid,
-        ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS receipt`,
-      );
-      return KnowledgeEntryWriteReceipt.parse(row?.receipt);
-    });
+    return await inKnowledgeContext(db, context, (tx) => applyIn(tx, context, request));
   } catch (error) {
     // An entry outside the caller's RLS scope still owns its primary key, so a
     // colliding create surfaces as this unique violation, not as operation reuse.
@@ -147,6 +139,16 @@ async function apply(db: Database, context: KnowledgeContext, request: Record<st
     }
     throw error;
   }
+}
+
+async function applyIn(tx: Database, context: KnowledgeContext, request: Record<string, unknown>) {
+  const [row] = await rawRows<{ receipt: unknown }>(
+    tx,
+    sql`
+      SELECT knowledge_entry_apply(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS receipt`,
+  );
+  return KnowledgeEntryWriteReceipt.parse(row?.receipt);
 }
 
 /** Freeze before model execution; retries of the logical turn recover the same policy. */
@@ -300,9 +302,36 @@ export async function restoreKnowledgeEntry(
   input: KnowledgeEntryRestoreRequest,
 ) {
   const request = KnowledgeEntryRestoreRequest.parse(input);
-  return apply(db, context, { ...request, operation: "restore" });
+  return inKnowledgeContext(db, context, async (tx) => {
+    // Read before the restore: the archive that this restore undoes.
+    const [archived] = await rawRows<{ operation_id: string }>(
+      tx,
+      sql`SELECT o.operation_id FROM knowledge_entries e
+        JOIN knowledge_entry_operations o ON o.account_id=e.account_id AND o.entry_id=e.id
+          AND o.receipt->>'revisionId'=e.latest_revision_id::text AND o.receipt->>'outcome'='archived'
+        WHERE e.account_id=${context.accountId}::uuid AND e.id=${request.entryId}::uuid AND e.archived
+        LIMIT 1`,
+    );
+    const receipt = await applyIn(tx, context, { ...request, operation: "restore" });
+    if (archived && receipt.outcome === "published" && !receipt.replayed) {
+      await restoreArchivedWith(
+        tx,
+        context,
+        request.entryId,
+        archived.operation_id,
+        request.operationId,
+      );
+    }
+    return receipt;
+  });
 }
 
+/**
+ * Archiving a collection also archives what is only inside it: its
+ * sub-collections and the entries that no other live collection holds.
+ * Otherwise they surface at the top level and stay in use, so the collection
+ * seems to come back. Undo and restore bring the same set back.
+ */
 export async function archiveKnowledgeEntry(
   db: Database,
   context: KnowledgeContext,
@@ -320,7 +349,168 @@ export async function archiveKnowledgeEntry(
     })
     .strict()
     .parse(input);
-  return apply(db, context, { ...request, operation: "archive" });
+  return inKnowledgeContext(db, context, async (tx) => {
+    // Read the tree while the collection is still live.
+    const members = await collectionMembers(tx, context.accountId, request.entryId);
+    const receipt = await applyIn(tx, context, { ...request, operation: "archive" });
+    if (receipt.outcome !== "archived" || receipt.replayed || !members.length) return receipt;
+    for (const member of onlyInside(request.entryId, members)) {
+      await skipUnavailable(tx, (savepoint) =>
+        applyIn(savepoint, context, {
+          operationId: archivedWithOperationId(context.accountId, request.operationId, member.id),
+          entryId: member.id,
+          expectedVersion: member.version,
+          operation: "archive",
+        }),
+      );
+    }
+    return receipt;
+  });
+}
+
+type CollectionMember = { id: string; version: number; parents: string[] };
+
+/** Every live published entry under a collection, with its live parent collections. */
+async function collectionMembers(
+  tx: Database,
+  accountId: string,
+  collectionId: string,
+): Promise<CollectionMember[]> {
+  const rows = await rawRows<{
+    id: string;
+    version: number;
+    parents: string[] | null;
+  }>(
+    tx,
+    sql`WITH RECURSIVE tree(id) AS (
+        SELECT root.id FROM knowledge_entries root
+          JOIN knowledge_entry_revisions r ON r.account_id=root.account_id AND r.id=root.latest_revision_id
+          WHERE root.account_id=${accountId}::uuid AND root.id=${collectionId}::uuid
+            AND NOT root.archived AND r.body->>'kind'='group'
+        UNION
+        SELECT c.id FROM tree
+          JOIN knowledge_entry_links l ON l.account_id=${accountId}::uuid AND l.target_entry_id=tree.id
+            AND l.relation='group'
+          JOIN knowledge_entries c ON c.account_id=l.account_id AND c.id=l.entry_id
+            AND l.revision_id=c.published_revision_id AND NOT c.archived
+      )
+      SELECT c.id, c.version, (SELECT array_agg(DISTINCT l.target_entry_id::text)
+          FROM knowledge_entry_links l
+          JOIN knowledge_entries g ON g.account_id=l.account_id AND g.id=l.target_entry_id AND NOT g.archived
+          WHERE l.account_id=c.account_id AND l.entry_id=c.id AND l.revision_id=c.published_revision_id
+            AND l.relation='group') AS parents
+      FROM tree JOIN knowledge_entries c ON c.account_id=${accountId}::uuid AND c.id=tree.id
+      WHERE tree.id<>${collectionId}::uuid
+      ORDER BY c.id`,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    version: Number(row.version),
+    parents: row.parents ?? [],
+  }));
+}
+
+/** Members whose every live collection is being archived, parents first. */
+function onlyInside(collectionId: string, members: CollectionMember[]): CollectionMember[] {
+  const inside = new Map(members.map((member) => [member.id, member]));
+  const archiving = (id: string) => id === collectionId || inside.has(id);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const member of inside.values()) {
+      if (member.parents.some((parent) => !archiving(parent))) {
+        inside.delete(member.id);
+        changed = true;
+      }
+    }
+  }
+  const ordered: CollectionMember[] = [];
+  const placed = new Set([collectionId]);
+  while (ordered.length < inside.size) {
+    const before = ordered.length;
+    for (const member of inside.values()) {
+      if (placed.has(member.id)) continue;
+      if (member.parents.every((parent) => placed.has(parent) || !inside.has(parent))) {
+        ordered.push(member);
+        placed.add(member.id);
+      }
+    }
+    if (ordered.length === before) break;
+  }
+  return ordered;
+}
+
+/** Restore what an archive took with it, parents before their members. */
+async function restoreArchivedWith(
+  tx: Database,
+  context: KnowledgeContext,
+  collectionId: string,
+  archiveOperationId: string,
+  restoreOperationId: string,
+) {
+  const rows = await rawRows<{
+    id: string;
+    version: number;
+    published_revision_id: string;
+    operation_id: string;
+  }>(
+    tx,
+    sql`WITH RECURSIVE tree(id) AS (
+        SELECT ${collectionId}::uuid
+        UNION
+        SELECT c.id FROM tree
+          JOIN knowledge_entry_links l ON l.account_id=${context.accountId}::uuid
+            AND l.target_entry_id=tree.id AND l.relation='group'
+          JOIN knowledge_entries c ON c.account_id=l.account_id AND c.id=l.entry_id
+            AND l.revision_id=c.latest_revision_id AND c.archived
+      )
+      SELECT c.id, c.version, c.published_revision_id, o.operation_id
+      FROM tree JOIN knowledge_entries c ON c.account_id=${context.accountId}::uuid AND c.id=tree.id
+      JOIN knowledge_entry_operations o ON o.account_id=c.account_id AND o.entry_id=c.id
+        AND o.receipt->>'revisionId'=c.latest_revision_id::text AND o.receipt->>'outcome'='archived'
+      WHERE tree.id<>${collectionId}::uuid AND c.archived AND c.published_revision_id IS NOT NULL
+      ORDER BY c.id`,
+  );
+  let pending = rows.filter(
+    (row) =>
+      row.operation_id === archivedWithOperationId(context.accountId, archiveOperationId, row.id),
+  );
+  // A member's collections and evidence must be live again before it is.
+  while (pending.length) {
+    const left: typeof pending = [];
+    for (const row of pending) {
+      const restored = await skipUnavailable(tx, (savepoint) =>
+        applyIn(savepoint, context, {
+          operationId: archivedWithOperationId(context.accountId, restoreOperationId, row.id),
+          entryId: row.id,
+          revisionId: row.published_revision_id,
+          expectedVersion: Number(row.version),
+          operation: "restore",
+        }),
+      );
+      if (!restored) left.push(row);
+    }
+    if (left.length === pending.length) break;
+    pending = left;
+  }
+}
+
+/** Stable per archive and member, so a member's archive is traceable to its collection's. */
+function archivedWithOperationId(accountId: string, operationId: string, entryId: string) {
+  return knowledgeEntryIdForOperation(accountId, `archived-with:${operationId}:${entryId}`);
+}
+
+/** Members the caller can't change, or that changed meanwhile, keep their state. */
+async function skipUnavailable<T>(
+  tx: Database,
+  run: (savepoint: Database) => Promise<T>,
+): Promise<T | null> {
+  try {
+    return await tx.transaction((savepoint) => run(savepoint));
+  } catch (error) {
+    const state = nestedPostgresSqlState(error);
+    if (state === "42501" || state === "40001" || state === "22023") return null;
+    throw error;
+  }
 }
 
 /**

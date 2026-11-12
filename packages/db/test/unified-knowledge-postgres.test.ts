@@ -46,6 +46,7 @@ import {
   listAgentLearningOverrides,
   getAgentInstruction,
   getKnowledgeEntry,
+  getKnowledgeEntries,
   getKnowledgeEntryReach,
   listKnowledgeEntries,
   listKnowledgeReviewBatches,
@@ -1217,9 +1218,82 @@ describe("unified Knowledge storage", () => {
       entryId: company.entryId,
       expectedVersion: company.version,
     });
+    // What was only inside Acme went with it; Renewal stays in Billing.
     expect(ids(await listKnowledgeEntries(client.db, f.human, { rootOnly: true }))).toEqual(
-      [contracts.entryId, product.entryId, loose.entryId, personal.entryId].sort(),
+      [product.entryId, loose.entryId].sort(),
     );
+    expect(
+      ids(await listKnowledgeEntries(client.db, f.human, { groupId: product.entryId })),
+    ).toEqual([finding.entryId]);
+  });
+
+  test("archiving a collection archives what is only inside it, and restoring brings it back", async () => {
+    const f = await fixture();
+    const create = (title: string, kind: "group" | "note", groupIds: string[] = []) =>
+      saveKnowledgeEntry(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        entry: { title, kind, content: `${title} description`, groupIds },
+      });
+    const experiment = await create("Synthetic experiment", "group");
+    const lab = await create("Laboratory collections", "group", [experiment.entryId]);
+    const atlas = await create("Atlas", "group", [lab.entryId]);
+    const finding = await create("Atlas finding", "note", [atlas.entryId]);
+    const other = await create("Real product", "group");
+    const shared = await create("Shared finding", "note", [atlas.entryId, other.entryId]);
+    const earlier = await create("Already archived", "group", [lab.entryId]);
+    const earlierArchive = await archiveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: earlier.entryId,
+      expectedVersion: earlier.version,
+    });
+    const roots = async () =>
+      (await listKnowledgeEntries(client.db, f.human, { rootOnly: true })).entries
+        .map((entry) => entry.id)
+        .sort();
+    const archived = async (id: string) =>
+      (await getKnowledgeEntries(client.db, f.human, [id], { view: "archived" }))[0]?.archived ??
+      false;
+    const operationId = crypto.randomUUID();
+    const archive = () =>
+      archiveKnowledgeEntry(client.db, f.human, {
+        operationId,
+        entryId: experiment.entryId,
+        expectedVersion: experiment.version,
+      });
+    const receipt = await archive();
+    expect(receipt.outcome).toBe("archived");
+    // Nothing inside surfaces at the top level, and agents stop using it.
+    expect(await roots()).toEqual([other.entryId]);
+    for (const id of [lab.entryId, atlas.entryId, finding.entryId])
+      expect(await archived(id)).toBe(true);
+    expect(await archived(shared.entryId)).toBe(false);
+    expect(
+      (await listKnowledgeEntries(client.db, f.human, { groupId: other.entryId })).entries.map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([shared.entryId]);
+    expect((await archive()).replayed).toBe(true);
+
+    // Undo restores the collection and everything archived with it.
+    await restoreKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: experiment.entryId,
+      revisionId: experiment.revisionId,
+      expectedVersion: receipt.version,
+    });
+    expect(await roots()).toEqual([experiment.entryId, other.entryId].sort());
+    for (const id of [lab.entryId, atlas.entryId, finding.entryId])
+      expect(await archived(id)).toBe(false);
+    expect(
+      (await listKnowledgeEntries(client.db, f.human, { groupId: atlas.entryId })).entries
+        .map((entry) => entry.id)
+        .sort(),
+    ).toEqual([finding.entryId, shared.entryId].sort());
+    // A collection archived on its own before stays archived.
+    expect(await archived(earlier.entryId)).toBe(true);
+    expect(earlierArchive.outcome).toBe("archived");
   });
 
   test("collection cycles are rejected across published, proposed and restored membership", async () => {
