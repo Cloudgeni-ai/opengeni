@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { buildSubscriptionUsagePool } from "@opengeni/subscriptions";
-import type { SubscriptionUsagePool } from "@opengeni/contracts";
+import { claudeUsageCreditsState, type SubscriptionUsagePool } from "@opengeni/contracts";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
@@ -9,6 +9,8 @@ import {
   type SubscriptionCoreConnectionRow,
 } from "./subscription-core/administration";
 import { projectSubscriptionCoreAccountUsage } from "./subscription-core/account-usage-presentation";
+import { decodeSubscriptionQuota } from "./subscription-core-repository";
+import { subscriptionCoreClaudeUsageDetails } from "./subscription-core-claude-usage";
 
 type Provider = SubscriptionUsagePool["provider"];
 type Window = "five_hour" | "weekly";
@@ -33,6 +35,33 @@ function epoch(value: string | null): number | null {
 }
 function iso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
+}
+type PoolAccountRow = Pick<
+  SubscriptionCoreConnectionRow,
+  | "id"
+  | "label"
+  | "account_email"
+  | "provider_account_id"
+  | "quota"
+  | "quota_revision"
+  | "quota_observed_refresh_generation"
+  | "quota_updated_at"
+>;
+function accountLabel(row: PoolAccountRow): string {
+  return row.label ?? row.account_email ?? row.provider_account_id ?? "Account";
+}
+
+/** Each pooled Claude account's usage-credits state, from its stored usage reading. */
+export function subscriptionPoolUsageCredits(
+  rows: readonly PoolAccountRow[],
+): NonNullable<SubscriptionUsagePool["usageCredits"]> {
+  return rows.map((row) => ({
+    id: row.id,
+    label: accountLabel(row),
+    state: claudeUsageCreditsState(
+      subscriptionCoreClaudeUsageDetails(decodeSubscriptionQuota(row)).extraUsage,
+    ),
+  }));
 }
 
 /**
@@ -184,7 +213,7 @@ export async function readSubscriptionUsagePool(
           );
           return {
             id: row.id,
-            label: row.label ?? row.account_email ?? row.provider_account_id ?? "Account",
+            label: accountLabel(row),
             plan: row.plan_type,
             planWeight: subscriptionPlanWeight(input.provider, row.plan_type),
             blocked: blockedSubscriptionWindows(input.provider, usage, now, absentWindows),
@@ -234,6 +263,9 @@ export async function readSubscriptionUsagePool(
         ...result,
         provider: input.provider,
         observedAt: iso(result.observedAt),
+        ...(input.provider === "claude"
+          ? { usageCredits: subscriptionPoolUsageCredits(rows) }
+          : {}),
         windows: result.windows.map((window) => ({
           ...window,
           accounts: window.accounts.map((account) => ({

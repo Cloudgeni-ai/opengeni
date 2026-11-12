@@ -14458,6 +14458,7 @@
         "$.disabledReason": "string! null",
         "$.isEnabled": "boolean! null",
         "$.monthlyLimit": "number! null",
+        "$.state": "enum! null=[\"\\\"disabled\\\"\",\"\\\"enabled\\\"\",\"\\\"not_configured\\\"\"]",
         "$.usedCredits": "number! null",
         "$.utilization": "number! null"
       }
@@ -31216,6 +31217,11 @@
         "$": "object",
         "$.observedAt": "string! null",
         "$.provider": "enum!=[\"\\\"claude\\\"\",\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",
+        "$.usageCredits": "array?",
+        "$.usageCredits[]": "object",
+        "$.usageCredits[].id": "string!",
+        "$.usageCredits[].label": "string!",
+        "$.usageCredits[].state": "enum!=[\"\\\"off\\\"\",\"\\\"on\\\"\",\"\\\"unknown\\\"\"]",
         "$.windows": "array!",
         "$.windows[]": "object",
         "$.windows[].accounts": "array!",

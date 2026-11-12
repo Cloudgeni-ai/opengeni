@@ -24,7 +24,12 @@ import {
   subscriptionAccountName,
 } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
-import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
+import {
+  ClaudeUsage,
+  claudeUsageCreditsChip,
+  ClaudeUsageReadout,
+  useClaudeUsage,
+} from "./claude-usage";
 import { ClaudeLimitResetsSection } from "./claude-limit-resets";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
@@ -131,6 +136,7 @@ export function ClaudeRow({
       title={subscriptionAccountName(account)}
       email={account.email}
       primary={claude.accounts.length > 1 && account.id === claude.activeAccountId}
+      addon={claudeUsageCreditsChip(account.usage?.extraUsage)}
       meta={[
         scopeLabel ??
           (claude.organizationId
