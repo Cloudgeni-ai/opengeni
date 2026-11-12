@@ -671,6 +671,37 @@ describe("admin passkey step-up", () => {
     expect(await stepUpCode(personal)).not.toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
   }, 120_000);
 
+  test("adding, enabling, disabling and removing a capability and its tool permissions are never asked", async () => {
+    const rt = runtime();
+    const setup = runtime("off");
+    const owner = await passwordPerson(rt);
+    const organization = await createOrganization(setup, owner.cookie);
+    const workspaceId = await sharedWorkspace(setup, owner.cookie, organization.id);
+    const capabilities = `/v1/workspaces/${workspaceId}/capabilities`;
+    const added = await call(rt, "POST", capabilities, owner.cookie, {
+      kind: "mcp",
+      name: "Step-up MCP",
+      endpointUrl: "https://step-up.example.test/mcp",
+    });
+    expect(added.status, await added.clone().text()).toBeLessThan(300);
+    const { id } = (await added.json()) as { id: string };
+    const item = `${capabilities}/${encodeURIComponent(id)}`;
+    // Enabling reaches the server itself (none here); only the guard is under test.
+    for (const [method, path, body] of [
+      ["POST", `${item}/enable`, {}],
+      ["PUT", `${item}/tool-permissions`, { tools: {} }],
+      ["PATCH", `/v1/workspaces/${workspaceId}/session-mcp-tool-permissions`, {}],
+      ["POST", `${item}/disable`, {}],
+      ["DELETE", `${item}/installation`, undefined],
+    ] as const) {
+      const response = await call(rt, method, path, owner.cookie, body);
+      expect(await stepUpCode(response), `${method} ${path}`).not.toBe(
+        ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+      );
+      expect(response.status, `${method} ${path}`).not.toBe(403);
+    }
+  }, 120_000);
+
   test("a workspace admin is asked in the browser and to create a key, not when using it", async () => {
     const rt = runtime();
     const setup = runtime("off");

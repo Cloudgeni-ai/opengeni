@@ -132,6 +132,33 @@ describe("admin step-up routes", () => {
     }
   });
 
+  test("adding, enabling, disabling and installing capabilities and their tool permissions are never asked", () => {
+    for (const [method, path] of [
+      ["POST", `${WS}/capabilities`],
+      ["POST", `${WS}/capabilities/mcp%3Aexample/enable`],
+      ["POST", `${WS}/capabilities/cap/enable`],
+      ["POST", `${WS}/capabilities/cap/disable`],
+      ["DELETE", `${WS}/capabilities/cap/installation`],
+      ["POST", `${WS}/capabilities/discovery/mcp-auth`],
+      ["PUT", `${WS}/capabilities/cap/tool-permissions`],
+      ["PATCH", `${WS}/capabilities/cap/tool-permissions`],
+      ["PATCH", `${WS}/session-mcp-tool-permissions`],
+      ["POST", `${WS}/skills/preview`],
+      ["POST", `${WS}/skills/install`],
+      ["DELETE", `${WS}/skills/cap`],
+      ["POST", `${WS}/plugins/preview`],
+      ["POST", `${WS}/plugins/install`],
+      ["DELETE", `${WS}/plugins/key`],
+      ["POST", `${WS}/integrations/install`],
+      ["PUT", `${WS}/integrations/cap/organization`],
+      ["PATCH", `${WS}/integrations/cap/instances/key`],
+      ["DELETE", `${WS}/integrations/cap/instances/key`],
+      ["PUT", `${WS}/integrations/cap/instances/key/facets/facet`],
+    ] as const) {
+      expect(matchAdminRoute(method, path), `${method} ${path}`).toBeNull();
+    }
+  });
+
   test("ids are compared in their canonical form", () => {
     const id = CONNECTION_ID;
     for (const written of [id.toUpperCase(), id.replaceAll("-", ""), `{${id}}`]) {
