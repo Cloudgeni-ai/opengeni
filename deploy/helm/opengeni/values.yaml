@@ -1654,8 +1654,9 @@ computeControl:
     createFailureRatio: 0.1
     createMinimum: 5
     # OpenGeniComputeHostAgentRestarting: a host's agent starts again
-    # this many times in six hours. Raise it where hosts' agents are upgraded
-    # in place more often.
+    # without being asked to (its watchdog stopped it, it crashed, or its
+    # machine went down) this many times in six hours. Upgrades, restarts
+    # and planned reboots are not counted.
     agentRestarts: 2
     # OpenGeniComputeHostRefusingWakes: a host refuses this many wakes as
     # full in 30 minutes, and is still refusing.

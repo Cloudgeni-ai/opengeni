@@ -659,6 +659,11 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
     let client = Client::new(&cli.socket);
     match cli.command {
         Command::Serve(args) => {
+            // Whether the previous run was asked to stop, taken before
+            // anything this run does can fail: a run that fails to start
+            // was not.
+            let after_asked_stop = compute_host::fleet::stopped::take_mark(&args.root);
+            tracing::info!(after_asked_stop, "the agent starts");
             let served = Box::pin(run_serve(*args, cli.socket)).await;
             // What it said last, often why it stopped, unless the journal
             // has stalled.
@@ -1023,6 +1028,7 @@ async fn run_agent<S: Store>(
 ) -> anyhow::Result<()> {
     let observer = config.observer.clone();
     let links = config.agent_link.clone();
+    let root = config.root.clone();
     // On a host in a fleet the lease is renewed from before this run takes
     // back what the previous one left until this one exits.
     let ((handle, agent), mut joined) = if let Some((fleet, prepared)) = fleet {
@@ -1050,12 +1056,13 @@ async fn run_agent<S: Store>(
         }
     };
     let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
-    let result = tokio::select! {
-        result = serve(local, &socket) => result.context("serving"),
-        result = tokio::signal::ctrl_c() => result.map_err(Into::into),
-        _ = terminate.recv() => Ok(()),
-        result = agent => result.map_err(Into::into),
-        result = in_fleet => result.context("in the fleet"),
+    // `asked`: the agent stops because it was asked to, by a signal.
+    let (result, asked) = tokio::select! {
+        result = serve(local, &socket) => (result.context("serving"), false),
+        result = tokio::signal::ctrl_c() => (result.map_err(Into::into), true),
+        _ = terminate.recv() => (Ok(()), true),
+        result = agent => (result.map_err(Into::into), false),
+        result = in_fleet => (result.context("in the fleet"), false),
     };
     let stopping = async {
         // Stopped by a signal, the agent did not get to it: the agent
@@ -1078,6 +1085,10 @@ async fn run_agent<S: Store>(
     match joined {
         Some(joined) => joined.stopping(stopping).await,
         None => stopping.await,
+    }
+    // Its stop is done: the next run's start was asked for, not a fault.
+    if asked && result.is_ok() {
+        compute_host::fleet::stopped::leave_mark(&root);
     }
     result
 }
