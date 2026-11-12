@@ -18,6 +18,8 @@
  * with each earlier rendering (`slackMrkdwnKeeping*`) and then the unformatted
  * text; a later output change must keep the previous rendering reachable the
  * same way, or operations started before the deploy conflict on every retry.
+ * Opengeni links carry the deployment's web address, so it is part of those
+ * bytes too: changing it strands operations still in flight.
  */
 
 import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
@@ -304,7 +306,7 @@ function tableAt(
     const line = lines[next]!;
     if (!line.includes("|") || TABLE_END.test(line)) break;
     if (SLACK_TOKEN.test(line)) return null;
-    rows.push(tableCells(line, objectLinkUrl, links).slice(0, columns.length));
+    rows.push(tableCells(line, objectLinkUrl, links, columns.length));
   }
   return { rows, links, lines: next - index };
 }
@@ -325,8 +327,16 @@ function splitTableRow(row: string): string[] {
 /** A link in a table: its cell shows `label [n]`, and the link follows the table. */
 type TableLink = { label: string; url: string };
 
-function tableCells(row: string, objectLinkUrl: SlackObjectLinkUrl, links: TableLink[]): string[] {
-  return splitTableRow(row).map((cell) => tableCellText(cell.trim(), objectLinkUrl, links));
+function tableCells(
+  row: string,
+  objectLinkUrl: SlackObjectLinkUrl,
+  links: TableLink[],
+  columns?: number,
+): string[] {
+  // Cells past the header's are dropped before their links are numbered.
+  return splitTableRow(row)
+    .slice(0, columns)
+    .map((cell) => tableCellText(cell.trim(), objectLinkUrl, links));
 }
 
 /**

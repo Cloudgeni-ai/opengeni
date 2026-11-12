@@ -374,7 +374,7 @@ describe("Markdown tables in Slack", () => {
     const reply = [
       "| File | Note |",
       "| --- | --- |",
-      "| [Open](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e) | ok | extra |",
+      "| [Open](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e) | ok | [dropped](https://x.example) |",
       "## Next | step",
       "| x | y |",
       "| - | - |",
