@@ -4,9 +4,9 @@ import {
   ManagedPasskeyCeremony,
   ManagedPasskeySignInRequest,
   ManagedPasskeyStepUpHandoff,
+  ManagedPasskeyStepUpHandoffClaim,
   ManagedPasskeyStepUpOptionsRequest,
   ManagedPasskeyStepUpResponse,
-  ManagedPasskeyStepUpStatus,
   ManagedPasskeySignInResponse,
   ManagedPasskeySignUpOptionsRequest,
   ManagedPasskeySignUpRequest,
@@ -16,12 +16,13 @@ import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import { nestedPostgresSqlState } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
-import { adminStepUpVerified, recordAdminStepUp } from "../auth/admin-step-up";
+import { recordAdminStepUp } from "../auth/admin-step-up";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
 import {
+  claimManagedPasskeyHandoff,
+  confirmManagedPasskeyHandoff,
   consumeManagedPasskeyCeremony,
-  consumeManagedPasskeyHandoff,
   findManagedPasskeyHandoff,
   listManagedPasskeyCredentials,
   managedAuthRefusal,
@@ -272,16 +273,6 @@ export function registerManagedPasskeyRoutes(
     );
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
-  // Whether this browser session is confirmed: an app waiting for a step-up
-  // it handed to the person's browser reads this until it is.
-  app.get(`${base}/step-up`, async (context) => {
-    const person = await signedInBrowserPerson(context);
-    if (!person) return notSignedIn();
-    return context.json(
-      ManagedPasskeyStepUpStatus.parse({ confirmed: await adminStepUpVerified(deps, person) }),
-    );
-  });
-
   // An app that can't show passkey prompts (the desktop app) hands its
   // step-up to the person's browser on this same server. Only the app's own
   // session can start one, for itself; see `startManagedPasskeyHandoff`.
@@ -313,8 +304,8 @@ export function registerManagedPasskeyRoutes(
       return context.json(
         ManagedPasskeyStepUpHandoff.parse({
           handoffId: handoff.handoffId,
-          code: handoff.code,
           expiresAt: handoff.expiresAt,
+          expiresInSeconds: handoff.expiresInSeconds,
         }),
       );
     } catch (error) {
@@ -322,23 +313,67 @@ export function registerManagedPasskeyRoutes(
     }
   });
 
-  // The browser page reads the handoff it was opened for, to show its code.
-  app.get(`${base}/step-up/handoff/:handoffId`, async (context) => {
-    const handoffId = context.req.param("handoffId");
-    const person = await signedInBrowserPerson(context);
-    if (!person) return notSignedIn();
-    const handoff = UUID.test(handoffId)
-      ? await findManagedPasskeyHandoff(deps.managedAuth!, handoffId.toLowerCase())
-      : null;
-    if (!handoff) return handoffExpired();
-    if (handoff.userId !== person.authUserId) return handoffOtherAccount();
-    return context.json(
-      ManagedPasskeyStepUpHandoff.parse({
-        handoffId: handoff.handoffId,
-        code: handoff.code,
-        expiresAt: handoff.expiresAt,
-      }),
-    );
+  // The app's session claims its handoff with the code the person's browser
+  // showed after their passkey. That, and only that, confirms the app.
+  app.post(`${base}/step-up/handoff/:handoffId/claim`, async (context) => {
+    const notJson = requireJson(context);
+    if (notJson) return notJson;
+    try {
+      managedPasskeyRelyingParty(deps.settings, context.req.header("origin"));
+      const request = await body(context, ManagedPasskeyStepUpHandoffClaim);
+      const person = await signedInBrowserPerson(context);
+      if (!person) return notSignedIn();
+      if (
+        !(await admitManagedPasskeyAttempt(
+          context,
+          deps,
+          `step-up:${person.authUserId}`,
+          SIGN_IN_PER_MINUTE,
+        ))
+      ) {
+        return rateLimited();
+      }
+      const handoffId = context.req.param("handoffId");
+      if (!UUID.test(handoffId)) return handoffExpired();
+      const claim = await claimManagedPasskeyHandoff(deps.managedAuth!, handoffId.toLowerCase(), {
+        userId: person.authUserId,
+        authSessionId: person.authSessionId,
+        code: request.code,
+      });
+      switch (claim.kind) {
+        case "claimed":
+          if (!(await recordAdminStepUp(deps, person))) return notSignedIn();
+          return context.json(ManagedPasskeyStepUpResponse.parse({ confirmed: true }));
+        case "wrong_code":
+          return refusal(
+            422,
+            "PASSKEY_HANDOFF_WRONG_CODE",
+            "That code isn't right. Check the code your browser shows.",
+          );
+        case "too_many_attempts":
+          return refusal(
+            409,
+            "PASSKEY_HANDOFF_EXPIRED",
+            "Too many wrong codes. Start again in the app.",
+          );
+        case "not_confirmed":
+          return refusal(
+            409,
+            "PASSKEY_HANDOFF_NOT_CONFIRMED",
+            "Use your passkey in the browser first; it then shows the code.",
+          );
+        case "other_session":
+          return refusal(
+            403,
+            "PASSKEY_HANDOFF_OTHER_SESSION",
+            "This confirmation was started somewhere else. Start again in the app.",
+          );
+        case "expired":
+          return handoffExpired();
+      }
+    } catch (error) {
+      return passkeyRefusal(error);
+    }
   });
 
   app.post(`${base}/step-up/options`, async (context) => {
@@ -362,7 +397,7 @@ export function registerManagedPasskeyRoutes(
       const handoffId = request.handoffId?.toLowerCase();
       if (handoffId) {
         const handoff = await findManagedPasskeyHandoff(deps.managedAuth!, handoffId);
-        if (!handoff) return handoffExpired();
+        if (!handoff || handoff.confirmation) return handoffExpired();
         if (handoff.userId !== person.authUserId) return handoffOtherAccount();
       }
       const allow = await listManagedPasskeyCredentials(deps.db, person.authUserId);
@@ -408,23 +443,18 @@ export function registerManagedPasskeyRoutes(
       }
       if (!(await recordAdminStepUp(deps, person))) return notSignedIn();
       if (ceremony.handoffId) {
-        // The app session that handed this over is confirmed too: once, and
-        // only when it is the same person's.
-        const handoff = await consumeManagedPasskeyHandoff(deps.managedAuth!, ceremony.handoffId);
-        if (!handoff) return handoffExpired();
-        if (handoff.userId !== person.authUserId) return handoffOtherAccount();
-        if (
-          !(await recordAdminStepUp(deps, {
-            authUserId: handoff.userId,
-            authSessionId: handoff.authSessionId,
-          }))
-        ) {
-          return refusal(
-            409,
-            "PASSKEY_HANDOFF_SIGNED_OUT",
-            "The app signed out meanwhile. Sign in to it again, then start again.",
-          );
-        }
+        // An app handed this over: give the browser the one-time code that
+        // lets the app's own session claim it. This alone confirms no other
+        // session.
+        const confirmed = await confirmManagedPasskeyHandoff(
+          deps.managedAuth!,
+          ceremony.handoffId,
+          person.authUserId,
+        );
+        if (!confirmed) return handoffExpired();
+        return context.json(
+          ManagedPasskeyStepUpResponse.parse({ confirmed: true, code: confirmed.code }),
+        );
       }
       return context.json(ManagedPasskeyStepUpResponse.parse({ confirmed: true }));
     } catch (error) {

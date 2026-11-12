@@ -526,7 +526,7 @@ export function SecurityController({
               openInBrowser(new URL("/settings/security", window.location.origin).toString());
               setError(null);
               setSuccess(
-                "Add your passkey in the browser window that opened. It shows here when you come back.",
+                `Add your passkey in the browser window that opened${isPasskeyOnlyAccountEmail(email) ? "" : `, signed in as ${email}`}. It shows here when you come back.`,
               );
               return;
             }

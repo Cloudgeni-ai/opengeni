@@ -15,23 +15,23 @@ import { KitSection, KitCanvas } from "../kit";
  * Sample data stands in for the API: the first save is refused the way the
  * API refuses an admin change, and "Use passkey" waits a moment instead of a
  * real passkey ceremony. "In the desktop app" shows the browser handoff: the
- * sample browser confirms a few seconds after it "opens".
+ * sample browser page below shows code 482913, which confirms the app.
  */
 
+const SAMPLE_CODE = "482913";
+
 function sampleHandoff(): StepUpHandoffApi {
-  let openedAt = 0;
   return {
-    start: async () => {
-      openedAt = Date.now();
-      return {
-        handoffId: "8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21",
-        code: "482913",
-        expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
-      };
+    start: async () => ({
+      handoffId: "8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21",
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      expiresInSeconds: 600,
+    }),
+    claim: async (_handoffId, code) => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      if (code !== SAMPLE_CODE) throw new Error("That code isn't right.");
     },
-    confirmed: async () => openedAt > 0 && Date.now() - openedAt > 6_000,
     open: () => {},
-    pollMs: 1_000,
   };
 }
 
@@ -115,8 +115,7 @@ export default function AdminStepUpSection() {
           <ConfirmPasskeyRoute
             handoff="8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21"
             api={{
-              read: async () => ({ code: "482913" }),
-              confirm: () => new Promise((resolve) => setTimeout(resolve, 900)),
+              confirm: () => new Promise((resolve) => setTimeout(() => resolve(SAMPLE_CODE), 900)),
             }}
           />
         </div>

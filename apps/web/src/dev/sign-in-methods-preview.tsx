@@ -85,7 +85,7 @@ export function SignInMethodsPreview() {
         onAddPasskey={() => {
           if (inBrowser) {
             setSuccess(
-              "Add your passkey in the browser window that opened. It shows here when you come back.",
+              "Add your passkey in the browser window that opened, signed in as ada@example.com. It shows here when you come back.",
             );
             return;
           }

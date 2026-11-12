@@ -1,14 +1,17 @@
 import { useNavigate } from "@tanstack/react-router";
-import { KeyRoundIcon, LoaderCircleIcon } from "lucide-react";
+import { KeyRoundIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
+import { Button } from "@opengeni/react/ui/button";
+import { Field } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { Input } from "@opengeni/react/ui/input";
 
 import {
   AuthApiError,
+  claimPasskeyStepUpHandoff,
   confirmAdminWithPasskey,
-  passkeyStepUpConfirmed,
   startPasskeyStepUpHandoff,
   type PasskeyStepUpHandoff,
 } from "@/api";
@@ -28,7 +31,19 @@ export function adminStepUpErrorMessage(error: unknown): string {
   if (passkeyPromptUnavailable(error)) {
     return "Your browser didn't show a passkey prompt. Try again, or open Opengeni in another browser.";
   }
-  if (error instanceof AuthApiError && error.code === "PASSKEY_RATE_LIMITED") return error.message;
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return "The server didn't answer. Check your connection and try again.";
+  }
+  if (
+    error instanceof AuthApiError &&
+    (error.code === "PASSKEY_RATE_LIMITED" ||
+      error.code === "PASSKEY_HANDOFF_WRONG_CODE" ||
+      error.code === "PASSKEY_HANDOFF_NOT_CONFIRMED" ||
+      error.code === "PASSKEY_HANDOFF_EXPIRED" ||
+      error.code === "PASSKEY_HANDOFF_OTHER_SESSION")
+  ) {
+    return error.message;
+  }
   if (error instanceof AuthApiError && error.code === "PASSKEY_NONE_REGISTERED") {
     return "Add a passkey to your account first.";
   }
@@ -53,18 +68,25 @@ export function formatHandoffCode(code: string): string {
 /** How the dialog hands a step-up to the person's browser (replaceable in tests). */
 export type StepUpHandoffApi = {
   start: () => Promise<PasskeyStepUpHandoff>;
-  confirmed: () => Promise<boolean>;
+  claim: (handoffId: string, code: string) => Promise<void>;
   open: (url: string) => void;
-  /** How often to ask whether the browser confirmed. */
-  pollMs: number;
 };
 
 const browserHandoff: StepUpHandoffApi = {
   start: startPasskeyStepUpHandoff,
-  confirmed: passkeyStepUpConfirmed,
+  claim: claimPasskeyStepUpHandoff,
   open: openInBrowser,
-  pollMs: 2_000,
 };
+
+/** A handoff the dialog can't continue with: start again. */
+function handoffEnded(error: unknown): boolean {
+  return (
+    error instanceof AuthApiError &&
+    (error.code === "PASSKEY_HANDOFF_EXPIRED" ||
+      error.code === "PASSKEY_HANDOFF_OTHER_SESSION" ||
+      error.code === "PASSKEY_STEP_UP_SIGNED_OUT")
+  );
+}
 
 /**
  * The console's one admin step-up prompt. Admin changes the API refuses until
@@ -73,7 +95,8 @@ const browserHandoff: StepUpHandoffApi = {
  *
  * Inside the desktop app, passkey prompts can't open (see
  * `passkeysNeedBrowser`), so the confirmation is handed to the person's own
- * browser on this same server and the dialog waits for it, with a way out.
+ * browser on this same server. After their passkey there, the browser shows a
+ * one-time code, which they type in here to confirm this session.
  */
 export function AdminStepUpDialog({
   confirm = confirmAdminWithPasskey,
@@ -87,6 +110,7 @@ export function AdminStepUpDialog({
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [waiting, setWaiting] = useState<PasskeyStepUpHandoff | null>(null);
+  const [code, setCode] = useState("");
   const confirmed = useRef(false);
   const navigate = useNavigate();
 
@@ -98,6 +122,7 @@ export function AdminStepUpDialog({
             confirmed.current = false;
             setError(null);
             setWaiting(null);
+            setCode("");
             setPrompt({ ...request, resolve });
           }),
       ),
@@ -112,44 +137,17 @@ export function AdminStepUpDialog({
   const closeRef = useRef(close);
   closeRef.current = close;
 
-  // While the browser confirms, ask the server whether it has; stop when it
-  // has, when the handoff expires, or when the dialog closes.
+  // A handoff lasts a few minutes; past that, start again. Counted from when
+  // the server answered, so a wrong clock on this computer doesn't matter.
   useEffect(() => {
     if (!waiting) return;
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const expiresAt = Date.parse(waiting.expiresAt);
-    const check = async () => {
-      if (!live) return;
-      if (Number.isFinite(expiresAt) && Date.now() >= expiresAt) {
-        setWaiting(null);
-        setError("The confirmation in your browser expired. Try again.");
-        return;
-      }
-      try {
-        if (await handoff.confirmed()) {
-          if (!live) return;
-          confirmed.current = true;
-          closeRef.current(true);
-          return;
-        }
-      } catch (caught) {
-        if (!live) return;
-        if (caught instanceof AuthApiError && caught.status === 403) {
-          setWaiting(null);
-          setError(adminStepUpErrorMessage(caught));
-          return;
-        }
-        // A dropped request: keep waiting, the next check may get through.
-      }
-      if (live) timer = setTimeout(() => void check(), handoff.pollMs);
-    };
-    timer = setTimeout(() => void check(), handoff.pollMs);
-    return () => {
-      live = false;
-      clearTimeout(timer);
-    };
-  }, [waiting, handoff]);
+    const timer = setTimeout(() => {
+      setWaiting(null);
+      setCode("");
+      setError("The confirmation in your browser expired. Try again.");
+    }, waiting.expiresInSeconds * 1000);
+    return () => clearTimeout(timer);
+  }, [waiting]);
 
   if (!prompt) return null;
   if (!prompt.passkeyRegistered) {
@@ -178,30 +176,54 @@ export function AdminStepUpDialog({
     );
   }
   if (inBrowser && waiting) {
+    const complete = /^\d{6}$/u.test(code);
     return (
       <FormDialog
         open
-        onOpenChange={(open) => !open && close(false)}
+        onOpenChange={(open) => !open && close(confirmed.current)}
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
         title="Confirm in your browser"
-        description="Use your passkey in the browser window that opened. This continues by itself once you have."
-        submitLabel="Open browser again"
-        onSubmit={() => {
-          handoff.open(passkeyHandoffUrl(waiting.handoffId));
-          return false;
+        description="Use your passkey in the browser window that opened. Then enter the code it shows."
+        submitLabel="Confirm"
+        pendingLabel="Confirming…"
+        submitDisabled={!complete}
+        error={error}
+        footerStart={
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => handoff.open(passkeyHandoffUrl(waiting.handoffId))}
+          >
+            Open browser again
+          </Button>
+        }
+        onSubmit={async () => {
+          setError(null);
+          try {
+            await handoff.claim(waiting.handoffId, code);
+          } catch (caught) {
+            setError(adminStepUpErrorMessage(caught));
+            if (handoffEnded(caught)) {
+              setWaiting(null);
+              setCode("");
+            }
+            return false;
+          }
+          confirmed.current = true;
+          close(true);
         }}
       >
-        <div role="status" className="flex items-center gap-2 text-sm text-fg-muted">
-          <LoaderCircleIcon aria-hidden className="size-4 shrink-0 motion-safe:animate-spin" />
-          <span>
-            Waiting for your browser. Check it shows code{" "}
-            <strong className="font-mono text-fg tabular-nums">
-              {formatHandoffCode(waiting.code)}
-            </strong>
-            .
-          </span>
-        </div>
+        <Field label="Code from your browser">
+          <Input
+            value={code}
+            onChange={(event) => setCode(event.target.value.replace(/\D/gu, "").slice(0, 6))}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            placeholder="123456"
+            className="font-mono tabular-nums"
+          />
+        </Field>
       </FormDialog>
     );
   }
@@ -213,7 +235,7 @@ export function AdminStepUpDialog({
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
         title="Confirm it's you"
-        description="Use your passkey to change admin settings. Passkeys open in your browser, then this app continues."
+        description="Use your passkey to change admin settings. Passkeys open in your browser, which then shows a code to enter here."
         submitLabel="Continue in browser"
         pendingLabel="Opening your browser…"
         error={error}
@@ -222,6 +244,7 @@ export function AdminStepUpDialog({
           try {
             const started = await handoff.start();
             handoff.open(passkeyHandoffUrl(started.handoffId));
+            setCode("");
             setWaiting(started);
           } catch (caught) {
             setError(adminStepUpErrorMessage(caught));

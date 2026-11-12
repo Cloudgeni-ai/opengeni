@@ -24,7 +24,7 @@ mock.module("@/api", () => ({
   startPasskeyStepUpHandoff: async () => {
     throw new Error("not in this test");
   },
-  passkeyStepUpConfirmed: async () => false,
+  claimPasskeyStepUpHandoff: async () => {},
 }));
 // The Radix dialog is a portal; this inline stand-in keeps its contract.
 mock.module("@opengeni/react/ui/form-dialog", () => ({
@@ -32,16 +32,20 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     title,
     description,
     submitLabel,
+    submitDisabled,
     error,
     children,
+    footerStart,
     onOpenChange,
     onSubmit,
   }: {
     title: ReactNode;
     description?: ReactNode;
     submitLabel: ReactNode;
+    submitDisabled?: boolean;
     error?: ReactNode;
     children?: ReactNode;
+    footerStart?: ReactNode;
     onOpenChange: (open: boolean) => void;
     onSubmit: () => unknown;
   }) => (
@@ -50,8 +54,10 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
       <p>{description}</p>
       {children}
       {error ? <p role="alert">{error}</p> : null}
+      {footerStart}
       <button
         type="button"
+        disabled={submitDisabled}
         onClick={() => {
           void (async () => {
             if ((await onSubmit()) !== false) onOpenChange(false);
@@ -184,28 +190,53 @@ describe("AdminStepUpDialog", () => {
 
 describe("AdminStepUpDialog in the desktop app", () => {
   const wait = (ms: number) => act(async () => new Promise((resolve) => setTimeout(resolve, ms)));
-  const browser = (confirmedAfter: number, expiresInMs = 60_000) => {
+  const HANDOFF = "8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21";
+  const browser = (expiresInMs = 600_000) => {
     const opened: string[] = [];
-    let checks = 0;
+    const claims: string[] = [];
     const handoff: StepUpHandoffApi = {
       start: async () => ({
-        handoffId: "8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21",
-        code: "482913",
-        expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
+        handoffId: HANDOFF,
+        // A wrong clock here doesn't matter: the dialog counts from now.
+        expiresAt: new Date(0).toISOString(),
+        expiresInSeconds: expiresInMs / 1000,
       }),
-      confirmed: async () => {
-        checks += 1;
-        return checks >= confirmedAfter;
+      claim: async (handoffId, code) => {
+        expect(handoffId).toBe(HANDOFF);
+        claims.push(code);
+        if (code !== "482913") {
+          throw Object.assign(new AuthApiError(422, "PASSKEY_HANDOFF_WRONG_CODE"), {
+            message: "That code isn't right. Check the code your browser shows.",
+          });
+        }
       },
       open: (url) => opened.push(url),
-      pollMs: 5,
     };
-    return { handoff, opened, checks: () => checks };
+    return { handoff, opened, claims };
   };
+  // Typing, as React sees it: the input's own change handler with the new value.
+  const type = async (container: HTMLElement, value: string) => {
+    const input = container.querySelector("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set?.call(
+        input,
+        value,
+      );
+      const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+      (
+        input as unknown as Record<
+          string,
+          { onChange: (event: { target: HTMLInputElement }) => void }
+        >
+      )[propsKey]!.onChange({ target: input });
+    });
+  };
+  const submit = (container: HTMLElement) =>
+    [...container.querySelectorAll("button")].find((button) => button.textContent === "Confirm")!;
 
-  test("hands the passkey to the browser on the same server, then the refused change goes through", async () => {
+  test("hands the passkey to the browser on the same server; the browser's code confirms this app", async () => {
     let nativeCeremonies = 0;
-    const { handoff, opened } = browser(3);
+    const { handoff, opened, claims } = browser();
     const view = await mount(
       async () => {
         nativeCeremonies += 1;
@@ -222,14 +253,21 @@ describe("AdminStepUpDialog in the desktop app", () => {
     );
     await flush();
     await view.click("Continue in browser");
-    expect(opened).toEqual([
-      `${window.location.origin}/confirm-passkey?handoff=8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21`,
-    ]);
+    expect(opened).toEqual([`${window.location.origin}/confirm-passkey?handoff=${HANDOFF}`]);
     expect(view.container.querySelector("h2")?.textContent).toBe("Confirm in your browser");
-    expect(view.container.textContent).toContain("482 913");
     await view.click("Open browser again");
     expect(opened).toHaveLength(2);
-    await wait(60);
+    // Nothing to confirm until the person has the code from the browser.
+    expect(submit(view.container).disabled).toBe(true);
+    await type(view.container, "111 111");
+    await view.click("Confirm");
+    expect(view.container.querySelector("[role=alert]")?.textContent).toBe(
+      "That code isn't right. Check the code your browser shows.",
+    );
+    expect(sends).toBe(1);
+    await type(view.container, "482 913");
+    await view.click("Confirm");
+    expect(claims).toEqual(["111111", "482913"]);
     expect((await change).status).toBe(200);
     expect(sends).toBe(2);
     // The app never runs a passkey ceremony itself: it would never settle.
@@ -239,7 +277,7 @@ describe("AdminStepUpDialog in the desktop app", () => {
   });
 
   test("never waits forever: an expired handoff says so and can be cancelled", async () => {
-    const { handoff } = browser(Number.POSITIVE_INFINITY, 20);
+    const { handoff } = browser(20);
     const view = await mount(async () => {}, { handoff });
     const change = withAdminStepUp(async () => refusal(true), {
       input: "/v1/x",
@@ -257,26 +295,28 @@ describe("AdminStepUpDialog in the desktop app", () => {
     await view.unmount();
   });
 
-  test("cancelling while waiting stops asking the server", async () => {
-    const tracked = browser(Number.POSITIVE_INFINITY);
-    const view = await mount(async () => {}, { handoff: tracked.handoff });
+  test("a server that doesn't answer is reported, and Cancel still works", async () => {
+    const { handoff } = browser();
+    handoff.start = async () => {
+      throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    };
+    const view = await mount(async () => {}, { handoff });
     const change = withAdminStepUp(async () => refusal(true), {
       input: "/v1/x",
       init: { method: "POST", body: "{}" },
     });
     await flush();
     await view.click("Continue in browser");
-    await wait(20);
+    expect(view.container.querySelector("[role=alert]")?.textContent).toBe(
+      "The server didn't answer. Check your connection and try again.",
+    );
     await view.click("Cancel");
     expect((await change).status).toBe(403);
-    const after = tracked.checks();
-    await wait(40);
-    expect(tracked.checks()).toBe(after);
     await view.unmount();
   });
 
   test("someone without a passkey adds one in the browser", async () => {
-    const { handoff, opened } = browser(1);
+    const { handoff, opened } = browser();
     const view = await mount(async () => {}, { handoff });
     const change = withAdminStepUp(async () => refusal(false), {
       input: "/v1/x",

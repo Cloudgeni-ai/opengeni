@@ -16,11 +16,11 @@ class AuthApiError extends Error {
 mock.module("@/api", () => ({
   AuthApiError,
   confirmAdminWithPasskey: async () => {},
-  readPasskeyStepUpHandoff: async () => ({ code: "000000" }),
+  confirmPasskeyHandoff: async () => "000000",
   startPasskeyStepUpHandoff: async () => {
     throw new Error("not in this test");
   },
-  passkeyStepUpConfirmed: async () => false,
+  claimPasskeyStepUpHandoff: async () => {},
 }));
 
 const { ConfirmPasskeyRoute } = await import("./confirm-passkey");
@@ -60,37 +60,33 @@ async function mount(api: ConfirmPasskeyApi) {
 }
 
 describe("confirming the desktop app's step-up in the browser", () => {
-  test("shows the app's code, then confirms that handoff with the person's passkey", async () => {
+  test("asks first, and shows the code for the app only after the person's passkey", async () => {
     const confirmed: string[] = [];
     const view = await mount({
-      read: async (handoffId) => {
-        expect(handoffId).toBe(HANDOFF);
-        return { code: "482913" };
-      },
       confirm: async (handoffId) => {
         confirmed.push(handoffId);
+        return "482913";
       },
     });
     expect(view.container.textContent).toContain(
-      "Continue only if the Opengeni app shows this code",
+      "Continue only if you just selected Continue in browser in the Opengeni app",
     );
-    expect(view.container.textContent).toContain("482 913");
+    expect(view.container.textContent).not.toContain("482");
     await view.click("Use passkey");
     expect(confirmed).toEqual([HANDOFF]);
-    expect(view.container.querySelector("h1")?.textContent).toBe("Confirmed");
-    expect(view.container.textContent).toContain("The app continues by itself.");
+    expect(view.container.querySelector("h1")?.textContent).toBe("Enter this code in the app");
+    expect(view.container.textContent).toContain("482 913");
+    expect(view.container.textContent).toContain("Never share it");
     await view.unmount();
   });
 
-  test("a browser signed in to another account is told so, and can't confirm", async () => {
+  test("a browser signed in to another account is told so, and gets no code", async () => {
     const view = await mount({
-      read: async () => {
+      confirm: async () => {
         throw new AuthApiError(403, "PASSKEY_HANDOFF_OTHER_ACCOUNT");
       },
-      confirm: async () => {
-        throw new Error("must not confirm");
-      },
     });
+    await view.click("Use passkey");
     expect(view.container.querySelector("[role=alert]")?.textContent).toContain(
       "signed in to a different account than the app",
     );
@@ -101,7 +97,6 @@ describe("confirming the desktop app's step-up in the browser", () => {
   test("a passkey prompt that fails keeps the page usable with a plain sentence", async () => {
     const dismissed = Object.assign(new Error("cancelled"), { name: "NotAllowedError" });
     const view = await mount({
-      read: async () => ({ code: "482913" }),
       confirm: async () => {
         throw dismissed;
       },
