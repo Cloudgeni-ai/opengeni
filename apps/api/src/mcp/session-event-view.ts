@@ -8,6 +8,7 @@ import type {
   SessionEventSliceOptions,
   SessionEventSlicePage,
 } from "@opengeni/db/session-event-slices";
+import { ToolArgumentError } from "./tool-argument-error";
 
 export const SESSION_EVENT_VIEW_MAX_BYTES = 16 * 1024;
 /**
@@ -191,7 +192,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
   let continuation: z.infer<typeof cursorSchema> | null = null;
   if (input.cursor !== undefined) {
     if (input.cursor.length > MAX_CURSOR_LENGTH)
-      throw new Error("session_events cursor exceeds 4096 characters");
+      throw new ToolArgumentError("session_events cursor exceeds 4096 characters");
     try {
       continuation = cursorSchema.parse(
         JSON.parse(Buffer.from(input.cursor, "base64url").toString()),
@@ -212,7 +213,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
       "before",
     ] as const) {
       if (input[key] !== undefined && input[key] !== previous[key]) {
-        throw new Error(`session_events cursor cannot change ${key}`);
+        throw new ToolArgumentError(`session_events cursor cannot change ${key}`);
       }
     }
   }
@@ -245,7 +246,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
       notice = `view=${selection.view} does not return tool calls; this page is view=tools because callId/toolName select tool calls.`;
       selection.view = "tools";
     } else {
-      throw new Error(
+      throw new ToolArgumentError(
         `includeArguments/includeOutput only apply to view=tools. For a tool's result call ${exampleCall(
           {
             sessionId: selection.sessionId,
@@ -275,7 +276,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
     )
     .parse(input.limit ?? selection.limit ?? (namedOutputs ? 1 : 10));
   if (namedOutputs && continuation && continuation.sequence !== null)
-    throw new Error("Invalid session_events cursor position");
+    throw new ToolArgumentError("Invalid session_events cursor position");
   if (
     continuation &&
     ((continuation.sequence === null && continuation.offset !== 0) ||
@@ -283,7 +284,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
         (continuation.sequence <= selection.after ||
           (selection.before !== null && continuation.sequence >= selection.before))))
   )
-    throw new Error("Invalid session_events cursor position");
+    throw new ToolArgumentError("Invalid session_events cursor position");
   return { selection, continuation, notice };
 }
 
@@ -623,7 +624,7 @@ async function scanSessionEventView(
         const advance = (text: string) =>
           slice?.unit === "codepoint" ? Array.from(text).length : text.length;
         if (!slice && offset > (item.text?.length ?? 0))
-          throw new Error("Invalid message continuation offset");
+          throw new ToolArgumentError("Invalid message continuation offset");
         if (
           !slice &&
           offset > 0 &&
@@ -631,7 +632,9 @@ async function scanSessionEventView(
           /[\uD800-\uDBFF]/.test(item.text[offset - 1]!) &&
           /[\uDC00-\uDFFF]/.test(item.text[offset] ?? "")
         ) {
-          throw new Error("Invalid message continuation offset: splits a surrogate pair");
+          throw new ToolArgumentError(
+            "Invalid message continuation offset: splits a surrogate pair",
+          );
         }
         if (!slice && offset > 0 && item.text) item.text = item.text.slice(offset);
         events.push(item);

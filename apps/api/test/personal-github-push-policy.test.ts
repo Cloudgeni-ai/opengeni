@@ -99,7 +99,7 @@ function policyDecider(policy: "allow" | "ask") {
   const calls: GatewayDecisionInput[] = [];
   const decide: GatewayDecider = async (_identity, input) => {
     calls.push(input);
-    return policy === "allow" && !input.action.alwaysAsk
+    return policy === "allow" && !input.action.sensitive
       ? { kind: "allow" }
       : {
           kind: "refuse",
@@ -455,7 +455,7 @@ describe("pushes a real Git client sends from a shallow clone", () => {
         "Force-push topic on acme/widgets",
         "Delete topic on acme/widgets",
       ]);
-      expect(calls.every((call) => call.action.alwaysAsk)).toBe(true);
+      expect(calls.every((call) => call.action.sensitive)).toBe(true);
       for (const result of [forced, deleted]) {
         expect(result.kind).toBe("respond");
         if (result.kind !== "respond") continue;
@@ -473,7 +473,7 @@ describe("pushes a real Git client sends from a shallow clone", () => {
         requestId: null,
       });
     }
-    expect(calls.map((call) => [call.title, call.action.alwaysAsk])).toEqual([
+    expect(calls.map((call) => [call.title, call.action.sensitive])).toEqual([
       ["Force-push topic on acme/widgets", false],
       ["Delete topic on acme/widgets", false],
     ]);
@@ -495,7 +495,7 @@ describe("pushes a real Git client sends from a shallow clone", () => {
     const { calls, decide } = policyDecider("allow");
     const forced = await inspectCaptured("defaultForcePush", false, decide, "main");
     const tagDeleted = await inspectCaptured("tagDeletion", false, decide, "main");
-    expect(calls.map((call) => [call.title, call.action.alwaysAsk])).toEqual([
+    expect(calls.map((call) => [call.title, call.action.sensitive])).toEqual([
       ["Force-push main on acme/widgets", true],
       ["Delete tag v1 on acme/widgets", true],
     ]);
@@ -585,7 +585,7 @@ describe("push approvals", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.action).toMatchObject({
       kind: "write",
-      alwaysAsk: true,
+      sensitive: true,
       tools: ["ref_create"],
     });
     expect(calls[0]!.title).toBe("Force-push main on acme/widgets");
@@ -760,7 +760,7 @@ describe("pushes the gateway cannot read", () => {
       decide,
     });
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.action).toMatchObject({ alwaysAsk: true });
+    expect(calls[0]!.action).toMatchObject({ sensitive: true });
     expect(result.kind).toBe("respond");
     if (result.kind === "respond") {
       expect(result.response.status).toBe(200);

@@ -1,12 +1,14 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import postgres from "postgres";
 import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
 import {
   controlHumanSessionWorkstream,
+  createSessionForRequest,
   postUserMessageTurn,
   steerHumanQueuePrompt,
+  type ApiRouteDeps,
 } from "@opengeni/core";
 import {
   addSessionSystemUpdate,
@@ -34,6 +36,7 @@ import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { startTestServices, type TestServices } from "@opengeni/testing/compose";
 import { testSettings } from "@opengeni/testing/settings";
 import { waitFor } from "@opengeni/testing/process";
+import { quarantineTest } from "@opengeni/testing/quarantine";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { goalContinuationPrompt } from "../../apps/worker/src/activities/goals";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
@@ -44,6 +47,9 @@ import {
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 import { errorMessage } from "@opengeni/contracts/values";
+
+// Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
+const test = quarantineTest(bunTest, import.meta.path);
 
 type RequiredServices = Pick<
   TestServices,
@@ -502,6 +508,107 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         } finally {
           await fault.drop();
         }
+      }
+    },
+    integrationTimeoutMs,
+  );
+
+  test(
+    "session create returns while Temporal stalls and the durable wake dispatcher starts its run",
+    async () => {
+      const grant = await testGrant(dbClient.db, "stalled-create-wake");
+      const taskQueue = `durable-stalled-create-${crypto.randomUUID()}`;
+      const model = new ScriptedModel("started after a stalled create wake");
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        temporalHost: services.temporalHost,
+        temporalTaskQueue: taskQueue,
+        sandboxBackend: "none",
+        openaiAllowedModels: "scripted-model",
+      });
+      const temporal = new Client({ connection });
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue, dbClient.db);
+      // The API's Temporal frontend accepts the immediate signal and never answers.
+      const stalledSignals: Array<{ sessionId: string; wakeRevision: number }> = [];
+      const noop = async () => undefined;
+      const apiDeps = {
+        db: dbClient.db,
+        settings,
+        bus,
+        workflowClient: {
+          wakeSessionWorkflow: (wake: { sessionId: string; wakeRevision: number }) => {
+            stalledSignals.push(wake);
+            return new Promise<never>(() => undefined);
+          },
+          requestSessionWorkflowWakeDispatch: noop,
+          signalUserMessage: noop,
+        },
+        objectStorage: null,
+        githubStateSecret: "test",
+        documentIndexer: { indexDocument: noop },
+        getDocumentServices: () => ({}),
+      } as unknown as ApiRouteDeps;
+
+      const requestedAt = performance.now();
+      const created = await Promise.race([
+        createSessionForRequest(apiDeps, grant, grant.workspaceId, {
+          initialMessage: "start once Temporal answers",
+          model: "scripted-model",
+          sandboxBackend: "none",
+        }),
+        Bun.sleep(30_000).then(() => null),
+      ]);
+      if (!created) throw new Error("session create waited on the stalled Temporal wake");
+      const createMs = performance.now() - requestedAt;
+      expect(created.status).toBe("queued");
+      expect(stalledSignals.map((wake) => wake.sessionId)).toEqual([created.id]);
+      const pending = await workflowWakeRow(admin, grant.workspaceId, created.id);
+      expect(pending?.wakeRevision).toBe(stalledSignals[0]!.wakeRevision);
+      expect(pending?.deliveredRevision).toBeLessThan(stalledSignals[0]!.wakeRevision);
+
+      const activities = createActivityTestHarness({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+        wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
+      });
+      const worker = await integrationWorker(nativeConnection, taskQueue, activities);
+      const workerRun = worker.run();
+      try {
+        // The control worker's repair cadence runs this dispatcher; Temporal
+        // now answers, so the owed revision starts the session workflow.
+        const repair = await activities.dispatchSessionWorkflowWakes();
+        expect(repair.failed).toBe(0);
+        expect(repair.claimed).toBeGreaterThanOrEqual(1);
+        let turns: Awaited<ReturnType<typeof listSessionTurns>> = [];
+        await waitFor(
+          async () => {
+            turns = await listSessionTurns(dbClient.db, grant.workspaceId, created.id);
+            return turns.length === 1 && turns[0]!.status === "completed";
+          },
+          {
+            describe: () =>
+              JSON.stringify({
+                createMs,
+                turns: turns.map((turn) => ({ status: turn.status, source: turn.source })),
+              }),
+          },
+        );
+        expect(turns[0]!.id).toBe(created.initialTurnId!);
+        expect(
+          model.requests.filter((request) => JSON.stringify(request).includes(created.id)),
+        ).toHaveLength(1);
+        // Claiming the turn lets the next delivery acknowledge the revision.
+        await activities.dispatchSessionWorkflowWakes();
+        await waitFor(async () => {
+          const row = await workflowWakeRow(admin, grant.workspaceId, created.id);
+          return (row?.deliveredRevision ?? 0) >= stalledSignals[0]!.wakeRevision;
+        });
+      } finally {
+        worker.shutdown();
+        await workerRun;
       }
     },
     integrationTimeoutMs,

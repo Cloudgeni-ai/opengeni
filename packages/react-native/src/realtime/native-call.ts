@@ -20,10 +20,22 @@ export type NativeCallEvent =
   | { type: "audioSessionDeactivated" }
   /**
    * The system asked the app to start a call from outside it (Siri, the Phone
-   * app's recents, an App Intent or a shortcut). `target` is the host's own
-   * call target, for example a session id, or absent for the default.
+   * app's recents, an App Intent, a voice command or a shortcut). `target` is
+   * the host's own call target, for example a session id, or absent for the
+   * default. `workspaceId` names the target's workspace when the request knows
+   * it (a voice command, or a recent call that recorded it).
    */
-  | { type: "startRequested"; target: string | null }
+  | {
+      type: "startRequested";
+      target: string | null;
+      workspaceId?: string | null;
+      /**
+       * Set when the request also waits natively until taken: the listener
+       * then takes it with `takePendingStartRequest`, so it starts exactly once
+       * even when this event and the launch-time take race.
+       */
+      requestId?: string | undefined;
+    }
   /** The PushKit token agent calls ring changed (iOS). */
   | { type: "voipToken"; token: string | null }
   /** An agent's call is ringing this phone. */
@@ -101,12 +113,54 @@ export interface NativeCallAdapter {
   setSpeaker(on: boolean): Promise<void>;
   subscribe(listener: (event: NativeCallEvent) => void): () => void;
   /** A start request that launched the app before JavaScript subscribed. */
-  takePendingStartRequest(): Promise<{ target: string | null } | null>;
+  takePendingStartRequest(): Promise<NativeCallStartRequest | null>;
+  /**
+   * Voice commands: replace the chats the system offers by name (Siri and the
+   * Shortcuts app on iOS, launcher shortcuts on Android). Pass only the
+   * signed-in account's commands, and none while signed out. Absent where the
+   * platform or build has no voice commands.
+   */
+  setCallCommands?(commands: readonly NativeCallCommand[]): Promise<void>;
+  /**
+   * Ask the launcher to put a voice command on the home screen (Android).
+   * Resolves false when the launcher cannot pin shortcuts. Absent elsewhere.
+   */
+  pinCallCommand?(command: NativeCallCommand): Promise<boolean>;
   /**
    * Agent calls (PushKit and CallKit on iOS). Absent where the platform cannot
    * ring the app: agents can then not call this phone.
    */
   incoming?: NativeIncomingCallAdapter | undefined;
+}
+
+/** A start request from outside the app, as `startRequested` carries it. */
+export type NativeCallStartRequest = {
+  target: string | null;
+  workspaceId?: string | null;
+  requestId?: string | undefined;
+};
+
+/**
+ * A spoken command for one chat: saying its name ("Call Research in <app>")
+ * starts a call straight into that chat. `id` stays the same across renames,
+ * so shortcuts the person built on it keep working.
+ */
+export type NativeCallCommand = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  /** What the person says. */
+  name: string;
+  /** Other names Siri accepts for it. */
+  synonyms?: readonly string[] | undefined;
+};
+
+/**
+ * The system call handle of a session call: Phone recents call it back, so it
+ * names the workspace as well as the session.
+ */
+export function nativeCallHandle(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}/${sessionId}`;
 }
 
 export interface NativeIncomingCallAdapter {
@@ -122,6 +176,18 @@ export interface NativeIncomingCallAdapter {
    * microphone only on answer. Absent or false means connect on answer.
    */
   connectsBeforeAnswer?: boolean | undefined;
+  /**
+   * Whether a ring shows full screen over the lock screen, like a phone call.
+   * From Android 14, Play lets only calling and alarm apps do that without
+   * asking; in other apps the person allows it in system settings
+   * ({@link openFullScreenRingSettings}), and until then a ring is only a
+   * heads-up notification. Read it again when the app returns to the
+   * foreground. Absent means rings always show full screen (iOS, older
+   * Android). `useFullScreenRings` wraps both.
+   */
+  canRingFullScreen?(): boolean;
+  /** Open the system setting that lets rings show full screen; false when none opened. */
+  openFullScreenRingSettings?(): Promise<boolean>;
 }
 
 /** Native hosts can stream voice over WebRTC; WebSocket audio transports need a browser. */

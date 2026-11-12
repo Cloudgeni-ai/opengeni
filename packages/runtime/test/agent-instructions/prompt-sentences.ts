@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
 import { allAgentCapabilities } from "@opengeni/contracts";
 import { composeAgentInstructions } from "../../src/index";
@@ -61,7 +63,7 @@ export function modularAllText(): string {
   }).composed;
 }
 
-/** `- ` / `+ ` lines of every ```diff block in the changelog. */
+/** `- ` / `+ ` lines of every ```diff block in one changelog file. */
 export function changelogDiff(markdown: string): { removed: Set<string>; added: Set<string> } {
   const removed = new Set<string>();
   const added = new Set<string>();
@@ -70,6 +72,37 @@ export function changelogDiff(markdown: string): { removed: Set<string>; added: 
       if (line.startsWith("- ")) removed.add(line.slice(2).trim());
       else if (line.startsWith("+ ")) added.add(line.slice(2).trim());
     }
+  }
+  return { removed, added };
+}
+
+/** The prompt changelog directory: `README.md` plus one entry file per change. */
+export const PROMPT_CHANGELOG_DIR = join(
+  import.meta.dir,
+  "../../src/agent-instructions/prompt-changelog",
+);
+
+/** `<YYYY-MM-DD>-<kebab-slug>.md`, the naming rule in the changelog README. */
+export const PROMPT_CHANGELOG_ENTRY_NAME =
+  /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u;
+
+/** Every file name in the changelog directory, sorted. */
+export function promptChangelogFiles(): string[] {
+  return readdirSync(PROMPT_CHANGELOG_DIR).sort();
+}
+
+/**
+ * Union of the `diff` lines of every changelog entry file. Each file is parsed
+ * on its own, so an unclosed block in one entry cannot swallow the next.
+ */
+export function promptChangelogDiff(): { removed: Set<string>; added: Set<string> } {
+  const removed = new Set<string>();
+  const added = new Set<string>();
+  for (const name of promptChangelogFiles()) {
+    if (name === "README.md") continue;
+    const listed = changelogDiff(readFileSync(join(PROMPT_CHANGELOG_DIR, name), "utf8"));
+    for (const sentence of listed.removed) removed.add(sentence);
+    for (const sentence of listed.added) added.add(sentence);
   }
   return { removed, added };
 }

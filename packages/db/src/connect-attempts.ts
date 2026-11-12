@@ -274,14 +274,40 @@ export async function listPendingConnectAttempts(
   return scoped(db, scope, async (tx) => {
     const rows = await rawRows<Row>(
       tx,
-      sql`select * from connect_attempts
-      where workspace_id = ${scope.workspaceId}::uuid and account_id = ${scope.accountId}::uuid
-        and subject_id = ${scope.subjectId} and (expires_at > now() or operation_id is not null)
-        and projection->>'state' not in ('complete','cancelled','expired')
-      order by created_at desc, id desc limit 32`,
+      sql`select * from connect_attempts attempt
+      where attempt.workspace_id = ${scope.workspaceId}::uuid
+        and attempt.account_id = ${scope.accountId}::uuid
+        and attempt.subject_id = ${scope.subjectId}
+        and (attempt.expires_at > now() or attempt.operation_id is not null)
+        and attempt.projection->>'state' not in ('complete','cancelled','expired')
+        and not exists (${connectedSince(sql`attempt`)})
+      order by attempt.created_at desc, attempt.id desc limit 32`,
     );
     return rows.map((row) => projection(row, scope));
   });
+}
+
+/**
+ * A later setup by the same person that connected the same service, with the
+ * same owner and destination: an older unfinished setup has nothing left to
+ * continue, so it is no longer offered. Custom connections (MCP servers,
+ * OpenAPI and GraphQL sources) share one provider ID across different
+ * services, so a later one never stands in for another.
+ */
+function connectedSince(attempt: ReturnType<typeof sql>) {
+  return sql`select 1 from connect_attempts later
+    where later.workspace_id = ${attempt}.workspace_id and later.account_id = ${attempt}.account_id
+      and later.subject_id = ${attempt}.subject_id and later.id <> ${attempt}.id
+      and later.created_at > ${attempt}.created_at
+      and later.projection->>'state' = 'complete'
+      and later.projection->>'providerId' = ${attempt}.projection->>'providerId'
+      and later.projection->>'ownership' = ${attempt}.projection->>'ownership'
+      and ${attempt}.projection->>'providerId' not like 'mcp-%'
+      and ${attempt}.projection->>'providerId' not in ('openapi', 'graphql')
+      and ${attempt}.projection->'mcpSetup' is null and later.projection->'mcpSetup' is null
+      and coalesce(${attempt}.projection->'source'->>'kind', 'definition') = 'definition'
+      and coalesce(later.projection->'installationTarget'->>'instanceKey', '')
+        = coalesce(${attempt}.projection->'installationTarget'->>'instanceKey', '')`;
 }
 
 /** How long a saved account whose setup did not finish stays eligible to finish. */

@@ -17,6 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { browserCacheDirectory } from "./browser-cache";
 import {
   BROWSER_SHARED_NETWORK_NOTICE,
   browserNetworkIsolationScript,
@@ -562,6 +563,11 @@ export function managedChromeArguments(input: {
   return [
     "--remote-debugging-port=0",
     `--user-data-dir=${resolve(input.profileDirectory)}`,
+    // Chromium's HTTP and code caches go next to the profile, inside the
+    // session directory, so they are removed with it and can be dropped when
+    // the browser stops. Unnamed, Linux puts them under ~/.cache for a profile
+    // under ~/.config, where nothing ever removed them.
+    `--disk-cache-dir=${browserCacheDirectory(input.profileDirectory)}`,
     "--no-first-run",
     "--no-default-browser-check",
     // Background services of a person's browser that an agent's must not run:
@@ -1510,6 +1516,34 @@ async function readLinuxProcessCommandLines(): Promise<LinuxProcessCommandLines>
     }
   }
   return inventory;
+}
+
+/** One process inventory for a sweep over many profiles: whether any process
+ * names an exact private profile, by the same command-line evidence as
+ * assertManagedBrowserProfileUnused. Null where no inventory is available. */
+export async function managedProfileUseInventory(): Promise<
+  ((profileDirectory: string) => boolean) | null
+> {
+  let commandLines: Buffer[];
+  if (process.platform === "linux") {
+    commandLines = (await readLinuxProcessCommandLines()).map((entry) =>
+      Buffer.from(entry.commandLine),
+    );
+  } else if (process.platform === "darwin") {
+    const listing = await boundedProcessOutput(
+      "/bin/ps",
+      ["-axww", "-o", "command="],
+      PROCESS_INVENTORY_LIMITS,
+    );
+    if (!listing.trim()) return null;
+    commandLines = listing.split("\n").map((line) => Buffer.from(line));
+  } else {
+    return null;
+  }
+  return (profileDirectory) => {
+    const profileArgument = Buffer.from(`--user-data-dir=${resolve(profileDirectory)}`);
+    return commandLines.some((commandLine) => commandLine.includes(profileArgument));
+  };
 }
 
 async function findLinuxManagedBrowserProcess(

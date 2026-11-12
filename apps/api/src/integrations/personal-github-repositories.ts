@@ -2,6 +2,7 @@ import {
   PERSONAL_GITHUB_API_ORIGIN,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
   PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX,
+  GITHUB_OWNER_LOGIN_PATTERN,
   PersonalGitHubRepository,
   canonicalPersonalGitHubRepositoryUrl,
   isPersonalGitHubConnection,
@@ -250,7 +251,7 @@ export async function searchLivePersonalGitHubRepositories(
     owner &&
     name &&
     extra === undefined &&
-    /^[a-z0-9-]{1,39}$/u.test(owner) &&
+    GITHUB_OWNER_LOGIN_PATTERN.test(owner) &&
     /^[a-z0-9_.-]{1,100}$/u.test(name)
   ) {
     try {

@@ -96,6 +96,109 @@ spec:
                   name: http
     {{- end }}
 {{- end }}
+{{- /*
+Routes whose URL carries a credential: password-reset and email-verification
+tokens, and OAuth authorization codes and state on provider callbacks. A host
+gets a route only when its own routes already send that path to the same
+service, so this Ingress never changes where a request goes.
+*/}}
+{{- $credentialUrlApiPrefixes := list "/v1/auth/reset-password" "/v1/auth/verify-email" "/v1/auth/callback" }}
+{{- $credentialUrlApiExact := list "/v1/integrations/oauth/callback" "/v1/integrations/provider-oauth/callback" "/v1/integrations/fiken/callback" "/v1/integrations/slack/callback" "/v1/integrations/github-personal/oauth/callback" "/v1/social/oauth/callback" "/v1/github/oauth/callback" "/v1/github/setup" "/v1/github/install/callback" "/v1/github/app-manifest/callback" }}
+{{- $credentialUrlWebExact := list "/reset-password" }}
+{{- $credentialUrlCandidates := list }}
+{{- range $candidate := concat $credentialUrlApiPrefixes $credentialUrlApiExact }}
+  {{- $credentialUrlCandidates = append $credentialUrlCandidates (dict "path" $candidate "pathType" (ternary "Prefix" "Exact" (has $candidate $credentialUrlApiPrefixes)) "service" "api") }}
+{{- end }}
+{{- range $candidate := $credentialUrlWebExact }}
+  {{- $credentialUrlCandidates = append $credentialUrlCandidates (dict "path" $candidate "pathType" "Exact" "service" "web") }}
+{{- end }}
+{{- /* ingress-nginx merges every entry for one host, so judge each host as a whole. */}}
+{{- $credentialUrlHosts := list }}
+{{- $credentialUrlHostPaths := dict }}
+{{- range .Values.ingress.hosts }}
+  {{- $hostName := .host | default "" | toString }}
+  {{- if not (hasKey $credentialUrlHostPaths $hostName) }}
+    {{- $credentialUrlHosts = append $credentialUrlHosts $hostName }}
+    {{- $_ := set $credentialUrlHostPaths $hostName list }}
+  {{- end }}
+  {{- $_ := set $credentialUrlHostPaths $hostName (concat (get $credentialUrlHostPaths $hostName) (.paths | default list)) }}
+{{- end }}
+{{- $credentialUrlServiceEnabled := dict "api" .Values.api.enabled "web" .Values.web.enabled }}
+{{- $credentialUrlRules := list }}
+{{- range $hostName := $credentialUrlHosts }}
+  {{- $routes := list }}
+  {{- range $candidate := $credentialUrlCandidates }}
+    {{- /* The route that serves this path today: an exact match, else the longest prefix. */}}
+    {{- $winner := dict }}
+    {{- $winnerLength := -1 }}
+    {{- range (get $credentialUrlHostPaths $hostName) }}
+      {{- $routePath := toString .path }}
+      {{- $prefix := trimSuffix "/" $routePath }}
+      {{- if eq (toString .pathType) "Exact" }}
+        {{- if eq $routePath $candidate.path }}
+          {{- $winner = . }}
+          {{- $winnerLength = 100000 }}
+        {{- end }}
+      {{- else if and (hasPrefix (printf "%s/" $prefix) (printf "%s/" $candidate.path)) (gt (len $prefix) $winnerLength) }}
+        {{- $winner = . }}
+        {{- $winnerLength = len $prefix }}
+      {{- end }}
+    {{- end }}
+    {{- /* Only a broader route to the same service is refined; an explicit route is left as is. */}}
+    {{- if and (eq (toString $winner.service) $candidate.service) (get $credentialUrlServiceEnabled $candidate.service) (lt $winnerLength (len $candidate.path)) }}
+      {{- $routes = append $routes (merge (dict "portName" ($winner.portName | default "http")) $candidate) }}
+    {{- end }}
+  {{- end }}
+  {{- if $routes }}
+    {{- $credentialUrlRules = append $credentialUrlRules (dict "host" $hostName "routes" $routes) }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.credentialUrlIngress.enabled (gt (len $credentialUrlRules) 0) }}
+{{- $credentialUrlAnnotations := deepCopy (.Values.ingress.annotations | default dict) }}
+{{- if and .Values.ingress.maxRequestBody (not (hasKey $credentialUrlAnnotations "nginx.ingress.kubernetes.io/proxy-body-size")) }}
+{{- $_ := set $credentialUrlAnnotations "nginx.ingress.kubernetes.io/proxy-body-size" (toString .Values.ingress.maxRequestBody) }}
+{{- end }}
+{{- $credentialUrlAnnotations = merge (dict "nginx.ingress.kubernetes.io/enable-access-log" "false" "nginx.ingress.kubernetes.io/enable-opentelemetry" "false") (omit (.Values.ingress.credentialUrlIngress.annotations | default dict) "nginx.ingress.kubernetes.io/enable-access-log" "nginx.ingress.kubernetes.io/enable-opentelemetry") $credentialUrlAnnotations }}
+---
+# Paths that carry reset/verification tokens or OAuth codes in their URL, split
+# from the primary Ingress so ingress-nginx writes no access log line or request
+# trace for them (CASA 6.5.1). It keeps the primary Ingress annotations (an auth
+# gate, body-size limit and the like), so only logging changes. Like the
+# setup-account route, this does not sanitize the controller error_log.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "opengeni.fullname" . }}-credential-urls
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $credentialUrlAnnotations | nindent 4 }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $credentialUrlRules }}
+    - {{- with .host }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          {{- range .routes }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" $ }}-{{ .service }}
+                port:
+                  name: {{ .portName }}
+          {{- end }}
+    {{- end }}
+{{- end }}
 {{- if and .Values.ingress.enabled .Values.ingress.publicIngress.enabled (or .Values.api.enabled .Values.web.enabled) }}
 ---
 # A SECOND Ingress for the SAME host(s) that exposes ONLY the

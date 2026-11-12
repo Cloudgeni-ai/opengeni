@@ -62,7 +62,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install 1.97.0 --profile minimal --no-self-update
+          # The toolchain download occasionally fails to reach static.rust-lang.org.
+          for attempt in 1 2 3; do
+            rustup toolchain install 1.97.0 --profile minimal --no-self-update && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            echo "::warning::rustup toolchain install attempt $attempt failed; retrying"
+            sleep $((attempt * 10))
+          done
 
       - name: Build and smoke exact target
         shell: bash
@@ -134,7 +140,7 @@ jobs:
             rust:1.97.0-alpine3.23@sha256:ca0daf101eef0c8cd1e49dfc137154a220efb8c458c85a3eacacc7dfd5d9e04c \
             sh -euc '
               apk add --no-cache bash build-base curl libstdc++ unzip
-              curl --proto "=https" --tlsv1.2 -fL \
+              curl --proto "=https" --tlsv1.2 -fL --retry 4 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
                 "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$BUN_ARCHIVE" \
                 -o /tmp/bun.zip
               printf "%s  %s\n" "$BUN_SHA256" /tmp/bun.zip | sha256sum -c -
@@ -185,7 +191,13 @@ jobs:
       - name: Install pinned WASM toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install 1.97.0 --profile minimal --no-self-update
+          # The toolchain download occasionally fails to reach static.rust-lang.org.
+          for attempt in 1 2 3; do
+            rustup toolchain install 1.97.0 --profile minimal --no-self-update && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            echo "::warning::rustup toolchain install attempt $attempt failed; retrying"
+            sleep $((attempt * 10))
+          done
           bun scripts/artifact-kernel-rust.ts ensure --target wasm32-unknown-unknown
           bun scripts/artifact-kernel-rust.ts cargo install --locked wasm-bindgen-cli --version 0.2.127
 

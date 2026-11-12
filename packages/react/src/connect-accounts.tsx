@@ -12,6 +12,8 @@ export type ConnectAccountsProps = {
   className?: string;
   /** Enables explicit account-bound reconnect. Host supplies the exact destination. */
   returnUrl?: string;
+  /** Sign-in runs in a popup: it ends on a page that closes the popup. */
+  finishInPopup?: boolean;
   /** Uses authenticated catalogue assets and exact connection references for service identity. */
   client?: ChatClient<OpenGeniClient> | undefined;
   /** Reconcile surrounding service state after a confirmed account disconnect. */
@@ -34,6 +36,7 @@ function ScopedAccounts({
   controller,
   className,
   returnUrl,
+  finishInPopup = false,
   client,
   onDisconnected,
 }: ConnectAccountsProps) {
@@ -123,6 +126,7 @@ function ScopedAccounts({
         ownership: account.ownership,
         reconnectAccountId: account.id,
         returnUrl,
+        ...(finishInPopup ? { finishInPopup: true as const } : {}),
         idempotencyKey: crypto.randomUUID(),
       });
     } catch {

@@ -192,6 +192,30 @@ test("Version dispatch identity rejects workflow execution on a different SHA", 
     ),
   ).rejects.toThrow("exact head");
 });
+test("dispatched PR CI runs the exact head of any same-repository automation PR", async () => {
+  const dispatched = (f: Awaited<ReturnType<typeof fixture>>, sha = head) =>
+    runPrCiCommand(
+      "identity",
+      { ...f.env, GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_SHA: sha },
+      f.transport,
+    );
+  // A pin refresh opened with GITHUB_TOKEN, on its own branch.
+  const pin = await fixture();
+  pin.state.pull.head.ref = "chore/browser-engine-pins-auto";
+  await dispatched(pin);
+  expect(await Bun.file(join(pin.root, "out")).text()).toContain(`head=${head}`);
+  await dispatched(await fixture(true));
+  await expect(dispatched(await fixture(), old)).rejects.toThrow("exact head");
+  for (const impostor of [
+    { head: { repo: { full_name: "contributor/opengeni" } } },
+    { user: { login: "contributor" } },
+  ]) {
+    const f = await fixture(true);
+    if (impostor.head) f.state.pull.head.repo = impostor.head.repo;
+    if (impostor.user) f.state.pull.user = impostor.user;
+    await expect(dispatched(f)).rejects.toThrow("automation PR");
+  }
+});
 test("provider search truncation refuses Version readiness before any mutation", async () => {
   const f = await fixture(true);
   const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -98,7 +98,7 @@ describe("Teams onboarding message delivery", () => {
       expect(await sendTeamsOnboarding(app, message, purpose, url.toString())).toBe("sent-1");
       const text =
         purpose === "setup"
-          ? "Connect Teams to your Opengeni workspace."
+          ? "Connect Teams to Opengeni."
           : "Link your Opengeni account to use this bot.";
       expect(calls).toEqual([
         {

@@ -533,6 +533,14 @@ describe("official Gmail MCP OAuth compatibility", () => {
         prompt: "consent",
         login_hint: "me@example.test",
       });
+      // Google's account ID is preferred once recorded: it still names an
+      // account whose email has changed.
+      expect(
+        authorizeParamsFor(profile, {
+          [metadataKey]: "old@example.test",
+          googleSubject: "110248495921238986420",
+        }),
+      ).toEqual({ access_type: "offline", prompt: "consent", login_hint: "110248495921238986420" });
       // A first connection, or an account without a verified email, picks.
       for (const reconnecting of [undefined, {}, { [metadataKey]: "not an email" }]) {
         expect(authorizeParamsFor(profile, reconnecting)).toEqual({

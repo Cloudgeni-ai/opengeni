@@ -69,7 +69,10 @@ describe("release credential environment boundary", () => {
     );
     expect(workflows.get("release.yml").jobs.publish.environment).toBe("production-release");
     for (const [id, job] of Object.entries(workflows.get("ci.yml").jobs) as [string, any][]) {
-      if (id !== "api-image") expect(job.environment).toBeUndefined();
+      // The batch-only API build uses the same credential-free environment
+      // as every non-main API build.
+      if (id === "batch-api-image") expect(job.environment).toBe("ci-build");
+      else if (id !== "api-image") expect(job.environment).toBeUndefined();
     }
     expect(workflows.has("migrate-release-secrets.yml")).toBe(false);
   });

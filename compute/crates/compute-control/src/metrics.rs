@@ -3,7 +3,10 @@
 //!
 //! Every replica reports its own work: the public API's requests by route
 //! and outcome, with their latency; the hosts' metrics it passed on
-//! ([`crate::hostapi`], `--host-metrics-to`); and whether it leads. Only
+//! ([`crate::hostapi`], `--host-metrics-to`); whether it leads; and what
+//! it counted of each host it holds ([`crate::view::Tally`]): the host's
+//! fresh registrations, each a reboot or its lease lapsing, and
+//! the wakes and placements it refused as full. Only
 //! the replica that leads reports the fleet, so a Prometheus that scrapes
 //! every replica stores each fleet series once: each host as the
 //! replica's view last read it (its state, what it has for sandboxes and
@@ -280,6 +283,7 @@ impl Metrics {
             "1 while this replica leads: it alone reports the compute_fleet_ series.",
         );
         out.sample("compute_control_leader", &[], u64::from(leading));
+        render_tallies(&mut out, hosts);
         if let Some((imported, waiting)) = *locked(&self.pointers) {
             out.family(
                 "compute_control_pointers_imported",
@@ -395,6 +399,40 @@ fn state_label(state: HostState) -> &'static str {
 
 const MIB: u64 = 1 << 20;
 
+/// What this replica counted of each host it holds, which every replica
+/// reports: each sees its own refusals, and reads every registration.
+fn render_tallies(out: &mut Text, hosts: &[Known]) {
+    out.family(
+        "compute_control_host_registrations_total",
+        "counter",
+        "Fresh registrations of a host this replica read while it held the host, each under a new epoch: the host rebooted, or it was given up on (its lease lapsed) and registered once more. An agent restarted in place keeps its registration (compute_fleet_host_agent_restarts counts those).",
+    );
+    for host in hosts {
+        out.sample(
+            "compute_control_host_registrations_total",
+            &[("host_name", &host.target.name)],
+            host.tally.registrations,
+        );
+    }
+    out.family(
+        "compute_control_host_refusals_total",
+        "counter",
+        "Requests from this replica a host refused as full, by host and kind: wake (of a sandbox it holds) or place (a sandbox created on it or given to it to adopt).",
+    );
+    for host in hosts {
+        for (kind, count) in [
+            ("wake", host.tally.refused_wakes),
+            ("place", host.tally.refused_places),
+        ] {
+            out.sample(
+                "compute_control_host_refusals_total",
+                &[("host_name", &host.target.name), ("kind", kind)],
+                count,
+            );
+        }
+    }
+}
+
 /// A gauge's value, written exactly.
 #[derive(Clone, Copy, Debug)]
 enum Num {
@@ -411,8 +449,18 @@ fn bytes(mib: u64) -> Num {
 }
 
 /// The gauges each host the service counts on has.
-fn host_gauges() -> [HostGauge; 11] {
+fn host_gauges() -> [HostGauge; 13] {
     [
+        (
+            "compute_fleet_host_epoch",
+            "The registration a host holds: a number that rises each time it registers afresh (after a reboot, or once it was given up on). Its changes count fresh registrations whichever replica leads, across restarts of the service.",
+            |host| Num::Whole(host.target.epoch.0),
+        ),
+        (
+            "compute_fleet_host_agent_restarts",
+            "Times a host's agent started again: each later run of its agent it told of (after its watchdog stopped it, a crash, an upgrade or a reboot), counted once, as the fleet's store keeps it. Its changes count restarts whichever replica leads, across restarts of the service. Hosts of an earlier release tell no runs.",
+            |host| Num::Whole(host.restarts),
+        ),
         (
             "compute_fleet_host_memory_bytes",
             "Memory a host gives sandboxes in all.",
@@ -597,7 +645,7 @@ fn render_group(out: &mut Text, group: &GroupSeen) {
         ),
         (
             "compute_fleet_group_max_size",
-            "The most hosts the group may have (--scale-max).",
+            "The most hosts that take sandboxes the group may have (--scale-max); it may grow past it by one place per draining host it lists.",
             group.max,
         ),
     ] {

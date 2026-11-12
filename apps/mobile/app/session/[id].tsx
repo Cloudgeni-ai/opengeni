@@ -56,9 +56,13 @@ import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
 import { appSessionPath } from "@/app-links";
 import { openOnWeb, webPaths, webUrl } from "@/web-links";
+import { voiceCommandForSession } from "@/voice-command-model";
+import { useVoiceCommands } from "@/voice-commands";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
 const CALL_PIN_ACTION = "opengeni.take-calls-here";
+/** The session menu item that makes (or edits) this chat's voice command. */
+const VOICE_COMMAND_ACTION = "opengeni.voice-command";
 /** The session menu item that opens this conversation in the web app. */
 const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
 /** The session menu item that copies this conversation's web link. */
@@ -365,6 +369,9 @@ function LiveSession(props: {
   const takesCalls =
     callPreferences.target === "pinned" && callPreferences.pinned?.sessionId === props.sessionId;
   const workspaceId = props.workspaceId;
+  const voiceCommand = voiceCommandForSession(useVoiceCommands(), workspaceId, props.sessionId);
+  // Sub-agent sessions are not conversations to call by name.
+  const offersVoiceCommand = session ? session.parentSessionId === null : false;
   const repliesMute = useSessionRepliesMute(
     props.client,
     props.workspaceId,
@@ -481,6 +488,17 @@ function LiveSession(props: {
                         ? "phone.down"
                         : "phone.arrow.down.left") as MenuAction["image"],
                     },
+                    ...(offersVoiceCommand
+                      ? [
+                          {
+                            id: VOICE_COMMAND_ACTION,
+                            title: voiceCommand
+                              ? `Voice command “${voiceCommand.name}”`
+                              : "Add voice command",
+                            image: "waveform" as MenuAction["image"],
+                          },
+                        ]
+                      : []),
                     ...(repliesMute
                       ? [
                           {
@@ -524,6 +542,25 @@ function LiveSession(props: {
                         pinCallSession({ workspaceId, sessionId: props.sessionId, title });
                       return;
                     }
+                    if (nativeEvent.event === VOICE_COMMAND_ACTION) {
+                      router.push(
+                        voiceCommand
+                          ? {
+                              pathname: "/voice-command",
+                              params: { command: voiceCommand.id },
+                            }
+                          : {
+                              pathname: "/voice-command",
+                              params: {
+                                workspace: workspaceId,
+                                session: props.sessionId,
+                                title,
+                                ...(identity.agentName ? { agent: identity.agentName } : {}),
+                              },
+                            },
+                      );
+                      return;
+                    }
                     if (nativeEvent.event === MUTE_REPLIES_ACTION) {
                       void Haptics.selectionAsync();
                       void repliesMute?.toggle().then((muted) => {
@@ -554,8 +591,10 @@ function LiveSession(props: {
     [
       agentCall,
       fullAccess,
+      identity.agentName,
       onCall,
       onFullAccessAction,
+      offersVoiceCommand,
       props.client,
       props.sessionId,
       refreshSession,
@@ -564,6 +603,7 @@ function LiveSession(props: {
       takesCalls,
       theme.colors.fg,
       title,
+      voiceCommand,
       webBaseUrl,
       workspaceId,
     ],

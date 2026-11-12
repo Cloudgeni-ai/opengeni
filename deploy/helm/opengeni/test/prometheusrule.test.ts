@@ -444,7 +444,7 @@ describe("turn-capacity Prometheus alerts", () => {
     }
   });
 
-  test("never alerts on absolute provider TTFT; judges each provider against its own baseline", async () => {
+  test("never alerts on absolute provider TTFT; judges each provider against its own baseline on its response start where reported", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
@@ -472,9 +472,50 @@ describe("turn-capacity Prometheus alerts", () => {
       recordExpression(template, "opengeni:model_provider_ttft_requests:24h_baseline"),
     ).toContain("[24h] offset 30m");
 
+    // Response start (headers or the first socket event) for providers that
+    // report it: the provider accepted the request, before request shape counts.
+    const headersRecent = recordExpression(
+      template,
+      "opengeni:model_provider_headers_seconds:p90_30m",
+    );
+    const headersBaseline = recordExpression(
+      template,
+      "opengeni:model_provider_headers_seconds:p90_24h_baseline",
+    );
+    for (const expression of [headersRecent, headersBaseline]) {
+      expect(expression).toContain("histogram_quantile(0.9, sum by (le, provider)");
+      expect(expression).toContain("opengeni_model_request_phase_duration_seconds_bucket");
+      expect(expression).toContain('phase="headers"');
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+    expect(headersRecent).toContain("[30m]");
+    expect(headersBaseline).toContain("[24h] offset 30m");
+    expect(
+      recordExpression(template, "opengeni:model_provider_headers_requests:24h_baseline"),
+    ).toContain("[24h] offset 30m");
+
+    // Every regression-signal series makes the same per-provider choice from the
+    // headers baseline, so a window is never judged against the other signal.
+    for (const name of [
+      "opengeni:model_provider_regression_signal_seconds:p90_30m",
+      "opengeni:model_provider_regression_signal_seconds:p90_24h_baseline",
+      "opengeni:model_provider_regression_signal_requests:30m",
+      "opengeni:model_provider_regression_signal_requests:24h_baseline",
+    ]) {
+      const expression = recordExpression(template, name);
+      expect(expression).toContain('"signal", "headers"');
+      expect(expression).toContain('"signal", "first_content"');
+      expect(expression).toContain(
+        `unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{${DEPLOYMENT_SCOPE}} > 0)`,
+      );
+    }
+
     const regression = ruleBlock(template, "alert", "OpenGeniModelProviderTtftRegression");
+    expect(regression).not.toContain("opengeni:model_provider_ttft_");
     expect(regression).toContain(
-      "> {{ $providerTtftRegressionRatio }} * opengeni:model_provider_ttft_seconds:p90_24h_baseline",
+      "> {{ $providerTtftRegressionRatio }} * opengeni:model_provider_regression_signal_seconds:p90_24h_baseline",
     );
     expect(regression).toContain("> {{ $providerTtftRegressionFloorSeconds }}");
     expect(regression).toContain(">= {{ $providerTtftRecentMinSamples }}");

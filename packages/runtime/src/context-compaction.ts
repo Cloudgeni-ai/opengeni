@@ -35,9 +35,11 @@ import {
   formatModelContextTimestamp,
   isTransientSessionSystemUpdateBatch,
   latestAgentInstructionsContext,
+  latestRepositorySkillsContext,
   latestSkillCatalogContext,
   latestWorkspaceGovernanceContext,
   readAgentInstructionsContext,
+  readRepositorySkillsContext,
   readSkillCatalogContext,
   readWorkspaceGovernanceContext,
   resourceMountPath,
@@ -2286,6 +2288,7 @@ function rebuildAroundCheckpoint(
     if (remaining === 0) break;
   }
   const currentCatalog = latestSkillCatalogContext(items);
+  const currentRepositorySkills = latestRepositorySkillsContext(items);
   const currentGovernance = latestWorkspaceGovernanceContext(items);
   const carriedAgentInstructions = carriedAgentInstructionsContext(items, turns);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
@@ -2296,6 +2299,7 @@ function rebuildAroundCheckpoint(
   );
   const prefix = [
     currentCatalog,
+    currentRepositorySkills,
     currentGovernance,
     carriedAgentInstructions,
     attachmentCatalog,
@@ -2401,12 +2405,14 @@ function isTurnOperationalNotice(item: CompactionItem): boolean {
 }
 
 /**
- * Skill catalog and workspace governance snapshots are re-added as the latest
- * copy only; agent instruction edits are folded into the system prompt.
+ * Skill catalog, repository Skill index and workspace governance snapshots
+ * are re-added as the latest copy only; agent instruction edits are folded
+ * into the system prompt.
  */
 function isSessionContextSnapshot(item: CompactionItem): boolean {
   return (
     readSkillCatalogContext(item) !== null ||
+    readRepositorySkillsContext(item) !== null ||
     readWorkspaceGovernanceContext(item) !== null ||
     readAgentInstructionsContext(item) !== null
   );

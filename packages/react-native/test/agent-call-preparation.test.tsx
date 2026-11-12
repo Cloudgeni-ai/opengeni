@@ -6,6 +6,7 @@ import type {
   NativeCallEvent,
   NativeIncomingCall,
 } from "../src/realtime/native-call";
+import type { NativeOutsideCallContext } from "../src/realtime/agent-call";
 import { registerDom, renderComponent } from "../../react/test/render-hook";
 
 registerDom();
@@ -78,13 +79,20 @@ const incoming: NativeIncomingCall = {
   state: "ringing",
 };
 
-function fixture(connectsBeforeAnswer?: boolean, serverPrepares = false) {
+function fixture(
+  connectsBeforeAnswer?: boolean,
+  serverPrepares = false,
+  extra: { resolveOutsideCall?(context: NativeOutsideCallContext): Promise<string> } = {},
+) {
   const listeners = new Set<(event: NativeCallEvent) => void>();
   let finishAnswer!: (value: unknown) => void;
   let catalogLoads = 0;
+  const catalogWorkspaces: string[] = [];
+  const systemTargets: (string | null)[] = [];
   const client = {
-    getWorkspaceRealtimeModelCatalog: async () => {
+    getWorkspaceRealtimeModelCatalog: async (workspaceId: string) => {
       catalogLoads++;
+      catalogWorkspaces.push(workspaceId);
       return {
         models: [
           {
@@ -119,7 +127,9 @@ function fixture(connectsBeforeAnswer?: boolean, serverPrepares = false) {
       endIncomingCall() {},
     },
     takePendingStartRequest: async () => null,
-    startCall: async () => {},
+    startCall: async ({ target }) => {
+      systemTargets.push(target);
+    },
     reportConnected() {},
     endCall: async () => {},
     setMuted: async () => {},
@@ -139,6 +149,7 @@ function fixture(connectsBeforeAnswer?: boolean, serverPrepares = false) {
             client,
             workspaceId: "w",
             codexConnected: true,
+            ...extra,
             callAdapter: adapter,
             webrtc: {
               createPeerConnection: () => {
@@ -157,6 +168,8 @@ function fixture(connectsBeforeAnswer?: boolean, serverPrepares = false) {
     },
     answer: () => finishAnswer({ state: "answered", answeredHere: true }),
     catalogLoads: () => catalogLoads,
+    catalogWorkspaces,
+    systemTargets,
     call: () => calls.callSession("s"),
   };
 }
@@ -230,6 +243,49 @@ describe("native call preparation lifecycle", () => {
     expect(log).toContain("start");
     expect(log).not.toContain("close:1");
     expect(document.body.textContent).toContain("Call screen");
+    await rendered.unmount();
+  });
+
+  test("a voice command calls its chat in the workspace it names, not the current one", async () => {
+    log.length = 0;
+    instance = 0;
+    const contexts: NativeOutsideCallContext[] = [];
+    const f = fixture(undefined, false, {
+      resolveOutsideCall: async (context) => {
+        contexts.push(context);
+        return context.requested ?? "fresh";
+      },
+    });
+    const rendered = await f.render();
+    await act(async () => f.emit({ type: "startRequested", target: "s2", workspaceId: "w2" }));
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]).toMatchObject({
+      workspaceId: "w2",
+      requested: "s2",
+      requestedWorkspaceId: "w2",
+    });
+    // The call runs in the named workspace, and Phone recents calls it back there.
+    expect(f.catalogWorkspaces.at(-1)).toBe("w2");
+    expect(f.systemTargets).toEqual(["w2/s2"]);
+    expect(document.body.textContent).toContain("Call screen");
+    await rendered.unmount();
+  });
+
+  test("a request without a session stays in the current workspace and generic in recents", async () => {
+    log.length = 0;
+    instance = 0;
+    const contexts: NativeOutsideCallContext[] = [];
+    const f = fixture(undefined, false, {
+      resolveOutsideCall: async (context) => {
+        contexts.push(context);
+        return "fresh";
+      },
+    });
+    const rendered = await f.render();
+    await act(async () => f.emit({ type: "startRequested", target: null, workspaceId: "w2" }));
+    expect(contexts[0]).toMatchObject({ workspaceId: "w", requested: null });
+    expect(contexts[0]?.requestedWorkspaceId).toBeNull();
+    expect(f.systemTargets).toEqual([null]);
     await rendered.unmount();
   });
 });

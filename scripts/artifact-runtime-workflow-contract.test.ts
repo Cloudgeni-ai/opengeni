@@ -137,9 +137,11 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
   });
 
   test("CI and immutable candidate consume only the run-local verified bundle", async () => {
-    const [ci, candidate] = await Promise.all([
+    const [ci, candidate, browserAcceptance] = await Promise.all([
       readFile(resolve(root, ".github/workflows/ci.yml"), "utf8"),
       readFile(resolve(root, ".github/workflows/release-candidate.yml"), "utf8"),
+      // Batch's browser acceptance job, which ci.yml and pr-ci.yml both call.
+      readFile(resolve(root, ".github/workflows/ci-browser-acceptance.yml"), "utf8"),
     ]);
     for (const source of [ci, candidate]) {
       expect(source).toContain("uses: ./.github/workflows/artifact-runtime.yml");
@@ -148,7 +150,8 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     }
     expect(candidate).toContain("cancel-in-progress: false");
     expect(ci).toContain("github.event_name != 'workflow_dispatch'");
-    expect(ci).toContain(
+    expect(ci).toContain("uses: ./.github/workflows/ci-browser-acceptance.yml");
+    expect(browserAcceptance).toContain(
       "browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );
     for (const suite of [
@@ -157,7 +160,7 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
       "artifact-static-renderer.browser.e2e.ts",
       "editable-artifacts.browser.e2e.ts",
     ]) {
-      expect(ci).toContain(suite);
+      expect(browserAcceptance).toContain(suite);
     }
   });
 
@@ -169,9 +172,8 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
 
     const runtimeConsumers = [
       parsed.jobs["api-image"],
+      parsed.jobs["batch-api-image"],
       parsed.jobs["artifact-materializer-image"],
-      parsed.jobs["sandbox-image"],
-      parsed.jobs["desktop-image"],
     ];
     for (const job of runtimeConsumers) {
       expect(job?.steps?.find((step) => step.name === "Check out repository")?.with?.ref).toBe(
@@ -182,6 +184,32 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
           ?.name,
       ).toBe("${{ needs.artifact-runtime.outputs.artifact_name }}");
     }
+    // The sandbox images start before artifact-runtime finishes and wait in
+    // the job for the artifact it uploads, by its exact name, in this run.
+    const runtimeWorkflow = Bun.YAML.parse(
+      await readFile(resolve(root, ".github/workflows/artifact-runtime.yml"), "utf8"),
+    ) as { jobs: Record<string, CiJob> };
+    const upload = runtimeWorkflow.jobs.aggregate?.steps?.find(
+      (step) => step.name === "Upload verified runtime inputs",
+    );
+    expect(upload?.with?.name).toBe("artifact-runtime-containers-${{ inputs.source_sha }}");
+    for (const jobName of ["sandbox-image", "desktop-image"]) {
+      const job = parsed.jobs[jobName];
+      expect(job?.steps?.find((step) => step.name === "Check out repository")?.with?.ref).toBe(
+        exactCiSource,
+      );
+      const wait = job?.steps?.find(
+        (step) => step.name === "Wait for exact artifact runtime inputs",
+      );
+      expect(wait?.env?.SOURCE_SHA).toBe(exactCiSource);
+      expect(wait?.run).toBe(
+        `bun scripts/ci/wait-for-run-artifact.ts --name "artifact-runtime-containers-$SOURCE_SHA" --producer "${parsed.jobs["artifact-runtime"]?.name}"`,
+      );
+      expect(
+        job?.steps?.find((step) => step.name === "Download exact artifact runtime inputs")?.with
+          ?.name,
+      ).toBe("${{ steps.runtime_inputs.outputs.artifact_name }}");
+    }
 
     const serverBuilds = [
       ["api-image", "api_image"],
@@ -191,9 +219,7 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
       ["artifact-outbox-dispatcher-image", "artifact_outbox_dispatcher_image"],
     ].map(([jobName, stepId]) =>
       parsed.jobs[jobName]?.steps?.find(
-        (step) =>
-          step.uses === "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc" &&
-          step.id === stepId,
+        (step) => step.uses === "./.github/actions/docker-build-retry" && step.id === stepId,
       ),
     );
     expect(serverBuilds.map((step) => step?.id)).toEqual([
@@ -215,11 +241,13 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     const sandboxBuild = parsed.jobs["sandbox-image"]?.steps?.find(
       (step) => step.id === "sandbox_image",
     );
-    expect(sandboxBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
+    // The exact source, and missing runtime inputs fail the build.
+    const exactRuntimeBuildArgs = `OPENGENI_SOURCE_SHA=${exactCiSource}\nOPENGENI_REQUIRE_ARTIFACT_RUNTIME=true\n`;
+    expect(sandboxBuild?.with?.["build-args"]).toBe(exactRuntimeBuildArgs);
     const desktopBuild = parsed.jobs["desktop-image"]?.steps?.find(
       (step) => step.id === "desktop_image",
     );
-    expect(desktopBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
+    expect(desktopBuild?.with?.["build-args"]).toBe(exactRuntimeBuildArgs);
   });
 
   test("desktop publish consumes the same verified runtime bundle as the headless sandbox", async () => {

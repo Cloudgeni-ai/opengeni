@@ -39,6 +39,8 @@ mock.module(Bun.resolveSync("../src/subscription-core-providers", import.meta.di
 
 const {
   bootstrapWorkspace,
+  claimSubscriptionCoreClaudeOrganizationLimitReset,
+  claimSubscriptionCoreClaudeWorkspaceLimitReset,
   createDb,
   createOrganizationModelProviderCustomModel,
   createScheduledTask,
@@ -411,7 +413,7 @@ function scriptedUsage(respond: () => Response) {
   const fetchImpl = Object.assign(
     async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
+      if (url.split("?")[0] !== USAGE_URL) throw new Error(`unexpected request ${url}`);
       calls.push(new Headers(init?.headers).get("authorization") ?? "");
       return respond();
     },
@@ -1641,5 +1643,208 @@ describe("live refresh outside a workspace pool (C2c)", () => {
         provider_account_id = null, allocator_enabled = false
       where id = ${personal}::uuid`;
     expect(await call(owner, owner)).toEqual(none);
+  });
+});
+
+describe("limit reset claims", () => {
+  const ORGANIZATION_UUID = "00000000-0000-4000-8000-0000000000aa";
+  const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
+  const CLAIM_URL = `https://api.anthropic.com/api/organizations/${ORGANIZATION_UUID}/reset_rate_limits`;
+
+  /**
+   * A Claude account at its weekly limit with one weekly reset grant: the
+   * usage endpoint, the OAuth profile and the claim endpoint. After a
+   * `reset` the weekly limit reads 0 and the grant has no resets left.
+   */
+  function resettableAccount(answer: () => Response = () => Response.json({ result: "reset" })) {
+    let claimed = false;
+    const usageUrls: string[] = [];
+    const claims: { body: Record<string, unknown>; userAgent: string | null }[] = [];
+    const weeklyReset = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    const grant = (left: number) => ({
+      id: "full-reset-2611",
+      label: "One full limit reset (November 2026)",
+      resets_total: 1,
+      resets_left: left,
+      starts_at: "2026-11-10T21:30:00+00:00",
+      ends_at: "2026-12-10T22:00:00+00:00",
+      clears: ["seven_day", "seven_day_overage_included"],
+      paused: false,
+      usable_now: left > 0,
+      use_requires_limit: false,
+      percent_used: { seven_day: claimed ? 0 : 100 },
+      blocking: [],
+      type: "weekly",
+      unavailable_reason: left > 0 ? null : "no_resets_left",
+      gives_back_weekly: false,
+    });
+    const fetchImpl = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const headers = new Headers(init?.headers);
+        if (url.split("?")[0] === USAGE_URL) {
+          usageUrls.push(url);
+          return Response.json({
+            five_hour: {
+              utilization: 10,
+              resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+            },
+            seven_day: { utilization: claimed ? 0 : 100, resets_at: weeklyReset },
+            cedar_ember: {
+              eligible: true,
+              ineligible_reason: null,
+              at_limit: !claimed,
+              exhausted: claimed ? [] : ["seven_day"],
+              grants: [grant(claimed ? 0 : 1)],
+            },
+            juniper_tide: { eligible: false, ineligible_reason: "not_at_wall" },
+          });
+        }
+        if (url === PROFILE_URL)
+          return Response.json({ organization: { uuid: ORGANIZATION_UUID } });
+        if (url === CLAIM_URL && init?.method === "POST") {
+          claims.push({
+            body: JSON.parse(String(init.body)) as Record<string, unknown>,
+            userAgent: headers.get("user-agent"),
+          });
+          const response = answer();
+          if (response.ok) claimed = true;
+          return response;
+        }
+        throw new Error(`unexpected request ${url}`);
+      },
+      { abortAndJoin: async () => {} },
+    ) as unknown as typeof fetch;
+    return { fetchImpl, usageUrls, claims };
+  }
+
+  test("a workspace administrator claims a grant: one POST, then the weekly limit serves again", async () => {
+    resetSubscriptionCoreClaudeUsageThrottle();
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "claim", { pool: "workspace" });
+    const scope = {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    const target = async () =>
+      (await readSubscriptionCoreClaudeWorkspaceUsageTarget(client.db, {
+        ...scope,
+        accountIdParam: connectionId,
+      }))!;
+    const account = resettableAccount();
+    const before = await refreshSubscriptionCoreClaudeWorkspaceUsage(
+      client.db,
+      settings,
+      { ...scope, target: await target() },
+      { fetchImpl: account.fetchImpl },
+    );
+    // The usage refresh read the reset status, and the at-limit program.
+    expect(account.usageUrls).toEqual([
+      `${USAGE_URL}?cedar_ember=1&skip_spend=1`,
+      `${USAGE_URL}?at_wall=1&skip_spend=1`,
+    ]);
+    expect(before.usage.limitResets?.atLimit).toBe(true);
+    expect(
+      before.usage.limitResets?.grants.map((grant) => [
+        grant.id,
+        grant.resetsLeft,
+        grant.usableNow,
+      ]),
+    ).toEqual([["full-reset-2611", 1, true]]);
+    expect(before.usage.windows.find((window) => window.id === "seven_day")?.usedPercent).toBe(100);
+    // A model refusal stored the weekly limit's deadline as the connection's exhaustion.
+    const weeklyUntil = Date.parse(
+      before.usage.windows.find((w) => w.id === "seven_day")!.resetsAt!,
+    );
+    await shared.admin`
+      update subscription_connection_quota
+      set quota = quota || ${shared.admin.json({
+        exhaustedUntil: weeklyUntil,
+        exhaustedKind: "quota",
+        exhaustedClaim: {
+          until: weeklyUntil,
+          observedAt: Date.now() - 1_000,
+          windowIds: ["seven_day"],
+        },
+      })}::jsonb
+      where connection_id = ${connectionId}::uuid`;
+
+    // Within the refresh throttle: the claim still reads usage again.
+    const requestId = crypto.randomUUID();
+    const outcome = await claimSubscriptionCoreClaudeWorkspaceLimitReset(
+      client.db,
+      settings,
+      { ...scope, target: await target(), grantId: "full-reset-2611", requestId },
+      { fetchImpl: account.fetchImpl },
+    );
+    expect(account.claims).toEqual([
+      {
+        body: { program: "cedar_ember", grant_id: "full-reset-2611", request_id: requestId },
+        userAgent: "claude-cli/2.1.322 (external, cli)",
+      },
+    ]);
+    expect(outcome.claim.result).toBe("reset");
+    expect(outcome.claim.retryable).toBe(false);
+    // The reading after the claim ended the refusal's block: waiters are woken.
+    expect(outcome.recovered).toBe(true);
+    expect(outcome.usage.refreshStatus).toBe("available");
+    expect(outcome.usage.windows.find((window) => window.id === "seven_day")?.usedPercent).toBe(0);
+    expect(outcome.usage.limitResets?.grants[0]?.resetsLeft).toBe(0);
+    expect(outcome.usage.limitResets?.atLimit).toBe(false);
+    const quota = (await storedQuota(connectionId))!;
+    expect(quota.exhaustedUntil).toBeNull();
+    expect(
+      (quota.windows as { id: string; status: string }[]).find(
+        (window) => window.id === "seven_day",
+      )?.status,
+    ).toBe("ok");
+  });
+
+  test("an answer that settles nothing still reads usage; a member who may not manage it sends nothing", async () => {
+    resetSubscriptionCoreClaudeUsageThrottle();
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "claim-org");
+    const row = (await readSubscriptionCoreClaudeOrganizationUsageRow(client.db, {
+      organizationId: org.accountId,
+      subjectId: org.ownerSubjectId,
+      accountIdParam: connectionId,
+    }))!;
+    const busy = resettableAccount(() => new Response("{}", { status: 429 }));
+    const plain = await member(org);
+    const refused = await claimSubscriptionCoreClaudeOrganizationLimitReset(
+      client.db,
+      settings,
+      {
+        organizationId: org.accountId,
+        subjectId: plain.subjectId,
+        row,
+        grantId: "full-reset-2611",
+        requestId: "request-1",
+      },
+      { fetchImpl: busy.fetchImpl },
+    );
+    expect(busy.claims).toEqual([]);
+    expect(refused.claim.result).toBe("error");
+    expect(refused.usage.refreshStatus).toBe("unavailable");
+
+    const administrator = await claimSubscriptionCoreClaudeOrganizationLimitReset(
+      client.db,
+      settings,
+      {
+        organizationId: org.accountId,
+        subjectId: org.ownerSubjectId,
+        row,
+        grantId: "full-reset-2611",
+        requestId: "request-1",
+      },
+      { fetchImpl: busy.fetchImpl },
+    );
+    expect(busy.claims.map((claim) => claim.body.request_id)).toEqual(["request-1"]);
+    expect(administrator.claim).toMatchObject({ result: "rate_limited", retryable: true });
+    // The rate-limited claim reached the provider: usage is read past the throttle.
+    expect(administrator.usage.refreshStatus).toBe("available");
+    expect(administrator.usage.limitResets?.grants[0]?.resetsLeft).toBe(1);
+    expect(administrator.recovered).toBe(false);
   });
 });

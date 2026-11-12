@@ -1,14 +1,15 @@
-//! Templates and captured images in Postgres (see [`crate::store::Store`]).
+//! Templates, and the captured and built images' records, in Postgres (see
+//! [`crate::store::Store`]).
 //!
-//! Every use recorded of a captured image (a template, and through its
-//! template a sandbox) and a collector's claim on it take turns by locks:
-//! a template's insert and a claim lock the image's record, and a
-//! sandbox's insert locks its template. A claim looks at what uses the
-//! image only once it holds the lock, so a use committed before is seen,
-//! and one after finds the image claimed (or, for a sandbox, its template
-//! gone) and is refused. A build is a captured image's bytes only once
-//! recorded (see [`crate::store::Store::record_built`]), so a claim sees
-//! it as a use too.
+//! Every use recorded of an image (a template, through its template a
+//! sandbox, and a name's build) and a collector's claim on it take turns
+//! by locks: a template's insert, a build's record and a claim lock the
+//! image's record, and a sandbox's insert locks its template. A claim
+//! looks at what uses the image only once it holds the lock, so a use
+//! committed before is seen, and one after finds the image claimed (or,
+//! for a sandbox, its template gone) and is refused. A build is a captured
+//! image's bytes only once recorded (see
+//! [`crate::store::Store::record_built`]).
 
 use std::str::FromStr as _;
 
@@ -22,13 +23,17 @@ const TEMPLATE_COLUMNS: &str = "team, id, name, image, source, vcpus, memory_mib
      memory_request_mib, cpu_request_millis, disk_mib, created_ms";
 
 /// Whether the image `image`, an SQL expression, is used: by a template,
-/// a sandbox's config or an image built from an OCI image.
+/// a sandbox's config, or a name of the fleet's as the latest build it
+/// used.
 fn used(image: &str) -> String {
     format!(
         "(exists (select 1 from compute_templates t where t.image = {image}) \
          or exists (select 1 from compute_sandboxes s \
          where s.spec -> 'config' ->> 'image' = {image}) \
-         or exists (select 1 from compute_images i where i.image = {image}))"
+         or exists (select 1 from compute_images i \
+         join compute_image_names n on n.source = i.source \
+         where i.image = {image} and n.used = (select max(m.used) \
+         from compute_image_names m where m.name = n.name)))"
     )
 }
 
@@ -284,14 +289,33 @@ impl PostgresStore {
     }
 
     pub(super) async fn collected_now(&self, image: ImageId, collector: &str) -> Result<()> {
-        self.client()
-            .await?
+        let image = image.to_string();
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(database)?;
+        let held = tx
             .execute(
                 "delete from compute_captured_images where image = $1 and collector = $2",
-                &[&image.to_string(), &collector],
+                &[&image, &collector],
             )
             .await
             .map_err(database)?;
+        if held == 0 {
+            return Ok(());
+        }
+        // The builds that made it go with it: a name that uses one of
+        // their sources again builds it again. No name uses them as its
+        // latest, or the image was not claimed.
+        tx.execute(
+            "delete from compute_image_names where source in \
+             (select source from compute_images where image = $1)",
+            &[&image],
+        )
+        .await
+        .map_err(database)?;
+        tx.execute("delete from compute_images where image = $1", &[&image])
+            .await
+            .map_err(database)?;
+        tx.commit().await.map_err(database)?;
         Ok(())
     }
 }

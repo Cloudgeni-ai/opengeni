@@ -4,6 +4,7 @@ import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 import type { Context, MiddlewareHandler } from "hono";
 import { ANALYTICS_CONSENT_PATH } from "../routes/analytics-consent";
 import { CLIENT_ERRORS_PATH } from "../routes/client-errors";
+import { CONSOLE_CONTENT_SECURITY_PATH } from "./console-content-security";
 import { isDesktopDistributionPath } from "../routes/desktop-distribution";
 import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 import {
@@ -69,6 +70,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     return true;
   }
   if (path === "/v1/config/client") {
+    return true;
+  }
+  // The console policy's external origins: public configuration the web
+  // server reads before anyone signs in (they appear in the policy header).
+  if (c.req.method === "GET" && path === CONSOLE_CONTENT_SECURITY_PATH) {
     return true;
   }
   // The Site gateway authenticates every site-runtime call with its own

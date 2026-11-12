@@ -277,6 +277,7 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
         "POST /v1/workspaces/:workspaceId/integrations/teams/link",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
         // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",

@@ -11,7 +11,8 @@ import {
 import { parseDocumentBytes, type DocumentServices } from "@opengeni/documents";
 import type { ObjectStorage } from "@opengeni/storage";
 import { knowledgeContractPdf } from "./fixtures/knowledge-pdf";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
+import { quarantineTest } from "@opengeni/testing/quarantine";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
@@ -60,6 +61,9 @@ import {
   promoteTaskNoteToKnowledge,
   type KnowledgeContext,
 } from "../src/knowledge-entries";
+
+// Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
+const test = quarantineTest(bunTest, import.meta.path, { deadlineMs: 100_000 });
 
 let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb>;

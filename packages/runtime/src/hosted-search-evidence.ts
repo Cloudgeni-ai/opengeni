@@ -1,6 +1,5 @@
 import { anthropicWebSearchFacts, isAnthropicWebSearchItem } from "./anthropic-web-search";
-import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
-import { toolCallIdFromSdkItem } from "./tool-call-identity";
+import { withItemsAfterOpenCalls } from "./items-after-open-calls";
 
 /** Hard bound on the UTF-8 JSON encoding of one projected message, not its text alone. */
 export const HOSTED_SEARCH_EVIDENCE_MAX_BYTES = 32 * 1024;
@@ -111,60 +110,15 @@ export function isHostedSearchEvidenceEchoText(text: string): boolean {
   return Boolean(evidence && record(evidence.included) && Array.isArray(evidence.entries));
 }
 
-const TOOL_RESULT_TYPES = new Set(Object.values(TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE));
-
 /**
  * A search record must never separate a tool call from its result: Chat
  * Completions and Claude require the result right after the call. A record
  * that falls while calls are open moves to just after the result that closes
- * the last of them, keeping relative order. A message that is not the
- * model's own (a user, system or developer message) never comes between a
- * call and its result, so calls still open there never get one: records wait
- * no further than just before it, and those calls are forgotten. A record's
- * place therefore depends only on the items up to the one that ends its wait,
- * so a later request reproduces the same prefix, also when stored history
- * holds a call that never got its result. Returns `items` itself when
- * nothing moves.
+ * the last of them, keeping relative order (see {@link withItemsAfterOpenCalls}).
+ * Returns `items` itself when nothing moves.
  */
 export function withSearchRecordsAfterOpenCalls<T>(items: T[]): T[] {
-  const open = new Set<string>();
-  let deferred: T[] = [];
-  let out: T[] | null = null;
-  for (const [index, item] of items.entries()) {
-    if (open.size > 0 && isHostedSearchEvidenceRecord(item)) {
-      out ??= items.slice(0, index);
-      deferred.push(item);
-      continue;
-    }
-    if (open.size > 0 && isOutsideMessage(item)) {
-      if (deferred.length > 0) {
-        out!.push(...deferred);
-        deferred = [];
-      }
-      open.clear();
-    }
-    out?.push(item);
-    const type = record(item)?.type;
-    const callId = typeof type === "string" ? toolCallIdFromSdkItem(item) : undefined;
-    if (typeof type === "string" && callId) {
-      const resultType = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE[type];
-      if (resultType) open.add(`${resultType}\u0000${callId}`);
-      else if (TOOL_RESULT_TYPES.has(type)) open.delete(`${type}\u0000${callId}`);
-    }
-    if (open.size === 0 && deferred.length > 0) {
-      out!.push(...deferred);
-      deferred = [];
-    }
-  }
-  if (deferred.length > 0) out!.push(...deferred);
-  return out ?? items;
-}
-
-/** A message that is not the model's own: user, system or developer input. */
-function isOutsideMessage(item: unknown): boolean {
-  const value = record(item);
-  if (!value || typeof value.role !== "string" || value.role === "assistant") return false;
-  return value.type === undefined || value.type === "message";
+  return withItemsAfterOpenCalls(items, isHostedSearchEvidenceRecord);
 }
 
 /** A request-local search record produced by {@link projectHostedSearchEvidence}. */

@@ -226,14 +226,15 @@ describe("Claude adapter", () => {
     expect(adapter.capabilitiesFor("claude_future_v9").autoRenews).toBe(false);
     expect(subscriptionCoreCredentialRefresher(adapter, oauthCredential)).toBe(adapter.refresh);
     expect(subscriptionCoreCredentialRefresher(adapter, setupCredential)).toBeNull();
-    // Claude has no Opengeni-managed extra credits, entitlements, media or Apps.
+    // Claude has no Opengeni-managed extra credits, entitlements, media or
+    // Apps; it has the provider's limit reset grants.
     expect(adapter.capabilities).toMatchObject({
       extraCredits: false,
       modelEntitlements: false,
       realtime: false,
       fundsMedia: false,
       apps: false,
-      resetCredits: false,
+      resetCredits: true,
       quotaWindows: true,
     });
   });

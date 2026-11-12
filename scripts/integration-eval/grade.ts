@@ -301,6 +301,20 @@ export function gradeCase(
     return fail("missing_card", [...reasons, "no connect card"]);
   }
 
+  if (testCase.kind === "clarify") {
+    // One system's connect card alone means the agent picked for the person.
+    const offered = new Set(
+      receipts.cards.map((card) => card.integration ?? card.capabilityName ?? card.capabilityId),
+    );
+    if (offered.size === 1)
+      return fail("wrong_tool", [...reasons, `picked ${[...offered][0] ?? "?"} without asking`]);
+    if (offered.size > 1)
+      return { pass: true, category: null, reasons: [...reasons, "offered several systems"] };
+    if (receipts.humanInputRequests > 0 || matchesAny(receipts.finalAnswer, testCase.expectAnswer))
+      return { pass: true, category: null, reasons: [...reasons, "asked which system"] };
+    return fail("incomplete_answer", [...reasons, "did not ask which system the person uses"]);
+  }
+
   const own = integrationTools(receipts, testCase);
   // A call with no output never ran to completion; it is not a success.
   const ok = own.filter((tool) => tool.completed && !tool.errored);

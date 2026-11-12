@@ -6,6 +6,7 @@ import {
   ToolActionReview,
   toolReviewContextFromSchema,
   type ToolReviewContext,
+  type ToolReviewReasonCode,
   toolReviewAction,
   toolReviewDetails,
   toolReviewFields,
@@ -406,6 +407,7 @@ export async function getToolActionReview(
     revision: `${request.updatedAt.toISOString()}:${operation?.updatedAt.toISOString() ?? turn.updatedAt.toISOString()}`,
     status,
     ...toolReviewAction(request.toolName, args, context),
+    toolName: request.toolName.slice(0, 256),
     ...(context?.accountLabel ? { accountLabel: context.accountLabel } : {}),
     ...(context?.samples
       ? {
@@ -419,16 +421,7 @@ export async function getToolActionReview(
         }
       : {}),
     ...toolReviewFields(args, context, request.toolName),
-    reason:
-      status === "blocked"
-        ? request.policySource === "explicit"
-          ? "Your permission settings block this action."
-          : request.policySource === "ambiguous"
-            ? "Two permission settings conflict, so this action is blocked."
-            : "This action is blocked by default."
-        : request.policySource === "explicit"
-          ? "This action is set to Ask first."
-          : "This action asks first by default.",
+    ...toolReviewReason(status, request.policySource),
     createdAt: request.createdAt.toISOString(),
     updatedAt: (operation?.updatedAt ?? request.updatedAt).toISOString(),
     availableActions: waiting
@@ -443,6 +436,28 @@ export async function getToolActionReview(
         : {}),
     detailsAvailable: args !== null,
   });
+}
+
+/**
+ * Why an action waits or is blocked: a code a host words in its own language,
+ * and the English sentence for everyone else.
+ */
+function toolReviewReason(
+  status: ToolReviewStatus,
+  policySource: string,
+): { reason: string; reasonCode: ToolReviewReasonCode } {
+  if (status === "blocked")
+    return policySource === "explicit"
+      ? { reason: "Your permission settings block this action.", reasonCode: "blocked_by_setting" }
+      : policySource === "ambiguous"
+        ? {
+            reason: "Two permission settings conflict, so this action is blocked.",
+            reasonCode: "blocked_by_conflict",
+          }
+        : { reason: "This action is blocked by default.", reasonCode: "blocked_by_default" };
+  return policySource === "explicit"
+    ? { reason: "This action is set to Ask first.", reasonCode: "asks_by_setting" }
+    : { reason: "This action asks first by default.", reasonCode: "asks_by_default" };
 }
 
 /** A chat other people can see: shared with a workspace that isn't someone's Personal one. */

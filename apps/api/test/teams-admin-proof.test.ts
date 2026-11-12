@@ -61,7 +61,11 @@ function microsoft(token: string | (() => Promise<string>), tokenStatus = 200) {
   return { fetchImpl, requests };
 }
 
-function signedState(overrides: Partial<typeof binding> = {}) {
+function signedState(
+  overrides: Partial<typeof binding> & {
+    purpose?: "teams-admin-setup" | "teams-account-link";
+  } = {},
+) {
   return mintTeamsAdminState(config.stateSecret, { ...binding, ...overrides });
 }
 
@@ -238,5 +242,76 @@ describe("Teams admin sign-in verification", () => {
       "consumer_tenant",
     );
     expect(requests).toEqual([]);
+  });
+});
+
+describe("Teams account-link sign-in verification", () => {
+  const linkState = () => signedState({ purpose: "teams-account-link" });
+
+  test("signs its purpose, so a link state is never a setup state", () => {
+    const { token, state } = linkState();
+    expect(state.purpose).toBe("teams-account-link");
+    expect(signedState().state.purpose).toBe("teams-admin-setup");
+    const [payload, signature] = token.split(".");
+    const forged = Buffer.from(JSON.stringify({ ...state, purpose: "teams-admin-setup" })).toString(
+      "base64url",
+    );
+    expect(verifyTeamsAdminState(config.stateSecret, token)).toEqual(state);
+    expect(() => verifyTeamsAdminState(config.stateSecret, `${forged}.${signature}`)).toThrow(
+      "state_invalid",
+    );
+    expect(payload).not.toBe(forged);
+  });
+
+  test("accepts the matching identity without an administrator role", async () => {
+    for (const wids of [undefined, [], ["b79fbf4d-3ef9-4689-8143-76b194e85509"]]) {
+      const { state } = linkState();
+      const { fetchImpl } = microsoft(await idToken(adminClaims(state, { wids })));
+      await expect(verifyTeamsAdminSignIn(config, state, "code", fetchImpl)).resolves.toMatchObject(
+        { tenantId, actorId },
+      );
+    }
+  });
+
+  test("refuses a different oid or tid and says who signed in", async () => {
+    const { state } = linkState();
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ oid: "10000000-0000-4000-8000-000000000099" }, "user_mismatch"],
+      [{ tid: otherTenant }, "tenant_mismatch"],
+    ];
+    for (const [claims, code] of cases) {
+      const { fetchImpl } = microsoft(
+        await idToken(
+          adminClaims(state, { ...claims, preferred_username: "bob@contoso.test", name: "Bob" }),
+        ),
+      );
+      const error = await verifyTeamsAdminSignIn(config, state, "code", fetchImpl).catch(
+        (caught: unknown) => caught,
+      );
+      expect(error).toMatchObject({ code, signedInAs: "bob@contoso.test" });
+    }
+    const { fetchImpl } = microsoft(
+      await idToken(adminClaims(state, { oid: "10000000-0000-4000-8000-000000000099" })),
+    );
+    const error = await verifyTeamsAdminSignIn(config, state, "code", fetchImpl).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({ code: "user_mismatch", signedInAs: null });
+  });
+
+  test("keeps the nonce, issuer and audience checks", async () => {
+    const { state } = linkState();
+    for (const token of [
+      idToken(adminClaims(state, { nonce: "replayed" })),
+      idToken(adminClaims(state, { tid: otherTenant }), {
+        issuer: `https://login.microsoftonline.com/${otherTenant}/v2.0`,
+      }),
+      idToken(adminClaims(state), { audience: "00000000-0000-4000-8000-000000000001" }),
+    ]) {
+      const { fetchImpl } = microsoft(await token);
+      await expect(verifyTeamsAdminSignIn(config, state, "code", fetchImpl)).rejects.toThrow(
+        "id_token_invalid",
+      );
+    }
   });
 });

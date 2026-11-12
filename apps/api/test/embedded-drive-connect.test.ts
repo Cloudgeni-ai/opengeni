@@ -279,6 +279,8 @@ test("Drive callback requires an authenticated read and binds one exact personal
         ...(providerId === "google-drive"
           ? OFFICIAL_DRIVE_MCP_SCOPES
           : OFFICIAL_GMAIL_MCP_BASE_SCOPES),
+        // So Google reports the account ID.
+        "openid",
       ].sort(),
     );
     expect(authorize.searchParams.get("access_type")).toBe("offline");

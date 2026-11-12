@@ -81,6 +81,7 @@ Reference: [Azure Bot registration](https://learn.microsoft.com/en-us/azure/bot-
 | `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS` | Exact approved group chats as `tenantId:conversationId`; empty denies all groups, independently of broad rollout |
 | `OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS` | Explicit operator-approved `tenantId:actorObjectId` installer pairs |
 | `OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED` | Lets a tenant administrator of an admitted tenant connect it after a Microsoft sign-in; default false |
+| `OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED` | Lets a connected tenant's 1:1 chats start work in any workspace of the organization the linked person can use, within the organization's reach; default false. Turn it on only after every replica runs a release that reads `teams_bot_routes.agent_id` |
 | `OPENGENI_TEAMS_BOT_CLIENT_ID` | Bot's Entra application ID |
 | `OPENGENI_TEAMS_BOT_CLIENT_SECRET` | Server-only bot credential |
 | `OPENGENI_TEAMS_BOT_TENANT_ID` | Home tenant used to acquire bot service tokens |
@@ -92,7 +93,8 @@ Initial setup and account linking require a verified managed browser session.
 Only shared workspaces administered by that human can be selected. Confirming
 setup also links that verified Teams actor to the signed-in human atomically;
 the installer does not need a second account-link confirmation. Other people
-follow their own signed account-link flow. The installer
+follow their own account-link flow, which proves their Teams identity with a
+Microsoft sign-in (see [Account linking](#account-linking)). The installer
 allowlist is explicit operator approval of a Teams actor, not proof that the
 actor holds a Microsoft tenant administrator role. Keep it empty until the
 operator has independently approved the intended installer. Personal messages use
@@ -104,7 +106,11 @@ installation's shared workspace. A chat that starts landing in the Personal
 workspace is a fresh conversation, and turning Personal workspaces off returns
 to the earlier one; a first message still waiting to start its Personal chat
 then gets the usual admission notice. The bot is still installed in, and its link still belongs
-to, the shared workspace, so losing access there stops the chat. This does not
+to, the shared workspace, so losing access there stops the chat. (With workspace
+routing on, 1:1 chats follow
+[Workspace routing](#workspace-routing) instead: they can start work in any
+workspace the organization lets Teams reach, and each message is checked against
+the target workspace.) This does not
 grant the bot a canonical managed-browser session. Channel and group-chat
 sessions stay in the shared workspace and remain workspace-visible. Both
 incoming work and outgoing replies recheck the
@@ -172,9 +178,12 @@ Privileged Identity Management activates it first. Microsoft personal accounts
 (tenant `9188040d-6c67-4c5b-b112-36a304b66dad`) can never self-serve.
 
 An operator-approved installer (`OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS`) gets the
-setup link without the Microsoft sign-in only in reply to their own 1:1
-message, never on an install event, whose sender needn't be the person whose
-chat it is.
+setup link only in reply to their own 1:1 message, never on an install event,
+whose sender needn't be the person whose chat it is. Because setup links the
+installer's Teams account, they too sign in to Microsoft on the setup page.
+Their sign-in must be the Teams user the setup link names (`tid` and `oid`),
+but needs no administrator role. A setup link forwarded to someone else is
+refused with `user_mismatch` and connects nothing.
 
 What self-serve cannot do: bind a tenant the person doesn't administer (the
 Microsoft sign-in must be the same Teams user and hold an administrator role in
@@ -272,9 +281,12 @@ replies. Its redelivery then gets the short reminder. An install's welcome is al
 
 ### Entra app configuration
 
-Self-serve sign-in uses the bot's own Entra application
-(`OPENGENI_TEAMS_BOT_CLIENT_ID`) and its existing client secret. Do not reuse
-the Microsoft 365 tools connector app. On that app registration:
+Self-serve sign-in and the account-link sign-in use the bot's own Entra
+application (`OPENGENI_TEAMS_BOT_CLIENT_ID`) and its existing client secret. Do
+not reuse the Microsoft 365 tools connector app. Setup by an operator-approved
+installer and account linking need the redirect URI and API permissions below
+on every deployment, including one without self-serve setup. On that app
+registration:
 
 - **Supported account types**: accounts in any organizational directory
   (multi-tenant).
@@ -307,6 +319,68 @@ Staging acceptance for self-serve, in the dedicated test tenant:
    link.
 7. After disconnecting, a Teams Administrator can reconnect only in the original
    workspace; a Global Administrator can move it to another shared workspace.
+8. A person without an administrator role opens their own account link, signs in
+   to Microsoft with their Teams account and is linked.
+9. A workspace member opens someone else's account link and signs in to
+   Microsoft as themselves: the link is refused with a message naming the Teams
+   account it is for, and nothing is linked.
+10. A guest from another organization messages the bot, opens their link and
+    signs in to Microsoft with their home account. Microsoft signs them in to
+    the connected tenant as its guest, and they are linked.
+
+## Account linking
+
+A person in a connected organization who isn't linked yet gets a **Link
+account** card in their 1:1 chat. Its URL opens the workspace's integrations
+page with a signed link proof in the fragment: the tenant, the Teams user
+(`aadObjectId`), their Teams display name, the workspace and installation
+generation, a single-use nonce and a 10-minute expiry. The proof is not enough
+to link: someone it is forwarded to could otherwise link the sender's Teams
+account to their own Opengeni account, and the sender's Teams messages would
+then run with their access.
+
+1. The page asks **Link your Teams account?** and explains that the person
+   signs in to Microsoft with the account they use in Teams. **Sign in with
+   Microsoft** sends the proof to
+   `POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in`
+   in the person's own authenticated browser request. The API checks the proof
+   against the workspace's current installation and returns a Microsoft sign-in
+   URL, exactly as for setup (bot Entra app, tenant-specific authority of the
+   Teams tenant, authorization code with PKCE, `openid profile`, the
+   `/teams/connect` redirect URI). Its signed state has the purpose
+   `teams-account-link` and binds the proof nonce, tenant, Teams user, Opengeni
+   person and workspace.
+2. The proof and workspace wait in the tab's session storage, never in a URL
+   Microsoft sees. Microsoft returns to `/teams/connect`, which recognizes the
+   link sign-in by its state and sends the proof with the code and state to
+   `POST …/teams/link`.
+3. The API checks the state's purpose and binding against the proof and the
+   browser session and verifies the ID token as for setup: Microsoft's keys,
+   issuer for the Teams tenant, audience, expiry and nonce. `tid` must equal the
+   proof's tenant and `oid` its Teams user; no administrator role is needed.
+   Only then does it link, so link conflicts are never revealed before the
+   identity is proven.
+
+A guest signs in to the connected (resource) tenant, because the authority
+names it. Their ID token carries that tenant's `tid` and the object ID of their
+guest account there, which is the `aadObjectId` Teams sends for them, so they
+link like anyone else. Microsoft personal accounts (consumer tenant) can't
+link (`link_consumer_tenant`).
+
+A Microsoft account other than the link's Teams user, by `oid` or `tid`, is
+refused with `link_identity_mismatch`. The message names the Teams account the
+link is for (its display name; links issued before the name was added say "a
+different Teams account") and the Microsoft account that signed in
+(`preferred_username`, else `name`), and says to open the link again with that
+account or get a link for one's own account. A refused or abandoned sign-in
+doesn't use up the link, so its owner can retry within the 10 minutes. A link
+request without a Microsoft sign-in is refused with `link_sign_in_required`; a
+sign-in state for another link, person or workspace, or a setup sign-in, with
+`link_sign_in_expired`.
+
+An organization that blocks user consent to the bot's Entra app must have an
+administrator consent to it once before people can link; the page then explains
+that a Global Administrator needs to approve Opengeni.
 
 ## Generate a package
 
@@ -362,7 +436,7 @@ across the metadata.
 The short and full descriptions are generated for the enabled scopes. They name
 Microsoft Teams on first reference, say that the app is an AI agent whose
 replies can be wrong and how to report one, state the one-time administrator
-setup, the Opengeni account with access to the connected workspace and the
+setup, the Opengeni account in the connected organization and the
 account link, with the website as the way to sign up, and list the main
 limitations (text messages only; approvals and private information requests
 open Opengeni in a web browser). Copy `description.short` and
@@ -397,7 +471,7 @@ and the personal-only package. In it:
   messages, and in `help` and `unlink`, that Opengeni needs a work or school
   account and to sign in to Teams with one.
 - A linked person whose workspace access doesn't allow starting chats is told
-  so and asked to get access from an admin of the connected workspace.
+  so and asked to get access from an Opengeni admin in their organization.
 - A 1:1 message with only a file or an image, or no text, is told that
   Opengeni reads text messages only and to send the request as text.
 - Onboarding replies are limited per person, per tenant and across the
@@ -712,6 +786,57 @@ References: [publisher verification](https://learn.microsoft.com/en-us/entra/ide
 [Store publication](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/appsource/publish),
 [Store validation](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/appsource/prepare/teams-store-validation-guidelines),
 [submission failures](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/appsource/resolve-submission-issues).
+
+## Workspace routing
+
+`OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED` (default false) lets a connected
+tenant's 1:1 chats start work in any workspace of the connecting organization
+that the linked person can start chats in, like a Slack bot DM. Turn it on only
+after every replica runs a release that reads `teams_bot_routes.agent_id`
+(migration 1373); an older replica would admit an agent route as a plain chat.
+With it off, nothing changes: 1:1 chats use the installation's workspace or the
+person's Personal workspace, and linking needs `sessions:create` there.
+
+With it on:
+
+- **Linking** is an organization fact, like Slack's: any active full member of
+  the installation's organization can link, still bound to the Microsoft `tid`
+  and `oid` of the Teams user. The **Link account** card opens
+  `/teams/connect`, not one workspace's page. A person who isn't a member gets
+  `link_not_organization_member`.
+- **Where a message goes**, first match wins: `in <Workspace>: …` for one
+  message; `<App name>: …` for the main assistant; an agent addressed by name
+  (`Name: …`, `Name, …` or `+name`), which also becomes the chat's choice; the
+  person's remembered choice; their Personal workspace; their only workspace;
+  otherwise a **switch** card with the message parked until they pick (one
+  card per person, 24 hours, single use). Agents are the organization's shared
+  agents in workspaces the person can use; Only me agents and agents in
+  Personal workspaces are never listed. Agent replies carry an
+  "**Agent** · Workspace" header, and the first reply after a real choice names
+  the workspace the chat is saved in.
+- **Authority** is read live at enqueue (before and inside the enqueue
+  transaction), at admission and before delivery: active organization
+  membership, the person's live authority in the target workspace (membership
+  or their own Personal workspace), and the organization's reach. Stored
+  choices and switch cards are memory, never authority; a choice that no longer
+  works is refused ("You can no longer start chats in **X** from Teams"), never
+  served from another workspace. Each route, choice and card row has a
+  same-account CHECK and composite foreign keys to its organization.
+- **Reach** is the organization admin's limit, stored on the installation
+  (`reach_workspace_ids`, null for every workspace, and
+  `reach_personal_workspaces`). It uses the same **Available in Opengeni**
+  control as Slack's, on the Teams card in **Capabilities**, and the same rule:
+  an organization owner or administrator who administers the connected
+  workspace. `GET`/`PUT /v1/workspaces/:workspaceId/integrations/teams/reach`
+  read and change it with a version check. The connected workspace is always
+  in reach.
+- **Group chats and channels** are unchanged: they use the installation's
+  workspace and the server-side allowlists.
+
+To test on staging: two shared workspaces and one shared agent, a linked
+person in both, then `switch`, `in <Workspace>: …`, `Agent: …`, a workspace the
+person can't use (refused), and a reach limit set by an organization admin
+(refused, then allowed again).
 
 ## Disable and recover
 

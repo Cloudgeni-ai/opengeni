@@ -436,8 +436,10 @@ connection, titles the session.
 
 `OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
 Older or custom runtimes that do not implement it retain the prior attempt-local
-`set_session_title` tool plus one-shot model instruction, so an embedding host
-does not silently lose automatic naming during an upgrade. That compatibility
+`set_session_title` tool plus a one-shot title request, so an embedding host
+does not silently lose automatic naming during an upgrade. That request rides in
+the turn's operational notice, a history item stored where it was sent, never in
+the system prompt, which must stay identical across turns and requests. That compatibility
 path remains serialized; the production runtime takes the parallel path. Neither
 path runs on the managed OpenRouter free route.
 
@@ -1470,11 +1472,16 @@ the worker clear its in-memory copy. Failed requests and late/zombie completion
 events cannot reset the streak. Successful inference between transient outages
 therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
-OpenAI/Azure HTTP-200 Responses `response.failed` / `response.error` terminals
-are intercepted before the SDK flattens their diagnostic. Closed server-error
-and overload codes use this recovery lane; rate-limit codes retain the pacing
-below. Invalid requests, content-policy refusals, and unknown terminal codes
-remain terminal even when their diagnostic mentions transient failures. The
+OpenAI/Azure HTTP-200 Responses `response.failed` / `response.error` / `error`
+terminals are intercepted before the SDK flattens their diagnostic. Closed
+server-error and overload codes (including Azure's CamelCase service codes and
+bare `500`/`502`/`503`/`504`) use this recovery lane; rate-limit codes retain the
+pacing below. An unrecognized code defers only to a closed status `type` (Azure
+documents mid-stream `server_error` as a 500 and `too_many_requests` as a 429;
+OpenAI's `service_unavailable_error` is its 503). Invalid requests,
+content-policy refusals, and unknown codes without such a type remain terminal
+even when their diagnostic mentions transient failures, and record the bounded
+provider code and type as `providerErrorCode` / `providerErrorType`. The
 failure/recovery `detail` preserves the exact provider message through 4 KiB;
 larger messages keep a UTF-8-safe prefix and explicit truncation marker. SDK
 error messages, tracing and worker public diagnostics stay structural.
@@ -2349,7 +2356,13 @@ invocation boundary also records
 `opengeni_mcp_tool_call_duration_seconds{outcome,tool}` with one closed structural
 outcome: `success`, `provider_declared_error`, `auth_needed`,
 `outcome_uncertain`, `timeout`, `cancelled`, `thrown_transport_error`, or
-`thrown_protocol_error`. `tool` is bounded (`mcpToolMetricLabel` in
+`thrown_protocol_error`, plus `rejected` when a first-party tool refused the
+caller's own arguments before doing any work (a schema mismatch, a bad field
+combination, an unknown ID). The first-party server marks such an error result
+with the `opengeni/argumentRejected` result `_meta` key, which the worker honors
+only from that server and removes before anyone sees the result; the
+`OpenGeniMcpToolFailureRatio` alert leaves `rejected` out of both the failures
+and the total. `tool` is bounded (`mcpToolMetricLabel` in
 `packages/runtime/src/metrics.ts`): it is the tool name only for a verified
 first-party server calling a name in the fixed first-party catalog, and the
 single value `external` for every connector, API-integration, Codex Apps, and
@@ -2485,9 +2498,24 @@ repository skills" notice carries a `reason` for every omitted entry. Managed
 and inline Skill admission stay strict.
 Discovery, inventories, and reading accept ordinary files and directories;
 symlink Skill entrypoints are excluded because portable filesystem APIs cannot
-prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
-the configured-catalog history lifecycle above. It is fixed for the bound capability; reads
-observe live edits or report missing files, and rebinding refreshes discovery.
+prove target containment. The repository index is discovered by the sandbox-SDK
+capability, but the system prompt only carries a stable "Repository skills"
+notice built from the search-path folders. The rendered index (a listing, an
+empty, unreachable or degraded notice) is a durable developer history item on
+its own session context channel (`ensureSessionRepositorySkills`,
+`packages/contracts/src/repository-skills-context.ts`): the worker writes it
+only when it differs from the latest item, freezes it per turn for retries, and
+inserts it before the turn's first active history item. When a run stores a new
+item, its model requests replace the run's durable history prefix with the same
+rows re-projected with that item (`historyWithRepositorySkills`), so this turn's
+requests and later turns' loaded history share one byte-identical prefix; a
+mid-run rewrite of the input skips this. Deferred runs discover nothing up front:
+they publish null, which freezes the turn on the earlier item so a later
+attempt of the same turn cannot add one between its requests. A Skill added mid-chat, an unreachable
+workspace or a deferred turn therefore never changes the system prompt, which
+Claude binds signed thinking to and both providers cache. The index is fixed for
+the bound capability; reads observe live edits or report missing files, and
+rebinding refreshes discovery.
 When discovery meets a typed unreachable workspace (a Connected Machine
 `agentOffline` or control-timeout `SelfhostedControlError`), the bound
 capability memoizes an explicitly unavailable, empty index and contributes a
@@ -3597,6 +3625,11 @@ New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
 their recorded `snapshot_filesystem` or tar mode and remain recoverable.
+A deployment that sets `OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar` keeps every
+save in its own object storage: a session whose latest save is a directory
+snapshot is restored from it into a tar destination, so that snapshot is the
+last one it reads and it never writes another. A box that is still live keeps
+the mode it was created in until it is next restored.
 Filesystem snapshot recovery boots the exact selected immutable Image directly,
 attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
@@ -5645,8 +5678,11 @@ The existing
 children still cover atomic initialization, post-commit fanout,
 immediate workflow signal plus wake-ledger acknowledgement, and response reload.
 The initial turn, authority, event log and wake outbox still commit atomically
-before either notification. Initial live fanout and the immediate durable-revision
-workflow wake then overlap; both settle before response reload or error propagation.
+before either notification. Create then answers once that commit and the response
+reload finish: initial live fanout and the immediate durable-revision workflow
+wake start right after commit but run detached from the request, so Temporal
+latency delays only when the run starts. A failed or lost immediate wake leaves
+the outbox revision owed, and the control worker's wake dispatcher delivers it.
 Wake-ledger acknowledgement stays after signal acceptance, and ordinary fanout
 transport failures remain best-effort. Durable SSE replay handles later committed
 events arriving ahead of initial live fanout. Worker child phases

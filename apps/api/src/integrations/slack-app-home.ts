@@ -1,5 +1,8 @@
-import { deriveSessionDisplayTitle, type Session } from "@opengeni/contracts";
+import { deriveSessionDisplayTitle, type Session as StoredSession } from "@opengeni/contracts";
 import type { SlackHomeBlock } from "./slack-bot";
+
+/** App Home reads sessions without their Skill folders, which it never shows. */
+type Session = Omit<StoredSession, "skills">;
 
 const ATTENTION_LIMIT = 5;
 const ACTIVE_LIMIT = 8;

@@ -5,6 +5,8 @@ import {
   getWorkspaceGrant,
   requireTeamsConversationProof,
   namedSubjectHasLiveWorkspaceAuthority,
+  namedSubjectIsActiveOrganizationMember,
+  namedSubjectPersonalWorkspaceId,
   resolveNamedManagedPersonalWorkspaceGrant,
   type Database,
   type TeamsConversationProof,
@@ -18,7 +20,9 @@ import { requireDeploymentAllowsOnlyMe } from "./organization-privacy";
  * Only the authenticated ingress writer can produce the matching durable inbox.
  * This grants admission of that exact message/session, never visibility mutation,
  * forks or approval authority. A 1:1 route may hold its session in the sender's
- * own Personal workspace; every other route stays in the installation's.
+ * own Personal workspace or, with Teams workspace routing, in another
+ * workspace of the organization where the sender may start work; every other
+ * route stays in the installation's.
  */
 export async function authorizeTeamsConversationAdmission(
   deps: Pick<AppDependencies, "db" | "settings">,
@@ -78,17 +82,30 @@ export async function authorizeTeamsConversationAdmission(
       throw new HTTPException(403, { message: "teams_channel_disabled" });
     }
     // A session outside the installation's workspace is only ever the 1:1
-    // sender's own chat in their Personal workspace, and they must still be
-    // able to use the installation's workspace, where their Teams link lives.
+    // sender's own chat. Without workspace routing it is in their Personal
+    // workspace, and they must still be able to use the installation's
+    // workspace, where their Teams link lives. With it, the link is an
+    // organization fact: the sender must be an active full member of the
+    // organization, and their own access to the target is checked below.
     const elsewhere = source.installationWorkspaceId !== accepted.workspaceId;
+    const ownPersonal =
+      elsewhere &&
+      (await namedSubjectPersonalWorkspaceId(db, {
+        accountId: accepted.accountId,
+        subjectId: accepted.subjectId,
+      })) === accepted.workspaceId;
+    const routing = deps.settings.teamsWorkspaceRoutingEnabled;
     if (
       elsewhere &&
       (!source.personal ||
         source.groupAudience ||
-        !(await namedSubjectHasLiveWorkspaceAuthority(db, {
-          ...accepted,
-          workspaceId: source.installationWorkspaceId,
-        })))
+        (routing
+          ? !(await namedSubjectIsActiveOrganizationMember(db, accepted))
+          : !ownPersonal ||
+            !(await namedSubjectHasLiveWorkspaceAuthority(db, {
+              ...accepted,
+              workspaceId: source.installationWorkspaceId,
+            }))))
     ) {
       throw new HTTPException(403, { message: "teams_actor_access_revoked" });
     }
@@ -128,8 +145,9 @@ export async function authorizeTeamsConversationAdmission(
       throw new HTTPException(403, { message: "teams_session_audience_changed" });
     }
     // The sender's own Personal workspace grant comes from their active
-    // membership pointer; it has no workspace membership row.
-    const liveGrant = elsewhere
+    // membership pointer; it has no workspace membership row. Any other
+    // workspace needs their own membership there.
+    const liveGrant = ownPersonal
       ? await resolveNamedManagedPersonalWorkspaceGrant(db, accepted)
       : await getWorkspaceGrant(db, accepted.subjectId, accepted.workspaceId);
     if (!liveGrant || liveGrant.accountId !== accepted.accountId) {
@@ -146,9 +164,10 @@ export async function authorizeTeamsConversationAdmission(
     });
     // In the sender's own Personal workspace an Only me chat needs no
     // organization setting for shared workspaces, as anywhere else there. A
-    // Personal workspace is reachable only through a 1:1 route that names it.
+    // Personal workspace is reachable only through a 1:1 route that names it,
+    // and only the sender's own.
     if (
-      policy.personalWorkspace !== elsewhere ||
+      policy.personalWorkspace !== ownPersonal ||
       !policy.platformAvailable ||
       (!policy.personalWorkspace && !policy.organizationEnabled)
     ) {

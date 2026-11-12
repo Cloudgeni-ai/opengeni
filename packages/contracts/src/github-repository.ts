@@ -41,7 +41,8 @@ export function parseCanonicalGitHubRepositoryUrl(value: string): CanonicalGitHu
   const owner = match[1]!;
   const name = match[2]!.replace(/\.git$/iu, "");
   if (
-    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(owner) ||
+    // Enterprise managed users' logins carry an underscore (`octocat_acme`).
+    !/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,37}[A-Za-z0-9])?$/u.test(owner) ||
     !/^[A-Za-z0-9_.-]{1,100}$/u.test(name) ||
     name === "." ||
     name === ".."

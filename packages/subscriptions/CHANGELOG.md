@@ -1,5 +1,21 @@
 # @opengeni/subscriptions
 
+## 6.17.0
+
+### Patch Changes
+
+- 4d7c96e: The subscription usage pool no longer reports a five-hour "Observed pool exhaustion" for accounts that have no five-hour limit. Codex plans with only a weekly limit report no five-hour window, and an account at its weekly limit used to be counted in the five-hour total as nothing usable. When it was the only account in that total, the whole pool read 0 % and "runs out now", even while other accounts served normally. A complete usage reading that omits a window now marks the account as not having it. The account is listed as unknown in that window and kept out of its total and forecast. A window that no account has reports "No account has this limit.", and a usage-limit deadline that matches no reset is placed in a window the account has. A refusal of a window still counts, and refusals, response headers and incomplete providers never mark a window absent.
+
+## 6.16.0
+
+## 6.15.0
+
+### Minor Changes
+
+- 60d067d: Claude subscription usage now matches what Claude reports today. The usage refresh reads the account's limit reset grants (presenting Claude Code's CLI surface, which Claude requires for them) and, while at a limit, the at-limit reset program. `ClaudeSubscriptionUsage` gains optional `limitResets`, `wallReset`, `limits`, `extraUsage`, `surfaceWindows` and `serviceState`, and the SDK exports their types. The account page lists each grant with what it clears, resets left, expiry and whether it can be used now. `@opengeni/db` adds the adapter-level claim and claim-then-refresh helpers (idempotent request ids); Opengeni never claims a grant on its own.
+
+  The weekly limit model responses call `seven_day_overage_included` is treated as the weekly Fable limit: it limits Fable models only and shows as "Fable week". Responses served in the slow tier or grace zone mark a connection constrained (`SubscriptionQuota.constrainedUntil`): it still serves, but placement prefers accounts with plain capacity, and busy slow-tier slots are a short rate limit rather than the weekly limit.
+
 ## 6.14.0
 
 ## 6.13.0

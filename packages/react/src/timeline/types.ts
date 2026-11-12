@@ -481,6 +481,8 @@ export type NoticeItem = {
   approvalActions?: Array<{
     id: string;
     title: string | null;
+    /** The tool's name without its server prefix, so the host's title for it can name it. */
+    toolName?: string;
     /**
      * Server-read facts about what it changes (the approval's `targetFacts`), in card
      * order; history uses them only to tell two alike lines apart.

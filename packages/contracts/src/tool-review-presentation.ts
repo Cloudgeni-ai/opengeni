@@ -260,6 +260,10 @@ const fieldPointer = (key: string, index: number, parent = "") =>
     ? `/~2${index}`
     : pointer(key);
 
+/** The argument name a field stands for, so a host can name it; long names stay unnamed. */
+const reviewFieldKey = (key: string): { key?: string } =>
+  key.length > 0 && key.length <= 256 ? { key } : {};
+
 export function toolReviewFields(
   argumentsValue: unknown,
   context?: ToolReviewContext,
@@ -357,6 +361,7 @@ export function toolReviewFields(
               : valueText(safe);
       return {
         path: fieldPointer(key, index),
+        ...reviewFieldKey(key),
         label: bound(
           (context?.fieldLabels && Object.hasOwn(context.fieldLabels, key)
             ? context.fieldLabels[key]
@@ -364,6 +369,7 @@ export function toolReviewFields(
           256,
         ),
         preview: bound(text, 240),
+        ...(!hidden && typeof value === "boolean" ? { booleanValue: value } : {}),
         ...(count !== undefined ? { count } : {}),
         truncated:
           !hidden &&
@@ -793,6 +799,7 @@ function apiEnvelopeReviewFields(
     if (hidden)
       return {
         path: entry.path,
+        ...reviewFieldKey(entry.key),
         label,
         preview: "[Protected value]",
         truncated: false,
@@ -821,8 +828,10 @@ function apiEnvelopeReviewFields(
     const limit = read !== undefined || typeof value === "string" ? API_TEXT_PREVIEW : 240;
     return {
       path: entry.path,
+      ...reviewFieldKey(entry.key),
       label: bound(label, 256),
       preview: reading?.fitted ? text : bound(text, limit),
+      ...(typeof value === "boolean" ? { booleanValue: value } : {}),
       ...(count !== undefined ? { count } : {}),
       // A plain reading is the value a person checks, shown as text; its exact
       // structure stays in Details. A bare size ("3 fields") opens it here.
@@ -917,7 +926,13 @@ export function toolReviewAction(
   context?: ToolReviewContext,
 ): Pick<
   ToolActionReview,
-  "title" | "approveLabel" | "effects" | "consequence" | "selectionCount" | "selectionKind"
+  | "title"
+  | "approveLabel"
+  | "approveLabelCode"
+  | "effects"
+  | "consequence"
+  | "selectionCount"
+  | "selectionKind"
 > {
   const fallback = {
     title:
@@ -931,6 +946,8 @@ export function toolReviewAction(
     // An app action's card asks the person a plain question ("Invite … to
     // your organization?"), so its button answers it.
     approveLabel: toolName === APP_ACTION_REVIEW_TOOL ? "Allow" : "Approve action",
+    approveLabelCode:
+      toolName === APP_ACTION_REVIEW_TOOL ? ("allow" as const) : ("approve_action" as const),
     effects: [] as string[],
   };
   if (toolName === APP_ACTION_REVIEW_TOOL) {

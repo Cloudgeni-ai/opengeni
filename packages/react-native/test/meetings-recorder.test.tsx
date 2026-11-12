@@ -90,12 +90,20 @@ mock.module("react-native", () => ({
 const started: string[] = [];
 const stopped: string[] = [];
 const setStates = new Map<string, (state: string) => void>();
+const registeredCaptures: { ownerId: string | null }[] = [];
 mock.module("../src/recordings", () => ({
   useNativeRecorderPlatform: (options: { storeScope?: string }) => ({
     scope: options.storeScope ?? "",
   }),
 }));
 mock.module("@opengeni/react/recordings", () => ({
+  registerLiveRecordingCapture: (capture: { ownerId: string | null }) => {
+    registeredCaptures.push(capture);
+    return () => {
+      const index = registeredCaptures.indexOf(capture);
+      if (index >= 0) registeredCaptures.splice(index, 1);
+    };
+  },
   useRecorder: (options: { workspaceId?: string; platform: { scope: string } }) => {
     const id = `${options.platform.scope}/${options.workspaceId ?? ""}`;
     const [state, setState] = useState("idle");
@@ -153,6 +161,17 @@ describe("MeetingRecorderProvider", () => {
     expect(seen.at(-1)).toBeNull();
     await rendered.rerender(tree({ storeScope: "a", workspaceId: "w1" }));
     expect(seen.at(-1)).toBe("a/w1");
+    await rendered.unmount();
+  });
+
+  test("a live recording is offered to sign-out as its account's, until it ends", async () => {
+    registeredCaptures.length = 0;
+    const rendered = await renderComponent(tree({ storeScope: "a", workspaceId: "w1" }));
+    expect(registeredCaptures).toEqual([]);
+    await act(async () => setStates.get("a/w1")!("recording"));
+    expect(registeredCaptures.map((capture) => capture.ownerId)).toEqual(["a"]);
+    await act(async () => setStates.get("a/w1")!("stopped"));
+    expect(registeredCaptures).toEqual([]);
     await rendered.unmount();
   });
 

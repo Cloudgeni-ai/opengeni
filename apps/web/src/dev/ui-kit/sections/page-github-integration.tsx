@@ -310,7 +310,7 @@ type Actor = {
   installationId?: number;
   connectionId?: string;
   label: string;
-  groups: Record<"routine" | "review" | "merge", Decision>;
+  groups: Record<"routine" | "review" | "merge", Decision> & { sensitive?: Decision };
 };
 
 function approvalActors(state: State): Actor[] {
@@ -327,7 +327,12 @@ function approvalActors(state: State): Actor[] {
             kind: "personal" as const,
             connectionId: personalConnection.id,
             label: "@octocat",
-            groups: { routine: "allow", review: "allow", merge: "ask" } as Actor["groups"],
+            groups: {
+              routine: "allow",
+              review: "allow",
+              merge: "ask",
+              sensitive: "ask",
+            } as Actor["groups"],
           },
         ]
       : []),

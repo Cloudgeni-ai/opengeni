@@ -214,8 +214,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Provider TTFT p90: last 30m vs trailing 24h baseline",
-      "description": "The regression alert's inputs (chart recording rules). OpenGeniModelProviderTtftRegression fires when the 30m p90 exceeds the configured multiple (default 2x) of the provider's own 24h p90, above an absolute floor and minimum request counts.",
+      "title": "Provider regression signal p90: last 30m vs trailing 24h baseline",
+      "description": "The regression alert's inputs (chart recording rules). Each provider is judged on response start (signal headers) where it reports it, otherwise first streamed content (signal first_content). OpenGeniModelProviderTtftRegression fires when the 30m p90 exceeds the configured multiple (default 2x) of the provider's own 24h p90, above an absolute floor and minimum request counts. The first-content 30m p90 line is shown for comparison and is not judged for providers on the headers signal.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -258,8 +258,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "opengeni:model_provider_ttft_seconds:p90_30m",
-          "legendFormat": "30m p90 {{provider}}",
+          "expr": "opengeni:model_provider_regression_signal_seconds:p90_30m",
+          "legendFormat": "30m p90 {{provider}} ({{signal}})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -269,8 +269,19 @@
         },
         {
           "refId": "B",
-          "expr": "opengeni:model_provider_ttft_seconds:p90_24h_baseline",
-          "legendFormat": "24h baseline p90 {{provider}}",
+          "expr": "opengeni:model_provider_regression_signal_seconds:p90_24h_baseline",
+          "legendFormat": "24h baseline p90 {{provider}} ({{signal}})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "opengeni:model_provider_ttft_seconds:p90_30m",
+          "legendFormat": "first content 30m p90 {{provider}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

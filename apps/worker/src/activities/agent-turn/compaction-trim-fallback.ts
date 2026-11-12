@@ -4,6 +4,7 @@ import {
   compactionProviderRejection,
 } from "@opengeni/runtime";
 import {
+  PROVIDER_SAFETY_REFUSAL_CODE,
   classifyProviderQuotaExhaustionError,
   isCompactionSummaryFailure,
   shouldRecoverCompactionProviderFailure,
@@ -13,7 +14,8 @@ import { turnOperationCancellationFailure } from "./sandbox-provision";
 /**
  * Why a portable checkpoint fell back to trimming history:
  * - `provider_rejected`: the provider definitively refused the summary request
- *   (HTTP 400, 413 or 422);
+ *   (HTTP 400, 413 or 422, or a safety refusal of its content, which Claude
+ *   sends with HTTP 200);
  * - `provider_failed`: the provider answered with a failed or incomplete
  *   response whose code is not a temporary condition;
  * - `summary_unusable`: a response came back but held no usable summary, no
@@ -32,8 +34,9 @@ const TEMPORARY_RESPONSE_CODE =
  * Whether a failed summary may be replaced by trimming history, and why.
  * Only a failure that repeating the same request cannot fix, and that leaves
  * the chat's model usable for ordinary requests, qualifies: a definitive
- * rejection of this request, a failed or incomplete response with a
- * non-temporary code, or an unusable summary. Anything else keeps its existing
+ * rejection of this request (including a safety refusal of its content), a
+ * failed or incomplete response with a non-temporary code, or an unusable
+ * summary. Anything else keeps its existing
  * handling and history stays as it was: a retryable provider or capacity
  * failure keeps the same-turn retry; an exhausted quota, an authentication,
  * permission or missing-model refusal (401, 403, 404) or any other HTTP status
@@ -55,11 +58,14 @@ export function compactionTrimFallbackReason(
   if (compactionProviderRejection(error)) return "provider_rejected";
   if (!(error instanceof CompactionProviderResponseError)) return null;
   const diagnostics = error.diagnostics;
+  const code = typeof diagnostics.code === "string" ? diagnostics.code : null;
+  // A safety refusal judges this request's content, whatever status carried
+  // it; the trimmed history is a different request.
+  if (code && PROVIDER_SAFETY_REFUSAL_CODE.test(code)) return "provider_rejected";
   // Any other HTTP status, or none at all (a transport failure), is not this
   // request's own fault.
   if (diagnostics.httpStatus !== undefined && diagnostics.httpStatus !== null) return null;
   const responseStatus = diagnostics.responseStatus;
-  const code = typeof diagnostics.code === "string" ? diagnostics.code : null;
   if (code && TEMPORARY_RESPONSE_CODE.test(code)) return null;
   if (responseStatus === "incomplete") return "provider_failed";
   if (responseStatus === "failed" && code) return "provider_failed";

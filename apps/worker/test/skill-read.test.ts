@@ -85,7 +85,14 @@ describe("skill_read gateway definition", () => {
       .find((entry) => entry.type === "workspace-skills")!
       .clone()
       .bind(session);
-    const catalog = await capability.instructions(session.state.manifest);
+    // The system prompt names where repository skills live; the index itself
+    // reaches the model as a Repository skills history item.
+    const notice = await capability.instructions(session.state.manifest);
+    expect(notice).toContain("repository_skill_read");
+    expect(notice).not.toContain("opengeni-client");
+    const catalog = (
+      await (capability as unknown as { index(): Promise<{ text: string } | null> }).index()
+    )?.text;
     const repositoryReader = capability
       .tools()
       .find((entry) => entry.type === "function" && entry.name === "repository_skill_read")!;

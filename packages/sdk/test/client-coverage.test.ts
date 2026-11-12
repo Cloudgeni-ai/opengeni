@@ -1445,6 +1445,230 @@ describe("OpenGeniClient files", () => {
     expect(JSON.parse(requests[0]!.body!).sha256).toBe(suppliedSha256);
   });
 
+  test("uploadFile lets a caller-sent source PUT its own bytes between begin and complete", async () => {
+    const begin = {
+      fileId: FILE_ID,
+      uploadId: UPLOAD_ID,
+      putUrl: "https://storage.example.test/put/video",
+      requiredHeaders: { "content-type": "video/quicktime", "x-amz-meta-sha256": "x" },
+      expiresAt: "",
+      maxSizeBytes: 5_000_000_000,
+    };
+    const file = { id: FILE_ID, status: "ready", filename: "IMG_0001.MOV" };
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) return jsonResponse(begin, 201);
+      if (request.url.endsWith(`/files/uploads/${UPLOAD_ID}/complete`)) {
+        return jsonResponse({ file });
+      }
+      throw new Error(`the SDK must not send the bytes itself: ${request.url}`);
+    });
+    const sent: Array<{ url: string; headers: Record<string, string>; sizeBytes: number }> = [];
+    const uploaded = await client.uploadFile(WORKSPACE_ID, {
+      filename: "IMG_0001.MOV",
+      contentType: "video/quicktime",
+      data: {
+        sizeBytes: 734_003_200,
+        send: async ({ url, headers, sizeBytes, signal }) => {
+          expect(signal.aborted).toBe(false);
+          sent.push({ url, headers, sizeBytes });
+          return { status: 200 };
+        },
+      },
+    });
+
+    expect(uploaded).toEqual(file as never);
+    // Begin carries the exact size and no digest: the SDK never reads the bytes.
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      filename: "IMG_0001.MOV",
+      contentType: "video/quicktime",
+      sizeBytes: 734_003_200,
+    });
+    expect(sent).toEqual([
+      { url: begin.putUrl, headers: begin.requiredHeaders, sizeBytes: 734_003_200 },
+    ]);
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      `/v1/workspaces/${WORKSPACE_ID}/files/uploads`,
+      `/v1/workspaces/${WORKSPACE_ID}/files/uploads/${UPLOAD_ID}/complete`,
+    ]);
+  });
+
+  test("uploadFile passes a caller-supplied digest through for a caller-sent source", async () => {
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/photo",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 10,
+          },
+          201,
+        );
+      }
+      return jsonResponse({ file: { id: FILE_ID, status: "ready" } });
+    });
+    await client.uploadFile(WORKSPACE_ID, {
+      filename: "photo.jpg",
+      contentType: "image/jpeg",
+      sha256: "b".repeat(64),
+      data: { sizeBytes: 3, send: async () => ({ status: 201 }) },
+    });
+    expect(JSON.parse(requests[0]!.body!).sha256).toBe("b".repeat(64));
+  });
+
+  test("uploadFile reports a caller-sent PUT's failure status and does not complete", async () => {
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/denied",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 10,
+          },
+          201,
+        );
+      }
+      throw new Error("complete must not run after a failed PUT");
+    });
+    const error = await client
+      .uploadFile(WORKSPACE_ID, {
+        filename: "clip.mp4",
+        contentType: "video/mp4",
+        data: { sizeBytes: 3, send: async () => ({ status: 403 }) },
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(403);
+    expect(requests).toHaveLength(1);
+  });
+
+  test("uploadFile aborts a caller-sent PUT at the deadline", async () => {
+    const observed: { signal?: AbortSignal } = {};
+    const { client } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/stalled-source",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 10,
+          },
+          201,
+        );
+      }
+      throw new Error("complete must not run after a timed-out PUT");
+    });
+    const error = await client
+      .uploadFile(WORKSPACE_ID, {
+        filename: "clip.mp4",
+        contentType: "video/mp4",
+        timeoutMs: 10,
+        data: {
+          sizeBytes: 3,
+          send: ({ signal }) => {
+            observed.signal = signal;
+            return new Promise(() => undefined);
+          },
+        },
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+    expect((error as Error).message).toBe("File upload timed out. Retry the upload.");
+    expect(observed.signal?.aborted).toBe(true);
+  });
+
+  test("uploadFile stops the PUT in flight and never completes when the caller cancels", async () => {
+    const controller = new AbortController();
+    const observed: { signal?: AbortSignal } = {};
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/cancelled",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 10,
+          },
+          201,
+        );
+      }
+      throw new Error("complete must not run after a cancelled PUT");
+    });
+    const pending = client.uploadFile(WORKSPACE_ID, {
+      filename: "clip.mp4",
+      contentType: "video/mp4",
+      signal: controller.signal,
+      data: {
+        sizeBytes: 3,
+        send: ({ signal }) => {
+          observed.signal = signal;
+          controller.abort();
+          return new Promise(() => undefined);
+        },
+      },
+    });
+    const error = await pending.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect((error as Error).message).toBe("File upload was cancelled.");
+    expect(observed.signal?.aborted).toBe(true);
+    expect(requests).toHaveLength(1);
+
+    const { client: unused, requests: none } = makeClient(() => {
+      throw new Error("an already-cancelled upload must not start");
+    });
+    const early = await unused
+      .uploadFile(WORKSPACE_ID, {
+        filename: "a.txt",
+        contentType: "text/plain",
+        data: "x",
+        signal: controller.signal,
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+    expect((early as Error).message).toBe("File upload was cancelled.");
+    expect(none).toHaveLength(0);
+  });
+
+  test("uploadFile rejects a caller-sent source without an exact size before any request", async () => {
+    const { client, requests } = makeClient(() => {
+      throw new Error("fetch must not run for invalid input");
+    });
+    for (const sizeBytes of [0, -1, 1.5, Number.NaN]) {
+      const error = await client
+        .uploadFile(WORKSPACE_ID, {
+          filename: "clip.mp4",
+          contentType: "video/mp4",
+          data: { sizeBytes, send: async () => ({ status: 200 }) },
+        })
+        .then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+      expect((error as Error).message).toBe(
+        "File upload size must be a positive whole number of bytes",
+      );
+    }
+    expect(requests).toHaveLength(0);
+  });
+
   test("uploadFile snapshots an ArrayBuffer before hashing and uploading it", async () => {
     const data = new ArrayBuffer(5);
     new Uint8Array(data).set(new TextEncoder().encode("hello"));

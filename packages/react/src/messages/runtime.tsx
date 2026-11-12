@@ -72,15 +72,27 @@ export type OpenGeniText = (<K extends OpenGeniMessageKey>(
 /**
  * Host-supplied text. Any subset of keys; counted keys may add the plural forms their
  * language uses (`files.count_few`) even where English has none. Service names and
- * descriptions use `connectService.<providerId>.name` and `.description`.
+ * descriptions use `connectService.<providerId>.name` and `.description`; a tool
+ * action's title and field labels use `toolAction.<toolName>.title`,
+ * `toolAction.<toolName>.field.<argument>` and, for every tool, `toolField.<argument>`.
  */
 export type OpenGeniMessages = Partial<
   Record<SingularKey<CatalogKey> | `${PluralBaseKey}${PluralSuffix}`, string>
 > &
-  Partial<Record<ConnectServiceMessageKey, string>>;
+  Partial<Record<ConnectServiceMessageKey | ToolActionMessageKey, string>>;
 
 /** A connectable service's own name or description, by its provider id. */
 export type ConnectServiceMessageKey = `connectService.${string}.${"name" | "description"}`;
+
+/**
+ * A tool action's own title or one of its field labels, by the tool's name
+ * without its server prefix and the argument's name; `toolField.<argument>`
+ * names that argument for every tool.
+ */
+export type ToolActionMessageKey =
+  | `toolAction.${string}.title`
+  | `toolAction.${string}.field.${string}`
+  | `toolField.${string}`;
 
 /** A complete catalog: declare yours with this type to be told about every new key. */
 export type OpenGeniMessageCatalog = Record<SingularKey<CatalogKey>, string> &

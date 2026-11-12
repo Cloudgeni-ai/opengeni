@@ -294,7 +294,10 @@ describe("provider dispatch history barrier", () => {
       const nextCallbackAt = runSource.indexOf("onModelRequestEvent: async", callbackAt + 1);
       const callbackEnd = nextCallbackAt === -1 ? runSource.length : nextCallbackAt;
       const barrierAt = runSource.indexOf("await checkpointBeforeProviderDispatch();", callbackAt);
-      const auditAt = runSource.indexOf("await eventing.publish([", callbackAt);
+      const auditAt = runSource.indexOf(
+        "await publishModelRequestAudit(eventing, event.phase, [",
+        callbackAt,
+      );
       expect(barrierAt).toBeGreaterThan(callbackAt);
       expect(barrierAt).toBeLessThan(callbackEnd);
       expect(auditAt).toBeGreaterThan(barrierAt);

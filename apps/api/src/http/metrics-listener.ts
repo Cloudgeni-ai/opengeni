@@ -34,6 +34,10 @@ export function createMetricsListenerApp(
   observability: PrometheusSource,
 ): Hono {
   const app = new Hono();
+  app.use("*", async (c, next) => {
+    await next();
+    if (!c.res.headers.has("x-content-type-options")) c.header("x-content-type-options", "nosniff");
+  });
   app.use("*", requireAccessKey(settings));
   registerPrometheusMetricsRoute(app, observability);
   return app;

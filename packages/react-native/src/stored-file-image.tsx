@@ -1,13 +1,12 @@
 import type { FileAsset, ResourceRef } from "@opengeni/sdk";
 import {
-  isStoredImage,
   useStoredFilePreview,
   useStoredFiles,
   type StoredFileSource,
 } from "@opengeni/react/session";
 import type { ReactNode } from "react";
 import { Image, type ImageProps, type ImageStyle, type StyleProp } from "react-native";
-import type { NativeAttachment } from "./attachments";
+import { nativeAttachmentKind, type NativeAttachment } from "./attachments";
 
 /**
  * An attached image: the local photo while it is there, otherwise (after a
@@ -79,7 +78,7 @@ export function useNativeComposerAttachments(
         name: file?.filename ?? fileId,
         contentType: file?.contentType ?? "application/octet-stream",
         sizeBytes: file?.sizeBytes ?? null,
-        kind: isStoredImage(file) ? "image" : "document",
+        kind: file ? nativeAttachmentKind(file.contentType) : "document",
         status: "ready",
         file,
         restoredIndex: index,

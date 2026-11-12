@@ -65,6 +65,7 @@ import { prepareMathMarkdown } from "../markdown-math";
 import { useMathPlugins } from "./markdown-math-loader";
 import { useArtifactLinkTarget } from "./artifact-link-scope";
 import { LazyPart } from "./lazy-part";
+import { displayImageSrc } from "../lib/content-hosting";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -579,7 +580,14 @@ function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
         {alt || t("markdown.image")} {t("markdown.previewUnavailable")}
       </span>
     );
-  return <img src={src} alt={alt ?? ""} loading="lazy" className="my-3 max-w-full rounded-og-md" />;
+  return (
+    <img
+      src={displayImageSrc(src)}
+      alt={alt ?? ""}
+      loading="lazy"
+      className="my-3 max-w-full rounded-og-md"
+    />
+  );
 }
 
 // Link hrefs stay as authored: Opengeni object links and host renderers need

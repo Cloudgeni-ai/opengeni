@@ -639,7 +639,12 @@ describe("durable programmatic review", () => {
       accountLabel: "mail@example.test",
       actionDigest: prepared.actionFingerprint,
       availableActions: [],
+      // A host words the action and the reason from these, in its own language.
+      toolName: "batch_modify_messages",
+      reason: "This action asks first by default.",
+      reasonCode: "asks_by_default",
     });
+    expect(review!.approveLabelCode).toBeUndefined();
     expect(JSON.stringify(review)).not.toContain("private-canary");
     const page = await getToolReviewDetailsPage(client.db, {
       ...input,

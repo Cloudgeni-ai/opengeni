@@ -177,7 +177,19 @@ test.skipIf(!promtool)(
               instance: `${node}:10250`,
               operation_type: "create_container",
             }),
-            values: node === "node-a" ? "0+1x5 5+0x7" : "0+0x13",
+            // Errors keep recurring on node-a, so the runtime alert holds and
+            // fires after its 10m `for`.
+            values: node === "node-a" ? "0+1x13" : "0+0x13",
+          },
+          {
+            // One rollout burst (kubelet retrying a removal the runtime is
+            // already doing) on node-b never pages.
+            series: series("kubelet_runtime_operations_errors_total", {
+              job: "kubelet",
+              instance: `${node}:10250`,
+              operation_type: "remove_container",
+            }),
+            values: node === "node-b" ? "0+0x1 2+0x12" : "0+0x13",
           },
           {
             series: series("kube_node_status_condition", {
@@ -260,7 +272,9 @@ test.skipIf(!promtool)(
               alertname,
               eval_time,
               exp_alerts:
-                eval_time === "12m"
+                // Pressure alerts fire at 5m and recover by 12m; recurring
+                // runtime errors are still pending at 5m and fire by 12m.
+                eval_time !== (alertname === "OpenGeniNodeContainerRuntimeErrors" ? "12m" : "5m")
                   ? []
                   : selected
                       .filter((scope) => scope.node === "node-a")

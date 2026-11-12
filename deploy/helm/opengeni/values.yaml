@@ -1253,6 +1253,15 @@ ingress:
   mcpOAuthIngress:
     enabled: true
     annotations: {}
+  # Paths whose URL carries a credential (password-reset and email-verification
+  # tokens, OAuth codes and state on provider callbacks) get their own Ingress
+  # with ingress-nginx access logs and request tracing off. It copies the
+  # primary Ingress annotations, so an auth gate or body-size limit still
+  # applies; this map adds to them. Rendered only for hosts whose own routes
+  # already send those paths to the same service.
+  credentialUrlIngress:
+    enabled: true
+    annotations: {}
   # During a web rollout old and new web pods serve side by side and every
   # request is balanced separately, so a page from one build can ask a pod of
   # the other build for a hashed asset it does not have. This extra Ingress
@@ -1631,6 +1640,28 @@ computeControl:
     # rules must admit this endpoint. Empty: the service refuses hosts'
     # metrics, and the host alerts are left out.
     hostsTo: ""
+  alerts:
+    # Thresholds of the OpenGeniCompute alerts, per environment.
+    # OpenGeniComputeFleetFull fires when the host group is at its maximum
+    # size and no live host can promise this much more memory (free plus
+    # reclaimable): about one sandbox's memory request
+    # (OPENGENI_COMPUTE_MEMORY_REQUEST_MIB). Memory only, and only for a
+    # group the service sizes. 0: no FleetFull alert.
+    spareMemoryMib: 4096
+    # OpenGeniComputeCreatesFailing: more than this share of sandbox creates
+    # (POST /v1/sandboxes) fail in 30 minutes, out of at least createMinimum,
+    # with at least two failures.
+    createFailureRatio: 0.1
+    createMinimum: 5
+    # OpenGeniComputeHostAgentRestarting: a host's agent starts again
+    # this many times in six hours. Raise it where hosts' agents are upgraded
+    # in place more often.
+    agentRestarts: 2
+    # OpenGeniComputeHostRefusingWakes: a host refuses this many wakes as
+    # full in 30 minutes, and is still refusing.
+    refusedWakes: 3
+    # 0 or unset means the default for each threshold above, except
+    # spareMemoryMib, where 0 or unset turns FleetFull off.
   hostsService:
     # Hosts dial this endpoint from outside the cluster: a LoadBalancer
     # (annotations for an internal one) or a NodePort.
@@ -1795,10 +1826,11 @@ observability:
     # when healthy.
     modelRequestPreDispatchP95Seconds: 2
     modelRequestMinSamples: 20
-    # Provider time-to-first-token (dispatch -> first streamed delta) alerts only
-    # relative to that provider's own trailing 24h p90, never on an absolute
-    # number: the 30m p90 must exceed ratio x baseline AND the floor, with
-    # enough recent and baseline requests.
+    # Provider latency alerts only relative to that provider's own trailing 24h
+    # p90, never on an absolute number: the 30m p90 must exceed ratio x baseline
+    # AND the floor, with enough recent and baseline requests. The signal is
+    # response start (headers or first socket event) where the provider reports
+    # it, otherwise dispatch -> first streamed delta.
     providerTtftRegressionRatio: 2
     providerTtftRegressionFloorSeconds: 5
     providerTtftRecentMinSamples: 30

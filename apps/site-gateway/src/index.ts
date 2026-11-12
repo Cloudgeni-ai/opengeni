@@ -29,6 +29,7 @@ import {
 import { applySecurityHeaders, jsonError } from "./headers";
 import { UpstreamError, lookupHost } from "./host-map";
 import { handleHumanCheck } from "./human";
+import { handleHtmlFrameHost, isHtmlFrameHostRequest } from "./html-frame-host";
 import { messagePage, neutralPage, takedownPage } from "./pages";
 import { countSiteRequest } from "./platform-requests";
 import { handleReport } from "./report";
@@ -112,6 +113,17 @@ export async function handleRequest(
   if (isSiteDbInternalPath(url.pathname))
     return await handleSiteDbInternal(request, url, env, config);
   const requestHost = url.hostname.toLowerCase();
+  // `og.<domain>` is reserved for the console's HTML frame host, never a Site.
+  if (isHtmlFrameHostRequest(requestHost, config.sitesDomain)) {
+    if (!config.development && url.protocol !== "https:") {
+      url.protocol = "https:";
+      return new Response(null, { status: 308, headers: { Location: url.toString() } });
+    }
+    return handleHtmlFrameHost(request, url, {
+      appOrigin: config.appOrigin,
+      hsts: !config.development,
+    });
+  }
   if (!parseSiteHostname(requestHost, config.sitesDomain)) return plain(404, "Not found.\n");
   // `<site>.<domain>.` is the same DNS name but another browser origin (and
   // another cookie jar): send it to the canonical host.

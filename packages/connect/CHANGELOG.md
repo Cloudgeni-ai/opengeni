@@ -1,5 +1,11 @@
 # @opengeni/connect
 
+## 6.17.0
+
+## 6.16.0
+
+## 6.15.0
+
 ## 6.14.0
 
 ### Patch Changes

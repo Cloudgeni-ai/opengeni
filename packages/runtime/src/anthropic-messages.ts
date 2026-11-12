@@ -28,7 +28,6 @@ import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import {
   ARTIFACT_ORIGIN_KEY,
   artifactOrigin,
-  historicalReasoningText,
   projectHistoryForProvider,
 } from "./provider-history-adapter";
 import {
@@ -176,21 +175,25 @@ export function claudeReplayScope(
 
 /**
  * Signed thinking in earlier turns goes back natively only under the binding
- * it was issued with (`claudeReplayScope`); elsewhere it becomes readable
- * historical text, exactly as another provider's reasoning does. The turn
+ * it was issued with (`claudeReplayScope`); elsewhere it is left out of the
+ * request, which is what Claude itself does with a block whose binding no
+ * longer matches (`drop_block`). It is never resent as readable text: Claude's
+ * own reasoning shown back to it as assistant text in a later turn can trip
+ * Claude's safety systems, which refuse the whole request and every retry of
+ * it (a turn "blocked by Claude's safety systems"). The turn
  * boundary is the one Claude sees: the last user message that is not only
  * tool results (a machine-origin continuation has its own). The reply in
  * progress keeps its thinking native whatever binding it records: the system
  * prompt can legitimately differ between requests of one turn (a one-shot
  * directive on its first request), Claude accepts that, and text in place of
- * the turn's thinking would turn thinking off for the rest of the turn. A
- * refusal is still caught by the retry. (That Claude accepts the reply in
+ * leaving out the turn's thinking would turn thinking off for the rest of the
+ * turn. A refusal is still caught by the retry. (That Claude accepts the reply in
  * progress under a changed system prompt is inferred from production, not
  * documented; if it is wrong, the cost is one refusal and retry.) Claude binds
  * every block to the prefix before it, so once a block of an earlier turn
- * becomes text, the later blocks of that turn do too.
+ * is left out, the later blocks of that turn are too.
  */
-function replayEarlierThinkingUnderBinding(
+function omitEarlierThinkingUnderOtherBinding(
   messages: Message[],
   origins: ReadonlyMap<string, string>,
   scope: string,
@@ -202,27 +205,36 @@ function replayEarlierThinkingUnderBinding(
   messages.forEach((message, index) => {
     if (opensTurn(message)) turnStart = index;
   });
-  let downgraded = false;
+  let omitted = false;
   for (const message of messages.slice(0, Math.max(turnStart, 0))) {
-    if (opensTurn(message)) downgraded = false;
+    if (opensTurn(message)) omitted = false;
     if (message.role !== "assistant") continue;
-    message.content = message.content.map((block) => {
+    message.content = message.content.filter((block) => {
       const fingerprint = claudeThinkingFingerprint(block);
-      if (!fingerprint) return block;
+      if (!fingerprint) return true;
       const origin = origins.get(fingerprint);
-      if (!downgraded && (origin === undefined || origin === scope)) return block;
-      downgraded = true;
-      return thinkingAsText(block);
+      if (!omitted && (origin === undefined || origin === scope)) return true;
+      omitted = true;
+      return false;
     });
   }
 }
 
-/** A thinking or redacted thinking block as readable historical text. */
-function thinkingAsText(block: Json): Json {
-  return {
-    type: "text",
-    text: historicalReasoningText(block.type === "thinking" ? String(block.thinking ?? "") : ""),
-  };
+/**
+ * Messages with no content left (an assistant message that held only thinking
+ * that was left out) are removed, and the neighbours they separated are joined
+ * when they share a role, as Claude would join them. This depends only on the
+ * messages themselves, so every later request reproduces the same prefix.
+ */
+function withoutEmptyMessages(messages: Message[]): Message[] {
+  const kept: Message[] = [];
+  for (const message of messages) {
+    if (!message.content.length) continue;
+    const previous = kept.at(-1);
+    if (previous?.role === message.role) previous.content.push(...message.content);
+    else kept.push(message);
+  }
+  return kept;
 }
 
 /** The binding recorded on each signed thinking block of a request's history. */
@@ -297,14 +309,14 @@ function refusedBlockFingerprints(
 
 /**
  * How far a request fell back from replaying signed thinking natively:
- * `binding` converts blocks issued under another binding (or already
- * refused) to readable text; `refused` additionally converts the blocks a
- * refusal points at; `plain` sends history with no opaque provider state.
+ * `binding` leaves out blocks issued under another binding (or already
+ * refused); `refused` additionally leaves out the blocks a refusal points at;
+ * `plain` sends history with no opaque provider state.
  */
 type ThinkingReplay = "binding" | "refused" | "plain";
 
 /**
- * Operator-only record of the thinking a fallback request replayed as text.
+ * Operator-only record of the thinking a fallback request left out.
  * The steady-state binding projection is not a fallback and is not recorded.
  */
 const REPLAY_TRANSFORMATION_REASON: Record<Exclude<ThinkingReplay, "binding">, string> = {
@@ -313,7 +325,7 @@ const REPLAY_TRANSFORMATION_REASON: Record<Exclude<ThinkingReplay, "binding">, s
 };
 const replayTransformations = new WeakMap<Response, Json[]>();
 
-/** A response's message, with the thinking its request replayed as text recorded. */
+/** A response's message, with the thinking its request left out recorded. */
 function withReplayTransformations(message: Json, response: Response): Json {
   const recorded = replayTransformations.get(response);
   if (!recorded?.length) return message;
@@ -529,12 +541,12 @@ function contentBlocks(
     // History recorded while progress updates became assistant messages keeps
     // Claude's own signed thinking block on the message. It goes back exactly
     // as received, never as the summary text it was shown as.
-    // One this provider refused goes back as its readable text instead.
+    // One this provider refused is left out (see omitEarlierThinkingUnderOtherBinding).
     const signed = options.assistant ? block.providerData?.anthropic?.block : undefined;
     if (signed?.type === "thinking") {
       if (!options.isRefusedThinking?.(claudeThinkingFingerprint(signed)))
         return [structuredClone(object(signed))];
-      return [{ type: "text", text: historicalReasoningText(String(signed.thinking ?? "")) }];
+      return [];
     }
     if (["text", "input_text", "output_text", "refusal"].includes(block.type)) {
       const blockText = text(block.text ?? block.refusal, "text");
@@ -681,8 +693,12 @@ export function anthropicMessages(
       }
       case "reasoning": {
         const block = item.providerData?.anthropic?.block;
-        if (block) append("assistant", [structuredClone(object(block))]);
-        else if (item.content?.length) append("assistant", contentBlocks(item.content));
+        if (block) {
+          // Claude's own thinking this provider refused is left out, never
+          // resent as readable text (see omitEarlierThinkingUnderOtherBinding).
+          if (!options.isRefusedThinking?.(claudeThinkingFingerprint(object(block))))
+            append("assistant", [structuredClone(object(block))]);
+        } else if (item.content?.length) append("assistant", contentBlocks(item.content));
         break;
       }
       case "compaction":
@@ -897,8 +913,8 @@ export function buildAnthropicRequest(
   options: {
     /** Fallback of last resort: history with no opaque provider state at all. */
     plainHistory?: boolean;
-    /** Signed thinking (by fingerprint) to send as text in this request only. */
-    replayAsText?: ReadonlySet<string>;
+    /** Signed thinking (by fingerprint) to leave out of this request only. */
+    omitThinking?: ReadonlySet<string>;
   } = {},
 ): Json {
   if (request.previousResponseId || request.conversationId)
@@ -928,20 +944,23 @@ export function buildAnthropicRequest(
   // Signed thinking goes back natively only under the binding it was issued
   // with, and never once this provider refused it (opaque-reasoning-replay).
   const remembered = provider.id ? refusedOpaqueReasoning(provider.id) : undefined;
-  const { plainHistory, replayAsText } = options;
+  const { plainHistory, omitThinking } = options;
   const isRefused =
     plainHistory === true
       ? () => true
-      : remembered || replayAsText?.size
+      : remembered || omitThinking?.size
         ? (fingerprint: string | null) =>
             fingerprint !== null &&
-            (replayAsText?.has(fingerprint) === true || remembered?.(fingerprint) === true)
+            (omitThinking?.has(fingerprint) === true || remembered?.(fingerprint) === true)
         : undefined;
   const input =
     typeof request.input === "string"
       ? request.input
       : (projectHistoryForProvider(request.input, "anthropic-messages", {
-          isRejectedArtifact: (item) => isRefused?.(opaqueReasoningFingerprint(item)) === true,
+          // Claude's own signed thinking is handled below and never becomes text.
+          isRejectedArtifact: (item) =>
+            !claudeSignedThinkingBlock(item) &&
+            isRefused?.(opaqueReasoningFingerprint(item)) === true,
         }) as ModelRequest["input"]);
   const webSearch = request.tools.some(isHostedWebSearchTool);
   let messages = anthropicMessages(input, {
@@ -972,7 +991,7 @@ export function buildAnthropicRequest(
   while (messages[0]?.role === "system") system.push(...messages.shift()!.content);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires a conversation message");
   messages = placeConversationSystems(messages);
-  replayEarlierThinkingUnderBinding(
+  omitEarlierThinkingUnderOtherBinding(
     messages,
     recordedThinkingOrigins(request.input),
     claudeReplayScope(request, model, provider),
@@ -981,11 +1000,11 @@ export function buildAnthropicRequest(
   if (plainHistory === true)
     for (const message of messages)
       if (message.role === "assistant")
-        message.content = message.content.map((block) =>
-          block.type === "thinking" || block.type === "redacted_thinking"
-            ? thinkingAsText(block)
-            : block,
+        message.content = message.content.filter(
+          (block) => block.type !== "thinking" && block.type !== "redacted_thinking",
         );
+  messages = withoutEmptyMessages(messages);
+  if (!messages.length) throw new AnthropicProtocolError("Claude requires a conversation message");
   const tools: Json[] = request.tools.map((tool) => {
     // Claude's own server-side search, at the agent's tool position so the
     // tools prefix is identical on every request of the conversation.
@@ -1467,14 +1486,14 @@ export class AnthropicMessagesModel implements Model {
   private async prepare(
     request: ModelRequest,
     stream: boolean,
-    replay: { fallback: ThinkingReplay; replayAsText?: ReadonlySet<string> } = {
+    replay: { fallback: ThinkingReplay; omitThinking?: ReadonlySet<string> } = {
       fallback: "binding",
     },
   ) {
     request.signal?.throwIfAborted();
     const body = buildAnthropicRequest(request, this.model, this.provider, stream, {
       plainHistory: replay.fallback === "plain",
-      ...(replay.replayAsText ? { replayAsText: replay.replayAsText } : {}),
+      ...(replay.omitThinking ? { omitThinking: replay.omitThinking } : {}),
     });
     const projection = { resized: false };
     for (const message of body.messages) {
@@ -1595,7 +1614,7 @@ export class AnthropicMessagesModel implements Model {
    * replay). If Claude still refuses a replayed signature (history stored
    * before bindings were recorded, or a binding Claude checks that we do
    * not record), the request is sent once more with the blocks the refusal
-   * concerns as readable text: those with no recorded binding and the one it
+   * concerns left out: those with no recorded binding and the one it
    * names. They are remembered for this provider, so later requests do not
    * repeat the refusal. If Claude refuses that too, the request is sent with
    * no opaque provider state at all, which it always accepts, and every block
@@ -1603,7 +1622,7 @@ export class AnthropicMessagesModel implements Model {
    * operators (`thinkingBlocksDropped`), never shown to the person.
    */
   private async send(request: ModelRequest, stream: boolean): Promise<Response> {
-    let replay: { fallback: ThinkingReplay; replayAsText?: ReadonlySet<string> } = {
+    let replay: { fallback: ThinkingReplay; omitThinking?: ReadonlySet<string> } = {
       fallback: "binding",
     };
     const history = historyThinking(request.input);
@@ -1611,11 +1630,11 @@ export class AnthropicMessagesModel implements Model {
       const prepared = await this.prepare(request, stream, replay);
       try {
         const response = await this.dispatch(request, prepared);
-        const asText = history.all - prepared.signedThinking.length;
-        if (asText > 0 && replay.fallback !== "binding")
+        const leftOut = history.all - prepared.signedThinking.length;
+        if (leftOut > 0 && replay.fallback !== "binding")
           replayTransformations.set(
             response,
-            Array.from({ length: asText }, () => ({
+            Array.from({ length: leftOut }, () => ({
               type: "thinking_dropped",
               reason: REPLAY_TRANSFORMATION_REASON[replay.fallback as "refused" | "plain"],
             })),
@@ -1641,7 +1660,7 @@ export class AnthropicMessagesModel implements Model {
           // A refusal we cannot attribute concerns every block it carried.
           const refused = suspects.size ? suspects : new Set(prepared.signedThinking);
           rememberRefusedOpaqueReasoning(this.provider.id, refused);
-          replay = { fallback: "refused", replayAsText: refused };
+          replay = { fallback: "refused", omitThinking: refused };
         } else {
           rememberRefusedOpaqueReasoning(this.provider.id, prepared.signedThinking);
           replay = { fallback: "plain" };

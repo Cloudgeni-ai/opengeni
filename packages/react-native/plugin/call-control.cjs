@@ -6,6 +6,8 @@
 // the app and performs the intent there, so the extension declares an intent
 // with the same type name as the app's generated one; the app's copy does the
 // work (it hands the request to the same start path as Siri and Phone recents).
+const { callIntentDeclarations } = require("./call-intents.cjs");
+
 const CONTROL_TARGET = "OpenGeniCallControl";
 const CONTROL_SWIFT_FILE = "OpenGeniCallControl.swift";
 const CONTROL_INFO_PLIST = "OpenGeniCallControl-Info.plist";
@@ -65,17 +67,9 @@ import AppIntents
 import SwiftUI
 import WidgetKit
 
-/// Same type name as the app's intent: the system opens the app and runs the
-/// app's copy, which starts the call. This copy never runs.
-struct OpenGeniStartCallIntent: AppIntent {
-  static let title: LocalizedStringResource = ${swiftString(call.title)}
-  static let description = IntentDescription(${swiftString(call.description)})
-  static let openAppWhenRun: Bool = true
-
-  func perform() async throws -> some IntentResult {
-    return .result()
-  }
-}
+/// Same type names as the app's intent and chat: the system opens the app
+/// and runs the app's copy, which starts the call. This copy never runs.
+${callIntentDeclarations(call, { catalog: false })}
 
 struct OpenGeniCallControl: ControlWidget {
   var body: some ControlWidgetConfiguration {

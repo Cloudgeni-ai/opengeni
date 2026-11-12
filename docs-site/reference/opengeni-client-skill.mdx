@@ -148,8 +148,8 @@ Workspaces and memberships are created on first use (the key needs
 `members:manage`, which full-access keys have). To remove a user, stop
 resolving them. Chats are private to the user who started them;
 `chats: "shared"` on the handler shares them with the workspace. Files attached
-in the stock UI are workspace files even in a private chat; use a workspace per
-user when uploads must stay private. A tenant is
+in a private chat are the uploader's own (Only me), read by them and that chat's
+agent; in shared chats they are workspace files. A tenant is
 the product's team, organization, or customer: the group that shares data and
 tools. Derive `user` and `tenant` from the product's session, never from the
 request body or path. Anonymous visitors on a public site share one fixed

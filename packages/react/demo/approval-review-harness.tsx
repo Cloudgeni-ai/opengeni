@@ -2,8 +2,10 @@ import { useCallback, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ApprovalSurface,
+  OpenGeniMessagesProvider,
   ToolActionReviewCard,
   ToolActionReviewDetails,
+  type OpenGeniMessages,
   type PendingApproval,
 } from "@opengeni/react";
 import {
@@ -14,6 +16,37 @@ import {
   type ToolReviewStatus,
 } from "@opengeni/contracts";
 import "./styles.css";
+
+const params = new URLSearchParams(location.search);
+
+// `?lang=nb`: a host's own words for the card and for one connector action.
+const NORWEGIAN: OpenGeniMessages = {
+  "approvalSurface.approveAction": "Godkjenn handlingen",
+  "toolActionReview.decline": "Avslå",
+  "toolActionReview.details": "Detaljer",
+  "toolActionReview.approvalNeeded": "Trenger godkjenning",
+  "toolActionReview.reason.asksByDefault": "Denne handlingen spør først som standard.",
+  "toolActionReview.yes": "Ja",
+  "toolActionReview.no": "Nei",
+  "toolAction.me_calendar_createevents.title": "Opprett en kalenderavtale",
+  "toolField.subject": "Emne",
+  "toolField.start": "Starter",
+  "toolField.end": "Slutter",
+  "toolField.isReminderOn": "Påminnelse",
+  "toolField.showAs": "Vis som",
+};
+
+// An Outlook calendar event, as Microsoft Graph receives it.
+const calendarArgs = {
+  body: {
+    subject: "Befaring hos kunde",
+    start: { dateTime: "2026-11-12T09:00:00", timeZone: "Europe/Oslo" },
+    end: { dateTime: "2026-11-12T10:00:00", timeZone: "Europe/Oslo" },
+    isReminderOn: true,
+    showAs: "busy",
+  },
+};
+const calendarContext = { kind: "api" as const, title: "Create a calendar event" };
 
 const args = {
   messageIds: Array.from({ length: 600 }, (_, i) => `synthetic-message-${i + 1}`),
@@ -65,7 +98,7 @@ const states: ToolReviewStatus[] = [
 function Gallery() {
   const [dark, setDark] = useState(false);
   const [status, setStatus] = useState<ToolReviewStatus>("pending");
-  const [scenario, setScenario] = useState("bulk");
+  const [scenario, setScenario] = useState(params.get("scenario") ?? "bulk");
   const [details, setDetails] = useState<{ review: ToolActionReview; path: string } | null>(null);
   const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<string | null>(null);
@@ -93,21 +126,35 @@ function Gallery() {
   };
   const values = scenario === "generic" ? generic : args;
   const review: ToolActionReview =
-    scenario === "generic"
+    scenario === "calendar"
       ? {
           ...base,
           consequence: undefined,
           selectionCount: undefined,
           samples: undefined,
-          ...toolReviewAction("update_record", generic, {
-            kind: "generic",
-            title: "Update project record",
-          }),
-          ...toolReviewFields(generic),
-          accountLabel: "Projects · Example workspace",
+          ...toolReviewAction("me_calendar_createevents", calendarArgs, calendarContext),
+          ...toolReviewFields(calendarArgs, calendarContext, "me_calendar_createevents"),
+          toolName: "me_calendar_createevents",
+          accountLabel: "Outlook Calendar · kari@example.test",
+          reason: "This action asks first by default.",
+          reasonCode: "asks_by_default",
           status,
         }
-      : { ...base, status };
+      : scenario === "generic"
+        ? {
+            ...base,
+            consequence: undefined,
+            selectionCount: undefined,
+            samples: undefined,
+            ...toolReviewAction("update_record", generic, {
+              kind: "generic",
+              title: "Update project record",
+            }),
+            ...toolReviewFields(generic),
+            accountLabel: "Projects · Example workspace",
+            status,
+          }
+        : { ...base, status };
   const load = useCallback(
     async (current: ToolActionReview, path: string, offset: number) => ({
       version: 1 as const,
@@ -163,6 +210,7 @@ function Gallery() {
               >
                 <option value="bulk">Mailbox cleanup</option>
                 <option value="generic">Generic action</option>
+                <option value="calendar">Calendar event</option>
                 <option value="many">100 pending actions</option>
                 <option value="loading">Loading</option>
                 <option value="unavailable">Unavailable details</option>
@@ -183,9 +231,11 @@ function Gallery() {
             </label>
           </div>
           <p className="mb-6 text-og-sm leading-relaxed text-og-fg">
-            {scenario === "generic"
-              ? "The project changes are ready for review."
-              : "I found the old tracker notifications. The selected messages are ready to move to Trash."}
+            {scenario === "calendar"
+              ? "The meeting is ready to add to your calendar."
+              : scenario === "generic"
+                ? "The project changes are ready for review."
+                : "I found the old tracker notifications. The selected messages are ready to move to Trash."}
           </p>
           {scenario === "loading" || scenario === "unavailable" || scenario === "many" ? (
             <ApprovalSurface
@@ -232,4 +282,12 @@ function Gallery() {
 }
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing root");
-createRoot(root).render(<Gallery />);
+createRoot(root).render(
+  params.get("lang") === "nb" ? (
+    <OpenGeniMessagesProvider locale="nb-NO" messages={NORWEGIAN}>
+      <Gallery />
+    </OpenGeniMessagesProvider>
+  ) : (
+    <Gallery />
+  ),
+);

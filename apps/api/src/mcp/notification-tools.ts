@@ -41,6 +41,7 @@ import {
 import { appendAndPublishEvents, appendAndPublishTurnEventsFenced } from "@opengeni/events";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
+import { ToolArgumentError } from "./tool-argument-error";
 
 type JsonResult = (value: unknown) => {
   content: { type: "text"; text: string }[];
@@ -129,14 +130,14 @@ export async function requireMember(
   if (member) return member;
   const unresolved = `${recipient} is not a member of this workspace (or the name matches more than one member).`;
   if (!hasPermission(grant.permissions, "workspace:read")) {
-    throw new Error(`${unresolved} Use their email.`);
+    throw new ToolArgumentError(`${unresolved} Use their email.`);
   }
   const members = await listWorkspaceMembers(deps.db, grant.workspaceId);
   const choices = members.map(
     (each) =>
       `- ${JSON.stringify(each.subjectLabel?.trim() || each.subjectId)}: recipient=${JSON.stringify(each.subjectId)}`,
   );
-  throw new Error(
+  throw new ToolArgumentError(
     `${unresolved} ` +
       "Retry with the exact recipient ID of the intended member below.\n" +
       (choices.length > 0
@@ -303,7 +304,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
       });
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
-        throw new Error(
+        throw new ToolArgumentError(
           `Invalid notification${issue ? ` (${issue.path.join(".") || "input"}): ${issue.message}` : ""}`,
         );
       }
@@ -450,7 +451,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         if (dismissed.includes(itemId) || !find(itemId)) continue;
         const at = new Date(until);
         if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) {
-          throw new Error(`Snooze time for ${itemId} must be in the future`);
+          throw new ToolArgumentError(`Snooze time for ${itemId} must be in the future`);
         }
         const iso = at.toISOString();
         if (await updateInboxItemAttention(deps.db, { itemId, ...scope, snoozedUntil: iso })) {

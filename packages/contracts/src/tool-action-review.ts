@@ -220,13 +220,35 @@ export const ToolReviewField = /* @__PURE__ */ defineSchema(() =>
     .object({
       path: primitives.string,
       label: primitives.string,
+      /**
+       * The argument name the label stands for ("subject", "isReminderOn"),
+       * when the field is one, so a host can name it in its own language.
+       * Absent for facts the server states under its own label.
+       */
+      key: z.string().max(256).optional(),
       preview: primitives.string,
+      /** The value when it is a plain yes or no, so a host says it in its own language. */
+      booleanValue: z.boolean().optional(),
       count: z.number().int().nonnegative().optional(),
       truncated: primitives.boolean,
       protected: primitives.optionalBoolean,
     })
     .strict(),
 );
+/**
+ * Why the action waits or is blocked, as a code a host can word itself; the
+ * English sentence stays in `reason`.
+ */
+export const ToolReviewReasonCode = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "asks_by_setting",
+    "asks_by_default",
+    "blocked_by_setting",
+    "blocked_by_conflict",
+    "blocked_by_default",
+  ]),
+);
+export type ToolReviewReasonCode = z.infer<typeof ToolReviewReasonCode>;
 export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -236,6 +258,11 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
       revision: primitives.string,
       status: ToolReviewStatus,
       title: primitives.string,
+      /**
+       * The tool's own name without its server prefix ("create_event"), so a
+       * host can name the action and its fields in its own language.
+       */
+      toolName: z.string().max(256).optional(),
       accountLabel: z.string().optional(),
       consequence: z.string().optional(),
       effects: z.array(primitives.string),
@@ -245,9 +272,16 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
       fields: z.array(ToolReviewField),
       moreFields: primitives.nonnegativeInteger,
       reason: primitives.string,
+      reasonCode: ToolReviewReasonCode.optional(),
       createdAt: primitives.string,
       updatedAt: primitives.string,
       approveLabel: primitives.string,
+      /**
+       * Set when `approveLabel` is the plain default ("Approve action", or
+       * "Allow" for an app action), so a host shows its own word for it.
+       * Absent when the label names the action ("Move to Trash").
+       */
+      approveLabelCode: z.enum(["approve_action", "allow"]).optional(),
       availableActions: z.array(z.enum(["approve", "reject"])),
       /**
        * Who alone can approve this waiting action, when not everyone who can

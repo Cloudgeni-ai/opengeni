@@ -84,14 +84,17 @@ export {
   type UseNativeSessionRealtimeOptions,
 } from "./realtime/use-native-session-realtime";
 export {
+  nativeCallHandle,
   nativeRealtimeModelSupported,
   useNativeRealtimeCall,
   type NativeCallAdapter,
   type NativeCallAudioRoute,
+  type NativeCallCommand,
   type NativeCallEvent,
   type NativeCallPhase,
   type NativeCallRealtime,
   type NativeCallRouteChangeReason,
+  type NativeCallStartRequest,
   type NativeIncomingCall,
   type NativeIncomingCallAdapter,
   type NativeIncomingCallEndReason,
@@ -103,6 +106,12 @@ export {
   useNativeVoipToken,
   type IncomingAgentCallsOptions,
 } from "./realtime/incoming-agent-calls";
+export {
+  DEFAULT_FULL_SCREEN_RING_MESSAGES,
+  useFullScreenRings,
+  type FullScreenRingMessages,
+  type FullScreenRings,
+} from "./realtime/full-screen-rings";
 export {
   DEFAULT_OPENGENI_NATIVE_CALL_LABELS,
   OpenGeniNativeCallView,

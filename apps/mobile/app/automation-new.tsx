@@ -19,6 +19,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { rememberPendingPrompt } from "@/pending-prompt";
 import { rememberSessionRow } from "@/session-list-cache";
@@ -37,6 +38,10 @@ export default function NewAutomationScreen() {
 
 function NewAutomation() {
   const theme = useNativeTimelineTheme();
+  // iOS shows this as a page sheet below the status bar; Android shows it
+  // full screen, edge to edge, so its header clears the status bar itself.
+  const insets = useSafeAreaInsets();
+  const statusBar = Platform.OS === "android" ? insets.top : 0;
   const c = theme.colors;
   const { client, workspaceId } = useAccount();
   const [request, setRequest] = useState("");
@@ -94,7 +99,7 @@ function NewAutomation() {
           alignItems: "center",
           justifyContent: "space-between",
           paddingHorizontal: 16,
-          paddingTop: 14,
+          paddingTop: 14 + statusBar,
           paddingBottom: 10,
         }}
       >

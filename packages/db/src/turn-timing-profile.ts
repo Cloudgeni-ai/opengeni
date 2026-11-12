@@ -11,7 +11,7 @@ import { agentToolCallOutcome, agentToolMetricFamily } from "@opengeni/observabi
  * Bump the version whenever the attribution rules change; stored profiles keep
  * the version that computed them.
  */
-export const TURN_TIMING_PROFILE_VERSION = 1;
+export const TURN_TIMING_PROFILE_VERSION = 2;
 
 /**
  * Exclusive wall-time categories. Every millisecond between the turn's
@@ -28,6 +28,8 @@ export const TURN_TIMING_PROFILE_VERSION = 1;
  * - model_unsplit: a successful model request whose provider reports no
  *   server timing.
  * - model_stalled: a model request that failed, timed out or never finished.
+ * - compaction: compacting the conversation's context inside the turn, from
+ *   its start until it was compacted or skipped, including its own model call.
  * - web_search: hosted web search inside a model request, and web tools.
  * - mcp_tool: tools served by a remote MCP server (custom or integration).
  * - sandbox_tool: shell, patch and code-mode tools that run in the sandbox.
@@ -49,6 +51,7 @@ export const TURN_TIMING_CATEGORIES = [
   "model_network",
   "model_unsplit",
   "model_stalled",
+  "compaction",
   "web_search",
   "mcp_tool",
   "sandbox_tool",
@@ -93,6 +96,7 @@ export type TurnTimingStepKind =
   | "tool"
   | "web_search"
   | "sandbox"
+  | "compaction"
   | "human_wait"
   | "capacity_wait";
 
@@ -150,6 +154,9 @@ export const TURN_TIMING_EVENT_TYPES = [
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "session.context.compaction.started",
+  "session.context.compacted",
+  "session.context.compaction.skipped",
   "session.requiresAction",
   "user.approvalDecision",
   "session.humanInput.requested",
@@ -170,8 +177,11 @@ const FIRST_PARTY_PREFIX = /^(?:opengeni|interaction)__/;
 
 // Higher wins where intervals overlap. Equal ranks share the time equally.
 const RANK = {
-  wait: 6,
-  hostedSearch: 5,
+  wait: 7,
+  hostedSearch: 6,
+  // A compaction owns its whole interval, its own model call included: not
+  // every provider path audits that call as a model request.
+  compaction: 5,
   model: 4,
   sandbox: 3,
   tool: 2,
@@ -694,6 +704,46 @@ export function computeTurnTimingProfile(input: {
   }
   for (const started of openSandbox.values()) {
     closeSandbox(started, fallbackEnd(started.attemptId), "incomplete");
+  }
+
+  // Context compactions inside the turn, from their start until the context
+  // was compacted or the compaction was skipped (or the attempt ended).
+  const openCompaction = new Map<string, TurnTimingEvent>();
+  const closeCompaction = (started: TurnTimingEvent, end: number, outcome: string) => {
+    const start = started.occurredAt.getTime();
+    const trigger = text(started.payload.trigger);
+    add(
+      start,
+      end,
+      RANK.compaction,
+      { compaction: 1 },
+      "model",
+      step("compaction", start, end, {
+        category: "compaction",
+        outcome,
+        ...(trigger ? { name: trigger } : {}),
+        ...(started.attemptId ? { attemptId: started.attemptId } : {}),
+      }),
+    );
+  };
+  for (const event of events) {
+    if (!event.type.startsWith("session.context.compact")) continue;
+    const key = event.attemptId ?? "";
+    if (event.type === "session.context.compaction.started") {
+      if (!openCompaction.has(key)) openCompaction.set(key, event);
+      continue;
+    }
+    const started = openCompaction.get(key);
+    if (!started) continue;
+    openCompaction.delete(key);
+    closeCompaction(
+      started,
+      event.occurredAt.getTime(),
+      event.type === "session.context.compacted" ? "completed" : "skipped",
+    );
+  }
+  for (const started of openCompaction.values()) {
+    closeCompaction(started, fallbackEnd(started.attemptId), "incomplete");
   }
 
   // Waits for a person and for provider capacity: from the request to the

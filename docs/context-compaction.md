@@ -267,14 +267,17 @@ also discards every later thinking block) and keeps requests valid where
 block records the binding it was issued under: the platform and account, the
 model and, for prefix-bound models, a digest of the system prompt (which a
 session can change between turns, for example when a turn adds a repository
-Skill). A request under another binding replays the block as readable
-historical reasoning text; canonical history keeps the signed block, so a switch
-back replays it natively. This works on every Claude transport, including
+Skill). A request under another binding leaves the block out, as Claude itself
+does with a block whose binding no longer matches; canonical history keeps the
+signed block, so a switch back replays it natively. Claude's own thinking is
+never resent as readable assistant text: shown back to Claude that way it can
+trip Claude's safety systems, which then refuse the request and every retry of
+it. This works on every Claude transport, including
 gateways that do not forward the binding beta. Blocks stored before bindings
 were recorded stay native until Claude refuses them. A refused replay never
 fails the turn: the request is sent once more with the blocks the refusal
 concerns (those with no recorded binding, the one it names and every signed
-block after it) as text, and
+block after it) left out, and
 those are remembered per provider in the worker process (a process-local memory
 shared by the provider's sessions). If Claude refuses that too, the request is
 sent with plain history, with no thinking blocks, encrypted search results or

@@ -44,22 +44,21 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   private var provider: CXProvider?
   private var activeCalls = Set<UUID>()
   private var incoming: [UUID: IncomingCall] = [:]
-  private var pendingStart: [String: Any]?
+  /// The latest start request from outside the app, until JavaScript takes it.
+  private var pendingStart: (event: [String: Any], at: Date)?
+  /// A request nobody took this long after it was made is stale: starting it
+  /// later (say, after signing in) would surprise the person.
+  private static let startRequestLifetime: TimeInterval = 60
   private var routeObserver: NSObjectProtocol?
   /// Loudspeaker or receiver for the current call. Every call starts on the
   /// loudspeaker; the person's choice during it replaces that.
   private var speaker = true
   private(set) var voipToken: String?
 
-  /// Set while JavaScript observes events; nil otherwise.
-  var emit: (([String: Any]) -> Void)? {
-    didSet {
-      if emit != nil, let pending = pendingStart {
-        pendingStart = nil
-        emit?(pending)
-      }
-    }
-  }
+  /// Set while JavaScript observes events; nil otherwise. A start request
+  /// waits until JavaScript takes it (`takePendingStart`), since observing
+  /// events does not mean the code that starts calls listens yet.
+  var emit: (([String: Any]) -> Void)?
 
   func configure(includeInRecents: Bool) {
     let configuration = CXProviderConfiguration()
@@ -171,19 +170,43 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
 
   // MARK: Start requests from outside the app
 
-  func requestStart(target: String?) {
-    let event: [String: Any] = ["type": "startRequested", "target": target ?? NSNull()]
-    if let emit {
-      emit(event)
+  /// Keep the request for JavaScript to take, and tell it one is waiting.
+  func requestStart(target: String?, workspaceId: String?) {
+    let event: [String: Any] = [
+      "type": "startRequested", "target": target ?? NSNull(),
+      "workspaceId": (target == nil ? nil : workspaceId) ?? NSNull(),
+      "requestId": UUID().uuidString.lowercased(),
+    ]
+    pendingStart = (event, Date())
+    emit?(event)
+  }
+
+  /// A start request from a system call handle: "opengeni" is the default call,
+  /// "<workspace>/<session>" a session in its workspace, and anything else a
+  /// session alone (handles recorded before they named the workspace).
+  func requestStart(handle: String?) {
+    guard let handle, !handle.isEmpty, handle != "opengeni" else {
+      return requestStart(target: nil, workspaceId: nil)
+    }
+    let parts = handle.split(separator: "/", maxSplits: 1).map(String.init)
+    if parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty {
+      requestStart(target: parts[1], workspaceId: parts[0])
     } else {
-      pendingStart = event
+      requestStart(target: handle, workspaceId: nil)
     }
   }
 
+  /// The waiting start request, once; nil when there is none or it went stale.
   func takePendingStart() -> [String: Any]? {
     defer { pendingStart = nil }
-    guard let pending = pendingStart else { return nil }
-    return ["target": pending["target"] ?? NSNull()]
+    guard let pending = pendingStart,
+      Date().timeIntervalSince(pending.at) < Self.startRequestLifetime
+    else { return nil }
+    let event = pending.event
+    return [
+      "target": event["target"] ?? NSNull(), "workspaceId": event["workspaceId"] ?? NSNull(),
+      "requestId": event["requestId"] ?? NSNull(),
+    ]
   }
 
   // MARK: Incoming agent calls
@@ -218,7 +241,10 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
       state: "ringing")
     let update = CXCallUpdate()
     // Calling back from the Phone app's recents returns to the same chat.
-    update.remoteHandle = CXHandle(type: .generic, value: sessionId.isEmpty ? "opengeni" : sessionId)
+    update.remoteHandle = CXHandle(
+      type: .generic,
+      value: sessionId.isEmpty
+        ? "opengeni" : call.workspaceId.isEmpty ? sessionId : "\(call.workspaceId)/\(sessionId)")
     // The ring screen says why the agent calls; the app name shows beneath it.
     update.localizedCallerName = call.reason ?? call.title ?? "Your agent"
     update.hasVideo = false

@@ -80,16 +80,12 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -98,11 +94,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -414,7 +424,11 @@ jobs:
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+          # The exact runtime inputs were downloaded above; missing inputs must
+          # fail the candidate instead of shipping an image without the runtime.
+          build-args: |
+            OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+            OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
           labels: |
             org.opencontainers.image.revision=${{ inputs.source_sha }}
@@ -541,7 +555,11 @@ jobs:
           file: docker/desktop.Dockerfile
           platforms: linux/amd64
           push: true
-          build-args: OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+          # The exact runtime inputs were downloaded above; missing inputs must
+          # fail the candidate instead of shipping an image without the runtime.
+          build-args: |
+            OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
+            OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}
           labels: |
             org.opencontainers.image.revision=${{ inputs.source_sha }}

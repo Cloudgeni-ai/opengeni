@@ -89,10 +89,19 @@ test("expected tool waits and retained interactions do not page; failed and unce
     };
   });
   const faultCases = [
-    { outcome: "timeout", failed: 15, success: 45, rule: failure, value: 0.25 },
-    { outcome: "outcome_uncertain", failed: 1, success: 99, rule: uncertain, value: 5 },
-  ].map(({ outcome, failed, success, rule, value }) => ({
-    name: `actionable ${outcome} still alerts`,
+    { outcome: "timeout", failed: 15, success: 45, rejected: 0, rule: failure, value: 0.25 },
+    // Refused arguments neither page nor dilute real failures.
+    { outcome: "timeout", failed: 15, success: 45, rejected: 300, rule: failure, value: 0.25 },
+    {
+      outcome: "outcome_uncertain",
+      failed: 1,
+      success: 99,
+      rejected: 0,
+      rule: uncertain,
+      value: 5,
+    },
+  ].map(({ outcome, failed, success, rejected, rule, value }) => ({
+    name: `actionable ${outcome} still alerts${rejected ? " beside argument rejections" : ""}`,
     interval: "1m",
     input_series: [
       {
@@ -102,6 +111,10 @@ test("expected tool waits and retained interactions do not page; failed and unce
       {
         series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="success"}`,
         values: `0+${success}x30`,
+      },
+      {
+        series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="rejected"}`,
+        values: `0+${rejected}x30`,
       },
     ],
     alert_rule_test: [
@@ -117,6 +130,23 @@ test("expected tool waits and retained interactions do not page; failed and unce
       },
     ],
   }));
+  // A tool refusing the agent's own arguments is the caller's mistake, not a
+  // tool failure: even when most calls are refused, nothing pages.
+  const rejectedCase = {
+    name: "argument rejections do not page",
+    interval: "1m",
+    input_series: [
+      {
+        series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="rejected"}`,
+        values: "0+30x30",
+      },
+      {
+        series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="success"}`,
+        values: "0+10x30",
+      },
+    ],
+    promql_expr_test: [{ expr: 'ALERTS{alertstate="firing"}', eval_time: "20m", exp_samples: [] }],
+  };
   const directory = mkdtempSync(join(tmpdir(), "mcp-actionable-alert-"));
   try {
     writeFileSync(
@@ -142,7 +172,7 @@ test("expected tool waits and retained interactions do not page; failed and unce
       Bun.YAML.stringify({
         rule_files: ["rules.yaml"],
         evaluation_interval: "30s",
-        tests: [...cases, ...faultCases],
+        tests: [...cases, ...faultCases, rejectedCase],
       }),
     );
     const result = Bun.spawnSync([promtool, "test", "rules", "tests.yaml"], { cwd: directory });

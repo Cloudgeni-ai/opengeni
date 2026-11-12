@@ -835,7 +835,12 @@ GitHub's Options block includes the attempt-frozen action approval policy for
 each available acting identity. `Create and update work`, `Submit reviews`, and
 `Merge pull requests` each select Ask every time, Allow, or Block. They are
 separate so autonomous pull-request creation never implies autonomous review or
-merge. The stock UI reads and writes the public GitHub action-policy endpoints;
+merge. Your GitHub also has `Settings and deletions` (API group `sensitive`,
+default Ask): what agents do with `gh` and Git that is hard to undo, such as
+repository settings, secrets, environments, deletions and tag or
+default-branch changes (see [`personal-github.md`](personal-github.md)). The
+workspace app has no such group, and setting it for the app is a 400. The
+stock UI reads and writes the public GitHub action-policy endpoints;
 it does not mutate connector-policy rows directly.
 
 - Connections, Skills, and Plugins share `CapabilityCatalogRow` from
@@ -1042,6 +1047,20 @@ a shared chat a teammate connects their own account, and the agent continues
 only for the person whose request it was. When Microsoft reports that an
 administrator must approve the app, the card shows the administrator approval
 link with a copy button and a **Try again** action.
+`ConnectPanel` shows the same help, including when the person left Microsoft's
+"Need admin approval" page with Cancel: the attempt then ends `cancelled` with
+the approval link stored in its error. A plain cancel that stores no link
+closes quietly.
+
+A sign-in popup started with `finishInPopup` ends on
+`/v1/integrations/connect/finished`, a small page that closes itself, and an
+administrator who opens the approval link lands on a short result page. The
+API renders both outside any app, so set their wording in the deployment's
+language with `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON`, for example
+`{"lang":"nb","signInFinishedTitle":"Du kan lukke dette vinduet","adminApprovedTitle":"Godkjent"}`.
+The fields are `lang`, `signInFinishedTitle`, `signInFinishedBody`,
+`adminApprovedTitle`, `adminApprovedBody`, `adminNotApprovedTitle`,
+`adminNotApprovedBody` and `closeWindow`. Any field left out stays in English.
 
 Installing a reviewed definition's tools for your own personal account counts
 as connecting your own account, so it needs only `connections:personal`

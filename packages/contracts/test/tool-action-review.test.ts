@@ -23,6 +23,21 @@ test("Gmail review counts exact unique IDs and exposes every label effect", () =
   ).toBeUndefined();
 });
 
+test("only the plain approve word carries a code a host can replace", () => {
+  expect(toolReviewAction("create_event", {}, { kind: "generic" })).toMatchObject({
+    approveLabel: "Approve action",
+    approveLabelCode: "approve_action",
+  });
+  expect(toolReviewAction("admin_action_call", {})).toMatchObject({
+    approveLabel: "Allow",
+    approveLabelCode: "allow",
+  });
+  // A label that names the action stays as it is.
+  expect(
+    toolReviewAction("trash_message", { messageId: "one" }, { kind: "gmail" }).approveLabelCode,
+  ).toBeUndefined();
+});
+
 test("generic review decodes once, bounds arrays and redacts nested credentials", () => {
   const args = {
     recipients: Array.from({ length: 600 }, (_, i) => `recipient-${i}@example.test`),

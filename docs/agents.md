@@ -3,9 +3,12 @@
 An agent is one channel-independent record that replaces two older concepts:
 [Slack agents](slack-bot.md#slack-agents) and [bot templates](bots.md#bot-templates).
 It has a name, an icon, a description, Instructions (the one text saying
-what it does and how), Memory, a home workspace (where its chats run) and a visibility: Only me
-(`private`) or the home workspace (`workspace`). Slack is one place an agent can
-be available, per connected Slack installation.
+what it does and how), Memory, a home workspace (where its chats run) and a
+visibility: Only me (`private`) or the home workspace (`workspace`). An agent
+works wherever its workspace is connected: a shared agent is available in the
+app and in every Slack workspace linked to its home workspace, with no
+separate step, and who can use it there is still its own access
+([Available everywhere](#available-everywhere)).
 
 The change ships as expand, migrate and contract releases
 ([migrations-expand-contract.md](migrations-expand-contract.md)). The API now
@@ -121,8 +124,9 @@ path is the agent's home.
 | `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin (a workspace API key without a person counts as an admin, as for bot templates) |
 | `GET /agents/:id/revisions?cursor&limit` | `sessions:read` |
 | `GET /agents/:id/chats?filter=yours\|everyone&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner |
-| `GET /agents/:id/slack` | `sessions:read` |
-| `PUT` and `DELETE /agents/:id/slack/:connectionId` | `workspace:admin`; turning `open` on also needs an organization admin |
+| `GET /agents/:id/slack` | `sessions:read`; also catches the agent up in the linked Slack workspaces |
+| `PUT /agents/:id/slack/:connectionId` (open use) | `workspace:admin`; turning `open` on also needs an organization admin |
+| `DELETE /agents/:id/slack/:connectionId` | always `409 agent_slack_always_available`: there is nothing to turn off |
 | `GET /agents/:id/slack/:connectionId/channels`, `POST .../intro` | `workspace:admin` |
 
 - Limits: name 1 to 120 characters, description up to 280, Instructions up
@@ -130,25 +134,76 @@ path is the agent's home.
   messages); refusals carry `error.details.code` from `AGENT_ERROR_CODES`.
 - Every change to Instructions adds a revision recording
   who made it; name and description changes are stored with the next one.
-  Every change bumps `version`, including turning Slack on or off; recording
-  the Memory collection once it exists does not.
-- Slack needs a shared (`workspace`) agent outside a personal workspace. The
-  Slack name rules are checked only when Slack is turned on (and on a rename
-  while it is on). On a clash the agent already in Slack keeps its name and the
-  other is refused (`agent_slack_name_taken`); agents are never merged.
+  Every change bumps `version`, including Slack availability a person
+  changes; Opengeni adding the agent to Slack on its own, and recording the
+  Memory collection once it exists, do not.
+- Slack needs a shared (`workspace`) agent outside a personal workspace. When
+  a shared agent is created, renamed or shared, its name is checked against
+  every linked Slack workspace: a name Slack can't use is refused
+  (`agent_slack_name_invalid`, 422) and so is a name another agent there
+  answers to (`agent_slack_name_taken`, 409, with `connectionId` and
+  `slackTeamName`); agents are never merged. A kept name is never rechecked, so
+  older agents still save.
 - For now an agent is available in at most one Slack installation
   (`agent_slack_single_install`), because `slack_agents.id` is the agent's id
-  and `slack_channel_routes` still points at `slack_agents`.
-- Turning Slack off deletes the legacy row, and with it the agent's channel
+  and `slack_channel_routes` still points at `slack_agents`. It goes to its
+  own workspace's Slack apps first, then those its organization shares, each
+  by Slack workspace name. `PUT /agents/:id/slack/:connectionId` on another
+  linked installation moves it there (Move here on its page), which resets
+  its channel settings there.
+- Leaving Slack (an agent made Only me) deletes the legacy row, and with it the agent's channel
   routes, intro records and update settings in that installation; its older
   Slack threads lose their link to the agent
   (`slack_interactions.slack_agent_id` is set to null), so they no longer
-  resolve to it if Slack is turned on again.
-- The visibility rule is checked again under the agent's row lock, so an
-  agent can never be Only me and in Slack at once.
+  resolve to it once it is shared again.
+- Making an agent Only me takes it out of every Slack workspace in the same
+  transaction, under the agent's row lock (exactly like turning Slack off
+  used to), so an agent can never be Only me and in Slack at once. Sharing it
+  again makes it available again.
 - `PUT /agents/:id/slack/:connectionId` takes the availability's own
   `expectedVersion`; a conflict reports that version as
-  `details.currentVersion`.
+  `details.currentVersion`. Each row of `GET /agents/:id/slack` has
+  `availability`, or `unavailable` with the `AGENT_ERROR_CODES` value saying
+  why not (Only me, personal workspace, the name, or one Slack workspace for
+  now).
+
+### Available everywhere
+
+A shared agent outside a personal workspace is available in every Slack
+workspace linked to its home workspace: each active Opengeni Slack app
+installed there or shared with it by the organization
+(`availableSlackBotConnectionMetadata`) with an active installation binding.
+Availability is still one `agent_slack_installs` row (plus the legacy row)
+per agent and installation, because threads, channel settings and intros hang
+off it; `apps/api/src/integrations/agent-slack-availability.ts` keeps the rows
+in step:
+
+- at once, when an agent is created or changed through `/agents`,
+  `bot_template_save` or the older `/bot-templates` API, so the reply and the
+  next Slack message already see it. The organization's older agents not in
+  Slack yet are placed first, oldest first, so a new name never takes theirs;
+- when a Slack installation reads its agents for routing
+  (`loadSlackAgentsForConnection`), for every shared agent of the workspaces
+  it is linked to that it is missing: agents that existed before, agents a
+  compatibility path or an older release made, and Slack workspaces connected
+  later. That is one read when nothing is missing and runs at most once a
+  minute per installation and process. When two such agents share a name,
+  the older one gets it;
+- when the agent's Slack rows are read (`GET /agents/:id/slack`).
+
+An agent whose name Slack can't use, or that another agent there already
+answers to, stays out of that Slack workspace and its page says why. Nobody
+turns availability on or off; any member who may make a shared agent
+(`sessions:create`) makes one people can ask in every linked Slack workspace,
+including Slack apps the organization shares. Before, that took a workspace
+admin. The older `/bot-templates` API still accepts names Slack can't use or
+that clash; such an agent stays out of Slack and its page says why. Who may use it there is unchanged: members of its
+workspace, or linked organization members while it is open (an organization
+admin's switch). No migration: these are the rows turning Slack on always
+wrote, and an older release reads them as turned on. During a rolling deploy,
+servers on the previous release still refuse Only me for an agent in Slack
+and show the old switch, which can turn Slack off; a server on this release
+adds the agent back within a minute.
 - Memory (`memoryEnabled`) creates the collection when switched on: workspace
   scope for a shared agent, the owner's personal scope for an Only me one. It
   is best effort and may wait for review under Review-first.
@@ -291,7 +346,12 @@ is migrated and the column stays:
   with standing `instructions` (the older `firstMessage` and
   `setupInstructions` arguments join them), shared like the chat it was made
   from, with Memory on and its collection saved by the chat's live turn (under
-  that chat's Agent learning).
+  that chat's Agent learning). Its result's `memory` says whether that
+  collection is `ready`, `pending_review`, `learning_off` or `not_saved`.
+- `bot_template_save` checks a shared agent's name against the linked Slack
+  workspaces like `POST /agents`, makes it available there, and returns
+  `slack: [{ slackWorkspace, ask, where }]` (`ask` is, for example, `@Opengeni
+  Staging Growth analyst`), so the chat can tell the person how to ask it.
 - Slack agents are the agents available in that installation. Deleting one
   through the old endpoint deletes the agent.
 
@@ -319,12 +379,14 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   file with its name, icon, description, Instructions and Memory switch; no
   ids, chats, Memory contents or Slack; an older file's First message joins
   the Instructions on import), its chats (Yours / Everyone's, each marked with
-  where it started), Instructions, **Remember across chats**, who can use it, and **Available in**: the app
-  always, and one row per connected Slack workspace (`@Opengeni +handle`, open
-  use, **Introduce in channels** at `/agents/:agentId/introduce/:connectionId`).
-  While an agent is on in one Slack workspace, the others' switches are off
-  with a reason (`agent_slack_single_install`). Controls follow the agent's
-  `viewer` access.
+  where it started), Instructions, **Remember across chats**, who can use it,
+  and **Available in**: the app always, and one row per linked Slack workspace
+  with no switch: how people ask it (`@Opengeni <Name>`), open use and
+  **Introduce in channels** at `/agents/:agentId/introduce/:connectionId`, or
+  why it isn't there (Only me, its name, or "for now an agent works in one
+  Slack workspace", with **Move here** for those who manage it). Controls
+  follow the agent's `viewer` access. Choosing Only me in the form says it
+  stops answering in Slack; a Slack name refusal shows at the name.
 - Form: icon, name, what it helps with, Instructions, **Remember across
   chats** (a switch, on for a new agent) and who can use it. Only the name is
   required. Lengths are checked on save with a count

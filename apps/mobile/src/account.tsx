@@ -19,6 +19,7 @@ import {
   type OpenGeniReactNativeAdapters,
 } from "@opengeni/react-native";
 import { createExpoOpenGeniAdapters, expoStreamingFetch } from "@opengeni/react-native/expo";
+import { forgetAccountRecordings, prepareAccountRecordingsForSignOut } from "@/sign-out-recordings";
 import {
   createContext,
   type ReactNode,
@@ -44,6 +45,7 @@ import {
 import { planAccountPick, wayBackWhenLeaving } from "@/account-switching";
 import { openLinkFromApp } from "@/app-link-registry";
 import { recordingRequests } from "@/feedback/recent-errors";
+import { forgetVoiceCommands } from "@/voice-commands";
 import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
 
 /** The deployment a new account signs in to unless the person names another. */
@@ -93,7 +95,12 @@ interface AccountState {
    * in use ("ready"); a missing one marks it signed out ("signIn").
    */
   retrySignIn(id: string): Promise<"ready" | "signIn" | "unreadable">;
-  signOut(id: string): Promise<void>;
+  /**
+   * Sign an account out of this device. Recordings it has not uploaded yet are
+   * asked about first (`askAboutRecordings`, on by default): false when the
+   * person chose to wait for the upload, so the account stays signed in.
+   */
+  signOut(id: string, options?: { askAboutRecordings?: boolean }): Promise<boolean>;
 }
 
 const AccountContext = createContext<AccountState | null>(null);
@@ -469,10 +476,15 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(
-    async (id: string) => {
+    async (id: string, options: { askAboutRecordings?: boolean } = {}) => {
+      if (!snapshotRef.current?.accounts.some((each) => each.id === id)) return true;
+      // Recordings still uploading: wait for them, or discard them first.
+      if (!(await prepareAccountRecordingsForSignOut(id, options.askAboutRecordings !== false))) {
+        return false;
+      }
       const current = snapshotRef.current;
       const target = current?.accounts.find((each) => each.id === id);
-      if (!current || !target) return;
+      if (!current || !target) return true;
       const stored = await readAccountToken(id);
       if (stored) {
         // Revoke on the server first; the device forgets the account either way.
@@ -485,6 +497,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         console.warn("Native sign-out: no stored credential for the account");
       }
       await forgetAccountToken(id);
+      // Its voice commands leave Siri and the launcher with it.
+      await forgetVoiceCommands(id);
       supersedeReads(id);
       noteRead(id, false);
       // Other writers (the launch check) may have saved meanwhile.
@@ -494,6 +508,9 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         accounts,
         activeId: latest.activeId === id ? (accounts[0]?.id ?? null) : latest.activeId,
       });
+      // Nothing of theirs stays here, not even what a capture half-wrote.
+      forgetAccountRecordings(id);
+      return true;
     },
     [noteRead, persist, supersedeReads],
   );

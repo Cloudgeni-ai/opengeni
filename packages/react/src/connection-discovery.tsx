@@ -24,6 +24,8 @@ export type ConnectionDiscoveryProps = {
   controller?: ConnectController | undefined;
   workspaceId: string;
   returnUrl: string;
+  /** Sign-in runs in a popup: it ends on a page that closes the popup. */
+  finishInPopup?: boolean;
   onConfigured?: (() => void | Promise<void>) | undefined;
 };
 
@@ -44,6 +46,7 @@ function ScopedDiscovery({
   controller,
   workspaceId,
   returnUrl,
+  finishInPopup = false,
   onConfigured,
 }: ConnectionDiscoveryProps) {
   const t = useOpenGeniText();
@@ -171,6 +174,7 @@ function ScopedDiscovery({
           providerOnly
           initialProviderId={selectedProvider.id}
           personalOnly={alone}
+          finishInPopup={finishInPopup}
         />
       </section>
     );

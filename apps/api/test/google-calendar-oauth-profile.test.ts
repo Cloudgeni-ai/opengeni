@@ -89,6 +89,7 @@ describe("Google Calendar REST OAuth profile", () => {
     expect(profile.reconnectLoginHint).toEqual({
       metadataKey: "googleCalendarEmail",
       prompt: "consent",
+      accountIdKey: "googleSubject",
     });
   });
 

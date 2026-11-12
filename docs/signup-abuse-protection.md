@@ -168,6 +168,8 @@ bun scripts/operator/promotion-decisions.ts --network-velocity-set --exact-thres
   --operator <operator-id> --reason 'Reset thresholds to defaults'
 # Review pending detector holds of this rule, per account and per network group
 bun scripts/operator/promotion-decisions.ts --network-holds --limit 200
+# Capture denied and held owners' sign-in networks again (safe to repeat)
+bun scripts/operator/promotion-decisions.ts --network-capture-flagged
 # Release or deny one account (existing revision-fenced decision path)
 bun scripts/operator/promotion-decisions.ts --account <uuid> --decision eligible \
   --revision <current-revision> --operator <operator-id> --reason 'Normal app use'
@@ -208,6 +210,89 @@ Set `--mode off` to stop new observations and holds. Release existing detector
 holds of this rule with `--network-release-holds`. Turn the rate limit off with
 `--rate-limit off`. The migration is additive; recorded sources and history stay
 for review.
+
+## Denied network
+
+`1368_signup_denied_network.sql` adds a third rule (`denied-network-v1`) for farms
+that come back in small waves: a few accounts after a quiet period on an address
+already used by denied accounts never reach the velocity threshold. It holds the
+Free credit of a new self-serve owner whose exact network (IPv4 address or IPv6
+/64) was used, in the 90 days up to their organization setup, by an account with
+a `denied` decision or a currently `held` account, even when it is the only
+signup from that network in the window. Real shared addresses (offices, carrier
+NAT) exist, so it holds for review rather than denying.
+Holds placed by this rule do not count as matches themselves, so a hold never
+spreads from one shared network to the next; once an operator denies such an
+account, its networks count.
+
+**Networks compared.** Two sources, each exact network only; /24 and /48
+prefixes never take part:
+
+- Signup: the API's address hash of 1354 (`signup_network_sources`) of the new
+  organization against those of denied or held accounts.
+- Sign-in: the networks of the new owner's sessions against those of the owners
+  of denied or held accounts. Better Auth already stores session addresses
+  (`auth_sessions.ip_address`); the database reduces each to its exact network and
+  keeps only an HMAC-SHA256 under a random per-schema key
+  (`opengeni_private.signup_network_session_keys`) that runtime roles cannot read.
+  The key is in the same database, so anyone with the database owner's access or
+  a full dump could recover IPv4 addresses by trying every address; the hashes
+  protect against runtime roles, logs and exports, not against the owner. Rows
+  live in
+  `opengeni_private.signup_network_owner_addresses` (account, keyed hash, first
+  and last sign-in); they hold no address or email. A session's use is its
+  creation (sign-in) time; refreshes do not extend it, since the stored address
+  is the sign-in address.
+
+The new owner's session networks are recorded at organization setup. When an
+account becomes `denied` or `held`, the decision setter captures its owner's
+session networks (newest 200 sessions in the last 90 days) and remembers the
+owner (`opengeni_private.signup_network_flagged_owners`), so the networks
+outlast the sessions. Sign-ins after the decision are captured when the capture
+runs again (`--network-capture-flagged`). Setup itself only writes the new
+account's own rows. `1369_signup_denied_network_backfill.sql`, in its own
+transaction so 1368's settings lock is not held meanwhile, captures every
+account already denied or held, account by account, including those decided
+before 1354; a failure is a migration warning with counts, and
+`--network-holds` reports `deniedNetworkCoverage` (denied or held accounts, how
+many owners are captured, how many have no self-serve owner to capture, and the
+oldest capture). Re-run the capture with `--network-capture-flagged`, for
+example daily while the rule is on, so that sign-ins after a decision are
+included. Only account owners are recorded: invited members
+are never recorded, counted or held. Released (`eligible`) accounts stop
+counting. Rows not used for 97 days are removed a few at a time.
+
+**Setting.** `deniedNetworkMode` in the 1354 settings (same owner-only,
+revision-fenced writes), default `off`, independent of the velocity `mode`:
+`observe` records a `denied-network-v1` observation with the matched denied and
+held account counts, how they matched (`signup`, `sign-in`), up to 20 matched
+account UUIDs and the last use time; `enforce` also holds as
+`service:promotion-detector`. Hold semantics are those of the velocity rule: the
+current account only, evaluated after setup and lazily at Free issuance and
+admission for seven days after setup; never over a manual decision or an operator
+release; failures are logged and skipped (fail open); capture and recording never
+fail setup. Sign-in, the app, purchased credit and paid allowances are unaffected
+and the console shows the held-credit notice with **Request review**.
+
+```sh
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --denied-network-mode observe \
+  --revision <current-revision> --operator <operator-id> --reason 'Observe denied networks'
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --denied-network-mode enforce \
+  --revision <current-revision> --operator <operator-id> --reason 'Hold signups from denied networks'
+# Review: --network-holds lists both rules; denied-network holds carry
+# reason "Network used in the last 90 days by a denied or currently held account"
+# and a deniedNetwork evidence block.
+bun scripts/operator/promotion-decisions.ts --network-holds --limit 200
+# Rollback of this rule only
+bun scripts/operator/promotion-decisions.ts --network-release-holds --rule denied-network-v1 \
+  --dry-run --operator <operator-id> --reason 'Roll back denied network holds'
+```
+
+Reviewers apply the rules above. A denied-network hold whose matches are only
+held accounts (no denied ones) or a single old sign-in deserves a closer look
+before denial. Rollback: `--denied-network-mode off`, then release with
+`--network-release-holds --rule denied-network-v1`. Without `--rule`,
+`--network-release-holds` releases the holds of both network rules.
 
 ## Funding and review
 

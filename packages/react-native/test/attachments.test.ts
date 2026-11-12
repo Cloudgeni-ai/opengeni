@@ -4,6 +4,9 @@ import type { FileAttachmentClientLike } from "@opengeni/react/session";
 import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "../src/adapters";
 import {
   addNativeFilesForGeneration,
+  NATIVE_ATTACHMENT_DIGEST_MAX_BYTES,
+  nativeAttachmentKind,
+  prepareNativeAttachmentData,
   prepareNativeAttachmentUpload,
   projectNativeAttachmentScopeState,
   runNativeAttachmentPicker,
@@ -208,6 +211,84 @@ describe("native attachment scope", () => {
     expect(remembered).toEqual(["file-1", "file-2"]);
     expect(appended).toEqual([["file-1", "file-2"]]);
     expect(uploads).toEqual([{ id: "file-1", generation: 4 }]);
+  });
+});
+
+describe("prepareNativeAttachmentData", () => {
+  const hashing: NativeCryptoAdapter = {
+    randomUUID: () => "uuid",
+    sha256Hex: async () => "c".repeat(64),
+  };
+  const streamedSource = (sizeBytes: number) => ({
+    sizeBytes,
+    send: async () => ({ status: 200 }),
+  });
+
+  test("a long video streams from disk without being read or hashed", async () => {
+    let reads = 0;
+    const streamed = streamedSource(NATIVE_ATTACHMENT_DIGEST_MAX_BYTES + 1);
+    const prepared = await prepareNativeAttachmentData(englishText, {
+      source: { ...source, kind: "video", contentType: "video/quicktime" },
+      files: {
+        ...fileAdapter(async () => {
+          reads += 1;
+          return new Uint8Array();
+        }),
+        uploadSource: () => streamed,
+      },
+      crypto: hashing,
+      onProgress: () => undefined,
+    });
+    expect(prepared).toEqual({ data: streamed, streamed: true });
+    expect(reads).toBe(0);
+  });
+
+  test("a photo still streams but keeps its digest", async () => {
+    const streamed = streamedSource(NATIVE_ATTACHMENT_DIGEST_MAX_BYTES);
+    const prepared = await prepareNativeAttachmentData(englishText, {
+      source,
+      files: { ...fileAdapter(async () => new Uint8Array([1])), uploadSource: () => streamed },
+      crypto: hashing,
+      onProgress: () => undefined,
+    });
+    expect(prepared).toEqual({ data: streamed, sha256: "c".repeat(64), streamed: true });
+  });
+
+  test("an adapter without streaming reads the file into memory as before", async () => {
+    const prepared = await prepareNativeAttachmentData(englishText, {
+      source,
+      files: fileAdapter(async () => new Uint8Array([1, 2, 3])),
+      crypto: hashing,
+      onProgress: () => undefined,
+    });
+    expect(prepared.streamed).toBe(false);
+    expect(prepared.sha256).toBe("c".repeat(64));
+    expect(new Uint8Array(prepared.data as ArrayBuffer)).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  test("a file the adapter cannot stream fails the attachment, not the composer", async () => {
+    await expect(
+      prepareNativeAttachmentData(englishText, {
+        source,
+        files: {
+          ...fileAdapter(async () => new Uint8Array()),
+          uploadSource: () => {
+            throw new Error("This file is no longer on the device. Attach it again.");
+          },
+        },
+        crypto: hashing,
+        onProgress: () => undefined,
+      }),
+    ).rejects.toThrow("This file is no longer on the device. Attach it again.");
+  });
+});
+
+describe("nativeAttachmentKind", () => {
+  test("photos, videos and everything else", () => {
+    expect(nativeAttachmentKind("image/heic")).toBe("image");
+    expect(nativeAttachmentKind("video/quicktime")).toBe("video");
+    expect(nativeAttachmentKind("VIDEO/MP4")).toBe("video");
+    expect(nativeAttachmentKind("application/pdf")).toBe("document");
   });
 });
 

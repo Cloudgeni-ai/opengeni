@@ -273,9 +273,15 @@ the cost with leaner platforms. Before you add or change this text:
 - Keep the cached prefix stable. Per-turn data, times and caller context go in
   the user message, never in instructions or tool definitions (see
   `AGENTS.md`).
-- Measure the change. Record the byte or token delta in
-  `agent-instructions/PROMPT_CHANGELOG.md`, keep the prompt budget and parity
-  tests green, and do not raise a budget without a reason stated in the PR.
+- Changes under the model request section of `.github/CODEOWNERS` (these
+  modules among them) land only with the maintainer's approval of the PR's
+  head. Open them as drafts with a plain risk note and never approve them
+  yourself (`AGENTS.md`, "Model request changes").
+- Measure the change. Record the byte or token delta in a new entry file,
+  `agent-instructions/prompt-changelog/<YYYY-MM-DD>-<slug>.md` (one file per
+  change, named by date and branch topic; see its `README.md`), keep the
+  prompt budget and parity tests green, and do not raise a budget without a
+  reason stated in the PR.
 - Shortening existing behavioural text needs before/after behaviour evidence,
   for example from `scripts/agent-behavior-eval`, because most of it guards a
   known failure. Omitting text for a feature that is switched off does not.
@@ -385,8 +391,9 @@ When working on file flows, trace the full path end to end:
 7. Any result/artifact flow, if present in current code.
 
 The current generic sandbox-output write-back is deliberately narrow: `sandbox_file_publish`
-and the matching session API publish one current non-empty `/workspace` file of at most
-`25 MiB - 1 byte` into a permanent, integrity-addressed workspace `files` artifact. The
+and the matching session API publish one current non-empty file the session's shell can read
+(path scope in docs/artifact-library.md) of at most `25 MiB - 1 byte` into a permanent,
+integrity-addressed workspace `files` artifact. The
 closed receipt exposes only authenticated retrieval metadata. A historical raw sandbox
 link may invoke that route when selected, but publication uses the file's current bytes and
 does not rewrite message/event history. Do not generalize this into automatic retention of

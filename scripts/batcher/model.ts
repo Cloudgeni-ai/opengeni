@@ -106,12 +106,18 @@ export interface Settings {
   maxBatch: number;
   /** A batch whose CI has not appeared after this long is rebuilt. */
   startTimeoutMs: number;
+  /**
+   * How many batches test at once: 2 builds the next batch on the running
+   * batch's candidate (see `Manifest.stackedOn`); 1 tests one at a time.
+   */
+  concurrentBatches: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   windowMs: 3 * 60_000,
   maxBatch: 12,
   startTimeoutMs: 10 * 60_000,
+  concurrentBatches: 2,
 };
 
 export interface QueuedPull {
@@ -123,10 +129,18 @@ export interface QueuedPull {
   /** When PR CI passed on this exact head, or null while it has not. */
   greenAt: number | null;
   /**
-   * Why the PR cannot land on main as it is (a Git conflict, a number main
-   * already uses, a Version PR whose PR CI failed), or null.
+   * Why the PR cannot land on main as it is and leaves the queue (a number
+   * main already uses, a Version PR whose PR CI failed), or null.
    */
   conflict: string | null;
+  /**
+   * It conflicts with main in a way only its author can settle. It keeps its
+   * place and label but is not batched until its branch merges main cleanly
+   * and PR CI passes on that head. `noted` once it was told so for this head.
+   * `recheck`: it is skipped only while it is in the running batch, whose
+   * branch must not move; once out of it, it is checked (and regenerated) again.
+   */
+  parked: { reason: string; noted: boolean; recheck?: true } | null;
   /**
    * Added files whose numbers main already uses, which the batcher moves to
    * free numbers on the PR's branch before testing it; empty when none.
@@ -134,7 +148,7 @@ export interface QueuedPull {
   renumber: string[];
   /**
    * It conflicts with main. The batcher merges main into its branch and
-   * regenerates the generated files that conflict, or ejects it when other
+   * regenerates the generated files that conflict, or parks it when other
    * files conflict too; it is not tested meanwhile.
    */
   regenerate: boolean;
@@ -150,6 +164,13 @@ export interface QueuedPull {
   /** A Version PR's head commit time (epoch ms): its notices are looked up from then. */
   headAt?: number;
   controlPlane: boolean;
+  /**
+   * It changes what Opengeni sends to model providers and the maintainer has
+   * not approved its current head (scripts/ci/model-request-review.ts). It is
+   * then never ready (`greenAt` is null), and a running batch that holds it
+   * is abandoned before it can land.
+   */
+  awaitingModelReview?: true;
 }
 
 export interface Member {
@@ -180,6 +201,14 @@ export interface Manifest {
    * after it is that group, so priority PRs and a bisection take turns.
    */
   aheadOfBisection?: true;
+  /**
+   * Built on batch `id`'s candidate while that batch was still testing. The
+   * first `count` members are that batch's own, which land with it: this
+   * batch lands only the members after them, and only once main is exactly
+   * those `count` members landed on `base`. Its CI tests them all together,
+   * so its receipt walks them all from `base` (scripts/ci/batch-receipt.ts).
+   */
+  stackedOn?: { id: string; count: number };
 }
 
 export interface BatchRun {
@@ -213,6 +242,11 @@ export interface Batch {
    * gives exactly the tree this batch tests: PR number to that new head.
    */
   sameTree?: Record<number, string>;
+  /**
+   * For a batch stacked on another: main is exactly that batch's members
+   * landed in order on this batch's base, with the trees CI tested.
+   */
+  parentLanded?: boolean;
 }
 
 export interface Observation {
@@ -229,6 +263,8 @@ export type Action =
       reason: string;
       /** The member whose new head or departure from the queue ended the batch. */
       changed?: number;
+      /** PRs of the batch built on this one, which were restarted with it. */
+      alsoRestarted?: number[];
     }
   | { kind: "retry"; batch: Batch; runs: BatchRun[] }
   | { kind: "land"; batch: Batch }
@@ -241,7 +277,15 @@ export type Action =
       pending: number[][];
       blame?: string[];
       aheadOfBisection?: true;
+      /** Build it on this running batch's candidate instead of on main. */
+      stackedOn?: Batch;
     }
+  /**
+   * A PR that conflicts with main keeps its label and is skipped until its
+   * branch merges main cleanly; it is told so once per head. One parked only
+   * while in the running batch is told without that, as it is checked again.
+   */
+  | { kind: "park"; number: number; headSha: string; reason: string; recheck?: true }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
   | {
       kind: "hold";
@@ -315,7 +359,7 @@ export function verdict(batch: Batch, now: number, settings: Settings): Verdict 
  */
 function repeatsBlame(batch: Batch, failed: BatchRun[]): boolean {
   const blame = new Set(batch.manifest.blame ?? []);
-  if (!blame.size || batch.manifest.members.length < 2) return false;
+  if (!blame.size || ownMembers(batch.manifest).length < 2) return false;
   return failed.every(
     (run) => !!run.failedJobs?.length && run.failedJobs.every((job) => blame.has(job)),
   );
@@ -340,11 +384,12 @@ export function readyAt(pull: QueuedPull): number {
  * once it is green and current with main, and nothing else builds before it
  * lands, so a release operator gets a stable main. Then priority PRs go
  * first, and ready PRs in queue order fill the rest of their batch, so
- * priority PRs that arrive one at a time do not each take a round alone; the
- * fill leaves out the PRs a failed batch's split still holds. While a failed
- * batch is being split, priority batches and its halves take turns: after a
- * priority batch went ahead of a half, that half goes next, so a steady stream
- * of priority PRs cannot hold a bisection back. Then ready PRs in queue order.
+ * priority PRs that arrive one at a time do not each take a round alone.
+ * While a failed batch is being split, a priority batch has no fill, and
+ * priority batches and its halves take turns: after a priority batch or a
+ * Version PR went ahead of a half, that half goes next, and the halves run
+ * oldest first, so neither a steady stream of priority PRs nor PRs queued
+ * later can hold a bisection back. Then ready PRs in queue order.
  * CI and batcher changes run alone; while a failed batch is being split, the
  * oldest one outside its halves takes turns with them when no priority PR
  * waits. A priority PR already in a failed batch's
@@ -373,7 +418,14 @@ export function nextBatch(
         };
 
   const ready = pulls
-    .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length && !p.regenerate)
+    .filter(
+      (p) =>
+        p.greenAt !== null &&
+        p.conflict === null &&
+        p.parked === null &&
+        !p.renumber.length &&
+        !p.regenerate,
+    )
     .sort(fifo);
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.controlPlane;
@@ -395,9 +447,11 @@ export function nextBatch(
     const first = urgent[0]!;
     if (alone(first)) return { kind: "build", members: [first], pending, ...ahead };
     // The oldest ready PRs fill the rest without waiting for the batching
-    // window, after the priority PRs. PRs a failed batch's split still holds
-    // stay out: their halves keep their own runs.
-    const fill = ready.filter((p) => !p.priority && !bisecting.has(p.number));
+    // window, after the priority PRs. While a failed batch is being split
+    // there is no fill: PRs queued after its halves would otherwise go ahead
+    // of them, and a larger batch ahead of a bisection is likelier to fail
+    // and add halves of its own.
+    const fill = pending.length ? [] : ready.filter((p) => !p.priority);
     const members = compatible(
       [...urgent, ...fill].filter((p) => !alone(p)),
       settings,
@@ -424,15 +478,11 @@ export function nextBatch(
       ...(blame.length ? { blame } : {}),
     };
 
-  // A half holding a priority PR runs before the other halves; the halves are
-  // independent, so their order only decides which PRs land sooner.
-  const holdsPriority = (group: number[]) =>
-    group.some((n) => ready.find((p) => p.number === n)?.priority);
-  const order = [
-    ...pending.flatMap((group, index) => (holdsPriority(group) ? [index] : [])),
-    ...pending.flatMap((group, index) => (holdsPriority(group) ? [] : [index])),
-  ];
-  for (const index of order) {
+  // The halves run in the order they were queued, oldest first. A split
+  // already puts a batch's priority PRs in its first half, so ordering by
+  // priority again here would only let newer halves, which many priority PRs
+  // start, go ahead of older ones indefinitely.
+  for (const index of pending.keys()) {
     const group = pending[index]!.map((n) => ready.find((p) => p.number === n)).filter(
       (p): p is QueuedPull => p !== undefined,
     );
@@ -518,9 +568,75 @@ function rejoined(pending: number[][], pull: (n: number) => QueuedPull | undefin
   return groups.map((g) => g.numbers);
 }
 
-/** The running batch: the newest one, as `decide` treats any others as extra. */
-export function runningBatch<T extends { createdAt: number }>(batches: T[]): T | undefined {
-  return [...batches].sort((a, b) => b.createdAt - a.createdAt)[0];
+/**
+ * The members a batch lands itself: without those of the batch it was
+ * stacked on, which land with that batch.
+ */
+export function ownMembers(manifest: Pick<Manifest, "members" | "stackedOn">): Member[] {
+  return manifest.members.slice(manifest.stackedOn?.count ?? 0);
+}
+
+/**
+ * The batch to build on the running batch's candidate while that one tests,
+ * so two batches test at once (see `Manifest.stackedOn`). Only an ordinary
+ * batch is built on: not a bisection's group, a batch ahead of one, a
+ * Version PR or a CI change, whose result decides what runs next.
+ * What goes on it is what would go next anyway, without the running batch's
+ * PRs and those adding a number one of them adds. A CI change or Version PR
+ * next in line waits for the running batch instead.
+ */
+export function stackOn(
+  front: Batch,
+  pulls: QueuedPull[],
+  byNumber: Map<number, QueuedPull>,
+  now: number,
+  settings: Settings,
+): Action | null {
+  if (settings.concurrentBatches < 2) return null;
+  const { manifest } = front;
+  const own = ownMembers(manifest);
+  if (manifest.pending.length || manifest.blame?.length || manifest.aheadOfBisection) return null;
+  if (own.some((m) => m.version || byNumber.get(m.number)?.controlPlane !== false)) return null;
+  const numbers = new Set(own.map((m) => m.number));
+  const taken = new Set(own.flatMap((m) => byNumber.get(m.number)?.slots ?? []));
+  const next = nextBatch(
+    pulls.filter(
+      (p) =>
+        p.conflict === null && !numbers.has(p.number) && !p.slots.some((slot) => taken.has(slot)),
+    ),
+    [],
+    now,
+    settings,
+  );
+  if (next?.kind === "wait") return next;
+  if (next?.kind !== "build" || next.members.some((p) => p.controlPlane || p.version)) return null;
+  return { ...next, pending: [], stackedOn: front };
+}
+
+/**
+ * The batches running now: the front one, which lands next, and the one
+ * stacked on its candidate, if any. Any others are extra and abandoned.
+ */
+export function runningBatches<T extends { createdAt: number; manifest: Manifest }>(
+  batches: T[],
+): { front?: T; stacked?: T; extras: T[] } {
+  // Commit dates have one-second resolution: of two built in the same
+  // second, the one built on another is the newer.
+  const sorted = [...batches].sort(
+    (a, b) =>
+      b.createdAt - a.createdAt || Number(!!b.manifest.stackedOn) - Number(!!a.manifest.stackedOn),
+  );
+  const newest = sorted[0];
+  const parent = newest?.manifest.stackedOn
+    ? sorted.find((b) => b !== newest && b.manifest.id === newest.manifest.stackedOn!.id)
+    : undefined;
+  const front = parent ?? newest;
+  const stacked = parent ? newest : undefined;
+  return {
+    ...(front ? { front } : {}),
+    ...(stacked ? { stacked } : {}),
+    extras: sorted.filter((b) => b !== front && b !== stacked),
+  };
 }
 
 /**
@@ -546,8 +662,8 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   let pulls = observation.pulls;
   let pending: number[][] = [];
   let blame: string[] = [];
-  // A finished priority batch that went ahead of a bisection hands the next
-  // turn to the bisection.
+  // A finished priority batch or Version PR that went ahead of a bisection
+  // hands the next turn to the bisection.
   let halvesFirst = false;
   const byNumber = new Map(pulls.map((p) => [p.number, p]));
 
@@ -558,7 +674,16 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         number: pull.number,
         reason: pull.conflict,
       });
-    else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
+    else if (pull.parked !== null) {
+      if (!pull.parked.noted)
+        actions.push({
+          kind: "park",
+          number: pull.number,
+          headSha: pull.headSha,
+          reason: pull.parked.reason,
+          ...(pull.parked.recheck ? { recheck: true as const } : {}),
+        });
+    } else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
     else if (pull.renumber.length)
       actions.push({
         kind: "renumber",
@@ -566,60 +691,142 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         paths: pull.renumber,
       });
 
-  const batch = runningBatch(observation.batches);
-  for (const extra of observation.batches.filter((b) => b !== batch))
+  const { front: batch, stacked, extras } = runningBatches(observation.batches);
+  for (const extra of extras)
     actions.push({
       kind: "abandon",
       batch: extra,
-      reason: "only one batch runs at a time",
+      reason: "only one batch runs at a time, and one built on it",
     });
+  // The batch built on the front one cannot land without it as tested.
+  const dropStacked = (reason: string) => {
+    if (stacked) actions.push({ kind: "abandon", batch: stacked, reason });
+  };
+  // While the front batch tests, judge the one built on it as far as it can
+  // be before the front one lands, or build one on it.
+  const ahead = (front: Batch): Action[] => {
+    if (stacked && settings.concurrentBatches < 2) {
+      actions.push({ kind: "abandon", batch: stacked, reason: "only one batch runs at a time" });
+      return actions;
+    }
+    if (stacked) {
+      const own = ownMembers(stacked.manifest);
+      const left = own.find(
+        (m) =>
+          byNumber.get(m.number)?.headSha !== (stacked.sameTree?.[m.number] ?? m.head) ||
+          byNumber.get(m.number)?.parked,
+      );
+      let reason: string | null = null;
+      if (stacked.manifest.base !== mainSha) reason = "main moved since the batch was built";
+      else if (left)
+        reason = !byNumber.has(left.number)
+          ? `#${left.number} left the queue`
+          : byNumber.get(left.number)!.parked
+            ? `#${left.number} conflicts with main`
+            : `#${left.number} has a new head`;
+      else {
+        const result = verdict(stacked, now, settings);
+        if (result.kind === "missing") reason = "its CI never started";
+        else {
+          // A result is judged once the front batch landed: a failure may be
+          // the front batch's.
+          if (result.kind === "retry")
+            actions.push({ kind: "retry", batch: stacked, runs: result.runs });
+          return actions;
+        }
+      }
+      actions.push({
+        kind: "abandon",
+        batch: stacked,
+        reason,
+        ...(left ? { changed: left.number } : {}),
+      });
+    }
+    const next = stackOn(front, pulls, byNumber, now, settings);
+    if (next) actions.push(next);
+    return actions;
+  };
 
   if (batch) {
     const { manifest } = batch;
-    const numbers = manifest.members.map((m) => m.number);
-    // An interrupted batch is tested again first, keeping any bisection.
-    pending = [numbers, ...manifest.pending];
+    const own = ownMembers(manifest);
+    const numbers = own.map((m) => m.number);
+    // An interrupted batch is tested again first, keeping any bisection. One
+    // that went ahead of a bisection is not one of its halves: its PRs go back
+    // to the queue, so they cannot become a half ahead of the older ones.
+    pending =
+      manifest.aheadOfBisection === true ? manifest.pending : [numbers, ...manifest.pending];
     blame = manifest.blame ?? [];
+    // A Version PR always builds ahead of any halves, as a priority batch can.
+    const wentAhead = manifest.aheadOfBisection === true || manifest.members[0]?.version === true;
     // A new head that tests to the same tree (main merged in again, a rebase)
-    // changes nothing this batch tests, so it does not restart it.
-    const left = manifest.members.find(
-      (m) => byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head),
+    // changes nothing this batch tests, so it does not restart it. A member
+    // that now conflicts with main is rebuilt out of it, though it stays queued.
+    const left = own.find(
+      (m) =>
+        byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head) ||
+        byNumber.get(m.number)?.parked,
     );
+    // A member whose model request approval is gone (dismissed, or revoked by
+    // a later review) must not land with the batch.
+    const unapproved = manifest.members.find((m) => byNumber.get(m.number)?.awaitingModelReview);
     // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
     let changed: number | undefined;
-    if (manifest.base !== mainSha) reason = "main moved since the batch was built";
+    // A batch built on another one stands on main only once that one landed:
+    // on its own base it lacks that one's PRs.
+    const onMain = manifest.stackedOn ? batch.parentLanded === true : manifest.base === mainSha;
+    if (!onMain)
+      reason = manifest.stackedOn
+        ? `the batch it was built on, \`${manifest.stackedOn.id}\`, did not land as tested`
+        : "main moved since the batch was built";
     else if (left) {
       changed = left.number;
-      reason = byNumber.has(left.number)
-        ? `#${left.number} has a new head`
-        : `#${left.number} left the queue`;
+      const current = byNumber.get(left.number);
+      reason = !current
+        ? `#${left.number} left the queue`
+        : current.parked
+          ? `#${left.number} conflicts with main`
+          : `#${left.number} has a new head`;
+    } else if (unapproved) {
+      changed = unapproved.number;
+      reason = `#${unapproved.number} needs the maintainer's approval of its model request changes on its head`;
     }
-    if (reason)
+    if (reason) {
       actions.push({
         kind: "abandon",
         batch,
         reason,
         ...(changed === undefined ? {} : { changed }),
+        ...(changed !== undefined && stacked
+          ? { alsoRestarted: ownMembers(stacked.manifest).map((m) => m.number) }
+          : {}),
       });
-    else {
+      dropStacked(`the batch it was built on, \`${manifest.id}\`, was cancelled`);
+    } else {
       const result = verdict(batch, now, settings);
-      if (result.kind === "running") return actions;
+      if (result.kind === "running") return ahead(batch);
       if (result.kind === "missing") {
         actions.push({
           kind: "abandon",
           batch,
           reason: "its CI never started",
         });
+        dropStacked(`the batch it was built on, \`${manifest.id}\`, never started CI`);
       } else if (result.kind === "retry") {
         actions.push({ kind: "retry", batch, runs: result.runs });
-        return actions;
+        return ahead(batch);
       } else if (result.kind === "passed") {
-        halvesFirst = manifest.aheadOfBisection === true;
+        halvesFirst = wentAhead;
         actions.push({ kind: "land", batch });
+        // The batch built on it is judged once it landed, in the next round.
+        if (stacked) return actions;
         const landed = new Set(numbers);
         pulls = pulls.filter((p) => !landed.has(p.number));
         pending = manifest.pending;
+      }
+      if (result.kind !== "failed") {
+        // It never started or it landed: nothing to split.
       } else {
         actions.push({
           kind: "abandon",
@@ -628,10 +835,11 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
             ? "its CI failed only in jobs the batch it was split from failed also after a retry, so it is split without another retry"
             : "its CI failed",
         });
+        dropStacked(`the batch it was built on, \`${manifest.id}\`, failed`);
         // What a batch built ahead of a bisection failed in says nothing about
         // the bisection's halves.
         if (manifest.aheadOfBisection !== true) blame = blamed(blame, result.runs);
-        halvesFirst = manifest.aheadOfBisection === true;
+        halvesFirst = wentAhead;
         if (numbers.length === 1) {
           const final = result.runs.find((r) => r.final);
           const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;
@@ -702,7 +910,8 @@ export function batchTitle(id: string, members: { number: number }[]): string {
 }
 
 export function renderManifest(manifest: Manifest): string {
-  return `${batchTitle(manifest.id, manifest.members)}\n\n${MANIFEST_TRAILER}${JSON.stringify(manifest)}\n`;
+  const on = manifest.stackedOn ? ` (on batch ${manifest.stackedOn.id})` : "";
+  return `${batchTitle(manifest.id, ownMembers(manifest))}${on}\n\n${MANIFEST_TRAILER}${JSON.stringify(manifest)}\n`;
 }
 
 export function parseManifest(message: string): Manifest | null {
@@ -728,7 +937,14 @@ export function parseManifest(message: string): Manifest | null {
       value.pending.some((g) => !Array.isArray(g) || g.some((n) => !Number.isSafeInteger(n))) ||
       (value.blame !== undefined &&
         (!Array.isArray(value.blame) || value.blame.some((job) => typeof job !== "string"))) ||
-      (value.aheadOfBisection !== undefined && value.aheadOfBisection !== true)
+      (value.aheadOfBisection !== undefined && value.aheadOfBisection !== true) ||
+      (value.stackedOn !== undefined &&
+        (typeof value.stackedOn !== "object" ||
+          value.stackedOn === null ||
+          !/^[0-9a-f]{12}$/.test(value.stackedOn.id) ||
+          !Number.isSafeInteger(value.stackedOn.count) ||
+          value.stackedOn.count < 1 ||
+          value.stackedOn.count >= value.members.length))
     )
       return null;
     return value;

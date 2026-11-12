@@ -1,4 +1,4 @@
-import type { FetchLike } from "@opengeni/sdk";
+import type { FetchLike, FileUploadSource } from "@opengeni/sdk";
 
 export type NativeLifecycleState = "active" | "background" | "inactive";
 
@@ -35,16 +35,26 @@ export interface NativePickedFile {
   name: string;
   contentType: string;
   sizeBytes: number | null;
-  kind: "document" | "image";
+  kind: "document" | "image" | "video";
+  /** Local picture of an image; videos have none. */
   previewUri?: string;
+  /** Length of a video, when the picker knows it. */
+  durationSeconds?: number;
 }
 
 export interface NativeFileAdapter {
   pickDocuments(): Promise<NativePickedFile[]>;
+  /** Photos and videos from the photo library. */
   pickImages(): Promise<NativePickedFile[]>;
-  /** Take one photo with the camera (asks for camera access first). Optional. */
+  /** Take a photo or record a video with the camera (asks for camera access first). Optional. */
   takePhoto?(): Promise<NativePickedFile[]>;
   readBytes(file: NativePickedFile): Promise<Uint8Array>;
+  /**
+   * The file as an upload the device streams from disk to the signed URL,
+   * reporting the fraction sent. Optional: without it the file is read into
+   * memory, which suits photos and documents but not long videos.
+   */
+  uploadSource?(file: NativePickedFile, onProgress: (fraction: number) => void): FileUploadSource;
 }
 
 /**

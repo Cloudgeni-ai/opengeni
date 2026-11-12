@@ -1006,6 +1006,11 @@ async fn remove_op_cgroup(dir: &Path) -> std::io::Result<()> {
 
     let events_file = std::fs::File::open(dir.join("cgroup.events"))?;
     let interest = Interest::PRIORITY.add(Interest::ERROR);
+    // tokio deprecated the safe constructor because an arbitrary `AsRawFd`
+    // can close or swap its descriptor while registered. The `AsyncFd` owns
+    // this `File`, whose descriptor stays open and unchanged until it drops,
+    // so the safe call is sound here and keeps the workspace free of `unsafe`.
+    #[allow(deprecated)]
     let mut events = AsyncFd::with_interest(events_file, interest)?;
 
     if cgroup_is_populated(events.get_mut())? {

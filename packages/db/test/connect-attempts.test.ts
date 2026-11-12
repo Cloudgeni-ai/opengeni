@@ -654,6 +654,56 @@ describe("durable Connect attempts", () => {
     ).rejects.toThrow("not found");
   });
 
+  test("an unfinished setup is no longer offered once a later one connected the same service", async () => {
+    const person = { ...scope, subjectId: "test:connect-superseded" };
+    const start = (overrides: Partial<ConnectAttempt>) => {
+      const value = { ...attempt(), completionRequirement: "connection" as const, ...overrides };
+      return beginConnectAttempt(client.db, person, {
+        idempotencyKey: value.id,
+        requestDigest: digest,
+        returnUrl: "https://host.example.com/settings",
+        attempt: value,
+      });
+    };
+    const connect = async (value: ConnectAttempt) => {
+      const input = {
+        attemptId: value.id,
+        operationId: crypto.randomUUID(),
+        expectedRevision: value.revision,
+        inputDigest: digest,
+      };
+      await claimConnectOperation(client.db, person, input);
+      await finishConnectOperation(client.db, person, {
+        ...input,
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          credentialsCommitted: true,
+          state: "complete",
+          nextAction: { type: "none" },
+        }),
+      });
+    };
+    const outlook = await start({ providerId: "microsoft-outlook-mail" });
+    const personalOutlook = await start({
+      providerId: "microsoft-outlook-mail",
+      ownership: "personal",
+    });
+    const gmail = await start({ providerId: "gmail" });
+    const mcp = await start({ providerId: "mcp-oauth" });
+    const pendingIds = async () =>
+      (await listPendingConnectAttempts(client.db, person)).map((value) => value.id).sort();
+    expect(await pendingIds()).toEqual([outlook.id, personalOutlook.id, gmail.id, mcp.id].sort());
+    // Outlook connects (for the workspace) in a later setup, and another MCP
+    // server connects, which says nothing about the first one.
+    await connect(await start({ providerId: "microsoft-outlook-mail" }));
+    await connect(await start({ providerId: "mcp-oauth" }));
+    expect(await pendingIds()).toEqual([personalOutlook.id, gmail.id, mcp.id].sort());
+    // A setup begun after the connection is still offered.
+    const again = await start({ providerId: "microsoft-outlook-mail" });
+    expect(await pendingIds()).toContain(again.id);
+  });
+
   test("one committed claim prevents duplicate physical work and completion replays its receipt", async () => {
     const value = await begin();
     const input = {

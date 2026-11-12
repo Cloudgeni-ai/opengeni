@@ -1,8 +1,12 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
+import { quarantineTest } from "@opengeni/testing/quarantine";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser, type Page } from "playwright";
+
+// Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
+const test = quarantineTest(bunTest, import.meta.path);
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const demoRoot = `${repoRoot}/packages/react/demo`;

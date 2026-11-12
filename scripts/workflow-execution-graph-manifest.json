@@ -14,7 +14,7 @@
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
-      "sha256": "f2593b9b8c51be63dbb18980dbc2124077d392d9f679992f0eae8931725ee44e"
+      "sha256": "c5e0cbf842ba816c8fb9831d71a53961f731e687774a6c62dce651c7fd745bcd"
     },
     {
       "path": ".github/workflows/backup-image.yml",
@@ -22,15 +22,23 @@
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
-      "sha256": "065cb0f4219707aac416d3d21f6d8ac94c688ef6e0218be94c6cea69488e5ebb"
+      "sha256": "decc84aa96743f1a79ba1621ee7b00b62ab9b21a0a375139b1fa7006ecc5b8c1"
+    },
+    {
+      "path": ".github/workflows/ci-browser-acceptance.yml",
+      "sha256": "32c3ad9d07f15c443ac731f1e51134406930e1700ad252414b9d677cb7d06b2e"
+    },
+    {
+      "path": ".github/workflows/ci-e2e-shards.yml",
+      "sha256": "dd5e2b2b69d3e9489bdec3ca5df71ec96b8768f26e39fd4b5d51520c7a2ee97f"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "1decc4dfef7d8d6c3ba7fb027abb5b93d398f0f3fd3d17bed2c69f0e803eaa37"
+      "sha256": "636228c46ff445b50a85b7b2b75cb4f47f2c36d54e70364f98e90a0973ab86c7"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
-      "sha256": "d5029463237fdcc032d89828e0069f799f562c496b0e8011666c6d83d0db6409"
+      "sha256": "0aef40e8bfbbf2079aa35d82f4bdf764cca0b6a1ef656ba10e15b6d78b425953"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -50,7 +58,7 @@
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "460e1c067f5e4381a4ff89129fba7c4d304dae83dc1b5fca0f573b14dbc15ac0"
+      "sha256": "ad59c33def67f13b7b0bd7be3b61c105f0903df4041110ebe381c669fa8c0d13"
     },
     {
       "path": ".github/workflows/main-approval-superseded.yml",
@@ -58,15 +66,23 @@
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "8e0450523e7b6b1868943383bfe9070fe0fd11f4917056088106186cae716439"
+      "sha256": "205a6aa9d47a33d191d9c55973aeec39765c207bad18e4a87357241f4f95e3ce"
     },
     {
       "path": ".github/workflows/merge-content.yml",
       "sha256": "ccf67b8f6bcedacf010900f04da6add275adacc38db197da587e490a204d475c"
     },
     {
+      "path": ".github/workflows/model-request-review-signal.yml",
+      "sha256": "f2f4493da9d5547de5188cdaac997c35660c23d56ad9af5b97d92ee250d7ae5b"
+    },
+    {
+      "path": ".github/workflows/model-request-review.yml",
+      "sha256": "588b74302270dbdca9bfffa76ef47f635f228a007c1643f91474fa64fbcad275"
+    },
+    {
       "path": ".github/workflows/open-version-pr.yml",
-      "sha256": "46a6f37251be047130c31735285ef50d75274001b48fa2ce67a0871a386020fc"
+      "sha256": "ec011c2b75f39230a2c0b3b3378a8c675a76a59f82fa5ec872ff8b534f1d6f51"
     },
     {
       "path": ".github/workflows/pr-ci-superseded.yml",
@@ -74,7 +90,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "8421c5db8c98a14dd23597a70dfc1ab907ad2b0c85eb2681105c8caa47719853"
+      "sha256": "ec8d9fe110d782b775c9b84f352dd4fa44d13ca94da142eae80eab17ad2ed335"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -94,19 +110,19 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "aa80719ca2ea9f35645e42622d9cfa0542d644ba7a396531006c6a3c5fb07b91"
+      "sha256": "087cb13feba7bd66312488b80bc0bd49970d3838541fd415b8f1f1d5bc0398c6"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "d80e59e7a03fd5b4164bb85101d3940fdd26cb5fae5a29b2be825faab7935364"
+      "sha256": "5e1712fb3dc3e9db15f0dfebfbc75baf8aba5154b3f3503f1ac7c52918f774fa"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "26503663df3a21a65bcbb108b9f0edd35d097338bce77de875a9359562294716"
+      "sha256": "205e790f15dd4c87ddddc85277b7b81051b2d9d9506c9aac2ab5a953e8cca86a"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
-      "sha256": "fb06ad9d583c1e9374517d51dc58af6b6637381024f0b0da926e02ac27e42bda"
+      "sha256": "bdbd818e8d4e58cfa55a713da2267c7bb583fc7b3127e9d404edbdfbdbeb67ec"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",
@@ -122,19 +138,19 @@
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
-      "sha256": "ede811f4433d2918605314be62460571eccdd6755a9b2e4e82ea0cbd34882466"
+      "sha256": "e5d8bf07bc7875cde8ea40124545355407f96db19149a652b9c6eb02cbc396cb"
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "8840814eb022bf325759b1997a6f2ccc39571b1a9156806cac5c2ce3648be3b8"
+      "sha256": "ce74793436faf6dd993278cf3b523dc65f1af948539ab54820f4e49def4dd5b5"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
-      "sha256": "9297605dcc1cfc69ad1a5a2313c69bac3fff52b35e82c9be8b881f75ca3d1252"
+      "sha256": "84ee20aec70559c306be1e51124d621964ed5365f05a3df3204217ba430e91bb"
     },
     {
       "path": ".github/workflows/release-publication-admission.yml",
-      "sha256": "0df8176884ddab479cf4a78952579d42470e2c6fe4a69b114efab3f8bce7728e"
+      "sha256": "1ec7d96fbbac21f24776e6732eced4ae097c14d96b865eec865e5427e4c58cbb"
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
@@ -142,7 +158,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "7abcc74d5a1e81cb15431db93f9bc1d25b56258d6c344896d099871703ee63be"
+      "sha256": "82ea5bdae0c07806a420d400637f7dd592018c91273fcc73677a810ce98282b1"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",
@@ -162,7 +178,7 @@
     },
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",
-      "sha256": "97b782a4a9ab08d345183fd0ba5d98012fa274141f01f7560725d208c6eddc2e"
+      "sha256": "2d8092283b8a218ecf82a7ea0bfe4650df8c4edbcd0d4c374d89727f5b2cf9e3"
     },
     {
       "path": ".github/workflows/verify-public-container-packages.yml",
@@ -170,13 +186,17 @@
     },
     {
       "path": ".github/workflows/xai-client-version-pin.yml",
-      "sha256": "59ca1124a8247841031da1ea07bc4573ad41d382f96c59c6b3a582a5a0eec6e6"
+      "sha256": "66d8de1cc031507abdaaed9529d891b50bdc6ce26db3e3c0d6ed7821635c2da0"
     }
   ],
   "actions": [
     {
+      "path": ".github/actions/docker-build-retry/action.yml",
+      "sha256": "02305616a377277af507215b08212bbfdeba9a454887fd585d084067a51601bc"
+    },
+    {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "9dba373599d4e3ef644b91e8300e3ac491fe01bf0b70ccb4876204a9aca6c57a"
+      "sha256": "ef2a39d5f201fd82e101fa3c151d004f5fe7fe20075368d60958b6b46df881ba"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",
@@ -569,7 +589,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "musl",
       "step": "Build and smoke in exact musl userspace",
-      "sha256": "41224291f8ee35f3b73468e40432ab085a7276a0d68163b049fd2336fb307195"
+      "sha256": "19bcaa95eba5ac83d73aa98114ddcd5bc0e0806ebf5d058175cb3f2b38626a8c"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -593,7 +613,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "native",
       "step": "Install pinned Rust toolchain",
-      "sha256": "56d2197373be048720d3354d40d73f12eed8a7468a02c7c0b4d21995b1d8bfff"
+      "sha256": "c35a6d9ef232342309b662673b0677e817b7e98305391de04b0b5864d928158d"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -617,7 +637,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "wasm",
       "step": "Install pinned WASM toolchain",
-      "sha256": "cca351707a26012784309de7f7e837e4b9108cf4f6fa662d96d4930aa55e977a"
+      "sha256": "66457a9a1d86c07d7a904bb49d37c540d95d25efceeccb6f84d3937c758cd8ae"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -629,13 +649,91 @@
       "workflow": ".github/workflows/browser-engine-pins.yml",
       "job": "update",
       "step": "Open or update the pull request",
-      "sha256": "7bbb7ad1c6768781bd6388bc7b5e1e0c437a3e8789a9b2e4da1db47259c50cd8"
+      "sha256": "e746e24a954f5bc5c6b02bde17de14bb76ac3aa66fab4143f59b9b75566e2c0f"
     },
     {
       "workflow": ".github/workflows/browser-engine-pins.yml",
       "job": "update",
       "step": "Resolve and rewrite pins",
       "sha256": "0999ae760fbe71d0a3f60befc4d9ffe416c752e635269ba0399850d883df6e3f"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Capabilities control-center browser acceptance",
+      "sha256": "13d43426ee9160b769cbd9fa9c5cb8c1e6ab0df704f715a838ed433f3abcdeec"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Codex quota and entitlement browser acceptance",
+      "sha256": "109cdbd2e74b9aae77236e20260e664682e2d813571ebf1cf33c862013f5e4b8"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Editable artifact browser acceptance",
+      "sha256": "a68f2df21aa4bcaa2bf4f1099f385c49ec090f426eacd20e50591486f7e8242a"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Editable artifact full-stack browser acceptance",
+      "sha256": "b7821561d885b09961454ebf10b6e2361de01317e4d55f3a136ff7ca9c7d2d8b"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Install dependencies",
+      "sha256": "acdbe82897befb27a6854892711caa1bbd85ccb5cc3a58adbff78167eb8b5216"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Install pinned artifact native toolchain",
+      "sha256": "7a458aad8b3e42b2c7252ea1ca6a7b4167ac8e54d1090d22abb7e2ccdaad60d7"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Long user-message disclosure browser acceptance",
+      "sha256": "2575f64502e4c4e54a98cb0b9fe0dd6ea3f0db4527e4e0b4bd017e389a140036"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Public realtime SDK demo browser acceptance",
+      "sha256": "d8f5ce53d9d4c0781712937173a2b58e9f16d1d0a531f0bd1ef78046f18a5fd6"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Queue surface browser acceptance",
+      "sha256": "0806821ab20e60febe4c8d1ec9f837a95b0aac7fb84a6e3283c5ee797084f753"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Stabilize Ubuntu package downloads",
+      "sha256": "543fc67e20070a76f283d2003b8dfd9c37f4eed80c4d52d69c98caf32ce0fac6"
+    },
+    {
+      "workflow": ".github/workflows/ci-browser-acceptance.yml",
+      "job": "browser-acceptance",
+      "step": "Timeline pagination and tip-follow browser regressions",
+      "sha256": "118373b8a0af43c1a34668f7b8a950fdff33d5d9af49eabd0d8f2b88eba70cec"
+    },
+    {
+      "workflow": ".github/workflows/ci-e2e-shards.yml",
+      "job": "e2e-shards",
+      "step": "Install dependencies",
+      "sha256": "98b68452514d3b9965731d131613a559bf5e89ad2600d91ecd927613f7d5e955"
+    },
+    {
+      "workflow": ".github/workflows/ci-e2e-shards.yml",
+      "job": "e2e-shards",
+      "step": "Stabilize Ubuntu package downloads",
+      "sha256": "f880bd06b2fb5833118fdd73f78bb2e7bce378946e9170b3404978b53a2de8b9"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -665,7 +763,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "api-image",
       "step": "Install Rust toolchain for canary agent bake",
-      "sha256": "e2ddf5461ac0ed0837eecfce5fb7a0301a153fec5b620c74cf9f613cd518084e"
+      "sha256": "9dc160cc983219621bf70baa996b8a093366ac86c199df53b8cb41c0a0a6a81e"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -723,75 +821,15 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "batch-api-image",
+      "step": "Free runner disk before the image build",
+      "sha256": "d8f9184feb8a942825a8a893afa7c9bcef1255534237e0326aa34959f3c321b5"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "batch-receipt",
       "step": "Classify this main push",
       "sha256": "5ed236c5cf2860a870d2efa2e72fce973455bd44cc24104a5f08cfa1ecd5dfdd"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Capabilities control-center browser acceptance",
-      "sha256": "fa2d16a4ad98e618faf02d3a01621110009be34290ccaa3488e224f6027bb937"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Codex quota and entitlement browser acceptance",
-      "sha256": "fd3952eafc7f28972d1313c83f9526a35edcabe179526d5ced04dee26731fa7f"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Editable artifact browser acceptance",
-      "sha256": "07108d4c2f508e5b2d0c8f042098adacc04d8f998c43c5d93cf60b0f7c9140b1"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Editable artifact full-stack browser acceptance",
-      "sha256": "aec77af91c54739fdb8f5d0f35831a3b9401b871c6e11568c642759a7ad7f694"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Install dependencies",
-      "sha256": "9dc2fb5bd77f5a2a3f1400a3a6411a437f95954e7ae0bb45ed7adb539da9fbbb"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Install pinned artifact native toolchain",
-      "sha256": "ca2c2c49237ff95707be54cd6e91f2a72ebd94193b7e9ba2386d732d8edcc704"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Long user-message disclosure browser acceptance",
-      "sha256": "739c84e9bac7302d3c170004ffc7de7de6b4dc3306dc8556c5a14b9e10134ec2"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Public realtime SDK demo browser acceptance",
-      "sha256": "bcd0219a8019bc01d7ab093ef8a772aa18c13510254538b758506ba0be844cd6"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Queue surface browser acceptance",
-      "sha256": "e01d34dfa1b0c05fe42e775b79a39571ddf9ef7e0826999a2f49aefa84b8b549"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Stabilize Ubuntu package downloads",
-      "sha256": "fab7e78dd1d412f10650b97447bc8742deff4000c1f2ca13c40d21ce4edaf912"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "browser-acceptance",
-      "step": "Timeline pagination and tip-follow browser regressions",
-      "sha256": "254ad9bb6b4dd8aa90e9383780dd1b4af7efd08d6851af7cc66cb4b0c85f9965"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -821,7 +859,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "deployment",
       "step": "Validate Helm chart",
-      "sha256": "6a4a178aa8a1af109f3fdc299a921c33bffbaf109efe75360af8cfb4ebf69140"
+      "sha256": "855726323ea42d027d36b6ce68cadc1c90d9f2b28fb04179ffa8ea6ad7124124"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -843,18 +881,6 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "job": "e2e-shards",
-      "step": "Install dependencies",
-      "sha256": "1d7e772f27cb0541a9370d9b2821a04e9f73a075ba77c2f659b2f52b0026d8fd"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "e2e-shards",
-      "step": "Stabilize Ubuntu package downloads",
-      "sha256": "ad9bed9b4b78a32de8973d0897f2616c37ff69d93d2e0e87168023385d84e3d0"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
       "job": "full-green",
       "step": "Publish exact-SHA full CI evidence",
       "sha256": "d44d4cdd9748522598221439ce1d4627bcbb7c2d6255a6240ab9e628f88c158d"
@@ -863,7 +889,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Require every workload image build",
-      "sha256": "a3af46be51b64462bbe19dfc3a19f52773b66ef09f962bf3a1b68d9bafa03c00"
+      "sha256": "7dd936b50bc98589bbf72a264dae3f087a293dd60d5fb433e1b3eb42e5fdf45e"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1023,6 +1049,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "sandbox-image",
+      "step": "Room on the runner",
+      "sha256": "cc49ab77801c518e4caffc2c1acf4b64800e4fabb933439dbf4fa5ce33aca2e6"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Check committed Site browser runtime before builds",
       "sha256": "05ad79d8a4f14bc9868e1a2863355bc44441eb00c8703163059a287fee4142b0"
@@ -1059,6 +1091,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "test-suite",
+      "step": "Room on the runner",
+      "sha256": "4a8bd7efa7e1fba32878c92d5c5ee95100b8295b947e4144db8f9d06d25ffbcc"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "test",
       "step": "Require every split CI lane",
       "sha256": "aed0b05bb1764cf3c4a20e9b056211f13f3772b254f059b7a69ed2a594f1716d"
@@ -1074,6 +1112,12 @@
       "job": "unit-shards",
       "step": "Install dependencies",
       "sha256": "e4fcbcf8dfa696270d7185fee7c21706af0a4b314368f407203418f3493dbeb2"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "worker-image",
+      "step": "Room on the runner",
+      "sha256": "1a60650cc8c246e218f0d6fb7c9143dcac94420344eac19be6f1f11583e6b076"
     },
     {
       "workflow": ".github/workflows/compact-session-view.yml",
@@ -1427,13 +1471,31 @@
       "workflow": ".github/workflows/merge-batcher.yml",
       "job": "pass",
       "step": "Run one pass",
-      "sha256": "76dc09a121599165ef19d190af152fe64a05c16681a902909c855cc462f342f9"
+      "sha256": "4eb14398ac47147c8a3d583e5e45d1a0672904b6d9b93e9c2e27a67ba88c27f4"
     },
     {
       "workflow": ".github/workflows/merge-content.yml",
       "job": "content",
       "step": "Recompute landed merge content",
       "sha256": "58808325ef978e67fac85965381b0808323d1adb509b66a3bba9530e37523799"
+    },
+    {
+      "workflow": ".github/workflows/model-request-review-signal.yml",
+      "job": "signal",
+      "step": "Signal",
+      "sha256": "04db7e53af37976bc554eb647fd5eca55d0d67f2a547b9afa23bd38775048a97"
+    },
+    {
+      "workflow": ".github/workflows/model-request-review.yml",
+      "job": "evaluate",
+      "step": "Report the gate after a review",
+      "sha256": "46e796d352e300fa0a32c942c4df2954c2f2524ab157354831316cd1ad536ea3"
+    },
+    {
+      "workflow": ".github/workflows/model-request-review.yml",
+      "job": "evaluate",
+      "step": "Report the gate for a pushed or opened PR",
+      "sha256": "9329ab82c7bdbbd705a5d390d2d2b27cc53a23091353c5b96318da3461ca616a"
     },
     {
       "workflow": ".github/workflows/open-version-pr.yml",
@@ -1517,13 +1579,13 @@
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "plan",
       "step": "Plan all affected files",
-      "sha256": "6b8414536d24b2a540d30803806d5cc2f100b1933b36eae9b87b7044abe25ff5"
+      "sha256": "0fd49dab7cbd58118f80d64677306b7b6fde2414c1c0e8e66c5ad9430a036245"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "ready",
       "step": "Require all selected hosted work",
-      "sha256": "88049466ca9af445aae288aa6329af89434fcfdfc78306e5ec2351812a464f97"
+      "sha256": "ba6fb054dcca72c08e36915f6965c60a5afa1c85550a37ea40e68eff3302c05b"
     },
     {
       "workflow": ".github/workflows/production-pr-heads.yml",
@@ -2351,7 +2413,7 @@
       "workflow": ".github/workflows/xai-client-version-pin.yml",
       "job": "update",
       "step": "Open or update the pull request",
-      "sha256": "d59097bce2fd938d54a69f7b48632da3aa75419236ea372ac06f5b84285f230b"
+      "sha256": "3388010dbc150ba94b52342b9aaacf120e550c5c9581c2030ed0c0014e9f4b0f"
     },
     {
       "workflow": ".github/workflows/xai-client-version-pin.yml",

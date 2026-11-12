@@ -280,6 +280,12 @@ export type SessionAdmissionNoticeProps = {
    * blocked chat and refresh. Omit where the host cannot.
    */
   onContinueWaitingWork?: (() => Promise<void>) | undefined;
+  /**
+   * Other people in the workspace can see this chat (workspace visibility,
+   * outside a Personal workspace). The owner then learns that allowing their
+   * machine lets them see what the agent does on it. Defaults to false.
+   */
+  sharedChat?: boolean | undefined;
 };
 
 /**
@@ -304,6 +310,7 @@ export function SessionAdmissionNotice({
   onMoveToMachine,
   onRefresh,
   onContinueWaitingWork,
+  sharedChat = false,
 }: SessionAdmissionNoticeProps) {
   const t = useOpenGeniText();
   const descriptionId = useId();
@@ -370,6 +377,8 @@ export function SessionAdmissionNotice({
     : needsMachineAccess && machineAccess
       ? sessionAdmissionMachineAccessCopy(t, machineAccess, {
           canAllowHere: onAllowMachine !== undefined,
+          paused,
+          shared: sharedChat,
         })
       : sessionAdmissionCopy(t, reason);
   const allowing = !machineChanged && needsMachineAccess && machineAccess?.isOwner === true;
@@ -462,11 +471,12 @@ export function SessionAdmissionNotice({
           ) : (
             <>
               <p>{copy.body}</p>
-              <p className="mt-1">{copy.next}</p>
+              {copy.next ? <p className="mt-1">{copy.next}</p> : null}
             </>
           )}
         </div>
-        {paused ? <p className="mt-2">{t("sessionAdmission.pausedNote")}</p> : null}
+        {/* The owner's own words already say it starts once resumed. */}
+        {paused && !allowing ? <p className="mt-2">{t("sessionAdmission.pausedNote")}</p> : null}
         {action !== null && !machineBlocked ? (
           <Button
             type="button"
@@ -708,6 +718,7 @@ export function SessionStartNotice({
           onAllowMachine={start.allowMachine}
           onRefresh={start.refresh}
           onContinueWaitingWork={start.continueWaitingWork}
+          sharedChat={start.sharedChat}
         />
       ) : null}
       {showPreSendWarning && start.warnBeforeSending ? (

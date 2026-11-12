@@ -187,17 +187,32 @@ describe("lazy logical manifest handoff", () => {
           };
         },
       });
+      // The index reaches the model as a history item through the publish
+      // callback; the system prompt only carries the stable notice.
+      const publications: (string | null)[] = [];
       const agent = new SandboxAgent({
         name: "cache regression",
         model: "gpt-test",
         defaultManifest: manifest,
-        capabilities: [workspaceSkills([{ path: searchRoot, source: "test" }])],
+        capabilities: [
+          workspaceSkills([{ path: searchRoot, source: "test" }], [], [], {
+            publish: async (index) => {
+              publications.push(index?.text ?? null);
+            },
+          }),
+        ],
       });
       const manager = new SandboxRuntimeManager({ startingAgent: agent });
+      const systemPrompts = new Set<string | null>();
       for (let request = 0; request < 5; request++) {
         const prepared = manager.getPreparedAgent(agent, proxy);
-        expect(await prepared.getSystemPrompt(new RunContext({}))).toContain('"name":"example"');
+        systemPrompts.add(await prepared.getSystemPrompt(new RunContext({})));
       }
+      expect(publications.length).toBeGreaterThan(0);
+      for (const text of publications) expect(text).toContain('"name":"example"');
+      // Repository skills never change the system prompt; without the handoff
+      // only the SDK's filesystem layout changes once, with the second scan.
+      expect(systemPrompts.size).toBe(synchronize ? 1 : 2);
       expect(scans).toBe(synchronize ? 1 : 2);
       // A real manifest/route change must still invalidate preparation.
       epoch++;

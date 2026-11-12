@@ -68,6 +68,9 @@ function Product({ context }: { context: HostContext }) {
         <ConnectPanel
           controller={controller}
           returnUrl={context.returnUrl}
+          // A popup sign-in ends on a page that closes itself, never on a
+          // second copy of this app.
+          finishInPopup={mode === "popup"}
           onAuthorize={(attempt) => {
             // Synchronous call retains the click gesture for popup opening. Recovery
             // uses authenticated pending attempts, never return URL parameters.

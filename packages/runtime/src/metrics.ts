@@ -5,6 +5,9 @@ import type { SandboxSetupOperationObservation } from "./sandbox/operation-purpo
 export const MCP_TOOL_CALL_OUTCOMES = [
   "success",
   "provider_declared_error",
+  // A first-party tool refused the caller's arguments before doing any work:
+  // the caller's mistake, not a tool or provider failure.
+  "rejected",
   "auth_needed",
   "outcome_uncertain",
   "timeout",

@@ -51,7 +51,10 @@ without ever forgetting one a template or a create still needs.
   clone starts as new; a clone told it is a sandbox does it again should
   its disk still name another.
 - The store records every captured image. An image is used while a
-  template, a sandbox's config or a built image names it. A replica looks
+  template, a sandbox's config or a built image names it (since
+  [ADR 35](0035-built-images-nothing-uses-are-forgotten.md) only the
+  latest build a name uses, and built images are recorded and forgotten
+  the same way). A replica looks
   every 10 minutes; an image unused for an hour is claimed by one
   collector, which empties its pointer, then deletes its record. A sweep
   (ADR 17) then frees its chunks.

@@ -1732,7 +1732,9 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                 : "Connect your Slack"
               : undefined
           }
-        />
+        >
+          {openIntegrationModel.id === teamsBot.model.id ? teamsBot.sections : null}
+        </IntegrationPage>
       );
   } else if (selectedItem) {
     const back = backFrom(selectedItem.id);

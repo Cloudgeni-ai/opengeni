@@ -268,6 +268,8 @@ function unreadableClaudeUsage(
  * remembered attempt, when it is younger than the interval and newer than
  * the stored reading. A reading the core did not apply (the generation
  * fence, or a failed write) is reported `unavailable`, never `available`.
+ * `deps.force` reads live whatever the throttle says: a limit reset claim
+ * has just changed the provider's answer.
  */
 export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
   db: Database,
@@ -280,6 +282,7 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
   },
   deps: Pick<SubscriptionCoreConnectionProbeDeps, "fetchImpl" | "requestFetch" | "resolver"> & {
     now?: () => number;
+    force?: boolean;
   } = {},
 ): Promise<{ usage: ClaudeSubscriptionUsage; recovered: boolean }> {
   const { target } = input;
@@ -288,6 +291,7 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
     key: [input.accountId, input.workspaceId, target.connectionId],
     row: target.row,
     now: deps.now ?? Date.now,
+    force: deps.force === true,
     probe: async () => {
       const modelIds = await listSubscriptionCoreClaudeCatalogModelIds(db, input);
       if (target.scope === "user")
@@ -346,17 +350,23 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
  * workspace's own models get their cooldowns from that workspace's reads,
  * and a stored cooldown is never shortened by a later reading). When the
  * administrator's model list cannot be read, nothing is read live.
+ * `deps.force` reads live whatever the throttle says.
  */
 export async function refreshSubscriptionCoreClaudeOrganizationUsage(
   db: Database,
   settings: Settings,
   input: { organizationId: string; subjectId: string; row: SubscriptionCoreConnectionRow },
-  deps: { fetchImpl?: SubscriptionCoreConnectionProbeDeps["fetchImpl"]; now?: () => number } = {},
+  deps: {
+    fetchImpl?: SubscriptionCoreConnectionProbeDeps["fetchImpl"];
+    now?: () => number;
+    force?: boolean;
+  } = {},
 ): Promise<{ usage: ClaudeSubscriptionUsage; recovered: boolean }> {
   return await refreshClaudeUsage({
     key: [input.organizationId, "organization", input.row.id],
     row: input.row,
     now: deps.now ?? Date.now,
+    force: deps.force === true,
     probe: async () => {
       const models = await listOrganizationModelProviderCustomModels(db, {
         organizationId: input.organizationId,
@@ -398,6 +408,8 @@ async function refreshClaudeUsage(plan: {
   key: readonly string[];
   row: SubscriptionCoreConnectionRow;
   now: () => number;
+  /** Read live even within the throttle interval. */
+  force: boolean;
   probe: () => Promise<SubscriptionCoreUsageProbe>;
   /** The connection as the caller sees it after the read (null: no longer visible). */
   readBack: () => Promise<SubscriptionCoreConnectionRow | null>;
@@ -411,10 +423,15 @@ async function refreshClaudeUsage(plan: {
     stored.refreshStatus === "available" && stored.refreshCheckedAt !== null
       ? Date.parse(stored.refreshCheckedAt)
       : null;
-  if (storedAt !== null && now() - storedAt < SUBSCRIPTION_CORE_CLAUDE_USAGE_REFRESH_INTERVAL_MS)
+  if (
+    !plan.force &&
+    storedAt !== null &&
+    now() - storedAt < SUBSCRIPTION_CORE_CLAUDE_USAGE_REFRESH_INTERVAL_MS
+  )
     return { usage: stored, recovered: false };
   const last = lastAttempts.get(key);
   if (
+    !plan.force &&
     last &&
     now() - last.at < SUBSCRIPTION_CORE_CLAUDE_USAGE_REFRESH_INTERVAL_MS &&
     (storedAt === null || last.at > storedAt)

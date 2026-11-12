@@ -6140,6 +6140,33 @@
       "response": []
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/interaction-events/stream",
       "sdk": [
@@ -11907,7 +11934,8 @@
         "$.availability": "ref(AgentSlackAvailability)! null",
         "$.connectionId": "string!",
         "$.slackTeamId": "string!",
-        "$.slackTeamName": "string! null"
+        "$.slackTeamName": "string! null",
+        "$.unavailable": "enum! null=[\"\\\"agent_child_chat\\\"\",\"\\\"agent_limit_reached\\\"\",\"\\\"agent_not_found\\\"\",\"\\\"agent_requires_private_chat\\\"\",\"\\\"agent_slack_always_available\\\"\",\"\\\"agent_slack_name_invalid\\\"\",\"\\\"agent_slack_name_taken\\\"\",\"\\\"agent_slack_personal_workspace\\\"\",\"\\\"agent_slack_requires_workspace_visibility\\\"\",\"\\\"agent_slack_single_install\\\"\",\"\\\"agent_version_conflict\\\"\",\"\\\"slack_bot_unavailable\\\"\"]"
       }
     },
     "AgentSlackIntroRequest": {
@@ -14388,6 +14416,98 @@
         "$.endpointUrl": "string?"
       }
     },
+    "ClaudeExtraUsage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.currency": "string! null",
+        "$.disabledReason": "string! null",
+        "$.isEnabled": "boolean! null",
+        "$.monthlyLimit": "number! null",
+        "$.usedCredits": "number! null",
+        "$.utilization": "number! null"
+      }
+    },
+    "ClaudeLimitResetGrant": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.blocking": "array!",
+        "$.blocking[]": "string",
+        "$.clears": "array!",
+        "$.clears[]": "string",
+        "$.endsAt": "string! null",
+        "$.givesBackWeekly": "boolean!",
+        "$.id": "string!",
+        "$.kind": "enum!=[\"\\\"fable\\\"\",\"\\\"full\\\"\",\"\\\"session\\\"\",\"\\\"weekly\\\"\"]",
+        "$.label": "string! null",
+        "$.paused": "boolean!",
+        "$.percentUsed": "object!",
+        "$.percentUsed{}": "number",
+        "$.resetsLeft": "integer! null",
+        "$.resetsTotal": "integer! null",
+        "$.startsAt": "string! null",
+        "$.type": "string! null",
+        "$.unavailableReason": "string! null",
+        "$.usableNow": "boolean!",
+        "$.useRequiresLimit": "boolean!"
+      }
+    },
+    "ClaudeLimitResets": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.atLimit": "boolean!",
+        "$.cooldownUntil": "string! null",
+        "$.eligible": "boolean!",
+        "$.exhausted": "array!",
+        "$.exhausted[]": "string",
+        "$.grants": "array!",
+        "$.grants[]": "ref(ClaudeLimitResetGrant)",
+        "$.ineligibleReason": "string! null",
+        "$.nextGrantId": "string! null",
+        "$.observedAt": "string!",
+        "$.weeklyResetsAt": "string! null"
+      }
+    },
+    "ClaudeServiceState": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.fallbackAvailable": "boolean! null",
+        "$.fallbackPercentage": "number! null",
+        "$.grace": "object! null",
+        "$.grace.fiveHourUtilization": "number! null",
+        "$.grace.sevenDayUtilization": "number! null",
+        "$.observedAt": "string!",
+        "$.overageDailyCapPaused": "boolean! null",
+        "$.overageDisabledReason": "string! null",
+        "$.overageInUse": "boolean! null",
+        "$.overageScope": "string! null",
+        "$.retryAfterSeconds": "number! null",
+        "$.slow": "object! null",
+        "$.slow.budgetResetsAt": "string! null",
+        "$.slow.budgetUtilization": "number! null",
+        "$.slow.maxWaitSeconds": "number! null",
+        "$.slow.offer": "string! null",
+        "$.slow.retryAfterSeconds": "number! null",
+        "$.slow.status": "string! null",
+        "$.surpassedThresholds": "array!",
+        "$.surpassedThresholds[]": "object",
+        "$.surpassedThresholds[].threshold": "number!",
+        "$.surpassedThresholds[].windowId": "enum!=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_overage_included\\\"\"]",
+        "$.upgradePaths": "array!",
+        "$.upgradePaths[]": "string"
+      }
+    },
     "ClaudeSubscriptionAccount": {
       "io": [
         "output"
@@ -14492,15 +14612,53 @@
         "$": "object",
         "$.connected": "boolean!",
         "$.credentialVersion": "integer! null",
+        "$.extraUsage": "ref(ClaudeExtraUsage)? null",
+        "$.limitResets": "ref(ClaudeLimitResets)? null",
+        "$.limits": "array?",
+        "$.limits[]": "ref(ClaudeUsageLimit)",
         "$.observedAt": "string! null",
         "$.refreshCheckedAt": "string! null",
         "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
         "$.requestRestrictions": "array?",
         "$.requestRestrictions[]": "ref(ClaudeUsageRequestStatus)",
         "$.requestStatus": "ref(ClaudeUsageRequestStatus)? null",
+        "$.serviceState": "ref(ClaudeServiceState)? null",
         "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.surfaceWindows": "array?",
+        "$.surfaceWindows[]": "ref(ClaudeSurfaceUsageWindow)",
+        "$.wallReset": "ref(ClaudeWallReset)? null",
         "$.windows": "array!",
         "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeSurfaceUsageWindow": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "enum!=[\"\\\"seven_day_cowork\\\"\",\"\\\"seven_day_oauth_apps\\\"\",\"\\\"seven_day_omelette\\\"\"]",
+        "$.resetsAt": "string! null",
+        "$.usedPercent": "number! null"
+      }
+    },
+    "ClaudeUsageLimit": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.allowancePercentOfWeekly": "number! null",
+        "$.group": "string! null",
+        "$.isActive": "boolean!",
+        "$.kind": "string!",
+        "$.modelId": "string! null",
+        "$.modelName": "string! null",
+        "$.percent": "number! null",
+        "$.resetsAt": "string! null",
+        "$.severity": "string! null",
+        "$.surface": "string! null",
+        "$.usedPercentOfWeekly": "number! null"
       }
     },
     "ClaudeUsageRequestStatus": {
@@ -14539,6 +14697,22 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_fable\\\"\",\"\\\"seven_day_opus\\\"\",\"\\\"seven_day_overage_included\\\"\",\"\\\"seven_day_sonnet\\\"\"]"
+      }
+    },
+    "ClaudeWallReset": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.available": "boolean!",
+        "$.eligible": "boolean!",
+        "$.inExperiment": "boolean!",
+        "$.ineligibleReason": "string! null",
+        "$.nextAvailableAt": "string! null",
+        "$.observedAt": "string!",
+        "$.resetsPerWeek": "integer! null",
+        "$.weeklyResetsAt": "string! null"
       }
     },
     "ClearWorkspaceAllowanceRequest": {
@@ -19098,6 +19272,7 @@
         "$|kind=personal.groups.merge": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.groups.review": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.groups.routine": "ref(GitHubActionPolicyEffectiveDecision)!",
+        "$|kind=personal.groups.sensitive": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.kind": "const!=[\"\\\"personal\\\"\"]",
         "$|kind=personal.label": "string!"
       }
@@ -19108,14 +19283,6 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"allow\\\"\",\"\\\"ask\\\"\",\"\\\"block\\\"\",\"\\\"mixed\\\"\"]"
-      }
-    },
-    "GitHubActionPolicyGroup": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\"]"
       }
     },
     "GitHubAppInfo": {
@@ -24972,6 +25139,14 @@
         "$.owner.name": "string!",
         "$.owner.subjectId": "string!",
         "$.prefix": "string!"
+      }
+    },
+    "PersonalGitHubActionPolicyGroup": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\",\"\\\"sensitive\\\"\"]"
       }
     },
     "PersonalGitHubConnectionStatusResponse": {
@@ -31236,6 +31411,7 @@
         "$.accountOwnerLabel": "string?",
         "$.actionDigest": "string!",
         "$.approveLabel": "string!",
+        "$.approveLabelCode": "enum?=[\"\\\"allow\\\"\",\"\\\"approve_action\\\"\"]",
         "$.approvedBy": "enum?=[\"\\\"account_owner\\\"\",\"\\\"you\\\"\"]",
         "$.availableActions": "array!",
         "$.availableActions[]": "enum=[\"\\\"approve\\\"\",\"\\\"reject\\\"\"]",
@@ -31249,6 +31425,7 @@
         "$.id": "string!",
         "$.moreFields": "integer!",
         "$.reason": "string!",
+        "$.reasonCode": "ref(ToolReviewReasonCode)?",
         "$.revision": "string!",
         "$.samples": "array?",
         "$.samples[]": "object",
@@ -31260,6 +31437,7 @@
         "$.selectionKind": "enum?=[\"\\\"messages\\\"\",\"\\\"threads\\\"\"]",
         "$.status": "ref(ToolReviewStatus)!",
         "$.title": "string!",
+        "$.toolName": "string?",
         "$.updatedAt": "string!",
         "$.version": "const!=[\"1\"]"
       }
@@ -31951,12 +32129,22 @@
       ],
       "shape": {
         "$": "object",
+        "$.booleanValue": "boolean?",
         "$.count": "integer?",
+        "$.key": "string?",
         "$.label": "string!",
         "$.path": "string!",
         "$.preview": "string!",
         "$.protected": "boolean?",
         "$.truncated": "boolean!"
+      }
+    },
+    "ToolReviewReasonCode": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"asks_by_default\\\"\",\"\\\"asks_by_setting\\\"\",\"\\\"blocked_by_conflict\\\"\",\"\\\"blocked_by_default\\\"\",\"\\\"blocked_by_setting\\\"\"]"
       }
     },
     "ToolReviewStatus": {
@@ -32363,7 +32551,7 @@
         "$": "object",
         "$.actor": "ref(GitHubActionPolicyActor)!",
         "$.decision": "ref(AtlassianReadPolicy)!",
-        "$.group": "ref(GitHubActionPolicyGroup)!"
+        "$.group": "ref(PersonalGitHubActionPolicyGroup)!"
       }
     },
     "UpdateMachineAgentResponse": {
@@ -35954,6 +36142,12 @@
       "ChatSession": "type",
       "ChatSessionLineageResponse": "type",
       "ChatSessionListResponse": "type",
+      "ClaudeExtraUsage": "type",
+      "ClaudeLimitResetClaim": "type",
+      "ClaudeLimitResetClaimResult": "type",
+      "ClaudeLimitResetGrant": "type",
+      "ClaudeLimitResets": "type",
+      "ClaudeServiceState": "type",
       "ClaudeSubscriptionAccount": "type",
       "ClaudeSubscriptionAccountsResponse": "type",
       "ClaudeSubscriptionOAuthCompleteRequest": "type",
@@ -35961,8 +36155,11 @@
       "ClaudeSubscriptionOAuthStartResponse": "type",
       "ClaudeSubscriptionSetupTokenRequest": "type",
       "ClaudeSubscriptionUsage": "type",
+      "ClaudeSurfaceUsageWindow": "type",
+      "ClaudeUsageLimit": "type",
       "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
+      "ClaudeWallReset": "type",
       "ClearWorkspaceAllowanceRequest": "type",
       "ClearWorkspaceAllowanceResponse": "type",
       "ClientAgentConfig": "type",
@@ -36315,6 +36512,8 @@
       "FileSystemCapability": "type",
       "FileSystemRouteIdentity": "type",
       "FileUploadData": "type",
+      "FileUploadSource": "type",
+      "FileUploadTarget": "type",
       "FirstPartyMcpToolName": "type",
       "ForkSessionRequest": "type",
       "ForkSessionResponse": "type",
@@ -36899,6 +37098,7 @@
       "PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING": "value",
       "PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION": "value",
       "PersonalApiKey": "type",
+      "PersonalGitHubActionPolicyGroup": "type",
       "PersonalGitHubConnectionMetadata": "type",
       "PersonalGitHubConnectionStatusResponse": "type",
       "PersonalGitHubDisconnectRequest": "type",
@@ -38770,6 +38970,7 @@
       "createMemoryRecordingChunkStore": "value",
       "defaultSystemAudioSource": "value",
       "desktopSystemAudioSource": "value",
+      "discardLocalRecordingsOf": "value",
       "displaySystemAudioSource": "value",
       "LiveFetch": "type",
       "LiveMediaTrack": "type",
@@ -38783,6 +38984,7 @@
       "LiveTranscriptTransport": "type",
       "LiveWebSocket": "type",
       "LiveWebSocketConstructor": "type",
+      "localRecordingsOf": "value",
       "OpenGeniRecordingsClient": "value",
       "OpenGeniRecordingsTransport": "type",
       "preferredRecordingMimeType": "value",
@@ -38981,8 +39183,10 @@
       "teamsApi": "value",
       "TeamsBotStatus": "type",
       "TeamsInstallOptions": "type",
+      "TeamsLinkSignInStart": "type",
       "TeamsMicrosoftSignInResult": "type",
-      "TeamsMicrosoftSignInStart": "type"
+      "TeamsMicrosoftSignInStart": "type",
+      "TeamsReach": "type"
     },
     "@opengeni/sdk/tenant-workspaces": {
       "createWorkspaceIdResolver": "value",
@@ -40040,8 +40244,11 @@
       "BrowserEditableArtifactWorkbenchProps": "type",
       "ChatInteractiveBlock": "value",
       "ChatInteractiveBlockProps": "type",
+      "configureContentHosting": "value",
+      "ContentHostingConfig": "type",
       "DEFAULT_ARTIFACT_LABELS": "value",
       "DeferredChatMedia": "value",
+      "displayImageSrc": "value",
       "DocumentArtifactSurface": "value",
       "DocumentArtifactSurfaceProps": "type",
       "DocumentCommit": "type",
@@ -40145,6 +40352,7 @@
       "SpreadsheetSelection": "type",
       "SpreadsheetViewport": "type",
       "useArtifactLabels": "value",
+      "useDisplayImageSrc": "value",
       "useRetainedImageObjectUrl": "value"
     },
     "@opengeni/react/artifacts/document": {
@@ -40886,6 +41094,11 @@
       "MeetingRecorderStore": "type",
       "MeetingRecorderStoreProvider": "value",
       "MeetingStartRequest": "type",
+      "prepareRecordingsForSignOut": "value",
+      "recordingOwnerKey": "value",
+      "setSignOutRecordingsPrompt": "value",
+      "SignOutRecordingsChoice": "type",
+      "SignOutRecordingsPrompt": "type",
       "useMeetingRecorder": "value",
       "useMeetingRecorderLostTrack": "value",
       "useMeetingRecorderState": "value",
@@ -41067,6 +41280,7 @@
       "ImportRecordingAudioInput": "type",
       "interleaveUnrecordedMarks": "value",
       "languageName": "value",
+      "LiveRecordingCapture": "type",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
       "meetingHereStatus": "value",
@@ -41077,8 +41291,14 @@
       "meetingTitle": "value",
       "meetingUploadFailure": "value",
       "ownerLiveLaneName": "value",
+      "prepareRecordingsForSignOut": "value",
+      "recordingOwnerKey": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
+      "registerLiveRecordingCapture": "value",
+      "setSignOutRecordingsPrompt": "value",
+      "SignOutRecordingsChoice": "type",
+      "SignOutRecordingsPrompt": "type",
       "speakerColorSlots": "value",
       "speakerDisplayName": "value",
       "speakerIsNamed": "value",

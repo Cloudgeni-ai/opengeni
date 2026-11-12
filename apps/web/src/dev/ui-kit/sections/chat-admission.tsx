@@ -3,6 +3,8 @@ import { SessionAdmissionNotice, SessionMachineAccessNotice } from "@opengeni/re
 import { Button } from "@opengeni/react/ui/button";
 import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";
 
+import { useEffect, useState } from "react";
+
 import { KitSection, StateCell, StatesGrid } from "../kit";
 import { showPart } from "./chat-shared";
 
@@ -27,6 +29,22 @@ function blocked(reason: string, activeSandboxId = "laptop", sqlState = "OG002")
       retryPolicy: "explicit_recheck",
       blockedAt: "2026-10-28T11:52:00Z",
     },
+  } as unknown as Session;
+}
+
+/** The same chat, paused by someone. */
+function paused(session: Session): Session {
+  return {
+    ...session,
+    effectiveControl: { state: "paused", controlVersion: 5, controlEtag: "etag-kit-paused" },
+  } as unknown as Session;
+}
+
+/** The same chat, shared with the workspace. */
+function shared(session: Session): Session {
+  return {
+    ...session,
+    tenancy: { ...session.tenancy, visibility: "workspace" },
   } as unknown as Session;
 }
 
@@ -62,6 +80,7 @@ const STATES: {
   machines?: MachineView[];
   picker?: boolean;
   allow?: boolean;
+  paused?: boolean;
 }[] = [
   {
     part: "run",
@@ -102,6 +121,29 @@ const STATES: {
     session: blocked("personal_resource_grant_required"),
     access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
     allow: true,
+  },
+  {
+    part: "machine-access-owner-paused",
+    label: "Your machine isn't allowed, and the chat is paused",
+    session: paused(blocked("personal_resource_grant_required")),
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+    allow: true,
+    paused: true,
+  },
+  {
+    part: "machine-access-owner-shared",
+    label: "Your machine isn't allowed, in a chat shared with the workspace",
+    session: shared(blocked("personal_resource_grant_required")),
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+    allow: true,
+  },
+  {
+    part: "machine-access-owner-shared-paused",
+    label: "Your machine isn't allowed, in a paused shared chat",
+    session: paused(shared(blocked("personal_resource_grant_required"))),
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+    allow: true,
+    paused: true,
   },
   {
     part: "machine-access-legacy",
@@ -182,6 +224,26 @@ const MACHINE_ACCESS_FAILED: { part: string; label: string; owner: boolean }[] =
   { part: "machine-access-member", label: "Someone else's machine", owner: false },
 ];
 
+/** After a refusal, the chat moved to another machine: the notice sees the move happen. */
+function MachineChangedState() {
+  const [moved, setMoved] = useState(false);
+  useEffect(() => setMoved(true), []);
+  const session = blocked(
+    "personal_resource_grant_required",
+    moved ? "workspace-machine" : "laptop",
+  );
+  return (
+    <SessionAdmissionNotice
+      session={session}
+      machineAccess={moved ? null : access({ isOwner: false, queuedTurnBlocked: true })}
+      canControl
+      paused={false}
+      busy={false}
+      onRecheck={async () => {}}
+    />
+  );
+}
+
 export default function ChatAdmissionSection() {
   const shown = STATES.filter((state) => showPart(state.part));
   const beforeSending = BEFORE_SENDING.filter((state) => showPart(state.part));
@@ -237,14 +299,24 @@ export default function ChatAdmissionSection() {
                   }
                   onMoveToMachine={async () => true}
                   canControl
-                  paused={false}
+                  paused={state.paused === true}
                   busy={false}
                   onRecheck={async () => {}}
                   onAllowMachine={state.allow ? async () => {} : undefined}
+                  sharedChat={state.session.tenancy?.visibility === "workspace"}
                 />
               </div>
             </StateCell>
           ))}
+        </StatesGrid>
+      ) : null}
+      {showPart("machine-changed") ? (
+        <StatesGrid title="After the chat moved" columns={1}>
+          <StateCell label="Moved to a machine it can use" align="stretch">
+            <div className="mx-auto w-full max-w-3xl">
+              <MachineChangedState />
+            </div>
+          </StateCell>
         </StatesGrid>
       ) : null}
       {machineAccessFailed.length > 0 ? (

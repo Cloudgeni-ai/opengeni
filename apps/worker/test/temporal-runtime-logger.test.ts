@@ -48,6 +48,7 @@ test("the runtime forwards core logs and routes SDK records to the structured lo
         attempt: 3,
         errorClass: "TemporalSdkOperationError",
         errorCode: "temporal_sdk_failure_logged",
+        failureName: "Error",
         origin: "worker",
       },
     },

@@ -44,7 +44,13 @@ saying why the agent called, and the conversation lands in that chat.
      app's own service, which hands it to `OpenGeniCallPush.handle` first.
      An older app, or one without
      system calls, shows the plain notification instead. The setting shows on
-     Android only in an app with system calls and push. While the app runs it
+     Android only in an app with system calls and push. From Android 14 the
+     ring screen needs the person's "full-screen notifications" permission
+     unless the app is a calling or alarm app on Play; without it the ring is
+     a heads-up notification. Turning the setting on therefore checks it
+     (`useFullScreenRings`), explains and offers to open the system setting,
+     and the settings section keeps a link there, re-checked whenever the app
+     returns to the foreground. While the app runs it
      follows the call's state, as on iOS. When the call is answered or
      declined on another phone, or the agent cancels it, each Android phone
      that rang gets one more data message, `opengeniCall` with
