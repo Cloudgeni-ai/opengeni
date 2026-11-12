@@ -20,6 +20,7 @@ import {
   removeTeamsLink,
   disconnectTeamsBot,
   TEAMS_ROUTE_PROMPT_TTL_MS,
+  TEAMS_ROUTE_PROMPT_MAX_OPTIONS,
 } from "../src";
 import { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "../src/personal-workspace-membership";
 
@@ -108,7 +109,7 @@ test("a chat choice is the linked person's memory in their organization, and goe
       agentId: null,
     }),
   ).rejects.toThrow("teams_link_missing");
-  await clearTeamsChatChoice(client!.db, o.i, { actorId: o.actorId });
+  await clearTeamsChatChoice(client!.db, o.i, who);
   expect(await getTeamsChatChoice(client!.db, o.i, who)).toBeNull();
   await setTeamsChatChoice(client!.db, o.i, { ...who, workspaceId: o.design, agentId: null });
   await removeTeamsLink(client!.db, o.i, o.subjectId);
@@ -419,4 +420,121 @@ test("a routed 1:1 route holds its workspace and agent, checked by the caller in
     o.i,
     message(`route:${crypto.randomUUID()}`, { sessionWorkspaceId: o.personal }),
   );
+});
+
+test("stored choices and switch cards only name an agent in its own workspace, for a linked person", async () => {
+  const o = await organization();
+  const who = { actorId: o.actorId, subjectId: o.subjectId };
+  const helper = await agent(o.accountId, o.design, "Helper");
+  const mine = await agent(o.accountId, o.design, "Mine", "private", o.subjectId);
+  const personal = await agent(o.accountId, o.personal, "Personal");
+  const other = await organization();
+  const foreign = await agent(other.accountId, other.design, "Foreign");
+  for (const target of [
+    { workspaceId: o.sales, agentId: helper },
+    { workspaceId: o.design, agentId: mine },
+    { workspaceId: o.personal, agentId: personal },
+    { workspaceId: o.design, agentId: foreign },
+    { workspaceId: o.design, agentId: "not-a-uuid" },
+  ]) {
+    await expect(setTeamsChatChoice(client!.db, o.i, { ...who, ...target })).rejects.toThrow(
+      "teams_route_target_invalid",
+    );
+    await expect(
+      putTeamsRoutePrompt(client!.db, o.i, {
+        ...who,
+        payload: null,
+        options: [{ workspaceId: o.design, agentId: null }, target],
+      }),
+    ).rejects.toThrow("teams_route_target_invalid");
+  }
+  expect(await getTeamsChatChoice(client!.db, o.i, who)).toBeNull();
+  expect(await readTeamsRoutePrompt(client!.db, o.i, who)).toBeNull();
+  // A card is only ever for the linked person, and holds at most 100 rows.
+  await expect(
+    putTeamsRoutePrompt(client!.db, o.i, {
+      ...who,
+      subjectId: "user:other",
+      payload: null,
+      options: [{ workspaceId: o.design, agentId: helper }],
+    }),
+  ).rejects.toThrow("teams_link_missing");
+  await expect(
+    putTeamsRoutePrompt(client!.db, o.i, {
+      ...who,
+      payload: null,
+      options: Array.from({ length: TEAMS_ROUTE_PROMPT_MAX_OPTIONS + 1 }, () => ({
+        workspaceId: o.design,
+        agentId: null,
+      })),
+    }),
+  ).rejects.toThrow("teams_route_prompt_options_invalid");
+  await putTeamsRoutePrompt(client!.db, o.i, {
+    ...who,
+    payload: null,
+    options: Array.from({ length: TEAMS_ROUTE_PROMPT_MAX_OPTIONS }, () => ({
+      workspaceId: o.design,
+      agentId: helper,
+    })),
+  });
+  expect((await readTeamsRoutePrompt(client!.db, o.i, who))?.options).toHaveLength(
+    TEAMS_ROUTE_PROMPT_MAX_OPTIONS,
+  );
+  // Clearing forgets only the named person's choice.
+  await setTeamsChatChoice(client!.db, o.i, { ...who, workspaceId: o.design, agentId: helper });
+  await clearTeamsChatChoice(client!.db, o.i, { actorId: o.actorId, subjectId: "user:other" });
+  expect(await getTeamsChatChoice(client!.db, o.i, who)).toMatchObject({ agentId: helper });
+});
+
+test("the agent directory puts the person's workspaces and open agents first, and says which are open", async () => {
+  const o = await organization();
+  const writer = await agent(o.accountId, o.sales, "Writer");
+  const helper = await agent(o.accountId, o.design, "Helper");
+  const auditor = await agent(o.accountId, o.home, "Auditor");
+  await shared!.admin`update agents set organization_access=true where id=${auditor}`;
+  const listed = await listTeamsAgentDirectory(client!.db, {
+    accountId: o.accountId,
+    workspaceIds: [o.home, o.design, o.sales],
+    preferWorkspaceIds: [o.sales],
+  });
+  expect(listed.map((a) => [a.id, a.organizationAccess])).toEqual([
+    [auditor, true],
+    [writer, false],
+    [helper, false],
+  ]);
+});
+
+test("a reach change committed while a routed message is checked refuses it", async () => {
+  const o = await organization();
+  const message = {
+    routeId: `route:${crypto.randomUUID()}`,
+    actorId: o.actorId,
+    subjectId: o.subjectId,
+    personal: true,
+    sessionWorkspaceId: o.design,
+    conversationId: "19:dm",
+    threadId: null,
+    serviceUrl: "https://smba.trafficmanager.net/emea/",
+    botId: "28:test",
+    eventId: `event:${crypto.randomUUID()}`,
+    payload: { text: "routed" },
+  };
+  await expect(
+    enqueueTeamsMessage(client!.db, o.i, {
+      ...message,
+      authorizeSessionWorkspace: async () => {
+        await setTeamsReach(client!.db, o.i, { workspaceIds: [], personalWorkspaces: true });
+        return true;
+      },
+    }),
+  ).rejects.toThrow("teams_reach_changed");
+  expect(
+    await shared!.admin`select 1 from teams_bot_routes where route_id=${message.routeId}`,
+  ).toHaveLength(0);
+  // Checked against an unchanged reach, it is queued.
+  const queued = await enqueueTeamsMessage(client!.db, o.i, {
+    ...message,
+    authorizeSessionWorkspace: async () => true,
+  });
+  expect(queued.queued).toBe(true);
 });

@@ -35,6 +35,10 @@ export async function requireTeamsConversationProof(
   /** The installation's workspace; differs from the session's only for a
    * 1:1 route whose session lives in the sender's Personal workspace. */
   installationWorkspaceId: string;
+  /** The agent a 1:1 route's chat runs as, or null. */
+  agentId: string | null;
+  /** The route's id. */
+  routeId: string;
 }> {
   return withRlsContext(db, input, async (tx) => {
     // The native admission transaction already owns the canonical workspace
@@ -95,9 +99,10 @@ async function verifyTeamsConversation(
     group_active: boolean;
     channel_id: string | null;
     actor_id: string;
+    agent_id: string | null;
   }>(
     tx,
-    sql`select personal,channel_id,actor_id,conversation_id,group_audience,group_active from teams_bot_routes
+    sql`select personal,channel_id,actor_id,conversation_id,group_audience,group_active,agent_id::text as agent_id from teams_bot_routes
         where route_id=${input.proof.routeId} and account_id=${input.accountId}::uuid
           and workspace_id=${installationWorkspaceId}::uuid and tenant_id=${installation.tenant_id}::uuid
           and coalesce(session_workspace_id,workspace_id)=${input.workspaceId}::uuid
@@ -159,6 +164,8 @@ async function verifyTeamsConversation(
     conversationId: route.conversation_id,
     groupAudience: route.group_audience,
     installationWorkspaceId,
+    agentId: route.agent_id ?? null,
+    routeId: input.proof.routeId,
   };
 }
 

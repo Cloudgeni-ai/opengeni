@@ -117,6 +117,12 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
   } as unknown as ApiRouteDeps;
   /** Every activity sent to Teams directly (replies to a message, cards). */
   const calls: Array<Record<string, unknown>> = [];
+  /** What Teams says about a 1:1 sender: a full member of the tenant unless a test changes it. */
+  const sender: { userRole: string | null; tenantId: string | null; fails: boolean } = {
+    userRole: "user",
+    tenantId: tenant,
+    fails: false,
+  };
   const app = {
     api: {
       fromServiceUrl: () => ({
@@ -124,6 +130,10 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
           createActivity: async (_conversationId: string, activity: Record<string, unknown>) => {
             calls.push(activity);
             return { id: `activity-${calls.length}` };
+          },
+          getMemberById: async (_conversationId: string, memberId: string) => {
+            if (sender.fails) throw new Error("Teams unavailable");
+            return { aadObjectId: memberId, tenantId: sender.tenantId, userRole: sender.userRole };
           },
         },
       }),
@@ -202,13 +212,14 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
       },
     ]);
   };
-  const agent = async (workspaceId: string, name: string) =>
+  const agent = async (workspaceId: string, name: string, agentOptions: { open?: boolean } = {}) =>
     (
       await createAgent(
         client.db,
         { accountId, workspaceId },
         {
           visibility: "workspace",
+          ...(agentOptions.open ? { organizationAccess: true } : {}),
           ownerSubjectId: null,
           name,
           description: "",
@@ -249,6 +260,7 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
     outcomes,
     app,
     channelMention,
+    sender,
   };
 }
 
@@ -518,4 +530,112 @@ test("the app's name never moves a chat whose workspace was lost to another work
   // The lost choice is forgotten: the next message uses the Personal workspace.
   await f.say("summarize the week");
   expect(await f.inboxCount()).toBe(before + 1);
+});
+
+test("an agent anyone in the organization may use answers a non-member as itself, saying once who sees the chat", async () => {
+  const f = await fixture();
+  const auditor = await f.agent(f.finance, "Auditor", { open: true });
+  // Offered on the switch card, though the person isn't in Finance.
+  await f.say("switch");
+  expect(cardChoices(f.calls.at(-1)!).some((choice) => choice.includes("Auditor"))).toBe(true);
+
+  expect(await f.say("Auditor: check the books")).toEqual([]);
+  await f.pump();
+  const session = await f.latestSession();
+  expect(session.workspace_id).toBe(f.finance);
+  expect(session.session_workspace_id).toBe(f.finance);
+  expect(session.agent_id).toBe(auditor);
+  expect(session.session_agent_id).toBe(auditor);
+  expect(session.route_id).toStartWith("teams-agent:");
+  // The chat belongs to the agent's workspace, run by the agent itself.
+  expect(session.visibility).toBe("workspace_shared");
+  expect(session.owner_subject_id).toBeNull();
+  const [creator] =
+    await shared.admin`select created_by_kind, created_by_subject_id, created_by_context
+    from sessions where id=${session.session_id}`;
+  expect(creator!.created_by_subject_id).toBe(`teams-agent:${auditor}`);
+  // The person is recorded as context only.
+  expect(JSON.stringify(creator!.created_by_context)).toContain(f.subject);
+  const notice = "What you tell **Auditor** is visible to members of the **Finance** workspace.";
+  expect(f.delivered[0]).toStartWith(`Started in **Finance** with **Auditor**.\n\n${notice}\n\n`);
+  // Only Finance's members can open the chat, so there is no link to it.
+  expect(f.delivered[0]).not.toContain("https://app.example.test");
+
+  await f.answer(session, "Books checked");
+  await f.pump();
+  expect(f.delivered.at(-1)).toBe("**Auditor** · Finance\n\nBooks checked");
+  // The agent is now the chat's choice: a follow-up continues the same chat, without the notice again.
+  expect(await f.say("And the ledger?")).toEqual([]);
+  await f.pump();
+  expect((await f.latestSession()).session_id).toBe(session.session_id);
+  expect(f.delivered.filter((text) => text.includes(notice))).toHaveLength(1);
+
+  // A member of the agent's workspace keeps their own Only me chat with it.
+  const research = await f.agent(f.research, "Scout", { open: true });
+  await f.say("Scout: look around");
+  await f.pump();
+  const own = await f.latestSession();
+  expect(own.agent_id).toBe(research);
+  expect(own.route_id).not.toStartWith("teams-agent:");
+  expect(own.visibility).toBe("user_private");
+  expect(own.owner_subject_id).toBe(f.subject);
+});
+
+test("an organization agent refuses guests, and stops when the person or the agent loses access", async () => {
+  const f = await fixture();
+  await f.agent(f.finance, "Auditor", { open: true });
+  const before = await f.inboxCount();
+  f.sender.userRole = "guest";
+  expect(await f.say("Auditor: check the books")).toEqual([
+    "**Auditor** doesn't take requests from guests or people outside your organization's Microsoft Teams. No chat was started.",
+  ]);
+  f.sender.userRole = "user";
+  f.sender.fails = true;
+  expect(await f.say("Auditor: check the books")).toHaveLength(1);
+  f.sender.fails = false;
+  f.sender.tenantId = crypto.randomUUID();
+  expect(await f.say("Auditor: check the books")).toHaveLength(1);
+  f.sender.tenantId = f.i.tenant_id;
+  expect(await f.inboxCount()).toBe(before);
+
+  expect(await f.say("Auditor: check the books")).toEqual([]);
+  await f.pump();
+  const session = await f.latestSession();
+  expect(session.route_id).toStartWith("teams-agent:");
+  // The person leaves the organization: output under way stops before Teams.
+  await shared.admin`update organization_memberships set status='suspended' where account_id=${f.accountId} and subject_id=${f.subject}`;
+  await f.answer(session, "Ledger totals");
+  await f.pump();
+  expect(f.delivered).not.toContain("**Auditor** · Finance\n\nLedger totals");
+  await shared.admin`update organization_memberships set status='active' where account_id=${f.accountId} and subject_id=${f.subject}`;
+
+  // The agent is no longer open to the organization: refused, never answered elsewhere.
+  await shared.admin`update agents set organization_access=false where account_id=${f.accountId} and name='Auditor'`;
+  const queued = await f.inboxCount();
+  expect(await f.say("Auditor: one more thing")).toEqual([
+    "**Auditor** works in the **Finance** workspace, which you don't have access to. Ask an admin of that workspace for access. No chat was started.",
+  ]);
+  expect(await f.inboxCount()).toBe(queued);
+});
+
+test("a one-off in <Workspace>: message continues that workspace's chat, and its reply names the workspace", async () => {
+  const f = await fixture();
+  await f.say("switch Home");
+  await f.say("Plan the launch");
+  await f.pump();
+  const home = await f.latestSession();
+  expect(home.workspace_id).toBe(f.home);
+  await f.answer(home, "Plan ready");
+  await f.pump();
+  // The chat's own workspace needs no header.
+  expect(f.delivered.at(-1)).toBe("Plan ready");
+
+  await f.say("switch Research");
+  expect(await f.say("in Home: and the budget?")).toEqual([]);
+  await f.pump();
+  const sessions = await shared.admin`select id from sessions where workspace_id=${f.home}`;
+  expect(sessions).toHaveLength(1);
+  await f.answer(home, "Budget attached");
+  await f.pump();
+  expect(f.delivered.at(-1)).toBe("**Home**\n\nBudget attached");
 });

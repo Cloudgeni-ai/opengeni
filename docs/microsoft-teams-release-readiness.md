@@ -812,8 +812,29 @@ With it on:
   card per person, 24 hours, single use). Agents are the organization's shared
   agents in workspaces the person can use; Only me agents and agents in
   Personal workspaces are never listed. Agent replies carry an
-  "**Agent** · Workspace" header, and the first reply after a real choice names
-  the workspace the chat is saved in.
+  "**Agent** · Workspace" header, a one-off `in <Workspace>: …` message's
+  replies a "**Workspace**" header, and the first reply after a real choice
+  names the workspace the chat is saved in. A one-off continues the person's
+  chat in that workspace (same route as a switch there); it doesn't change the
+  remembered choice.
+- **Agents anyone in the organization may use** (Who can use it: Anyone in
+  <organization>, see [agents.md](agents.md#anyone-in-the-organization)) are
+  also listed, addressed and remembered for people who aren't in their
+  workspace, with Slack's open-agent rules: only in 1:1 chats; Teams'
+  `getMemberById` must say the sender is a full member (`userRole` "user") of
+  the connected tenant, never a guest, read on every queued message; the
+  linked person must be an active full member of the organization, read live
+  at enqueue (inside the enqueue transaction), at admission and before every
+  delivery, with the agent still open and in reach. The chat has its own
+  route (`teams-agent:` route ids), runs as the agent's read-only service
+  principal `teams-agent:<agentId>` with Slack's open-agent permissions and
+  session options, is visible to the workspace's members (no link to it is
+  sent), and its first reply says so once. Members of the workspace keep
+  their own Only me chat with the agent. No Teams-only setting, and no
+  migration. During a rollout a replica without this release fails closed on
+  these routes: it refuses their admission (the agent principal fails its
+  proof check) and drops their replies (the session isn't the person's Only
+  me one), so a person may need to ask again.
 - **Authority** is read live at enqueue (before and inside the enqueue
   transaction), at admission and before delivery: active organization
   membership, the person's live authority in the target workspace (membership
@@ -821,7 +842,16 @@ With it on:
   choices and switch cards are memory, never authority; a choice that no longer
   works is refused ("You can no longer start chats in **X** from Teams"), never
   served from another workspace. Each route, choice and card row has a
-  same-account CHECK and composite foreign keys to its organization.
+  same-account CHECK and composite foreign keys to its organization, and an
+  agent named by a stored choice or card option is checked, in the writing
+  transaction, to be a shared agent of that workspace (agents never move). A
+  reach change committed while a message's access is checked refuses it
+  (`reach_version` is read before the check and again under the installation
+  lock), and the message is checked once more.
+- **Limits.** A switch card holds at most 100 numbered rows, with room for up
+  to 50 workspaces however many agents there are; `switch <name>` and stored
+  choices still reach anything beyond the card. The agent directory reads up
+  to 1,000 agents, the person's own workspaces' and open agents first.
 - **Reach** is the organization admin's limit, stored on the installation
   (`reach_workspace_ids`, null for every workspace, and
   `reach_personal_workspaces`). It uses the same **Available in Opengeni**
