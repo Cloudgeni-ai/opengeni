@@ -499,12 +499,19 @@ export class OpStreamExecClient {
         const result = await consumer.run(exec, deadlineMs, wallMs, yieldOptions);
         if (result.status === "completed") {
           this.acknowledgedOps.delete(opId);
-          this.settled.push({
+          const settled: SettledOp = {
             opId,
             exitSeq: result.exitSeq,
             generation: consumer.generation,
             toolCallId,
-          });
+          };
+          this.settled.push(settled);
+          // An op no tool call owns has a random id that nothing can name
+          // again: a re-dispatch mints a new one, and its caller holds the
+          // whole result in memory now. Retaining it serves no reader, so it
+          // is released at once instead of waiting for a durability hook its
+          // caller may never reach.
+          if (toolCallId === null) this.releaseUnowned(settled);
           return { status: "completed", outcome: result.outcome };
         }
         return result;
@@ -673,11 +680,21 @@ export class OpStreamExecClient {
     const eligible = this.settled.filter(
       (op) => selected === null || (op.toolCallId !== null && selected.has(op.toolCallId)),
     );
+    await this.queueFinalization(eligible);
+  }
+
+  /** Release one completed op that no tool result owns, in the background of
+   *  its caller. A failure keeps it settled for the next durability hook. */
+  private releaseUnowned(op: SettledOp): void {
+    this.queueFinalization([op]).catch(() => undefined);
+  }
+
+  private queueFinalization(eligible: readonly SettledOp[]): Promise<void> {
     const finalization = this.finalization.then(() => this.finalizeOps(eligible));
     // Serialize overlapping durability hooks without letting one failed
     // journal poison later attempts to finalize the same retained frontier.
     this.finalization = finalization.catch(() => undefined);
-    await finalization;
+    return finalization;
   }
 
   private async finalizeOps(eligible: readonly SettledOp[]): Promise<void> {
@@ -690,7 +707,9 @@ export class OpStreamExecClient {
     for (const op of eligible) {
       // A preceding queued hook may already have acknowledged this object.
       if (!this.settled.includes(op)) continue;
-      await this.deps.journal?.persistSettled(op.opId, op.exitSeq);
+      // The journal records frontiers a re-dispatched turn can resume by
+      // their durable ids; an unowned op's random id is never resumed.
+      if (op.toolCallId !== null) await this.deps.journal?.persistSettled(op.opId, op.exitSeq);
       if (this.deps.outputReleaseSupported === true) {
         // One answered exchange: the runner drops the op and confirms it.
         releasing.push(this.releaseSettled(op));

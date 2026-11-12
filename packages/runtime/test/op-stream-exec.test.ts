@@ -1163,7 +1163,7 @@ describe("op-stream exec (fake runner)", () => {
     expect(events).toHaveLength(1);
   });
 
-  test("a durable tool result releases only its own sub-ops, preserving parallel and setup output", async () => {
+  test("a durable tool result releases only its own sub-ops, preserving parallel output", async () => {
     const { runner, session, transport } = buildRig();
     for (const opId of ["call_first:0", "call_first:1", "call_second:0"]) {
       runner.script(opId, { frames: [{ channel: "stdout", bytes: opId }] });
@@ -1187,19 +1187,85 @@ describe("op-stream exec (fake runner)", () => {
     const setupOpId = [...runner.runs.keys()].find((id) => id.startsWith("anon_"))!;
 
     await session.finalizeOpStreamOps([]);
-    expect(transport.decodedAcks().filter((ack) => ack.final)).toEqual([]);
+    // Unowned setup output is released on its own; no tool output is.
+    expect(transport.decodedAcks().filter((ack) => ack.final)).toHaveLength(1);
+    expect(runner.runs.get(setupOpId)?.finalAcked).toBe(true);
     await session.finalizeOpStreamOps(["call_first"]);
     expect(runner.runs.get("call_first:0")?.finalAcked).toBe(true);
     expect(runner.runs.get("call_first:1")?.finalAcked).toBe(true);
     expect(runner.runs.get("call_second:0")?.finalAcked).toBe(false);
-    expect(runner.runs.get(setupOpId)?.finalAcked).toBe(false);
 
     await session.finalizeOpStreamOps(["call_second"]);
     expect(runner.runs.get("call_second:0")?.finalAcked).toBe(true);
-    expect(runner.runs.get(setupOpId)?.finalAcked).toBe(false);
     await session.finalizeOpStreamOps();
-    expect(runner.runs.get(setupOpId)?.finalAcked).toBe(true);
     expect(transport.decodedAcks().filter((ack) => ack.final)).toHaveLength(4);
+  });
+
+  describe("a command no tool call owns", () => {
+    const unownedRig = (opts: { outputReleaseSupported?: boolean } = {}) => {
+      const persisted: string[] = [];
+      const rig = buildRig({
+        ...opts,
+        journal: {
+          attachGeneration: () => "7",
+          persistSettled: (opId) => {
+            persisted.push(opId);
+          },
+        },
+      });
+      const request = rig.runner.request.bind(rig.runner);
+      rig.runner.request = async (subject, input, options) => {
+        if (input.op?.$case === "opStart" && input.requestId.startsWith("anon_")) {
+          rig.runner.script(input.requestId, { frames: [{ channel: "stdout", bytes: "read" }] });
+        }
+        return await request(subject, input, options);
+      };
+      const anonymous = () => [...rig.runner.runs.keys()].filter((id) => id.startsWith("anon_"));
+      return { ...rig, persisted, anonymous };
+    };
+    // Join the client's queued releases without adding any durability hook.
+    const settle = async () => await new Promise((resolve) => setTimeout(resolve, 0));
+
+    test("is final-acked once its result returns, with no durability hook", async () => {
+      const { runner, session, persisted, anonymous } = unownedRig();
+      for (let index = 0; index < 3; index += 1) {
+        const result = await session.exec({ cmd: `git read ${index}` });
+        expect(result.stdout).toBe("read");
+      }
+      await settle();
+      expect(anonymous()).toHaveLength(3);
+      for (const opId of anonymous()) expect(runner.runs.get(opId)?.finalAcked).toBe(true);
+      // Nothing can resume an unowned op by its id, so nothing is journaled.
+      expect(persisted).toEqual([]);
+    });
+
+    test("is released in one exchange by a runner serving OpRelease", async () => {
+      const { runner, session, requests, transport, anonymous } = unownedRig({
+        outputReleaseSupported: true,
+      });
+      await session.exec({ cmd: "git read" });
+      await settle();
+      const [opId] = anonymous();
+      expect(runner.releasedOps.has(opId!)).toBe(true);
+      expect(requests.filter((request) => request.op?.$case === "opRelease")).toHaveLength(1);
+      expect(transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+      // A later complete-turn hook has nothing left to release.
+      await session.finalizeOpStreamOps();
+      expect(requests.filter((request) => request.op?.$case === "opRelease")).toHaveLength(1);
+    });
+
+    test("leaves a tool-owned result retained until its own durability hook", async () => {
+      const { runner, session, anonymous } = unownedRig();
+      runner.script("call_owned:0", { frames: [{ channel: "stdout", bytes: "owned" }] });
+      const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+      await runWithToolCallCorrelation("call_owned", () => session.exec({ cmd: "owned" }));
+      await session.exec({ cmd: "git read" });
+      await settle();
+      expect(runner.runs.get(anonymous()[0]!)?.finalAcked).toBe(true);
+      expect(runner.runs.get("call_owned:0")?.finalAcked).toBe(false);
+      await session.finalizeOpStreamOps(["call_owned"]);
+      expect(runner.runs.get("call_owned:0")?.finalAcked).toBe(true);
+    });
   });
 
   test("durable result scope uses the original call id, not a sanitized op-id prefix", async () => {
