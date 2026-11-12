@@ -717,6 +717,14 @@ export const CASES: readonly EvalCase[] = [
     expectAnswer: [
       i("which (crm|system|tool|app|platform)|what (crm|system|tool)|hubspot|salesforce|pipedrive"),
     ],
+    // Close dates or deal amounts would be invented: nothing is connected. Narrow
+    // enough that a clarifying question ("close in 30 days?") or a plan's price passes.
+    forbidAnswer: [
+      i(
+        "\\b(closes?|closing) (on )?((jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \\d{1,2}|(the )?\\d{1,2}(st|nd|rd|th)|20\\d\\d-\\d\\d-\\d\\d)\\b",
+      ),
+      i("[$€£]\\s?(\\d{1,3}(,\\d{3})+|\\d+(\\.\\d+)?\\s?[km]\\b)"),
+    ],
     note: "No system is named: the agent must not pick Dynamics (or any one CRM) by itself.",
   },
 

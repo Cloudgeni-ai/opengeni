@@ -316,6 +316,7 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
@@ -92740,6 +92741,12 @@ export type EnqueueCapabilitySetupContinuationInput = {
   sessionId: string;
   capabilityId: string;
   /**
+   * The capability's MCP endpoint. An agent's request to add a server
+   * (custom_mcp_setup_request) posts its card before the capability exists, so
+   * that card names the endpoint rather than a capability id.
+   */
+  endpointUrl?: string;
+  /**
    * The card is a connected account's own notice (expired access, more access
    * a tool needs) rather than a capability card: find it by this connection.
    */
@@ -92965,9 +92972,15 @@ async function latestAuthCardTx(
   tx: Database,
   input: Pick<
     EnqueueCapabilitySetupContinuationInput,
-    "workspaceId" | "sessionId" | "capabilityId" | "connectionId"
+    "workspaceId" | "sessionId" | "capabilityId" | "connectionId" | "endpointUrl"
   >,
 ): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
+  const capabilityCard = sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`;
+  // The card keeps the address as the agent gave it; ignore case and a
+  // trailing slash so the saved server's address still finds it.
+  const setupRequestCard = input.endpointUrl
+    ? sql`rtrim(lower(${schema.sessionEvents.payload} -> 'setupRequest' ->> 'endpointUrl'), '/') = rtrim(lower(${input.endpointUrl}), '/')`
+    : null;
   return await tx
     .select({
       id: schema.sessionEvents.id,
@@ -92982,7 +92995,9 @@ async function latestAuthCardTx(
         eq(schema.sessionEvents.type, "tool.auth_needed"),
         input.connectionId
           ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
-          : sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+          : setupRequestCard
+            ? sql`(${capabilityCard} or ${setupRequestCard})`
+            : capabilityCard,
       ),
     )
     .orderBy(desc(schema.sessionEvents.sequence))
@@ -97507,6 +97522,20 @@ function catalogExposureState(
   return "legacy_active";
 }
 
+/**
+ * A workspace's Microsoft Dynamics entry keeps its MCP address only in
+ * `endpoint_url`: `mcp_url` takes part in the registry's cross-workspace
+ * uniqueness, which two workspaces using one environment would break.
+ */
+function workspaceDynamicsMcpUrl(row: typeof schema.capabilityCatalogItems.$inferSelect) {
+  return row.workspaceId &&
+    row.kind === "mcp" &&
+    row.endpointUrl &&
+    microsoftDynamicsProductForMcpUrl(row.endpointUrl)
+    ? row.endpointUrl
+    : null;
+}
+
 function mapCapabilityCatalogItem(
   row: typeof schema.capabilityCatalogItems.$inferSelect,
   exposure: "trusted" | "legacy_active" | "unverified" = capabilityCatalogItemIsTrustedForExposure({
@@ -97572,7 +97601,7 @@ function mapCapabilityCatalogItem(
     providerDomain: row.providerDomain,
     surfaceType: row.surfaceType,
     transport: row.transport,
-    mcpUrl: row.mcpUrl,
+    mcpUrl: row.mcpUrl ?? workspaceDynamicsMcpUrl(row),
     authKind: row.authKind as CapabilityCatalogItem["authKind"],
     credentialFacts: row.credentialFacts,
     tier: row.tier as CapabilityCatalogItem["tier"],
