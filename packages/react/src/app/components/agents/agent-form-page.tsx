@@ -9,6 +9,7 @@ import {
   AGENT_INSTRUCTIONS_MAX_LENGTH,
   AGENT_INSTRUCTIONS_SOFT_LIMIT,
   AGENT_NAME_MAX_LENGTH,
+  slackAgentOpenDisclosure,
   type Agent,
   type AgentVisibility,
   type UpdateAgentRequest,
@@ -36,7 +37,13 @@ import {
   sessionAvatarFromDraft,
   sessionAvatarSeedHue,
 } from "../session/session-avatar-picker";
-import { AGENT_VERSION_CONFLICT, workspacePeopleLabel } from "./agent-page";
+import { orgName } from "../../lib/org";
+import { hasAccountPermission } from "../../lib/permissions";
+import {
+  AGENT_VERSION_CONFLICT,
+  organizationPeopleLabel,
+  workspacePeopleLabel,
+} from "./agent-page";
 
 export const INSTRUCTIONS_HINT =
   "What it does and how. Applies in every chat. Put long reference material in Memory.";
@@ -65,6 +72,7 @@ const EMPTY: AgentFormValues = {
 };
 
 export const ONLY_ME_UNAVAILABLE = "Only me chats aren't available here.";
+export const ORGANIZATION_ACCESS_ADMIN_ONLY = "Only an organization admin can choose this.";
 
 /** The count beside a field once it is near its limit. */
 export function lengthCount(value: string, max: number): string | undefined {
@@ -171,7 +179,7 @@ function AgentForm({
   onClose: () => void;
   onSaved: (agent: Agent) => void;
 }) {
-  const { client, workspaces } = useAppContext();
+  const { client, workspaces, accessContext } = useAppContext();
   const privateChats = usePrivateChatsAvailable(workspaceId);
   const seedKey = agent?.id ?? sourceSessionId ?? "new-agent";
   const [name, setName] = useState(initial.name);
@@ -188,8 +196,16 @@ function AgentForm({
   );
   const [pickerOpen, setPickerOpen] = useState(false);
   const [errors, setErrors] = useState<FormErrors>({});
-  const workspaceName =
-    workspaces.find((row) => row.id === (agent?.workspaceId ?? workspaceId))?.name ?? null;
+  const workspace = workspaces.find((row) => row.id === (agent?.workspaceId ?? workspaceId));
+  const workspaceName = workspace?.name ?? null;
+  // Only shared agents of an organization's workspaces reach its people.
+  const organizationOption = workspace !== undefined && workspace.kind !== "personal";
+  const organizationName = workspace
+    ? orgName(workspace.accountId, accessContext.accountGrants)
+    : null;
+  const organizationAdmin =
+    workspace !== undefined &&
+    hasAccountPermission(accessContext, workspace.accountId, "account:admin");
   const inSlack = (agent?.slack.length ?? 0) > 0;
   const long = instructions.length > AGENT_INSTRUCTIONS_SOFT_LIMIT;
   // Unchanged Instructions are never sent, so only changed ones must fit.
@@ -382,7 +398,9 @@ function AgentForm({
           hint={
             inSlack && visibility === "private"
               ? "Only me agents stay in the app, so it stops answering in Slack."
-              : undefined
+              : visibility === "organization"
+                ? slackAgentOpenDisclosure(name, workspaceName ?? "")
+                : undefined
           }
         >
           <SegmentedControl
@@ -396,6 +414,16 @@ function AgentForm({
                 disabledReason: ONLY_ME_UNAVAILABLE,
               },
               { value: "workspace", label: workspacePeopleLabel(workspaceName) },
+              ...(organizationOption || visibility === "organization"
+                ? [
+                    {
+                      value: "organization",
+                      label: organizationPeopleLabel(organizationName),
+                      disabled: visibility !== "organization" && !organizationAdmin,
+                      disabledReason: ORGANIZATION_ACCESS_ADMIN_ONLY,
+                    },
+                  ]
+                : []),
             ]}
             value={visibility}
             onValueChange={(next) => setVisibility(next as AgentVisibility)}

@@ -1210,9 +1210,11 @@ describe("Workspace page", () => {
     const listOpenGeniSlackAgents = mock(async () => ({
       routingEnabled: true,
       agents: [
-        { name: "Data team", targetWorkspaceId: "ws-platform" },
-        { name: "Elsewhere", targetWorkspaceId: "ws-other" },
-        { name: "Release", targetWorkspaceId: "ws-platform" },
+        { id: "agent-data", name: "Data team", targetWorkspaceId: "ws-platform" },
+        { id: "agent-elsewhere", name: "Elsewhere", targetWorkspaceId: "ws-other" },
+        { id: "agent-release", name: "Release", targetWorkspaceId: "ws-platform" },
+        // The same agent in a second Slack installation is named once.
+        { id: "agent-data", name: "Data team", targetWorkspaceId: "ws-platform" },
       ],
     }));
     const client = makeClient({ listOpenGeniSlackAgents });

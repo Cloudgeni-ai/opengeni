@@ -62,6 +62,8 @@ import {
   agentView,
   agentViewerCanMakePrivate,
   agentViewerForGrant,
+  agentVisibilityRecord,
+  agentVisibilityValue,
   agentVisibleTo,
   knowledgeContextForAccess,
   requireAccessGrantAuthorization,
@@ -224,6 +226,15 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   }
 
+  /**
+   * Letting anyone in the organization use an agent opens it beyond its
+   * workspace, so it takes an organization admin (as Slack's open use did).
+   * Narrowing it back does not.
+   */
+  function requireOrganizationAccessAdmin(context: RequestContext): void {
+    requireAccountAdminAuthorizationStamp(context.access);
+  }
+
   async function memoryReviewFirst(context: RequestContext): Promise<boolean> {
     try {
       return await withAccessGrantSessionRlsContext(deps, context.grant, async () => {
@@ -313,7 +324,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requestContext(c, "sessions:create");
     const request = await parseRequestJson(c, CreateAgentRequest);
     const { grant, viewer, home } = context;
-    if (request.visibility === "private" && viewer.subjectId === null) {
+    const access = agentVisibilityRecord(request.visibility);
+    if (access.organizationAccess) requireOrganizationAccessAdmin(context);
+    if (access.visibility === "private" && viewer.subjectId === null) {
       throw new ApiHttpError(422, {
         code: "validation_failed",
         message:
@@ -332,9 +345,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     await requireUsableSessionAvatar(deps, grant, request.avatar, {
-      sharedWithWorkspace: request.visibility === "workspace",
+      sharedWithWorkspace: access.visibility === "workspace",
     });
-    if (request.visibility === "workspace") {
+    if (access.visibility === "workspace") {
       const refusal = await agentSlackNameRefusal(deps, home, {
         agentId: null,
         name: request.name,
@@ -345,8 +358,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       created = (
         await createAgent(db, home, {
-          visibility: request.visibility,
-          ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
+          visibility: access.visibility,
+          ownerSubjectId: access.visibility === "private" ? viewer.subjectId : null,
+          organizationAccess: access.organizationAccess,
           name: request.name,
           description: request.description,
           avatar: request.avatar,
@@ -381,8 +395,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireEditable(context, current);
     const request = await parseRequestJson(c, UpdateAgentRequest);
     const { grant, viewer, home } = context;
-    const visibility = request.visibility ?? current.visibility;
+    const access = agentVisibilityRecord(request.visibility ?? agentVisibilityValue(current));
+    const visibility = access.visibility;
     const changesVisibility = visibility !== current.visibility;
+    const changesOrganizationAccess = access.organizationAccess !== current.organizationAccess;
+    if (access.organizationAccess && changesOrganizationAccess) {
+      requireOrganizationAccessAdmin(context);
+    }
     // Making it Only me takes it out of Slack (see updateAgent).
     if (changesVisibility && visibility === "private") {
       if (!agentViewerCanMakePrivate(viewer, current)) {
@@ -429,6 +448,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
         ...(request.firstMessage !== undefined ? { firstMessage: request.firstMessage } : {}),
         ...(request.memoryEnabled !== undefined ? { memoryEnabled: request.memoryEnabled } : {}),
+        ...(changesOrganizationAccess ? { organizationAccess: access.organizationAccess } : {}),
         ...(changesVisibility
           ? {
               visibility,
@@ -592,8 +612,8 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return parsed.data;
   }
 
-  // Change open use in one linked Slack workspace. While an agent is in one
-  // Slack workspace at a time, PUT on another linked one moves it there.
+  // Make a shared agent available in one linked Slack workspace now (it is
+  // anyway, on its own), or change open use, which is the agent's own.
   app.put(`${base}/:agentId/slack/:connectionId`, async (c) => {
     const context = await requestContext(c, "workspace:admin");
     const agent = await requireVisibleAgent(c, context);
@@ -640,22 +660,20 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
       }
     }
-    if (request.open === true && !existing?.open) {
-      requireAccountAdminAuthorizationStamp(context.access);
+    // Open use is the agent's own "Anyone in <organization>" now; this
+    // older field changes that, in every Slack workspace.
+    if (request.open === true && !agent.organizationAccess) {
+      requireOrganizationAccessAdmin(context);
     }
-    // While an agent is in one Slack workspace at a time, choosing another
-    // one moves it there, in one step: if that fails, it stays where it was.
     const outcome = await putAgentSlackInstall(db, home, {
       agentId: agent.id,
       connectionId,
       slackTeamId: installation.binding.slackTeamId,
       installWorkspaceId: installation.home.workspaceId,
-      ...(request.open !== undefined ? { open: request.open } : {}),
       ...(request.expectedVersion !== undefined
         ? { expectedVersion: request.expectedVersion }
         : {}),
       actorSubjectId: context.grant.subjectId,
-      moveFromOther: true,
     });
     if (outcome.kind === "not_found") throw notFound();
     if (outcome.kind === "requires_workspace_visibility") {
@@ -672,28 +690,31 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         "Another agent in that Slack workspace already has this name. Rename this one first.",
       );
     }
-    if (outcome.kind === "single_install") {
-      throw agentError(
-        409,
-        "agent_slack_single_install",
-        "For now an agent is available in one Slack workspace, and this one is already in another.",
-        { connectionId: outcome.connectionId || null },
-      );
-    }
     if (outcome.kind === "version_conflict") {
       throw agentError(409, "agent_version_conflict", "This changed. Refresh and try again.", {
         currentVersion: outcome.install.version,
       });
     }
-    const view = await viewContext(context, [outcome.agent]);
+    let saved = { agent: outcome.agent, install: outcome.install };
+    if (request.open !== undefined && request.open !== outcome.agent.organizationAccess) {
+      const opened = await updateAgent(db, home, {
+        agentId: agent.id,
+        expectedVersion: null,
+        actorSubjectId: context.viewer.subjectId,
+        patch: { organizationAccess: request.open },
+      });
+      if (opened.kind !== "updated") throw notFound();
+      const install = (await listAgentSlackInstalls(db, home, [agent.id])).find(
+        (candidate) => candidate.connectionId === connectionId,
+      );
+      if (!install) throw notFound();
+      saved = { agent: opened.agent, install };
+    }
+    const view = await viewContext(context, [saved.agent]);
     return c.json(
       AgentSlackAvailabilityResponse.parse({
-        agent: agentView(outcome.agent, view),
-        availability: agentSlackAvailabilityView(
-          outcome.agent,
-          outcome.install,
-          view.slackTeamNames,
-        ),
+        agent: agentView(saved.agent, view),
+        availability: agentSlackAvailabilityView(saved.agent, saved.install, view.slackTeamNames),
       }),
       outcome.created ? 201 : 200,
     );
@@ -719,6 +740,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const projection = await getSlackAgent(db, {
       accountId: context.home.accountId,
       agentId: agent.id,
+      connectionId,
     });
     if (
       !projection ||

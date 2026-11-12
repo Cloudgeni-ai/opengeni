@@ -33,7 +33,7 @@ import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
  * `/bot-templates` endpoints and the `bot_template_save` tool. Every agent the
  * reader can use is a template; its setup instructions are the agent's First
  * message. Saving one makes an agent with that First message and no
- * Instructions, and keeps a legacy `bot_templates` row for older releases.
+ * Instructions.
  *
  * Who may change one follows the agents rule: whoever made it, an admin, or a
  * workspace-level caller. An Only me one exists only for its owner. The server
@@ -186,7 +186,6 @@ export async function createBotTemplateForViewer(input: {
         origin: "bot_template",
         sourceSessionId: request.sourceSessionId,
         createdBySubjectId: viewer.subjectId,
-        legacyBotTemplate: true,
         maxPerWorkspace: AGENTS_PER_WORKSPACE_MAX,
       },
     );
