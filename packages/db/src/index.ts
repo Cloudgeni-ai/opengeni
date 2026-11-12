@@ -93051,6 +93051,11 @@ async function latestAuthCardTx(
   >,
 ): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
   const capabilityCard = sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`;
+  // The card keeps the address as the agent gave it; ignore case and a
+  // trailing slash so the saved server's address still finds it.
+  const setupRequestCard = input.endpointUrl
+    ? sql`rtrim(lower(${schema.sessionEvents.payload} -> 'setupRequest' ->> 'endpointUrl'), '/') = rtrim(lower(${input.endpointUrl}), '/')`
+    : null;
   return await tx
     .select({
       id: schema.sessionEvents.id,
@@ -93065,8 +93070,8 @@ async function latestAuthCardTx(
         eq(schema.sessionEvents.type, "tool.auth_needed"),
         input.connectionId
           ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
-          : input.endpointUrl
-            ? sql`(${capabilityCard} or ${schema.sessionEvents.payload} -> 'setupRequest' ->> 'endpointUrl' = ${input.endpointUrl})`
+          : setupRequestCard
+            ? sql`(${capabilityCard} or ${setupRequestCard})`
             : capabilityCard,
       ),
     )

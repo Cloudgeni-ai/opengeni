@@ -360,7 +360,11 @@ describe("capability setup continuation", () => {
         endpointUrl: "https://other.example.com/mcp",
       }),
     ).toEqual({ outcome: "not_needed", reason: "no_card" });
-    const queued = await enqueueCapabilitySetupContinuation(client.db, { ...input, endpointUrl });
+    // The saved server may differ from the card's address by case or a trailing slash.
+    const queued = await enqueueCapabilitySetupContinuation(client.db, {
+      ...input,
+      endpointUrl: "https://Mail.example.com/mcp/",
+    });
     if (queued.outcome !== "queued") throw new Error(`not queued: ${JSON.stringify(queued)}`);
     expect(queued.update.sourceId).toBe(card.id);
     expect(queued.shouldWake).toBe(true);
