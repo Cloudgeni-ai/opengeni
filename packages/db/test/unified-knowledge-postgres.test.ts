@@ -387,6 +387,101 @@ describe("unified Knowledge storage", () => {
     });
   }
 
+  test("a continuation follows the modes its chat accepted most recently, not an older cause", async () => {
+    const f = await fixture();
+    const reviewed = {
+      knowledge: "automatic",
+      instructions: "review_first",
+      skills: "automatic",
+    } as const;
+    const automatic = {
+      knowledge: "automatic",
+      instructions: "automatic",
+      skills: "automatic",
+    } as const;
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: reviewed,
+    });
+    const { agent, session } = await attempt(f, null);
+    expect((await freezeAgentLearningPolicy(client.db, agent)).effective).toEqual(reviewed);
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 1,
+      settings: automatic,
+    });
+
+    let previous = agent.actor;
+    async function nextTurn(position: number, source: "user" | "system") {
+      const turnId = crypto.randomUUID(),
+        attemptId = crypto.randomUUID();
+      await shared!.admin.begin(async (tx) => {
+        await tx`SELECT set_config('opengeni.session_inference_claim','1',true)`;
+        await tx`UPDATE session_turn_attempts SET state='closed',outcome='completed',closed_at=now() WHERE id=${previous.attemptId}`;
+        await tx`UPDATE session_turns SET status='completed',active_attempt_id=NULL WHERE id=${previous.turnId}`;
+        await tx`INSERT INTO session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,
+          status,source,position,prompt,model,reasoning_effort,sandbox_backend,execution_generation,
+          initiator_kind,initiator_subject_id,initiator_context,initiating_human_subject_id)
+          VALUES(${turnId},${f.accountId},${f.workspaceId},${session.id},${crypto.randomUUID()},${`follow-${turnId}`},
+          'running',${source},${position},'Continue','test-model','medium','none',1,
+          ${source === "user" ? "subject" : "service"},${source === "user" ? f.subjectId : "worker"},'{}',${f.subjectId})`;
+        await tx`UPDATE sessions SET active_turn_id=${turnId},status='running' WHERE id=${session.id}`;
+        await tx`UPDATE session_turns SET active_attempt_id=${attemptId} WHERE id=${turnId}`;
+        await tx`INSERT INTO session_turn_attempts(id,account_id,workspace_id,session_id,turn_id,execution_generation,state,
+          temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,verified_control_revision,mcp_approval_policies)
+          VALUES(${attemptId},${f.accountId},${f.workspaceId},${session.id},${turnId},1,'running',${`follow-${turnId}`},
+          ${`run-${attemptId}`},${`activity-${attemptId}`},0,'{}')`;
+      });
+      previous = { ...agent.actor, turnId, attemptId };
+      return { ...agent, actor: previous };
+    }
+    async function deliverChildResult(turn: typeof agent, causeTurnId: string, position: number) {
+      expect(
+        await appendSessionHistoryItems(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          sessionId: session.id,
+          turnId: turn.actor.turnId,
+          expectedExecutionGeneration: 1,
+          expectedAttemptId: turn.actor.attemptId,
+          items: [{ position, item: { role: "user", content: "The child finished" } }],
+        }),
+      ).toBe(true);
+      const [history] = await shared!
+        .admin`SELECT id FROM session_history_items WHERE turn_id=${turn.actor.turnId}`;
+      await shared!
+        .admin`INSERT INTO session_system_updates(account_id,workspace_id,session_id,kind,source_id,dedupe_key,summary,payload,
+        lineage,state,delivered_turn_id,delivered_history_item_id,delivered_at)
+        VALUES(${f.accountId},${f.workspaceId},${session.id},'child_terminal_result',${crypto.randomUUID()},${crypto.randomUUID()},
+        'The child finished','{}',${shared!.admin.json({ parentTurnId: causeTurnId })},'delivered',${turn.actor.turnId},
+        ${history!.id},now())`;
+    }
+
+    // The person writes again after the change: that turn resolves the new modes.
+    const human = await nextTurn(2, "user");
+    expect((await freezeAgentLearningPolicy(client.db, human)).effective).toEqual(automatic);
+
+    // A child started by the first turn finishes later. Its result keeps the
+    // first turn as its cause but follows what the chat accepted since.
+    const childResult = await nextTurn(3, "system");
+    await deliverChildResult(childResult, agent.actor.turnId, 1);
+    expect(await freezeAgentLearningPolicy(client.db, childResult)).toMatchObject({
+      producerTurnId: agent.actor.turnId,
+      effective: automatic,
+    });
+
+    // So does every later continuation of that chain.
+    const laterResult = await nextTurn(4, "system");
+    await deliverChildResult(laterResult, childResult.actor.turnId, 2);
+    expect(await freezeAgentLearningPolicy(client.db, laterResult)).toMatchObject({
+      producerTurnId: childResult.actor.turnId,
+      effective: automatic,
+    });
+  });
+
   test("a child's first turn can narrow workspace learning to its personal owner", async () => {
     const f = await fixture();
     const parent = await attempt(f, "automatic");

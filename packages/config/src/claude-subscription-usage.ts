@@ -462,20 +462,46 @@ export function parseClaudeUsageLimits(
   });
 }
 
-/** The usage body's `extra_usage`; undefined when absent, null when the provider reports none. */
-export function parseClaudeExtraUsage(value: unknown): ClaudeExtraUsage | null | undefined {
-  if (value === undefined) return undefined;
-  const extra = record(value);
-  if (!extra) return null;
+const USAGE_CREDITS_STATES = new Set(["enabled", "disabled", "not_configured"]);
+
+/**
+ * The account's usage-credits setting, from the `extra_usage_state` the
+ * reset programs report in their `event_props` (Claude Code 2.1.322 reads
+ * `not_configured`, `disabled`, `enabled` or `unknown`). Null when neither
+ * program says, or says `unknown` or something unrecognized.
+ */
+function usageCreditsSetting(body: Record<string, unknown>): ClaudeExtraUsage["state"] {
+  for (const program of [body.cedar_ember, body.juniper_tide]) {
+    const state = record(record(program)?.event_props)?.extra_usage_state;
+    if (typeof state === "string" && USAGE_CREDITS_STATES.has(state))
+      return state as NonNullable<ClaudeExtraUsage["state"]>;
+  }
+  return null;
+}
+
+/**
+ * The account's paid usage credits, from every part of a usage body that
+ * reports them: the setting from the reset programs' `event_props`, and the
+ * `extra_usage` object (whether they can pay now, and the month's cap and
+ * spend in minor units). Reads that skip spend reporting (`skip_spend=1`)
+ * answer `extra_usage: null` whatever the setting, so a null object is not
+ * evidence of anything. Undefined when the body reports neither: unknown,
+ * never off.
+ */
+export function parseClaudeExtraUsage(body: Record<string, unknown>): ClaudeExtraUsage | undefined {
+  const state = usageCreditsSetting(body);
+  const extra = record(body.extra_usage);
+  if (!extra && state === null) return undefined;
   const parsed = ClaudeExtraUsage.safeParse({
-    isEnabled: typeof extra.is_enabled === "boolean" ? extra.is_enabled : null,
-    monthlyLimit: numberOrNull(extra.monthly_limit),
-    usedCredits: numberOrNull(extra.used_credits),
-    utilization: percentOrNull(extra.utilization),
-    currency: typeof extra.currency === "string" ? extra.currency.slice(0, 16) : null,
-    disabledReason: tokenOrNull(extra.disabled_reason),
+    state,
+    isEnabled: typeof extra?.is_enabled === "boolean" ? extra.is_enabled : null,
+    monthlyLimit: numberOrNull(extra?.monthly_limit),
+    usedCredits: numberOrNull(extra?.used_credits),
+    utilization: percentOrNull(extra?.utilization),
+    currency: typeof extra?.currency === "string" ? extra.currency.slice(0, 16) : null,
+    disabledReason: tokenOrNull(extra?.disabled_reason),
   });
-  return parsed.success ? parsed.data : null;
+  return parsed.success ? parsed.data : undefined;
 }
 
 const SURFACE_WINDOWS = ["seven_day_cowork", "seven_day_omelette", "seven_day_oauth_apps"] as const;
@@ -518,7 +544,7 @@ export function parseClaudeUsageDetails(
   if (wallReset !== undefined) details.wallReset = wallReset;
   const limits = part(() => parseClaudeUsageLimits(body));
   if (limits !== undefined) details.limits = limits;
-  const extraUsage = part(() => parseClaudeExtraUsage(body.extra_usage));
+  const extraUsage = part(() => parseClaudeExtraUsage(body));
   if (extraUsage !== undefined) details.extraUsage = extraUsage;
   const surfaceWindows = part(() =>
     SURFACE_WINDOWS.some((id) => Object.hasOwn(body, id)) ? parseSurfaceWindows(body) : undefined,

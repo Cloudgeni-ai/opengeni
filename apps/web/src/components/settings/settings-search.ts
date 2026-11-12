@@ -262,8 +262,12 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
     { label: "Add credits", keywords: ["buy credits", "top up", "payment"] },
     { label: "Promo code", keywords: ["coupon", "redeem", "discount"] },
     {
-      label: "Receipts and invoices",
-      keywords: ["receipt", "invoice", "billing history", "payment method", "card"],
+      label: "Payment details",
+      keywords: ["payment method", "card", "update card", "billing address"],
+    },
+    {
+      label: "Receipts",
+      keywords: ["receipt", "invoice", "billing history", "payment history", "automatic top-up"],
     },
     { label: "Workspace budgets", keywords: ["budget", "spend limit", "monthly"] },
     // On a workspace's budget page, under Workspace budgets.

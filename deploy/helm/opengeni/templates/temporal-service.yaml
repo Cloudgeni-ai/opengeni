@@ -6,12 +6,20 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: temporal
+    {{- if (.Values.temporal.metrics).port }}
+    opengeni.ai/metrics-endpoint: "true"
+    {{- end }}
 spec:
   type: ClusterIP
   ports:
     - name: grpc
       port: {{ .Values.temporal.service.port }}
       targetPort: grpc
+    {{- with (.Values.temporal.metrics).port }}
+    - name: metrics
+      port: {{ int64 . }}
+      targetPort: metrics
+    {{- end }}
   selector:
     {{- include "opengeni.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: temporal

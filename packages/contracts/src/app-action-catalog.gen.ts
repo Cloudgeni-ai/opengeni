@@ -5264,6 +5264,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listBillingReceipts",
+    "method": "GET",
+    "path": "/v1/billing/receipts",
+    "request": [
+      "ListBillingReceiptsQuery"
+    ],
+    "query": [
+      "accountId",
+      "cursor",
+      "limit"
+    ],
+    "response": [
+      "ListBillingReceiptsResponse"
+    ]
+  },
+  {
     "id": "listBotTemplates",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/bot-templates",

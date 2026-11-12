@@ -86,10 +86,13 @@ pub struct HostRow {
     /// registration, a renewal or a report; `None` until a host that tells
     /// it does. An earlier run heard late never replaces it.
     pub run: Option<u64>,
-    /// Later runs of its agent it told of than the one before: each start
-    /// of its agent after the first it told of (after its watchdog
-    /// stopped it, a crash, an upgrade or a reboot), counted once,
-    /// whichever replica hears it. Kept across its registrations.
+    /// Later runs of its agent it told of than the one before that started
+    /// without being asked for: each start of its agent after the first it
+    /// told of that followed its watchdog stopping it, a crash, a stop that
+    /// hung or losing its machine, counted once, whichever replica hears
+    /// it. A start after a stop it was asked for (an upgrade, a restart, a
+    /// planned reboot: [`Capacity::after_asked_stop`]) is no fault and is
+    /// not counted. Kept across its registrations.
     pub restarts: u64,
     /// When the row last changed, by the store's change counter: replicas
     /// read the rows changed since they last looked.
@@ -104,19 +107,22 @@ impl HostRow {
         if let Some(info) = info {
             self.info = info.told_again(&self.info);
         }
-        self.ran(capacity.run);
+        self.ran(capacity.run, capacity.after_asked_stop);
         self.capacity = capacity;
     }
 
     /// Takes in the run of its agent the host told of: a later one than
-    /// the latest is its agent starting again, counted once; an earlier
-    /// one, heard late, changes nothing.
-    pub fn ran(&mut self, run: Option<u64>) {
+    /// the latest is its agent starting again, counted once unless
+    /// `asked`, it followed a stop that was asked for; an earlier one,
+    /// heard late, changes nothing.
+    pub fn ran(&mut self, run: Option<u64>, asked: bool) {
         let Some(run) = run else { return };
         match self.run {
             Some(latest) if run <= latest => {}
             Some(_) => {
-                self.restarts += 1;
+                if !asked {
+                    self.restarts += 1;
+                }
                 self.run = Some(run);
             }
             None => self.run = Some(run),

@@ -50,6 +50,7 @@ mock.module("react-native", () => {
     Pressable,
     Modal: host("div"),
     KeyboardAvoidingView: host("div"),
+    Keyboard: { metrics: () => undefined, addListener: () => ({ remove: () => {} }) },
     Animated: {
       View: host("div"),
       Value: function AnimatedValue() {},
