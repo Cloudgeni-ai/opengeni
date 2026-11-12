@@ -61,7 +61,7 @@ export function microsoftAuthorizationNotGranted(input: {
       state: "failed",
       error: {
         code: "admin_consent_required",
-        message: `Your organization requires a Microsoft 365 administrator to approve this app first. Send your administrator this approval link: ${input.adminConsentUrl} After they approve, connect again.`,
+        message: `Your organization requires a Microsoft administrator to approve this app first. Send your administrator this approval link: ${input.adminConsentUrl} After they approve, connect again.`,
         retryable: true,
       },
     };
@@ -99,9 +99,9 @@ export function microsoftAdminConsentResultPage(
     lines: [
       granted
         ? (text.adminApprovedBody ??
-          "People in your organization can now connect their Microsoft 365 accounts. Ask them to connect again.")
+          "People in your organization can now connect. Ask them to try again.")
         : (text.adminNotApprovedBody ??
-          "Microsoft did not record an approval. Open the approval link again with a Microsoft 365 administrator account."),
+          "Microsoft did not record an approval. Open the approval link again with a Microsoft administrator account."),
       text.closeWindow ?? "You can close this window.",
     ],
   });

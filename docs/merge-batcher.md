@@ -18,9 +18,52 @@ never cancelled for one. The oldest ready PRs fill the rest of a priority
 batch, after the priority PRs and without waiting for the batching window, so
 priority PRs that arrive one at a time do not each take a round alone. A
 priority CI or batcher change still runs alone. While a failed batch is being
-split, the fill leaves out the PRs its halves hold, and priority batches and
-those halves take turns: after a priority batch goes ahead of a half, that half
-goes next, so priority PRs that keep arriving cannot stall a bisection.
+split, a priority batch has no fill, and priority batches and those halves
+take turns: after a priority batch goes ahead of a half, that half goes next,
+and the halves run in the order they were split off, oldest first. A priority
+batch that is cancelled (say a member got a new head) is rebuilt ahead of the
+halves; it never becomes one of them. So neither priority PRs that keep
+arriving nor PRs queued later can stall a bisection.
+
+## Model request review
+
+A PR that changes what Opengeni sends to model providers is batched only once
+the maintainer (`jorgensandhaug`) has approved its exact current head. The
+guarded paths are the model request section at the end of
+`.github/CODEOWNERS`; `scripts/ci/model-request-review.ts` reads that section
+from `main` and decides, and the batcher and the status below share it.
+
+- **Which files:** the PR's changed files, including the old path of each
+  rename. A PR with more files than GitHub lists (3,000) needs the approval
+  too.
+- **Which approval:** the maintainer's latest decisive review submitted on the
+  PR's current head commit. An approval of an earlier head, a dismissed
+  approval, or anyone else's review does not count, and a later "changes
+  requested" revokes it. GitHub refuses self-approval, so on a PR he authored a
+  review he submits on the head whose first line is `/approve-model-request`
+  counts instead.
+- **The batcher** holds such a PR, queued and without a comment, as it holds a
+  PR whose PR CI has not passed. If a member of the running batch loses its
+  approval, the batch is cancelled and rebuilt without it, so it cannot land.
+  Right before landing it checks every member again on the exact head it
+  lands, which covers a new head with the tested tree.
+  Any new head, including one the batcher writes itself to renumber a
+  migration or regenerate files, needs a new approval.
+- **On the PR**, `.github/workflows/model-request-review.yml` (running main's
+  code through `pull_request_target`, and through `workflow_run` of the review
+  signal workflow for review events) posts the **Model request review**
+  status, re-requests the maintainer's review on every unapproved head and
+  keeps one comment that lists the guarded files.
+- **The batcher is the gate; the status only reports it.** Anyone who can
+  run a workflow can post a status, and the batcher's App bypasses rulesets,
+  so the batcher never reads the status: it recomputes the verdict from
+  main's code at every pass. The protection ruleset also requires the status
+  (from the GitHub Actions app), which only matters for a merge outside the
+  batcher.
+
+To check one PR by hand:
+`GITHUB_TOKEN=$(gh auth token) bun scripts/ci/model-request-review.ts --pull <n> --dry-run`
+prints the verdict and exits 1 when the gate blocks.
 
 ## Releasing: a Version PR holds main
 
@@ -184,7 +227,9 @@ above).
    go into separate groups. A PR removed from a batch that went ahead of the
    bisection, or a Version PR, leaves its groups as they were. A failed
    batch with both priority and other PRs is split into its priority PRs, tested
-   first, and the rest, so a broken fill delays them one round. When the rest
+   first, and the rest, so a broken fill delays them one round (one that went
+   ahead of a bisection queues all its halves behind that bisection's). When
+   the rest
    has at least two PRs and at least as many as the priority PRs, it is halved
    at once: it is then at least as likely to hold what broke the batch, and
    testing it whole again would usually only fail once more first. Priority PRs in

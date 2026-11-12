@@ -85,8 +85,13 @@ class FakeModalSandboxClient {
               ? "snapshot_directory"
               : null;
         const actualPersistence = snapshot?.workspacePersistence ?? expectedPersistence;
+        // The Modal provider lets a tar session mount a directory snapshot.
+        const mountedIntoTarSession =
+          expectedPersistence === "snapshot_directory" &&
+          session.state.workspacePersistence === "tar";
         if (
           expectedPersistence &&
+          !mountedIntoTarSession &&
           (actualPersistence !== expectedPersistence ||
             session.state.workspacePersistence !== expectedPersistence)
         ) {
@@ -749,6 +754,45 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(new TextDecoder().decode(hydrateCalls[0]!)).toBe(DIRECTORY_SNAPSHOT_REF);
     expect(clientPersistenceModes).toEqual(["snapshot_filesystem", "snapshot_directory"]);
     expect(established.instanceId).toBe("sb-fresh");
+    expect(established.origin).toBe("restored");
+  });
+
+  test("a directory snapshot is restored into a tar destination when the operator configured tar", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    clientPersistenceModes.length = 0;
+
+    const established = await establishSandboxSessionFromEnvelope(
+      modalSettings({ modalWorkspacePersistence: "tar" }),
+      envelopeWithArchive(DIRECTORY_SNAPSHOT_B64),
+      { sessionId: "sess-cold-directory-tar", recovery: "create-or-restore", environment: {} },
+    );
+
+    expect(createArgs).toHaveLength(1);
+    expect(hydrateCalls).toHaveLength(1);
+    expect(new TextDecoder().decode(hydrateCalls[0]!)).toBe(DIRECTORY_SNAPSHOT_REF);
+    // One client, in the configured mode: the destination never saves another
+    // native snapshot.
+    expect(clientPersistenceModes).toEqual(["tar"]);
+    expect(
+      (established.sessionState as { workspacePersistence?: unknown }).workspacePersistence,
+    ).toBe("tar");
+    expect(established.origin).toBe("restored");
+  });
+
+  test("a filesystem snapshot keeps its own mode when the operator configured tar", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    clientPersistenceModes.length = 0;
+
+    const established = await establishSandboxSessionFromEnvelope(
+      modalSettings({ modalWorkspacePersistence: "tar" }),
+      envelopeWithArchive(SNAPSHOT_B64),
+      { sessionId: "sess-cold-filesystem-tar", recovery: "create-or-restore", environment: {} },
+    );
+
+    expect(hydrateCalls).toHaveLength(0);
+    expect(clientPersistenceModes).toEqual(["tar", "snapshot_filesystem"]);
     expect(established.origin).toBe("restored");
   });
 

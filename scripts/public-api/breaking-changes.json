@@ -474,5 +474,12 @@
     ],
     "securityException": true,
     "reason": "Description-only change forced by the CASA 6.1.1 security upgrade of zod (4.4.3 has a high-severity memory-exhaustion advisory; fixed in 4.6.6). zod 4.6 renders this z.intersection as one object where 4.4 emitted allOf, which the surface recorded as unknown. The server schema and wire behavior are unchanged: these fields were always required, and the route has answered 410 since Knowledge source sync was retired. Recorded in docs/design/api-compatibility-policy.md."
+  },
+  {
+    "ids": [
+      "semantic:DELETE /v1/workspaces/{workspaceId}/agents/{agentId}/slack/{connectionId}:agent_slack_always_available"
+    ],
+    "approval": "https://github.com/Cloudgeni-ai/opengeni/pull/7395#issuecomment-6741026523",
+    "reason": "A shared agent is available in every Slack workspace linked to its workspace, so turning it off in one Slack workspace now answers 409 agent_slack_always_available instead of removing it. Approved by Bendik on 2026-11-09 at 12:39 UTC; the route never shipped in a production release or a published SDK call path. Not a security exception."
   }
 ]

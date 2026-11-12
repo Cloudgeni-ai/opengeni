@@ -1082,6 +1082,17 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
 
+API and worker readiness probes evaluate the same posture on every probe, with
+one difference in how they read it: each probe first computes a fingerprint of
+the schema, privilege, ownership, policy, trigger, role and membership catalog
+rows the inspection depends on, in the inspection's own snapshot, and re-reads
+those catalogs only when the fingerprint changed since the previous probe.
+Identity, activation and cutover receipts are read live on every probe. Any
+DDL, GRANT, REVOKE or role change changes the fingerprint, so a stray grant
+still fails the next probe. The release-gate assertion and the startup check
+always read every catalog. See
+[the readiness catalog fingerprint benchmark](benchmarks/readiness-catalog-fingerprint.md).
+
 After a successful install or upgrade, the default-on `catalogImport` hook Job
 imports the committed reviewed integrations snapshot. It receives the runtime
 Secret for object-storage configuration but overrides `OPENGENI_DATABASE_URL`
@@ -1497,6 +1508,20 @@ them, and readiness requires them from then on. A release that still has the
 - Removing a passkey signs the person out everywhere, as a password change
   does: sessions don't record which passkey opened them, so ending all of them
   is the only way to shut out a removed passkey.
+- `OPENGENI_ADMIN_PASSKEY_STEP_UP=required` (default `off`) makes owners and
+  admins make admin changes from a browser session confirmed with a passkey:
+  members, roles and invitations, billing and plans, API keys, shared
+  integrations and connections, and organization and workspace settings, and
+  creating a personal API key. A session signed in with a passkey is confirmed;
+  otherwise the API refuses with `ADMIN_PASSKEY_STEP_UP_REQUIRED` in the error
+  details, the console asks for the passkey once and sends the change again,
+  and the session stays confirmed until it ends (`auth_sessions.mfa_verified_at`,
+  removed with the session on sign-out or revocation). Someone without a
+  passkey is sent to add one. The phone app, and agents and personal API keys
+  acting for a person, act under the person's existing authority and are not
+  asked; normal members, personal workspaces, reads and organization or
+  workspace API keys are not affected. It applies only where passkey sign-in
+  is offered. Production sets `required` (CASA 3.3.1).
 - Ceremonies are single use, expire after five minutes and are bound to the
   origin that started them. Requests for new ceremonies are rate limited per
   client address. Credentials are stored as public keys only; the signature

@@ -3537,10 +3537,111 @@ function difference(left: ReadonlySet<string>, right: ReadonlySet<string>): stri
   return sorted([...left].filter((value) => !right.has(value)));
 }
 
-/** Inspect PostgreSQL catalogs plus one value-free global activation predicate; no tenant content. */
+/** The part of a standalone posture read only from schema, privilege and role catalogs. */
+type RuntimeCatalogPosture = Pick<
+  RuntimeDatabasePosture,
+  | "memberships"
+  | "schemas"
+  | "ownedSchemas"
+  | "ownedRelations"
+  | "tables"
+  | "privateTables"
+  | "targetRoutines"
+  | "privateRoutines"
+  | "subscriptionOwnerRoutines"
+>;
+
+/**
+ * The catalog part of the latest standalone inspection and the catalog
+ * fingerprint it was read under. One per readiness check: repeated probes
+ * re-read the catalogs only when the fingerprint changed.
+ */
+export type RuntimeDatabaseCatalogPostureCache = {
+  entry?: { key: string; catalog: RuntimeCatalogPosture };
+};
+
+export function createRuntimeDatabaseCatalogPostureCache(): RuntimeDatabaseCatalogPostureCache {
+  return {};
+}
+
+/**
+ * Identifies every catalog row the standalone catalog inspection can depend
+ * on, in the inspection's own snapshot. Any DDL, GRANT, REVOKE, ownership,
+ * RLS, policy, trigger, role or membership change writes a new version of
+ * one of these rows (a new xmin), adds one or removes one, so it changes the
+ * fingerprint: each catalog contributes its row count and the sum of a hash
+ * of each row's identity and xmin. Roles are read through pg_roles (the
+ * application role cannot read pg_authid), so their whole row is hashed.
+ * The settings and role that privilege and RLS answers depend on are part of
+ * it too; search_path because routine signatures print type names relative
+ * to it.
+ *
+ * Temporary relations and their types are left out: the inspection never
+ * reads them, and other sessions create them all the time. Rows the
+ * inspection does not need (indexes, other schemas) only make the
+ * fingerprint change more often than necessary, never miss a change.
+ * Privilege helpers can see catalog changes newer than the snapshot; such a
+ * change is in the next inspection's snapshot, so it changes that
+ * fingerprint and the catalogs are read again.
+ */
+const RUNTIME_CATALOG_FINGERPRINT = sql.raw(`
+  select md5(concat_ws('|',
+    current_user, current_setting('row_security'), current_setting('search_path'),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((c.oid::bigint << 32) | c.xmin::text::bigint, 0)), 0)
+      from pg_catalog.pg_class c where c.relpersistence <> 't'),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((t.oid::bigint << 32) | t.xmin::text::bigint, 0)), 0)
+      from pg_catalog.pg_type t join pg_catalog.pg_namespace n on n.oid = t.typnamespace
+      where n.nspname !~ '^pg_(toast_)?temp_'),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((n.oid::bigint << 32) | n.xmin::text::bigint, 0)), 0)
+      from pg_catalog.pg_namespace n),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((p.oid::bigint << 32) | p.xmin::text::bigint, 0)), 0)
+      from pg_catalog.pg_proc p),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((pol.oid::bigint << 32) | pol.xmin::text::bigint, 0)), 0)
+      from pg_catalog.pg_policy pol),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((t.oid::bigint << 32) | t.xmin::text::bigint, 0)), 0)
+      from pg_catalog.pg_trigger t),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((i.inhrelid::bigint << 32) | i.xmin::text::bigint, i.inhparent::bigint)), 0)
+      from pg_catalog.pg_inherits i),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((a.attrelid::bigint << 32) | a.xmin::text::bigint, a.attnum)), 0)
+      from pg_catalog.pg_attribute a where a.attacl is not null),
+    (select count(*) || ':' || coalesce(sum(hashint8extended((d.objid::bigint << 32) | d.xmin::text::bigint, d.refobjid::bigint)), 0)
+      from pg_catalog.pg_depend d where d.refclassid = 'pg_catalog.pg_proc'::regclass),
+    (select count(*) || ':' || coalesce(sum(hashtextextended(m::text || ':' || m.xmin::text, 0)), 0)
+      from pg_catalog.pg_auth_members m),
+    (select count(*) || ':' || coalesce(sum(hashtextextended(r::text, 0)), 0)
+      from pg_catalog.pg_roles r)
+  )) as fingerprint
+`);
+
+async function inspectRuntimeCatalogPostureUnlessUnchanged(
+  tx: Database,
+  targetSchema: string,
+  cache: RuntimeDatabaseCatalogPostureCache | undefined,
+): Promise<RuntimeCatalogPosture> {
+  if (!cache) return await inspectRuntimeCatalogPosture(tx, targetSchema);
+  const fingerprint = resultRows<{ fingerprint: string }>(
+    await tx.execute(RUNTIME_CATALOG_FINGERPRINT),
+  )[0]?.fingerprint;
+  if (!fingerprint) {
+    throw new Error("Runtime database posture could not fingerprint the catalogs");
+  }
+  const key = `${targetSchema}\u0000${fingerprint}`;
+  if (cache.entry?.key === key) return structuredClone(cache.entry.catalog);
+  const catalog = await inspectRuntimeCatalogPosture(tx, targetSchema);
+  cache.entry = { key, catalog: structuredClone(catalog) };
+  return catalog;
+}
+
+/**
+ * Inspect PostgreSQL catalogs plus one value-free global activation predicate; no tenant content.
+ * With `catalogCache`, the standalone catalog queries run again only when the
+ * catalog fingerprint changed since the cached inspection; identity,
+ * activation predicates, retired objects and cutover receipts are always read live.
+ */
 export async function inspectRuntimeDatabasePosture(
   db: Database,
   options: RuntimeDatabasePostureOptions,
+  catalogCache?: RuntimeDatabaseCatalogPostureCache,
 ): Promise<RuntimeDatabasePosture> {
   const targetSchema = options.targetSchema?.trim() || "public";
 
@@ -3622,62 +3723,8 @@ export async function inspectRuntimeDatabasePosture(
         subscription: identity.retiring_subscription_present,
         variableSets: identity.retiring_variable_sets_present,
       };
-      // Migration 0751: any retired subscription object still present (a
-      // dropped one, or the Codex name of a renamed one) means the drained
-      // retirement migration has not run. Read from the catalogs by name (no
-      // schema privilege needed); a routine counts by name, so an unexpected
-      // overload is reported too. Byte order, as
-      // retiredSubscriptionObjectDescriptions lists them.
-      const retiredSubscriptionObjects = resultRows<{ object: string }>(
-        await tx.execute(sql`
-          select object from (
-          select 'routine ' || n.nspname || '.' || p.proname || '('
-            || pg_catalog.oidvectortypes(p.proargtypes) || ')' as object
-          from pg_catalog.pg_proc p
-          join pg_catalog.pg_namespace n on n.oid = p.pronamespace
-          join jsonb_to_recordset(${JSON.stringify(
-            RETIRED_ROUTINE_ENTRIES.map(({ schema, signature }) => ({
-              schema_name: schema === "target" ? targetSchema : schema,
-              routine_name: signature.slice(0, signature.indexOf("(")),
-            })),
-          )}::jsonb) as retired(schema_name text, routine_name text)
-            on retired.schema_name = n.nspname and retired.routine_name = p.proname
-          union all
-          select 'policy ' || c.relname || '.' || pol.polname
-          from pg_catalog.pg_policy pol
-          join pg_catalog.pg_class c on c.oid = pol.polrelid
-          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-          join jsonb_to_recordset(${JSON.stringify(
-            RETIRED_POLICY_ENTRIES,
-          )}::jsonb) as retired("table" text, policy text)
-            on retired."table" = c.relname and retired.policy = pol.polname
-          where n.nspname = ${targetSchema}
-          union all
-          select 'trigger ' || c.relname || '.' || t.tgname
-          from pg_catalog.pg_trigger t
-          join pg_catalog.pg_class c on c.oid = t.tgrelid
-          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-          join jsonb_to_recordset(${JSON.stringify(
-            RETIRED_TRIGGER_ENTRIES,
-          )}::jsonb) as retired("table" text, "trigger" text)
-            on retired."table" = c.relname and retired."trigger" = t.tgname
-          where n.nspname = ${targetSchema} and not t.tgisinternal
-          union all
-          select 'relation ' || n.nspname || '.' || c.relname
-          from pg_catalog.pg_class c
-          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-          join jsonb_to_recordset(${JSON.stringify(
-            SUBSCRIPTION_RENAMED_RELATIONS.map(({ schema, from }) => ({
-              schema_name: schema,
-              relation_name: from,
-            })),
-          )}::jsonb) as retired(schema_name text, relation_name text)
-            on retired.schema_name = n.nspname and retired.relation_name = c.relname
-          where c.relkind in ('r', 'p', 'v', 'm', 'f')
-          ) retired_objects
-          order by object collate "C"
-        `),
-      ).map((row) => row.object);
+      // Cheap and by name: read live, also for scoped topology.
+      const retiredSubscriptionObjects = await inspectRetiredSubscriptionObjects(tx, targetSchema);
       const subscriptionCodexCutoverActivationPresent =
         identity.codex_cutover_activation_present === true;
       // The receipt is read through its boolean readiness function only:
@@ -3696,291 +3743,32 @@ export async function inspectRuntimeDatabasePosture(
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
       // the standalone opengeni_app object/grant contract on the host's role.
-      if (options.rlsStrategy === "scoped") {
-        return {
-          identity: mappedIdentity,
-          memberships: [],
-          schemas: [],
-          ownedSchemas: [],
-          ownedRelations: [],
-          tables: [],
-          privateTables: [],
-          targetRoutines: [],
-          privateRoutines: [],
-          sessionVariableSetAttachmentsCutoverPresent,
-          retiredSubscriptionObjects,
-          subscriptionCodexCutoverActivationPresent,
-          subscriptionProviderCutoverReceipts,
-          retiringFeatureTablesPresent,
-        };
-      }
-
-      const relationshipRows = resultRows<RoleRelationshipCatalogRow>(
-        await tx.execute(sql.raw(roleRelationshipsCatalogQuery("current_user"))),
-      );
-      const memberships = classifyRoleRelationships(relationshipRows).unsafeRelationships;
-
-      const schemas = resultRows<{
-        name: string;
-        owner: string;
-        usage: boolean;
-        create: boolean;
-      }>(
-        await tx.execute(sql`
-          select
-            n.nspname::text as name,
-            pg_get_userbyid(n.nspowner)::text as owner,
-            has_schema_privilege(current_user, n.oid, 'USAGE') as usage,
-            has_schema_privilege(current_user, n.oid, 'CREATE') as create
-          from pg_namespace n
-          where n.nspname in (${targetSchema}, 'opengeni_private')
-          order by n.nspname
-        `),
-      );
-
-      const ownedSchemas = resultRows<{ name: string }>(
-        await tx.execute(sql`
-          select n.nspname::text as name
-          from pg_namespace n
-          join pg_roles r on r.oid = n.nspowner
-          where r.rolname = current_user
-            and n.nspname <> 'information_schema'
-            and n.nspname !~ '^pg_'
-          order by n.nspname
-        `),
-      ).map((row) => row.name);
-
-      const ownedRelations = resultRows<{ name: string }>(
-        await tx.execute(sql`
-          select (n.nspname || '.' || c.relname)::text as name
-          from pg_class c
-          join pg_namespace n on n.oid = c.relnamespace
-          join pg_roles r on r.oid = c.relowner
-          where r.rolname = current_user
-            and c.relkind in ('r', 'p', 'S', 'v', 'm', 'f')
-            and n.nspname <> 'information_schema'
-            and n.nspname !~ '^pg_'
-          order by n.nspname, c.relname
-        `),
-      ).map((row) => row.name);
-
-      // Inspect both namespaces together: their catalog and privilege probes
-      // are identical. Keep evaluation live on every readiness check.
-      const tableRows = resultRows<{
-        private_schema: boolean;
-        name: string;
-        owner: string;
-        rls_enabled: boolean;
-        rls_forced: boolean;
-        rls_active: boolean;
-        policy_count: number;
-        artifact_outbox_dispatcher_policy: boolean;
-        artifact_materializer_policy: boolean;
-        can_select: boolean;
-        can_insert: boolean;
-        can_update: boolean;
-        can_delete: boolean;
-        can_truncate: boolean;
-        can_references: boolean;
-        can_trigger: boolean;
-        column_privileges: string[];
-        extra_privileges: string[];
-        has_inheritance: boolean;
-      }>(
-        await tx.execute(sql`
-          select
-            (n.nspname = 'opengeni_private') as private_schema,
-            c.relname::text as name,
-            pg_get_userbyid(c.relowner)::text as owner,
-            c.relrowsecurity as rls_enabled,
-            c.relforcerowsecurity as rls_forced,
-            row_security_active(c.oid) as rls_active,
-            coalesce(policies.policy_count, 0) as policy_count,
-            coalesce(policies.artifact_outbox_dispatcher_policy, false) as artifact_outbox_dispatcher_policy,
-            coalesce(policies.artifact_materializer_policy, false) as artifact_materializer_policy,
-            has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
-            has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
-            has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
-            has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
-            has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
-            has_table_privilege(current_user, c.oid, 'REFERENCES') as can_references,
-            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
-            exists(select 1 from pg_inherits i where i.inhrelid = c.oid or i.inhparent = c.oid) as has_inheritance,
-            ARRAY(
-              SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
-              WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
-                AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
-              ORDER BY acl.privilege_type
-            ) AS extra_privileges,
-            -- Same answer as has_any_column_privilege(current_user, c.oid, privilege):
-            -- the table-level privilege, or that privilege on a live user column.
-            -- A column without its own ACL grants nothing beyond the table, so only
-            -- columns with an ACL need a check. has_any_column_privilege reads every
-            -- column through the catalog cache, which on a fresh connection loads
-            -- thousands of pg_attribute rows one by one on each readiness probe.
-            ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
-              WHERE has_table_privilege(current_user, c.oid, privilege)
-                OR EXISTS (SELECT 1 FROM unnest(column_acls.attnums) attnum
-                  WHERE has_column_privilege(current_user, c.oid, attnum, privilege))) as column_privileges
-          from pg_class c
-          join pg_namespace n on n.oid = c.relnamespace
-          left join (
-            select polrelid, count(*)::int as policy_count,
-              bool_or(polname = 'editable_artifact_outbox_dispatcher') as artifact_outbox_dispatcher_policy,
-              bool_or(polname = 'editable_artifact_materializer_owner') as artifact_materializer_policy
-            from pg_policy group by polrelid
-          ) policies on policies.polrelid = c.oid
-          left join (
-            select attrelid, array_agg(attnum) as attnums
-            from pg_attribute
-            where attnum > 0 and not attisdropped and attacl is not null
-            group by attrelid
-          ) column_acls on column_acls.attrelid = c.oid
-          where n.nspname in (${targetSchema}, 'opengeni_private')
-            and c.relkind in ('r', 'p')
-          order by c.relname
-        `),
-      );
-      const tables = tableRows
-        .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
-        .map((row) => ({
-          name: row.name,
-          owner: row.owner,
-          rlsEnabled: row.rls_enabled,
-          rlsForced: row.rls_forced,
-          rlsActive: row.rls_active,
-          policyCount: row.policy_count,
-          artifactOutboxDispatcherPolicy: row.artifact_outbox_dispatcher_policy,
-          artifactMaterializerPolicy: row.artifact_materializer_policy,
-          select: row.can_select,
-          insert: row.can_insert,
-          update: row.can_update,
-          delete: row.can_delete,
-          truncate: row.can_truncate,
-          references: row.can_references,
-          trigger: row.can_trigger,
-          columnPrivileges: row.column_privileges,
-          extraPrivileges: row.extra_privileges,
-          hasInheritance: row.has_inheritance,
-        }));
-
-      const privateTables = tableRows
-        .filter((row) => row.private_schema)
-        .map((row) => ({
-          name: row.name,
-          owner: row.owner,
-          rlsEnabled: row.rls_enabled,
-          rlsForced: row.rls_forced,
-          rlsActive: row.rls_active,
-          policyCount: row.policy_count,
-          select: row.can_select,
-          insert: row.can_insert,
-          update: row.can_update,
-          delete: row.can_delete,
-          truncate: row.can_truncate,
-          references: row.can_references,
-          trigger: row.can_trigger,
-          ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
-          columnPrivileges: row.column_privileges,
-          hasInheritance: row.has_inheritance,
-        }));
-
-      // A lateral ACL probe lets PostgreSQL memoize equal (ACL, owner) pairs
-      // within this statement. Read the catalog tuple, not a privilege helper:
-      // those helpers can observe newer grants than our repeatable-read snapshot.
-      const routineRows = resultRows<{
-        private_schema: boolean;
-        name: string;
-        owner: string;
-        can_execute: boolean;
-        public_execute: boolean;
-        security_definer: boolean;
-        trigger_callable: boolean;
-        has_dependents: boolean;
-        configuration: string[] | null;
-      }>(
-        await tx.execute(sql`
-          select
-            (n.nspname = 'opengeni_private') as private_schema,
-            (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
-            pg_get_userbyid(p.proowner)::text as owner,
-            has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
-            coalesce(public_acl.public_execute, false) as public_execute,
-            p.prosecdef as security_definer,
-            (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
-              or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
-            exists(select 1 from pg_depend d where d.refclassid = 'pg_catalog.pg_proc'::regclass and d.refobjid = p.oid) as has_dependents,
-            p.proconfig as configuration
-          from pg_proc p
-          join pg_namespace n on n.oid = p.pronamespace
-          left join lateral (
-            select true as public_execute
-            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
-            limit 1
-          ) public_acl on true
-          where n.nspname in (${targetSchema}, 'opengeni_private')
-            and p.prokind in ('f', 'p')
-          order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
-        `),
-      );
-      const targetRoutines = routineRows
-        .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
-        .map((row) => ({
-          name: row.name,
-          owner: row.owner,
-          execute: row.can_execute,
-          publicExecute: row.public_execute,
-          securityDefiner: row.security_definer,
-          triggerCallable: row.trigger_callable,
-          hasDependents: row.has_dependents,
-          configuration: row.configuration,
-        }))
-        .sort((left, right) => left.name.localeCompare(right.name));
-
-      const privateRoutines = routineRows
-        .filter((row) => row.private_schema)
-        .map((row) => ({
-          name: row.name,
-          owner: row.owner,
-          execute: row.can_execute,
-          publicExecute: row.public_execute,
-          securityDefiner: row.security_definer,
-          triggerCallable: row.trigger_callable,
-          hasDependents: row.has_dependents,
-          configuration: row.configuration,
-        }));
-
-      const subscriptionOwnerRoutines = resultRows<RuntimeRoutinePosture>(
-        await tx.execute(sql`
-          select (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
-            pg_get_userbyid(p.proowner)::text as owner,
-            (has_function_privilege(current_user, p.oid, 'EXECUTE')
-              or has_schema_privilege(current_user, n.oid, 'USAGE')
-              or has_schema_privilege(current_user, n.oid, 'CREATE')) as execute,
-            coalesce(public_acl.public_execute, false) as "publicExecute",
-            p.prosecdef as "securityDefiner", p.proconfig as configuration
-          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-          left join lateral (
-            select true as public_execute
-            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
-            limit 1
-          ) public_acl on true
-          where n.nspname = 'opengeni_subscription_internal' and p.prokind = 'f'
-        `),
-      );
+      const catalog =
+        options.rlsStrategy === "scoped"
+          ? {
+              memberships: [],
+              schemas: [],
+              ownedSchemas: [],
+              ownedRelations: [],
+              tables: [],
+              privateTables: [],
+              targetRoutines: [],
+              privateRoutines: [],
+            }
+          : await inspectRuntimeCatalogPostureUnlessUnchanged(tx, targetSchema, catalogCache);
       return {
         identity: mappedIdentity,
-        memberships,
-        schemas,
-        ownedSchemas,
-        ownedRelations,
-        tables,
-        privateTables,
-        targetRoutines,
-        privateRoutines,
-        subscriptionOwnerRoutines,
+        memberships: catalog.memberships,
+        schemas: catalog.schemas,
+        ownedSchemas: catalog.ownedSchemas,
+        ownedRelations: catalog.ownedRelations,
+        tables: catalog.tables,
+        privateTables: catalog.privateTables,
+        targetRoutines: catalog.targetRoutines,
+        privateRoutines: catalog.privateRoutines,
+        ...("subscriptionOwnerRoutines" in catalog
+          ? { subscriptionOwnerRoutines: catalog.subscriptionOwnerRoutines }
+          : {}),
         sessionVariableSetAttachmentsCutoverPresent,
         retiredSubscriptionObjects,
         subscriptionCodexCutoverActivationPresent,
@@ -3990,6 +3778,340 @@ export async function inspectRuntimeDatabasePosture(
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
+}
+
+async function inspectRetiredSubscriptionObjects(
+  tx: Database,
+  targetSchema: string,
+): Promise<string[]> {
+  // Migration 0751: any retired subscription object still present (a
+  // dropped one, or the Codex name of a renamed one) means the drained
+  // retirement migration has not run. Read from the catalogs by name (no
+  // schema privilege needed); a routine counts by name, so an unexpected
+  // overload is reported too. Byte order, as
+  // retiredSubscriptionObjectDescriptions lists them.
+  return resultRows<{ object: string }>(
+    await tx.execute(sql`
+      select object from (
+      select 'routine ' || n.nspname || '.' || p.proname || '('
+        || pg_catalog.oidvectortypes(p.proargtypes) || ')' as object
+      from pg_catalog.pg_proc p
+      join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+      join jsonb_to_recordset(${JSON.stringify(
+        RETIRED_ROUTINE_ENTRIES.map(({ schema, signature }) => ({
+          schema_name: schema === "target" ? targetSchema : schema,
+          routine_name: signature.slice(0, signature.indexOf("(")),
+        })),
+      )}::jsonb) as retired(schema_name text, routine_name text)
+        on retired.schema_name = n.nspname and retired.routine_name = p.proname
+      union all
+      select 'policy ' || c.relname || '.' || pol.polname
+      from pg_catalog.pg_policy pol
+      join pg_catalog.pg_class c on c.oid = pol.polrelid
+      join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      join jsonb_to_recordset(${JSON.stringify(
+        RETIRED_POLICY_ENTRIES,
+      )}::jsonb) as retired("table" text, policy text)
+        on retired."table" = c.relname and retired.policy = pol.polname
+      where n.nspname = ${targetSchema}
+      union all
+      select 'trigger ' || c.relname || '.' || t.tgname
+      from pg_catalog.pg_trigger t
+      join pg_catalog.pg_class c on c.oid = t.tgrelid
+      join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      join jsonb_to_recordset(${JSON.stringify(
+        RETIRED_TRIGGER_ENTRIES,
+      )}::jsonb) as retired("table" text, "trigger" text)
+        on retired."table" = c.relname and retired."trigger" = t.tgname
+      where n.nspname = ${targetSchema} and not t.tgisinternal
+      union all
+      select 'relation ' || n.nspname || '.' || c.relname
+      from pg_catalog.pg_class c
+      join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      join jsonb_to_recordset(${JSON.stringify(
+        SUBSCRIPTION_RENAMED_RELATIONS.map(({ schema, from }) => ({
+          schema_name: schema,
+          relation_name: from,
+        })),
+      )}::jsonb) as retired(schema_name text, relation_name text)
+        on retired.schema_name = n.nspname and retired.relation_name = c.relname
+      where c.relkind in ('r', 'p', 'v', 'm', 'f')
+      ) retired_objects
+      order by object collate "C"
+    `),
+  ).map((row) => row.object);
+}
+
+async function inspectRuntimeCatalogPosture(
+  tx: Database,
+  targetSchema: string,
+): Promise<RuntimeCatalogPosture> {
+  const relationshipRows = resultRows<RoleRelationshipCatalogRow>(
+    await tx.execute(sql.raw(roleRelationshipsCatalogQuery("current_user"))),
+  );
+  const memberships = classifyRoleRelationships(relationshipRows).unsafeRelationships;
+
+  const schemas = resultRows<{
+    name: string;
+    owner: string;
+    usage: boolean;
+    create: boolean;
+  }>(
+    await tx.execute(sql`
+      select
+        n.nspname::text as name,
+        pg_get_userbyid(n.nspowner)::text as owner,
+        has_schema_privilege(current_user, n.oid, 'USAGE') as usage,
+        has_schema_privilege(current_user, n.oid, 'CREATE') as create
+      from pg_namespace n
+      where n.nspname in (${targetSchema}, 'opengeni_private')
+      order by n.nspname
+    `),
+  );
+
+  const ownedSchemas = resultRows<{ name: string }>(
+    await tx.execute(sql`
+      select n.nspname::text as name
+      from pg_namespace n
+      join pg_roles r on r.oid = n.nspowner
+      where r.rolname = current_user
+        and n.nspname <> 'information_schema'
+        and n.nspname !~ '^pg_'
+      order by n.nspname
+    `),
+  ).map((row) => row.name);
+
+  const ownedRelations = resultRows<{ name: string }>(
+    await tx.execute(sql`
+      select (n.nspname || '.' || c.relname)::text as name
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      join pg_roles r on r.oid = c.relowner
+      where r.rolname = current_user
+        and c.relkind in ('r', 'p', 'S', 'v', 'm', 'f')
+        and n.nspname <> 'information_schema'
+        and n.nspname !~ '^pg_'
+      order by n.nspname, c.relname
+    `),
+  ).map((row) => row.name);
+
+  // Inspect both namespaces together: their catalog and privilege probes
+  // are identical.
+  const tableRows = resultRows<{
+    private_schema: boolean;
+    name: string;
+    owner: string;
+    rls_enabled: boolean;
+    rls_forced: boolean;
+    rls_active: boolean;
+    policy_count: number;
+    artifact_outbox_dispatcher_policy: boolean;
+    artifact_materializer_policy: boolean;
+    can_select: boolean;
+    can_insert: boolean;
+    can_update: boolean;
+    can_delete: boolean;
+    can_truncate: boolean;
+    can_references: boolean;
+    can_trigger: boolean;
+    column_privileges: string[];
+    extra_privileges: string[];
+    has_inheritance: boolean;
+  }>(
+    await tx.execute(sql`
+      select
+        (n.nspname = 'opengeni_private') as private_schema,
+        c.relname::text as name,
+        pg_get_userbyid(c.relowner)::text as owner,
+        c.relrowsecurity as rls_enabled,
+        c.relforcerowsecurity as rls_forced,
+        row_security_active(c.oid) as rls_active,
+        coalesce(policies.policy_count, 0) as policy_count,
+        coalesce(policies.artifact_outbox_dispatcher_policy, false) as artifact_outbox_dispatcher_policy,
+        coalesce(policies.artifact_materializer_policy, false) as artifact_materializer_policy,
+        has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
+        has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
+        has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
+        has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
+        has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
+        has_table_privilege(current_user, c.oid, 'REFERENCES') as can_references,
+        has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
+        exists(select 1 from pg_inherits i where i.inhrelid = c.oid or i.inhparent = c.oid) as has_inheritance,
+        ARRAY(
+          SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
+          WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
+            AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
+          ORDER BY acl.privilege_type
+        ) AS extra_privileges,
+        -- Same answer as has_any_column_privilege(current_user, c.oid, privilege):
+        -- the table-level privilege, or that privilege on a live user column.
+        -- A column without its own ACL grants nothing beyond the table, so only
+        -- columns with an ACL need a check. has_any_column_privilege reads every
+        -- column through the catalog cache, which on a fresh connection loads
+        -- thousands of pg_attribute rows one by one on each readiness probe.
+        ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
+          WHERE has_table_privilege(current_user, c.oid, privilege)
+            OR EXISTS (SELECT 1 FROM unnest(column_acls.attnums) attnum
+              WHERE has_column_privilege(current_user, c.oid, attnum, privilege))) as column_privileges
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      left join (
+        select polrelid, count(*)::int as policy_count,
+          bool_or(polname = 'editable_artifact_outbox_dispatcher') as artifact_outbox_dispatcher_policy,
+          bool_or(polname = 'editable_artifact_materializer_owner') as artifact_materializer_policy
+        from pg_policy group by polrelid
+      ) policies on policies.polrelid = c.oid
+      left join (
+        select attrelid, array_agg(attnum) as attnums
+        from pg_attribute
+        where attnum > 0 and not attisdropped and attacl is not null
+        group by attrelid
+      ) column_acls on column_acls.attrelid = c.oid
+      where n.nspname in (${targetSchema}, 'opengeni_private')
+        and c.relkind in ('r', 'p')
+      order by c.relname
+    `),
+  );
+  const tables = tableRows
+    .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
+    .map((row) => ({
+      name: row.name,
+      owner: row.owner,
+      rlsEnabled: row.rls_enabled,
+      rlsForced: row.rls_forced,
+      rlsActive: row.rls_active,
+      policyCount: row.policy_count,
+      artifactOutboxDispatcherPolicy: row.artifact_outbox_dispatcher_policy,
+      artifactMaterializerPolicy: row.artifact_materializer_policy,
+      select: row.can_select,
+      insert: row.can_insert,
+      update: row.can_update,
+      delete: row.can_delete,
+      truncate: row.can_truncate,
+      references: row.can_references,
+      trigger: row.can_trigger,
+      columnPrivileges: row.column_privileges,
+      extraPrivileges: row.extra_privileges,
+      hasInheritance: row.has_inheritance,
+    }));
+
+  const privateTables = tableRows
+    .filter((row) => row.private_schema)
+    .map((row) => ({
+      name: row.name,
+      owner: row.owner,
+      rlsEnabled: row.rls_enabled,
+      rlsForced: row.rls_forced,
+      rlsActive: row.rls_active,
+      policyCount: row.policy_count,
+      select: row.can_select,
+      insert: row.can_insert,
+      update: row.can_update,
+      delete: row.can_delete,
+      truncate: row.can_truncate,
+      references: row.can_references,
+      trigger: row.can_trigger,
+      ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
+      columnPrivileges: row.column_privileges,
+      hasInheritance: row.has_inheritance,
+    }));
+
+  // A lateral ACL probe lets PostgreSQL memoize equal (ACL, owner) pairs
+  // within this statement. Read the catalog tuple, not a privilege helper:
+  // those helpers can observe newer grants than our repeatable-read snapshot.
+  const routineRows = resultRows<{
+    private_schema: boolean;
+    name: string;
+    owner: string;
+    can_execute: boolean;
+    public_execute: boolean;
+    security_definer: boolean;
+    trigger_callable: boolean;
+    has_dependents: boolean;
+    configuration: string[] | null;
+  }>(
+    await tx.execute(sql`
+      select
+        (n.nspname = 'opengeni_private') as private_schema,
+        (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
+        pg_get_userbyid(p.proowner)::text as owner,
+        has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
+        coalesce(public_acl.public_execute, false) as public_execute,
+        p.prosecdef as security_definer,
+        (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
+          or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
+        exists(select 1 from pg_depend d where d.refclassid = 'pg_catalog.pg_proc'::regclass and d.refobjid = p.oid) as has_dependents,
+        p.proconfig as configuration
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+      left join lateral (
+        select true as public_execute
+        from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+        where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        limit 1
+      ) public_acl on true
+      where n.nspname in (${targetSchema}, 'opengeni_private')
+        and p.prokind in ('f', 'p')
+      order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
+    `),
+  );
+  const targetRoutines = routineRows
+    .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
+    .map((row) => ({
+      name: row.name,
+      owner: row.owner,
+      execute: row.can_execute,
+      publicExecute: row.public_execute,
+      securityDefiner: row.security_definer,
+      triggerCallable: row.trigger_callable,
+      hasDependents: row.has_dependents,
+      configuration: row.configuration,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  const privateRoutines = routineRows
+    .filter((row) => row.private_schema)
+    .map((row) => ({
+      name: row.name,
+      owner: row.owner,
+      execute: row.can_execute,
+      publicExecute: row.public_execute,
+      securityDefiner: row.security_definer,
+      triggerCallable: row.trigger_callable,
+      hasDependents: row.has_dependents,
+      configuration: row.configuration,
+    }));
+
+  const subscriptionOwnerRoutines = resultRows<RuntimeRoutinePosture>(
+    await tx.execute(sql`
+      select (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
+        pg_get_userbyid(p.proowner)::text as owner,
+        (has_function_privilege(current_user, p.oid, 'EXECUTE')
+          or has_schema_privilege(current_user, n.oid, 'USAGE')
+          or has_schema_privilege(current_user, n.oid, 'CREATE')) as execute,
+        coalesce(public_acl.public_execute, false) as "publicExecute",
+        p.prosecdef as "securityDefiner", p.proconfig as configuration
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      left join lateral (
+        select true as public_execute
+        from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+        where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        limit 1
+      ) public_acl on true
+      where n.nspname = 'opengeni_subscription_internal' and p.prokind = 'f'
+    `),
+  );
+  return {
+    memberships,
+    schemas,
+    ownedSchemas,
+    ownedRelations,
+    tables,
+    privateTables,
+    targetRoutines,
+    privateRoutines,
+    subscriptionOwnerRoutines,
+  };
 }
 
 /** Private per-task usage accounting; FORCE-RLS, owner-only. */
@@ -7075,8 +7197,9 @@ export async function assertRuntimeDatabaseReadiness(
   db: Database,
   options: RuntimeDatabasePostureOptions,
   onDegraded?: RuntimeDatabaseDegradedListener,
+  catalogCache?: RuntimeDatabaseCatalogPostureCache,
 ): Promise<{ posture: RuntimeDatabasePosture; degraded: string[] }> {
-  const posture = await inspectRuntimeDatabasePosture(db, options);
+  const posture = await inspectRuntimeDatabasePosture(db, options, catalogCache);
   const { fatal, degraded } = classifyRuntimeDatabasePosture(posture, options);
   try {
     onDegraded?.(degraded);
@@ -7172,6 +7295,9 @@ export function runtimeDatabaseReadyCheck(
   onDegraded?: RuntimeDatabaseDegradedListener,
 ): () => Promise<void> {
   let inFlight: Promise<void> | undefined;
+  // Every probe evaluates the full posture; the catalogs are re-read only
+  // when they changed since the previous probe.
+  const catalogCache = createRuntimeDatabaseCatalogPostureCache();
   return () => {
     // The HTTP timeout cannot cancel a driver query. Concurrent probes share
     // the outstanding inspection, as the worker readiness check does, so slow
@@ -7179,7 +7305,7 @@ export function runtimeDatabaseReadyCheck(
     // next probe after it settles always runs a fresh inspection.
     if (inFlight) return inFlight;
     inFlight = (async () => {
-      await assertRuntimeDatabaseReadiness(db, options, onDegraded);
+      await assertRuntimeDatabaseReadiness(db, options, onDegraded, catalogCache);
     })().finally(() => {
       inFlight = undefined;
     });

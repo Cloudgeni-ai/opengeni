@@ -21,6 +21,7 @@ import {
   getSlackAgent,
   insertSlackAgent,
   listAgentSlackInstalls,
+  listAgentsMissingFromSlack,
   listSlackAgentsForConnection,
   putAgentSlackInstall,
   readSessionAgentPrompt,
@@ -105,6 +106,7 @@ async function legacySlackRow(id: string) {
   const [row] = await shared.admin<
     {
       workspace_id: string;
+      connection_id: string;
       target_workspace_id: string;
       name: string;
       name_key: string;
@@ -113,7 +115,7 @@ async function legacySlackRow(id: string) {
       version: number;
       avatar: unknown;
     }[]
-  >`select workspace_id::text, target_workspace_id::text, name, name_key, instructions, open,
+  >`select workspace_id::text, connection_id::text, target_workspace_id::text, name, name_key, instructions, open,
       version, avatar from slack_agents where id = ${id}`;
   return row ?? null;
 }
@@ -364,6 +366,28 @@ describe("agents data layer (restricted runtime role)", () => {
     );
     expect(await put(twin.id, org.connectionId)).toEqual({ kind: "name_taken" });
     expect(await listAgentSlackInstalls(app.db, org.homeScope, [twin.id])).toEqual([]);
+    // A move is one step: refused where the name is taken, it stays where it was.
+    expect((await put(twin.id, org.otherConnectionId)).kind).toBe("saved");
+    expect(
+      await putAgentSlackInstall(app.db, org.homeScope, {
+        agentId: twin.id,
+        connectionId: org.connectionId,
+        slackTeamId: "T0AGENTS",
+        installWorkspaceId: org.install,
+        actorSubjectId: org.owner,
+        moveFromOther: true,
+      }),
+    ).toEqual({ kind: "name_taken" });
+    expect(
+      (await listAgentSlackInstalls(app.db, org.homeScope, [twin.id])).map(
+        (install) => install.connectionId,
+      ),
+    ).toEqual([org.otherConnectionId]);
+    expect(await legacySlackRow(twin.id)).toMatchObject({ connection_id: org.otherConnectionId });
+    await deleteAgentSlackInstall(app.db, org.homeScope, {
+      agentId: twin.id,
+      connectionId: org.otherConnectionId,
+    });
     const { agent: other } = await createAgent(
       app.db,
       org.homeScope,
@@ -636,7 +660,7 @@ describe("agents data layer (restricted runtime role)", () => {
     ).toBe(8);
   }, 120_000);
 
-  test("an agent in Slack stays shared, checked under its row lock", async () => {
+  test("an agent in Slack is always shared: Only me takes it out of Slack, under its row lock", async () => {
     const org = await organization();
     const { agent: mine } = await createAgent(
       app.db,
@@ -673,6 +697,7 @@ describe("agents data layer (restricted runtime role)", () => {
         patch: { description: "Stale" },
       }),
     ).toMatchObject({ kind: "version_conflict" });
+    expect(await legacySlackRow(agent.id)).not.toBeNull();
     expect(
       await updateAgent(app.db, org.homeScope, {
         agentId: agent.id,
@@ -680,8 +705,71 @@ describe("agents data layer (restricted runtime role)", () => {
         actorSubjectId: org.owner,
         patch: { visibility: "private", ownerSubjectId: org.owner },
       }),
-    ).toEqual({ kind: "requires_workspace_visibility" });
-    expect((await getAgent(app.db, org.homeScope, agent.id))?.visibility).toBe("workspace");
+    ).toMatchObject({ kind: "updated", agent: { visibility: "private" } });
+    expect(await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).toEqual([]);
+    expect(await legacySlackRow(agent.id)).toBeNull();
+    // The agent stays.
+    expect((await getAgent(app.db, org.homeScope, agent.id))?.visibility).toBe("private");
+  }, 120_000);
+
+  test("Opengeni can make an agent no person made available in Slack", async () => {
+    const org = await organization();
+    const { agent } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { createdBySubjectId: null, name: "Keyed agent" }),
+    );
+    const saved = await putAgentSlackInstall(app.db, org.homeScope, {
+      agentId: agent.id,
+      connectionId: org.connectionId,
+      slackTeamId: "T0AGENTS",
+      installWorkspaceId: org.install,
+      actorSubjectId: null,
+    });
+    expect(saved).toMatchObject({ kind: "saved", install: { enabledBySubjectId: null } });
+    const [legacy] = await shared.admin<{ creator: string }[]>`
+      select created_by_subject_id as creator from slack_agents where id = ${agent.id}`;
+    expect(legacy?.creator).toBe("opengeni:agents");
+
+    // What the organization is still missing: shared agents in no Slack
+    // workspace yet, oldest first.
+    const { agent: other } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { name: "Second desk" }),
+    );
+    const { agent: third } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { name: "Third desk" }),
+    );
+    await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { name: "Diary", visibility: "private", ownerSubjectId: org.owner }),
+    );
+    expect(await listAgentsMissingFromSlack(app.db, org.installScope)).toEqual([
+      { id: other.id, workspaceId: org.home, name: "Second desk", createdBySubjectId: org.owner },
+      { id: third.id, workspaceId: org.home, name: "Third desk", createdBySubjectId: org.owner },
+    ]);
+
+    // Opengeni adding an agent on its own leaves its version alone, so an
+    // open edit form can still save; a person turning it on bumps it.
+    const before = (await getAgent(app.db, org.homeScope, other.id))?.version;
+    expect(
+      await putAgentSlackInstall(app.db, org.homeScope, {
+        agentId: other.id,
+        connectionId: org.connectionId,
+        slackTeamId: "T0AGENTS",
+        installWorkspaceId: org.install,
+        actorSubjectId: org.owner,
+        automatic: true,
+      }),
+    ).toMatchObject({ kind: "saved" });
+    expect((await getAgent(app.db, org.homeScope, other.id))?.version).toBe(before);
+    expect(await listAgentsMissingFromSlack(app.db, org.installScope)).toEqual([
+      expect.objectContaining({ id: third.id }),
+    ]);
   }, 120_000);
 
   test("the legacy Slack API accepts either version during the rollout", async () => {

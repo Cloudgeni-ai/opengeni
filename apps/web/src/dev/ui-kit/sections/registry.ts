@@ -148,6 +148,7 @@ export const SECTION_KEYS = [
   "page-org-people",
   "page-org-connectors",
   "page-eu-only",
+  "page-admin-step-up",
   "page-github-integration",
 ] as const;
 
@@ -1122,6 +1123,16 @@ export const SECTIONS: readonly SectionMeta[] = [
       "The organization setting and what an EU-only workspace switches off, in production components.",
     usedOn: "Organization settings > Security & data, model pickers, feature settings",
     load: () => import("./page-eu-only"),
+  },
+  {
+    key: "page-admin-step-up",
+    group: "Pages",
+    title: "Admin passkey step-up",
+    purpose:
+      "An admin change asks the owner or admin to confirm with their passkey, then goes through; someone without a passkey is sent to add one.",
+    usedOn:
+      "Every admin change: members, invitations, billing, API keys, shared integrations, settings",
+    load: () => import("./page-admin-step-up"),
   },
   {
     key: "page-github-integration",

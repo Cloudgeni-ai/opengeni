@@ -89,6 +89,39 @@ describe("gradeCase", () => {
     expect(gradeCase(testCase, receipts)).toMatchObject({ pass: false, category: "missing_card" });
   });
 
+  test("a clarify case passes when the agent asks which system, and fails when it picks one", () => {
+    const testCase: EvalCase = {
+      id: "microsoft_dynamics.clarify.x",
+      integration: "microsoft_dynamics",
+      kind: "clarify",
+      prompt: "Which of my opportunities close this month?",
+      expectAnswer: [/which (crm|system)/i],
+    };
+    const asked = parseReceipts(
+      events({
+        type: "agent.message.completed",
+        payload: { text: "Which CRM do you use: HubSpot, Salesforce or Dynamics?" },
+      }),
+    );
+    expect(gradeCase(testCase, asked)).toMatchObject({ pass: true });
+    const card = {
+      capabilityId: "api:microsoft-dynamics",
+      capabilityName: "Microsoft Dynamics",
+      providerDomain: "dynamics.com",
+      integration: "microsoft_dynamics" as const,
+      sequence: 1,
+    };
+    const picked = { ...asked, cards: [card] };
+    expect(gradeCase(testCase, picked)).toMatchObject({ pass: false, category: "wrong_tool" });
+    const silent = parseReceipts(
+      events({ type: "agent.message.completed", payload: { text: "Let me look." } }),
+    );
+    expect(gradeCase(testCase, silent)).toMatchObject({
+      pass: false,
+      category: "incomplete_answer",
+    });
+  });
+
   test("needs an approval before a write", () => {
     const testCase: EvalCase = {
       id: "linear.write.x",

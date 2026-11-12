@@ -263,6 +263,27 @@ const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
 /** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
 const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
+/** The verified Better Auth session (its id and user) behind a canonical managed-cookie context. */
+const managedCookieSessions = new WeakMap<
+  AccessContext,
+  { authUserId: string; authSessionId: string }
+>();
+
+/**
+ * The person signed in in this browser session, with the session's id, from
+ * how access resolution actually authenticated the request (never from
+ * request headers). Null for an approved native app, an agent or API key
+ * acting as a person, organization and workspace API keys, services,
+ * host-signed delegation, external people and local installs.
+ */
+export function managedBrowserSessionForAccessContext(
+  context: AccessContext,
+): { authUserId: string; authSessionId: string } | null {
+  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) return null;
+  const session = managedCookieSessions.get(context);
+  if (!canonicalManagedCookieContexts.has(context) || !session) return null;
+  return { ...session };
+}
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -2232,6 +2253,10 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      const authSessionId = (session as { session?: { id?: unknown } }).session?.id;
+      const authUserId = (session as { user?: { id?: unknown } }).user?.id;
+      if (typeof authSessionId === "string" && typeof authUserId === "string")
+        managedCookieSessions.set(context, { authUserId, authSessionId });
       markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;

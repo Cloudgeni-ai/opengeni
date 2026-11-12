@@ -82,6 +82,14 @@ const DesktopDictationRoot = lazy(() =>
   })),
 );
 
+// Loaded right after the shell renders, off the eager graph. A refusal that
+// arrives before it mounts is shown as the plain error it is.
+const AdminStepUpDialog = lazy(() =>
+  import("@/components/admin-step-up-dialog").then((module) => ({
+    default: module.AdminStepUpDialog,
+  })),
+);
+
 const OrganizationOnboardingPanel = lazy(() =>
   import("@/components/organization-onboarding-panel").then((module) => ({
     default: module.OrganizationOnboardingPanel,
@@ -560,6 +568,9 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <Suspense fallback={null}>
+        <AdminStepUpDialog />
+      </Suspense>
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}

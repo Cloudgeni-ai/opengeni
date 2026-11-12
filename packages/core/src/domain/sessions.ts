@@ -1,6 +1,11 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
-import type { TeamsConversationProof } from "@opengeni/db";
+import type {
+  SessionLineage,
+  SessionLineageWithoutSkills,
+  SessionSkillsRead,
+  TeamsConversationProof,
+} from "@opengeni/db";
 import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
 import {
   isDirectModelId,
@@ -6437,11 +6442,25 @@ export async function updateSessionSkills(
   return await requireSession(deps.db, grant.workspaceId, sessionId);
 }
 
+/** A response that never carries the Skill folders passes `skills: "omit"`. */
 export async function readSessionLineage(
   deps: Pick<ApiRouteDeps, "db" | "sessionAuthorization">,
   grant: AccessGrant,
   sessionId: string,
-) {
+  skills: SessionSkillsRead,
+): Promise<SessionLineageWithoutSkills>;
+export async function readSessionLineage(
+  deps: Pick<ApiRouteDeps, "db" | "sessionAuthorization">,
+  grant: AccessGrant,
+  sessionId: string,
+  skills?: "read",
+): Promise<SessionLineage>;
+export async function readSessionLineage(
+  deps: Pick<ApiRouteDeps, "db" | "sessionAuthorization">,
+  grant: AccessGrant,
+  sessionId: string,
+  skills: SessionSkillsRead = "read",
+): Promise<SessionLineage | SessionLineageWithoutSkills> {
   const authorization = await requireSessionAuthorization(deps, grant, {
     sessionId,
     operation: "session.lineage.read",
@@ -6454,7 +6473,7 @@ export async function readSessionLineage(
     }
     return { ancestors: [], children: [], truncated: false };
   }
-  const lineage = await getSessionLineage(deps.db, grant.workspaceId, sessionId);
+  const lineage = await getSessionLineage(deps.db, grant.workspaceId, sessionId, skills);
   if (!lineage) {
     throw new HTTPException(404, { message: "session not found" });
   }

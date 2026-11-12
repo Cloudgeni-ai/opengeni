@@ -1,13 +1,13 @@
-//! Templates and captured images in memory (see [`crate::store::Store`]).
-//! Every use recorded of a captured image and every claim on it happen
-//! under the store's one lock, so they take turns.
+//! Templates, and the captured and built images' records, in memory (see
+//! [`crate::store::Store`]). Every use recorded of an image and every
+//! claim on it happen under the store's one lock, so they take turns.
 
 use compute_protocol::host::ImageId;
 
 use super::Inner;
 use crate::store::{Collector, Inserted, SandboxRow, TEMPLATE_PREFIX, TemplateRow};
 
-/// A captured image's record.
+/// A captured or built image's record.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Captured {
     /// Since when nothing uses it, as last noted.
@@ -23,7 +23,52 @@ impl Inner {
                 .sandboxes
                 .values()
                 .any(|row| row.spec.config.image == Some(image))
-            || self.built.values().any(|built| *built == image)
+            || self.latest_builds().any(|built| built == image)
+    }
+
+    /// The image of the source each name used last.
+    fn latest_builds(&self) -> impl Iterator<Item = ImageId> + '_ {
+        let mut seen = std::collections::HashSet::new();
+        self.image_uses
+            .iter()
+            .rev()
+            .filter(move |(name, _)| seen.insert(name.as_str()))
+            .filter_map(|(_, source)| self.built.get(source).copied())
+    }
+
+    /// Whether a collector claimed `image` to forget it.
+    fn collecting_image(&self, image: ImageId) -> bool {
+        self.captured
+            .get(&image)
+            .is_some_and(|captured| captured.claim.is_some())
+    }
+
+    pub(super) fn image_built(&self, source: &str) -> Option<ImageId> {
+        self.built
+            .get(source)
+            .copied()
+            .filter(|image| !self.collecting_image(*image))
+    }
+
+    pub(super) fn record_built(
+        &mut self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+    ) -> Option<ImageId> {
+        let recorded = self.built.get(source).copied().unwrap_or(image);
+        if self.collecting_image(recorded) {
+            return None;
+        }
+        self.built.insert(source.to_owned(), recorded);
+        // The one offered when another was recorded first is stored too,
+        // and nothing uses it.
+        self.captured.entry(image).or_default();
+        self.captured.entry(recorded).or_default().unused_ms = None;
+        self.image_uses
+            .retain(|(named, used)| named != name || used != source);
+        self.image_uses.push((name.to_owned(), source.to_owned()));
+        Some(recorded)
     }
 
     /// Whether `row` is created from a team's template that is gone.
@@ -161,6 +206,11 @@ impl Inner {
     pub(super) fn collected(&mut self, image: ImageId, collector: &str) {
         if self.collecting(image, collector) {
             self.captured.remove(&image);
+            // The builds that made it go with it.
+            self.built.retain(|_, built| *built != image);
+            let built = &self.built;
+            self.image_uses
+                .retain(|(_, source)| built.contains_key(source));
         }
     }
 }

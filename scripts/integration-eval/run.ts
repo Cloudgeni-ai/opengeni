@@ -498,7 +498,10 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
   const { testCase, cell, repeat } = job;
   const marker = runMarker();
   const workspaceId =
-    (testCase.workspace ?? (testCase.kind === "not_connected" ? "empty" : "connected")) === "empty"
+    (testCase.workspace ??
+      (testCase.kind === "not_connected" || testCase.kind === "clarify"
+        ? "empty"
+        : "connected")) === "empty"
       ? env("OPENGENI_EVAL_EMPTY_WORKSPACE_ID")
       : env("OPENGENI_EVAL_CONNECTED_WORKSPACE_ID");
   const appUrl = (process.env.OPENGENI_EVAL_APP_URL ?? api.baseUrl).replace(/\/+$/, "");
@@ -689,7 +692,9 @@ async function runAll(flags: Map<string, string>) {
   ]);
   const running = new Map<string, number>();
   const capped = (job: Job) =>
-    job.testCase.kind === "not_connected" ? null : (job.testCase.integration as string);
+    job.testCase.kind === "not_connected" || job.testCase.kind === "clarify"
+      ? null
+      : (job.testCase.integration as string);
   const takeNext = (): Job | undefined => {
     const index = pending.findIndex((job) => {
       const key = capped(job);

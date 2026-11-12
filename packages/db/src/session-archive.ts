@@ -758,6 +758,43 @@ export async function completeSessionArchiveObjectDeletion(
 
 export { SessionArchivedError } from "./session-archive-errors";
 
+/**
+ * A control-worker proof that the session's execution is closed: its content
+ * is archived (or being archived) or it is an imported read-only copy. The
+ * database refuses every turn, attempt, history and wake write for such a
+ * session, so a control activity that failed against it can never succeed by
+ * retrying. Read in the session's own worker scope; a hidden or missing row is
+ * not read-only (deletion has its own proof), and read errors propagate.
+ */
+export async function isSessionExecutionReadOnly(
+  db: Database,
+  scope: SessionArchiveScope,
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: scope.accountId, workspaceId: scope.workspaceId },
+    async (scoped) => {
+      const [row] = await scoped
+        .select({
+          contentArchiveState: schema.sessions.contentArchiveState,
+          importedArchiveImportId: schema.sessions.importedArchiveImportId,
+        })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, scope.workspaceId),
+            eq(schema.sessions.id, scope.sessionId),
+          ),
+        )
+        .limit(1);
+      return (
+        row !== undefined &&
+        (row.contentArchiveState !== null || row.importedArchiveImportId !== null)
+      );
+    },
+  );
+}
+
 export type SetSessionKeepLiveResult =
   | { status: "updated"; retention: SessionRetention }
   | { status: "not_found" }

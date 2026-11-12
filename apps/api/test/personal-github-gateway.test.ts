@@ -76,12 +76,17 @@ function harness(
   const upstream: Upstream[] = [];
   const decisions: GatewayDecisionInput[] = [];
   const completions: string[] = [];
-  const authorized: Array<{ url: string; tool: string; repositories: unknown[] }> = [];
+  const authorized: Array<{
+    url: string;
+    tool: string;
+    repositories: unknown[];
+    everyRepository?: boolean;
+  }> = [];
   const services: PersonalGitHubGatewayServices = {
     openClaims: (token) => (token === "session-pass" ? claims : null),
     resolveAuthority: async () => options.authority ?? authority(),
-    authorizeProviderRequest: async (_authority, url, tool, repositories) => {
-      authorized.push({ url, tool, repositories });
+    authorizeProviderRequest: async (_authority, url, tool, repositories, checked) => {
+      authorized.push({ url, tool, repositories, everyRepository: checked?.everyRepository });
       return "Bearer person-token";
     },
     decide: async (_identity, input) => {
@@ -530,6 +535,8 @@ describe("personal GitHub gateway review fixes", () => {
     await covered.send("/user/keys", addKey());
     expect(covered.decisions[0]!.action).toMatchObject({ sensitive: true });
     expect(covered.decisions[0]!.action).not.toHaveProperty("unscoped");
+    // The send re-checks that every repository is still allowed for writing.
+    expect(covered.authorized[0]).toMatchObject({ everyRepository: true });
     // A repository removed from the chat is an allowlist again: it asks.
     const restricted = harness({ authority: allWrite(removedWidgets) });
     await restricted.send("/user/keys", addKey());

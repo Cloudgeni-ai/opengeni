@@ -226,9 +226,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         for (key, value) in &report.notes.details {
             event = event.with(*key, *value);
         }
-        if let Some(paused) = report.notes.paused {
-            event = event.with("compute.paused_us", paused);
-        }
         if let (Some(reading), Some(slot)) = (report.reading, self.slots.get_mut(&id.0)) {
             event = with_pressure(event, pressure_since(slot.reported, reading));
             slot.reported = Some(reading);

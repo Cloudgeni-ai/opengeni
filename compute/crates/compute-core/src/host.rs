@@ -1021,8 +1021,8 @@ impl Host {
 
     /// Takes in [`Input::Busy`].
     fn busy(&mut self, now: At, sandbox: SandboxId) {
-        // A checkpoint pauses the VM only while it captures it: its guest
-        // runs, and works, through the rest.
+        // A checkpoint never pauses the VM: its guest runs, and works,
+        // throughout.
         if let Some(slot) = self.sandboxes.get_mut(&sandbox)
             && slot.state.level == Level::Running
             && slot
@@ -1184,17 +1184,17 @@ impl Host {
         // What a step wrote stays booked until a reading shows it. A
         // failed save or fetch may leave what it wrote, such as a failed
         // copy kept in quarantine, while a retry books its writes afresh.
-        // A checkpoint leaves its sandbox running, booking its next save as
-        // before, so what it wrote, its new memory image, is booked here
-        // whatever it came to: one cancelled while it uploads has written
-        // it too, and one cancelled while its guest wrote its disks out may
-        // have had the guest trim them. A step that certainly wrote
-        // nothing, such as one cancelled before it began, books nothing: a
-        // checkpoint cancelled so, and due again at once, would otherwise
-        // book an image each time it is tried.
+        // A checkpoint leaves nothing of its own behind: it copies the disk
+        // alone and removes its clone as it ends. What its guest's disk
+        // took meanwhile, through the clone's shared blocks or a trim it
+        // took back, which one cancelled while the guest wrote its disks
+        // out may also have had, stays booked until a reading measures it,
+        // as anything a booking stops standing for does. A step that
+        // certainly wrote nothing, such as one cancelled before it began,
+        // books nothing.
         let written = match (flight.step, outcome) {
             _ if !wrote => DiskSpace::default(),
-            (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
+            (Step::Save, Outcome::Failed(_)) => slot.save_space(),
             (Step::Fetch, Outcome::Failed(_)) => {
                 DiskSpace::save(slot.size.fetch.saturating_add(slot.size.disk))
             }

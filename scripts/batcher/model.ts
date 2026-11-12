@@ -164,6 +164,13 @@ export interface QueuedPull {
   /** A Version PR's head commit time (epoch ms): its notices are looked up from then. */
   headAt?: number;
   controlPlane: boolean;
+  /**
+   * It changes what Opengeni sends to model providers and the maintainer has
+   * not approved its current head (scripts/ci/model-request-review.ts). It is
+   * then never ready (`greenAt` is null), and a running batch that holds it
+   * is abandoned before it can land.
+   */
+  awaitingModelReview?: true;
 }
 
 export interface Member {
@@ -379,9 +386,11 @@ export function readyAt(pull: QueuedPull): number {
  * first, and ready PRs in queue order fill the rest of their batch, so
  * priority PRs that arrive one at a time do not each take a round alone; the
  * fill leaves out the PRs a failed batch's split still holds. While a failed
- * batch is being split, priority batches and its halves take turns: after a
- * priority batch went ahead of a half, that half goes next, so a steady stream
- * of priority PRs cannot hold a bisection back. Then ready PRs in queue order.
+ * batch is being split, a priority batch has no fill, and priority batches and
+ * its halves take turns: after a priority batch went ahead of a half, that half
+ * goes next, and the halves run oldest first, so neither a steady stream of
+ * priority PRs nor PRs queued later can hold a bisection back. Then ready PRs
+ * in queue order.
  * CI and batcher changes run alone; while a failed batch is being split, the
  * oldest one outside its halves takes turns with them when no priority PR
  * waits. A priority PR already in a failed batch's
@@ -439,9 +448,11 @@ export function nextBatch(
     const first = urgent[0]!;
     if (alone(first)) return { kind: "build", members: [first], pending, ...ahead };
     // The oldest ready PRs fill the rest without waiting for the batching
-    // window, after the priority PRs. PRs a failed batch's split still holds
-    // stay out: their halves keep their own runs.
-    const fill = ready.filter((p) => !p.priority && !bisecting.has(p.number));
+    // window, after the priority PRs. While a failed batch is being split
+    // there is no fill: PRs queued after its halves would otherwise go ahead
+    // of them, and a larger batch ahead of a bisection is likelier to fail
+    // and add halves of its own.
+    const fill = pending.length ? [] : ready.filter((p) => !p.priority);
     const members = compatible(
       [...urgent, ...fill].filter((p) => !alone(p)),
       settings,
@@ -468,15 +479,11 @@ export function nextBatch(
       ...(blame.length ? { blame } : {}),
     };
 
-  // A half holding a priority PR runs before the other halves; the halves are
-  // independent, so their order only decides which PRs land sooner.
-  const holdsPriority = (group: number[]) =>
-    group.some((n) => ready.find((p) => p.number === n)?.priority);
-  const order = [
-    ...pending.flatMap((group, index) => (holdsPriority(group) ? [index] : [])),
-    ...pending.flatMap((group, index) => (holdsPriority(group) ? [] : [index])),
-  ];
-  for (const index of order) {
+  // The halves run in the order they were queued, oldest first. A split
+  // already puts a batch's priority PRs in its first half, so ordering by
+  // priority again here would only let newer halves, which many priority PRs
+  // start, go ahead of older ones indefinitely.
+  for (const index of pending.keys()) {
     const group = pending[index]!.map((n) => ready.find((p) => p.number === n)).filter(
       (p): p is QueuedPull => p !== undefined,
     );
@@ -745,8 +752,11 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     const { manifest } = batch;
     const own = ownMembers(manifest);
     const numbers = own.map((m) => m.number);
-    // An interrupted batch is tested again first, keeping any bisection.
-    pending = [numbers, ...manifest.pending];
+    // An interrupted batch is tested again first, keeping any bisection. One
+    // that went ahead of a bisection is not one of its halves: its PRs go back
+    // to the queue, so they cannot become a half ahead of the older ones.
+    pending =
+      manifest.aheadOfBisection === true ? manifest.pending : [numbers, ...manifest.pending];
     blame = manifest.blame ?? [];
     // A new head that tests to the same tree (main merged in again, a rebase)
     // changes nothing this batch tests, so it does not restart it. A member
@@ -756,6 +766,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head) ||
         byNumber.get(m.number)?.parked,
     );
+    // A member whose model request approval is gone (dismissed, or revoked by
+    // a later review) must not land with the batch.
+    const unapproved = manifest.members.find((m) => byNumber.get(m.number)?.awaitingModelReview);
     // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
     let changed: number | undefined;
@@ -774,6 +787,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         : current.parked
           ? `#${left.number} conflicts with main`
           : `#${left.number} has a new head`;
+    } else if (unapproved) {
+      changed = unapproved.number;
+      reason = `#${unapproved.number} needs the maintainer's approval of its model request changes on its head`;
     }
     if (reason) {
       actions.push({

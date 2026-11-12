@@ -1,0 +1,120 @@
+---
+title: "Microsoft Dynamics"
+description: "Connect Opengeni to Dynamics 365 Sales and other Dataverse apps, or Dynamics 365 Finance and Operations, with each person's Microsoft work account."
+icon: "building"
+---
+
+The Microsoft Dynamics connection lets Opengeni agents read and change your
+Dynamics 365 data. Each person signs in with their Microsoft work account, and
+every call runs with that person's Dynamics security roles.
+
+| Product                                                       | Environment URL you enter                                | Status               |
+| ------------------------------------------------------------- | -------------------------------------------------------- | -------------------- |
+| Dynamics 365 Sales, Customer Service and other Dataverse apps | `https://<org>.crm.dynamics.com` (or `crm4`, `crm17`, …) | Available            |
+| Dynamics 365 Finance and Operations                           | `https://<env>.operations.dynamics.com`                  | Ask us to turn it on |
+| Business Central                                              |                                                          | Not yet supported    |
+
+## Connect
+
+1. Ask an agent in chat to connect Microsoft Dynamics, and give it the address
+   you open Dynamics at. Any page of your environment works, for example
+   `https://contoso.crm4.dynamics.com/main.aspx?...`. If you don't know it,
+   open Dynamics and copy the address bar, or find **Environment URL** in the
+   Power Platform admin center.
+2. Press **Connect Microsoft Dynamics** on the card and sign in with your
+   Microsoft work account. The connection is yours alone: it acts with your
+   own Dynamics permissions.
+
+You can also add the same address as a custom server under **Capabilities**;
+Opengeni recognizes it as Microsoft Dynamics.
+
+To approve every change before it happens, open the connection's **Tool
+permissions**. Creating, updating and deleting records ask first unless an
+administrator changes that.
+
+If sign-in or a call fails, Opengeni shows the reason from Microsoft. Most
+failures are one of the administrator steps below.
+
+## What agents can do
+
+For Dataverse environments (Dynamics 365 Sales and other model-driven apps),
+agents list and describe tables, query records with OData or FetchXML
+(including totals grouped by month or stage), and create, update and delete
+records. They use the environment's Web API, so you don't need to turn on
+Dataverse's MCP server or allow Opengeni as an MCP client, and these calls
+don't use Copilot Credits.
+
+## Administrator setup
+
+On Opengeni's cloud service, the Microsoft Entra application ID is
+`2b52f1a0-3c32-4103-a554-e6e3f3d483ff` ("Opengeni Dynamics"). Self-hosted
+deployments use their own application; ask your operator for its ID.
+
+### Consent in Microsoft Entra
+
+Until Microsoft verifies Opengeni as a publisher, people outside Opengeni's
+own tenant can't consent to it themselves, so the first person to sign in sees
+**Need admin approval**. When they come back, the card shows a ready-made
+message with the approval link to send to IT, and **Try signing in again** for
+after they approve. A Global Administrator, Application Administrator or Cloud
+Application Administrator grants consent for everyone once, by opening:
+
+```
+https://login.microsoftonline.com/<your-tenant-domain-or-id>/adminconsent?client_id=2b52f1a0-3c32-4103-a554-e6e3f3d483ff
+```
+
+If your tenant uses the admin consent request workflow, people can request
+approval from Microsoft's screen instead; they can connect once an
+administrator approves it in the Entra admin center (**Enterprise
+applications** > **Admin consent requests**). See Microsoft's
+[publisher verification](https://learn.microsoft.com/en-us/entra/identity-platform/publisher-verification-overview)
+and [admin consent](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent)
+pages.
+
+### Dataverse
+
+No environment setting is needed beyond consent. Each user needs a security
+role in the environment and a Dynamics 365 or Power Apps licence that gives
+access to the data, as for any other app.
+
+### Finance and Operations
+
+1. In Feature management, turn on **Dynamics 365 ERP Model Context Protocol
+   server** (newer environments have it on already).
+2. Open **System administration** > **Setup** > **Allowed MCP clients**, add
+   Opengeni's application ID and set **Allowed** to **Yes**.
+   A newly allowed client can take up to a minute to work.
+
+Environments created in the Power Platform admin center use a regional
+address such as `https://contoso.operations.ch.dynamics.com`; it works the
+same way.
+
+Calls run under each user's own Finance and Operations security roles. See
+[MCP server security](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/copilot/mcp/mcp-security).
+
+## Licensing and billing
+
+- Users need a licence that gives them access to the data, as for any other
+  client. Dataverse Web API calls count toward your tenant's normal
+  [Power Platform request limits](https://learn.microsoft.com/en-us/power-platform/admin/api-request-limits-allocations);
+  they are not billed in Copilot Credits.
+- Microsoft bills calls to its hosted MCP servers from non-Microsoft clients
+  in Copilot Credits (see
+  [Dataverse MCP billing](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/data-platform-mcp#billing)).
+  Opengeni uses the Web API for Dataverse. The Finance and Operations
+  connection uses its MCP server, which Microsoft bills at 0.1 Copilot Credits
+  per tool call unless the user has Finance Premium or Supply Chain Management
+  Premium (see
+  [ERP MCP server](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/copilot/copilot-mcp)).
+- Opengeni's own usage is billed as usual.
+
+## Troubleshooting
+
+| Message                                           | What to do                                                                                    |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Your IT needs to approve Opengeni first           | Copy the message for IT from the card. After they approve, choose **Try signing in again**.   |
+| Didn't get to finish signing in?                  | If you sent an approval request from Microsoft's page, wait for IT to approve it, then retry. |
+| Access denied, or missing a privilege             | The signed-in user's Dynamics security roles don't allow it.                                  |
+| The client isn't allowed (Finance and Operations) | Add Opengeni's application ID to **Allowed MCP clients**.                                     |
+| Finance and Operations isn't available here yet   | Ask us to turn on Finance and Operations.                                                     |
+| No access to this Dynamics environment            | Ask the environment's Dynamics admin to add your account with a security role.                |

@@ -318,7 +318,7 @@ export function OrgPagePreview() {
       updatePerson(person.id, (current) => ({
         ...current,
         status: "invited",
-        statusLabel: "Invited · expires in 7 days",
+        statusLabel: "Invited · expires in 2 days",
       }));
       toast(`Sent a new invitation to ${person.email ?? person.name}`);
     },
@@ -365,7 +365,7 @@ export function OrgPagePreview() {
         kind: "person",
         organizationRole: each.role,
         status: "invited",
-        statusLabel: "Invited · expires in 7 days",
+        statusLabel: "Invited · expires in 2 days",
         grants: { ...each.grants },
       };
     });
