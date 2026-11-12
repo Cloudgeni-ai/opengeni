@@ -1276,8 +1276,9 @@ describe("unified Knowledge storage", () => {
       });
     const receipt = await archive();
     expect(receipt.outcome).toBe("archived");
-    // Nothing inside surfaces at the top level, and agents stop using it.
-    expect(await roots()).toEqual([other.entryId, citing.entryId].sort());
+    // Nothing only inside surfaces at the top level, and agents stop using it. The cited
+    // note stays live without a live collection, so it is listed at the top level.
+    expect(await roots()).toEqual([other.entryId, citing.entryId, cited.entryId].sort());
     for (const id of [lab.entryId, atlas.entryId, finding.entryId])
       expect(await archived(id)).toBe(true);
     // Held or cited by something live outside it: stays.
