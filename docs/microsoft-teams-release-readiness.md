@@ -793,7 +793,7 @@ References: [publisher verification](https://learn.microsoft.com/en-us/entra/ide
 tenant's 1:1 chats start work in any workspace of the connecting organization
 that the linked person can start chats in, like a Slack bot DM. Turn it on only
 after every replica runs a release that reads `teams_bot_routes.agent_id`
-(migration 1363); an older replica would admit an agent route as a plain chat.
+(migration 1373); an older replica would admit an agent route as a plain chat.
 With it off, nothing changes: 1:1 chats use the installation's workspace or the
 person's Personal workspace, and linking needs `sessions:create` there.
 
