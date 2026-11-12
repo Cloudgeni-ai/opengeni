@@ -1070,6 +1070,8 @@ export type {
   OrganizationModelCatalogProviderKind,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  ClaimClaudeLimitResetRequest,
+  ClaimClaudeLimitResetResponse,
   ClaudeExtraUsage,
   ClaudeLimitResetClaim,
   ClaudeLimitResetClaimResult,

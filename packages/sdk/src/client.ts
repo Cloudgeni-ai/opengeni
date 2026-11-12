@@ -497,6 +497,8 @@ import type {
   DeleteWorkspaceOpperCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  ClaimClaudeLimitResetRequest,
+  ClaimClaudeLimitResetResponse,
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -6171,6 +6173,22 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Use one limit reset grant of a Claude account. Reuse `requestId` when
+   * the answer is `retryable`: Claude settles each request id once.
+   */
+  async claimClaudeSubscriptionAccountLimitReset(
+    workspaceId: string,
+    accountId: string,
+    request: ClaimClaudeLimitResetRequest,
+  ): Promise<ClaimClaudeLimitResetResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/limit-resets/claim`,
+      request,
+    );
+  }
+
   async listOrganizationClaudeSubscriptionAccounts(
     organizationId: string,
   ): Promise<ClaudeSubscriptionAccountsResponse> {
@@ -6245,6 +6263,19 @@ export class OpenGeniClient {
       "POST",
       `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/usage/refresh`,
       {},
+    );
+  }
+
+  /** Use one limit reset grant of an organization Claude account (see the workspace variant). */
+  async claimOrganizationClaudeSubscriptionAccountLimitReset(
+    organizationId: string,
+    accountId: string,
+    request: ClaimClaudeLimitResetRequest,
+  ): Promise<ClaimClaudeLimitResetResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/limit-resets/claim`,
+      request,
     );
   }
 

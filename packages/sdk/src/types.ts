@@ -4891,6 +4891,8 @@ import type {
   ClaudeWallReset,
 } from "@opengeni/contracts";
 export type {
+  ClaimClaudeLimitResetRequest,
+  ClaimClaudeLimitResetResponse,
   ClaudeExtraUsage,
   ClaudeLimitResetClaim,
   ClaudeLimitResetClaimResult,

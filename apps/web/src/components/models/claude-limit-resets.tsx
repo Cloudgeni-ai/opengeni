@@ -1,9 +1,16 @@
 import type {
+  ClaimClaudeLimitResetRequest,
+  ClaimClaudeLimitResetResponse,
+  ClaudeLimitResetClaim,
   ClaudeLimitResetGrant,
   ClaudeLimitResets,
   ClaudeSubscriptionUsage,
 } from "@opengeni/sdk";
-import type { ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
+import { toast } from "sonner";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { formatAbsoluteTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
@@ -20,13 +27,16 @@ import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
  * limit, except for a grant that gives back Fable usage.
  */
 export function claudeGrantClears(grant: ClaudeLimitResetGrant): string | null {
+  return claudeClearsText(grant.clears, grant.givesBackWeekly);
+}
+
+function claudeClearsText(clears: readonly string[], givesBackWeekly: boolean): string | null {
   const names = new Set<string>();
-  if (grant.givesBackWeekly) names.add("Fable");
-  for (const id of grant.clears) {
+  if (givesBackWeekly) names.add("Fable");
+  for (const id of clears) {
     if (id === "five_hour") names.add("5-hour");
     else if (id === "seven_day") names.add("weekly");
-    else if (id === "seven_day_overage_included")
-      names.add(grant.givesBackWeekly ? "Fable" : "weekly");
+    else if (id === "seven_day_overage_included") names.add(givesBackWeekly ? "Fable" : "weekly");
     else if (id === "seven_day_fable") names.add("Fable");
     else if (id === "seven_day_opus") names.add("Opus weekly");
     else if (id === "seven_day_sonnet") names.add("Sonnet weekly");
@@ -205,5 +215,213 @@ export function ClaudeLimitResetsSection({
         })}
       </SettingRowGroup>
     </DetailSection>
+  );
+}
+
+/** What a claim's answer means for the person, and whether to say it as an error. */
+export function claudeClaimOutcome(
+  claim: ClaudeLimitResetClaim,
+  grant: ClaudeLimitResetGrant,
+  now: number,
+): { ok: boolean; title: string; description?: string } {
+  switch (claim.result) {
+    case "reset": {
+      const cleared = claudeClearsText(
+        claim.cleared.length ? claim.cleared : grant.clears,
+        grant.givesBackWeekly,
+      );
+      return {
+        ok: true,
+        title: "Limit reset used",
+        description: cleared
+          ? cleared.replace(/^Clears/, "Claude cleared")
+          : "Claude cleared the limit.",
+      };
+    }
+    case "already_used":
+      return { ok: false, title: "This reset was already used" };
+    case "not_limited":
+      return {
+        ok: false,
+        title: "Nothing to reset",
+        description: "No limit this reset clears is reached. It wasn't used.",
+      };
+    case "cooldown":
+      return {
+        ok: false,
+        title: "Not yet",
+        description: claim.cooldownUntil
+          ? `Claude allows the next reset ${formatAbsoluteTime(claim.cooldownUntil, { now })}. It wasn't used.`
+          : "Claude allows another reset after a short wait. It wasn't used.",
+      };
+    case "ineligible":
+      return {
+        ok: false,
+        title: "Claude won't use this reset now",
+        description: "It wasn't used.",
+      };
+    case "unavailable":
+      return {
+        ok: false,
+        title: "This reset isn't available now",
+        description: "It wasn't used.",
+      };
+    case "rate_limited":
+      return {
+        ok: false,
+        title: "Claude is busy",
+        description: "Try again in a minute. A retry can't use a second reset.",
+      };
+    case "auth_error":
+      return claim.retryable
+        ? {
+            ok: false,
+            title: "Couldn't reach Claude with this account",
+            description: "Try again. A retry can't use a second reset.",
+          }
+        : {
+            ok: false,
+            title: "This sign-in can't use resets",
+            description: "Sign in to Claude again with your browser to use them.",
+          };
+    default:
+      return claim.retryable
+        ? {
+            ok: false,
+            title: "Couldn't confirm the reset",
+            description: "Try again. A retry can't use a second reset.",
+          }
+        : { ok: false, title: "Couldn't use the reset" };
+  }
+}
+
+/**
+ * Claiming limit resets from one account's page: the grant waiting for
+ * confirmation, and one request id per grant, kept until Claude settles it,
+ * so a retry after an unknown outcome can never use a second reset.
+ */
+export function useClaudeLimitResetClaim({
+  claim,
+  beginRecord,
+}: {
+  claim: (request: ClaimClaudeLimitResetRequest) => Promise<ClaimClaudeLimitResetResponse>;
+  /** Records the usage Claude reported right after the claim. */
+  beginRecord?: (() => (usage: ClaudeSubscriptionUsage) => void) | undefined;
+}) {
+  const [confirming, setConfirming] = useState<ClaudeLimitResetGrant | null>(null);
+  const [busy, setBusy] = useState(false);
+  const requestIds = useRef(new Map<string, string>());
+  const confirm = useCallback(async (): Promise<boolean> => {
+    const grant = confirming;
+    if (!grant) return true;
+    const requestId = requestIds.current.get(grant.id) ?? crypto.randomUUID();
+    requestIds.current.set(grant.id, requestId);
+    setBusy(true);
+    try {
+      const record = beginRecord?.();
+      const response = await claim({ grantId: grant.id, requestId });
+      if (!response.claim.retryable) requestIds.current.delete(grant.id);
+      record?.(response.usage);
+      const outcome = claudeClaimOutcome(response.claim, grant, Date.now());
+      (outcome.ok ? toast.success : toast.error)(
+        outcome.title,
+        outcome.description ? { description: outcome.description } : undefined,
+      );
+      return true;
+    } catch (error) {
+      // Sent or not, the outcome is unknown: the same request id settles it.
+      toast.error("Couldn't confirm the reset", {
+        description: `${userErrorText(error)} Try again. A retry can't use a second reset.`,
+      });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }, [claim, confirming, beginRecord]);
+  return {
+    confirming,
+    busy,
+    begin: setConfirming,
+    close: () => setConfirming(null),
+    confirm,
+  };
+}
+
+/** The confirm before a limit reset is used. Mount once per account page. */
+export function ClaudeLimitResetDialog({
+  state,
+}: {
+  state: ReturnType<typeof useClaudeLimitResetClaim>;
+}) {
+  const now = useMinuteNow();
+  const grant = state.confirming;
+  return (
+    <ConfirmDialog
+      open={grant !== null}
+      onOpenChange={(open) => {
+        if (!open) state.close();
+      }}
+      title="Use this limit reset?"
+      description="Claude clears the limits it names right away. This uses up the reset and can't be undone."
+      confirmLabel="Use reset"
+      pendingLabel="Using reset…"
+      cancelLabel="Cancel"
+      cancelAutoFocus
+      destructive={false}
+      onConfirm={state.confirm}
+    >
+      {grant ? (
+        <dl className="m-0 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-[10px] bg-surface-2 px-3 py-2.5 text-xs">
+          <dt className="text-fg-muted">Reset</dt>
+          <dd className="m-0 break-words text-fg">{claudeGrantTitle(grant)}</dd>
+          {claudeGrantClears(grant) ? (
+            <>
+              <dt className="text-fg-muted">Clears</dt>
+              <dd className="m-0 break-words text-fg">
+                {claudeGrantClears(grant)!.replace(/^Clears the /, "The ")}
+              </dd>
+            </>
+          ) : null}
+          {resetsLeftText(grant) ? (
+            <>
+              <dt className="text-fg-muted">Left</dt>
+              <dd className="m-0 text-fg">{resetsLeftText(grant)}</dd>
+            </>
+          ) : null}
+          {grant.endsAt ? (
+            <>
+              <dt className="text-fg-muted">Expires</dt>
+              <dd className="m-0 text-fg">{formatAbsoluteTime(grant.endsAt, { now })}</dd>
+            </>
+          ) : null}
+        </dl>
+      ) : null}
+    </ConfirmDialog>
+  );
+}
+
+/** The row control: "Use reset" while the grant is usable now. */
+export function ClaudeUseResetButton({
+  grant,
+  blocked,
+  state,
+}: {
+  grant: ClaudeLimitResetGrant;
+  blocked: string | null;
+  state: ReturnType<typeof useClaudeLimitResetClaim>;
+}) {
+  if (blocked !== null) return null;
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="rounded-[10px] pointer-coarse:h-11"
+      disabled={state.busy}
+      aria-label={`Use ${claudeGrantTitle(grant)}`}
+      onClick={() => state.begin(grant)}
+    >
+      Use reset
+    </Button>
   );
 }
