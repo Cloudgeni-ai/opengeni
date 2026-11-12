@@ -1,5 +1,38 @@
 # @opengeni/runtime
 
+## 6.18.0
+
+### Patch Changes
+
+- 07a9375: Listing browsers and Desktops no longer ends the ones on a Connected Machine their chat has moved away from. A browser left there keeps running with its profile, as the refusal to use it from the new machine already says, so moving the chat back continues in the same browser with its sign-ins. Before, any listing (the app polls them) retired it within seconds of a move, even a brief one, and its signed-in state could not be resumed. Ending it still retires it on that machine.
+- d83e5f2: Each Microsoft Dynamics Dataverse tool's description now ends with the environment it is connected to (`Environment: <host>.`), so an agent can tell one connected environment from another and notice when a request names an environment that isn't connected yet.
+- 3c366a7: A sandbox command no tool call owns, such as a workspace capture's Git and file reads or platform setup, now releases its retained output on the machine as soon as its result returns. Before, that output stayed retained until a durability hook its caller often never reached, so the agent kept it, and an open spool file, for up to an hour. Busy compute sandboxes could then run out of file descriptors. Tool-owned output keeps its existing release points.
+- 4c6c0a4: Tool search without a decision model loads each request's strongest few matches instead of one: the best match and the next ones from the same integration scoring at least 0.7 of it, up to three per request, so a task's sibling tools (create a session, then message it) arrive in one search instead of one round trip each. A tie within one integration now loads the close matches together rather than one guess; close matches from other integrations or connections are listed, not loaded. "Notification" now matches tools that notify, and notifying counts as sending, so a messaging tool's "send" no longer outranks the tool that notifies.
+- c1b19a8: A command that fails before it is started no longer keeps its turn from finishing. When a command's preparation failed on its way to the sandbox (for example, writing the private file for a secret reference while the machine was restarting), the turn kept waiting to stop a command that never existed, until the worker gave up and restarted. The turn now releases a command whose operation was never created, and still waits for every command that was.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [ea2f259]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [917393e]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/sdk@6.18.0
+  - @opengeni/config@6.18.0
+  - @opengeni/observability@6.18.0
+  - @opengeni/network@6.18.0
+  - @opengeni/capabilities@6.18.0
+  - @opengeni/codemode@6.18.0
+  - @opengeni/codex@6.18.0
+  - @opengeni/decisions@6.18.0
+  - @opengeni/interaction@6.18.0
+  - @opengeni/tool-gateway@6.18.0
+  - @opengeni/vaults@6.18.0
+  - @opengeni/xai-subscription@6.18.0
+  - @opengeni/jev@6.18.0
+  - @opengeni/agent-proto@6.18.0
+
 ## 6.17.0
 
 ### Minor Changes
