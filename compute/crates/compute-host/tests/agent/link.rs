@@ -4,7 +4,7 @@
 //! connections under it; a sleeping sandbox wakes for a message, the
 //! gateway hears when it sleeps and wakes, a new ticket opens the session
 //! again, and the session outlives the host agent's restart and ends when
-//! the sandbox goes.
+//! the sandbox goes or its VM ends with no memory kept.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request as Upgrade, Response};
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
-use super::{Delays, Lab, NEVER, id};
+use super::{Delays, END_QUICKLY, Lab, NEVER, id};
 
 const WAIT: Duration = Duration::from_secs(5);
 const SCOPE: &str = "agent.w1.a1.connection.inst-1";
@@ -577,6 +577,35 @@ async fn a_new_ticket_opens_the_session_again_and_removing_the_sandbox_closes_it
     lab.assert_clean();
 }
 
+/// A sandbox whose VM ends with no memory kept has lost its agent for
+/// good: the host ends that agent's session at once, rather than keeping
+/// it for a wake the agent can never answer, and keeps no copy of it, so a
+/// restarted host does not open it again. The sandbox's next agent opens a
+/// session of its own when it boots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_ended_with_no_memory_kept_ends_its_agents_session() {
+    let mut gateway = Gateway::start().await;
+    let links = hub();
+    let lab = linked_lab_with(Lab::root(), Arc::default(), links.clone()).await;
+    let sandbox = id(5);
+    let mut config = config(&gateway, "ticket-1");
+    config.sleep = END_QUICKLY;
+    create(&lab, sandbox, config).await;
+    lab.wake(sandbox).await;
+    gateway.up().await;
+    let socket = link_socket(&lab.sandbox_dir(sandbox));
+    let (_agent, s) = connect(&mut gateway, &socket, sandbox, "ticket-1").await;
+    let dir = lab.sandbox_dir(sandbox);
+    // Idle, it pauses, and its VM soon ends with no memory saved.
+    assert_eq!(gateway.frame().await, HostFrame::Close { s });
+    let (_root, _world) = lab.stop().await;
+    links.shutdown().await;
+    assert!(
+        !dir.join("agent-link.json").exists(),
+        "the gone agent's session is kept for a restarted host to open again"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restarted_host_opens_its_sandboxes_sessions_again_before_their_agents_connect() {
     let mut gateway = Gateway::start().await;
@@ -584,6 +613,9 @@ async fn a_restarted_host_opens_its_sandboxes_sessions_again_before_their_agents
     let lab = linked_lab_with(Lab::root(), Arc::default(), links.clone()).await;
     let sandbox = id(3);
     create(&lab, sandbox, config(&gateway, "ticket-1")).await;
+    // Its VM runs, as one whose agent connects does, and outlives the
+    // host agent's restart.
+    lab.wake(sandbox).await;
     gateway.up().await;
     let socket = link_socket(&lab.sandbox_dir(sandbox));
     let (mut agent, _) = connect(&mut gateway, &socket, sandbox, "ticket-1").await;

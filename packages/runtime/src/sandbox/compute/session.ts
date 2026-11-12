@@ -212,8 +212,9 @@ export interface ComputeWakeGateDeps {
 /**
  * Reaches a compute sandbox's agent. Normally the gateway holds the agent's
  * session, asleep or not, and the agent's connection resolves at once. When it
- * does not (no host serves the sandbox), the gate asks the control service to wake the
- * sandbox, which places and adopts it, and waits until the new host's session
+ * does not (no host serves the sandbox, or its VM ended with no memory kept, so
+ * its agent is gone), the gate asks the control service to wake the sandbox,
+ * which places and adopts or boots it, and waits until the agent's session
  * opens and the agent answers. Single flight: concurrent operations share one
  * recovery.
  */
