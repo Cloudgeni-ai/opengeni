@@ -73,6 +73,18 @@ const MARKDOWN_LINK =
 const OPENGENI_OBJECT_LINK =
   /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*(<(?:artifact|session|sandbox):[^<>\n]*>|(?:artifact|session|sandbox):(?:[^\s()<>]|\([^\s()<>]*\))*|\/workspaces?\/(?:[^\s()<>]|\([^\s()<>]*\))*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/giu;
 
+/** A link whose label is just an image, as in a clickable thumbnail: `[![alt](src)](`. */
+const LINKED_IMAGE = /\[[ \t]*!\[([^[\]\n]*)\]\((?:[^()\n]|\([^()\n]*\))*\)[ \t]*\]\(/gu;
+
+/**
+ * A line that starts another block and so ends a table: blank, a heading, a
+ * fence, a list item, a quote or a thematic break.
+ */
+const TABLE_END =
+  /^\s*$|^ {0,3}(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,}|[-*+][ \t]|\d{1,9}[.)][ \t]|>|([-*_])(?:[ \t]*\1){2,}[ \t]*$)/u;
+/** Slack's own mention, channel and special tokens. */
+const SLACK_TOKEN = /<[@#!][^<>\n]*>/u;
+
 /** One cell of a GFM table's delimiter row, such as `---` or `:-:`. */
 const TABLE_DELIMITER_CELL = /^:?-+:?$/u;
 
@@ -257,8 +269,10 @@ function slackMrkdwn(markdown: string, options: SlackMrkdwnOptions | null): stri
 /**
  * The GFM table starting at `index`, or null: a header row with a pipe, then a
  * delimiter row with as many columns, then every following row with a pipe up
- * to a blank line, heading or fence. Like GFM, each row keeps the header's
- * columns: a short row is padded, and cells past the header's are dropped.
+ * to a line that starts another block (see {@link TABLE_END}). Like GFM, each
+ * row keeps the header's columns: a short row is padded, and cells past the
+ * header's are dropped. A table with a Slack mention or channel token stays as
+ * written, so the token still works.
  */
 function tableAt(
   lines: readonly string[],
@@ -270,15 +284,16 @@ function tableAt(
   if (!header.includes("|") || delimiter === undefined || !isTableDelimiter(delimiter)) {
     return null;
   }
+  // A code block would show a mention or channel token as raw text.
+  if (SLACK_TOKEN.test(header)) return null;
   const columns = tableCells(header, objectLinkUrl);
   if (columns.length === 0 || splitTableRow(delimiter).length !== columns.length) return null;
   const rows = [columns];
   let next = index + 2;
   for (; next < lines.length; next += 1) {
     const line = lines[next]!;
-    if (!line.trim() || !line.includes("|") || ATX_HEADING.test(line) || FENCE_OPEN.test(line)) {
-      break;
-    }
+    if (!line.includes("|") || TABLE_END.test(line)) break;
+    if (SLACK_TOKEN.test(line)) return null;
     rows.push(tableCells(line, objectLinkUrl).slice(0, columns.length));
   }
   return { rows, lines: next - index };
@@ -387,6 +402,8 @@ function slackInline(
   // could collide with one. Slack does not render NUL; drop it.
   let working = text.replace(/\u0000/gu, "");
   working = working.replace(CODE_SPAN_OR_SLACK_TOKEN, keep);
+  // A clickable thumbnail links with its alt text, whatever either target is.
+  if (options?.objects) working = working.replace(LINKED_IMAGE, "[$1](");
   working = working.replace(MARKDOWN_LINK, (_match, label: string, url: string) =>
     keep(slackLink(restore(label, kept), url)),
   );
@@ -395,7 +412,7 @@ function slackInline(
     working = working.replace(OPENGENI_OBJECT_LINK, (_match, label: string, target: string) => {
       const href = target.startsWith("<") ? target.slice(1, -1) : target;
       const url = objectLinkUrl(href);
-      if (url) return keep(slackLink(restore(label, kept), url));
+      if (url) return keep(slackLink(withImagesAsAltText(restore(label, kept)), url));
       // Nothing to open in Slack: the label reads on, as ordinary text.
       const readable = withImagesAsAltText(label);
       return readable.trim() ? readable : keep(href);
@@ -429,7 +446,7 @@ function withImagesAsAltText(label: string): string {
 }
 
 function slackLink(label: string, url: string): string {
-  const text = withImagesAsAltText(label)
+  const text = label
     .replace(BOLD_ASTERISK, "$1")
     .replace(BOLD_UNDERSCORE, "$1")
     .replace(/`/gu, "")

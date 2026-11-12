@@ -298,6 +298,16 @@ describe("Opengeni object links in Slack", () => {
     expect(slackMrkdwnFromMarkdown(`[![Preview](${file})](${file})`, links)).toBe(
       `<${app}/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e?fromSession=${sessionId}|Preview>`,
     );
+    expect(slackMrkdwnFromMarkdown(`[![Shot](https://img.example/a.png)](${file})`, links)).toBe(
+      `<${app}/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e?fromSession=${sessionId}|Shot>`,
+    );
+    expect(slackMrkdwnFromMarkdown(`[![Shot](${file})](https://example.com/a)`, links)).toBe(
+      "<https://example.com/a|Shot>",
+    );
+    // Earlier renderings keep their bytes for operations bound to them.
+    expect(
+      slackMrkdwnKeepingObjectLinks("[![Shot](https://img.example/a.png)](https://b.example)"),
+    ).toBe("<https://b.example|![Shot](https://img.example/a.png)>");
     expect(
       slackMrkdwnFromMarkdown("[![Shot](sandbox:/tmp/a.png)](sandbox:/tmp/a.png)", links),
     ).toBe("Shot");
@@ -359,6 +369,15 @@ describe("Markdown tables in Slack", () => {
       "| --- | --- |",
       "| [Open](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e) | ok | extra |",
       "## Next | step",
+      "| x | y |",
+      "| - | - |",
+      "| 1 | 2 |",
+      "- next | item",
+      "> quoted | line",
+      "",
+      "| Who | Note |",
+      "| --- | --- |",
+      "| <@U123> | ping |",
     ].join("\n");
     const cell =
       "Open (https://app.example/workspaces/w/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)";
@@ -370,15 +389,27 @@ describe("Markdown tables in Slack", () => {
         `${cell} | ok`,
         "```",
         "*Next | step*",
+        "```",
+        "x | y",
+        "--|--",
+        "1 | 2",
+        "```",
+        "• next | item",
+        "> quoted | line",
+        "",
+        "| Who | Note |",
+        "| --- | --- |",
+        "| <@U123> | ping |",
       ].join("\n"),
     );
   });
 
   test("long runs of spaces don't slow formatting down", () => {
-    const spaces = " ".repeat(80_000);
+    // Quadratic matching took seconds here; linear takes milliseconds.
+    const spaces = " ".repeat(160_000);
     const started = performance.now();
     slackMrkdwnFromMarkdown(`| a |\n|${spaces}-|\nx${spaces}y`);
-    expect(performance.now() - started).toBeLessThan(500);
+    expect(performance.now() - started).toBeLessThan(2_000);
   });
 
   test("pipes that aren't a table, and tables in code, stay as written", () => {

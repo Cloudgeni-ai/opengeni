@@ -21,7 +21,11 @@ import {
   type FullScreenRings,
 } from "@opengeni/react-native";
 import { sharedCallAdapter } from "@/call";
-import { apnsEnvironment, pushRegistrationProblem } from "@/push-registration";
+import {
+  apnsEnvironment,
+  pushRegistrationIsStale,
+  pushRegistrationProblem,
+} from "@/push-registration";
 
 /** The rules a person can turn on, in the order Settings shows them. */
 export const NOTIFICATION_RULES: Array<{ rule: NativePushRule; title: string; subtitle: string }> =
@@ -615,17 +619,26 @@ export function NotificationRouting() {
       const { status: granted } = await Notifications.getPermissionsAsync();
       if (granted !== "granted" && !device.rules.every(isCallRule)) return;
       const token = await devicePushToken().catch(() => null);
-      const callsNeedToken =
-        Platform.OS === "ios" &&
-        device.rules.some(isCallRule) &&
-        voipToken !== null &&
-        voipToken !== (device.voipToken ?? null);
-      if (!token || (token === device.token && !callsNeedToken)) return;
+      if (!token || !live) return;
+      const environment = await pushEnvironment();
+      const callsVoipToken =
+        Platform.OS === "ios" && device.rules.some(isCallRule) ? voipToken : null;
+      if (
+        !live ||
+        !pushRegistrationIsStale(device, {
+          token,
+          voipToken: callsVoipToken,
+          environment,
+          appId: appId(),
+        })
+      ) {
+        return;
+      }
       await client
         .registerNativePushDevice({
           platform: Platform.OS === "android" ? "android" : "ios",
           appId: appId(),
-          environment: __DEV__ ? "development" : "production",
+          environment,
           token,
           rules: device.rules,
           voipToken: Platform.OS === "ios" ? (voipToken ?? device.voipToken ?? null) : null,

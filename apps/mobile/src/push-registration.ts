@@ -31,3 +31,32 @@ export async function apnsEnvironment(
   if (profile === "development" || profile === "production") return profile;
   return isDevelopmentBuild ? "development" : "production";
 }
+
+/**
+ * Whether the device's stored registration is out of date and must be sent
+ * again: a rotated push or VoIP token, or an APNs environment or app ID that
+ * no longer matches this build. A stale environment makes Apple reject every
+ * push, so it re-registers even when the tokens are unchanged.
+ */
+export function pushRegistrationIsStale(
+  stored: {
+    token: string;
+    voipToken?: string | null | undefined;
+    environment: string;
+    appId: string;
+  },
+  current: {
+    token: string;
+    /** This build's VoIP token when calls need one, else null. */
+    voipToken: string | null;
+    environment: string;
+    appId: string;
+  },
+): boolean {
+  return (
+    current.token !== stored.token ||
+    (current.voipToken !== null && current.voipToken !== (stored.voipToken ?? null)) ||
+    current.environment !== stored.environment ||
+    current.appId !== stored.appId
+  );
+}

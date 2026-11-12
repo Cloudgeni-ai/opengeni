@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { apnsEnvironment, pushRegistrationProblem } from "./push-registration";
+import {
+  apnsEnvironment,
+  pushRegistrationIsStale,
+  pushRegistrationProblem,
+} from "./push-registration";
 
 // The server's answer when it can't push to this app build (an app ID it
 // doesn't list, or no APNs credentials): retrying never helps.
@@ -44,4 +48,28 @@ test("the APNs environment follows the signing profile, not development mode", a
       throw new Error("unavailable");
     }, true),
   ).toBe("development");
+});
+
+test("a stored registration for the wrong APNs environment is sent again", () => {
+  const stored = {
+    token: "apns-1",
+    voipToken: "voip-1",
+    environment: "production",
+    appId: "ai.opengeni.app",
+  };
+  const current = {
+    token: "apns-1",
+    voipToken: "voip-1",
+    environment: "production",
+    appId: "ai.opengeni.app",
+  };
+  expect(pushRegistrationIsStale(stored, current)).toBe(false);
+  // Turning notifications on registered it from the signing profile; the
+  // background sync must not flip it back by build mode.
+  expect(pushRegistrationIsStale(stored, { ...current, environment: "development" })).toBe(true);
+  expect(pushRegistrationIsStale(stored, { ...current, token: "apns-2" })).toBe(true);
+  expect(pushRegistrationIsStale(stored, { ...current, voipToken: "voip-2" })).toBe(true);
+  // No call rules: the VoIP token doesn't matter.
+  expect(pushRegistrationIsStale(stored, { ...current, voipToken: null })).toBe(false);
+  expect(pushRegistrationIsStale(stored, { ...current, appId: "ai.opengeni.app.dev" })).toBe(true);
 });
