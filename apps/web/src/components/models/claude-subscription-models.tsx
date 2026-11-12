@@ -24,7 +24,12 @@ import {
   subscriptionAccountName,
 } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
-import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
+import {
+  ClaudeUsage,
+  ClaudeUsageReadout,
+  SUBSCRIPTION_API_KEY_PLAN,
+  useClaudeUsage,
+} from "./claude-usage";
 import { ClaudeLimitResetsSection } from "./claude-limit-resets";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
@@ -346,6 +351,8 @@ export function ClaudeConnectPage({
           ? "Couldn't load this account. Return to Models and try again."
           : "This account isn't connected here. Return to Models to connect an account."
       : null;
+  // An API-key account is replaced with another key of its Anthropic organization.
+  const apiKeyAccount = reconnectAccount?.plan === SUBSCRIPTION_API_KEY_PLAN;
   return (
     <ClaudeSignInPage
       key={
@@ -353,9 +360,11 @@ export function ClaudeConnectPage({
         ":" +
         connectionScope +
         ":" +
-        (reconnectAccountId ?? "add")
+        (reconnectAccountId ?? "add") +
+        (apiKeyAccount ? ":api-key" : "")
       }
       accountPool
+      initialMethod={apiKeyAccount ? "api_key" : undefined}
       connectionScope={connectionScope}
       scopeChoice={
         !claude.organizationId && !reconnectAccountId && scope === undefined && allowPrivate

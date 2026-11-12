@@ -71,6 +71,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   so that cross-provider failover and future non-agent model consumers (tools
   and background processes that call a model directly) can use them without a
   parallel framework.
+  The one exception is an Anthropic API key added to the Claude account pool
+  (SUB-KEY-01 to SUB-KEY-03, D-55): it is a pool account funded by API
+  credits, while the single-key Anthropic API connection stays a connector.
 
 ## Terms
 
@@ -445,6 +448,31 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   eligibility and selection interfaces, so they can be failover targets and
   serve non-agent model consumers. Verification: pending (consumers).
 
+### Anthropic API keys in the Claude pool
+
+- **SUB-KEY-01** An administrator can add several Anthropic API keys to the
+  Claude account pool of an organization or workspace, each with its own
+  label, and replace or remove each one like any other Claude account. Adding
+  a key checks it by listing models (no inference) and names its account by
+  the key's Anthropic organization, so two keys of one Anthropic organization
+  are one account. A key is sent as `x-api-key`, never as a bearer token, with
+  no Claude Code identity. Its value is never returned or shown. The
+  single-key Anthropic API connection is unchanged and keeps working.
+  Verification: `apps/api/test/claude-core-routes.test.ts`, `apps/web/src/components/models/claude-signin.test.tsx`, `apps/worker/test/claude-core-chat.test.ts`, `packages/db/test/subscription-core-claude-acceptance-postgres.test.ts`, `packages/runtime/test/anthropic-messages.test.ts`.
+- **SUB-KEY-02** A key spends paid API credits, so placement ranks it after
+  every account with included allowance, as it ranks accounts that would use
+  extra credits. A session stays on its key while the key serves it, because
+  Anthropic's prompt cache belongs to the key's Anthropic organization; it
+  moves only when the key can't serve it or a plan account with room is
+  available. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-claude-acceptance-postgres.test.ts`.
+- **SUB-KEY-03** Anthropic's "credit balance too low" refusal (and other
+  billing refusals) marks the key exhausted with no known reset, and the
+  session fails over to another account. The key is tried again after an
+  hour, since credits can be granted at any time. A 429 rate limit follows
+  the pool's ordinary rate-limit handling. The account list shows the key as
+  out of credits until it is tried again.
+  Verification: `packages/subscriptions/test/policy.test.ts`, `packages/subscriptions/test/settlement.test.ts`, `apps/worker/test/claude-core-settlement.test.ts`, `apps/web/src/components/models/claude-usage.test.tsx`.
+
 ### Provider-specific capabilities
 
 - **SUB-APPS-01** The Codex Apps credential is authorized by its own explicit
@@ -586,6 +614,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-52 | 2026-10-30 | Supersedes the last clause of D-50 ("making it serve more workspaces makes it the organization's"): sharing never changes a connection's owner. A workspace's own connection may also serve other shared workspaces, chosen one by one, and stays that workspace's: its administrators and the organization's administrators manage it. Organization administrators choose those workspaces from the organization's list. The owning workspace's administrators can add a workspace they also administer, and can remove any. An administrator of a workspace it serves can remove it from that workspace but can't change it. A workspace's own connection never serves a Personal workspace, every shared workspace including later ones, or chosen people: that needs the organization to own it, and an organization administrator moves it there explicitly (`moveToOrganization`), after which the workspace's administrators no longer manage it. Connections that D-50 already gave to the organization stay the organization's. Migration 1166 replaces the owner-reach guard (other workspaces must be shared ones) and adds the managing-workspace and receiving-workspace row policies. |
 | D-53 | 2026-10-30 | The product owner decided that a turn uses its person's own subscription first, where they turned it on (SUB-SEL-01, SUB-SEL-02, SUB-ELIG-05). A person's own Codex, Claude or SuperGrok account is used automatically in their Personal workspace and, in any other workspace, for the turns they themselves send there once they turn it on for that workspace, in shared and Only me chats alike, before the organization's accounts. Other people's turns never use it. Turned on is the owner's standing `subscription_connection.use` user-resource grant for that workspace, so it reuses the existing personal-resource authority, revocation and organization veto instead of a new setting; an account added from a shared workspace starts turned on there. Acceptance freezes it into the turn as consent restricted to that session and connection (the same shape as an explicit shared-session choice, at most one account per provider per turn), and in a shared chat the database refuses an automatic binding to a personal account without it. Turning it off applies from the next accepted turn. Turns without a signed-in initiating person, such as scheduled and service turns, never use it. This supersedes D-03, D-12, D-27 and D-28's opt-in path and D-42's personal-fallback order: the per-person fallback opt-in and the organization's "personal fallback allowed" setting are retired, still stored and returned but read by nothing. Existing opt-ins are deliberately not converted into grants, because that would silently widen where an account is used, from Only me chats after shared accounts ran out to every turn the person sends. |
 | D-54 | 2026-11-12 | Implementer decision, for SUB-WAIT-01 and SUB-WAIT-02: a waiter resumes its turn only when the turn's own placement would run. Before it judges, a Codex waiter re-reads the accounts' usage and live model lists, as the resumed turn does before it places, because placement counts an account whose list has expired as possibly serving the model. Without that read the waiter resumed turns onto an account that does not offer the model (or its Ultrafast tier), and quoted the reset of an account that cannot serve it. A resume that still finds no capacity (another turn took it) backs the next resume off, 30 seconds to 15 minutes, and never ends the turn: the former ten-resumption limit and its terminal codes are retired for new waits, and Retry still clears turns that failed with them. The person's notice says the message will be answered as soon as an account has room, and names a time only when placement knows the earliest reset of an account that can serve the turn. |
+| D-55 | 2026-11-12 | The product owner decided that several Anthropic API keys join an organization through the existing Claude account pool rather than a second rotation mechanism (SUB-KEY-01 to SUB-KEY-03). A key is a credential format of the Claude provider (`claude_api_key_v1`, plan `api_key`), sent as `x-api-key` like the existing Anthropic API connection, so request content, the model catalog and access policy are those of any Claude account. Its account is the key's Anthropic organization, read from the `anthropic-organization-id` header of the free model list, because Anthropic's prompt cache and credit balance belong to that organization. Keys rank after included allowance because they spend paid credits, and a session stays on its key while it serves. A credit refusal has no known reset, so it marks the key exhausted and re-checks it after one hour instead of guessing a reset. Usage reads and limit resets skip keys, which have no plan windows. The lifecycle conformance suite also runs with key accounts (`packages/db/test/subscription-core-claude-api-key-conformance-postgres.test.ts`). The single-key Anthropic API connection is not migrated: organizations with one key keep it unchanged, and adding pool keys is an explicit choice. |
 
 ### Open decisions
 

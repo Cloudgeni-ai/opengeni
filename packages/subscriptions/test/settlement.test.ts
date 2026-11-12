@@ -49,6 +49,34 @@ describe("planSubscriptionCoreRefusal", () => {
     }
   });
 
+  test("SUB-KEY-03: an exhaustion without a reset that names its own recheck rests until then, not the fallback", () => {
+    const plan = planSubscriptionCoreRefusal(
+      adapter,
+      { kind: "exhausted", resetAt: null, recheckAfterMs: 3_600_000 },
+      base,
+    );
+    expect(until(plan)).toEqual([null, null]);
+    if (plan.kind === "settle" && plan.health.kind === "quota")
+      expect(plan.health.observation.windows).toEqual([
+        {
+          id: "exhausted_without_reset",
+          usedPercent: 100,
+          resetsAt: now + 3_600_000,
+          status: "exhausted",
+        },
+      ]);
+    // A known future reset still wins over the recheck.
+    expect(
+      until(
+        planSubscriptionCoreRefusal(
+          adapter,
+          { kind: "exhausted", resetAt: now + 9, recheckAfterMs: 3_600_000 },
+          base,
+        ),
+      ),
+    ).toEqual([now + 9, "quota"]);
+  });
+
   test("a refusal's receipt carries its kind and the refused credential's generation", () => {
     const plan = planSubscriptionCoreRefusal(adapter, { kind: "forbidden" }, base);
     expect(plan).toEqual({

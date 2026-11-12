@@ -126,6 +126,90 @@ describe("Claude provider-error classification", () => {
     ).toBeNull();
     expect(classifyClaudeProviderError("not an error", MODEL)).toBeNull();
   });
+
+  function pooledKey(status: number | undefined, type: string, message: string, code?: string) {
+    return new AnthropicRequestError(
+      "Synthetic provider failure",
+      status,
+      code ?? "anthropic_http_error",
+      { type, message },
+      new Headers(),
+      { subscription: true, apiKey: true },
+    );
+  }
+  const OUT_OF_CREDITS = {
+    kind: "exhausted",
+    resetAt: null,
+    recheckAfterMs: db.SUBSCRIPTION_CORE_CLAUDE_API_KEY_CREDIT_RECHECK_MS,
+  };
+
+  test("SUB-KEY-03: a pooled API key out of credits is exhausted with no reset, rechecked later", () => {
+    const low =
+      "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
+    expect(
+      classifyClaudeProviderError(pooledKey(400, "invalid_request_error", low), MODEL),
+    ).toEqual(OUT_OF_CREDITS);
+    expect(
+      classifyClaudeProviderError(
+        new Error("Wrapped", {
+          cause: pooledKey(402, "billing_error", "Billing", "anthropic_billing_error"),
+        }),
+        MODEL,
+      ),
+    ).toEqual(OUT_OF_CREDITS);
+    expect(
+      classifyClaudeProviderError(
+        pooledKey(
+          400,
+          "invalid_request_error",
+          "You have reached your specified API usage limits.",
+          "enforced_spend_limit_reached",
+        ),
+        MODEL,
+      ),
+    ).toEqual(OUT_OF_CREDITS);
+    // A billing error on a subscription sign-in is not a credit refusal.
+    expect(classifyClaudeProviderError(anthropic(400, "invalid_request_error"), MODEL)).toBeNull();
+    expect(
+      classifyClaudeProviderError(
+        new AnthropicRequestError(
+          "x",
+          400,
+          "anthropic_http_error",
+          { type: "invalid_request_error", message: low },
+          new Headers(),
+          { subscription: true },
+        ),
+        MODEL,
+      ),
+    ).toBeNull();
+  });
+
+  test("SUB-KEY-03: a pooled API key's rate limit stays temporary and other 400s are not refusals", () => {
+    expect(
+      classifyClaudeProviderError(pooledKey(429, "rate_limit_error", "Rate limited"), MODEL),
+    ).toEqual({ kind: "rate_limited", retryAfterMs: null, modelId: MODEL });
+    expect(
+      classifyClaudeProviderError(pooledKey(400, "invalid_request_error", "messages: bad"), MODEL),
+    ).toBeNull();
+    expect(
+      classifyClaudeProviderError(
+        pooledKey(401, "authentication_error", "invalid x-api-key"),
+        MODEL,
+      ),
+    ).toEqual({ kind: "unauthorized" });
+    // apiKey without the pool mark is the legacy API-key route: not a pool refusal.
+    const legacy = new AnthropicRequestError(
+      "x",
+      402,
+      "anthropic_billing_error",
+      { type: "billing_error" },
+      new Headers(),
+      { apiKey: true },
+    );
+    expect(legacy.apiKey).toBe(false);
+    expect(classifyClaudeProviderError(legacy, MODEL)).toBeNull();
+  });
 });
 
 function core(overrides: Partial<SubscriptionCoreTurn> = {}): SubscriptionCoreTurn {

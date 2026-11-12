@@ -19,7 +19,11 @@
  * the read reports a recovery.
  */
 import type { Settings } from "@opengeni/config";
-import { CLAUDE_OAUTH_PROFILE_URL, parseClaudeLimitResetClaim } from "@opengeni/config";
+import {
+  CLAUDE_OAUTH_PROFILE_URL,
+  isClaudeApiKeyCredential,
+  parseClaudeLimitResetClaim,
+} from "@opengeni/config";
 import type { ClaudeLimitResetClaim, ClaudeSubscriptionUsage } from "@opengeni/contracts";
 import { readResponseJsonBounded } from "@opengeni/network";
 import type { SubscriptionCoreConnectionRead } from "@opengeni/subscriptions";
@@ -125,7 +129,11 @@ export async function requestSubscriptionCoreClaudeLimitResetClaim(
   if (!GRANT_ID.test(input.grantId) || !REQUEST_ID.test(input.requestId))
     return notSettled("error", false);
   const { credential } = await read.getToken();
-  if (!credential.oauth?.scopes.includes(SUBSCRIPTION_CORE_CLAUDE_USAGE_SCOPE))
+  // An API key has no limit resets; a setup token lacks the profile scope.
+  if (
+    isClaudeApiKeyCredential(credential) ||
+    !credential.oauth?.scopes.includes(SUBSCRIPTION_CORE_CLAUDE_USAGE_SCOPE)
+  )
     return notSettled("auth_error", false);
   let organization: string | null;
   try {

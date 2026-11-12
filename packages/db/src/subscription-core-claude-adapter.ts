@@ -28,8 +28,10 @@
  * the `claude` cutover receipt.
  */
 import {
+  ClaudeApiKeyCredential,
   ClaudeSubscriptionCredential,
   claudeServiceStateInGrace,
+  isClaudeApiKeyCredential,
   type ClaudeUsageObservation,
 } from "@opengeni/config";
 import {
@@ -65,6 +67,18 @@ export const SUBSCRIPTION_CORE_CLAUDE_PROVIDER = "claude";
 export const SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT = "claude_oauth_v1";
 /** The credential format of a pasted setup token, which never renews. */
 export const SUBSCRIPTION_CORE_CLAUDE_SETUP_TOKEN_FORMAT = "claude_setup_token_v1";
+/**
+ * The credential format of an Anthropic API key in the Claude pool: a static
+ * key that never renews and has no usage endpoint or limit resets.
+ */
+export const SUBSCRIPTION_CORE_CLAUDE_API_KEY_FORMAT = "claude_api_key_v1";
+/**
+ * How long an API key whose Anthropic organization ran out of credits rests
+ * before placement tries it again. Anthropic reports no reset (a grant or a
+ * purchase restores credit at an unknown time), so this is only a recheck:
+ * a refused request costs nothing, and replacing the key clears it at once.
+ */
+export const SUBSCRIPTION_CORE_CLAUDE_API_KEY_CREDIT_RECHECK_MS = 60 * 60 * 1000;
 /** Refresh this long before the OAuth token expires (the legacy resolver's margin). */
 export const SUBSCRIPTION_CORE_CLAUDE_REFRESH_WINDOW_MS = 60 * 1000;
 /** An OAuth credential always records its expiry; this bounds one that somehow does not. */
@@ -98,8 +112,15 @@ export const SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES = [
   "workspace-claude-subscription",
 ] as const;
 
-/** The decoded Claude credential (the legacy secret object, unchanged). */
-export type SubscriptionCoreClaudeCredential = z.infer<typeof ClaudeSubscriptionCredential>;
+/**
+ * The decoded Claude credential: the legacy secret object (an OAuth sign-in
+ * or a setup token) or an Anthropic API key (`ClaudeApiKeyCredential`).
+ */
+export type SubscriptionCoreClaudeCredential =
+  | SubscriptionCoreClaudeSignInCredential
+  | z.infer<typeof ClaudeApiKeyCredential>;
+/** A Claude sign-in credential: an OAuth sign-in or a pasted setup token. */
+export type SubscriptionCoreClaudeSignInCredential = z.infer<typeof ClaudeSubscriptionCredential>;
 
 const RELOGIN_TEXT = "Claude sign-in expired or was revoked. Sign in again in Models.";
 
@@ -120,6 +141,8 @@ export function decodeSubscriptionCoreClaudeCredential(
     // No cause: a JSON.parse message quotes the plaintext it failed on.
     throw new Error("A core Claude credential is not valid JSON");
   }
+  const apiKey = ClaudeApiKeyCredential.safeParse(parsed);
+  if (apiKey.success) return apiKey.data;
   const result = ClaudeSubscriptionCredential.safeParse(parsed);
   if (!result.success) {
     throw new Error("A core Claude credential does not hold the expected token object");
@@ -131,6 +154,15 @@ export function decodeSubscriptionCoreClaudeCredential(
 export function encodeSubscriptionCoreClaudeCredential(
   credential: SubscriptionCoreClaudeCredential,
 ): string {
+  if (isClaudeApiKeyCredential(credential)) {
+    const key = ClaudeApiKeyCredential.safeParse(credential);
+    if (!key.success) throw new Error("A core Claude credential cannot be encoded");
+    return JSON.stringify({
+      version: key.data.version,
+      kind: key.data.kind,
+      apiKey: key.data.apiKey,
+    });
+  }
   const parsed = ClaudeSubscriptionCredential.safeParse(credential);
   if (!parsed.success) throw new Error("A core Claude credential cannot be encoded");
   const { version, token, identity, oauth } = parsed.data;
@@ -158,6 +190,13 @@ export function subscriptionCoreClaudeAdapter(
     quotaWindows: true,
   };
   const setupTokenCapabilities = { ...capabilities, autoRenews: false };
+  // An API key never renews, has no plan windows to read and no limit resets.
+  const apiKeyCapabilities = {
+    ...capabilities,
+    autoRenews: false,
+    resetCredits: false,
+    quotaWindows: false,
+  };
   return {
     provider: SUBSCRIPTION_CORE_CLAUDE_PROVIDER,
     displayName: "Claude",
@@ -165,7 +204,11 @@ export function subscriptionCoreClaudeAdapter(
     // Only an OAuth sign-in renews. Any other stored format, including one
     // this binary does not know, is never refreshed (fail closed).
     capabilitiesFor: (format) =>
-      format === SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT ? capabilities : setupTokenCapabilities,
+      format === SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT
+        ? capabilities
+        : format === SUBSCRIPTION_CORE_CLAUDE_API_KEY_FORMAT
+          ? apiKeyCapabilities
+          : setupTokenCapabilities,
     credentialKind: "oauth",
     quotaKind: "usage_windows",
     // Workspace model policy treats every Claude subscription provider id as
@@ -185,19 +228,25 @@ export function subscriptionCoreClaudeAdapter(
     credential: {
       decode: decodeSubscriptionCoreClaudeCredential,
       encode: encodeSubscriptionCoreClaudeCredential,
-      expiry: (credential) => (credential.oauth ? new Date(credential.oauth.expiresAt) : null),
+      expiry: (credential) =>
+        !isClaudeApiKeyCredential(credential) && credential.oauth
+          ? new Date(credential.oauth.expiresAt)
+          : null,
       format: (credential) =>
-        credential.oauth
-          ? SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT
-          : SUBSCRIPTION_CORE_CLAUDE_SETUP_TOKEN_FORMAT,
+        isClaudeApiKeyCredential(credential)
+          ? SUBSCRIPTION_CORE_CLAUDE_API_KEY_FORMAT
+          : credential.oauth
+            ? SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT
+            : SUBSCRIPTION_CORE_CLAUDE_SETUP_TOKEN_FORMAT,
     },
     refresh: {
       windowMs: SUBSCRIPTION_CORE_CLAUDE_REFRESH_WINDOW_MS,
       fallbackMs: SUBSCRIPTION_CORE_CLAUDE_REFRESH_FALLBACK_MS,
       async rotate(credential) {
-        // A setup token has no refresh token: never called for its format,
-        // and refused as a relogin if it were.
-        if (!credential.oauth) throw new ClaudeSubscriptionReconnectRequired();
+        // A setup token or an API key has no refresh token: never called
+        // for its format, and refused as a relogin if it were.
+        if (isClaudeApiKeyCredential(credential) || !credential.oauth)
+          throw new ClaudeSubscriptionReconnectRequired();
         // Claude's refresh reports no plan: read it from the profile with the
         // current token, before the refresh. Once Anthropic rotates the
         // refresh token nothing fallible may run before it is persisted.

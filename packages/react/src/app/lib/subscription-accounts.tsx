@@ -99,6 +99,8 @@ const CLAUDE_PLANS: Record<string, string> = {
   claude_ultra: "Ultra",
   claude_team: "Team",
   claude_enterprise: "Enterprise",
+  // An Anthropic API key in the Claude pool: no plan, its organization's API credits.
+  api_credits: "API credits",
 };
 
 // Ultra (formerly Max 20x) is sold without a 5-hour limit, but Claude still

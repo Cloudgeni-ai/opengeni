@@ -32,6 +32,7 @@
  */
 import {
   CLAUDE_CLI_SURFACE_USER_AGENT,
+  isClaudeApiKeyCredential,
   parseClaudeUsageResponse,
   parseClaudeWallReset,
   type ClaudeUsageObservation,
@@ -49,6 +50,7 @@ import {
 } from "@opengeni/contracts";
 import { readResponseJsonBounded } from "@opengeni/network";
 import {
+  EXHAUSTED_WITHOUT_RESET_WINDOW,
   quotaCapacity,
   type QuotaWindow,
   type SubscriptionCoreConnectionRead,
@@ -98,8 +100,12 @@ export async function fetchSubscriptionCoreClaudeUsage(
 ): Promise<SubscriptionCoreClaudeUsageReading> {
   const { credential } = await read.getToken();
   const checkedAt = new Date().toISOString();
-  // Setup tokens never carry the scope: no request is sent.
-  if (!credential.oauth?.scopes.includes(SUBSCRIPTION_CORE_CLAUDE_USAGE_SCOPE))
+  // Setup tokens never carry the scope, and an API key has no usage
+  // endpoint: no request is sent.
+  if (
+    isClaudeApiKeyCredential(credential) ||
+    !credential.oauth?.scopes.includes(SUBSCRIPTION_CORE_CLAUDE_USAGE_SCOPE)
+  )
     return { status: "scope_required", observation: null, checkedAt };
   let status: SubscriptionCoreClaudeUsageReading["status"] = "unavailable";
   let observation: ClaudeUsageObservation | null = null;
@@ -404,6 +410,24 @@ function iso(value: number | null): string | null {
 }
 
 /**
+ * When placement tries the account again after a refusal with no plan
+ * window to name and no known reset (an API key out of credits, SUB-KEY-03),
+ * or null while no such refusal holds it back.
+ */
+function refusedWithoutResetUntil(quota: SubscriptionQuota | null, now: number): number | null {
+  let until: number | null = null;
+  for (const window of quota?.windows ?? [])
+    if (
+      window.id === EXHAUSTED_WITHOUT_RESET_WINDOW &&
+      window.status === "exhausted" &&
+      window.resetsAt !== null &&
+      window.resetsAt > now
+    )
+      until = Math.max(until ?? 0, window.resetsAt);
+  return until;
+}
+
+/**
  * The stored provider details as usage response fields. Each part is
  * checked against its contract and dropped when it does not match (a
  * newer build may have stored a shape this one does not know).
@@ -506,6 +530,7 @@ export function projectSubscriptionCoreClaudeUsage(
           : source === "provider"
             ? { status: "available", checkedAt: observedAt }
             : { status: "not_checked", checkedAt: null }));
+  const refusedUntil = refusedWithoutResetUntil(stored, now);
   return {
     // Every row a usage route can read is connected: the readers return no
     // disconnected connection.
@@ -517,5 +542,6 @@ export function projectSubscriptionCoreClaudeUsage(
     refreshStatus: derived.status,
     refreshCheckedAt: derived.checkedAt,
     ...subscriptionCoreClaudeUsageDetails(stored),
+    ...(refusedUntil !== null ? { refusedUntil: iso(refusedUntil) } : {}),
   };
 }

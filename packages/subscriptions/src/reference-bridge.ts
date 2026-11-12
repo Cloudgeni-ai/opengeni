@@ -115,6 +115,7 @@ function referenceConnection(
     healthy: connection.health === "healthy",
     allocatorEnabled: connection.allocatorEnabled,
     extraCreditsEnabled: connection.extraCreditsEnabled === true,
+    creditsOnly: connection.creditsOnly === true,
     refusalUntil: connection.quota?.exhaustedUntil ?? null,
     entitledModels: entitled,
     allowedModelIds: connection.allowedModelIds,

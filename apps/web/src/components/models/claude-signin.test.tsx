@@ -134,6 +134,59 @@ for (const scope of ["workspace", "organization"] as const) {
     expect(container.querySelector('button[type="submit"]')?.textContent).toBe("Sign in to Claude");
     expect(sessionStorage.getItem(key)).toBeNull();
   });
+  test(`${scope}: SUB-KEY-01: an account pool adds an Anthropic API key, never outside the pool`, async () => {
+    const calls: Array<{ method: string; id: string; request: Record<string, unknown> }> = [];
+    const record = (method: string) => async (id: string, request: Record<string, unknown>) => {
+      calls.push({ method, id, request });
+      return { connected: true, accountId: nextId, credentialVersion: 1, scope: "workspace" };
+    };
+    let refreshed = 0;
+    const connectedIds: Array<string | undefined> = [];
+    const state = {
+      ...(stateFor(
+        {
+          connectClaudeSubscriptionApiKey: record("workspace"),
+          connectOrganizationClaudeSubscriptionApiKey: record("organization"),
+        },
+        async () => false,
+      ) as unknown as Record<string, unknown>),
+      refreshConnection: async () => {
+        refreshed++;
+      },
+    } as unknown as ProviderConnectionView;
+    const button = (text: string) =>
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (b) => b.textContent === text,
+      );
+    // Outside the account pool there is no API-key method.
+    await render(state);
+    expect(button("API key")).toBeUndefined();
+    await act(async () =>
+      root.render(
+        createElement(ClaudeSignInPage, {
+          state,
+          accountPool: true,
+          onClose: () => {},
+          onConnected: (id?: string) => connectedIds.push(id),
+        }),
+      ),
+    );
+    await act(async () => button("API key")!.click());
+    expect(container.querySelector('button[type="submit"]')?.textContent).toBe("Add API key");
+    await fill("Anthropic API key", "sk-ant-api03-test");
+    await submit();
+    expect(calls).toEqual([
+      {
+        method: scope,
+        id: scopeId,
+        request: organization
+          ? { apiKey: "sk-ant-api03-test" }
+          : { apiKey: "sk-ant-api03-test", scope: "workspace" },
+      },
+    ]);
+    expect(refreshed).toBe(1);
+    expect(connectedIds).toEqual([nextId]);
+  });
   test(`${scope}: an API error keeps its reference behind Technical details`, async () => {
     sessionStorage.setItem(key, JSON.stringify(attempt(scopeId)));
     const failure = async () => {

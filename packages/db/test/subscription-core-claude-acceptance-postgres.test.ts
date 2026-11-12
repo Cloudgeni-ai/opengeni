@@ -302,6 +302,67 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
     expect(JSON.stringify(projection)).not.toContain("sk-ant-");
   });
 
+  test("SUB-KEY-01, SUB-KEY-02: an API key is an account of its Anthropic organization that placement reads as credits-only", async () => {
+    const apiKey = `sk-ant-api03-${crypto.randomUUID()}`;
+    const organizationId = crypto.randomUUID();
+    const connect = (value: string, label: string) =>
+      db.connectSubscriptionCoreClaudeApiKeyConnection(client!.db, {
+        accountId: org!.accountId,
+        workspaceId: null,
+        subjectId: org!.subjectId,
+        encryptionKey: key,
+        apiKey: value,
+        anthropicOrganizationId: organizationId,
+        label,
+        connectedBySubjectId: org!.subjectId,
+      });
+    const connected = await connect(apiKey, "Credits");
+    if (connected.kind !== "connected") throw new Error(`refused: ${connected.reason}`);
+    const stored = await connection(connected.id);
+    expect(stored).toMatchObject({
+      provider: "claude",
+      ownership: "shared",
+      credential_format: "claude_api_key_v1",
+      provider_account_id: `api:${organizationId}`,
+    });
+    expect(JSON.parse(decryptEnvironmentValue(key, stored.credential_encrypted))).toEqual({
+      version: 1,
+      kind: "api_key",
+      apiKey,
+    });
+    const placement = await db.withSessionRlsActorContext(
+      { subjectId: org!.subjectId, initiatingHumanSubjectId: org!.subjectId },
+      () =>
+        db.withRlsContext(
+          client!.db,
+          { accountId: org!.accountId, workspaceId: org!.sharedWorkspaceId },
+          (tx) =>
+            db.listSubscriptionConnectionsForPlacement(tx, {
+              accountId: org!.accountId,
+              workspaceId: org!.sharedWorkspaceId,
+              provider: "claude",
+              health: "stored",
+            }),
+        ),
+    );
+    expect(placement.find((row) => row.id === connected.id)?.creditsOnly).toBe(true);
+    for (const other of placement.filter((row) => row.id !== connected.id))
+      expect(other.creditsOnly).toBeUndefined();
+    // A second key of the same Anthropic organization is the same account.
+    const again = await connect(`sk-ant-api03-${crypto.randomUUID()}`, "Credits again");
+    if (again.kind !== "connected") throw new Error(`refused: ${again.reason}`);
+    expect(again.id).toBe(connected.id);
+    const projection = await db.getSubscriptionCoreClaudeOrganizationProjection(client!.db, {
+      organizationId: org!.accountId,
+      subjectId: org!.subjectId,
+    });
+    expect(projection.accounts.find((account) => account.id === connected.id)).toMatchObject({
+      planType: "api_credits",
+      providerAccountId: `api:${organizationId}`,
+    });
+    expect(JSON.stringify(projection)).not.toContain(apiKey);
+  });
+
   test("a reconnect is fenced on the row version and keeps the Claude identity", async () => {
     const setupId = `setup:${"b".repeat(64)}`;
     const first = await connectClaude(org!, {

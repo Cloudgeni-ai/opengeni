@@ -16,6 +16,7 @@ import {
   type SubscriptionCoreProvider,
 } from "@opengeni/db";
 import {
+  isClaudeApiKeyCredential,
   parseClaudeUsageHeaders,
   parseModelProvidersJson,
   withClaudeConnectionCredential,
@@ -265,6 +266,8 @@ export function buildClaudeCoreRequestAuthorization(input: {
  * spending the account unreserved.
  */
 export const CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN = "sk-ant-oat01-opengeni-core-custody-only";
+/** The placeholder an API-key account's settings carry in place of the key. */
+export const CLAUDE_CORE_SETTINGS_PLACEHOLDER_API_KEY = "sk-ant-api03-opengeni-core-custody-only";
 
 /**
  * The placeholder bearer of one connection at one credential version. It is
@@ -284,12 +287,19 @@ export function claudeCoreSettingsPlaceholderToken(
 /**
  * The Claude credential a core-placed turn's capability settings carry: the
  * account identity with the connection's placeholder bearer, never the live
- * token or any refresh material.
+ * token or any refresh material. An API-key account carries a placeholder
+ * key and no identity: its requests are plain API-key requests.
  */
 export function claudeCoreSettingsCredential(
   token: SubscriptionCoreClaudeTokenSnapshot,
   connectionId: string,
 ): string {
+  if (isClaudeApiKeyCredential(token.credential))
+    return JSON.stringify({
+      version: 1,
+      kind: "api_key",
+      apiKey: `${CLAUDE_CORE_SETTINGS_PLACEHOLDER_API_KEY}-${connectionId}-${token.credentialVersion}`,
+    });
   return JSON.stringify({
     version: token.credential.version,
     token: claudeCoreSettingsPlaceholderToken(connectionId, token.credentialVersion),
@@ -444,8 +454,13 @@ export function claudeCoreRequestPreparer(input: {
     ): PreparedUsageRequest => {
       const request = { requestId, transportAttempt };
       const bearer = new Headers(headers);
-      bearer.set("authorization", `Bearer ${token.credential.token}`);
-      bearer.delete("x-api-key");
+      if (isClaudeApiKeyCredential(token.credential)) {
+        bearer.set("x-api-key", token.credential.apiKey);
+        bearer.delete("authorization");
+      } else {
+        bearer.set("authorization", `Bearer ${token.credential.token}`);
+        bearer.delete("x-api-key");
+      }
       return {
         headers: bearer,
         observe: (_provider, response, upstreamModelId) =>

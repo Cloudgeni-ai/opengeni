@@ -2003,3 +2003,123 @@ describe("subscription review regressions", () => {
             }
   });
 });
+
+describe("API-key accounts in the pool", () => {
+  const HOUR = 3_600_000;
+  const key = (id: string, patch: Partial<SubscriptionConnection> = {}) =>
+    connection(id, "claude", {
+      creditsOnly: true,
+      quota: quota({ windows: [], observedAt: null, source: "refusal" }),
+      ...patch,
+    });
+  // What settling a credit refusal records (planSubscriptionCoreRefusal with
+  // the key's recheck): an exhausted window that ends at the recheck.
+  const outOfCredits = () =>
+    quota({
+      windows: [
+        {
+          id: "exhausted_without_reset",
+          usedPercent: 100,
+          resetsAt: NOW + HOUR,
+          status: "exhausted",
+        },
+      ],
+      observedAt: NOW,
+      source: "refusal",
+    });
+  const claudeSession = (connectionId: string | null, lastModelCallAt = NOW) => ({
+    preferredModelId: "claude/a",
+    onlyThisModel: true,
+    binding:
+      connectionId === null
+        ? null
+        : {
+            connectionId,
+            provider: "claude",
+            modelId: "claude/a",
+            choice: "automatic" as const,
+            lastModelCallAt,
+          },
+  });
+
+  test("SUB-KEY-02: included allowance outranks every API key; keys serve only when it runs out", () => {
+    const subscription = connection("sub", "claude");
+    const world = input({
+      connections: [key("key-1"), subscription, key("key-2")],
+      session: claudeSession(null),
+    });
+    expect(decidePlacement(world)).toMatchObject({ kind: "run", connectionId: "sub" });
+    expect(checkPlacementDecision(world, decidePlacement(world))).toEqual([]);
+    subscription.quota = quota({
+      windows: [{ id: "weekly", usedPercent: 100, resetsAt: NOW + HOUR, status: "exhausted" }],
+    });
+    const fallback = decidePlacement(world);
+    expect(fallback).toMatchObject({ kind: "run" });
+    expect(["key-1", "key-2"]).toContain((fallback as { connectionId: string }).connectionId);
+    expect(checkPlacementDecision(world, fallback)).toEqual([]);
+  });
+
+  test("SUB-KEY-02: a session stays on its key while it can serve, warm or cold, and returns to freed allowance", () => {
+    const keys = [key("key-1"), key("key-2"), key("key-3")];
+    for (const bound of keys) {
+      const warm = input({ connections: keys, session: claudeSession(bound.id) });
+      expect(decidePlacement(warm)).toMatchObject({ kind: "run", connectionId: bound.id });
+      expect(checkPlacementDecision(warm, decidePlacement(warm))).toEqual([]);
+    }
+    // A cold cache reselects by the session's own spread hash, so the same
+    // session lands on the same key again rather than wandering.
+    const first = decidePlacement(input({ connections: keys, session: claudeSession(null) }));
+    const cold = input({ connections: keys, session: claudeSession(null) });
+    const again = decidePlacement(cold);
+    expect(again).toEqual(first);
+    // Included allowance frees up: the key's session moves back to it.
+    const freed = input({
+      connections: [...keys, connection("sub", "claude")],
+      session: claudeSession("key-2"),
+    });
+    expect(decidePlacement(freed)).toMatchObject({ kind: "run", connectionId: "sub" });
+    expect(checkPlacementDecision(freed, decidePlacement(freed))).toEqual([]);
+  });
+
+  test("SUB-KEY-03: a key out of credits is exhausted; its session fails over to another key and it is retried after the recheck", () => {
+    const keys = [key("key-1", { quota: outOfCredits() }), key("key-2")];
+    const world = (now: number) =>
+      input({ now, connections: keys, session: claudeSession("key-1", now) });
+    expect(connectionIneligibility(world(NOW), keys[0]!, "claude/a")).toContain("exhausted");
+    const moved = decidePlacement(world(NOW));
+    expect(moved).toMatchObject({ kind: "run", connectionId: "key-2" });
+    expect(checkPlacementDecision(world(NOW), moved)).toEqual([]);
+    // Every key out of credits: a wait on the recheck, never a run.
+    keys[1]!.quota = outOfCredits();
+    expect(decidePlacement(world(NOW))).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: NOW + HOUR,
+    });
+    // After the recheck the key may serve again (the provider says whether
+    // credits came back).
+    expect(decidePlacement(world(NOW + HOUR + 1))).toMatchObject({ kind: "run" });
+  });
+
+  test("SUB-KEY-02: extra-credit consent and credits-only keys never outrank included allowance in the oracle", () => {
+    const world = input({
+      connections: [
+        key("key-1"),
+        connection("sub", "claude", {
+          extraCreditsEnabled: true,
+          quota: quota({
+            windows: [
+              { id: "weekly", usedPercent: 100, resetsAt: NOW + HOUR, status: "exhausted" },
+            ],
+          }),
+        }),
+      ],
+      session: claudeSession(null),
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ kind: "run" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+    const reference = toReferenceWorld(world);
+    expect(reference.world.connections.find((c) => c.id === "key-1")?.creditsOnly).toBe(true);
+  });
+});

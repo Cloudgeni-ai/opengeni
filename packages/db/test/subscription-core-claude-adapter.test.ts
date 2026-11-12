@@ -33,6 +33,7 @@ import {
   subscriptionCoreClaudeModelPolicyProviderIds,
   subscriptionCoreClaudeProvider,
   type SubscriptionCoreClaudeCredential,
+  type SubscriptionCoreClaudeSignInCredential,
 } from "../src/subscription-core-claude-adapter";
 
 const realFetch = globalThis.fetch;
@@ -288,10 +289,11 @@ describe("Claude adapter", () => {
       },
     });
     const second = await adapter.refresh!.rotate(first.credential);
-    expect(second.credential.oauth?.refreshToken).toBe("refresh-two");
-    expect(second.credential.token).toBe("sk-ant-oat01-access-three");
+    const rotated = second.credential as SubscriptionCoreClaudeSignInCredential;
+    expect(rotated.oauth?.refreshToken).toBe("refresh-two");
+    expect(rotated.token).toBe("sk-ant-oat01-access-three");
     // The granted scopes are recorded as the token endpoint reports them.
-    expect(second.credential.oauth?.scopes).toEqual(["user:profile", "user:inference"]);
+    expect(rotated.oauth?.scopes).toEqual(["user:profile", "user:inference"]);
     expect(second.planType).toBeNull();
     expect(endpoint.calls.map((call) => call.url)).toEqual([
       CLAUDE_OAUTH_TOKEN_URL,

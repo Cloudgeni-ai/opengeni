@@ -33,6 +33,13 @@ export type ModelDescriptor = {
 
 export type ConnectionKind = "subscription" | "api_key";
 
+/**
+ * The stored plan of a connection that holds a provider API key inside a
+ * subscription provider's pool (SUB-KEY-01). It has no included allowance:
+ * everything it serves is paid from the key's own API credits (SUB-KEY-02).
+ */
+export const SUBSCRIPTION_API_KEY_PLAN_TYPE = "api_credits";
+
 /** Where a shared connection may be used (SUB-SCOPE-02). */
 export type ConnectionScope =
   | { kind: "organization" }
@@ -69,6 +76,14 @@ export type SubscriptionConnection = {
    * database placement world clears it for any other provider).
    */
   extraCreditsEnabled?: boolean;
+  /**
+   * The connection has no included allowance: it is a provider API key
+   * whose every request spends the key's own API credits (SUB-KEY-02). It
+   * always counts as spending credits, so automatic selection uses it only
+   * when no included allowance can serve (SUB-CREDITS-01). Adding the key
+   * to the pool is the consent to spend it.
+   */
+  creditsOnly?: boolean;
   allocatorEnabled: boolean;
   /**
    * Models the plan entitles, as reported by the adapter. Null means every

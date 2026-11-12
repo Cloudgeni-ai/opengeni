@@ -6,6 +6,12 @@ import {
 import type { ModelId, SubscriptionQuota } from "./types";
 
 /**
+ * The window a refusal without a known reset records (`planSubscriptionCoreRefusal`):
+ * spent until the adapter's fallback or the outcome's own recheck.
+ */
+export const EXHAUSTED_WITHOUT_RESET_WINDOW = "exhausted_without_reset";
+
+/**
  * How a reserved model request settles (the request ledger's outcome):
  * `refused` when the provider definitively declined it, `response_received`
  * when a response arrived (an error response included), `unknown` when the
@@ -64,7 +70,9 @@ export type SubscriptionCoreRefusalPlan =
  *   retries the connection then even when no usage reading exists, and a
  *   later usage reading of an adapter that declares its readings complete
  *   (which replaces windows but never shortens an exhaustion deadline) can
- *   show recovered capacity sooner; a partial reading keeps the window;
+ *   show recovered capacity sooner; a partial reading keeps the window. An
+ *   outcome's own `recheckAfterMs` replaces the fallback (an API key out of
+ *   credits, SUB-KEY-03);
  * - `entitlement_missing`: the model cools down for `entitlementCooldownMs`;
  * - `unauthorized` and `forbidden`: refresh and retry once when the credential
  *   renews and has not been refreshed for this refusal; otherwise
@@ -86,6 +94,12 @@ export function planSubscriptionCoreRefusal(
 ): SubscriptionCoreRefusalPlan {
   if (outcome === null) return { kind: "no_failover", requestOutcome: "unknown" };
   const { now, refreshGeneration } = input;
+  const exhaustedFallbackMs =
+    outcome.kind === "exhausted" &&
+    outcome.recheckAfterMs !== undefined &&
+    outcome.recheckAfterMs > 0
+      ? outcome.recheckAfterMs
+      : adapter.health.exhaustedFallbackMs;
   const quota = (
     fields: Pick<SubscriptionQuota, "windows" | "exhaustedUntil" | "exhaustedKind">,
   ): SubscriptionCoreRefusalHealth => ({
@@ -122,7 +136,7 @@ export function planSubscriptionCoreRefusal(
           : now +
             (outcome.kind === "rate_limited"
               ? adapter.health.rateLimitFallbackMs
-              : adapter.health.exhaustedFallbackMs),
+              : exhaustedFallbackMs),
     });
   }
   switch (outcome.kind) {
@@ -145,9 +159,9 @@ export function planSubscriptionCoreRefusal(
           : quota({
               windows: [
                 {
-                  id: "exhausted_without_reset",
+                  id: EXHAUSTED_WITHOUT_RESET_WINDOW,
                   usedPercent: 100,
-                  resetsAt: now + adapter.health.exhaustedFallbackMs,
+                  resetsAt: now + exhaustedFallbackMs,
                   status: "exhausted",
                 },
               ],

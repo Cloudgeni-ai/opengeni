@@ -4,9 +4,16 @@ import { requireEnvironmentEncryption } from "@opengeni/core";
 import { ClaudeSubscriptionCredential } from "@opengeni/config";
 import type { ClaudeSubscriptionAccountMetadata } from "@opengeni/db";
 
-import { prepareClaudeSubscriptionCredential } from "../claude-workspace-connection";
+import {
+  assertAnthropicApiKey,
+  prepareClaudeSubscriptionCredential,
+} from "../claude-workspace-connection";
 import { requireAccessGrant } from "@opengeni/core";
-import { ClaudeSubscriptionUsage, ClaudeSubscriptionSetupTokenRequest } from "@opengeni/contracts";
+import {
+  ClaudeSubscriptionApiKeyRequest,
+  ClaudeSubscriptionUsage,
+  ClaudeSubscriptionSetupTokenRequest,
+} from "@opengeni/contracts";
 
 import { requireOrganizationSubscriptionAdministrator } from "./codex";
 import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
@@ -24,6 +31,7 @@ import {
   claudeCoreAccount,
   claudePoolCore,
   connectClaudeCore,
+  connectClaudeCoreApiKey,
   requireClaudeCorePersonalWorkspace,
 } from "../claude-subscription-core";
 import { deliverPoolCoreWake } from "./subscription-pool-core";
@@ -53,6 +61,42 @@ function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: strin
 
 const CLAUDE_CORE = claudePoolCore(accountJson);
 const SETUP_TOKEN_CHANGED = "Claude account changed. Reload it before replacing the token.";
+const API_KEY_CHANGED = "Claude account changed. Reload it before replacing the API key.";
+const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models?limit=1";
+
+/**
+ * The Anthropic organization an API key belongs to, from a free model-list
+ * request (it runs no model and spends no credits). A key Anthropic refuses
+ * is not connected.
+ */
+export async function anthropicApiKeyOrganization(
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  let response: Response;
+  try {
+    response = await fetchImpl(ANTHROPIC_MODELS_URL, {
+      method: "GET",
+      headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new HTTPException(502, {
+      message: "Couldn't reach Anthropic to check the API key. Try again.",
+    });
+  }
+  await response.body?.cancel().catch(() => undefined);
+  if (response.status === 401 || response.status === 403)
+    throw new HTTPException(422, {
+      message: "Anthropic didn't accept this API key. Check it in the Anthropic Console.",
+    });
+  const organization = response.headers.get("anthropic-organization-id")?.trim() ?? "";
+  if (!response.ok || !/^[A-Za-z0-9-]{1,128}$/.test(organization))
+    throw new HTTPException(502, {
+      message: "Anthropic couldn't confirm the API key's organization. Try again.",
+    });
+  return organization;
+}
 
 export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRouteDeps) {
   registerSubscriptionAccountPoolRoutes(app, deps, {
@@ -216,6 +260,119 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
       await deliverPoolCoreWake(deps, CLAUDE_CORE, connected.wake);
       // Their own account added from a shared workspace starts turned on
       // there for the messages they send (D-53).
+      if (personal && workspaceId && requestWorkspaceId && requestWorkspaceId !== workspaceId)
+        await turnOnOwnSubscriptionWhereAdded(deps.db, {
+          accountId,
+          workspaceId: requestWorkspaceId,
+          subjectId,
+          connectionId: connected.id,
+        });
+      await offerClaudeDefaultModels(deps, {
+        ...(workspaceId ? { accountId, workspaceId } : { organizationId: accountId }),
+        actorSubjectId: subjectId,
+        providerKind: "claude_subscription",
+      });
+      return c.json({
+        connected: true,
+        accountId: connected.id,
+        credentialVersion: connected.version,
+        scope,
+      });
+    });
+  }
+
+  // An Anthropic API key as an account of the pool (SUB-KEY-01): one per
+  // Anthropic organization, spending that organization's API credits only
+  // after included subscription allowance (SUB-KEY-02).
+  for (const organization of [false, true]) {
+    const path = organization
+      ? "/v1/organizations/:organizationId/claude/accounts/api-key"
+      : "/v1/workspaces/:workspaceId/claude/accounts/api-key";
+    app.post(path, async (c) => {
+      c.header("cache-control", "private, no-store");
+      if (!deps.settings.claudeSubscriptionEnabled)
+        throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+      requireSameOriginBrowserMutation(c, deps);
+      const parsed = ClaudeSubscriptionApiKeyRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsed.success || (organization && parsed.data.scope !== "workspace"))
+        throw new HTTPException(422, { message: "Enter an Anthropic API key." });
+      const apiKey = assertAnthropicApiKey(parsed.data.apiKey);
+      const actor = organization
+        ? {
+            organizationId: c.req.param("organizationId")!,
+            ...(await requireOrganizationSubscriptionAdministrator(
+              c,
+              deps,
+              c.req.param("organizationId")!,
+            )),
+          }
+        : null;
+      const requestWorkspaceId = organization ? null : c.req.param("workspaceId")!;
+      const read: { grant?: Awaited<ReturnType<typeof requireAccessGrant>> } = {};
+      if (!actor)
+        read.grant = await requireAccessGrant(c, deps, requestWorkspaceId!, "workspace:read");
+      if (requestWorkspaceId && parsed.data.scope === "user") {
+        if (!read.grant) throw new Error("core Claude route without its read grant");
+        await requireClaudeCorePersonalWorkspace(deps, {
+          accountId: read.grant.accountId,
+          subjectId: read.grant.subjectId,
+        });
+      }
+      const authority = requestWorkspaceId
+        ? await requireSubscriptionScopeMutation(
+            c,
+            deps,
+            requestWorkspaceId,
+            parsed.data.scope,
+            "Claude",
+            "own_personal_workspace",
+          )
+        : null;
+      const workspaceId = authority?.workspaceId ?? null;
+      const accountId = actor?.organizationId ?? authority!.accountId;
+      const subjectId = actor?.subjectId ?? authority!.subjectId;
+      const encryptionKey = requireEnvironmentEncryption(deps.settings);
+      const reconnectId = parsed.data.reconnectAccountId;
+      const scope = workspaceId ? parsed.data.scope : "organization";
+      const personal = scope === "user";
+      const target = reconnectId
+        ? await claudeCoreAccount(deps, { accountId, workspaceId, subjectId }, reconnectId)
+        : null;
+      if (
+        reconnectId &&
+        (!target ||
+          target.version !== parsed.data.expectedCredentialVersion ||
+          target.scope !== scope)
+      )
+        throw new HTTPException(409, { message: API_KEY_CHANGED });
+      const anthropicOrganizationId = await anthropicApiKeyOrganization(apiKey, deps.claudeFetch);
+      const connected = await connectClaudeCoreApiKey(
+        deps.db,
+        {
+          accountId,
+          workspaceId,
+          subjectId,
+          ...(personal ? { personal: true } : {}),
+          encryptionKey,
+          apiKey,
+          anthropicOrganizationId,
+          label: target?.label ?? parsed.data.label ?? "Anthropic API key",
+          connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null,
+          ...(target
+            ? {
+                reconnectTarget: {
+                  connectionId: target.id,
+                  expectedVersion: target.version,
+                  providerAccountId: target.providerAccountId,
+                },
+              }
+            : {}),
+        },
+        API_KEY_CHANGED,
+      );
+      await deliverPoolCoreWake(deps, CLAUDE_CORE, connected.wake);
       if (personal && workspaceId && requestWorkspaceId && requestWorkspaceId !== workspaceId)
         await turnOnOwnSubscriptionWhereAdded(deps.db, {
           accountId,

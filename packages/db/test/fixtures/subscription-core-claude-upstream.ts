@@ -13,11 +13,16 @@ import {
 } from "../../src/subscription-core-claude-adapter";
 import { ScriptedApiKeyUpstream } from "./subscription-core-fake-api-key";
 
+/** The secret a Claude pool credential sends: a sign-in's token or an API key. */
+export function claudeCredentialSecret(credential: SubscriptionCoreClaudeCredential): string {
+  return "kind" in credential ? credential.apiKey : credential.token;
+}
+
 export class ScriptedClaudeUpstream extends ScriptedApiKeyUpstream<SubscriptionCoreClaudeCredential> {
   private readonly readings = new Map<string, unknown>();
 
   constructor(private readonly upstreamModelIds: readonly string[]) {
-    super((credential) => credential.token);
+    super(claudeCredentialSecret);
   }
 
   /** Claude's usage endpoint, read through the Claude decoder. */
@@ -25,7 +30,7 @@ export class ScriptedClaudeUpstream extends ScriptedApiKeyUpstream<SubscriptionC
     // The plan has room again: both account windows well below their limit.
     restore: (credential: SubscriptionCoreClaudeCredential) => {
       const reset = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
-      this.readings.set(credential.token, {
+      this.readings.set(claudeCredentialSecret(credential), {
         five_hour: { utilization: 12, resets_at: reset(4) },
         seven_day: { utilization: 30, resets_at: reset(100) },
         seven_day_opus: { utilization: 5, resets_at: reset(100) },
@@ -37,7 +42,7 @@ export class ScriptedClaudeUpstream extends ScriptedApiKeyUpstream<SubscriptionC
       refreshGeneration: number,
     ): Promise<SubscriptionQuota> => {
       const observation = parseClaudeUsageResponse(
-        this.readings.get(credential.token) ?? {},
+        this.readings.get(claudeCredentialSecret(credential)) ?? {},
         new Date(observedAt),
       );
       if (!observation) throw new Error("The scripted Claude usage endpoint has no reading");

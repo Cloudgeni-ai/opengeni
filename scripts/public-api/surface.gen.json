@@ -758,6 +758,19 @@
     },
     {
       "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/api-key",
+      "sdk": [
+        "OpenGeniClient.connectOrganizationClaudeSubscriptionApiKey"
+      ],
+      "request": [
+        "ClaudeSubscriptionApiKeyRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/v1/organizations/:organizationId/claude/accounts/setup-token",
       "sdk": [
         "OpenGeniClient.connectOrganizationClaudeSubscriptionSetupToken"
@@ -3531,6 +3544,19 @@
       "request": [],
       "response": [
         "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/api-key",
+      "sdk": [
+        "OpenGeniClient.connectClaudeSubscriptionApiKey"
+      ],
+      "request": [
+        "ClaudeSubscriptionApiKeyRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
       ]
     },
     {
@@ -14548,6 +14574,19 @@
         "$.source": "ref(ResourceAuthorityScope)!"
       }
     },
+    "ClaudeSubscriptionApiKeyRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.apiKey": "string!",
+        "$.expectedCredentialVersion": "integer?",
+        "$.label": "string? null",
+        "$.reconnectAccountId": "string?",
+        "$.scope": "enum?=[\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
+      }
+    },
     "ClaudeSubscriptionOAuthCompleteRequest": {
       "io": [
         "input"
@@ -14619,6 +14658,7 @@
         "$.observedAt": "string! null",
         "$.refreshCheckedAt": "string! null",
         "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
+        "$.refusedUntil": "string? null",
         "$.requestRestrictions": "array?",
         "$.requestRestrictions[]": "ref(ClaudeUsageRequestStatus)",
         "$.requestStatus": "ref(ClaudeUsageRequestStatus)? null",
@@ -43123,7 +43163,9 @@
       "completeWorkspaceClaudeSubscriptionOAuth",
       "configureIntegrationFacet",
       "configureOrganizationRecoveryPolicy",
+      "connectClaudeSubscriptionApiKey",
       "connectClaudeSubscriptionSetupToken",
+      "connectOrganizationClaudeSubscriptionApiKey",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
       "connectWorkspaceOrganizationConnector",
@@ -43954,7 +43996,9 @@
       "completeWorkspaceClaudeSubscriptionOAuth",
       "configureIntegrationFacet",
       "configureOrganizationRecoveryPolicy",
+      "connectClaudeSubscriptionApiKey",
       "connectClaudeSubscriptionSetupToken",
+      "connectOrganizationClaudeSubscriptionApiKey",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
       "connectWorkspaceOrganizationConnector",
@@ -44785,7 +44829,9 @@
       "configureIntegrationFacet",
       "configureOrganizationRecoveryPolicy",
       "confirmIdentityLink",
+      "connectClaudeSubscriptionApiKey",
       "connectClaudeSubscriptionSetupToken",
+      "connectOrganizationClaudeSubscriptionApiKey",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
       "connectWorkspaceOrganizationConnector",
@@ -46325,8 +46371,14 @@
       "confirmIdentityLink": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConfirmExternalIdentityLinkRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalIdentityLink\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "connectClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "connectClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "connectOrganizationClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "connectOrganizationClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -49129,8 +49181,14 @@
       "configureOrganizationRecoveryPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConfigureOrganizationRecoveryPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "connectClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "connectClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "connectOrganizationClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "connectOrganizationClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -51688,8 +51746,14 @@
       "configureOrganizationRecoveryPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConfigureOrganizationRecoveryPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "connectClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "connectClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "connectOrganizationClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "connectOrganizationClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -54412,8 +54476,14 @@
       "configureOrganizationRecoveryPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConfigureOrganizationRecoveryPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "connectClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "connectClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "connectOrganizationClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "connectOrganizationClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -56957,8 +57027,14 @@
       "configureOrganizationRecoveryPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConfigureOrganizationRecoveryPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "connectClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "connectClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSIntersectionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"user\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "connectOrganizationClaudeSubscriptionApiKey": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionApiKeyRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "connectOrganizationClaudeSubscriptionSetupToken": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionSetupTokenRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"scope\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaudeSubscriptionOAuthCompleteResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

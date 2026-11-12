@@ -32,6 +32,15 @@ export type ClaudeUsageState = {
   refresh(): Promise<void>;
 };
 
+/** The plan of an Anthropic API key in the Claude pool (SUB-KEY-01). */
+export const SUBSCRIPTION_API_KEY_PLAN = "api_credits";
+
+/** When an API key out of credits is tried again, or null while it serves. */
+function apiKeyRefusedUntil(value: ClaudeSubscriptionUsage | null, now: number): string | null {
+  const until = value?.refusedUntil ?? null;
+  return until && Date.parse(until) > now ? until : null;
+}
+
 // The last successful reading per exact scope + reading kind + credential +
 // version, retained per client so a revisit within five minutes needs no read.
 // Only a reading whose credential id and version are both known is
@@ -278,6 +287,15 @@ export function ClaudeUsageReadout({
   plan?: string | null | undefined;
 }) {
   const now = useMinuteNow();
+  // An API key has no plan limits to read: it serves until its credits run out.
+  if (plan === SUBSCRIPTION_API_KEY_PLAN)
+    return (
+      <SubscriptionUsageCell
+        windows={[]}
+        loading={state.loading}
+        fallback={apiKeyRefusedUntil(state.value, now) ? "Out of credits" : "API credits"}
+      />
+    );
   const unavailable =
     state.error ||
     state.value?.refreshStatus === "unavailable" ||
@@ -313,6 +331,29 @@ export function ClaudeUsage({
 }) {
   const now = useMinuteNow();
   const value = state.value;
+  if (plan === SUBSCRIPTION_API_KEY_PLAN) {
+    const refusedUntil = apiKeyRefusedUntil(value, now);
+    return (
+      <DetailSection
+        title="Credits"
+        description="Requests on this key spend its Anthropic organization’s API credits. Opengeni uses it only when no Claude plan has room."
+      >
+        <p className="m-0 text-sm leading-5 text-fg">
+          {refusedUntil ? (
+            <>
+              Anthropic reported the credits ran out. Opengeni tries the key again{" "}
+              <RelativeTime date={refusedUntil} now={now} inSentence />.
+            </>
+          ) : (
+            "Serving from API credits."
+          )}
+        </p>
+        <p className="mt-2 mb-0 text-xs leading-4.5 text-fg-muted">
+          Anthropic doesn’t report the balance to Opengeni. See it in the Anthropic Console.
+        </p>
+      </DetailSection>
+    );
+  }
   const readings = claudeUsageReadings(value, now, plan);
   const reportedAt = claudeUsageReportedAt(value, now);
   const stale = Boolean(reportedAt && now - Date.parse(reportedAt) > 5 * 60_000);

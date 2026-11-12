@@ -5,6 +5,7 @@
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
+  connectSubscriptionCoreClaudeApiKeyConnection,
   connectSubscriptionCoreClaudeConnection,
   getSubscriptionCoreClaudeOrganizationProjection,
   getSubscriptionCoreClaudeWorkspaceProjection,
@@ -147,6 +148,25 @@ export async function connectClaudeCore(
   if (result.kind === "refused")
     throw claudeCoreConnectRefused(result, input.personal === true, changedMessage);
   // The Claude writer always asks for the version (the legacy credential version).
+  if (result.version === undefined) throw new Error("core Claude connect reported no version");
+  return { id: result.id, version: result.version, wake: result.wake };
+}
+
+/** Connect an Anthropic API key through the neutral writer (SUB-KEY-01). */
+export async function connectClaudeCoreApiKey(
+  db: Database,
+  input: Parameters<typeof connectSubscriptionCoreClaudeApiKeyConnection>[1],
+  changedMessage: string,
+) {
+  const result = await connectSubscriptionCoreClaudeApiKeyConnection(db, input);
+  if (result.kind === "refused") {
+    if (result.reason === "different_account")
+      throw new HTTPException(409, {
+        message:
+          "This key belongs to a different Anthropic organization. Replace the account with a key of the same organization, or add it as a new account.",
+      });
+    throw claudeCoreConnectRefused(result, input.personal === true, changedMessage);
+  }
   if (result.version === undefined) throw new Error("core Claude connect reported no version");
   return { id: result.id, version: result.version, wake: result.wake };
 }

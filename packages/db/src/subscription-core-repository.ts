@@ -11,6 +11,7 @@ import type {
   SubscriptionSettingValues,
 } from "@opengeni/subscriptions";
 import {
+  SUBSCRIPTION_API_KEY_PLAN_TYPE,
   quotaAfterRateLimitReset,
   storedQuotaDocument,
   withSubscriptionCoreModelIdForms,
@@ -139,6 +140,7 @@ export async function listSubscriptionConnectionsForPlacement(
     owner_membership_id: string | null;
     health: string;
     extra_credits_enabled: boolean;
+    plan_type: string | null;
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
     observed_model_slugs: string[] | null;
@@ -164,7 +166,7 @@ export async function listSubscriptionConnectionsForPlacement(
           ? subscriptionConnectionEffectiveStatus("connection", sql`${now}::timestamptz`)
           : sql`connection.status`
       } as health, connection.allocator_enabled, connection.extra_credits_enabled,
-      null::text[] as entitled_model_ids, connection.excluded_models,
+      connection.plan_type, null::text[] as entitled_model_ids, connection.excluded_models,
       case when quota.model_catalog_refresh_generation = connection.refresh_generation
         and quota.model_catalog_observed_at <= ${now}::timestamptz
         and quota.model_catalog_expires_at > ${now}::timestamptz
@@ -251,6 +253,8 @@ export async function listSubscriptionConnectionsForPlacement(
       ownership,
       health,
       extraCreditsEnabled: row.extra_credits_enabled,
+      // An API-key account spends its key's credits on every request (SUB-KEY-02).
+      ...(row.plan_type === SUBSCRIPTION_API_KEY_PLAN_TYPE ? { creditsOnly: true } : {}),
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,
       observedModelSlugs: row.observed_model_slugs,

@@ -69,6 +69,8 @@ export type Connection = {
   quota: Quota;
   /** Explicit consent to spend credits after the included allowance (extra-credits providers only). */
   extraCreditsEnabled?: boolean;
+  /** No included allowance: every request spends the key's own credits (SUB-KEY-02). */
+  creditsOnly?: boolean;
   /** A provider refusal blocks even paid credits until this deadline. */
   refusalUntil?: number | null;
 };
@@ -223,9 +225,21 @@ function hasCapacity(connection: Connection, now: number): boolean {
 }
 
 function spendsCredits(connection: Connection, now: number): boolean {
+  const refused = connection.refusalUntil != null && connection.refusalUntil > now;
+  if (connection.creditsOnly === true) {
+    // A credits-only key spends credits whenever it can serve; its refusal
+    // for lack of credits is exhaustion (SUB-KEY-02, SUB-KEY-03).
+    return (
+      !refused &&
+      !(
+        connection.quota.kind === "exhausted" &&
+        (connection.quota.resetsAt === null || connection.quota.resetsAt > now)
+      )
+    );
+  }
   return (
     connection.extraCreditsEnabled === true &&
-    (connection.refusalUntil == null || connection.refusalUntil <= now) &&
+    !refused &&
     connection.quota.kind === "exhausted" &&
     (connection.quota.resetsAt === null || connection.quota.resetsAt > now)
   );

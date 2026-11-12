@@ -2588,6 +2588,17 @@ model IDs to each connection; connecting alone does not validate model entitleme
 or make a paid model call. Subscription usage consumes the connected plan's limits;
 API-key usage is billed by Anthropic. Neither uses Opengeni credits.
 
+An account pool can also take **Anthropic API keys** as pool accounts: choose
+**API key** as the sign-in method on **Add Claude account**, once per key, each with
+its own label. Adding a key lists models to check it and runs no inference. Placement
+uses a key only when no Claude plan account has room, keeps a session on its key
+(the prompt cache belongs to the key's Anthropic organization), and moves the session
+to another account when Anthropic reports the key's credit balance is too low. The key
+is tried again an hour later. The account list shows **API credits** or **Out of
+credits**; Anthropic does not report the balance itself. The single-key Anthropic API
+connection is separate and unchanged. See SUB-KEY-01 to SUB-KEY-03 in
+[subscription accounts](subscription-accounts.md).
+
 The `anthropic-messages` protocol is implemented by
 `packages/runtime/src/anthropic-messages.ts`, through the existing Agents SDK
 model interface and instrumented transport. It posts full projected history to

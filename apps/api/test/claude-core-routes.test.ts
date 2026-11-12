@@ -87,6 +87,28 @@ function claudeFetch(accountUuid: string, email: string): typeof fetch {
   }) as typeof fetch;
 }
 
+/** Anthropic API keys this fake Anthropic knows, by key: their organization. */
+const anthropicKeys = new Map<string, string>();
+const anthropicModelCalls: Array<{ apiKey: string | null; version: string | null }> = [];
+/** Anthropic's free model list, which names the key's organization; everything else passes through. */
+const anthropicModels = (async (input: string | URL | Request, init?: RequestInit) => {
+  const url = String(input);
+  if (!url.startsWith("https://api.anthropic.com/v1/models")) return await fetch(input, init);
+  const headers = new Headers(init?.headers);
+  const apiKey = headers.get("x-api-key");
+  anthropicModelCalls.push({ apiKey, version: headers.get("anthropic-version") });
+  const organization = apiKey ? anthropicKeys.get(apiKey) : undefined;
+  if (!organization)
+    return Response.json(
+      { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } },
+      { status: 401 },
+    );
+  return Response.json(
+    { data: [{ id: "claude-sonnet-5", type: "model" }], has_more: true },
+    { headers: { "anthropic-organization-id": organization } },
+  );
+}) as typeof fetch;
+
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("api-claude-core-routes");
@@ -133,7 +155,7 @@ beforeAll(async () => {
   });
   keyWorkspaceId = configured.workspaceGrants[0]!.workspaceId;
   app = new Hono();
-  deps = { db: client.db, settings, managedAuth: null } as never;
+  deps = { db: client.db, settings, managedAuth: null, claudeFetch: anthropicModels } as never;
   registerClaudeSubscriptionAccountRoutes(app, deps);
   registerModelConnectionAccessRoutes(app, deps);
   keyApp = new Hono();
@@ -863,5 +885,73 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     expect(await served()).toEqual([workspaceId]);
     expect(await owner()).toBe(workspaceId);
     expect((await remove(administered)).status).toBe(404);
+  });
+
+  test("SUB-KEY-01: Anthropic API keys join the pool as accounts of their Anthropic organization", async () => {
+    const key = () => `sk-ant-api03-${crypto.randomUUID()}`;
+    const orgA = crypto.randomUUID();
+    const orgB = crypto.randomUUID();
+    const [a1, a2, b1] = [key(), key(), key()];
+    anthropicKeys.set(a1, orgA).set(a2, orgA).set(b1, orgB);
+    const connectKey = async (apiKey: string, body: Record<string, unknown> = {}) =>
+      await request("/claude/accounts/api-key", {
+        method: "POST",
+        body: { apiKey, scope: "workspace", ...body },
+      });
+    const before = (await listed()).accounts.length;
+
+    const first = await connectKey(a1, { label: "Credits A" });
+    expect(first.status).toBe(200);
+    const firstBody = await first.json();
+    expect(firstBody).toMatchObject({ connected: true, scope: "workspace" });
+    expect(anthropicModelCalls.at(-1)).toEqual({ apiKey: a1, version: "2023-06-01" });
+    const second = await connectKey(b1, { label: "Credits B" });
+    expect(second.status).toBe(200);
+    const secondBody = await second.json();
+    expect(secondBody.accountId).not.toBe(firstBody.accountId);
+
+    const listing = await listed();
+    expect(listing.accounts).toHaveLength(before + 2);
+    const accountA = listing.accounts.find((account) => account.id === firstBody.accountId);
+    expect(accountA).toMatchObject({
+      label: "Credits A",
+      plan: "api_credits",
+      status: "active",
+      subject: `api:${orgA}`,
+      expiresAt: null,
+    });
+    // Key values are never listed.
+    for (const secret of [a1, a2, b1]) expect(JSON.stringify(listing)).not.toContain(secret);
+    const [stored] = await shared!.admin<{ credential_format: string; plan_type: string }[]>`
+      select credential_format, plan_type from subscription_connections
+      where id = ${firstBody.accountId}::uuid`;
+    expect(stored).toEqual({ credential_format: "claude_api_key_v1", plan_type: "api_credits" });
+
+    // Another key of the same Anthropic organization replaces that account's key.
+    const replaced = await connectKey(a2, {
+      reconnectAccountId: firstBody.accountId,
+      expectedCredentialVersion: firstBody.credentialVersion,
+    });
+    expect(replaced.status).toBe(200);
+    expect((await replaced.json()).accountId).toBe(firstBody.accountId);
+    expect((await listed()).accounts).toHaveLength(before + 2);
+    // A key of another organization cannot replace it.
+    const crossed = await connectKey(b1, {
+      reconnectAccountId: firstBody.accountId,
+      expectedCredentialVersion: (await listed()).accounts.find(
+        (account) => account.id === firstBody.accountId,
+      )!.version,
+    });
+    expect(crossed.status).toBe(409);
+
+    // A key Anthropic refuses, a subscription token or an Admin key is not connected.
+    expect((await connectKey(key())).status).toBe(422);
+    expect((await connectKey(`sk-ant-oat01-${crypto.randomUUID()}`)).status).toBe(422);
+    expect((await connectKey(`sk-ant-admin01-${crypto.randomUUID()}`)).status).toBe(422);
+    expect((await listed()).accounts).toHaveLength(before + 2);
+
+    for (const id of [firstBody.accountId, secondBody.accountId])
+      expect((await request(`/claude/accounts/${id}`, { method: "DELETE" })).status).toBe(200);
+    expect((await listed()).accounts).toHaveLength(before);
   });
 });

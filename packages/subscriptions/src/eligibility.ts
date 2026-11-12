@@ -85,14 +85,29 @@ export function connectionCapacity(
   return capacity;
 }
 
-/** Only included-window exhaustion is eligible for opted-in credit fallback. */
+/**
+ * Whether serving on the connection now spends credits rather than included
+ * allowance. Only included-window exhaustion is eligible for opted-in credit
+ * fallback (SUB-CREDITS-01). A credits-only connection (a provider API key,
+ * SUB-KEY-02) spends credits on every request until the provider refuses it
+ * for lack of them; that refusal is exhaustion, not credit use.
+ */
 export function connectionUsesExtraCredits(
   input: PlacementInput,
   connection: SubscriptionConnection,
 ): boolean {
+  const refused =
+    connection.quota?.exhaustedUntil != null && connection.quota.exhaustedUntil > input.now;
+  if (connection.creditsOnly === true) {
+    return (
+      !refused &&
+      quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.[connection.provider])
+        .kind !== "exhausted"
+    );
+  }
   return (
     connection.extraCreditsEnabled === true &&
-    !(connection.quota?.exhaustedUntil != null && connection.quota.exhaustedUntil > input.now) &&
+    !refused &&
     quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.[connection.provider])
       .kind === "exhausted"
   );

@@ -54,6 +54,7 @@ export function ClaudeSignInPage({
   reconnectCredentialVersion,
   scopeChoice,
   onPendingChange,
+  initialMethod,
 }: {
   state: Pick<
     ProviderConnectionView,
@@ -79,6 +80,8 @@ export function ClaudeSignInPage({
   reconnectCredentialVersion?: number | undefined;
   scopeChoice?: { scopeName: string; onChange(value: "workspace" | "user"): void } | undefined;
   onPendingChange?: ((pending: boolean) => void) | undefined;
+  /** The method the form opens with: an API-key account is replaced with a key. */
+  initialMethod?: "browser" | "token" | "api_key" | undefined;
 }) {
   const target = state.accessTarget;
   const scopeId = target.organizationId ?? target.workspaceId!;
@@ -86,7 +89,12 @@ export function ClaudeSignInPage({
   const [attempt, setAttempt] = useState(() => recovered(storageKey));
   const [code, setCode] = useState("");
   const [token, setToken] = useState("");
-  const [legacy, setLegacy] = useState(false);
+  // An API key joins the account pool only (SUB-KEY-01).
+  const [method, setMethod] = useState<"browser" | "token" | "api_key">(
+    initialMethod === "api_key" && !accountPool ? "browser" : (initialMethod ?? "browser"),
+  );
+  const legacy = method !== "browser";
+  const apiKeyMethod = method === "api_key";
   const [pending, setPending] = useState(false);
   // What to do next, with the request reference kept behind Technical details.
   const [error, setError] = useState<{
@@ -134,11 +142,15 @@ export function ClaudeSignInPage({
     popup.current?.close();
     popup.current = null;
   };
-  const submitLabel = legacy
-    ? "Connect Claude"
-    : attempt
-      ? "Complete sign-in"
-      : "Sign in to Claude";
+  const submitLabel = apiKeyMethod
+    ? reconnectAccountId
+      ? "Replace API key"
+      : "Add API key"
+    : legacy
+      ? "Connect Claude"
+      : attempt
+        ? "Complete sign-in"
+        : "Sign in to Claude";
   const pendingLabel = legacy || attempt ? "Connecting…" : "Starting sign-in…";
   const submitDisabled =
     !state.canManageConnection ||
@@ -208,6 +220,27 @@ export function ClaudeSignInPage({
       onSubmit={async () => {
         setError(null);
         try {
+          if (apiKeyMethod) {
+            const replace = reconnectAccountId
+              ? { reconnectAccountId, expectedCredentialVersion: reconnectCredentialVersion }
+              : {};
+            const connected = await (state.organization
+              ? target.client.connectOrganizationClaudeSubscriptionApiKey(scopeId, {
+                  apiKey: token,
+                  ...replace,
+                })
+              : target.client.connectClaudeSubscriptionApiKey(scopeId, {
+                  apiKey: token,
+                  scope: connectionScope,
+                  ...replace,
+                }));
+            savedAccountId.current = connected.accountId;
+            if (!active.current) return false;
+            reset();
+            await state.refreshConnection();
+            await afterSave?.(savedAccountId.current);
+            return true;
+          }
           if (legacy) {
             const connected = accountPool
               ? await (state.organization
@@ -325,14 +358,15 @@ export function ClaudeSignInPage({
         <Field label="Sign-in method" group>
           <SegmentedControl
             className="self-start"
-            value={legacy ? "token" : "browser"}
+            value={method}
             options={[
               { value: "browser", label: "Browser" },
               { value: "token", label: "Setup token" },
+              ...(accountPool ? [{ value: "api_key" as const, label: "API key" }] : []),
             ]}
             disabled={pending}
-            onValueChange={(method) => {
-              setLegacy(method === "token");
+            onValueChange={(next) => {
+              setMethod(next);
               setCode("");
               setToken("");
               setError(null);
@@ -382,6 +416,29 @@ export function ClaudeSignInPage({
                     disabled={pending || !attempt}
                     onChange={(event) => {
                       setCode(event.target.value);
+                      setError(null);
+                    }}
+                  />
+                </Field>
+              </>
+            ) : apiKeyMethod ? (
+              <>
+                <p className="m-0 text-sm leading-5 text-fg-muted">
+                  Requests on this key spend its Anthropic organization’s API credits. Opengeni uses
+                  it only when no Claude plan has room.
+                </p>
+                <Field
+                  label="Anthropic API key"
+                  hint="Stored encrypted. Checking the key lists models and runs none."
+                >
+                  <SecretInput
+                    value={token}
+                    autoComplete="off"
+                    aria-label="Anthropic API key"
+                    placeholder="sk-ant-api03-…"
+                    disabled={pending}
+                    onChange={(event) => {
+                      setToken(event.target.value);
                       setError(null);
                     }}
                   />

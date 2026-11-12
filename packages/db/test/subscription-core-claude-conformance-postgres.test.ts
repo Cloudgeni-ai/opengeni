@@ -22,6 +22,7 @@ import { subscriptionCoreProviderIds } from "../src/subscription-core-providers"
 import {
   subscriptionCoreClaudeProvider,
   type SubscriptionCoreClaudeCredential,
+  type SubscriptionCoreClaudeSignInCredential,
 } from "../src/subscription-core-claude-adapter";
 import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
 import { ScriptedClaudeUpstream } from "./fixtures/subscription-core-claude-upstream";
@@ -86,10 +87,10 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   }),
   // A completed Claude OAuth sign-in reports the account UUID, which is both
   // the account and the person.
-  identity: async (_label, credential) => ({
-    providerAccountId: credential.identity.accountUuid,
-    providerSubjectId: credential.identity.accountUuid,
-  }),
+  identity: async (_label, credential) => {
+    const { identity } = credential as SubscriptionCoreClaudeSignInCredential;
+    return { providerAccountId: identity.accountUuid, providerSubjectId: identity.accountUuid };
+  },
   providerState: {},
   executionPolicy: {
     wireApi: "anthropic-messages",

@@ -12,6 +12,7 @@ import {
   buildAnthropicRequest,
 } from "../src/anthropic-messages";
 import { isModelCallFetch } from "../src/model-provider-transport";
+import { AnthropicRequestError } from "../src/anthropic-request-error";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { MultiProviderModelProvider } from "../src/model-provider-routing";
 import {
@@ -1511,6 +1512,51 @@ test("provider diagnostics are UTF-8 bounded and malformed/non-JSON bodies retai
       expect(failure.detail).not.toContain("\ufffd");
     } else expect(failure.detail).toBeUndefined();
   }
+});
+
+test("SUB-KEY-01: a pooled API key sends a plain API-key request and marks its refusals pooled", async () => {
+  let sent: Headers | undefined;
+  let body: Record<string, unknown> | undefined;
+  const model = new AnthropicMessagesModel(
+    {
+      ...provider,
+      id: "organization-claude-subscription",
+      kind: "claude-subscription-organization",
+      apiKey: "sk-ant-api03-pooled",
+      anthropic: {
+        auth: "api-key",
+        cacheTtl: "5m",
+        maxOutputTokens: 1000,
+        streamIdleTimeoutMs: 600000,
+      },
+    },
+    "claude-sonnet-5",
+    (async (_url, init) => {
+      sent = new Headers(init?.headers);
+      body = JSON.parse(String(init?.body));
+      return Response.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: "Your credit balance is too low to access the Anthropic API.",
+          },
+        },
+        { status: 400 },
+      );
+    }) as typeof fetch,
+  );
+  const failure = await model.getResponse(request()).catch((error: unknown) => error);
+  expect(sent?.get("x-api-key")).toBe("sk-ant-api03-pooled");
+  expect(sent?.has("authorization")).toBe(false);
+  expect(sent?.get("anthropic-beta") ?? "").not.toContain("oauth");
+  expect(sent?.has("x-claude-code-session-id")).toBe(false);
+  // No Claude Code billing marker or account metadata on an API key.
+  expect(JSON.stringify(body?.system ?? "")).not.toContain("x-anthropic-billing-header");
+  expect(body?.metadata).toBeUndefined();
+  const cause = (failure as { cause?: unknown }).cause ?? failure;
+  expect(cause).toBeInstanceOf(AnthropicRequestError);
+  expect(cause).toMatchObject({ status: 400, subscription: true, apiKey: true });
 });
 
 test.each([

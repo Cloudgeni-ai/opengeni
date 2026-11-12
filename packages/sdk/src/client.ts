@@ -38,6 +38,7 @@ import type {
   ClaudeSubscriptionAccountsResponse,
   ClaudeSubscriptionAccount,
   ClaudeSubscriptionOAuthStartRequest,
+  ClaudeSubscriptionApiKeyRequest,
   ClaudeSubscriptionSetupTokenRequest,
   AutoConnectSupport,
   CheckMcpTrustedIssuerRequest,
@@ -6265,6 +6266,30 @@ export class OpenGeniClient {
     return this.requestJson(
       "POST",
       `/v1/organizations/${organizationId}/claude/accounts/setup-token`,
+      request,
+    );
+  }
+  /** Add an Anthropic API key to the workspace's Claude account pool. */
+  async connectClaudeSubscriptionApiKey(
+    workspaceId: string,
+    request: Omit<ClaudeSubscriptionApiKeyRequest, "scope"> & {
+      scope?: "workspace" | "user";
+    },
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/api-key`,
+      request,
+    );
+  }
+  /** Add an Anthropic API key to the organization's Claude account pool. */
+  async connectOrganizationClaudeSubscriptionApiKey(
+    organizationId: string,
+    request: Omit<ClaudeSubscriptionApiKeyRequest, "scope">,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/api-key`,
       request,
     );
   }

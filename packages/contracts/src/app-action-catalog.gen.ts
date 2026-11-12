@@ -832,6 +832,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
+    "id": "connectClaudeSubscriptionApiKey",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/claude/accounts/api-key",
+    "request": [
+      "ClaudeSubscriptionApiKeyRequest"
+    ],
+    "response": [
+      "ClaudeSubscriptionOAuthCompleteResponse"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
     "id": "connectClaudeSubscriptionSetupToken",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/claude/accounts/setup-token",
@@ -843,6 +857,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "secretFields": [
       "request.token"
+    ]
+  },
+  {
+    "id": "connectOrganizationClaudeSubscriptionApiKey",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/claude/accounts/api-key",
+    "request": [
+      "ClaudeSubscriptionApiKeyRequest"
+    ],
+    "response": [
+      "ClaudeSubscriptionOAuthCompleteResponse"
+    ],
+    "secretFields": [
+      "request.apiKey"
     ]
   },
   {

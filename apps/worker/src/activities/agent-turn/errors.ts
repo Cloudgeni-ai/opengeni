@@ -1,4 +1,7 @@
-import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import {
+  ClaudeSubscriptionReconnectRequired,
+  SUBSCRIPTION_CORE_CLAUDE_API_KEY_CREDIT_RECHECK_MS,
+} from "@opengeni/db";
 import type { ProviderAccountRefusal } from "@opengeni/observability";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
@@ -3214,6 +3217,21 @@ export function codexUsageLimitFailurePayload(
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
 
 /**
+ * Anthropic refused an API key for lack of credits: its "credit balance is
+ * too low" answer (HTTP 400), a billing error (402) or a spend limit.
+ */
+function claudeApiKeyCreditRefusal(error: AnthropicRequestError): boolean {
+  if (error.status === 402 || error.errorType === "billing_error") return true;
+  if (error.code === "anthropic_billing_error" || error.code === "enforced_spend_limit_reached")
+    return true;
+  return (
+    error.status === 400 &&
+    error.errorType === "invalid_request_error" &&
+    /\bcredit balance is too low\b/i.test(error.detail ?? "")
+  );
+}
+
+/**
  * Claude's classification of a failed model request as a shared provider
  * outcome (the adapter's `classifyError`, Claude track C1b), for a request
  * of the Claude subscription transport only: a reconnect-required refresh or
@@ -3222,6 +3240,10 @@ export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
  * the provider's retry time (null: the adapter's fallback applies); 529 or
  * `overloaded_error` is `overloaded`, which never moves the turn to another
  * account; 403 is `fatal`, which never rotates or quarantines the account.
+ * On a pooled API key, Anthropic's refusal for lack of credits (its "credit
+ * balance is too low" answer, a billing error or a spend limit) is
+ * `exhausted` with no known reset, rechecked after
+ * `SUBSCRIPTION_CORE_CLAUDE_API_KEY_CREDIT_RECHECK_MS` (SUB-KEY-03).
  * Anything else, a provider safety refusal included, is null: not a refusal
  * of the account.
  */
@@ -3235,6 +3257,12 @@ export function classifyClaudeProviderError(
     if (current instanceof ClaudeSubscriptionReconnectRequired) return { kind: "unauthorized" };
     if (current instanceof AnthropicRequestError) {
       if (!current.subscription) return null;
+      if (current.apiKey && claudeApiKeyCreditRefusal(current))
+        return {
+          kind: "exhausted",
+          resetAt: null,
+          recheckAfterMs: SUBSCRIPTION_CORE_CLAUDE_API_KEY_CREDIT_RECHECK_MS,
+        };
       if (current.status === 401) return { kind: "unauthorized" };
       if (current.status === 429)
         return {

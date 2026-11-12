@@ -4924,6 +4924,11 @@ export type ClaudeSubscriptionUsage = {
   surfaceWindows?: ClaudeSurfaceUsageWindow[] | undefined;
   /** Service state from the newest model response (fallback, overage, slow tier, grace). */
   serviceState?: ClaudeServiceState | null | undefined;
+  /**
+   * Claude refused the account with no plan limit to name and no known
+   * reset (an API key out of credits): it is tried again at this time.
+   */
+  refusedUntil?: string | null | undefined;
 };
 
 export type OrganizationModelProviderConnection = {

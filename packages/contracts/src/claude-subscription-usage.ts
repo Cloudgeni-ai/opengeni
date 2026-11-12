@@ -253,6 +253,12 @@ export const ClaudeSubscriptionUsage = /* @__PURE__ */ defineSchema(() =>
       extraUsage: ClaudeExtraUsage.nullable().optional(),
       surfaceWindows: z.array(ClaudeSurfaceUsageWindow).max(3).optional(),
       serviceState: ClaudeServiceState.nullable().optional(),
+      /**
+       * Claude refused the account with no plan limit to name and no known
+       * reset (an API key out of credits): placement tries it again at this
+       * time. Absent while nothing like that holds it back.
+       */
+      refusedUntil: z.string().datetime().nullable().optional(),
     })
     .strict(),
 );

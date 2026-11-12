@@ -95,6 +95,30 @@ test("an account row shows every reported window with its reset", async () => {
   expect(windows[0]).toMatch(/^5h: Limit reached, until .*2099/);
   expect(windows[1]).toMatch(/^Week: 50% left, resets .*Oct 2099/);
 });
+test("SUB-KEY-03: an API key shows its credits, and when they ran out, never plan windows", async () => {
+  const state = (refusedUntil?: string): ClaudeUsageState => ({
+    value: { ...usage(), ...(refusedUntil ? { refusedUntil } : {}) },
+    loading: false,
+    refreshing: false,
+    error: false,
+    canRefresh: false,
+    refresh: async () => {},
+  });
+  await act(async () => root.render(<ClaudeUsageReadout state={state()} plan="api_credits" />));
+  expect(container.textContent).toContain("API credits");
+  expect(container.querySelectorAll('[data-slot="subscription-usage-window"]')).toHaveLength(0);
+  await act(async () =>
+    root.render(<ClaudeUsageReadout state={state("2099-09-30T16:20:00Z")} plan="api_credits" />),
+  );
+  expect(container.textContent).toContain("Out of credits");
+  await act(async () =>
+    root.render(<ClaudeUsage state={state("2099-09-30T16:20:00Z")} plan="api_credits" />),
+  );
+  expect(container.textContent).toContain("credits ran out");
+  expect(container.textContent).not.toContain("5h");
+  await act(async () => root.render(<ClaudeUsage state={state()} plan="api_credits" />));
+  expect(container.textContent).toContain("Serving from API credits.");
+});
 test("an account row shows the week alone while the 5h has room, and never a Fable week", async () => {
   const value = usage();
   value.windows = [

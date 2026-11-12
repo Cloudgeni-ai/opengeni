@@ -15,10 +15,13 @@ export class AnthropicRequestError extends Error {
   readonly request_id: string | null;
   readonly headers: Record<string, string>;
   /**
-   * Raised by a Claude subscription (OAuth) transport. Subscription limits are
-   * owned by account rotation and capacity waits, never by API-key quota rules.
+   * Raised by a provider of the Claude account pool (an OAuth sign-in, a
+   * setup token or a pooled API key). Pool limits are owned by account
+   * rotation and capacity waits, never by API-key quota rules.
    */
   readonly subscription: boolean;
+  /** The pooled account was an API key: a credit refusal exhausts it (SUB-KEY-03). */
+  readonly apiKey: boolean;
   #detail: string | undefined;
   #errorType: string | undefined;
 
@@ -28,11 +31,12 @@ export class AnthropicRequestError extends Error {
     readonly code: string,
     source: unknown,
     headers: Headers,
-    options: { subscription?: boolean } = {},
+    options: { subscription?: boolean; apiKey?: boolean } = {},
   ) {
     super(message);
     this.name = "AnthropicRequestError";
     this.subscription = options.subscription === true;
+    this.apiKey = this.subscription && options.apiKey === true;
     const error =
       source && typeof source === "object" && !Array.isArray(source)
         ? (source as Record<string, unknown>)

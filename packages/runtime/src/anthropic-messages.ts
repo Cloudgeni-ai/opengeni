@@ -112,6 +112,24 @@ export class AnthropicStreamInterruptedError extends Error {
   readonly code = "anthropic_stream_interrupted";
 }
 
+/**
+ * How a provider's request errors are marked: a provider of the Claude
+ * account pool (an OAuth sign-in, a setup token or an API key in the pool)
+ * raises pooled errors, which account rotation owns; `apiKey` says the
+ * pooled account was an API key, whose credit refusals exhaust it.
+ */
+function claudePoolErrorOptions(provider: ResolvedModelProvider): {
+  subscription: boolean;
+  apiKey: boolean;
+} {
+  const pooled =
+    provider.anthropic?.auth === "oauth" ||
+    provider.kind === "claude-subscription-workspace" ||
+    provider.kind === "claude-subscription-organization" ||
+    provider.kind === "claude-subscription";
+  return { subscription: pooled, apiKey: pooled && provider.anthropic?.auth !== "oauth" };
+}
+
 /** Preserve documented spend proof, without retaining an arbitrary error body. */
 function anthropicSpendLimitCode(error: unknown): string | undefined {
   if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
@@ -1745,7 +1763,7 @@ export class AnthropicMessagesModel implements Model {
                   : "anthropic_http_error",
         source,
         response.headers,
-        { subscription: this.provider.anthropic?.auth === "oauth" },
+        claudePoolErrorOptions(this.provider),
       );
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
@@ -1944,7 +1962,7 @@ export class AnthropicMessagesModel implements Model {
             code,
             event.error,
             response.headers,
-            { subscription: this.provider.anthropic?.auth === "oauth" },
+            claudePoolErrorOptions(this.provider),
           ),
         });
       }

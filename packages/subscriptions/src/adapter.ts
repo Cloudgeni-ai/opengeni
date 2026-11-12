@@ -53,7 +53,17 @@ export type ProviderCapabilities = {
  * adopts that step.
  */
 export type ProviderErrorOutcome =
-  | { kind: "exhausted"; resetAt: number | null; modelId?: ModelId }
+  | {
+      kind: "exhausted";
+      resetAt: number | null;
+      modelId?: ModelId;
+      /**
+       * Without a known reset, when placement retries the connection, in
+       * place of the adapter's `exhaustedFallbackMs` (an API key out of
+       * credits, SUB-KEY-03, which no window reset restores).
+       */
+      recheckAfterMs?: number;
+    }
   | { kind: "rate_limited"; retryAfterMs: number | null; modelId?: ModelId }
   | { kind: "unauthorized" }
   | { kind: "forbidden" }

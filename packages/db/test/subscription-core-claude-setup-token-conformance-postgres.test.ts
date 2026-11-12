@@ -17,7 +17,10 @@ import {
   type SubscriptionCoreClaudeCredential,
 } from "../src/subscription-core-claude-adapter";
 import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
-import { ScriptedClaudeUpstream } from "./fixtures/subscription-core-claude-upstream";
+import {
+  claudeCredentialSecret,
+  ScriptedClaudeUpstream,
+} from "./fixtures/subscription-core-claude-upstream";
 import { describeSubscriptionCoreConformance } from "./helpers/subscription-core-conformance";
 
 // Any token call fails the run: the refresh would swallow a throwing fetch
@@ -67,7 +70,8 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   // A setup token reports no account: the writers key it by an HMAC of the token.
   identity: async (_label, credential) => {
     const id =
-      "setup:" + createHmac("sha256", "conformance").update(credential.token).digest("hex");
+      "setup:" +
+      createHmac("sha256", "conformance").update(claudeCredentialSecret(credential)).digest("hex");
     return { providerAccountId: id, providerSubjectId: id };
   },
   providerState: {},

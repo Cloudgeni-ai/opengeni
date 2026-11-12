@@ -346,7 +346,13 @@ function credential(token: string) {
 }
 
 /** A placed core turn with a held core lease and scripted request custody. */
-function placedCore(options: { reserveError?: Error; refreshAdvances?: boolean } = {}) {
+function placedCore(
+  options: {
+    reserveError?: Error;
+    refreshAdvances?: boolean;
+    initial?: db.SubscriptionCoreClaudeTokenSnapshot["credential"];
+  } = {},
+) {
   const order: string[] = [];
   // Separate source or lease reads before a request's reservation.
   const reads: string[] = [];
@@ -377,7 +383,10 @@ function placedCore(options: { reserveError?: Error; refreshAdvances?: boolean }
   };
   spy(db, "subscriptionCoreRequests").mockReturnValue(runtime as never);
   let refreshes = 0;
-  let current = { credential: credential("sk-ant-oat01-core"), credentialVersion: 4 };
+  let current = {
+    credential: options.initial ?? credential("sk-ant-oat01-core"),
+    credentialVersion: 4,
+  };
   const resolverInputs: unknown[] = [];
   spy(db, "buildSubscriptionCoreClaudeTokenResolver").mockImplementation(((...args: unknown[]) => {
     resolverInputs.push(args);
@@ -514,6 +523,33 @@ describe("Claude request custody on the core", () => {
     await placed.core.requests!.checkpoint();
     expect(placed.order.at(-1)).toBe("settle:operation-1:response_received");
     expect(placed.core.requests!.canRecover()).toBe(true);
+  });
+
+  test("SUB-KEY-01: a pooled API key is sent as x-api-key with no bearer, and settings carry only a placeholder", async () => {
+    const key = {
+      version: 1,
+      kind: "api_key",
+      apiKey: "sk-ant-api03-pooled-key",
+    } as db.SubscriptionCoreClaudeTokenSnapshot["credential"];
+    const placed = placedCore({ initial: key });
+    const sent = send(placed, [answered]);
+    await (await sent.response).text();
+    expect(sent.sent).toEqual([
+      {
+        authorization: null,
+        apiKey: "sk-ant-api03-pooled-key",
+        body: JSON.stringify({ model: "claude-sonnet-5", messages: [] }),
+      },
+    ]);
+    const carried = JSON.parse(
+      claudeCoreSettingsCredential({ credential: key, credentialVersion: 4 }, "connection-core"),
+    );
+    expect(carried).toEqual({
+      version: 1,
+      kind: "api_key",
+      apiKey: "sk-ant-api03-opengeni-core-custody-only-connection-core-4",
+    });
+    expect(JSON.stringify(carried)).not.toContain("pooled-key");
   });
 
   test("a 401 forces one refresh and retries the same request as a new reservation when the generation advanced", async () => {
@@ -918,6 +954,36 @@ describe("Claude model scope and provider ids", () => {
     expect(db.subscriptionCoreClaudeModelPolicyProviderIds("supergrok/grok-4")).toEqual([
       "organization-claude-subscription",
     ]);
+  });
+
+  test("SUB-KEY-01: an API-key account's credential switches the Claude lists to API-key auth with no identity", () => {
+    const catalog = withClaudeConnectionCatalog(
+      testSettings({ claudeSubscriptionEnabled: true }),
+      { claude_subscription: { models: [{ upstreamModelId: "claude-sonnet-5" }] } },
+      "organization",
+    );
+    const binding = { connectionId: "20000000-0000-4000-8000-000000000003", credentialVersion: 2 };
+    const settings = withClaudeCoreConnectionCredential(
+      catalog,
+      claudeCoreSettingsCredential(
+        {
+          credential: { version: 1, kind: "api_key", apiKey: "sk-ant-api03-live" },
+          credentialVersion: 2,
+        } as db.SubscriptionCoreClaudeTokenSnapshot,
+        binding.connectionId,
+      ),
+      binding,
+    );
+    const provider = parseModelProvidersJson(settings.modelProvidersJson).find(
+      (candidate) => candidate.id === "organization-claude-subscription",
+    );
+    expect(provider?.apiKey).toBe(
+      `sk-ant-api03-opengeni-core-custody-only-${binding.connectionId}-2`,
+    );
+    expect(provider?.anthropic?.auth).toBe("api-key");
+    expect(provider?.anthropic?.identity).toBeUndefined();
+    expect(provider?.anthropic?.credentialBinding).toEqual(binding);
+    expect(settings.modelProvidersJson).not.toContain("sk-ant-api03-live");
   });
 
   test("only the Claude subscription providers of the catalog carry core custody", () => {

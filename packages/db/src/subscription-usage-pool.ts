@@ -1,5 +1,8 @@
 import { sql } from "drizzle-orm";
-import { buildSubscriptionUsagePool } from "@opengeni/subscriptions";
+import {
+  buildSubscriptionUsagePool,
+  SUBSCRIPTION_API_KEY_PLAN_TYPE,
+} from "@opengeni/subscriptions";
 import type { SubscriptionUsagePool } from "@opengeni/contracts";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
@@ -147,8 +150,14 @@ export async function readSubscriptionUsagePool(
         ];
       }
       // Only accounts that can serve work hold included usage: a disabled or
-      // disconnected account is left out, as it is for routing.
-      rows = rows.filter((row) => row.status === "active" && row.allocator_enabled);
+      // disconnected account is left out, as it is for routing. An API key
+      // has no included usage at all (it spends API credits, SUB-KEY-02).
+      rows = rows.filter(
+        (row) =>
+          row.status === "active" &&
+          row.allocator_enabled &&
+          row.plan_type !== SUBSCRIPTION_API_KEY_PLAN_TYPE,
+      );
       // Workspace scope selects accounts, never a fraction of their usage: a shared
       // account's history and forecast include activity from every workspace.
       const ids = rows.map((row) => row.id);

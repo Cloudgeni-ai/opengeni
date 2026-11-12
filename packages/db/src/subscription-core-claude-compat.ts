@@ -26,8 +26,10 @@ import {
 import {
   SUBSCRIPTION_CORE_CLAUDE,
   type SubscriptionCoreClaudeCredential,
+  type SubscriptionCoreClaudeSignInCredential,
 } from "./subscription-core-claude-adapter";
 import { projectSubscriptionCoreClaudeUsage } from "./subscription-core-claude-usage";
+import { SUBSCRIPTION_API_KEY_PLAN_TYPE } from "@opengeni/subscriptions";
 
 export type SubscriptionCoreClaudeScope = "workspace" | "user" | "organization";
 
@@ -257,7 +259,7 @@ export async function connectSubscriptionCoreClaudeConnection(
   db: Database,
   input: SubscriptionCoreConnectScope & {
     encryptionKey: Uint8Array;
-    credential: SubscriptionCoreClaudeCredential;
+    credential: SubscriptionCoreClaudeSignInCredential;
     /** The legacy provider account id this sign-in computes. */
     providerAccountId: string;
     accountEmail: string | null;
@@ -311,6 +313,81 @@ export async function connectSubscriptionCoreClaudeConnection(
     expiresAt: adapter.credential.expiry(input.credential),
     lastRefreshAt: new Date(),
     accountEmail: input.accountEmail,
+    label: input.label,
+    connectedBySubjectId: input.connectedBySubjectId,
+  });
+}
+
+/**
+ * The provider account id of an Anthropic API key: the Anthropic
+ * organization it belongs to (Anthropic's `anthropic-organization-id`
+ * response header). Credits and rate limits belong to that organization, so
+ * two keys of one organization are one account (SUB-OWN-08), and adding a
+ * second key of it replaces the first.
+ */
+export function subscriptionCoreClaudeApiKeyAccountId(anthropicOrganizationId: string): string {
+  return `api:${anthropicOrganizationId.toLowerCase()}`;
+}
+
+/**
+ * Connect (or replace) one Anthropic API key as an account of the Claude
+ * pool (SUB-KEY-01) through the neutral connect writer. The account is the
+ * key's Anthropic organization; its plan is `api_key`, which placement reads
+ * as an account funded only by API credits (SUB-KEY-02). A key of an
+ * organization already connected for this owner replaces that account's key.
+ * A `reconnect` replaces exactly that API-key account at that version, and
+ * only with a key of the same organization. The caller delivers `wake`
+ * after commit.
+ */
+export async function connectSubscriptionCoreClaudeApiKeyConnection(
+  db: Database,
+  input: SubscriptionCoreConnectScope & {
+    encryptionKey: Uint8Array;
+    apiKey: string;
+    /** The key's Anthropic organization, as Anthropic reported it for this key. */
+    anthropicOrganizationId: string;
+    label: string | null;
+    connectedBySubjectId: string | null;
+    reconnectTarget?: {
+      connectionId: string;
+      expectedVersion: number;
+      providerAccountId: string | null;
+    };
+  },
+): Promise<SubscriptionCoreClaudeConnectResult> {
+  const { adapter } = SUBSCRIPTION_CORE_CLAUDE;
+  const providerAccountId = subscriptionCoreClaudeApiKeyAccountId(input.anthropicOrganizationId);
+  const target = input.reconnectTarget;
+  if (target && target.providerAccountId !== providerAccountId)
+    return { kind: "refused", reason: "different_account" };
+  const credential: SubscriptionCoreClaudeCredential = {
+    version: 1,
+    kind: "api_key",
+    apiKey: input.apiKey,
+  };
+  return await connectSubscriptionCoreConnection(db, SUBSCRIPTION_CORE_CLAUDE, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    ...(input.personal ? { personal: true } : {}),
+    ...(target
+      ? {
+          reconnect: { connectionId: target.connectionId, expectedVersion: target.expectedVersion },
+        }
+      : {}),
+    returnVersion: true,
+    credentialEncrypted: encryptEnvironmentValue(
+      input.encryptionKey,
+      adapter.credential.encode(credential),
+    ),
+    credentialFormat: adapter.credential.format(credential),
+    providerAccountId,
+    providerSubjectId: providerAccountId,
+    planType: SUBSCRIPTION_API_KEY_PLAN_TYPE,
+    providerState: { oauthScopes: [] },
+    expiresAt: null,
+    lastRefreshAt: new Date(),
+    accountEmail: null,
     label: input.label,
     connectedBySubjectId: input.connectedBySubjectId,
   });

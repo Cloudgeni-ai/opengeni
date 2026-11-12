@@ -3809,6 +3809,30 @@ export const ClaudeSubscriptionCredential = z
       .optional(),
   })
   .strict();
+/**
+ * An Anthropic API key held as an account of the Claude pool (next to OAuth
+ * sign-ins and setup tokens). It is a static key: it never renews, has no
+ * usage endpoint or limit resets, and is sent as `x-api-key` without the
+ * Claude Code request identity. Subscription OAuth and Admin API keys are
+ * not API keys that can run models.
+ */
+export const ClaudeApiKeyCredential = z
+  .object({
+    version: z.literal(1),
+    kind: z.literal("api_key"),
+    apiKey: z
+      .string()
+      .max(1024)
+      .regex(/^sk-ant-(?!o(?:at|rt)|admin)[A-Za-z]+[0-9]*-[\x21-\x7E]+$/i),
+  })
+  .strict();
+export type ClaudeApiKeyCredential = z.infer<typeof ClaudeApiKeyCredential>;
+/** Whether a decoded Claude pool credential is an Anthropic API key. */
+export function isClaudeApiKeyCredential(
+  credential: z.infer<typeof ClaudeSubscriptionCredential> | ClaudeApiKeyCredential,
+): credential is ClaudeApiKeyCredential {
+  return "kind" in credential && credential.kind === "api_key";
+}
 const AnthropicProviderOptions = z.object({
   identity: ClaudeSubscriptionIdentity.optional(),
   // Native connection provenance only; never included in Anthropic request bodies.
@@ -14055,10 +14079,15 @@ export function withClaudeConnectionCredential(
   if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled)
     throw new Error("Claude subscriptions are not enabled on this deployment");
   if (!credential.trim()) throw new Error("Claude credential is empty");
-  const bundle =
+  const parsed =
     kind === "claude_subscription" && credential.trim().startsWith("{")
-      ? ClaudeSubscriptionCredential.parse(JSON.parse(credential))
+      ? (JSON.parse(credential) as unknown)
       : null;
+  // An API key in the Claude pool runs as a plain API-key request: x-api-key
+  // and no Claude Code identity (SUB-KEY-01).
+  const apiKey = parsed === null ? null : ClaudeApiKeyCredential.safeParse(parsed);
+  const key = apiKey?.success ? apiKey.data : null;
+  const bundle = parsed === null || key ? null : ClaudeSubscriptionCredential.parse(parsed);
   return {
     ...settings,
     modelProvidersJson: JSON.stringify(
@@ -14066,11 +14095,12 @@ export function withClaudeConnectionCredential(
         provider.id === claudeProviderId(kind, scope)
           ? {
               ...provider,
-              apiKey: bundle?.token ?? credential,
+              apiKey: key?.apiKey ?? bundle?.token ?? credential,
               ...(kind === "claude_subscription" && provider.anthropic
                 ? {
                     anthropic: {
                       ...provider.anthropic,
+                      ...(key ? { auth: "api-key" as const } : {}),
                       identity: bundle?.identity,
                       credentialBinding: credentialBinding
                         ? {
