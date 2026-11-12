@@ -101,6 +101,7 @@ import {
   slackMrkdwnKeepingClaudeCiteTags,
   slackMrkdwnKeepingObjectLinks,
   slackMrkdwnKeepingProviderTracking,
+  slackObjectLinkUrl,
 } from "../src/integrations/slack-mrkdwn";
 import {
   OPEN_SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
@@ -11223,8 +11224,20 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       "| Rule | Fee |",
       "| --- | --- |",
       "| 4-1 | 10 |",
+      "",
+      "![Fee chart](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)",
     ].join("\n");
-    const formatted = slackMrkdwnFromMarkdown(output);
+    // Delivery links Opengeni objects to the console, in this chat's workspace.
+    const baseUrl = value.deps.settings.webBaseUrl ?? value.deps.settings.publicBaseUrl;
+    expect(baseUrl).toBeTruthy();
+    const formatted = slackMrkdwnFromMarkdown(
+      output,
+      slackObjectLinkUrl({
+        baseUrl,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+      }),
+    );
     const earlier = slackMrkdwnKeepingObjectLinks(output);
     expect(formatted).toBe(
       [
@@ -11235,6 +11248,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         "-----|----",
         "4-1  | 10",
         "```",
+        "",
+        `<${new URL(`/workspaces/${value.owner.workspaceId}/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e?fromSession=${route!.session_id}`, baseUrl!).toString()}|Fee chart>`,
       ].join("\n"),
     );
     // Every earlier rendering differs, so only this one can match the claim.

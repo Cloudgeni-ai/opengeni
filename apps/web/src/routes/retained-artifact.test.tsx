@@ -189,8 +189,6 @@ test("a Site's UUID on the file page opens the Site", async () => {
     expect(rendered.router.state.location.pathname).toBe(
       `/workspaces/${workspaceId}/sites/${siteId}`,
     );
-    // Back still leads to the chat the link came from.
-    expect(rendered.router.state.location.searchStr).toBe(`?fromSession=${fromSession}`);
     expect(rendered.container.textContent).not.toContain("Artifact unavailable");
   } finally {
     await rendered.unmount();

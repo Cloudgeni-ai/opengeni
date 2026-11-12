@@ -14,10 +14,10 @@
  *
  * The output is part of the Slack post and update ledgers' request digest, so a
  * change to it changes the bytes an in-flight operation is bound to. Delivery
- * (`deliverSlackModelText` in `slack-interactions.ts`) falls back only to the
- * unformatted text; a later output change must keep the previous rendering
- * reachable the same way, or operations started before the deploy conflict on
- * every retry.
+ * (`deliverSlackModelText` in `slack-interactions.ts`) retries an operation
+ * with each earlier rendering (`slackMrkdwnKeeping*`) and then the unformatted
+ * text; a later output change must keep the previous rendering reachable the
+ * same way, or operations started before the deploy conflict on every retry.
  */
 
 import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
@@ -397,9 +397,12 @@ function slackSafeUrl(href: string): string | null {
   return /^(?:https?:\/\/|mailto:)[^\s<>|]+$/iu.test(url) ? url : null;
 }
 
-/** East Asian wide and fullwidth characters, and emoji, take two columns. */
+/**
+ * East Asian wide and fullwidth characters, and emoji shown as pictures, take
+ * two columns; text-style symbols such as © and ™ take one.
+ */
 const WIDE_CHARACTER =
-  /[\u{1100}-\u{115F}\u{2E80}-\u{303E}\u{3041}-\u{33FF}\u{3400}-\u{4DBF}\u{4E00}-\u{9FFF}\u{A000}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE30}-\u{FE4F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{20000}-\u{3FFFD}]|\p{Extended_Pictographic}/u;
+  /[\u{1100}-\u{115F}\u{2E80}-\u{303E}\u{3041}-\u{33FF}\u{3400}-\u{4DBF}\u{4E00}-\u{9FFF}\u{A000}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE30}-\u{FE4F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}/u;
 /** Combining marks (variation selectors included) and joiners take no column of their own. */
 const ZERO_WIDTH = /[\p{Mn}\p{Me}\u{200B}-\u{200D}]/u;
 
