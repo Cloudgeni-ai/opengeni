@@ -1,12 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelRequest } from "@openai/agents";
 import { getOrCreateTrace } from "@openai/agents-core";
+import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
+import type { ResolvedModelProvider } from "@opengeni/config";
 import OpenAI from "openai";
-import { OpenGeniChatCompletionsModel } from "../src/model-provider-routing";
+import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
+import {
+  OpenGeniChatCompletionsModel,
+  OpenGeniResponsesModel,
+} from "../src/model-provider-routing";
 import { ARTIFACT_ORIGIN_KEY, projectHistoryForProvider } from "../src/provider-history-adapter";
-import { ReplayableJsonOpenAI } from "../src/replayable-json-body";
+import {
+  ReplayableJsonOpenAI,
+  requestBodyText,
+  unwrappedErrorBody,
+  WRAPPED_PROVIDER_ERROR_MESSAGE_MAX_CHARS,
+} from "../src/replayable-json-body";
 
-// Synthetic fixtures only: the signature is an arbitrary opaque string.
+// Synthetic fixtures only: signatures are arbitrary opaque strings.
 const SIGNATURE = "synthetic-thought-signature";
 const EXTRA_CONTENT = { google: { thought_signature: SIGNATURE } };
 
@@ -20,8 +31,24 @@ function chunk(delta: Record<string, unknown>, finishReason: unknown = null) {
   };
 }
 
-/** A Gemini-shaped streamed tool call: the signature rides on the call's first delta. */
-const TOOL_CALL_CHUNKS = [
+/** Gemini on AI Studio streams each tool call whole, in one chunk, without an `index`. */
+const UNINDEXED_TOOL_CALL_CHUNKS = [
+  chunk({
+    role: "assistant",
+    tool_calls: [
+      {
+        id: "call_fixture",
+        type: "function",
+        function: { name: "lookup", arguments: '{"q":"x"}' },
+        extra_content: EXTRA_CONTENT,
+      },
+    ],
+  }),
+  chunk({}, "tool_calls"),
+];
+
+/** An indexed call whose arguments arrive in pieces (Vertex sends `index`). */
+const INDEXED_TOOL_CALL_CHUNKS = [
   chunk({
     role: "assistant",
     tool_calls: [
@@ -76,39 +103,44 @@ function request(input: ModelRequest["input"]): ModelRequest {
   };
 }
 
-async function streamedOutput(model: OpenGeniChatCompletionsModel, input: ModelRequest["input"]) {
-  for await (const event of model.getStreamedResponse(request(input)))
-    if (event.type === "response_done") return event.response.output;
+async function streamedCalls(chunks: unknown[], scope = "provider-a") {
+  const { model } = recordingModel(chunks, scope);
+  for await (const event of model.getStreamedResponse(request("look it up")))
+    if (event.type === "response_done")
+      return (event.response.output as Record<string, any>[]).filter(
+        (item) => item.type === "function_call",
+      );
   throw new Error("no response_done");
 }
 
-async function firstStepHistory(scope: string) {
-  const { model } = recordingModel(TOOL_CALL_CHUNKS, scope);
-  const output = await streamedOutput(model, "look it up");
-  // Canonical history round-trips through JSON storage.
-  return JSON.parse(
-    JSON.stringify([
-      { type: "message", role: "user", content: "look it up" },
-      ...output,
-      {
-        type: "function_call_result",
-        callId: "call_fixture",
-        name: "lookup",
-        status: "completed",
-        output: { type: "text", text: "found" },
-      },
-    ]),
-  ) as Record<string, unknown>[];
+async function send(model: OpenGeniChatCompletionsModel, input: ModelRequest["input"]) {
+  for await (const _event of model.getStreamedResponse(request(input))) {
+    // drain
+  }
 }
 
-function wireToolCalls(body: Record<string, any>) {
-  return (body.messages as Record<string, any>[]).flatMap((message) => message.tool_calls ?? []);
+/** History as the worker stores and reloads it after the first step. */
+function persisted(output: unknown[]): Record<string, unknown>[] {
+  return sanitizeHistoryItemsForModel(
+    JSON.parse(
+      JSON.stringify([
+        { type: "message", role: "user", content: "look it up" },
+        ...output,
+        {
+          type: "function_call_result",
+          callId: "call_fixture",
+          name: "lookup",
+          status: "completed",
+          output: { type: "text", text: "found" },
+        },
+      ]),
+    ).map(canonicalizePersistedHistoryItem),
+  ) as Record<string, unknown>[];
 }
 
 /** Canonical history as stored after a Gemini tool call on `provider-a`. */
 function storedHistory(): Record<string, unknown>[] {
-  return [
-    { type: "message", role: "user", content: "look it up" },
+  return persisted([
     {
       type: "function_call",
       id: "chat-fixture",
@@ -117,72 +149,85 @@ function storedHistory(): Record<string, unknown>[] {
       arguments: '{"q":"x"}',
       providerData: { extra_content: EXTRA_CONTENT, [ARTIFACT_ORIGIN_KEY]: "provider-a" },
     },
-    {
-      type: "function_call_result",
-      callId: "call_fixture",
-      name: "lookup",
-      status: "completed",
-      output: { type: "text", text: "found" },
-    },
-  ];
+  ]);
 }
 
-describe("Chat tool-call provider fields", () => {
-  test("a streamed tool call keeps the provider's extra fields and records their origin", async () => {
-    const { model } = recordingModel(TOOL_CALL_CHUNKS, "provider-a");
-    const output = (await streamedOutput(model, "look it up")) as Record<string, any>[];
-    const call = output.find((item) => item.type === "function_call");
-    expect(call).toMatchObject({
-      callId: "call_fixture",
-      name: "lookup",
-      arguments: '{"q":"x"}',
-      providerData: { extra_content: EXTRA_CONTENT, [ARTIFACT_ORIGIN_KEY]: "provider-a" },
+function wireToolCalls(body: Record<string, any>) {
+  return (body.messages as Record<string, any>[]).flatMap((message) => message.tool_calls ?? []);
+}
+
+const PLAIN_CALL = {
+  id: "call_fixture",
+  type: "function",
+  function: { name: "lookup", arguments: '{"q":"x"}' },
+};
+
+describe("streamed Chat tool calls keep provider fields", () => {
+  for (const [shape, chunks] of [
+    ["an unindexed whole call", UNINDEXED_TOOL_CALL_CHUNKS],
+    ["an indexed call in pieces", INDEXED_TOOL_CALL_CHUNKS],
+  ] as const)
+    test(`${shape} keeps its signature and records its origin`, async () => {
+      const [call, ...rest] = await streamedCalls(chunks);
+      expect(rest).toEqual([]);
+      expect(call).toMatchObject({
+        callId: "call_fixture",
+        name: "lookup",
+        arguments: '{"q":"x"}',
+        providerData: { extra_content: EXTRA_CONTENT, [ARTIFACT_ORIGIN_KEY]: "provider-a" },
+      });
     });
+
+  test("parallel unindexed calls stay separate, each with its own fields", async () => {
+    const calls = await streamedCalls([
+      chunk({
+        tool_calls: [
+          {
+            id: "call_a",
+            type: "function",
+            function: { name: "lookup", arguments: '{"q":"a"}' },
+            extra_content: EXTRA_CONTENT,
+          },
+        ],
+      }),
+      chunk({
+        tool_calls: [
+          { id: "call_b", type: "function", function: { name: "lookup", arguments: '{"q":"b"}' } },
+        ],
+      }),
+      chunk({}, "tool_calls"),
+    ]);
+    expect(calls.map(({ callId, arguments: args }) => [callId, args])).toEqual([
+      ["call_a", '{"q":"a"}'],
+      ["call_b", '{"q":"b"}'],
+    ]);
+    expect(calls[0]!.providerData.extra_content).toEqual(EXTRA_CONTENT);
+    expect(calls[1]!.providerData).toBeUndefined();
   });
 
-  test("the follow-up request to the same provider sends the thought signature back", async () => {
-    const history = await firstStepHistory("provider-a");
-    const { model, bodies } = recordingModel(TEXT_CHUNKS, "provider-a");
-    await streamedOutput(model, history as ModelRequest["input"]);
-    const [call] = wireToolCalls(bodies[0]!);
-    expect(call).toMatchObject({
-      id: "call_fixture",
-      type: "function",
-      function: { name: "lookup", arguments: '{"q":"x"}' },
-      extra_content: EXTRA_CONTENT,
+  test("fields that arrive before the id or in pieces are merged onto the call", async () => {
+    const [first, second] = await streamedCalls([
+      chunk({
+        tool_calls: [
+          { index: 0, extra_content: { google: { thought_signature: SIGNATURE } } },
+          { index: 1, id: "call_b", type: "function", function: { name: "lookup" } },
+        ],
+      }),
+      chunk({
+        tool_calls: [
+          { index: 0, id: "call_a", type: "function", function: { name: "lookup" } },
+          { index: 0, function: { arguments: "{}" }, extra_content: { google: { other: "y" } } },
+          { index: 1, function: { arguments: "{}" } },
+        ],
+      }),
+      chunk({}, "tool_calls"),
+    ]);
+    expect(first).toMatchObject({
+      callId: "call_a",
+      providerData: { extra_content: { google: { thought_signature: SIGNATURE, other: "y" } } },
     });
-    expect(JSON.stringify(bodies[0])).not.toContain(ARTIFACT_ORIGIN_KEY);
-  });
-
-  test("another Chat provider receives the plain call without the signature", async () => {
-    const { model, bodies } = recordingModel(TEXT_CHUNKS, "provider-b");
-    await streamedOutput(model, storedHistory() as ModelRequest["input"]);
-    const [call] = wireToolCalls(bodies[0]!);
-    expect(call).toEqual({
-      id: "call_fixture",
-      type: "function",
-      function: { name: "lookup", arguments: '{"q":"x"}' },
-    });
-    const wire = JSON.stringify(bodies[0]);
-    expect(wire).not.toContain(SIGNATURE);
-    expect(wire).not.toContain("extra_content");
-    expect(wire).not.toContain(ARTIFACT_ORIGIN_KEY);
-  });
-
-  test("a Responses provider receives the plain call; a provider-neutral pass keeps it", async () => {
-    const history = storedHistory();
-    const responses = projectHistoryForProvider(history, "responses", {
-      artifactScope: "responses-provider",
-    });
-    const call = responses.find((item) => item.type === "function_call")!;
-    expect(call.providerData).toBeUndefined();
-    expect(JSON.stringify(responses)).not.toContain(SIGNATURE);
-
-    // The worker's provider-neutral pass leaves the decision to the request's route.
-    const neutral = projectHistoryForProvider(history, "chat");
-    expect(neutral.find((item) => item.type === "function_call")).toMatchObject({
-      providerData: { extra_content: EXTRA_CONTENT, [ARTIFACT_ORIGIN_KEY]: "provider-a" },
-    });
+    expect(second).toMatchObject({ callId: "call_b", arguments: "{}" });
+    expect(second!.providerData).toBeUndefined();
   });
 
   test("a non-streamed tool call records the same origin", async () => {
@@ -203,14 +248,7 @@ describe("Chat tool-call provider fields", () => {
                 message: {
                   role: "assistant",
                   content: null,
-                  tool_calls: [
-                    {
-                      id: "call_fixture",
-                      type: "function",
-                      function: { name: "lookup", arguments: "{}" },
-                      extra_content: EXTRA_CONTENT,
-                    },
-                  ],
+                  tool_calls: [{ ...PLAIN_CALL, extra_content: EXTRA_CONTENT }],
                 },
               },
             ],
@@ -227,14 +265,104 @@ describe("Chat tool-call provider fields", () => {
   });
 });
 
+describe("replaying tool-call provider fields", () => {
+  test("the follow-up request to the same provider sends the signature back", async () => {
+    const history = persisted(await streamedCalls(UNINDEXED_TOOL_CALL_CHUNKS));
+    // The worker's provider-neutral pass runs first; it must keep the fields.
+    const neutral = projectHistoryForProvider(history, "chat");
+    const { model, bodies } = recordingModel(TEXT_CHUNKS, "provider-a");
+    await send(model, neutral as ModelRequest["input"]);
+    expect(wireToolCalls(bodies[0]!)).toEqual([{ ...PLAIN_CALL, extra_content: EXTRA_CONTENT }]);
+    expect(JSON.stringify(bodies[0])).not.toContain(ARTIFACT_ORIGIN_KEY);
+  });
+
+  test("another Chat provider receives the plain call", async () => {
+    const neutral = projectHistoryForProvider(storedHistory(), "chat");
+    const { model, bodies } = recordingModel(TEXT_CHUNKS, "provider-b");
+    await send(model, neutral as ModelRequest["input"]);
+    expect(wireToolCalls(bodies[0]!)).toEqual([PLAIN_CALL]);
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).not.toContain("extra_content");
+    expect(wire).not.toContain(ARTIFACT_ORIGIN_KEY);
+  });
+
+  test("a Responses provider receives the plain call on the wire", async () => {
+    const bodies: Record<string, any>[] = [];
+    const provider: ResolvedModelProvider = {
+      id: "responses-provider",
+      label: "responses-provider",
+      kind: "api-key",
+      api: "responses",
+      builtin: false,
+      baseUrl: "https://example.test/v1",
+      apiKey: "fixture-key",
+    };
+    const reply = {
+      id: "response-fixture",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "message-fixture",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "Done.", annotations: [] }],
+        },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+    const model = new OpenGeniResponsesModel(
+      new ReplayableJsonOpenAI({
+        apiKey: "fixture-key",
+        baseURL: provider.baseUrl,
+        maxRetries: 0,
+        fetch: (async (_url, init) => {
+          bodies.push(JSON.parse(await requestBodyText(init?.body)));
+          return Response.json(reply);
+        }) as typeof globalThis.fetch,
+      }),
+      "fixture",
+      provider,
+    );
+    await getOrCreateTrace(() =>
+      model.getResponse(
+        request(projectHistoryForProvider(storedHistory(), "responses") as ModelRequest["input"]),
+      ),
+    );
+    const call = (bodies[0]!.input as Record<string, unknown>[]).find(
+      (item) => item.type === "function_call",
+    );
+    expect(call).toMatchObject({ call_id: "call_fixture", name: "lookup" });
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).not.toContain("extra_content");
+    expect(wire).not.toContain(ARTIFACT_ORIGIN_KEY);
+  });
+
+  test("other providers keep Opengeni's own records on the call", () => {
+    const [, call] = storedHistory();
+    const marked = {
+      ...call,
+      providerData: {
+        ...(call!.providerData as Record<string, unknown>),
+        "opengeni.lazy_dispatch.v1": { version: 1, arguments: "{}" },
+      },
+    };
+    const projected = projectHistoryForProvider([marked], "chat", { artifactScope: "provider-b" });
+    expect(projected[0]!.providerData).toEqual({
+      "opengeni.lazy_dispatch.v1": { version: 1, arguments: "{}" },
+    });
+  });
+});
+
 describe("array-wrapped provider error bodies", () => {
   test("the provider's message and status code replace '(no body)'", async () => {
     const client = new ReplayableJsonOpenAI({
       apiKey: "fixture",
       maxRetries: 0,
       fetch: async () =>
-        new Response(
-          JSON.stringify([
+        Response.json(
+          [
             {
               error: {
                 code: 400,
@@ -242,14 +370,14 @@ describe("array-wrapped provider error bodies", () => {
                 status: "INVALID_ARGUMENT",
               },
             },
-          ]),
-          { status: 400, headers: { "content-type": "application/json" } },
+          ],
+          { status: 400 },
         ),
     });
     const model = new OpenGeniChatCompletionsModel(client, "gemini-fixture", undefined, "a");
     let error: any;
     try {
-      await streamedOutput(model, "look it up");
+      await send(model, "look it up");
     } catch (caught) {
       error = caught;
     }
@@ -260,9 +388,7 @@ describe("array-wrapped provider error bodies", () => {
     expect(error?.code).toBe("INVALID_ARGUMENT");
   });
 
-  test("a long wrapped message is bounded and other bodies are unchanged", async () => {
-    const { unwrappedErrorBody, WRAPPED_PROVIDER_ERROR_MESSAGE_MAX_CHARS } =
-      await import("../src/replayable-json-body");
+  test("a long wrapped message is bounded and other bodies are unchanged", () => {
     const long = unwrappedErrorBody([{ error: { message: "x".repeat(10_000) } }]) as {
       error: { message: string };
     };

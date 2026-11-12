@@ -1,3 +1,151 @@
+diff --git a/dist/openaiChatCompletionsStreaming.js b/dist/openaiChatCompletionsStreaming.js
+index cec565f3cc5a04aa58f4c988e1acb400ceb619a1..c01f7c2d31ff655624167bcfc171bcdd1ee3cd30 100644
+--- a/dist/openaiChatCompletionsStreaming.js
++++ b/dist/openaiChatCompletionsStreaming.js
+@@ -111,7 +111,12 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+         }
+         // Handle tool calls
+         if (delta.tool_calls) {
+-            for (const tc_delta of delta.tool_calls) {
++            for (const raw_tc_delta of delta.tool_calls) {
++                // Some providers (Gemini's OpenAI-compatible API) stream each
++                // tool call whole without an `index`; give each its own.
++                const tc_delta = typeof raw_tc_delta.index === 'number'
++                    ? raw_tc_delta
++                    : { ...raw_tc_delta, index: unindexedToolCallIndex(state, raw_tc_delta) };
+                 if (state.ignored_tool_call_indexes.has(tc_delta.index)) {
+                     continue;
+                 }
+@@ -138,6 +143,19 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+                 if (tc_delta.id && !state.function_calls[tc_delta.index].callId) {
+                     state.function_calls[tc_delta.index].callId = tc_delta.id;
+                 }
++                // Keep the provider's own fields on the call (for example
++                // Gemini's `extra_content` thought signature), as the
++                // non-streamed path does, so a replayed call carries them.
++                for (const [key, value] of Object.entries(tc_delta)) {
++                    if (STREAMED_TOOL_CALL_SDK_FIELDS.has(key) || value === undefined || value === null) {
++                        continue;
++                    }
++                    const functionCall = state.function_calls[tc_delta.index];
++                    functionCall.providerData = {
++                        ...functionCall.providerData,
++                        [key]: mergeToolCallProviderField(functionCall.providerData?.[key], value),
++                    };
++                }
+             }
+         }
+     }
+@@ -219,6 +237,35 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+     };
+     yield finalEvent;
+ }
++const STREAMED_TOOL_CALL_SDK_FIELDS = new Set(['index', 'id', 'type', 'function']);
++function isPlainRecord(value) {
++    return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++function mergeToolCallProviderField(previous, next) {
++    if (!isPlainRecord(previous) || !isPlainRecord(next)) {
++        return next;
++    }
++    const merged = { ...previous };
++    for (const [key, value] of Object.entries(next)) {
++        merged[key] = mergeToolCallProviderField(previous[key], value);
++    }
++    return merged;
++}
++function unindexedToolCallIndex(state, toolCall) {
++    const last = state.last_unindexed_tool_call;
++    if (last && (!toolCall.id || !last.callId || toolCall.id === last.callId)) {
++        if (toolCall.id && !last.callId) {
++            last.callId = toolCall.id;
++        }
++        return last.index;
++    }
++    const used = [...Object.keys(state.function_calls), ...state.ignored_tool_call_indexes]
++        .map(Number)
++        .filter(Number.isFinite);
++    const index = used.length > 0 ? Math.max(...used) + 1 : 0;
++    state.last_unindexed_tool_call = { index, callId: toolCall.id || undefined };
++    return index;
++}
+ function buildTraceChoice(state) {
+     const toolCalls = Object.entries(state.function_calls)
+         .sort(([left], [right]) => Number(left) - Number(right))
+diff --git a/dist/openaiChatCompletionsStreaming.mjs b/dist/openaiChatCompletionsStreaming.mjs
+index a09ff7c37dae74f2a50ba577269a36942ac900df..a71fc57647ba393090bc12f051c0c3bc7f2eab17 100644
+--- a/dist/openaiChatCompletionsStreaming.mjs
++++ b/dist/openaiChatCompletionsStreaming.mjs
+@@ -105,7 +105,12 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+         }
+         // Handle tool calls
+         if (delta.tool_calls) {
+-            for (const tc_delta of delta.tool_calls) {
++            for (const raw_tc_delta of delta.tool_calls) {
++                // Some providers (Gemini's OpenAI-compatible API) stream each
++                // tool call whole without an `index`; give each its own.
++                const tc_delta = typeof raw_tc_delta.index === 'number'
++                    ? raw_tc_delta
++                    : { ...raw_tc_delta, index: unindexedToolCallIndex(state, raw_tc_delta) };
+                 if (state.ignored_tool_call_indexes.has(tc_delta.index)) {
+                     continue;
+                 }
+@@ -132,6 +137,19 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+                 if (tc_delta.id && !state.function_calls[tc_delta.index].callId) {
+                     state.function_calls[tc_delta.index].callId = tc_delta.id;
+                 }
++                // Keep the provider's own fields on the call (for example
++                // Gemini's `extra_content` thought signature), as the
++                // non-streamed path does, so a replayed call carries them.
++                for (const [key, value] of Object.entries(tc_delta)) {
++                    if (STREAMED_TOOL_CALL_SDK_FIELDS.has(key) || value === undefined || value === null) {
++                        continue;
++                    }
++                    const functionCall = state.function_calls[tc_delta.index];
++                    functionCall.providerData = {
++                        ...functionCall.providerData,
++                        [key]: mergeToolCallProviderField(functionCall.providerData?.[key], value),
++                    };
++                }
+             }
+         }
+     }
+@@ -213,6 +231,35 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+     };
+     yield finalEvent;
+ }
++const STREAMED_TOOL_CALL_SDK_FIELDS = new Set(['index', 'id', 'type', 'function']);
++function isPlainRecord(value) {
++    return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++function mergeToolCallProviderField(previous, next) {
++    if (!isPlainRecord(previous) || !isPlainRecord(next)) {
++        return next;
++    }
++    const merged = { ...previous };
++    for (const [key, value] of Object.entries(next)) {
++        merged[key] = mergeToolCallProviderField(previous[key], value);
++    }
++    return merged;
++}
++function unindexedToolCallIndex(state, toolCall) {
++    const last = state.last_unindexed_tool_call;
++    if (last && (!toolCall.id || !last.callId || toolCall.id === last.callId)) {
++        if (toolCall.id && !last.callId) {
++            last.callId = toolCall.id;
++        }
++        return last.index;
++    }
++    const used = [...Object.keys(state.function_calls), ...state.ignored_tool_call_indexes]
++        .map(Number)
++        .filter(Number.isFinite);
++    const index = used.length > 0 ? Math.max(...used) + 1 : 0;
++    state.last_unindexed_tool_call = { index, callId: toolCall.id || undefined };
++    return index;
++}
+ function buildTraceChoice(state) {
+     const toolCalls = Object.entries(state.function_calls)
+         .sort(([left], [right]) => Number(left) - Number(right))
 diff --git a/dist/openaiResponsesModel.d.ts b/dist/openaiResponsesModel.d.ts
 index 8b7a52373fc2c7347ae695677110618559735aa3..4409b137299f15ddb459a5201eb1ec879894d31c 100644
 --- a/dist/openaiResponsesModel.d.ts
@@ -11,7 +159,7 @@ index 8b7a52373fc2c7347ae695677110618559735aa3..4409b137299f15ddb459a5201eb1ec87
      /**
       * Get a response from the OpenAI model using the Responses API.
 diff --git a/dist/openaiResponsesModel.js b/dist/openaiResponsesModel.js
-index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc2463568b684 100644
+index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..d0f7aefdb4d38b6048ce74825c6428942356613f 100644
 --- a/dist/openaiResponsesModel.js
 +++ b/dist/openaiResponsesModel.js
 @@ -2262,14 +2262,52 @@ function convertToOutputItem(items) {
@@ -196,7 +344,7 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
                  span.spanData.response_id = finalResponse.id;
                  span.spanData._response = finalResponse;
 diff --git a/dist/openaiResponsesModel.mjs b/dist/openaiResponsesModel.mjs
-index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda062281dc 100644
+index 3bc6e0a9335690a97120570c4d6355ac4447caf3..92f837508762183ee2aefb9e253b99c0576001b6 100644
 --- a/dist/openaiResponsesModel.mjs
 +++ b/dist/openaiResponsesModel.mjs
 @@ -1,4 +1,4 @@
