@@ -2845,13 +2845,6 @@ export type BuildAgentOptions = {
   // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
   codemodeTokenSessionId?: string;
-  /**
-   * Durable Opengeni session identity for Git credentials in a managed
-   * sandbox. Each chat sharing a box keeps its Git credential files (broker
-   * pass, routes, helper, gh selection) in its own directory, and every
-   * command of this chat selects that directory (sandbox/git-session.ts).
-   */
-  gitCredentialSessionId?: string;
   // Signed, digest-addressed URL for the release's managed Codemode client so a
   // fresh box fetches it in one command. Absent: the bytes are staged as before.
   codemodeClientDownload?: ManagedCodemodeClientDownload;
@@ -4341,10 +4334,6 @@ export function buildOpenGeniAgent(
   }
   if (options.gitCredentialBindings && options.gitCredentialBindings.length > 0) {
     agentGitCredentialBindings.set(agent, options.gitCredentialBindings);
-  }
-  // Connected Machines get their Git credentials another way (per exec).
-  if (options.gitCredentialSessionId && options.activeSandboxBackend !== "selfhosted") {
-    agentGitSessionKey.set(agent, gitSessionKey(options.gitCredentialSessionId));
   }
   if (options.codemodeTokenSeed && options.activeSandboxBackend !== "selfhosted") {
     agentCodemodeTokenSeed.set(agent, options.codemodeTokenSeed);
@@ -14124,6 +14113,18 @@ function codemodeTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
 
 function gitSessionKeyForAgent(agent: Agent<any, any>): string | undefined {
   return agentGitSessionKey.get(agent);
+}
+
+/**
+ * Names the chat an agent runs for on a managed sandbox. Each chat sharing a
+ * box keeps its Git credential files (broker pass, routes, helper, gh
+ * selection) in its own directory, and every command of this chat, including
+ * setup, selects that directory (sandbox/git-session.ts). Read when the agent
+ * runs, so bind it after building and before running. Connected Machines get
+ * their Git credentials per exec instead; don't bind those.
+ */
+export function bindAgentGitCredentialSession(agent: Agent<any, any>, sessionId: string): void {
+  agentGitSessionKey.set(agent, gitSessionKey(sessionId));
 }
 
 function codemodeTokenSessionIdForAgent(agent: Agent<any, any>): string | undefined {
