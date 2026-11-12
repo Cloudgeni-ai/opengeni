@@ -137,6 +137,9 @@ CREATE POLICY account_isolation ON organization_end_user_labels
 DO $opengeni_console_grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    -- Exact grants, whatever the owner's default privileges gave the runtime.
+    REVOKE ALL ON organization_managed_workspaces, organization_session_review_settings,
+      organization_console_audit_events, organization_end_user_labels FROM opengeni_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON organization_managed_workspaces TO opengeni_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON organization_session_review_settings TO opengeni_app;
     GRANT SELECT, INSERT ON organization_console_audit_events TO opengeni_app;
