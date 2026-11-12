@@ -101,6 +101,9 @@ function sessionCookie(response: Response): string {
 }
 
 async function passkeyPerson(rt: Runtime, name: string) {
+  // Every fixture signs up from the same test address; keep the per-address
+  // sign-up limit from deciding which later test fails.
+  await admin`delete from auth_rate_limits where key like 'passkey-sign-up:%'`;
   const passkey = createSoftwarePasskey();
   const options = await call(rt, "POST", "/v1/auth/passkey/sign-up/options", "", { name });
   expect(options.status).toBe(200);
@@ -380,7 +383,7 @@ describe("admin passkey step-up", () => {
     );
     expect(shown.status).toBe(200);
     expect(await shown.json()).toMatchObject({ code: handoff.code });
-    const stranger = await passkeyPerson(rt, "Stranger");
+    const stranger = await passwordPerson(rt);
     const foreign = await call(
       rt,
       "GET",
