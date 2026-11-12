@@ -235,30 +235,35 @@ impl MemoryStore {
                 sandbox.version += 1;
             }
         }
-        let (renewals, drained) = inner
-            .hosts
-            .get(&id)
-            .map_or((0, false), |host| (host.row.renewals, host.drained));
-        let renewals = renewals + 1;
+        let known = inner.hosts.get(&id);
+        let renewals = known.map_or(0, |host| host.row.renewals) + 1;
+        let run = known.and_then(|host| host.row.run);
+        let restarts = known.map_or(0, |host| host.row.restarts);
+        let drained = known.is_some_and(|host| host.drained);
         let changed = inner.change();
         inner.by_name.insert(register.info.name.clone(), id);
+        let mut row = HostRow {
+            id,
+            info: register.info.clone(),
+            epoch,
+            state: if drained {
+                HostState::Draining
+            } else {
+                HostState::Live
+            },
+            renewals,
+            seq: 0,
+            capacity: register.capacity.split().0,
+            run,
+            restarts,
+            changed,
+        };
+        // A host registering afresh after a reboot runs its agent again.
+        row.ran(register.capacity.run);
         inner.hosts.insert(
             id,
             Host {
-                row: HostRow {
-                    id,
-                    info: register.info.clone(),
-                    epoch,
-                    state: if drained {
-                        HostState::Draining
-                    } else {
-                        HostState::Live
-                    },
-                    renewals,
-                    seq: 0,
-                    capacity: register.capacity.split().0,
-                    changed,
-                },
+                row,
                 attempt: register.attempt,
                 answer: rulings.clone(),
                 gone_ms: None,

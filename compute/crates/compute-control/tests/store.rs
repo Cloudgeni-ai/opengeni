@@ -49,6 +49,7 @@ fn capacity() -> Capacity {
         pointers_in_service: true,
         reads_packs: true,
         sets_aside: true,
+        run: None,
         info: None,
     }
 }
@@ -216,6 +217,80 @@ async fn registration<S: Store>(store: S) {
 #[tokio::test]
 async fn registrations_are_answered_once_refused_while_live_and_renewed_by_their_host() {
     each(registration, registration).await;
+}
+
+/// What a host can take on, told by run `run` of its agent.
+fn in_run(run: u64) -> Capacity {
+    Capacity {
+        run: Some(run),
+        ..capacity()
+    }
+}
+
+/// The latest run of `host`'s agent, and its restarts, as the store holds
+/// them.
+async fn restarts<S: Store>(store: &S, host: HostId) -> (Option<u64>, u64) {
+    let row = row_of(store, host).await;
+    (row.run, row.restarts)
+}
+
+async fn agent_restarts<S: Store>(store: S) {
+    let name = name();
+    let names = std::slice::from_ref(&name);
+    let mut first = register(&name, random(), Vec::new());
+    first.capacity.run = Some(100);
+    let (host, epoch) = registered(&store, &first).await;
+    assert_eq!(
+        restarts(&store, host).await,
+        (Some(100), 0),
+        "its first run is no restart"
+    );
+    // Its agent restarts in place, keeping its registration: the new run
+    // renews without a capacity while it takes its sandboxes back, then
+    // tells its run. A renewal of the earlier run heard late changes
+    // nothing.
+    let capacities = [
+        None,
+        Some(in_run(100)),
+        Some(in_run(200)),
+        Some(in_run(100)),
+        Some(in_run(200)),
+    ];
+    for (seq, capacity) in (1..).zip(capacities) {
+        let renew = Renew {
+            host: host.0,
+            epoch,
+            seq,
+            capacity,
+        };
+        assert!(store.renew(&renew, names).await.unwrap());
+    }
+    assert_eq!(
+        restarts(&store, host).await,
+        (Some(200), 1),
+        "each run counted once"
+    );
+    // A report tells a run too.
+    let report = Report {
+        host: host.0,
+        epoch,
+        capacity: in_run(300),
+    };
+    assert!(store.report(&report, names).await.unwrap());
+    assert_eq!(restarts(&store, host).await, (Some(300), 2));
+    // Rebooted and given up on, it registers afresh with a later run, and
+    // keeps its count.
+    let count = renewals(&store, host).await.expect("counted");
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
+    let mut again = register(&name, random(), Vec::new());
+    again.capacity.run = Some(400);
+    assert_eq!(registered(&store, &again).await.0, host);
+    assert_eq!(restarts(&store, host).await, (Some(400), 3));
+}
+
+#[tokio::test]
+async fn each_later_run_of_a_hosts_agent_is_counted_once() {
+    each(agent_restarts, agent_restarts).await;
 }
 
 /// What a host can take on, telling that it is `info`.
@@ -1585,7 +1660,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))

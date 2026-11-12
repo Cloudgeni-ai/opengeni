@@ -2125,6 +2125,18 @@ function settingsForWorkspaceArchiveRestore(
       modalImageId: archive.nativeSnapshot!.snapshotId,
     };
   }
+  if (
+    workspacePersistence === "snapshot_directory" &&
+    settings.modalWorkspacePersistence === "tar"
+  ) {
+    // An operator who configures tar keeps every save in their own object
+    // storage. A directory snapshot only has to be mounted over the fresh
+    // workspace, which the Modal session does whatever mode it saves in, so
+    // the destination is created in tar mode and never writes another native
+    // snapshot. A filesystem snapshot holds the whole machine, which a tar of
+    // the workspace would not, so those sessions stay as they are.
+    return settings;
+  }
   return workspacePersistence && settings.modalWorkspacePersistence !== workspacePersistence
     ? { ...settings, modalWorkspacePersistence: workspacePersistence }
     : settings;
@@ -2308,8 +2320,10 @@ export async function establishSandboxSessionFromEnvelope(
         }
       }
       // The selected native artifact is the durable authority for its restore
-      // protocol. The process setting governs new sandboxes only: a mode rollout
-      // must not make an older, verified Modal snapshot impossible to hydrate.
+      // protocol: a mode rollout must not make an older, verified Modal
+      // snapshot impossible to hydrate. The process setting governs what the
+      // destination saves from then on only where that is safe (tar after a
+      // directory snapshot); otherwise the destination keeps the artifact's mode.
       const restoreSettings = settingsForWorkspaceArchiveRestore(
         backend,
         settings,
