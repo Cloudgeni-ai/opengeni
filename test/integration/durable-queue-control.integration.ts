@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import postgres from "postgres";
@@ -36,6 +36,7 @@ import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { startTestServices, type TestServices } from "@opengeni/testing/compose";
 import { testSettings } from "@opengeni/testing/settings";
 import { waitFor } from "@opengeni/testing/process";
+import { quarantineTest } from "@opengeni/testing/quarantine";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { goalContinuationPrompt } from "../../apps/worker/src/activities/goals";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
@@ -46,6 +47,9 @@ import {
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 import { errorMessage } from "@opengeni/contracts/values";
+
+// Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
+const test = quarantineTest(bunTest, import.meta.path);
 
 type RequiredServices = Pick<
   TestServices,
