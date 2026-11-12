@@ -169,13 +169,13 @@ describe("release image workflow contract", () => {
     expect(builds.map((step) => [step.id, step.uses, step.if, step["continue-on-error"]])).toEqual([
       [
         "first",
-        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+        "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
         undefined,
         true,
       ],
       [
         "retry",
-        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+        "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
         "${{ steps.first.outcome == 'failure' }}",
         undefined,
       ],
@@ -1005,6 +1005,27 @@ describe("release image workflow contract", () => {
     );
   });
 
+  test("candidate sandbox and desktop builds require the downloaded runtime inputs", async () => {
+    const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
+    const steps = parsed.jobs.candidate?.steps ?? [];
+    const download = steps.findIndex(
+      (step) =>
+        step.name === "Download exact artifact runtime inputs" &&
+        step.with?.path === ".release/artifact-runtime",
+    );
+    expect(download).toBeGreaterThanOrEqual(0);
+    for (const file of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
+      const builds = steps.filter(
+        (step) => step.uses?.startsWith("docker/build-push-action@") && step.with?.file === file,
+      );
+      expect(builds, file).toHaveLength(1);
+      expect(steps.indexOf(builds[0]!), file).toBeGreaterThan(download);
+      expect(String(builds[0]!.with?.["build-args"]).trim().split("\n"), file).toContain(
+        "OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true",
+      );
+    }
+  });
+
   test("candidate chart pins the Modal desktop box it built from the same source", async () => {
     const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
     const steps = parsed.jobs.candidate?.steps ?? [];
@@ -1020,7 +1041,9 @@ describe("release image workflow contract", () => {
     expect(build.with?.context).toBe(".");
     expect(build.with?.platforms).toBe("linux/amd64");
     expect(build.with?.push).toBe(true);
-    expect(build.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${sourceRevision}`);
+    expect(build.with?.["build-args"]).toBe(
+      `OPENGENI_SOURCE_SHA=${sourceRevision}\nOPENGENI_REQUIRE_ARTIFACT_RUNTIME=true\n`,
+    );
     expect(build.with?.tags).toBe(
       "${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}",
     );
@@ -1572,9 +1595,9 @@ describe("release image workflow contract", () => {
     expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: plan");
     expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
     expect(publish).toContain("bun scripts/verify-release-packages.ts");
-    expect(publish).toContain("actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10");
+    expect(publish).toContain("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1");
     expect(publish).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
-    expect(publish).toContain("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
+    expect(publish).toContain("actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1");
     expect(publish).not.toMatch(/actions\/(?:checkout|setup-node)@v[0-9]/);
     expect(publish).not.toMatch(/oven-sh\/setup-bun@v[0-9]/);
     expect(sourceGate).toBeGreaterThan(-1);
@@ -1802,7 +1825,7 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("https://get.opengeni.ai/install.");
 
     expect(agentRelease).toContain(
-      "uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+      "uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3",
     );
     expect(agentRelease).not.toContain("softprops/action-gh-release@v2");
     expect(agentRelease).toContain("tag_name: agent-v${{ needs.guard.outputs.version }}");
@@ -2008,7 +2031,7 @@ ${parser}`,
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "fcea891e6564f38134a9e62c1e7cb03e2d2fab60e10beb070c350d93c905a893",
+        fingerprint: "9116995b607a2ea26ca2e12ed76fe026e64a0cbf3ac4ab319e92943b8fbc66f1",
       },
     ]);
 
@@ -2033,8 +2056,18 @@ ${parser}`,
       expect(warmBuilds).toHaveLength(1);
       const warm = warmBuilds[0]!;
       expect(warm.uses).toBe(finalBuild.uses);
-      for (const key of ["context", "file", "platforms", "build-args", "cache-from"])
+      for (const key of ["context", "file", "platforms", "cache-from"])
         expect(warm.with?.[key], `${jobName} ${key}`).toBe(finalBuild.with?.[key]);
+      // The final build also requires the runtime inputs it downloaded, so
+      // missing inputs fail it instead of yielding an image without the
+      // runtime. The Dockerfiles declare that argument only for the runtime
+      // layer, which the warm build cannot reuse anyway.
+      const buildArgs = (step: typeof warm) =>
+        String(step.with?.["build-args"]).trim().split(/\r?\n/);
+      expect(buildArgs(finalBuild), jobName).toEqual([
+        ...buildArgs(warm),
+        "OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true",
+      ]);
       expect(warm.with?.push).toBeUndefined();
       expect(warm.with?.["cache-to"]).toBeUndefined();
       expect(warm.with?.["build-contexts"]).toBeUndefined();

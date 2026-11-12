@@ -26,6 +26,7 @@ const BOOT_WRITES: u64 = 256 * MIB;
 const SAVES_LATER: SleepConfig = SleepConfig {
     pause_after_ms: Some(3_600_000),
     save_after_ms: Some(3_600_000),
+    keep_memory: true,
     ..NEVER
 };
 

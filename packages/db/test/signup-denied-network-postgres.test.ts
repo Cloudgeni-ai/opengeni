@@ -409,6 +409,169 @@ test("decisions capture networks that outlive the sessions; the operator capture
   }
 }, 180_000);
 
+// Migration 1375. The production flow: a farm signs up and sets up its
+// organization from a fresh address, then signs in from its denied network.
+test("an owner's sign-in after setup is matched by the next evaluation while the setup can be evaluated", async () => {
+  if (!shared || !client) return;
+  await enforce();
+  try {
+    const farmIp = address();
+    const farm = await owner([farmIp]);
+    await decide(farm.accountId, "denied");
+
+    // Setup from a fresh network: nothing to match yet.
+    const fresh = await owner([address()]);
+    expect(await decision(fresh.accountId)).toBeNull();
+    expect(await observation(fresh.accountId)).toBeNull();
+    expect(await freePlanCreditEligible(client.db, fresh.accountId)).toBe(true);
+    const recorded = async (accountId: string) =>
+      await shared!.admin`select address_hash, recorded_at, last_seen_at
+        from opengeni_private.signup_network_owner_addresses
+        where data_schema = ${shared!.schema} and account_id = ${accountId} order by address_hash`;
+    // Admission reads with no newer sign-in write nothing.
+    const before = await recorded(fresh.accountId);
+    expect(before).toHaveLength(1);
+    await evaluate(fresh.accountId);
+    expect(await recorded(fresh.accountId)).toEqual(before);
+
+    // The owner then signs in from the farm's network. The next admission
+    // evaluation records it and holds.
+    const projection = await getCanonicalHumanIdentityProjection(client.db, fresh.userId);
+    const binding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
+      authUserId: fresh.userId,
+      providerId: "credential",
+    });
+    await session(fresh.userId, farmIp, projection, binding);
+    expect(await freePlanCreditEligible(client.db, fresh.accountId)).toBe(false);
+    expect(await decision(fresh.accountId)).toMatchObject(HELD);
+    expect(await observation(fresh.accountId)).toMatchObject({
+      ruleId: "denied-network-exact-v1",
+      deniedAccounts: 1,
+      matchedVia: ["sign-in"],
+      matchedAccountIds: [farm.accountId],
+      mode: "enforce",
+    });
+    expect(await recorded(fresh.accountId)).toHaveLength(2);
+    // Once refreshed, further evaluations write nothing.
+    const refreshed = await recorded(fresh.accountId);
+    await evaluate(fresh.accountId);
+    await evaluate(fresh.accountId);
+    expect(await recorded(fresh.accountId)).toEqual(refreshed);
+    const [dump] = await shared.admin`select string_agg(t::text, ' ') as text
+      from opengeni_private.signup_network_owner_addresses t where data_schema = ${shared.schema}`;
+    expect(String(dump!.text)).not.toContain(farmIp);
+
+    // A later sign-in from an unrelated network is recorded but not held.
+    const clean = await owner([address()]);
+    const cleanUser = await getCanonicalHumanIdentityProjection(client.db, clean.userId);
+    const cleanBinding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
+      authUserId: clean.userId,
+      providerId: "credential",
+    });
+    await session(clean.userId, address(), cleanUser, cleanBinding);
+    expect(await freePlanCreditEligible(client.db, clean.accountId)).toBe(true);
+    expect(await decision(clean.accountId)).toBeNull();
+    expect(await recorded(clean.accountId)).toHaveLength(2);
+
+    // Once the setup is older than seven days, later sign-ins are neither
+    // recorded nor evaluated.
+    const old = await owner([address()]);
+    await shared.admin`update opengeni_private.signup_network_owner_setups
+      set set_up_at = now() - interval '8 days'
+      where data_schema = ${shared.schema} and account_id = ${old.accountId}`;
+    const oldUser = await getCanonicalHumanIdentityProjection(client.db, old.userId);
+    const oldBinding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
+      authUserId: old.userId,
+      providerId: "credential",
+    });
+    await session(old.userId, farmIp, oldUser, oldBinding);
+    expect(await freePlanCreditEligible(client.db, old.accountId)).toBe(true);
+    expect(await decision(old.accountId)).toBeNull();
+    expect(await recorded(old.accountId)).toHaveLength(1);
+
+    // An operator release is never re-held by a later sign-in.
+    const released = await owner([address()]);
+    await decide(released.accountId, "held");
+    await decide(released.accountId, "eligible");
+    const releasedUser = await getCanonicalHumanIdentityProjection(client.db, released.userId);
+    const releasedBinding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
+      authUserId: released.userId,
+      providerId: "credential",
+    });
+    await session(released.userId, farmIp, releasedUser, releasedBinding);
+    expect(await freePlanCreditEligible(client.db, released.accountId)).toBe(true);
+    expect(await decision(released.accountId)).toMatchObject({
+      decision: "eligible",
+      actor: "operator:test",
+    });
+  } finally {
+    await configure({ deniedNetworkMode: "off" });
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
+test("a setup recorded without the owner's networks is matched from the owner's sessions", async () => {
+  if (!shared || !client) return;
+  await configure({ deniedNetworkMode: "observe" });
+  try {
+    const farmIp = address();
+    const farm = await owner([farmIp]);
+    await decide(farm.accountId, "denied");
+    // The owner had no session yet when the organization was set up, and no
+    // signup network record.
+    const late = await owner([], { source: null });
+    expect(await observation(late.accountId)).toBeNull();
+    const projection = await getCanonicalHumanIdentityProjection(client.db, late.userId);
+    const binding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
+      authUserId: late.userId,
+      providerId: "credential",
+    });
+    await session(late.userId, farmIp, projection, binding);
+    await evaluate(late.accountId);
+    expect(await observation(late.accountId)).toMatchObject({
+      deniedAccounts: 1,
+      matchedVia: ["sign-in"],
+      mode: "observe",
+    });
+    expect(await decision(late.accountId)).toBeNull();
+  } finally {
+    await configure({ deniedNetworkMode: "off" });
+  }
+}, 180_000);
+
+test("a failed refresh of the owner's networks fails open, and the next evaluation catches up", async () => {
+  if (!shared || !client) return;
+  await enforce();
+  const recordName = "opengeni_private.record_signup_owner_session_networks(text,uuid,text)";
+  const [recordBody] =
+    await shared.admin`select pg_get_functiondef(${recordName}::regprocedure) as body`;
+  try {
+    const farmIp = address();
+    const farm = await owner([farmIp]);
+    await decide(farm.accountId, "denied");
+    const broken = await owner([address()]);
+    await shared.admin
+      .unsafe(`CREATE OR REPLACE FUNCTION opengeni_private.record_signup_owner_session_networks(p_data_schema text, p_account_id uuid, p_auth_user_id text)
+      RETURNS integer LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+      BEGIN RAISE EXCEPTION 'record broken' USING ERRCODE = 'XX000'; END $$`);
+    const projection = await getCanonicalHumanIdentityProjection(client.db, broken.userId);
+    const binding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
+      authUserId: broken.userId,
+      providerId: "credential",
+    });
+    await session(broken.userId, farmIp, projection, binding);
+    expect(await freePlanCreditEligible(client.db, broken.accountId)).toBe(true);
+    expect(await decision(broken.accountId)).toBeNull();
+    await shared.admin.unsafe(recordBody!.body as string);
+    expect(await freePlanCreditEligible(client.db, broken.accountId)).toBe(false);
+    expect(await decision(broken.accountId)).toMatchObject(HELD);
+  } finally {
+    await shared.admin.unsafe(recordBody!.body as string);
+    await configure({ deniedNetworkMode: "off" });
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
 test("holds placed by this rule never spread to further accounts", async () => {
   if (!shared || !client) return;
   await enforce();
@@ -556,6 +719,49 @@ test("invited members are never recorded, counted or held", async () => {
     expect(members!.count).toBe(1); // the founder's own network only
     const sameAsColleague = await owner([companyIp]);
     expect(await decision(sameAsColleague.accountId)).toBeNull();
+  } finally {
+    await configure({ deniedNetworkMode: "off" });
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
+test("sign-ins of an invited member after setup never hold the new organization", async () => {
+  if (!shared || !client) return;
+  // (1375) Sign-ins of an invited member of a new organization after setup
+  // are never recorded for it, so they never hold it.
+  await enforce();
+  try {
+    const farmIp = address();
+    const farm = await owner([farmIp]);
+    await decide(farm.accountId, "denied");
+    const founder = await owner([address()]);
+    const member = await user([farmIp]);
+    await shared.admin`update auth_users set email = ${`${member.userId}@member.test`}
+      where id = ${member.userId}`;
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: founder.accountId,
+      actorSubjectId: `user:${founder.userId}`,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: `user:${member.userId}`,
+      targetEmail: `${member.userId}@member.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + DAY).toISOString(),
+    });
+    await acceptOrganizationInvitation(client.db, {
+      organizationId: founder.accountId,
+      actorSubjectId: `user:${member.userId}`,
+      operationId: crypto.randomUUID(),
+      invitationId: invitation.id,
+      expectedRevision: invitation.revision,
+    });
+    await session(member.userId, farmIp, member.projection, member.binding);
+    expect(await freePlanCreditEligible(client.db, founder.accountId)).toBe(true);
+    expect(await decision(founder.accountId)).toBeNull();
+    expect(await observation(founder.accountId)).toBeNull();
+    const [rows] = await shared.admin`select count(*)::int as count
+      from opengeni_private.signup_network_owner_addresses
+      where data_schema = ${shared.schema} and account_id = ${founder.accountId}`;
+    expect(rows!.count).toBe(1); // the founder's own network only
   } finally {
     await configure({ deniedNetworkMode: "off" });
     await shared.admin`update promotion_enforcement set enabled=false`;

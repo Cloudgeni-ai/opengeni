@@ -972,6 +972,14 @@ export const ErrorEnvelope = /* @__PURE__ */ defineSchema(() =>
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
 
 /**
+ * `details.code` when a native app's push registration can never be
+ * delivered on this deployment: it doesn't list the app's bundle identifier
+ * or package name, or it has no push credentials for the platform. Retrying
+ * won't help; the deployment's push setup has to change.
+ */
+export const NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE = "native_push_unavailable";
+
+/**
  * Why a request was refused as `unauthenticated` (HTTP 401) for want of a
  * sign-in, carried as the error envelope's `details.code`:
  *
@@ -7106,6 +7114,53 @@ export const CreateBillingPortalResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type CreateBillingPortalResponse = z.infer<typeof CreateBillingPortalResponse>;
+
+/** Query for one page of an organization's payments, newest first. */
+export const ListBillingReceiptsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accountId: primitives.optionalUuid,
+    /** The nextCursor of the previous page. */
+    cursor: z
+      .string()
+      .regex(/^ch_[A-Za-z0-9]{1,250}$/)
+      .optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(10),
+  }),
+);
+export type ListBillingReceiptsQuery = z.input<typeof ListBillingReceiptsQuery>;
+
+/**
+ * One successful payment and where to download its receipt: plan invoices,
+ * credit purchases and automatic top-ups alike. Amounts are in the currency's
+ * smallest unit (cents for USD).
+ */
+export const BillingReceipt = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.string,
+    createdAt: primitives.dateTime,
+    kind: z.enum(["plan", "credits", "auto_top_up", "other"]),
+    /** What the payment was for, in a few words. */
+    description: primitives.string,
+    amount: primitives.nonnegativeInteger,
+    currency: primitives.string,
+    amountRefunded: primitives.nonnegativeInteger,
+    refunded: primitives.boolean,
+    /** Stripe's receipt for the payment. */
+    receiptUrl: z.string().url().nullable(),
+    /** The invoice page and PDF when the payment paid an invoice. */
+    invoiceUrl: z.string().url().nullable(),
+    invoicePdfUrl: z.string().url().nullable(),
+  }),
+);
+export type BillingReceipt = z.infer<typeof BillingReceipt>;
+
+export const ListBillingReceiptsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    receipts: z.array(BillingReceipt),
+    nextCursor: primitives.nullableString,
+  }),
+);
+export type ListBillingReceiptsResponse = z.infer<typeof ListBillingReceiptsResponse>;
 
 export const RepositoryResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.object({

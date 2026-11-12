@@ -18,7 +18,10 @@ import {
   clearPendingTeamsLink,
   readPendingTeamsLink,
   readPendingTeamsSetup,
+  savePendingTeamsLink,
   savePendingTeamsSetup,
+  teamsFragmentWorkspace,
+  teamsLinkRetryPath,
   teamsMicrosoftSignInPurpose,
   teamsMicrosoftFailureText,
   teamsErrorText,
@@ -33,15 +36,23 @@ import {
 
 type Arrival =
   | { kind: "setup"; pending: TeamsPendingSetup | null; microsoft: TeamsMicrosoftReturn | null }
-  | { kind: "link"; pending: TeamsPendingLink | null; microsoft: TeamsMicrosoftReturn };
+  | { kind: "link"; pending: TeamsPendingLink | null; microsoft: TeamsMicrosoftReturn }
+  | { kind: "link_offer"; offer: TeamsPendingLink };
 
 /**
  * A return from Microsoft sign-in restores this tab's pending setup, or its
- * pending account link when the sign-in was for one. Reads only.
+ * pending account link when the sign-in was for one. Without one, an account
+ * link from Teams (its token and connected workspace) is offered. Reads only.
  */
 function readArrival(): Arrival {
   const microsoft = teamsMicrosoftReturn(window.location.search);
-  if (!microsoft) return { kind: "setup", pending: null, microsoft: null };
+  if (!microsoft) {
+    const linkToken = teamsFragmentToken(window.location.hash, "teams_link");
+    const workspaceId = teamsFragmentWorkspace(window.location.hash);
+    return linkToken && workspaceId
+      ? { kind: "link_offer", offer: { linkToken, workspaceId } }
+      : { kind: "setup", pending: null, microsoft: null };
+  }
   const purpose = teamsMicrosoftSignInPurpose(microsoft.state);
   const setup = purpose === "link" ? null : readPendingTeamsSetup();
   const link = purpose === "setup" ? null : readPendingTeamsLink();
@@ -54,8 +65,57 @@ export function TeamsConnectRoute() {
   const [arrival] = useState(readArrival);
   return arrival.kind === "link" ? (
     <TeamsLinkReturn pending={arrival.pending} microsoft={arrival.microsoft} />
+  ) : arrival.kind === "link_offer" ? (
+    <TeamsLinkOffer offer={arrival.offer} />
   ) : (
     <TeamsSetupPage arrival={arrival} />
+  );
+}
+
+/**
+ * Offers an account link from Teams to any signed-in member of the
+ * organization that connected it, with or without access to the connected
+ * workspace. Linking starts with the Microsoft sign-in that proves the Teams
+ * account is theirs; Microsoft returns here to finish.
+ */
+function TeamsLinkOffer({ offer }: { offer: TeamsPendingLink }) {
+  const { client } = useAppContext();
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <ConsentFrame>
+      <FormPage
+        leading={<LogoTile icon={<BotIcon />} />}
+        title="Link your Teams account?"
+        description="To confirm the Teams account is yours, sign in to Microsoft with the account you use in Teams. It's then linked to your signed-in Opengeni account, and the bot uses your access when you ask it to work."
+        submitLabel="Sign in with Microsoft"
+        pendingLabel="Opening Microsoft…"
+        cancelLabel={null}
+        onSubmit={async () => {
+          setError(null);
+          try {
+            const { authorizationUrl } = await teamsApi(client, offer.workspaceId).startLinkSignIn(
+              offer.linkToken,
+            );
+            savePendingTeamsLink(offer);
+            window.location.assign(authorizationUrl);
+          } catch (caught) {
+            setError(
+              teamsErrorText(
+                caught,
+                "Get a new account link from Opengeni in Teams, then try again.",
+              ),
+            );
+          }
+          return false;
+        }}
+      >
+        {error ? (
+          <p role="alert" className="text-sm text-danger">
+            {error}
+          </p>
+        ) : null}
+      </FormPage>
+    </ConsentFrame>
   );
 }
 
@@ -70,7 +130,7 @@ function TeamsLinkReturn({
   pending: TeamsPendingLink | null;
   microsoft: TeamsMicrosoftReturn;
 }) {
-  const { client } = useAppContext();
+  const { client, workspaces } = useAppContext();
   const [result, setResult] = useState<
     { kind: "linking" } | { kind: "linked" } | { kind: "failed"; message: string; retry: boolean }
   >(() =>
@@ -107,7 +167,11 @@ function TeamsLinkReturn({
       );
   }, [client, microsoft, pending]);
 
-  const plugins = pending ? `/workspaces/${encodeURIComponent(pending.workspaceId)}/plugins` : null;
+  // Only someone with access to the connected workspace can manage it there.
+  const plugins =
+    pending && workspaces.some((workspace) => workspace.id === pending.workspaceId)
+      ? `/workspaces/${encodeURIComponent(pending.workspaceId)}/plugins`
+      : null;
   if (result.kind === "linking")
     return (
       <ConsentFrame>
@@ -150,11 +214,13 @@ function TeamsLinkReturn({
         title="Couldn't link your Teams account"
         description={result.message}
         action={
-          pending && plugins && result.retry ? (
+          pending && result.retry ? (
             <Button
               onClick={() =>
                 window.location.assign(
-                  `${plugins}#${new URLSearchParams({ teams_link: pending.linkToken })}`,
+                  plugins
+                    ? `${plugins}#${new URLSearchParams({ teams_link: pending.linkToken })}`
+                    : teamsLinkRetryPath(pending),
                 )
               }
             >

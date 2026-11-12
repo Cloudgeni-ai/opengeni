@@ -14,6 +14,7 @@ use super::*;
 const NEVER: SleepConfig = SleepConfig {
     pause_after_ms: None,
     save_after_ms: None,
+    keep_memory: false,
     archive_after_ms: None,
     drop_after_ms: None,
     evict_after_ms: None,

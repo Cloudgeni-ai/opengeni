@@ -92,6 +92,19 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.temporal.service.port }}
+    {{- if and (.Values.temporal.metrics).port .Values.networkPolicy.monitoring }}
+    # The metrics listener admits only the scraper.
+    - from:
+        {{- with .Values.networkPolicy.monitoring }}
+        - namespaceSelector:
+            {{- toYaml .namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .podSelector | nindent 12 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ int64 .Values.temporal.metrics.port }}
+    {{- end }}
 {{- end }}
 {{- if and .Values.networkPolicy.enabled .Values.minio.enabled }}
 ---

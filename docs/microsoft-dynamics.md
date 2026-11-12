@@ -24,6 +24,11 @@ to its connection URL (`microsoftDynamicsMcpEndpoint`) and names the scopes.
 | `OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET` | Its client secret. Set both or neither. |
 | `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` | Accept Finance and Operations URLs. |
 
+Finance and Operations was verified on 12 Nov 2026 against a real environment
+(`opengeni-fno-test.operations.ch.dynamics.com`) through the staging connector:
+card, Entra sign-in and an ERP MCP read with an explicit company. The flag is on
+in Opengeni's staging and production environments.
+
 The Entra app needs:
 
 - redirect URI `<public API origin>/v1/integrations/oauth/callback` (Web platform);
@@ -102,10 +107,47 @@ message reaches the agent; a write whose outcome is unknown (network failure,
 
 ## Business Central (follow-up)
 
-Business Central's MCP server (`https://mcp.businesscentral.dynamics.com`) and
-API (`https://api.businesscentral.dynamics.com/v2.0/<tenant>/<environment>/`)
-both need the tenant and environment name per connection (MCP through
-`TenantId` / `EnvironmentName` headers). The scope is
-`https://<mcp|api>.businesscentral.dynamics.com/Financials.ReadWrite.All`. Add
-it with a bridge or headers that take the tenant from the token's `tid` and the
-environment from the connection URL.
+Not supported yet. Verified on 11 November 2026 against a real tenant with the
+staging Entra app (delegated authorization code with PKCE; device code fails
+under security defaults with AADSTS530035):
+
+- **MCP endpoint:** `POST https://mcp.businesscentral.dynamics.com`, one global
+  URL for every tenant. Streamable HTTP (`Accept: application/json,
+  text/event-stream`, reuse `Mcp-Session-Id`). A 401 advertises
+  `/.well-known/oauth-protected-resource` with authority
+  `https://login.microsoftonline.com/common/v2.0`; no dynamic client
+  registration. Server "Microsoft Dynamics 365 Business Central" 29.0.57751.0,
+  protocol 2025-06-18.
+- **Scope:** `https://mcp.businesscentral.dynamics.com/Financials.ReadWrite.All`
+  plus `offline_access` (token `aud` is the MCP host). The Entra permission is
+  Dynamics 365 Business Central, delegated `Financials.ReadWrite.All`, the
+  same resource as the BC API, so one consent covers both.
+- **Headers:** `TenantId` (customer tenant GUID, the token's `tid`) and
+  `EnvironmentName` (for example `Production`) are required; `Company` and
+  `ConfigurationName` are optional. Non-ASCII header values are sent as
+  `=?base64?<base64>?=`.
+- **Company modes (pick one):** without `Company`, the server uses the default
+  company named in its `initialize` instructions, offers `list_companies`, and
+  every tool takes a required `company` argument. With `Company`,
+  `list_companies` disappears, the schemas drop `company`, and passing it fails
+  with "The 'company' parameter is not accepted: the company is fixed to <name>
+  for this MCP session."
+- **Default tools** (no named configuration): `bc_actions_search`,
+  `bc_actions_describe`, `bc_actions_invoke`, `list_companies`. In
+  `bc_actions_invoke`, `RequestParameters` must be a JSON-encoded string, for
+  example `{"company":"CRONUS NO","ActionName":"List_Customers_PAG30009","RequestParameters":"{\"top\":3}"}`;
+  an object fails with only "An error occurred invoking 'bc_actions_invoke'."
+- **Configurations:** admins create named MCP configurations on BC page 8350
+  for more than the default read-only discovery. `GET
+  https://mcp.businesscentral.dynamics.com/$configurations` returns 400
+  `RequestDataInvalid` when none exists, so don't depend on it.
+- **BC API alternative** (same consent, no page-8350 setup): scope
+  `https://api.businesscentral.dynamics.com/Financials.ReadWrite.All`, for
+  example `GET https://api.businesscentral.dynamics.com/v2.0/<tenant>/<environment>/api/v2.0/companies`.
+- **Licensing:** no MCP-specific fee found; calls run as a licensed BC user.
+
+What remains: a connection target for BC (the environment name and tenant
+rather than a host URL), the per-connection headers or an API bridge,
+including `RequestParameters` string encoding, the BC Entra permission in the
+profile's scopes, and catalog/guide rows. Re-request consent from existing
+customers when the BC permission is added.

@@ -850,10 +850,13 @@ the PR.
   what changes on the wire and the possible quality, prompt-caching, behaviour
   or bug risks. Prompt-cache stability comes first: never change text an
   earlier request already sent.
-- Only the maintainer approves it. Agents must never submit the approving
-  review (or the `/approve-model-request` review on his own PRs) themselves,
-  including with his credentials or token, and must never work around the gate
-  by splitting, renaming or moving the change out of the guarded paths.
+- Only the maintainer approves it. He gives that approval in chat with his
+  agent, never on GitHub. The agent then records it: an approving review (or,
+  on a PR he authored, a review whose first line is `/approve-model-request`)
+  on the exact head he approved, saying when he approved it. An agent must
+  never record an approval he did not give for that head, and must never work
+  around the gate by splitting, renaming or moving the change out of the
+  guarded paths. A push after his approval needs his approval again.
 - Adding a new place that builds model requests? Add its path to the CODEOWNERS
   section in the same PR.
 

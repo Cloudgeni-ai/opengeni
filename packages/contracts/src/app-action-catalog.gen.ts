@@ -2835,6 +2835,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:read"
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/integrations/teams/reach",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+    "request": [],
+    "response": [],
+    "permission": "connections:read"
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/knowledge/entries",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries",
@@ -5256,6 +5264,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listBillingReceipts",
+    "method": "GET",
+    "path": "/v1/billing/receipts",
+    "request": [
+      "ListBillingReceiptsQuery"
+    ],
+    "query": [
+      "accountId",
+      "cursor",
+      "limit"
+    ],
+    "response": [
+      "ListBillingReceiptsResponse"
+    ]
+  },
+  {
     "id": "listBotTemplates",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/bot-templates",
@@ -7202,8 +7226,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
     "request": [],
     "response": [],
-    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
-    "permission": "sessions:create"
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
@@ -7211,8 +7234,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
     "request": [],
     "response": [],
-    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
-    "permission": "sessions:create"
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/learning/revisions",
@@ -7938,6 +7960,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [],
     "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
     "permission": "workspace:admin"
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/integrations/teams/reach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+    "request": [],
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",

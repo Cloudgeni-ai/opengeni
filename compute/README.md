@@ -45,10 +45,13 @@ an operator must set up and watch is in [docs/operations.md](docs/operations.md)
 ## What we optimize for
 
 1. **Nothing saved is lost.** Copies are deleted only after a newer one has
-   passed verification. A sandbox with a valid saved memory image wakes with
-   its programs intact. One without (it was running, or paused but not yet
-   saved, when its VM process died) boots fresh from its disk: programs are
-   lost, data the guest had written to its disk is kept.
+   passed verification. A sandbox is a computer: its files are what lasts,
+   and its programs last while its VM process does. One whose VM process
+   ended (the host needed its memory, or it died) boots fresh from its disk:
+   programs are lost, data the guest had written to its disk is kept. A
+   sandbox asked to keep its memory has it saved, and wakes from a valid
+   memory image with its programs intact
+   ([ADR 36](docs/adr/0036-idle-memory-stays-in-ram.md)).
    [ADR 10](docs/adr/0010-crash-safety-bar.md) states the exact fault model.
 2. **Idle is nearly free, use is fast.** Idle means no work is happening, not
    that a timer ran out. Memory goes to whoever needs it.
@@ -88,7 +91,11 @@ access and previews all ride on it.
 
 A sandbox has two separate properties: where its memory is (its level) and
 which saved copies exist (local disk, object storage). A sandbox can still be
-Paused in RAM while already having both copies, so ending it later is instant.
+Paused in RAM while its files are already in object storage. By default its
+memory is saved nowhere: the Saved, Archived and Remote levels then hold its
+files alone, ending its VM process writes nothing, and a wake from them is a
+boot (about 1.1 to 1.2 s observed). The wake times below for those levels
+are for a sandbox that keeps its memory (`keep_memory`).
 
 | Level | Where memory is | Host RAM | Wake, one sandbox (observed) |
 | --- | --- | --- | --- |
@@ -106,13 +113,15 @@ started as fire-and-forget), a stream into it carries traffic (one silent
 both ways for 10 minutes stops counting until its next byte, which wakes the
 sandbox), or one of its ports saw recent traffic. Idle means none of them. Holds should carry a lease the caller renews.
 
-Recommended rules (per sandbox, all optional): pause after 10 s idle; save to
-local disk after 30 s while staying paused in RAM; archive after 2 minutes;
-compress, then end the VM process, **only under memory pressure**, least
-recently used first ([ADR 4](docs/adr/0004-memory-pressure-evicts.md));
-delete the local copy after 3 idle days and the memory image after 30 (the
-files stay; the next wake boots fresh). Any use wakes the sandbox. `sleep`
-asks for a minimum depth once holds allow it; a later wake cancels it.
+Recommended rules (per sandbox, all optional): pause after 10 s idle and stay
+paused in RAM; archive the files after 2 minutes; compress, then end the VM
+process, **only under memory pressure**, least recently used first
+([ADR 4](docs/adr/0004-memory-pressure-evicts.md)); delete the local copy
+after 3 idle days. Memory is not saved: a sandbox whose VM process ended
+boots fresh from its files. With `keep_memory` it is saved to local disk
+after 30 s and archived with the files, and the memory image is deleted
+after 30 days. Any use wakes the sandbox. `sleep` asks for a minimum depth
+with the sandbox's programs once holds allow it; a later wake cancels it.
 
 ## Saving and waking
 

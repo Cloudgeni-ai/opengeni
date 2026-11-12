@@ -43,6 +43,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             reads_packs: true,
             sets_aside: true,
             run: None,
+            after_asked_stop: false,
             info: None,
         },
         restarts: 3,

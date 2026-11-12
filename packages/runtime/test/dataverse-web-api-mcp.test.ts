@@ -84,6 +84,9 @@ describe("Dataverse Web API bridge", () => {
       "dataverse_update_record",
       "dataverse_delete_record",
     ]);
+    for (const entry of tools) {
+      expect(entry.description).toEndWith(" Environment: contoso.crm17.dynamics.com.");
+    }
     expect(instance.bridge.destinations).toEqual([
       { origin: "https://contoso.crm17.dynamics.com", pathPrefix: "/api/data/v9.2/" },
     ]);

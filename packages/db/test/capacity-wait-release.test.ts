@@ -250,7 +250,7 @@ describe("long subscription capacity waits", () => {
     expect(payload.key).toBe(capacityWaitNotificationKey(chat.turn.id));
     expect(payload.title).toBe("Chat waiting for Codex capacity");
     expect(payload.body).toContain(
-      `until about ${chat.resetsAt.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+      `answered as soon as one has room, expected around ${chat.resetsAt.toISOString().slice(0, 16).replace("T", " ")} UTC`,
     );
     expect(payload.body).toContain("switch the chat to another model");
   });

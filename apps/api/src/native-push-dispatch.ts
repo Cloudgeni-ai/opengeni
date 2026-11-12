@@ -513,20 +513,30 @@ export function createFcmSender(input: {
   };
 }
 
+/** Whether this deployment has the credentials that push to a platform. */
+export function nativePushConfigured(
+  settings: Pick<Settings, "apnsKeyId" | "apnsTeamId" | "apnsPrivateKey" | "fcmServiceAccountJson">,
+  platform: "ios" | "android",
+): boolean {
+  return platform === "ios"
+    ? Boolean(settings.apnsKeyId && settings.apnsTeamId && settings.apnsPrivateKey)
+    : Boolean(settings.fcmServiceAccountJson);
+}
+
 /** The senders this deployment has credentials for. */
 export function configuredNativePushSenders(
   settings: Settings,
 ): Partial<Record<"ios" | "android", NativePushSender>> {
   const senders: Partial<Record<"ios" | "android", NativePushSender>> = {};
-  if (settings.apnsKeyId && settings.apnsTeamId && settings.apnsPrivateKey) {
+  if (nativePushConfigured(settings, "ios")) {
     senders.ios = createApnsSender({
-      keyId: settings.apnsKeyId,
-      teamId: settings.apnsTeamId,
-      privateKey: settings.apnsPrivateKey,
+      keyId: settings.apnsKeyId!,
+      teamId: settings.apnsTeamId!,
+      privateKey: settings.apnsPrivateKey!,
     });
   }
-  if (settings.fcmServiceAccountJson) {
-    senders.android = createFcmSender({ serviceAccountJson: settings.fcmServiceAccountJson });
+  if (nativePushConfigured(settings, "android")) {
+    senders.android = createFcmSender({ serviceAccountJson: settings.fcmServiceAccountJson! });
   }
   return senders;
 }

@@ -79,14 +79,18 @@ export function teamsRouteId(
   generation: string,
   subjectId: string,
   sessionWorkspaceId: string | null = null,
+  /** With workspace routing, each agent the person talks to keeps its own chat. */
+  agentId: string | null = null,
 ): string {
   return message.personal
     ? createHash("sha256")
         .update(
           JSON.stringify(
-            sessionWorkspaceId
-              ? [message.routeIdentity, generation, subjectId, sessionWorkspaceId]
-              : [message.routeIdentity, generation, subjectId],
+            agentId
+              ? [message.routeIdentity, generation, subjectId, sessionWorkspaceId, agentId]
+              : sessionWorkspaceId
+                ? [message.routeIdentity, generation, subjectId, sessionWorkspaceId]
+                : [message.routeIdentity, generation, subjectId],
           ),
         )
         .digest("hex")

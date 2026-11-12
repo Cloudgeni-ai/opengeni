@@ -13,7 +13,8 @@ use compute_core::{DiskPolicy, DiskSpace, HostPolicy, Level, Priority};
 use compute_engine::{CancellationToken, EngineError};
 use compute_host::fleet::{Admission, LeaseGate, boot_now};
 use compute_host::protocol::{
-    DiskStatus, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
+    DiskStatus, DurabilityName, ErrorCode, Id, LevelName, PriorityName, Reply, Request,
+    SandboxConfig, SleepConfig,
 };
 use compute_host::{
     Archive, Claimed, Directory, DiskGauge, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch,
@@ -23,7 +24,7 @@ use compute_protocol::fleet::{Answered, Ruling, Verdict};
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep};
 
-use super::{Delays, Lab, NEVER, PAUSE_SOON, id, vm_name};
+use super::{Delays, END_QUICKLY, Lab, NEVER, PAUSE_SOON, id, vm_name};
 
 fn config(sleep: SleepConfig) -> SandboxConfig {
     SandboxConfig {
@@ -217,6 +218,136 @@ async fn a_running_sandbox_is_handed_off_when_asked_to_go_awake() {
     assert_eq!(hand_off_awake(&one, sandbox, 1).await, Reply::Done);
     assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
     assert_eq!(two.run(sandbox, &["get"]).await, ["kept"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// Pauses quickly; its VM process ends unsaved only when something asks
+/// it to sleep deeper, as a hand-off does.
+const ENDS_WHEN_ASKED: SleepConfig = SleepConfig {
+    drop_after_ms: None,
+    ..END_QUICKLY
+};
+
+/// An idle sandbox whose memory is not kept leaves a host with its files
+/// alone: its VM process is ended with nothing of its memory written, and
+/// it boots on the host that adopts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_sandbox_whose_memory_is_not_kept_is_handed_off_with_its_files_alone() {
+    let (one, two, shelf) = hosts().await;
+    let sandbox = id(41);
+    one.create(sandbox, ENDS_WHEN_ASKED).await;
+    one.run(sandbox, &["set gone", "write on-disk"]).await;
+    one.wait_level(sandbox, LevelName::Paused).await;
+
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    assert!(shelf.join(sandbox.to_string()).exists());
+    let [full, diff] = &one.world.snapshots;
+    assert_eq!(
+        (full.load(Ordering::Relaxed), diff.load(Ordering::Relaxed)),
+        (0, 0),
+        "nothing of its memory was written"
+    );
+
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    let adopted = two.current(sandbox).await;
+    assert_eq!(adopted.level, LevelName::Remote);
+    assert!(!adopted.memory_saved, "the archive holds its files alone");
+    assert_eq!(
+        two.run(sandbox, &["get", "disk"]).await,
+        ["", "on-disk"],
+        "its files moved with it, and it booted"
+    );
+    assert_eq!(two.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(two.world.restores.load(Ordering::Relaxed), 0);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// One in use leaves with its programs whatever its rules say: they wake
+/// on the host it goes to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_in_use_whose_memory_is_not_kept_is_handed_off_with_its_programs() {
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(42);
+    let ends = SleepConfig {
+        pause_after_ms: Some(3_600_000),
+        save_after_ms: Some(3_600_000),
+        ..ENDS_WHEN_ASKED
+    };
+    one.create(sandbox, ends).await;
+    one.run(sandbox, &["set kept", "write on-disk"]).await;
+    assert_eq!(hand_off_awake(&one, sandbox, 1).await, Reply::Done);
+
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert!(
+        two.current(sandbox).await.memory_saved,
+        "it was saved with its memory"
+    );
+    assert_eq!(
+        two.run(sandbox, &["get", "disk"]).await,
+        ["kept", "on-disk"],
+        "programs and files moved with it"
+    );
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A paused sandbox whose memory is not kept is archived as it stands:
+/// its files go to the store with nothing of its memory written, its VM
+/// stays paused in memory, and a wake resumes its programs. A restarted
+/// agent takes it back with the store's copy of its files still vouched
+/// for, and handed off it boots elsewhere with its files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_sandbox_whose_memory_is_not_kept_is_archived_with_its_files_alone() {
+    let (one, two, shelf) = hosts().await;
+    let sandbox = id(43);
+    let rules = SleepConfig {
+        archive_after_ms: Some(90),
+        ..ENDS_WHEN_ASKED
+    };
+    one.create(sandbox, rules).await;
+    one.run(sandbox, &["set kept", "write on-disk"]).await;
+    let archived = |status: &compute_host::protocol::HostStatus| {
+        let view = Lab::sandbox(status, sandbox);
+        view.level == LevelName::Paused
+            && view.durability == DurabilityName::Remote
+            && view.step.is_none()
+    };
+    one.wait_until("its files to be archived", archived).await;
+    assert!(shelf.join(sandbox.to_string()).exists());
+    assert!(!one.image(sandbox), "no memory image was made");
+
+    assert_eq!(
+        one.run(sandbox, &["get"]).await,
+        ["kept"],
+        "its programs ran on"
+    );
+    assert_eq!(one.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(one.world.restores.load(Ordering::Relaxed), 0);
+    one.wait_until("its files to be archived again", archived)
+        .await;
+
+    let (root, world) = one.stop().await;
+    let one = Lab::start_stored(root, world, Directory::new(&shelf)).await;
+    let view = one.current(sandbox).await;
+    assert_eq!(
+        (view.level, view.durability),
+        (LevelName::Paused, DurabilityName::Remote),
+        "taken back paused, its files still in the store"
+    );
+
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    let [full, diff] = &one.world.snapshots;
+    assert_eq!(
+        (full.load(Ordering::Relaxed), diff.load(Ordering::Relaxed)),
+        (0, 0),
+        "nothing of its memory was ever written"
+    );
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    let adopted = two.current(sandbox).await;
+    assert!(!adopted.memory_saved, "the archive holds its files alone");
+    assert_eq!(two.run(sandbox, &["get", "disk"]).await, ["", "on-disk"]);
     one.assert_clean();
     two.assert_clean();
 }

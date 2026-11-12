@@ -791,6 +791,7 @@ async fn a_claimed_sandbox_is_idle_from_its_claim_across_a_restart() {
     const SAVE_SOON: SleepConfig = SleepConfig {
         pause_after_ms: Some(100),
         save_after_ms: Some(4_000),
+        keep_memory: true,
         ..NEVER
     };
     let lab = ready_lab(Lab::root(), Arc::default(), 1).await;

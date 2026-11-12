@@ -246,6 +246,19 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/v1/billing/receipts",
+      "sdk": [
+        "OpenGeniClient.listBillingReceipts"
+      ],
+      "request": [
+        "ListBillingReceiptsQuery"
+      ],
+      "response": [
+        "ListBillingReceiptsResponse"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/billing/subscription/cancel",
       "sdk": [
@@ -6142,6 +6155,24 @@
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
       "sdk": [
         "teamsApi"
       ],
@@ -12966,6 +12997,25 @@
         "$.seatLimit": "integer! null",
         "$.seatsUsed": "integer!",
         "$.status": "string!"
+      }
+    },
+    "BillingReceipt": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.amount": "integer!",
+        "$.amountRefunded": "integer!",
+        "$.createdAt": "string!",
+        "$.currency": "string!",
+        "$.description": "string!",
+        "$.id": "string!",
+        "$.invoicePdfUrl": "string! null",
+        "$.invoiceUrl": "string! null",
+        "$.kind": "enum!=[\"\\\"auto_top_up\\\"\",\"\\\"credits\\\"\",\"\\\"other\\\"\",\"\\\"plan\\\"\"]",
+        "$.receiptUrl": "string! null",
+        "$.refunded": "boolean!"
       }
     },
     "BillingSubscriptionCatalog": {
@@ -21942,6 +21992,28 @@
         "$": "object",
         "$.notifications": "array!",
         "$.notifications[]": "ref(BillingCreditNotification)"
+      }
+    },
+    "ListBillingReceiptsQuery": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string?",
+        "$.cursor": "string?",
+        "$.limit": "integer?"
+      }
+    },
+    "ListBillingReceiptsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.nextCursor": "string! null",
+        "$.receipts": "array!",
+        "$.receipts[]": "ref(BillingReceipt)"
       }
     },
     "ListBotTemplatesResponse": {
@@ -36030,6 +36102,7 @@
       "BillingEntitlementsResponse": "type",
       "BillingMode": "type",
       "BillingPlanBalance": "type",
+      "BillingReceipt": "type",
       "BillingSubscriptionCatalog": "type",
       "BillingSubscriptionChange": "type",
       "BillingSummary": "type",
@@ -36720,6 +36793,7 @@
       "isApprovalRequiresAccountOwnerError": "value",
       "isConnectedMachineOutcomeUnknownOutput": "value",
       "isMaintenanceError": "value",
+      "isNativePushUnavailableError": "value",
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
@@ -36781,6 +36855,8 @@
       "ListApiKeysResponse": "type",
       "ListAutomationTemplatesResponse": "type",
       "ListBillingCreditNotificationsResponse": "type",
+      "ListBillingReceiptsQuery": "type",
+      "ListBillingReceiptsResponse": "type",
       "ListBotTemplatesResponse": "type",
       "listCompanyBrainContextReceipts": "value",
       "listCompanyBrainKnowledgeProposals": "value",
@@ -36916,6 +36992,7 @@
       "MoveSessionQueueItemRequest": "type",
       "MoveVaultItemRequest": "type",
       "MutateIntegrationFacetRequest": "type",
+      "NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE": "value",
       "NativeAppAuthorizeInput": "type",
       "NativeAppPlatform": "type",
       "NativeAppToken": "type",
@@ -38972,6 +39049,7 @@
       "createMemoryRecordingChunkStore": "value",
       "defaultSystemAudioSource": "value",
       "desktopSystemAudioSource": "value",
+      "discardLocalRecordingsOf": "value",
       "displaySystemAudioSource": "value",
       "LiveFetch": "type",
       "LiveMediaTrack": "type",
@@ -38985,6 +39063,7 @@
       "LiveTranscriptTransport": "type",
       "LiveWebSocket": "type",
       "LiveWebSocketConstructor": "type",
+      "localRecordingsOf": "value",
       "OpenGeniRecordingsClient": "value",
       "OpenGeniRecordingsTransport": "type",
       "preferredRecordingMimeType": "value",
@@ -39185,7 +39264,8 @@
       "TeamsInstallOptions": "type",
       "TeamsLinkSignInStart": "type",
       "TeamsMicrosoftSignInResult": "type",
-      "TeamsMicrosoftSignInStart": "type"
+      "TeamsMicrosoftSignInStart": "type",
+      "TeamsReach": "type"
     },
     "@opengeni/sdk/tenant-workspaces": {
       "createWorkspaceIdResolver": "value",
@@ -41093,6 +41173,11 @@
       "MeetingRecorderStore": "type",
       "MeetingRecorderStoreProvider": "value",
       "MeetingStartRequest": "type",
+      "prepareRecordingsForSignOut": "value",
+      "recordingOwnerKey": "value",
+      "setSignOutRecordingsPrompt": "value",
+      "SignOutRecordingsChoice": "type",
+      "SignOutRecordingsPrompt": "type",
       "useMeetingRecorder": "value",
       "useMeetingRecorderLostTrack": "value",
       "useMeetingRecorderState": "value",
@@ -41274,6 +41359,7 @@
       "ImportRecordingAudioInput": "type",
       "interleaveUnrecordedMarks": "value",
       "languageName": "value",
+      "LiveRecordingCapture": "type",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
       "meetingHereStatus": "value",
@@ -41284,8 +41370,14 @@
       "meetingTitle": "value",
       "meetingUploadFailure": "value",
       "ownerLiveLaneName": "value",
+      "prepareRecordingsForSignOut": "value",
+      "recordingOwnerKey": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
+      "registerLiveRecordingCapture": "value",
+      "setSignOutRecordingsPrompt": "value",
+      "SignOutRecordingsChoice": "type",
+      "SignOutRecordingsPrompt": "type",
       "speakerColorSlots": "value",
       "speakerDisplayName": "value",
       "speakerIsNamed": "value",
@@ -43447,6 +43539,7 @@
       "listAutomationTemplates",
       "listAvailableOpenGeniSlackBots",
       "listBillingCreditNotifications",
+      "listBillingReceipts",
       "listBotTemplates",
       "listBrowserDiagnostics",
       "listBrowserDownloads",
@@ -44270,6 +44363,7 @@
       "listAutomationTemplates",
       "listAvailableOpenGeniSlackBots",
       "listBillingCreditNotifications",
+      "listBillingReceipts",
       "listBotTemplates",
       "listBrowserDiagnostics",
       "listBrowserDownloads",
@@ -45118,6 +45212,7 @@
       "listAutomationTemplates",
       "listAvailableOpenGeniSlackBots",
       "listBillingCreditNotifications",
+      "listBillingReceipts",
       "listBotTemplates",
       "listBrowserDiagnostics",
       "listBrowserDownloads",
@@ -47351,6 +47446,9 @@
       ],
       "listBillingCreditNotifications": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingCreditNotificationsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listBillingReceipts": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsQuery\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listBotTemplates": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50129,6 +50227,9 @@
       "listBillingCreditNotifications": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingCreditNotificationsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "listBillingReceipts": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsQuery\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "listBotTemplates": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -52645,6 +52746,9 @@
       ],
       "listBillingCreditNotifications": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingCreditNotificationsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listBillingReceipts": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsQuery\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listBotTemplates": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -55388,6 +55492,9 @@
       "listBillingCreditNotifications": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingCreditNotificationsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "listBillingReceipts": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsQuery\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "listBotTemplates": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -57932,6 +58039,9 @@
       ],
       "listBillingCreditNotifications": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingCreditNotificationsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listBillingReceipts": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsQuery\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListBillingReceiptsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listBotTemplates": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

@@ -269,7 +269,13 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
   async listTools(): Promise<Awaited<ReturnType<MCPServer["listTools"]>>> {
     // Surfaces a missing or expired connection before the model sees the tools.
     await this.resolve(`${this.base}WhoAmI`, undefined, false);
-    return DATAVERSE_WEB_API_TOOLS.map((entry) => structuredClone(entry));
+    // Naming the environment lets the agent tell connections apart and notice
+    // when a request is about an environment that isn't connected yet.
+    const environment = new URL(this.base).hostname;
+    return DATAVERSE_WEB_API_TOOLS.map((entry) => ({
+      ...structuredClone(entry),
+      description: `${entry.description} Environment: ${environment}.`,
+    }));
   }
 
   async callTool(

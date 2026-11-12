@@ -322,6 +322,9 @@ WORKDIR /src
 COPY . .
 COPY --from=node-runtime /out/node /usr/local/bin/node
 COPY --from=artifact-runtime-inputs / /src/${OPENGENI_ARTIFACT_RUNTIME_BUNDLE}/
+# CI passes true for builds that downloaded the exact inputs, so missing inputs
+# fail the build there instead of producing an image without the runtime.
+ARG OPENGENI_REQUIRE_ARTIFACT_RUNTIME=false
 RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
     set -eux; \
     case "$TARGETARCH" in \
@@ -344,6 +347,10 @@ RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},ta
         --installation-root "$(dirname "$input")" \
         --output /opt/opengeni/artifact-runtime; \
     else \
+      if [ "$OPENGENI_REQUIRE_ARTIFACT_RUNTIME" = "true" ]; then \
+        echo "artifact runtime inputs are required but $input is missing" >&2; \
+        exit 1; \
+      fi; \
       mkdir -p /opt/opengeni/artifact-runtime; \
       touch /opt/opengeni/artifact-runtime/.unavailable; \
     fi

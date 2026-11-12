@@ -25,106 +25,106 @@ import { MODULAR_PARITY_CASES, PARITY_SETTINGS } from "./modular-parity-cases";
  * because they leave tool availability unknown.
  */
 const LOCKED: Record<string, string> = {
-  "all/none": "31269:50f9d7e3108e8ff828e8b706d6853dec5bd725c443280cb18e022999a891b5e3",
-  "all/docker": "36546:fce8a0959a956586530f9e0c9de9960f46408d890e88836d5676268ada64a8de",
-  "all/selfhosted": "38220:b1762a9f53ca507edef0f7fb7a04622b4cbb5b1869205140974b24fa5c8a3220",
-  "all/markdown/none": "30295:a81e62a2dd07671bfde86239d48e5e9cb5be60c9ba8da4b652cbbb0f6e522953",
-  "all/markdown/docker": "34359:9f7d9cf7f697fc99f3b4da1892cc148d12589a30445632515a91370d5bcaa5d8",
+  "all/none": "31275:2cbec651ff7c537370d5640d5a5a1b34352394423664d546b4bf838826c887c1",
+  "all/docker": "36552:a5a4ee9030be81ac4182e7f855426a13c458da7eb4a90545a5df56e906c77cc7",
+  "all/selfhosted": "38226:9f518eab5289bfc4212642a61fe5ac88f047d334b040760ed5eb36cdd7403eaa",
+  "all/markdown/none": "30301:ef1a122a589054cea1e5ad32550c62d1190ce8beea62d66e8820602cdb23fcaf",
+  "all/markdown/docker": "34365:864771f956e82250581216164760025ff6064c9b0e38f5ff1b63e46c1141856c",
   "all/markdown/selfhosted":
-    "35886:74101391a03477cfa0edd29fe3856913ff588239cba51df5caef55712c957bb5",
-  "all/unattended/none": "31676:7ba8da90c8084ff91bea6400c8636ddf4fb15fa9f36649067ecc07e4defecb27",
-  "all/unattended/docker": "36953:8da818674cb803384ecf8d4d585f73c9f97e37dd88046275ff392bdb7a075c75",
+    "35892:fcd471eb0388f197240e91346cbf1a0ce6abb0be368063da2442ea8409468378",
+  "all/unattended/none": "31682:5829713234c007da04a60d290e5a65f98d1106f60b321dfc5b5dd57824cc4064",
+  "all/unattended/docker": "36959:55f681076e2291e505bf4aa4f19ae7d23f28242a8cf45535c89ab514dcc5cbd6",
   "all/unattended/selfhosted":
-    "38627:d790669dfd83f1730d7332eed9f14b4de39c40f07428c34fa0f0957491fa278d",
+    "38633:32b1959c5d456eb4aae41b9e716fd4a0203dc1d75cf156d0f7d26063565458a4",
   "all/secret-references/none":
-    "32825:86d9575056dbc2c536d9f11690096d4e011c7f7749645cac4b4d9a010dbb844e",
+    "32831:1f01f982d18bd1b70000db49e565584c426ab132e0fbbe2386404116b5194f5e",
   "all/secret-references/docker":
-    "38102:d862de04df1b1723b3e97b781468866e4fad1cf4d8dd4e7d557dbfe22476a821",
+    "38108:c8649fcd414c3f64fb48e4734686a1d6df91899caf588ecf5b01cbb767429621",
   "all/secret-references/selfhosted":
-    "39776:d96021492efab8ae09f53573782c9a2d3be4c790e367c021a52d2cf08b659973",
-  "all/skills-read/none": "31269:50f9d7e3108e8ff828e8b706d6853dec5bd725c443280cb18e022999a891b5e3",
+    "39782:adecc16048c59d37e1dcb6bdb9c17690b007afdbd116a6854ffbf089bbe875fa",
+  "all/skills-read/none": "31275:2cbec651ff7c537370d5640d5a5a1b34352394423664d546b4bf838826c887c1",
   "all/skills-read/docker":
-    "36546:fce8a0959a956586530f9e0c9de9960f46408d890e88836d5676268ada64a8de",
+    "36552:a5a4ee9030be81ac4182e7f855426a13c458da7eb4a90545a5df56e906c77cc7",
   "all/skills-read/selfhosted":
-    "38220:b1762a9f53ca507edef0f7fb7a04622b4cbb5b1869205140974b24fa5c8a3220",
-  "all/identity/none": "30989:1e24d14ba99e293f5359bed9dce0175be025a481636459762d36fbc590dfa759",
-  "all/identity/docker": "36266:a2f75fae91ba89227a78f1ca3e37c799bd263d0adff92fb13efaa8c849b2a1a9",
+    "38226:9f518eab5289bfc4212642a61fe5ac88f047d334b040760ed5eb36cdd7403eaa",
+  "all/identity/none": "30995:1512564578a84ff446a9d7773762d8aaa2e599b99f6231bb6f1ba91c03efb42a",
+  "all/identity/docker": "36272:d09fa04e37ad2eed9eb32437cb16336c003223aa784746d310fd274cf6bfe984",
   "all/identity/selfhosted":
-    "37940:83d26ed82a2d0f31ee593ea9b1a57dedb248c70d6e1e84735497296a344901c3",
+    "37946:5aba127601a18f8e9df3c82b8e6e1e6ee93d00164150973b83ecc2b3569df9b9",
   "all-without-humanInput/none":
-    "31115:ed411dfc59d00310cd0dc214f92e6b6f1eefa7130f3d2690c3be70c9e32432ff",
+    "31121:b781d0b3b69c85aa0b511a5cbf29261394fe2453a46170ef0b5869e3d739e70e",
   "all-without-humanInput/docker":
-    "36392:175b35f5724332600ebd1d4d6bba781deeae7b0a80ade30f0d77c2edf040fb15",
+    "36398:df63ac5fafd1796346d137ee68e5a6d84137b77d8dc3e620ee938fb9c1c18961",
   "all-without-humanInput/selfhosted":
-    "38066:2414d2ca2a077a4740966ca236f92bb6950f03eb9268d49c1f380dd51b49657d",
+    "38072:d3a033de76deaf2652930c550bf20b9a0ba028ceaf7aa55eb916cf4930d99ef4",
   "all-without-notifications/none":
-    "31269:50f9d7e3108e8ff828e8b706d6853dec5bd725c443280cb18e022999a891b5e3",
+    "31275:2cbec651ff7c537370d5640d5a5a1b34352394423664d546b4bf838826c887c1",
   "all-without-notifications/docker":
-    "36546:fce8a0959a956586530f9e0c9de9960f46408d890e88836d5676268ada64a8de",
+    "36552:a5a4ee9030be81ac4182e7f855426a13c458da7eb4a90545a5df56e906c77cc7",
   "all-without-notifications/selfhosted":
-    "38220:b1762a9f53ca507edef0f7fb7a04622b4cbb5b1869205140974b24fa5c8a3220",
+    "38226:9f518eab5289bfc4212642a61fe5ac88f047d334b040760ed5eb36cdd7403eaa",
   "all-without-media/none":
-    "30372:cc8a958da02392c02448f801b93211db551e4d6ab2adba5c3374f7ef83d34466",
+    "30378:99cc397bcafd47f8942ea59b40d8bcc995a01530431e103a5629774054023596",
   "all-without-media/docker":
-    "35627:735632344d00048fd780408a591664d7bc87cb012896944c75e19789eb039793",
+    "35633:18caa1319711c2676d675dd24b814c816ae2ad4fc3954a8c839daed730fda074",
   "all-without-media/selfhosted":
-    "37301:aa8f3c87bfc9c852e20d8c99c9efa5b6a94d9d147090bac835a881af4e81d3a3",
+    "37307:1e4c7fd6e020d560424aaad3b092a350c5f9d0959e149c21b16b19b5f82fa499",
   "all-without-subagents/none":
-    "24963:c44689b61f17acb9935f3c403c8891e2b4fb95dbde78aea37e0b0793e38b6fdb",
+    "24969:b29d052169ae58466673c87675511728001167adb53d740e7a2b43596d9f94b3",
   "all-without-subagents/docker":
-    "30097:4a1c9b456de1810dfaa1e0f85acf8cb6da442d89b21830f57cd70a39b649afdd",
+    "30103:cdb67ecf788821a2a0f68dbcd372d13de78cc440781f29c9b4291963fa1471c1",
   "all-without-subagents/selfhosted":
-    "31771:1c38071f91b1391c5b7ba5fa5df9dc223ce87ad950cc88105fbafccc9b5ca73d",
+    "31777:28ab3f3d1d156e8ae59c8c0488ad07904182527e56f7033a9209f9993125d3ed",
   "all-without-schedules/none":
-    "31269:50f9d7e3108e8ff828e8b706d6853dec5bd725c443280cb18e022999a891b5e3",
+    "31275:2cbec651ff7c537370d5640d5a5a1b34352394423664d546b4bf838826c887c1",
   "all-without-schedules/docker":
-    "36546:fce8a0959a956586530f9e0c9de9960f46408d890e88836d5676268ada64a8de",
+    "36552:a5a4ee9030be81ac4182e7f855426a13c458da7eb4a90545a5df56e906c77cc7",
   "all-without-schedules/selfhosted":
-    "38220:b1762a9f53ca507edef0f7fb7a04622b4cbb5b1869205140974b24fa5c8a3220",
+    "38226:9f518eab5289bfc4212642a61fe5ac88f047d334b040760ed5eb36cdd7403eaa",
   "all-without-browser/none":
-    "31269:50f9d7e3108e8ff828e8b706d6853dec5bd725c443280cb18e022999a891b5e3",
+    "31275:2cbec651ff7c537370d5640d5a5a1b34352394423664d546b4bf838826c887c1",
   "all-without-browser/docker":
-    "36546:fce8a0959a956586530f9e0c9de9960f46408d890e88836d5676268ada64a8de",
+    "36552:a5a4ee9030be81ac4182e7f855426a13c458da7eb4a90545a5df56e906c77cc7",
   "all-without-browser/selfhosted":
-    "38220:b1762a9f53ca507edef0f7fb7a04622b4cbb5b1869205140974b24fa5c8a3220",
+    "38226:9f518eab5289bfc4212642a61fe5ac88f047d334b040760ed5eb36cdd7403eaa",
   "all-without-secrets/none":
-    "31115:ed411dfc59d00310cd0dc214f92e6b6f1eefa7130f3d2690c3be70c9e32432ff",
+    "31121:b781d0b3b69c85aa0b511a5cbf29261394fe2453a46170ef0b5869e3d739e70e",
   "all-without-secrets/docker":
-    "36392:175b35f5724332600ebd1d4d6bba781deeae7b0a80ade30f0d77c2edf040fb15",
+    "36398:df63ac5fafd1796346d137ee68e5a6d84137b77d8dc3e620ee938fb9c1c18961",
   "all-without-secrets/selfhosted":
-    "38066:2414d2ca2a077a4740966ca236f92bb6950f03eb9268d49c1f380dd51b49657d",
+    "38072:d3a033de76deaf2652930c550bf20b9a0ba028ceaf7aa55eb916cf4930d99ef4",
   "all-without-knowledge/none":
-    "28856:f7970c3c6a258d51cd1c6bd61facee75580b737f63bb5c5a2c59bbdb4085a1b1",
+    "28862:a90d63462af6df328c19b67fb04c932f1042eba9b7e8891dc351b336e1579007",
   "all-without-knowledge/docker":
-    "34133:03d680e43d2198647a740386c49adb819787d7eefb19e075fb5aabab62b494b9",
+    "34139:f85e03833819085d5240a8fb441cef2eb896d17fe0dc36e5806d487f6dd6c492",
   "all-without-knowledge/selfhosted":
-    "35807:ae9a1b99a6ac2d358381c3bca1ac19246a1825b23ff4b27f242ee3128f7a6968",
+    "35813:057dfc561d23202bc20871a1b4bb737c39d4536ab7cb037b50928a0c81d090f7",
   "all-without-workspaceFiles/none":
-    "31269:50f9d7e3108e8ff828e8b706d6853dec5bd725c443280cb18e022999a891b5e3",
+    "31275:2cbec651ff7c537370d5640d5a5a1b34352394423664d546b4bf838826c887c1",
   "all-without-workspaceFiles/docker":
-    "36546:fce8a0959a956586530f9e0c9de9960f46408d890e88836d5676268ada64a8de",
+    "36552:a5a4ee9030be81ac4182e7f855426a13c458da7eb4a90545a5df56e906c77cc7",
   "all-without-workspaceFiles/selfhosted":
-    "38220:b1762a9f53ca507edef0f7fb7a04622b4cbb5b1869205140974b24fa5c8a3220",
+    "38226:9f518eab5289bfc4212642a61fe5ac88f047d334b040760ed5eb36cdd7403eaa",
   "all-without-workspaceConnectors/none":
-    "31269:50f9d7e3108e8ff828e8b706d6853dec5bd725c443280cb18e022999a891b5e3",
+    "31275:2cbec651ff7c537370d5640d5a5a1b34352394423664d546b4bf838826c887c1",
   "all-without-workspaceConnectors/docker":
-    "36546:fce8a0959a956586530f9e0c9de9960f46408d890e88836d5676268ada64a8de",
+    "36552:a5a4ee9030be81ac4182e7f855426a13c458da7eb4a90545a5df56e906c77cc7",
   "all-without-workspaceConnectors/selfhosted":
-    "38220:b1762a9f53ca507edef0f7fb7a04622b4cbb5b1869205140974b24fa5c8a3220",
+    "38226:9f518eab5289bfc4212642a61fe5ac88f047d334b040760ed5eb36cdd7403eaa",
   "all-without-workspaceAdmin/none":
-    "29950:981e5d294e055683fdd8ca47e9bb1e581803c4f9020c7b8a05d4aaf10de7ccfd",
+    "29956:f654fda731a148751a145d6784d0ae26bc3b44fe28d36f3b1a1075a10240b294",
   "all-without-workspaceAdmin/docker":
-    "35227:bb8577c57288f31f58b6da38c1f849148706046614db70703578ec659723c449",
+    "35233:e4884088d1295b1c1bbb5cf749a7ab83a67aaf492d39c61fd623b63d1d98a769",
   "all-without-workspaceAdmin/selfhosted":
-    "36901:b61b633744060d5d7cd69cb6a0ea7c9982fe2aa99606fbadbf36eec78ceef385",
+    "36907:d0feb84f1f2c2c1c637bd4ed8b7da082a1853d84f6df2a3a4beabc1823fd70ae",
   "none-with-features/docker":
-    "27700:c136e10bef158fbf5b3dc531cff44445f602879b36a62d7ccf363b2e9d8c9d7d",
+    "27706:9c0ff332e9ecca408703a1ff66b91e09ea8849d19ee01e603390ba9d1f6729f7",
   "none-with-features/selfhosted":
-    "29374:857545b1a546fb0add13139cb9668491d28d6b840eb8040691056b2da78ebfd8",
+    "29380:c295a3a86fcbd4f7644d18a0b599ebd1f94083f859332cb9d16ad95e08989ee6",
   "none-with-features-and-workspace/none":
-    "22588:3a0cc7ebb9b219be11772f499bf2d75618852330849a9a29a74b4a1dd898dd19",
+    "22594:243a1445b1a2d27a58d50c2c59b20cdf0caea322602a5136adf1404cc0b7c1fd",
   "none-with-features-manage/none":
-    "21340:59b879e4d52245bf8e5fa64dab58dd10c79992cc5fb31e4a68089e3c42e010bd",
+    "21346:8340de0bed2f270f9d9a5de05262590928d01734f46787c3f275ce0cf3a9fa72",
 };
 
 function digest(options: BuildAgentOptions): string {
@@ -170,7 +170,10 @@ describe("an absent feature only omits its own text", () => {
     extra: BuildAgentOptions = {},
   ): BuildAgentOptions => ({
     ...base,
-    agentConfig: { ...config, capabilities: { ...config.capabilities, ...capabilities } },
+    agentConfig: {
+      ...config,
+      capabilities: { ...config.capabilities, ...capabilities },
+    },
     ...extra,
   });
   // Each variant drops one feature; `gone` is text that must leave with it.
@@ -187,7 +190,11 @@ describe("an absent feature only omits its own text", () => {
       gone: ["Answer in chat by default", "documents, Sites, and visuals"],
       pure: false,
     },
-    learning: { options: without({ knowledge: false }), gone: ["learning"], pure: true },
+    learning: {
+      options: without({ knowledge: false }),
+      gone: ["learning"],
+      pure: true,
+    },
     privacyFacts: {
       options: without({ privacyFacts: false }),
       gone: ["only from `privacy_facts`"],
@@ -196,7 +203,12 @@ describe("an absent feature only omits its own text", () => {
     toolSearch: {
       options: without(
         {},
-        { agentPromptToolAvailability: { unavailable: [], toolSearchAbsent: true } },
+        {
+          agentPromptToolAvailability: {
+            unavailable: [],
+            toolSearchAbsent: true,
+          },
+        },
       ),
       gone: ["## Tool discovery"],
       pure: true,
@@ -235,7 +247,10 @@ describe("an absent feature only omits its own text", () => {
         agentConfig: { ...config, capabilities: noneAgentCapabilities() },
         activeSandboxBackend: "none",
         skillCatalog: [],
-        agentPromptToolAvailability: { unavailable: ["wait_for_input"], toolSearchAbsent: true },
+        agentPromptToolAvailability: {
+          unavailable: ["wait_for_input"],
+          toolSearchAbsent: true,
+        },
       },
       gone: [
         "## Tool discovery",
@@ -279,7 +294,11 @@ describe("the setup-card sentence follows capabilities that show a card", () => 
       ...base,
       agentConfig: {
         ...config,
-        capabilities: { ...config.capabilities, workspaceConnectors: false, ...capabilities },
+        capabilities: {
+          ...config.capabilities,
+          workspaceConnectors: false,
+          ...capabilities,
+        },
       },
     }).composed;
   test("a secret question shows one only with the question tool", () => {

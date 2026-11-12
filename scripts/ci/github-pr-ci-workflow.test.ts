@@ -34,7 +34,7 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
   expect(
     pr.jobs.plan.steps.some((s: any) => /github-pr-ci.ts (priority|admit-fast)/.test(s.run ?? "")),
   ).toBe(false);
-  expect(Object.keys(pr.jobs).sort()).toEqual(["fast", "plan", "ready"]);
+  expect(Object.keys(pr.jobs).sort()).toEqual(["browser", "e2e", "fast", "plan", "ready"]);
   expect(pr.jobs.fast.needs).toBe("plan");
   expect(pr.jobs.fast["timeout-minutes"]).toBe(15);
   expect(pr.jobs.fast.strategy).toBeUndefined();
@@ -68,10 +68,15 @@ test("required aggregate covers docs and every selected job at exact head", () =
   const { jobs } = workflow("pr-ci");
   expect(jobs.fast.steps.some((s: any) => s.run === "bun run lint")).toBe(true);
   expect(jobs.ready.name).toBe("PR CI");
-  expect(jobs.ready.needs).toEqual(["plan", "fast"]);
+  expect(jobs.ready.needs).toEqual(["plan", "fast", "e2e", "browser"]);
   expect(jobs.ready.if).toBe("${{ always() }}");
   const aggregate = jobs.ready.steps[0].run;
-  for (const required of ['test "$PLAN" = success', 'test "$FAST" = success'])
+  for (const required of [
+    'test "$PLAN" = success',
+    'test "$FAST" = success',
+    'if [ "$E2E_COUNT" = 0 ]; then test "$E2E" = skipped; else test "$E2E" = success; fi',
+    'if [ "$BROWSER_LANE_COUNT" = 0 ]; then test "$BROWSER" = skipped; else test "$BROWSER" = success; fi',
+  ])
     expect(aggregate).toContain(required);
   expect(jobs.fast.if).toBeUndefined();
   const commands = jobs.fast.steps.map((s: any) => s.run ?? "").join("\n");
@@ -148,6 +153,45 @@ test("PR fast checks build the production web bundle whenever the plan selects i
   expect(steps.indexOf(pr)).toBeLessThan(
     steps.findIndex((step) => step.name === "Test every selected unit file"),
   );
+});
+
+test("PR runs Batch's own E2E and browser jobs for its impacted subset", () => {
+  const pr = workflow("pr-ci");
+  const ci = workflow("ci");
+  const plan = pr.jobs.plan.steps.find((step: any) => step.id === "plan").run as string;
+  for (const output of ["e2e_count", "e2e_matrix", "browser_lane_count", "browser_lane_matrix"]) {
+    expect(pr.jobs.plan.outputs[output]).toBe(`\${{ steps.plan.outputs.${output} }}`);
+    expect(plan.indexOf("pr-fast-plan.ts")).toBeLessThan(plan.indexOf(`${output}=`));
+  }
+  expect(plan).toContain(
+    'cp "$RUNNER_TEMP/pr-plan.json" "$RUNNER_TEMP/pr-lane-plan/impact-plan.json"',
+  );
+  const upload = pr.jobs.plan.steps.find((s: any) => s.with?.name === "pr-lane-plan");
+  expect(upload.with.path).toBe("${{ runner.temp }}/pr-lane-plan/impact-plan.json");
+  const lanes = {
+    e2e: ["ci-e2e-shards.yml", "e2e-shards", "e2e_count"],
+    browser: ["ci-browser-acceptance.yml", "browser-acceptance", "browser_lane_count"],
+  } as const;
+  for (const [job, [file, batchJob, count]] of Object.entries(lanes)) {
+    const uses = `./.github/workflows/${file}`;
+    // The PR and Batch call the same reusable job, never a copy.
+    expect(pr.jobs[job].uses).toBe(uses);
+    expect(ci.jobs[batchJob].uses).toBe(uses);
+    expect(pr.jobs[job].needs).toBe("plan");
+    expect(pr.jobs[job].if).toBe(`\${{ needs.plan.outputs.${count} != '0' }}`);
+    expect(pr.jobs[job].with.ref).toBe("${{ needs.plan.outputs.head }}");
+    const called = workflow(file.replace(/\.yml$/, ""));
+    expect(Object.keys(called.on)).toEqual(["workflow_call"]);
+    expect(Object.keys(called.jobs)).toEqual([batchJob]);
+    expect(called.jobs[batchJob].strategy.matrix.include).toBe("${{ fromJSON(inputs.matrix) }}");
+    const checkout = called.jobs[batchJob].steps.find((s: any) =>
+      s.uses?.startsWith("actions/checkout@"),
+    );
+    expect(checkout.with.ref).toBe("${{ inputs.ref }}");
+    expect(JSON.stringify(called)).not.toContain("needs.");
+  }
+  expect(pr.jobs.e2e.with.plan_artifact).toBe("pr-lane-plan");
+  expect(ci.jobs["e2e-shards"].with.plan_artifact).toBe("ci-impact-plan");
 });
 
 test("write-capable supersession handler executes trusted base only on a new PR push", () => {
