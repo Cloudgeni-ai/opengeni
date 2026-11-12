@@ -1005,6 +1005,27 @@ describe("release image workflow contract", () => {
     );
   });
 
+  test("candidate sandbox and desktop builds require the downloaded runtime inputs", async () => {
+    const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
+    const steps = parsed.jobs.candidate?.steps ?? [];
+    const download = steps.findIndex(
+      (step) =>
+        step.name === "Download exact artifact runtime inputs" &&
+        step.with?.path === ".release/artifact-runtime",
+    );
+    expect(download).toBeGreaterThanOrEqual(0);
+    for (const file of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
+      const builds = steps.filter(
+        (step) => step.uses?.startsWith("docker/build-push-action@") && step.with?.file === file,
+      );
+      expect(builds, file).toHaveLength(1);
+      expect(steps.indexOf(builds[0]!), file).toBeGreaterThan(download);
+      expect(String(builds[0]!.with?.["build-args"]).trim().split("\n"), file).toContain(
+        "OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true",
+      );
+    }
+  });
+
   test("candidate chart pins the Modal desktop box it built from the same source", async () => {
     const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
     const steps = parsed.jobs.candidate?.steps ?? [];
@@ -1020,7 +1041,9 @@ describe("release image workflow contract", () => {
     expect(build.with?.context).toBe(".");
     expect(build.with?.platforms).toBe("linux/amd64");
     expect(build.with?.push).toBe(true);
-    expect(build.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${sourceRevision}`);
+    expect(build.with?.["build-args"]).toBe(
+      `OPENGENI_SOURCE_SHA=${sourceRevision}\nOPENGENI_REQUIRE_ARTIFACT_RUNTIME=true\n`,
+    );
     expect(build.with?.tags).toBe(
       "${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}",
     );

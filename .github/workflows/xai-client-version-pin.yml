@@ -10,6 +10,7 @@ on:
 
 permissions:
   actions: write # dispatch PR CI on the pull request's exact head
+  checks: read # whether PR CI already ran on a kept head
   contents: write
   pull-requests: write
 
@@ -57,20 +58,57 @@ jobs:
           git commit -m "chore(xai): update the Grok client version" -m "$summary"
           # A force push to the PR replaces its head, which throws away a running
           # merge batch that holds it. Push only when the pins actually differ from
-          # the open PR's, and never while it is in a batch (the next run retries).
-          pr_state="$(gh pr view "$branch" --json state,labels --jq '.state + " " + ([.labels[].name] | join(","))' 2>/dev/null || true)"
+          # the open PR's, and never while it is in a batch or may join one: the
+          # batcher labels a batch's members only after the batch starts, so a
+          # queued PR with green PR CI on its head is held as well (the next run
+          # retries). A queued PR with red PR CI cannot be batched and is updated.
+          # "OPEN <labels>" for an open pull request, with "auto-merge" among the
+          # labels when auto-merge is on, empty when there is none. A
+          # failed lookup must not read as "no pull request", which would push.
+          for attempt in 1 2 3; do
+            if pr_state="$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&head=$GITHUB_REPOSITORY_OWNER:$branch" \
+              --jq 'if length == 0 then "" else "OPEN " + ([.[0].labels[].name] + (if .[0].auto_merge then ["auto-merge"] else [] end) | join(",")) end')"; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Could not read the state of the $branch pull request."
+              exit 1
+            fi
+            sleep 10
+          done
+          # PR CI check runs on a head: all of them, those still running, and
+          # those that passed. A failed lookup fails the step, so it never pushes.
+          pr_ci() {
+            gh api "repos/$GITHUB_REPOSITORY/commits/$1/check-runs?check_name=PR%20CI&filter=all" \
+              --jq '[.total_count, ([.check_runs[] | select(.status != "completed")] | length), ([.check_runs[] | select(.conclusion == "success")] | length)] | @tsv'
+          }
           mapfile -t changed < <(git diff --name-only HEAD~1 HEAD)
           if [[ "$pr_state" == OPEN* ]] && git fetch --quiet --depth=2 origin "$branch" &&
             [ "$(git diff --name-only FETCH_HEAD~1 FETCH_HEAD)" = "$(printf '%s\n' "${changed[@]}")" ] &&
             git diff --quiet FETCH_HEAD HEAD -- "${changed[@]}"; then
             head_sha="$(git rev-parse FETCH_HEAD)"
             echo "The open pull request already carries these pins; its head stays $head_sha."
-            checks="$(gh api "repos/$GITHUB_REPOSITORY/commits/$head_sha/check-runs?check_name=PR%20CI" --jq .total_count)"
-            if [ "$checks" != 0 ]; then exit 0; fi
+            # Leave a running or passed PR CI alone. Re-run one that failed, a
+            # bounded number of times, since a flaky failure would otherwise
+            # hold the pull request until the pins next change.
+            read -r runs active passed < <(pr_ci "$head_sha")
+            if [ "$active" != 0 ] || [ "$passed" != 0 ]; then exit 0; fi
+            if [ "$runs" -ge 3 ]; then
+              echo "PR CI failed $runs times on $head_sha; not dispatching it again."
+              exit 0
+            fi
           elif [[ "$pr_state" == OPEN* && ",${pr_state#* }," == *,in-batch,* ]]; then
             echo "The pull request is in a running merge batch; leaving it unchanged until the next run."
             exit 0
           else
+            if [[ "$pr_state" == OPEN* && ",${pr_state#* }," =~ ,(queue-ready|auto-merge), ]]; then
+              git fetch --quiet --depth=1 origin "$branch"
+              read -r runs active passed < <(pr_ci "$(git rev-parse FETCH_HEAD)")
+              if [ "$passed" != 0 ]; then
+                echo "The pull request is queued with green PR CI, so the merge batcher may batch it; leaving it unchanged until the next run."
+                exit 0
+              fi
+            fi
             git push --force origin "$branch"
             head_sha="$(git rev-parse HEAD)"
             body="$(printf 'Automated pin refresh from the Grok CLI stable channel.\n\n%s' "$summary")"
