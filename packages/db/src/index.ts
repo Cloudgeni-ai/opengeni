@@ -70006,6 +70006,11 @@ export async function beginEnrollmentAgentUpdate(
      * (null: none), so a decision made from an older read of the machine
      * never replaces a newer record. */
     expectedOperationId?: string | null;
+    /** Also replace an unfinished operation whose last progress is at or
+     * before this time: its runner was asked and has not been heard from
+     * since, so it is treated as lost. A fresh progress event moves the
+     * operation past this time and keeps it. */
+    replaceUnfinishedBefore?: Date;
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(
@@ -70080,6 +70085,9 @@ export async function beginEnrollmentAgentUpdate(
               sql`${schema.enrollments.agentUpdateStatus} is null`,
               eq(schema.enrollments.agentUpdateStatus, "succeeded"),
               eq(schema.enrollments.agentUpdateStatus, "failed"),
+              input.replaceUnfinishedBefore === undefined
+                ? undefined
+                : sql`${schema.enrollments.agentUpdateUpdatedAt} <= ${input.replaceUnfinishedBefore.toISOString()}::timestamptz`,
             ),
             input.expectedOperationId === undefined
               ? undefined
