@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import type { ManagedAuth } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
@@ -32,6 +32,8 @@ export const MANAGED_PASSKEY_LIMIT = 25;
 const CEREMONY_TTL_MS = 5 * 60_000;
 const CEREMONY_TIMEOUT_MS = 120_000;
 const CEREMONY_IDENTIFIER_PREFIX = "opengeni-passkey:";
+const HANDOFF_TTL_MS = 10 * 60_000;
+const HANDOFF_IDENTIFIER_PREFIX = "opengeni-passkey-handoff:";
 const TRANSPORTS = new Set<string>([
   "ble",
   "cable",
@@ -75,6 +77,8 @@ const StoredCeremony = z
     userId: z.string().min(1).optional(),
     /** A step-up: the browser session it confirms. */
     authSessionId: z.string().min(1).optional(),
+    /** A step-up confirming, too, the app session that handed it over. */
+    handoffId: z.string().uuid().optional(),
     name: z.string().min(1).max(80).optional(),
     signupChallengeVerified: z.boolean().optional(),
   })
@@ -228,6 +232,8 @@ export async function startManagedPasskeyStepUp(
     userId: string;
     authSessionId: string;
     allow: { credentialId: string; transports: string[] }[];
+    /** A handoff from the person's app session that this step-up confirms too. */
+    handoffId?: string;
   },
 ): Promise<{ challengeId: string; options: Record<string, unknown> }> {
   const options = await generateAuthenticationOptions({
@@ -246,8 +252,183 @@ export async function startManagedPasskeyStepUp(
     ...relyingParty,
     userId: input.userId,
     authSessionId: input.authSessionId,
+    ...(input.handoffId ? { handoffId: input.handoffId } : {}),
   });
   return { challengeId, options: options as unknown as Record<string, unknown> };
+}
+
+/* ----------------------------------------------------------------------------
+   Step-up handoff. An app that shows the web console but can't show passkey
+   prompts itself (the desktop app: Electron has no WebAuthn UI on macOS or
+   Linux, so a ceremony there never reaches the system sheet or a password
+   manager) hands its step-up to the person's own browser on the same server.
+
+   1. The app's session starts a handoff, bound to that session.
+   2. In their browser, signed in to the same account, the person uses one of
+      their passkeys for it. Only then does the server make a random one-time
+      code, which that browser page shows.
+   3. The person types the code into the app; the app's own session claims the
+      handoff with it, which confirms that session.
+
+   A browser confirmation alone never confirms another session: whoever
+   started the handoff must also hold the code the passkey produced, so a
+   forwarded link can't lend someone else's passkey to a stolen session. A
+   handoff is single-use, short-lived, and void after a few wrong codes.
+   -------------------------------------------------------------------------- */
+
+export const MANAGED_PASSKEY_HANDOFF_MAX_CODE_ATTEMPTS = 5;
+
+const StoredHandoff = z
+  .object({
+    version: z.literal(1),
+    userId: z.string().min(1),
+    /** The app's session the step-up confirms. */
+    authSessionId: z.string().min(1),
+    expiresAt: z.string(),
+    /** Set once the browser confirmed with a passkey. */
+    confirmation: z
+      .object({ codeHash: z.string().min(1), attempts: z.number().int().min(0) })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type ManagedPasskeyHandoff = z.infer<typeof StoredHandoff> & { handoffId: string };
+
+function handoffIdentifier(handoffId: string): string {
+  return `${HANDOFF_IDENTIFIER_PREFIX}${handoffId}`;
+}
+
+function handoffCodeHash(handoffId: string, code: string): Buffer {
+  return createHash("sha256").update(`opengeni-passkey-handoff:${handoffId}:${code}`).digest();
+}
+
+async function storeHandoff(
+  auth: ManagedAuth,
+  handoffId: string,
+  handoff: z.infer<typeof StoredHandoff>,
+): Promise<void> {
+  const context = await auth.$context;
+  await context.internalAdapter.createVerificationValue({
+    identifier: handoffIdentifier(handoffId),
+    value: JSON.stringify(StoredHandoff.parse(handoff)),
+    expiresAt: new Date(handoff.expiresAt),
+  });
+}
+
+function withoutId(handoff: ManagedPasskeyHandoff): z.infer<typeof StoredHandoff> {
+  const { handoffId: _handoffId, ...stored } = handoff;
+  return stored;
+}
+
+export async function startManagedPasskeyHandoff(
+  auth: ManagedAuth,
+  input: { userId: string; authSessionId: string },
+): Promise<ManagedPasskeyHandoff & { expiresInSeconds: number }> {
+  const handoffId = randomUUID();
+  const stored = StoredHandoff.parse({
+    version: 1,
+    userId: input.userId,
+    authSessionId: input.authSessionId,
+    expiresAt: new Date(Date.now() + HANDOFF_TTL_MS).toISOString(),
+  });
+  await storeHandoff(auth, handoffId, stored);
+  return { ...stored, handoffId, expiresInSeconds: HANDOFF_TTL_MS / 1000 };
+}
+
+function parseHandoff(
+  handoffId: string,
+  stored: { value?: string | null; expiresAt: Date | string } | null | undefined,
+): ManagedPasskeyHandoff | null {
+  if (!stored?.value || new Date(stored.expiresAt).getTime() <= Date.now()) return null;
+  try {
+    return { ...StoredHandoff.parse(JSON.parse(stored.value)), handoffId };
+  } catch {
+    return null;
+  }
+}
+
+/** A live handoff, without using it up; null when missing or expired. */
+export async function findManagedPasskeyHandoff(
+  auth: ManagedAuth,
+  handoffId: string,
+): Promise<ManagedPasskeyHandoff | null> {
+  const context = await auth.$context;
+  return parseHandoff(
+    handoffId,
+    await context.internalAdapter.findVerificationValue(handoffIdentifier(handoffId)),
+  );
+}
+
+/** Take a handoff exactly once; null when missing, expired or already taken. */
+async function takeManagedPasskeyHandoff(
+  auth: ManagedAuth,
+  handoffId: string,
+): Promise<ManagedPasskeyHandoff | null> {
+  const context = await auth.$context;
+  return parseHandoff(
+    handoffId,
+    await context.internalAdapter.consumeVerificationValue(handoffIdentifier(handoffId)),
+  );
+}
+
+/**
+ * The browser confirmed the handoff with the person's passkey: make the
+ * one-time code the app claims it with. Null when the handoff is gone, is
+ * someone else's, or was already confirmed (a second confirmation voids it).
+ */
+export async function confirmManagedPasskeyHandoff(
+  auth: ManagedAuth,
+  handoffId: string,
+  userId: string,
+): Promise<{ code: string } | null> {
+  const handoff = await takeManagedPasskeyHandoff(auth, handoffId);
+  if (!handoff || handoff.userId !== userId || handoff.confirmation) return null;
+  const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+  await storeHandoff(auth, handoffId, {
+    ...withoutId(handoff),
+    confirmation: { codeHash: handoffCodeHash(handoffId, code).toString("hex"), attempts: 0 },
+  });
+  return { code };
+}
+
+export type ManagedPasskeyHandoffClaim =
+  | { kind: "claimed" }
+  | { kind: "expired" }
+  | { kind: "other_session" }
+  | { kind: "not_confirmed" }
+  | { kind: "wrong_code"; attemptsLeft: number }
+  | { kind: "too_many_attempts" };
+
+/**
+ * The app's session claims its handoff with the code the browser showed.
+ * Only the session that started it can; each wrong code uses up a try, and
+ * the last one voids the handoff.
+ */
+export async function claimManagedPasskeyHandoff(
+  auth: ManagedAuth,
+  handoffId: string,
+  input: { userId: string; authSessionId: string; code: string },
+): Promise<ManagedPasskeyHandoffClaim> {
+  const found = await findManagedPasskeyHandoff(auth, handoffId);
+  if (!found) return { kind: "expired" };
+  if (found.userId !== input.userId || found.authSessionId !== input.authSessionId) {
+    return { kind: "other_session" };
+  }
+  if (!found.confirmation) return { kind: "not_confirmed" };
+  const handoff = await takeManagedPasskeyHandoff(auth, handoffId);
+  if (!handoff?.confirmation) return { kind: "expired" };
+  const expected = Buffer.from(handoff.confirmation.codeHash, "hex");
+  const given = handoffCodeHash(handoffId, input.code);
+  if (expected.length === given.length && timingSafeEqual(expected, given)) {
+    return { kind: "claimed" };
+  }
+  const attempts = handoff.confirmation.attempts + 1;
+  if (attempts >= MANAGED_PASSKEY_HANDOFF_MAX_CODE_ATTEMPTS) return { kind: "too_many_attempts" };
+  await storeHandoff(auth, handoffId, {
+    ...withoutId(handoff),
+    confirmation: { ...handoff.confirmation, attempts },
+  });
+  return { kind: "wrong_code", attemptsLeft: MANAGED_PASSKEY_HANDOFF_MAX_CODE_ATTEMPTS - attempts };
 }
 
 export async function startManagedPasskeyRegistration(
