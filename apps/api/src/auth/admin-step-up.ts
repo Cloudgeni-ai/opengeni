@@ -103,10 +103,11 @@ export const ADMIN_ROUTES: readonly AdminRoute[] = [
   ),
   // An existing connection, also under a provider's own routes
   // (connections/atlassian/<id>/source, connections/google-drive/<id>/lifecycle).
-  // Vault (1Password) and Slack organization-access settings aren't asked.
+  // Vault (1Password) and Slack organization-access settings, and the
+  // GitHub repository access check (a read sent as POST), aren't asked.
   route(
     "workspace",
-    `${WS}/connections/(?:[^/]+/)?${CONNECTION}(?!/(?:1password|managed-vaults|slack-bot/organization-access)(?:/|$))(?:/.*)?`,
+    `${WS}/connections/(?:[^/]+/)?${CONNECTION}(?!/(?:1password|managed-vaults|slack-bot/organization-access|github/repositories/verify)(?:/|$))(?:/.*)?`,
     { shared: "existing" },
   ),
 ];

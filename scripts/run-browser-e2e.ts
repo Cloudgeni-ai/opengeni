@@ -5,6 +5,7 @@ const testFiles =
   requestedTestFiles.length > 0
     ? requestedTestFiles
     : [
+        "./test/e2e/admin-step-up-page-load.browser.e2e.ts",
         "./test/e2e/annotation-scroll.browser.e2e.ts",
         "./test/e2e/artifact-desktop.browser.e2e.ts",
         "./test/e2e/desktop-rail.browser.e2e.ts",

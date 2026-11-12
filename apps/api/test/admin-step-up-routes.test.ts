@@ -95,6 +95,7 @@ describe("admin step-up routes", () => {
       ["PUT", `${WS}/connections/${CONNECTION_ID}/1password/token`],
       ["DELETE", `${WS}/connections/${CONNECTION_ID}/1password`],
       ["POST", `${WS}/connections/${CONNECTION_ID}/managed-vaults`],
+      ["POST", `${WS}/connections/${CONNECTION_ID}/github/repositories/verify`],
       ["POST", `${WS}/integrations/install`],
       ["PUT", `${WS}/integrations/cap/organization`],
       ["DELETE", `${WS}/integrations/cap/instances/key`],
