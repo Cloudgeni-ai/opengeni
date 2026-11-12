@@ -20,8 +20,8 @@
   "devDependencies": {
     "@opengeni/desktop": "workspace:*",
     "electron": "44.10.1",
-    "electron-builder": "26.15.3",
-    "electron-updater": "6.8.9"
+    "electron-builder": "26.18.0",
+    "electron-updater": "6.8.11"
   },
   "productName": "Opengeni"
 }
