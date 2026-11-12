@@ -85,6 +85,7 @@ import {
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { ToolResultSpill } from "./tool-result-spill";
 import { attendanceChangeNote } from "./unattended";
+import { steerReplacementNote } from "./steer-replacement";
 import { createEagerOwnedSandboxSetup, hasEagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -2218,6 +2219,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
               fileMaterializationFailures,
             );
+            const replacementNote = await steerReplacementNote(db, input.workspaceId, turn);
             return await runTurnStreamAttempt({
               input,
               settings: capabilitySettings,
@@ -2272,6 +2274,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               runCredentialsNote,
               mcpAvailabilityNote,
               attendanceNote: attendanceChangeNote(session),
+              steerReplacementNote: replacementNote,
               knowledgeSourcePreparationNote,
               fileAuthoritySubjectId,
               activeSandboxBackend,

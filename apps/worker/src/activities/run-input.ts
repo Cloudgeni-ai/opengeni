@@ -43,6 +43,7 @@ import {
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
+import { steerReplacementNoteDue } from "./agent-turn/steer-replacement";
 import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
 import {
   projectTurnHistoryForProvider,
@@ -184,6 +185,11 @@ export type TurnInputOptions = {
   sandboxStopNote?: string;
   /** The chat's attendance differs from how it started (see `attendanceChangeNote`). */
   attendanceNote?: string;
+  /**
+   * This turn replaced a turn that a Steer left unfinished (see
+   * `steerReplacementNote`). Shown with the turn's first model input only.
+   */
+  steerReplacementNote?: string;
   /**
    * File resources mounted into the sandbox for this turn. The system
    * instructions never list them, so each one must appear in the turn's
@@ -1122,7 +1128,11 @@ async function messageInput(
   loadActiveHistory: ActiveHistoryLoader = loadActiveHistoryForTurn,
   preparationOptions: Pick<
     TurnInputOptions,
-    "onPreparationPhase" | "servingProviderId" | "omitRemoteCompactionItems" | "searchRecords"
+    | "onPreparationPhase"
+    | "servingProviderId"
+    | "omitRemoteCompactionItems"
+    | "searchRecords"
+    | "steerReplacementNote"
   > &
     Partial<Pick<TurnInputOptions, "turnId">> = {},
 ): Promise<PreparedTurnInput> {
@@ -1138,6 +1148,13 @@ async function messageInput(
   const stored = preparationOptions.omitRemoteCompactionItems
     ? activeHistory.items.filter((row) => row.item.type !== "compaction")
     : activeHistory.items;
+  // The unfinished-request note leads this turn's notice, once.
+  const turnContext =
+    preparationOptions.steerReplacementNote &&
+    preparationOptions.turnId &&
+    steerReplacementNoteDue(activeHistory.items, preparationOptions.turnId)
+      ? joinInternalContext(preparationOptions.steerReplacementNote, internalContext)
+      : internalContext;
   const searchRecords = preparationOptions.searchRecords;
   const storedIds = new Set(stored.map((row) => row.id));
   /**
@@ -1222,7 +1239,7 @@ async function messageInput(
       const assembled = await runtime.prepareInput(agent, {
         kind: "message",
         ...(text ? { text } : {}),
-        ...(internalContext ? { internalContext } : {}),
+        ...(turnContext ? { internalContext: turnContext } : {}),
         historyItems: historyItems as any,
         sandboxEnvelope: envelope,
         ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),

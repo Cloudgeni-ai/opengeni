@@ -340,6 +340,8 @@ export type TurnStreamAttemptDeps = {
   mcpAvailabilityNote: string | undefined;
   /** Turn-scoped note when the chat's attendance differs from how it started. */
   attendanceNote?: string | undefined;
+  /** This turn replaced one a Steer left unfinished (see `steerReplacementNote`). */
+  steerReplacementNote?: string | undefined;
   knowledgeSourcePreparationNote?: string | undefined;
   fileAuthoritySubjectId: string | null;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -500,6 +502,7 @@ export async function runTurnStreamAttempt(
     runCredentialsNote,
     mcpAvailabilityNote,
     attendanceNote,
+    steerReplacementNote,
     knowledgeSourcePreparationNote,
     fileAuthoritySubjectId,
     activeSandboxBackend,
@@ -742,6 +745,7 @@ export async function runTurnStreamAttempt(
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
         ...(attendanceNote ? { attendanceNote } : {}),
+        ...(steerReplacementNote ? { steerReplacementNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,
