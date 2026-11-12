@@ -297,7 +297,8 @@ export type ConsoleAuditEventListResponse = z.infer<typeof ConsoleAuditEventList
 export const ConsoleApiKeyUsage = /* @__PURE__ */ defineSchema(() =>
   z.object({
     apiKeyId: primitives.uuid,
-    createdByLabel: primitives.nullableString,
+    /** The person (or key) that created it, when known. */
+    createdBySubjectId: primitives.nullableString,
     /** Managed workspaces this key created. */
     managedWorkspaces: primitives.nonnegativeInteger,
     /** Spend in the range in the managed workspaces this key created. */

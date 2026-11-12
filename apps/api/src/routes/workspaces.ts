@@ -27,7 +27,11 @@ import {
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
 import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
-import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
+import {
+  markWorkspaceManagedByApiKey,
+  SessionControlConflictError,
+  WorkspacePauseTimerInputError,
+} from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
   evaluateWorkspaceModelPolicy,
@@ -402,6 +406,34 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  /**
+   * A workspace an organization API key creates is managed by the product
+   * that holds the key: Opengeni Console lists it, and its end users'
+   * sessions there are reviewable by the organization's owners and admins.
+   * A marker only; failing to write it never fails the creation.
+   */
+  async function markProductManagedWorkspace(
+    routeDeps: ApiRouteDeps,
+    context: AccessContext,
+    accountId: string,
+    workspaceId: string,
+  ): Promise<void> {
+    if (!context.subjectId.startsWith("api_key:")) return;
+    const apiKeyId = context.subjectId.slice("api_key:".length);
+    try {
+      await markWorkspaceManagedByApiKey(routeDeps.db, {
+        accountId,
+        workspaceId,
+        apiKeyId: /^[0-9a-f-]{36}$/i.test(apiKeyId) ? apiKeyId : null,
+      });
+    } catch (error) {
+      console.warn("[console] could not mark a key-created workspace as managed", {
+        workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   app.put("/v1/workspaces/external", async (c) => {
     const context = await requireAccessContext(c, deps);
     const request = await parseRequestJson(c, EnsureWorkspaceRequest);
@@ -448,6 +480,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
       const response = EnsureWorkspaceResponse.parse(result);
+      if (result.created) {
+        await markProductManagedWorkspace(deps, context, payload.accountId, result.workspace.id);
+      }
       const authority = accountScopedApiKeyWorkspaceAuthority(context);
       if (
         !result.created &&
@@ -499,6 +534,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           : {}),
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
+      await markProductManagedWorkspace(deps, context, accountId, workspace.id);
       // Setup keys already have canonical same-organization workspace access.
       // Do not widen that ceiling with an all-permissions creator membership.
       if (

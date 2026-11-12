@@ -21,6 +21,19 @@ import type {
   BrowserDownloadSaveProgress,
 } from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
+import type {
+  ConsoleApiKeyUsageResponse,
+  ConsoleAuditEventListResponse,
+  ConsoleRange,
+  ConsoleSessionDetail,
+  ConsoleSessionListResponse,
+  ConsoleSettings,
+  ConsoleSummary,
+  ConsoleWorkspaceKind,
+  ConsoleWorkspaceListResponse,
+  UpdateConsoleSettingsRequest,
+  UpdateConsoleWorkspaceRequest,
+} from "@opengeni/contracts/console";
 import {
   currentMessageTimeZone,
   normalizeMessageTimeZone,
@@ -12315,6 +12328,177 @@ export class OpenGeniClient {
       }
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
+  }
+
+  // --- Opengeni Console (organization owners and admins) ---------------------------------------
+
+  /** Console Overview: organization spend, managed and team workspaces, sessions and end users. */
+  async getConsoleSummary(
+    organizationId: string,
+    options: { range?: ConsoleRange; signal?: AbortSignal } = {},
+  ): Promise<ConsoleSummary> {
+    return await this.requestJson<ConsoleSummary>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/summary`,
+      undefined,
+      options.range ? { range: options.range } : {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Every shared workspace of the organization, managed by the product or the team's own. */
+  async listConsoleWorkspaces(
+    organizationId: string,
+    options: {
+      range?: ConsoleRange;
+      kind?: "all" | ConsoleWorkspaceKind;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ConsoleWorkspaceListResponse> {
+    return await this.requestJson<ConsoleWorkspaceListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/workspaces`,
+      undefined,
+      {
+        ...(options.range ? { range: options.range } : {}),
+        ...(options.kind ? { kind: options.kind } : {}),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /** Mark a workspace as managed by the product, or as the team's own. Audited. */
+  async updateConsoleWorkspace(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateConsoleWorkspaceRequest,
+  ): Promise<{ workspaceId: string; kind: ConsoleWorkspaceKind }> {
+    return await this.requestJson(
+      "PUT",
+      `/v1/organizations/${organizationId}/console/workspaces/${workspaceId}`,
+      request,
+    );
+  }
+
+  /**
+   * Reviewable sessions across the organization's managed workspaces, newest
+   * first: shared sessions and those private to the product's end users.
+   * Opengeni accounts' private chats are never listed.
+   */
+  async listConsoleSessions(
+    organizationId: string,
+    options: {
+      limit?: number;
+      cursor?: string;
+      workspaceId?: string;
+      q?: string;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ConsoleSessionListResponse> {
+    return await this.requestJson<ConsoleSessionListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/sessions`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+        ...(options.q ? { q: options.q } : {}),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /** One reviewable session with cost, tokens and ratings. Each open is written to the audit log. */
+  async getConsoleSession(
+    organizationId: string,
+    workspaceId: string,
+    sessionId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConsoleSessionDetail> {
+    return await this.requestJson<ConsoleSessionDetail>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/workspaces/${workspaceId}/sessions/${sessionId}`,
+      undefined,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** The transcript of a reviewable session, oldest first (full review level only). */
+  async listConsoleSessionEvents(
+    organizationId: string,
+    workspaceId: string,
+    sessionId: string,
+    options: { after?: number; limit?: number; signal?: AbortSignal } = {},
+  ): Promise<{ events: SessionEvent[]; hasMore: boolean; nextAfter: number | null }> {
+    return await this.requestJson(
+      "GET",
+      `/v1/organizations/${organizationId}/console/workspaces/${workspaceId}/sessions/${sessionId}/events`,
+      undefined,
+      {
+        ...(options.after === undefined ? {} : { after: String(options.after) }),
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  async getConsoleSettings(
+    organizationId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConsoleSettings> {
+    return await this.requestJson<ConsoleSettings>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/settings`,
+      undefined,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Set what owners and admins may see of end-user sessions: full, metadata or off. Audited. */
+  async updateConsoleSettings(
+    organizationId: string,
+    request: UpdateConsoleSettingsRequest,
+  ): Promise<ConsoleSettings> {
+    return await this.requestJson<ConsoleSettings>(
+      "PUT",
+      `/v1/organizations/${organizationId}/console/settings`,
+      request,
+    );
+  }
+
+  /** Console audit log, newest first: transcript opens and setting changes. */
+  async listConsoleAuditLog(
+    organizationId: string,
+    options: { limit?: number; cursor?: string; sessionId?: string; signal?: AbortSignal } = {},
+  ): Promise<ConsoleAuditEventListResponse> {
+    return await this.requestJson<ConsoleAuditEventListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/audit-log`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /** Who created each organization key and the spend in the workspaces it created. */
+  async getConsoleApiKeyUsage(
+    organizationId: string,
+    options: { range?: ConsoleRange; signal?: AbortSignal } = {},
+  ): Promise<ConsoleApiKeyUsageResponse> {
+    return await this.requestJson<ConsoleApiKeyUsageResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/api-keys`,
+      undefined,
+      options.range ? { range: options.range } : {},
+      { signal: options.signal },
+    );
   }
 
   // --- Billing (account-scoped) --------------------------------------------------------------------

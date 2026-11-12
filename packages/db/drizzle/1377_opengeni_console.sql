@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- online-safety-exception: unbatched-data: copies each organization's external identity labels once, a few rows per product end user, in per-organization statements
 -- Opengeni Console (expand). Organizations that embed Opengeni review the
 -- sessions their product's end users have in the workspaces the product
 -- manages, see cost, and audit who read what.

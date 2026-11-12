@@ -81,6 +81,44 @@ async function scopeWorkspace(tx: Database, workspaceId: string | null): Promise
 // ---------------------------------------------------------------------------
 // Managed workspaces
 
+export type ConsoleOrganizationWorkspace = {
+  id: string;
+  name: string;
+  externalSource: string | null;
+  externalId: string | null;
+  createdAt: string;
+};
+
+/** The organization's shared workspaces (never Personal ones), newest first, without projections. */
+export async function listConsoleOrganizationWorkspaces(
+  db: Database,
+  accountId: string,
+): Promise<ConsoleOrganizationWorkspace[]> {
+  const rows = await withAccountRls(db, accountId, (tx) =>
+    rawRows<{
+      id: string;
+      name: string;
+      external_source: string | null;
+      external_id: string | null;
+      created_at: Date;
+    }>(
+      tx,
+      sql`select w.id, w.name, w.external_source, w.external_id, w.created_at
+        from workspaces w
+        where w.account_id = ${accountId}::uuid
+          and w.id in (select workspace_id from list_organization_workspace_ids(${accountId}::uuid))
+        order by w.created_at desc, w.id desc`,
+    ),
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    externalSource: row.external_source,
+    externalId: row.external_id,
+    createdAt: iso(row.created_at),
+  }));
+}
+
 export async function listManagedWorkspaceMarkers(
   db: Database,
   accountId: string,
@@ -501,6 +539,28 @@ export async function consoleSpendByApiKey(
     workspaces: num(row.workspaces),
     spendMicros: num(row.spend),
   }));
+}
+
+/** Who created each organization key (the subject that created its service account). */
+export async function consoleApiKeyCreators(
+  db: Database,
+  accountId: string,
+): Promise<Map<string, string>> {
+  const rows = await withAccountRls(db, accountId, (tx) =>
+    rawRows<{ api_key_id: string; created_by_subject_id: string | null }>(
+      tx,
+      sql`select key.id as api_key_id, account.created_by_subject_id
+        from api_keys key
+        join organization_service_accounts account
+          on account.account_id = key.account_id and account.id = key.service_account_id
+        where key.account_id = ${accountId}::uuid and key.workspace_id is null`,
+    ),
+  );
+  return new Map(
+    rows.flatMap((row) =>
+      row.created_by_subject_id ? [[row.api_key_id, row.created_by_subject_id] as const] : [],
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
