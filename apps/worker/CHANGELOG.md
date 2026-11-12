@@ -1,5 +1,54 @@
 # @opengeni/worker-bundle
 
+## 6.18.0
+
+### Patch Changes
+
+- 3bc721a: A chat waiting for Codex subscription capacity now waits honestly and wakes on real capacity. Before a waiting turn is judged, the waiter re-reads both usage and every account's live model list, so it judges the same pool the resumed turn will be placed on: it no longer resumes a turn only to have it park again a second later, and the expected time it names is the reset of an account that actually offers the turn's model (and latency tier), or no time at all when none is known. A waiting turn no longer fails after ten resumptions with text only an operator could act on; it keeps waiting, with the existing backoff between resumptions. The chat and the inbox notification now say the message will be answered as soon as there is room, and that switching to another model continues sooner.
+- 6628d1c: Tool search decision-model requests are now visible in traces and metrics. A tool search that asks the decision model runs inside the model step that called it, before the step's result and usage are recorded, so its wait showed up only as an unexplained gap after the model response. Each request is now a `worker.tool_search.decision` span (provider, question count, outcome, input tokens) and a sample in `opengeni_tool_search_decision_duration_seconds`, labelled `completed`, `cancelled` (a hedged request that lost the race, or a deadline) or `failed`. Requests and results are unchanged.
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3bc721a]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [ea2f259]
+- Updated dependencies [07a9375]
+- Updated dependencies [35a2a06]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3c366a7]
+- Updated dependencies [f318955]
+- Updated dependencies [a16189c]
+- Updated dependencies [4c6c0a4]
+- Updated dependencies [c1b19a8]
+- Updated dependencies [917393e]
+  - @opengeni/sdk@6.18.0
+  - @opengeni/contracts@6.18.0
+  - @opengeni/config@6.18.0
+  - @opengeni/db@6.18.0
+  - @opengeni/core@6.18.0
+  - @opengeni/observability@6.18.0
+  - @opengeni/runtime@6.18.0
+  - @opengeni/network@6.18.0
+  - @opengeni/codemode@6.18.0
+  - @opengeni/capabilities@6.18.0
+  - @opengeni/codex@6.18.0
+  - @opengeni/decisions@6.18.0
+  - @opengeni/documents@6.18.0
+  - @opengeni/events@6.18.0
+  - @opengeni/github@6.18.0
+  - @opengeni/interaction@6.18.0
+  - @opengeni/storage@6.18.0
+  - @opengeni/tool-gateway@6.18.0
+  - @opengeni/vaults@6.18.0
+  - @opengeni/vaults-bitwarden@6.18.0
+  - @opengeni/vaults-keeper@6.18.0
+  - @opengeni/vaults-onepassword@6.18.0
+  - @opengeni/vaults-protonpass@6.18.0
+  - @opengeni/xai-subscription@6.18.0
+  - @opengeni/jev@6.18.0
+  - @opengeni/agent-proto@6.18.0
+  - @opengeni/subscriptions@6.18.0
+
 ## 6.17.0
 
 ### Patch Changes

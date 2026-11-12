@@ -1,5 +1,17 @@
 # @opengeni/browserd
 
+## 0.4.30
+
+### Patch Changes
+
+- b5a86db: A fill into a phone field that formats the number as it is typed (country code put in front, brackets around the area code) now completes instead of reporting an unknown outcome. A field that changed the number itself still reports it.
+- 4e3158f: An element reference still acts on its element after the page redraws it in the same document (an inbox or list re-rendering its rows), when exactly one element with the same role, name and frame existed when the reference was read and exists now, and no input was sent in between. Repeated or renamed elements, and pages that changed after the caller's own input, still report the reference as stale.
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [a16189c]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/interaction@6.18.0
+
 ## 0.4.29
 
 ### Patch Changes

@@ -1,5 +1,29 @@
 # @opengeni/db
 
+## 6.18.0
+
+### Patch Changes
+
+- 9188c1d: Claude accounts now show whether paid usage credits ("extra usage") are on. The usage read takes the account's usage-credits setting from the reset programs' `event_props.extra_usage_state` (`enabled`, `disabled`, `not_configured`) and keeps the `extra_usage` object when Claude sends it (whether the credits can pay right now, and the month's cap and spend in cents). Before, the usage-credits state came only from `extra_usage`, which reads that skip spend reporting always answer with `null`, so an account with usage credits switched on showed as having none. `ClaudeExtraUsage` gains `state`, and `claudeUsageCreditsState()` gives `on`, `off` or `unknown`: a missing or unrecognized report is unknown, never off. The pooled usage response gains `usageCredits` (Claude only), each pooled account's state. Account rows carry a "Usage credits on" chip, the account page says whether usage credits are on, off or not reported, and the pooled-limits card and the organization's Claude heading name or count the accounts that have them on. This is read and display only: Opengeni never turns usage credits on, buys credits or changes auto-reload.
+- 3bc721a: A chat waiting for Codex subscription capacity now waits honestly and wakes on real capacity. Before a waiting turn is judged, the waiter re-reads both usage and every account's live model list, so it judges the same pool the resumed turn will be placed on: it no longer resumes a turn only to have it park again a second later, and the expected time it names is the reset of an account that actually offers the turn's model (and latency tier), or no time at all when none is known. A waiting turn no longer fails after ten resumptions with text only an operator could act on; it keeps waiting, with the existing backoff between resumptions. The chat and the inbox notification now say the message will be answered as soon as there is room, and that switching to another model continues sooner.
+- d83e5f2: The agent now continues on its own after a person connects a server the agent asked to add (`custom_mcp_setup_request`, including Microsoft Dynamics environments), as it already does for catalog connect cards. That card is posted before the capability exists, so the continuation now also finds it by the capability's MCP endpoint.
+- d83e5f2: Two workspaces can now add the same Microsoft Dynamics environment. A workspace's Dynamics entry no longer stores its address in the catalog's `mcp_url` column, which is unique across workspaces, so adding an environment another workspace already uses no longer fails with an internal error. Reads still return the address as `mcpUrl`.
+- 35a2a06: Continuation turns (goal continuations, finished waits and background commands, child results) now take the learning modes their chat accepted most recently, instead of the modes of the turn that originally caused them. Before, a chain of continuations could carry settings from days earlier while turns started by a person or a schedule used the current settings, so a chat alternated between old and new modes after a settings change and re-sent its full governance block on every alternation. A chain with no later turn in the chat keeps exactly the policy it was accepted under, explicit chat overrides still win, scheduled-run provenance still follows the cause, and a child's first turn still inherits from its parent turn.
+- f318955: The denied network rule (`denied-network-v1`) now also matches a new owner's sign-ins after organization setup. Farms set up from a fresh address and sign in from a denied network a minute later; that sign-in was never recorded, so the account kept its Free credit. Each evaluation within seven days of setup now records the owner's newer sign-ins first (one indexed look-up; writes only when there is a newer sign-in) and then matches as before. Exact networks only, owners only, keyed hashes only, manual decisions and operator releases kept, and failures fail open.
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [ea2f259]
+- Updated dependencies [a16189c]
+- Updated dependencies [917393e]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/config@6.18.0
+  - @opengeni/observability@6.18.0
+  - @opengeni/network@6.18.0
+  - @opengeni/codemode@6.18.0
+  - @opengeni/codex@6.18.0
+  - @opengeni/xai-subscription@6.18.0
+  - @opengeni/subscriptions@6.18.0
+
 ## 6.17.0
 
 ### Minor Changes
