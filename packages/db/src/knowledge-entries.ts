@@ -28,7 +28,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { safeDatabaseErrorFacts } from "./persistence-errors";
+import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import {
   isKnowledgeLearningScopeGuardError,
   KnowledgeLearningScopeChangedError,
@@ -130,15 +130,7 @@ function resolveWriteEntryId(
 
 async function apply(db: Database, context: KnowledgeContext, request: Record<string, unknown>) {
   try {
-    return await inKnowledgeContext(db, context, async (tx) => {
-      const [row] = await rawRows<{ receipt: unknown }>(
-        tx,
-        sql`
-      SELECT knowledge_entry_apply(${context.accountId}::uuid,${context.workspaceId}::uuid,
-        ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS receipt`,
-      );
-      return KnowledgeEntryWriteReceipt.parse(row?.receipt);
-    });
+    return await inKnowledgeContext(db, context, (tx) => applyIn(tx, context, request));
   } catch (error) {
     // An entry outside the caller's RLS scope still owns its primary key, so a
     // colliding create surfaces as this unique violation, not as operation reuse.
@@ -147,6 +139,16 @@ async function apply(db: Database, context: KnowledgeContext, request: Record<st
     }
     throw error;
   }
+}
+
+async function applyIn(tx: Database, context: KnowledgeContext, request: Record<string, unknown>) {
+  const [row] = await rawRows<{ receipt: unknown }>(
+    tx,
+    sql`
+      SELECT knowledge_entry_apply(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS receipt`,
+  );
+  return KnowledgeEntryWriteReceipt.parse(row?.receipt);
 }
 
 /** Freeze before model execution; retries of the logical turn recover the same policy. */
@@ -300,9 +302,43 @@ export async function restoreKnowledgeEntry(
   input: KnowledgeEntryRestoreRequest,
 ) {
   const request = KnowledgeEntryRestoreRequest.parse(input);
-  return apply(db, context, { ...request, operation: "restore" });
+  return inKnowledgeContext(db, context, async (tx) => {
+    await lockKnowledgePublication(tx, context);
+    // Read before the restore: what the archive this restore undoes took along.
+    const cascade = RestoreCascade.safeParse(
+      await cascadeRead(tx, context, request.entryId, "restore"),
+    );
+    const receipt = await applyIn(tx, context, { ...request, operation: "restore" });
+    if (!cascade.success || receipt.outcome !== "published" || receipt.replayed) return receipt;
+    // Parents first; a member whose collection or evidence isn't back yet waits a round.
+    let pending = cascade.data.members;
+    while (pending.length) {
+      const left: typeof pending = [];
+      for (const member of pending) {
+        const restored = await skipUnavailable(tx, (savepoint) =>
+          applyIn(savepoint, context, {
+            operationId: archivedWithOperationId(request.operationId, member.entryId),
+            entryId: member.entryId,
+            revisionId: member.publishedRevisionId,
+            expectedVersion: member.version,
+            operation: "restore",
+          }),
+        );
+        if (!restored) left.push(member);
+      }
+      if (left.length === pending.length) break;
+      pending = left;
+    }
+    return receipt;
+  });
 }
 
+/**
+ * Archiving a collection also archives what is only inside it: its
+ * sub-collections and the entries that no live collection or entry outside it
+ * holds or cites. Otherwise they surface at the top level and stay in use, so
+ * the collection seems to come back. Undo and restore bring the same set back.
+ */
 export async function archiveKnowledgeEntry(
   db: Database,
   context: KnowledgeContext,
@@ -320,7 +356,151 @@ export async function archiveKnowledgeEntry(
     })
     .strict()
     .parse(input);
-  return apply(db, context, { ...request, operation: "archive" });
+  return inKnowledgeContext(db, context, async (tx) => {
+    // Lock before reading the tree, so no publication changes it meanwhile.
+    await lockKnowledgePublication(tx, context);
+    const cascade = ArchiveCascade.safeParse(
+      await cascadeRead(tx, context, request.entryId, "archive"),
+    );
+    const receipt = await applyIn(tx, context, { ...request, operation: "archive" });
+    if (!cascade.success || receipt.outcome !== "archived" || receipt.replayed) return receipt;
+    const archived = new Set([request.entryId]);
+    const kept = new Set<string>();
+    for (const member of onlyInside(request.entryId, cascade.data.members)) {
+      // A collection or citing entry that stayed live keeps what it holds.
+      const taken =
+        member.parentIds.every((id) => archived.has(id)) &&
+        !member.citedByIds.some((id) => kept.has(id)) &&
+        (await skipUnavailable(tx, (savepoint) =>
+          applyIn(savepoint, context, {
+            operationId: archivedWithOperationId(request.operationId, member.entryId),
+            entryId: member.entryId,
+            expectedVersion: member.version,
+            operation: "archive",
+          }),
+        ));
+      if (taken && taken.outcome === "archived") archived.add(member.entryId);
+      else kept.add(member.entryId);
+    }
+    return receipt;
+  });
+}
+
+const ArchiveCascade = z.object({
+  members: z.array(
+    z.object({
+      entryId: z.uuid(),
+      version: z.number().int().positive(),
+      parentIds: z.array(z.uuid()),
+      citedByIds: z.array(z.uuid()),
+      heldElsewhere: z.boolean(),
+    }),
+  ),
+});
+type CascadeMember = z.infer<typeof ArchiveCascade>["members"][number];
+
+const RestoreCascade = z.object({
+  members: z.array(
+    z.object({
+      entryId: z.uuid(),
+      version: z.number().int().positive(),
+      publishedRevisionId: z.uuid(),
+    }),
+  ),
+});
+
+/** Same lock and order as a single publication (knowledge_entry_apply). */
+async function lockKnowledgePublication(tx: Database, context: KnowledgeContext) {
+  await tx.execute(
+    sql`SELECT 1 FROM workspaces WHERE id=${context.workspaceId}::uuid AND account_id=${context.accountId}::uuid FOR KEY SHARE`,
+  );
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`knowledge-publication:${context.accountId}`},0))`,
+  );
+}
+
+/**
+ * What a collection's archive or restore takes along (migration 1378), read
+ * through the authorization seam. Null before that migration: no cascade.
+ */
+async function cascadeRead(
+  tx: Database,
+  context: KnowledgeContext,
+  entryId: string,
+  mode: "archive" | "restore",
+) {
+  return skipUnavailable(tx, async (savepoint) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      savepoint,
+      sql`SELECT knowledge_entry_read(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,
+        ${JSON.stringify({ operation: "collection_cascade", mode, entryId })}::jsonb) AS result`,
+    );
+    return row?.result ?? null;
+  });
+}
+
+/**
+ * Members no live collection or entry outside the archived set holds or
+ * cites, ordered so collections and citing entries come before what they hold.
+ */
+function onlyInside(collectionId: string, members: CascadeMember[]): CascadeMember[] {
+  const inside = new Map(
+    members.filter((member) => !member.heldElsewhere).map((member) => [member.entryId, member]),
+  );
+  const archiving = (id: string) => id === collectionId || inside.has(id);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const member of inside.values()) {
+      if (![...member.parentIds, ...member.citedByIds].every(archiving)) {
+        inside.delete(member.entryId);
+        changed = true;
+      }
+    }
+  }
+  const ordered: CascadeMember[] = [];
+  const placed = new Set([collectionId]);
+  while (ordered.length < inside.size) {
+    const before = ordered.length;
+    for (const member of inside.values()) {
+      if (placed.has(member.entryId)) continue;
+      if ([...member.parentIds, ...member.citedByIds].every((id) => placed.has(id))) {
+        ordered.push(member);
+        placed.add(member.entryId);
+      }
+    }
+    // Entries that cite each other: the rest in any order.
+    if (ordered.length === before) {
+      ordered.push(...[...inside.values()].filter((member) => !placed.has(member.entryId)));
+      break;
+    }
+  }
+  return ordered;
+}
+
+/**
+ * A member's operation in an archive or restore that takes it along. Migration
+ * 1378 derives the same id in SQL to find what an archive took along.
+ */
+function archivedWithOperationId(operationId: string, entryId: string) {
+  const hex = createHash("md5")
+    .update(`opengeni:knowledge-archived-with:${operationId}:${entryId}`)
+    .digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
+/** Members the caller can't change, or that changed meanwhile, keep their state. */
+async function skipUnavailable<T>(
+  tx: Database,
+  run: (savepoint: Database) => Promise<T>,
+): Promise<T | null> {
+  try {
+    return await tx.transaction((savepoint) => run(savepoint));
+  } catch (error) {
+    const state = nestedPostgresSqlState(error);
+    if (state === "42501" || state === "40001" || state === "22023") return null;
+    throw error;
+  }
 }
 
 /**
