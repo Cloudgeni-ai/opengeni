@@ -153,6 +153,10 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "credits",
     "payments",
     "invoices",
+    "receipts",
+    "billing history",
+    "purchase",
+    "stripe",
     "top up",
     "budgets",
     "plan",
@@ -257,7 +261,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
   "organization:billing": [
     { label: "Add credits", keywords: ["buy credits", "top up", "payment"] },
     { label: "Promo code", keywords: ["coupon", "redeem", "discount"] },
-    { label: "Invoices and payment details", keywords: ["receipts", "payment method", "card"] },
+    {
+      label: "Receipts and invoices",
+      keywords: ["receipt", "invoice", "billing history", "payment method", "card"],
+    },
     { label: "Workspace budgets", keywords: ["budget", "spend limit", "monthly"] },
     // On a workspace's budget page, under Workspace budgets.
     { label: "Member limits", keywords: ["member budget", "per person limit", "spend limit"] },

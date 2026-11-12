@@ -435,7 +435,7 @@ describe("organization billing StrictMode ownership", () => {
     expect(getOrganizationUsageSummary).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Open Insights");
     expect(useBillingUsage).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Invoices and payment details");
+    expect(container.textContent).toContain("Receipts and invoices");
     expect(container.textContent).not.toContain("OG-0042");
 
     await act(async () => button(container, "Add credits").click());
@@ -452,7 +452,7 @@ describe("organization billing StrictMode ownership", () => {
     });
     expect(button(container, "Add credits").disabled).toBe(false);
 
-    await act(async () => button(container, "Open Stripe billing").click());
+    await act(async () => button(container, "View receipts").click());
     await flush();
     expect(createBillingPortalSession).toHaveBeenCalledTimes(1);
     expect(createBillingPortalSession).toHaveBeenCalledWith({
@@ -462,7 +462,7 @@ describe("organization billing StrictMode ownership", () => {
     expect(toastError).toHaveBeenCalledWith("Couldn't open Stripe billing", {
       description: "bounded portal failure",
     });
-    expect(button(container, "Open Stripe billing").disabled).toBe(false);
+    expect(button(container, "View receipts").disabled).toBe(false);
 
     await act(async () => root.unmount());
     container.remove();

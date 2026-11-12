@@ -10,7 +10,9 @@ import { PlanSeats, SeatLimitNotice } from "@/components/organization/plan-seats
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
 import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
-import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { ArrowUpRightIcon } from "lucide-react";
 import type { BillingSummary } from "@opengeni/react/app/types";
 import { seatUpgradeFor } from "@opengeni/react/app/lib/subscription-plans";
 import { CreditProtectionPreview } from "./credit-protection-preview";
@@ -280,6 +282,19 @@ export function SubscriptionPlansPreview() {
                         onCheckout={() => setMessage("Preview only. A live top-up opens Stripe.")}
                         busy={false}
                         hasPlan
+                      />
+                      <SettingRow
+                        label="Receipts and invoices"
+                        description="For plans and credits. You can also update your card there."
+                        controlWidth="auto"
+                        control={
+                          <RowButton
+                            onClick={() => setMessage("Preview only. Receipts open in Stripe.")}
+                          >
+                            View receipts
+                            <ArrowUpRightIcon aria-hidden="true" />
+                          </RowButton>
+                        }
                       />
                     </SettingRowGroup>
                     {message ? (
