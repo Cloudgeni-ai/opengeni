@@ -16547,7 +16547,8 @@
         "$.nextCursor": "string! null",
         "$.reviewLevel": "ref(ConsoleReviewLevel)!",
         "$.sessions": "array!",
-        "$.sessions[]": "ref(ConsoleSessionSummary)"
+        "$.sessions[]": "ref(ConsoleSessionSummary)",
+        "$.truncated": "boolean!"
       }
     },
     "ConsoleSessionSummary": {
