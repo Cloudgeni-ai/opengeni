@@ -40,8 +40,10 @@ BEGIN
   IF setup_time IS NULL OR setup_time < statement_timestamp() - interval '7 days' THEN RETURN; END IF;
   -- The owner's sign-ins since the networks were last recorded (for example
   -- the first sign-in after email verification, or a later one). Owner only:
-  -- the signup record's owner, else the account's self-serve owner. Checks at
-  -- most the 20 newest newer sessions; records only when one has a network.
+  -- the signup record's owner, else the account's self-serve owner. Records
+  -- only when a newer session has a network. The mark is the newest recorded
+  -- sign-in, so a sign-in committed late with an earlier time (clock skew
+  -- between API hosts) is picked up only with the next newer sign-in.
   BEGIN
     owner_user := source.owner_auth_user_id;
     IF owner_user IS NULL THEN
@@ -57,7 +59,8 @@ BEGIN
           WHERE s.user_id = owner_user AND s.ip_address IS NOT NULL
             AND s.created_at > coalesce(recorded_until, '-infinity'::timestamptz)
             AND s.created_at >= clock_timestamp() - lookback
-          ORDER BY s.created_at DESC LIMIT 20) newer
+            AND opengeni_private.signup_network_exact_unit(s.ip_address) IS NOT NULL
+          ORDER BY s.created_at DESC LIMIT 1) newer
         WHERE opengeni_private.signup_network_session_hash(target, newer.ip_address) IS NOT NULL) THEN
         PERFORM opengeni_private.record_signup_owner_session_networks(target, p_account_id, owner_user);
       END IF;

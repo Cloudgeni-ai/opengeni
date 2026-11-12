@@ -452,6 +452,11 @@ test("an owner's sign-in after setup is matched by the next evaluation while the
       mode: "enforce",
     });
     expect(await recorded(fresh.accountId)).toHaveLength(2);
+    // Once refreshed, further evaluations write nothing.
+    const refreshed = await recorded(fresh.accountId);
+    await evaluate(fresh.accountId);
+    await evaluate(fresh.accountId);
+    expect(await recorded(fresh.accountId)).toEqual(refreshed);
     const [dump] = await shared.admin`select string_agg(t::text, ' ') as text
       from opengeni_private.signup_network_owner_addresses t where data_schema = ${shared.schema}`;
     expect(String(dump!.text)).not.toContain(farmIp);
@@ -714,6 +719,49 @@ test("invited members are never recorded, counted or held", async () => {
     expect(members!.count).toBe(1); // the founder's own network only
     const sameAsColleague = await owner([companyIp]);
     expect(await decision(sameAsColleague.accountId)).toBeNull();
+  } finally {
+    await configure({ deniedNetworkMode: "off" });
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
+test("sign-ins of an invited member after setup never hold the new organization", async () => {
+  if (!shared || !client) return;
+  // (1375) Sign-ins of an invited member of a new organization after setup
+  // are never recorded for it, so they never hold it.
+  await enforce();
+  try {
+    const farmIp = address();
+    const farm = await owner([farmIp]);
+    await decide(farm.accountId, "denied");
+    const founder = await owner([address()]);
+    const member = await user([farmIp]);
+    await shared.admin`update auth_users set email = ${`${member.userId}@member.test`}
+      where id = ${member.userId}`;
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: founder.accountId,
+      actorSubjectId: `user:${founder.userId}`,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: `user:${member.userId}`,
+      targetEmail: `${member.userId}@member.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + DAY).toISOString(),
+    });
+    await acceptOrganizationInvitation(client.db, {
+      organizationId: founder.accountId,
+      actorSubjectId: `user:${member.userId}`,
+      operationId: crypto.randomUUID(),
+      invitationId: invitation.id,
+      expectedRevision: invitation.revision,
+    });
+    await session(member.userId, farmIp, member.projection, member.binding);
+    expect(await freePlanCreditEligible(client.db, founder.accountId)).toBe(true);
+    expect(await decision(founder.accountId)).toBeNull();
+    expect(await observation(founder.accountId)).toBeNull();
+    const [rows] = await shared.admin`select count(*)::int as count
+      from opengeni_private.signup_network_owner_addresses
+      where data_schema = ${shared.schema} and account_id = ${founder.accountId}`;
+    expect(rows!.count).toBe(1); // the founder's own network only
   } finally {
     await configure({ deniedNetworkMode: "off" });
     await shared.admin`update promotion_enforcement set enabled=false`;
