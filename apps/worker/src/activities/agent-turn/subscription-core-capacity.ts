@@ -456,11 +456,6 @@ export async function parkCoreSubscriptionTurn(
     return { exit: claimedResult({ status: "idle" }) };
   }
   await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
-  if (armed.action === "stopped") {
-    control.turnMetricOutcome = "failed";
-    control.activityStatus = armed.sessionStatus === "queued" ? "idle" : "failed";
-    return { exit: claimedResult({ status: control.activityStatus }) };
-  }
   if (armed.action === "waiting") {
     // A Steer that was waiting for this turn's next model step replaces the
     // capacity wait now (its waiter goes with the superseded turn).

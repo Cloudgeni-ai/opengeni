@@ -41,6 +41,7 @@ import {
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import type { Settings } from "@opengeni/config";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { refreshCoreCodexModelEntitlements } from "@opengeni/core";
 import { servingCatalogForBlockedTurn } from "./agent-turn/subscription-serving-catalog";
 import { refreshExhaustedCodexCoreQuota } from "./subscription-core-codex-quota";
 import { subscriptionCoreWaitBindings } from "./subscription-core-wait-bindings";
@@ -92,8 +93,10 @@ export type CoreWaitBinding = {
    * placement, for a provider whose usage read can end an exhaustion before
    * its stored reset (its waiters then recheck on a bounded backoff), under
    * the parked turn's exact accepted identity (the same read placement
-   * evaluation uses; never called without one). Best effort: a failure
-   * leaves the stored state, and placement decides.
+   * evaluation uses; never called without one), and refresh any other
+   * placement input the resumed turn refreshes before it places, so the
+   * reconcile resumes the turn only when the turn's own placement would run.
+   * Best effort: a failure leaves the stored state, and placement decides.
    */
   refreshBeforeReconcile?: (
     services: { db: Database; settings: Settings },
@@ -113,15 +116,27 @@ export const CODEX_CORE_WAIT_BINDING: CoreWaitBinding = {
   reconcileWaiter: (db, input) => reconcileSubscriptionCoreCodexCapacityWait(db, input),
   // OpenAI can reset a Codex limit before the reset it reported, so a parked
   // turn re-reads `/wham/usage` (rate-limited per connection) at each bounded
-  // recheck instead of sleeping until a stale reset.
-  refreshBeforeReconcile: ({ db, settings }, turn) =>
-    refreshExhaustedCodexCoreQuota({
+  // recheck instead of sleeping until a stale reset. It then reads the
+  // accounts' live model lists exactly as the resumed turn will before it
+  // places (`beforePlacement`): placement reads an expired list as "may
+  // serve this model", so without this read the reconcile would judge a
+  // different pool than the turn. It would resume the turn onto an account
+  // whose list lacks the model (the turn parks again at once) and quote the
+  // reset of an account that cannot serve the model at all.
+  refreshBeforeReconcile: async ({ db, settings }, turn) => {
+    await refreshExhaustedCodexCoreQuota({
       db,
       settings,
       accountId: turn.accountId,
       workspaceId: turn.workspaceId,
       personalTurn: turn,
-    }),
+    }).catch(() => undefined);
+    await refreshCoreCodexModelEntitlements(db, settings, {
+      accountId: turn.accountId,
+      workspaceId: turn.workspaceId,
+      subjectId: turn.initiatingHumanSubjectId,
+    });
+  },
 };
 
 export type CoreCodexWakeDeliveryResult = {

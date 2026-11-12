@@ -79,11 +79,7 @@ import {
   setSubjectRlsContext,
   withWorkspaceSubjectSessionActivityRls,
 } from "../../src/database";
-import {
-  CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
-  CODEX_CAPACITY_RECOVERY_KEY,
-  SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES,
-} from "../../src/codex-capacity-recovery";
+import { CODEX_CAPACITY_RECOVERY_KEY } from "../../src/codex-capacity-recovery";
 import { encryptEnvironmentValue } from "../../src/environment-crypto";
 import {
   subscriptionAuthorityV2ForAcceptanceInTransaction,
@@ -6006,7 +6002,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       );
     }
     test.skipIf(!sessionWaits)(
-      "a false resumption counts toward the shared breaker; at its limit the turn stops with this provider's code",
+      "a false resumption backs the next resume off but never ends the turn; progress resets it",
       async () => {
         const waits = sessionWaits!;
         const org = await organization();
@@ -6070,22 +6066,28 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect(counted.turn.metadata[CODEX_CAPACITY_RECOVERY_KEY]).toMatchObject({
           falseResumptions: 4,
         });
-        const productive = await arm(CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT - 1, true);
+        const productive = await arm(9, true);
         expect(productive.armed.action).toBe("waiting");
         expect(productive.turn.metadata[CODEX_CAPACITY_RECOVERY_KEY]).toMatchObject({
           falseResumptions: 0,
           retryNotBefore: null,
         });
-        const stopped = await arm(CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT - 1);
-        expect(stopped.armed.action).toBe("stopped");
-        expect(stopped.turn.status).toBe("failed");
-        expect(stopped.armed.events[0]).toMatchObject({
-          type: "turn.failed",
-          payload: {
-            code: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES[waits.provider],
-            recoveryExhausted: true,
-          },
-        });
+        // The tenth, and any later, false resumption keeps the message
+        // queued for capacity: the turn waits on, with the capped backoff.
+        for (const before of [9, 40]) {
+          const kept = await arm(before);
+          expect(kept.armed.action).toBe("waiting");
+          expect(kept.turn.status).toBe("waiting_capacity");
+          expect(kept.armed.events.map((event) => event.type)).not.toContain("turn.failed");
+          const recovery = kept.turn.metadata[CODEX_CAPACITY_RECOVERY_KEY] as {
+            falseResumptions: number;
+            retryNotBefore: string;
+          };
+          expect(recovery.falseResumptions).toBe(before + 1);
+          const delay = Date.parse(recovery.retryNotBefore) - Date.now();
+          expect(delay).toBeGreaterThan(0);
+          expect(delay).toBeLessThanOrEqual(15 * 60_000);
+        }
       },
     );
 

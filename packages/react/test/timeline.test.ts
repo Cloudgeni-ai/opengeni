@@ -336,17 +336,18 @@ describe("buildTimeline", () => {
       },
     ],
     [{ waitReason: "compaction_provider_locked", error: "Provider has no capacity." }],
-  ] as const)("a capacity wait for %j reads as a short limit-reached state", (payload) => {
+  ] as const)("a capacity wait for %j reads as a short waiting-for-capacity state", (payload) => {
     reset();
     const [item] = buildTimeline(englishText, [event("codex.capacity.waiting", payload)]);
     expect(item).toMatchObject({
       kind: "notice",
       tone: "waiting",
-      text: "Usage limit reached. Try again after your quota resets, or switch to another model or provider.",
+      text: "Waiting for capacity. Your message will be answered as soon as there is room. To continue sooner, switch to another model.",
       capacityWait: {
         turnId: "turn-1",
-        label: "Usage limit reached",
-        detail: "Try again after your quota resets, or switch to another model or provider.",
+        label: "Waiting for capacity",
+        detail:
+          "Your message will be answered as soon as there is room. To continue sooner, switch to another model.",
       },
     });
   });
@@ -405,8 +406,8 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(item).toMatchObject({
-      text: "Usage limit reached. Try again after your quota resets, or switch to another model or provider.",
-      capacityWait: { label: "Usage limit reached" },
+      text: "Waiting for capacity. Your message will be answered as soon as there is room. To continue sooner, switch to another model.",
+      capacityWait: { label: "Waiting for capacity" },
     });
   });
 
@@ -433,17 +434,20 @@ describe("buildTimeline", () => {
     [{ waitReason: "pinned_account_unavailable" }],
     [{ waitReason: "compaction_provider_locked" }],
     [{ code: "claude_account_rate_limited", provider: "claude" }],
-  ] as const)("a limit wait for %j never promises to continue by itself", (payload) => {
-    reset();
-    for (const type of ["codex.capacity.waiting", "turn.capacity_waiting"]) {
-      const [item] = buildTimeline(englishText, [event(type, payload)]);
-      expect(item).toMatchObject({
-        text: "Usage limit reached. Try again after your quota resets, or switch to another model or provider.",
-        capacityWait: { label: "Usage limit reached" },
-      });
-      expect(JSON.stringify(item)).not.toMatch(/automatic|continues/i);
-    }
-  });
+  ] as const)(
+    "a capacity wait for %j says the message is answered when there is room",
+    (payload) => {
+      reset();
+      for (const type of ["codex.capacity.waiting", "turn.capacity_waiting"]) {
+        const [item] = buildTimeline(englishText, [event(type, payload)]);
+        expect(item).toMatchObject({
+          text: "Waiting for capacity. Your message will be answered as soon as there is room. To continue sooner, switch to another model.",
+          capacityWait: { label: "Waiting for capacity" },
+        });
+        expect(JSON.stringify(item)).not.toMatch(/automatic|continues/i);
+      }
+    },
+  );
 
   test("a capacity wait row has no clock; approval and agent waits keep theirs", () => {
     reset();
@@ -510,7 +514,7 @@ describe("buildTimeline", () => {
     ]);
     const wait = items.find((item) => item.kind === "notice" && item.capacityWait);
     expect(wait).toMatchObject({
-      text: "Usage limit reached. Try again after your quota resets, or switch to another model or provider.",
+      text: "Waiting for capacity. Your message will be answered as soon as there is room. To continue sooner, switch to another model.",
     });
     expect(wait && "resolvedAt" in wait ? wait.resolvedAt : undefined).toBe(
       new Date(1718000000000 + 3000).toISOString(),
@@ -545,7 +549,7 @@ describe("buildTimeline", () => {
       groupTimeline(englishText, items),
       groupTimeline(englishText, items, { readableTurns: true }),
     ]) {
-      expect(JSON.stringify(groups)).not.toMatch(/limit reached/i);
+      expect(JSON.stringify(groups)).not.toMatch(/waiting for capacity/i);
       expect(JSON.stringify(groups)).toContain("You're welcome!");
     }
   });
@@ -568,9 +572,10 @@ describe("buildTimeline", () => {
     const liveWork = live.find((group) => group.kind === "activity" && group.work);
     expect(live.some((group) => group.kind === "item" && group.item.kind === "notice")).toBe(false);
     expect(liveWork && liveWork.kind === "activity" ? liveWork.work?.waiting : null).toEqual({
-      label: "Usage limit reached",
+      label: "Waiting for capacity",
       since: new Date(1718000000000 + 2000).toISOString(),
-      detail: "Try again after your quota resets, or switch to another model or provider.",
+      detail:
+        "Your message will be answered as soon as there is room. To continue sooner, switch to another model.",
       untimed: true,
     });
 
@@ -592,7 +597,7 @@ describe("buildTimeline", () => {
     );
     const work = settled.find((group) => group.kind === "activity" && group.work);
     expect(work && work.kind === "activity" ? work.work?.pausedMs : null).toBe((hours - 2) * 1000);
-    expect(JSON.stringify(settled)).not.toMatch(/limit reached/i);
+    expect(JSON.stringify(settled)).not.toMatch(/waiting for capacity/i);
   });
 
   test("a retried turn's worked time excludes the idle gap before Retry", () => {
