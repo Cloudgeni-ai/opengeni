@@ -7105,6 +7105,53 @@ export const CreateBillingPortalResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type CreateBillingPortalResponse = z.infer<typeof CreateBillingPortalResponse>;
 
+/** Query for one page of an organization's payments, newest first. */
+export const ListBillingReceiptsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accountId: primitives.optionalUuid,
+    /** The nextCursor of the previous page. */
+    cursor: z
+      .string()
+      .regex(/^ch_[A-Za-z0-9]{1,250}$/)
+      .optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(10),
+  }),
+);
+export type ListBillingReceiptsQuery = z.input<typeof ListBillingReceiptsQuery>;
+
+/**
+ * One successful payment and where to download its receipt: plan invoices,
+ * credit purchases and automatic top-ups alike. Amounts are in the currency's
+ * smallest unit (cents for USD).
+ */
+export const BillingReceipt = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.string,
+    createdAt: primitives.dateTime,
+    kind: z.enum(["plan", "credits", "auto_top_up", "other"]),
+    /** What the payment was for, in a few words. */
+    description: primitives.string,
+    amount: primitives.nonnegativeInteger,
+    currency: primitives.string,
+    amountRefunded: primitives.nonnegativeInteger,
+    refunded: primitives.boolean,
+    /** Stripe's receipt for the payment. */
+    receiptUrl: z.string().url().nullable(),
+    /** The invoice page and PDF when the payment paid an invoice. */
+    invoiceUrl: z.string().url().nullable(),
+    invoicePdfUrl: z.string().url().nullable(),
+  }),
+);
+export type BillingReceipt = z.infer<typeof BillingReceipt>;
+
+export const ListBillingReceiptsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    receipts: z.array(BillingReceipt),
+    nextCursor: primitives.nullableString,
+  }),
+);
+export type ListBillingReceiptsResponse = z.infer<typeof ListBillingReceiptsResponse>;
+
 export const RepositoryResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: z.literal("repository"),

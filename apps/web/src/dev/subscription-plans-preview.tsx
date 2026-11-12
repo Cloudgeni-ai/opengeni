@@ -1,6 +1,6 @@
 import { useLayoutEffect, useState } from "react";
 import type { ChatClient } from "@opengeni/sdk";
-import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
+import type { BillingPlanBalance, BillingReceipt, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { CreditRefusalNotice } from "@opengeni/react/app/components/credits/credit-refusal-notice";
@@ -15,6 +15,7 @@ import { RowButton } from "@opengeni/react/ui/page-actions";
 import { ArrowUpRightIcon } from "lucide-react";
 import type { BillingSummary } from "@opengeni/react/app/types";
 import { seatUpgradeFor } from "@opengeni/react/app/lib/subscription-plans";
+import { BillingReceiptsList } from "@/components/organization/billing-receipts";
 import { CreditProtectionPreview } from "./credit-protection-preview";
 
 /** DEV only. The production components with deterministic API fixtures, no payments. */
@@ -61,6 +62,51 @@ export const previewPlans: BillingSubscriptionCatalog["plans"] = [
   },
 ];
 
+/** Every kind of payment, including an automatic top-up and refunds. */
+export const previewReceipts: BillingReceipt[] = [
+  previewReceipt("ch_preview_auto", "2026-11-10T08:12:00.000Z", "auto_top_up", 2750),
+  previewReceipt("ch_preview_plan", "2026-11-01T00:04:00.000Z", "plan", 2000, {
+    invoiceUrl: "https://invoice.stripe.com/i/preview",
+    invoicePdfUrl: "https://pay.stripe.com/invoice/preview/pdf",
+  }),
+  previewReceipt("ch_preview_credits", "2026-10-21T14:30:00.000Z", "credits", 5000, {
+    amountRefunded: 1000,
+  }),
+  previewReceipt("ch_preview_refund", "2026-10-12T09:45:00.000Z", "credits", 2500, {
+    amountRefunded: 2500,
+    refunded: true,
+  }),
+  previewReceipt("ch_preview_old_plan", "2026-10-01T00:03:00.000Z", "plan", 2000),
+];
+
+function previewReceipt(
+  id: string,
+  createdAt: string,
+  kind: BillingReceipt["kind"],
+  amount: number,
+  patch: Partial<BillingReceipt> = {},
+): BillingReceipt {
+  return {
+    id,
+    createdAt,
+    kind,
+    description: {
+      plan: "Plan",
+      credits: "Credits",
+      auto_top_up: "Automatic top-up",
+      other: "Payment",
+    }[kind],
+    amount,
+    currency: "usd",
+    amountRefunded: 0,
+    refunded: false,
+    receiptUrl: `https://pay.stripe.com/receipts/${id}`,
+    invoiceUrl: null,
+    invoicePdfUrl: null,
+    ...patch,
+  };
+}
+
 export function previewPlan(key: string): BillingPlanBalance {
   const item = previewPlans.find((plan) => plan.key === key) ?? previewPlans[0]!;
   return {
@@ -102,6 +148,7 @@ export function SubscriptionPlansPreview() {
   const [plan, setPlan] = useState(() => previewPlan(view));
   const [amount, setAmount] = useState("25.00");
   const [message, setMessage] = useState("");
+  const [receipts, setReceipts] = useState(() => previewReceipts.slice(0, 4));
   const client = {
     async upgradeBillingSubscription(input: { planKey: string }) {
       setPlan(previewPlan(input.planKey));
@@ -284,14 +331,16 @@ export function SubscriptionPlansPreview() {
                         hasPlan
                       />
                       <SettingRow
-                        label="Receipts and invoices"
-                        description="For plans and credits. You can also update your card there."
+                        label="Payment details"
+                        description="Your card and billing details, in Stripe."
                         controlWidth="auto"
                         control={
                           <RowButton
-                            onClick={() => setMessage("Preview only. Receipts open in Stripe.")}
+                            onClick={() =>
+                              setMessage("Preview only. Payment details open in Stripe.")
+                            }
                           >
-                            View receipts
+                            Open Stripe
                             <ArrowUpRightIcon aria-hidden="true" />
                           </RowButton>
                         }
@@ -305,6 +354,12 @@ export function SubscriptionPlansPreview() {
                   </div>
                 </Section>
                 {view === "protection" ? <CreditProtectionPreview /> : null}
+                <BillingReceiptsList
+                  receipts={receipts}
+                  hasMore={receipts.length < previewReceipts.length}
+                  onRetry={() => undefined}
+                  onLoadMore={() => setReceipts(previewReceipts)}
+                />
               </>
             )}
           </SectionStack>
