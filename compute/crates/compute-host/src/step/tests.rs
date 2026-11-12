@@ -28,8 +28,6 @@ struct Counting {
     /// Whether it refuses every memory image, as a VMM refuses a snapshot
     /// format it no longer reads.
     refuses: AtomicBool,
-    /// How its next resumes fail, one each, before they succeed again.
-    resume_failures: std::sync::Mutex<std::collections::VecDeque<ErrorKind>>,
     /// Whether its VM has ended: [`Engine::exited`] resolves once it has.
     ended: tokio::sync::watch::Sender<bool>,
 }
@@ -82,10 +80,7 @@ impl Engine for Counting {
 
     async fn resume(&self, (): &()) -> Result<(), EngineError> {
         self.resumes.fetch_add(1, Ordering::SeqCst);
-        let failure = self.resume_failures.lock().unwrap().pop_front();
-        failure.map_or(Ok(()), |kind| {
-            Err(EngineError::new(kind, "resume", "refused"))
-        })
+        Ok(())
     }
 
     async fn compress(&self, (): &(), _: &CancellationToken) -> Result<Completion, EngineError> {
@@ -810,10 +805,10 @@ async fn a_save_waiting_for_memory_that_does_not_arrive_can_be_cancelled() {
     assert!(!durable.image);
 }
 
-/// A checkpoint cancelled before it began, or while it waits for its
-/// memory, reports that it wrote nothing, so the core books nothing for
-/// it; a step that began its work, such as a save waiting for its memory,
-/// may have written.
+/// A checkpoint cancelled before it began reports that it wrote nothing,
+/// so the core books nothing for it; a step that began its work, such as a
+/// save waiting for its memory, may have written. A checkpoint never waits
+/// for the memory: it copies the disk alone.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_checkpoint_cancelled_before_it_captured_anything_reports_it_wrote_nothing() {
@@ -834,25 +829,23 @@ async fn a_checkpoint_cancelled_before_it_captured_anything_reports_it_wrote_not
             Vec::new(),
         )
     };
-    for (step, wrote) in [(Step::Checkpoint, false), (Step::Save, true)] {
-        let mut job = sandbox.job(NoStore, record.clone(), true);
-        // A pager that never listens: the memory it serves never completes.
-        job.live.as_mut().unwrap().memory.paging = Some(silent(&format!("{step:?}.sock")));
-        let cancel = job.cancel.clone();
-        let running = tokio::spawn(async move { job.run(step).await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            !running.is_finished(),
-            "{step:?} did not wait for the memory"
-        );
-        cancel.cancel();
-        let ran = tokio::time::timeout(Duration::from_secs(5), running)
-            .await
-            .expect("the cancelled step ends")
-            .unwrap();
-        assert_eq!(ran.outcome, Outcome::Cancelled, "{step:?}");
-        assert_eq!(ran.report.wrote, wrote, "{step:?}");
-    }
+    let mut job = sandbox.job(NoStore, record, true);
+    // A pager that never listens: the memory it serves never completes.
+    job.live.as_mut().unwrap().memory.paging = Some(silent("save.sock"));
+    let cancel = job.cancel.clone();
+    let running = tokio::spawn(async move { job.run(Step::Save).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !running.is_finished(),
+        "the save did not wait for the memory"
+    );
+    cancel.cancel();
+    let ran = tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the cancelled save ends")
+        .unwrap();
+    assert_eq!(ran.outcome, Outcome::Cancelled);
+    assert!(ran.report.wrote);
 }
 
 /// A checkpoint cancelled once it asked its guest to write its disks out
@@ -1011,58 +1004,6 @@ async fn a_vm_whose_disk_cannot_be_vouched_for_is_kept_unsaved() {
     );
     let durable = sandbox.records.settle(sandbox.id).await.unwrap();
     assert!(!durable.image, "the record vouches for an image");
-}
-
-/// A checkpoint resumes the VM it paused through failures that changed
-/// nothing, even once cancelled, since its sandbox is in use, for as long
-/// as the VM lives; a failure that may have changed something, or the VM
-/// ending, ends the tries.
-#[tokio::test]
-async fn a_checkpoint_resumes_its_paused_vm_through_transient_failures() {
-    let sandbox = Sandbox::new().await;
-    let record = sandbox.record(Change::new()).await;
-    let job = sandbox.job(NoStore, record, true);
-    job.cancel.cancel();
-    let fail = |kinds: &[ErrorKind]| {
-        let mut failures = sandbox.engine.resume_failures.lock().unwrap();
-        failures.clear();
-        failures.extend(kinds);
-    };
-
-    fail(&[ErrorKind::Transient; 3]);
-    job.resume_paused(&()).await.unwrap();
-    assert_eq!(Counting::count(&sandbox.engine.resumes), 4);
-
-    fail(&[
-        ErrorKind::Transient,
-        ErrorKind::MemoryLost,
-        ErrorKind::Transient,
-    ]);
-    let error = job.resume_paused(&()).await.unwrap_err();
-    assert_eq!(error.kind, ErrorKind::MemoryLost);
-    assert_eq!(Counting::count(&sandbox.engine.resumes), 6);
-
-    // A VMM that goes on answering that nothing changed is tried for as
-    // long as the VM lives, well past the point where that is an error,
-    // about once a second once the waits have grown.
-    tokio::time::pause();
-    fail(&[ErrorKind::Transient; 1_000]);
-    let begin = tokio::time::Instant::now();
-    let ends = async {
-        tokio::time::sleep(Duration::from_secs(120)).await;
-        sandbox.engine.ended.send_replace(true);
-    };
-    let (resumed, ()) = tokio::join!(job.resume_paused(&()), ends);
-    // Once the VM ends, its memory is gone.
-    assert_eq!(resumed.unwrap_err().kind, ErrorKind::MemoryLost);
-    assert!(begin.elapsed() >= Duration::from_secs(120));
-    let tries = Counting::count(&sandbox.engine.resumes) - 6;
-    assert!((115..135).contains(&tries), "{tries} tries");
-
-    // An ended VM is not asked to resume at all.
-    let error = job.resume_paused(&()).await.unwrap_err();
-    assert_eq!(error.kind, ErrorKind::MemoryLost);
-    assert_eq!(Counting::count(&sandbox.engine.resumes), tries + 6);
 }
 
 fn written(jail: &Path) -> SnapshotFiles {
