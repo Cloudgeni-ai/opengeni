@@ -359,12 +359,35 @@ const client = {
     };
   },
   async deleteOrganizationApiKey() {},
+  // An older setup's key, made in a team workspace, with the same name as the live one.
+  async listApiKeys(workspaceId: string) {
+    if (workspaceId !== workspaceRows[4]!.id) return [];
+    return [
+      {
+        id: "4a1d2c3b-0000-4000-8000-00000000a009",
+        accountId: ORG,
+        workspaceId,
+        name: "Production server",
+        description: null,
+        prefix: "og_live_k2Ld",
+        permissions: [],
+        expiresAt: null,
+        revokedAt: null,
+        lastUsedAt: "2026-04-02T10:00:00.000Z",
+        createdAt: "2026-02-01T08:00:00.000Z",
+        updatedAt: "2026-02-01T08:00:00.000Z",
+      },
+    ];
+  },
+  async deleteApiKey() {},
   async listOrganizationAdministrationMembers() {
     return {
       members: [
         ["user:mira", "Mira Holt", "mira@kontali.com", "owner"],
         ["user:jonas", "Jonas Berg", "jonas@kontali.com", "admin"],
         ["user:sara", "Sara Lind", "sara@kontali.com", "member"],
+        ["external_user:kontali:anna", "anna.berg@nordvik.no", null, "member"],
+        ["external_user:kontali:ops-7731", "ops-7731", null, "member"],
       ].map(([subjectId, name, email, role], index) => ({
         id: `3e3b0000-0000-4000-8000-00000000000${index + 1}`,
         organizationId: ORG,

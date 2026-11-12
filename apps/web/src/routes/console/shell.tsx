@@ -36,6 +36,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
@@ -195,6 +196,20 @@ export function ConsoleShellRoute() {
                 <DropdownMenuCheck checked={org.accountId === organization.accountId} />
               </DropdownMenuItem>
             ))}
+            {value?.appWorkspaceId ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link
+                    to="/workspaces/$workspaceId/organization"
+                    params={{ workspaceId: value.appWorkspaceId }}
+                    search={{ section: "general" }}
+                  >
+                    Rename organization
+                  </Link>
+                </DropdownMenuItem>
+              </>
+            ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       ) : null}

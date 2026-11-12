@@ -61,12 +61,64 @@ function useMemberNames() {
   );
 }
 
+/** A key in the list: an organization key, or a key that belongs to one team workspace. */
+export type ConsoleKey = { apiKey: ApiKey; workspace: { id: string; name: string } | null };
+
+const WORKSPACE_KEY_LOOKUPS = 50;
+
+/**
+ * Organization keys, then each team workspace's own keys (older setups created
+ * keys there). A workspace whose keys can't be read is left out.
+ */
+export async function loadConsoleKeys(
+  client: ReturnType<typeof useConsole>["client"],
+  organizationId: string,
+  signal: AbortSignal,
+): Promise<ConsoleKey[]> {
+  const [organizationKeys, teams] = await Promise.all([
+    client.listOrganizationApiKeys(organizationId),
+    client
+      .listConsoleWorkspaces(organizationId, { kind: "team", signal })
+      .then((response) => response.workspaces.slice(0, WORKSPACE_KEY_LOOKUPS))
+      .catch(() => []),
+  ]);
+  const workspaceKeys = await Promise.all(
+    teams.map(async (workspace) => {
+      try {
+        const keys = await client.listApiKeys(workspace.id);
+        return keys.map((apiKey) => ({
+          apiKey,
+          workspace: { id: workspace.id, name: workspace.name },
+        }));
+      } catch {
+        return [];
+      }
+    }),
+  );
+  const all: ConsoleKey[] = [
+    ...organizationKeys.map((apiKey) => ({ apiKey, workspace: null })),
+    ...workspaceKeys.flat(),
+  ];
+  // Most recently used first, so the key in daily use is at the top.
+  const used = (key: ConsoleKey) => (key.apiKey.lastUsedAt ? Date.parse(key.apiKey.lastUsedAt) : 0);
+  return all.sort((a, b) => used(b) - used(a));
+}
+
+function scopeLabel({ apiKey, workspace }: ConsoleKey): string {
+  if (workspace) return workspace.name;
+  const scope = apiKey.workspaceScope;
+  if (!scope || scope.kind === "all") return "All workspaces";
+  return scope.workspaceIds.length === 1
+    ? "1 workspace"
+    : `${formatCount(scope.workspaceIds.length)} workspaces`;
+}
+
 export function ConsoleApiKeysRoute() {
   const { client, organizationId, search } = useConsole();
   const navigate = useNavigate();
-  const [revoking, setRevoking] = useState<ApiKey | null>(null);
+  const [revoking, setRevoking] = useState<ConsoleKey | null>(null);
   const keys = useConsoleQuery(
-    () => client.listOrganizationApiKeys(organizationId),
+    (signal) => loadConsoleKeys(client, organizationId, signal),
     [client, organizationId],
   );
   const usage = useConsoleQuery(
@@ -122,15 +174,16 @@ export function ConsoleApiKeysRoute() {
           label="API keys"
           nameLabel="Key"
           columns={[
+            { id: "kind", label: "Kind", width: 100 },
+            { id: "scope", label: "Scope", width: 128 },
             { id: "access", label: "Access", width: 96 },
             { id: "used", label: "Last used", width: 100 },
-            { id: "creator", label: "Created by", width: 120 },
-            { id: "workspaces", label: "Workspaces", width: 88, align: "end" },
+            { id: "creator", label: "Created by", width: 104 },
             { id: "spend", label: "Spend, 30 days", width: 104, align: "end" },
-            { id: "expires", label: "Expires", width: 96, align: "end" },
           ]}
         >
-          {rows.map((apiKey) => {
+          {rows.map((key) => {
+            const { apiKey } = key;
             const status = apiKeyStatus(apiKey);
             const keyUsage = usageByKey.get(apiKey.id);
             const creator = keyUsage?.createdBySubjectId
@@ -140,38 +193,41 @@ export function ConsoleApiKeysRoute() {
               <ListRow
                 key={apiKey.id}
                 title={apiKey.name}
-                description={
-                  <span translate="no" className="font-mono">
+                meta={[
+                  <span key="prefix" translate="no" className="font-mono">
                     {apiKey.prefix}…
-                  </span>
-                }
+                  </span>,
+                  apiKey.expiresAt && status === "active" ? (
+                    <span key="expires">
+                      Expires <RelativeTime date={apiKey.expiresAt} format="date" />
+                    </span>
+                  ) : null,
+                  keyUsage && keyUsage.managedWorkspaces > 0
+                    ? `${formatCount(keyUsage.managedWorkspaces)} managed ${
+                        keyUsage.managedWorkspaces === 1 ? "workspace" : "workspaces"
+                      }`
+                    : null,
+                ]}
                 status={
                   status === "active" ? undefined : <StatusBadge variant="dot" status={status} />
                 }
                 cells={{
-                  access: accessLabel(apiKey),
+                  kind: key.workspace ? "Workspace" : "Organization",
+                  scope: scopeLabel(key),
+                  access: key.workspace ? "—" : accessLabel(apiKey),
                   used: apiKey.lastUsedAt ? (
                     <RelativeTime date={apiKey.lastUsedAt} />
                   ) : (
                     <span className="text-fg-subtle">Never</span>
                   ),
                   creator: creator ?? "—",
-                  workspaces: keyUsage ? formatCount(keyUsage.managedWorkspaces) : "—",
                   spend: keyUsage ? formatMicros(keyUsage.spendMicros) : "—",
-                  expires: apiKey.expiresAt ? (
-                    <RelativeTime date={apiKey.expiresAt} format="date" />
-                  ) : (
-                    "Never"
-                  ),
                 }}
                 {...(status === "revoked"
                   ? {}
                   : {
                       menu: (
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onSelect={() => setRevoking(apiKey)}
-                        >
+                        <DropdownMenuItem variant="destructive" onSelect={() => setRevoking(key)}>
                           Revoke
                         </DropdownMenuItem>
                       ),
@@ -186,11 +242,11 @@ export function ConsoleApiKeysRoute() {
         onOpenChange={(open) => {
           if (!open) setRevoking(null);
         }}
-        title={`Revoke ${revoking?.name ?? "this key"}?`}
+        title={`Revoke ${revoking?.apiKey.name ?? "this key"}?`}
         consequences={
           revoking
             ? [
-                `Every request using ${revoking.prefix}… is refused right away.`,
+                `Every request using ${revoking.apiKey.prefix}… is refused right away.`,
                 "Anything using it needs a new key to keep working.",
                 "This can't be undone.",
               ]
@@ -200,14 +256,16 @@ export function ConsoleApiKeysRoute() {
         pendingLabel="Revoking…"
         onConfirm={async () => {
           if (!revoking) return;
+          const { apiKey, workspace } = revoking;
           try {
-            await client.deleteOrganizationApiKey(organizationId, revoking.id);
+            if (workspace) await client.deleteApiKey(workspace.id, apiKey.id);
+            else await client.deleteOrganizationApiKey(organizationId, apiKey.id);
           } catch (error) {
-            throw new Error(`Couldn't revoke ${revoking.name}. ${userErrorText(error)}`, {
+            throw new Error(`Couldn't revoke ${apiKey.name}. ${userErrorText(error)}`, {
               cause: error,
             });
           }
-          toast.success(`Revoked ${revoking.name}`, {
+          toast.success(`Revoked ${apiKey.name}`, {
             description: "Requests using it are refused from now on.",
           });
           keys.reload();

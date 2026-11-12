@@ -20,6 +20,8 @@ const { ConsoleContext } = await import("./console-shared");
 const { ConsoleSessionsRoute } = await import("./sessions");
 const { ConsoleSettingsRoute } = await import("./settings");
 const { ConsoleNewApiKeyRoute } = await import("./api-keys");
+const { ConsoleApiKeysRoute } = await import("./api-keys");
+const { ConsoleMembersRoute } = await import("./organization-pages");
 
 function session(index: number, reviewLevel: "full" | "metadata") {
   return {
@@ -50,7 +52,21 @@ const client = {
     range: "30d",
     since: "2026-10-13T00:00:00.000Z",
     until: "2026-11-12T00:00:00.000Z",
-    workspaces: [],
+    workspaces: [{ id: workspaceId, name: "Analysts", kind: "team" }],
+  })),
+  listOrganizationApiKeys: mock(async () => [
+    apiKey("key-org", "Production server", "og_live_live", "2026-11-12T09:00:00.000Z"),
+  ]),
+  listApiKeys: mock(async () => [
+    apiKey("key-ws", "Production server", "og_live_old1", "2026-03-01T09:00:00.000Z", workspaceId),
+  ]),
+  getConsoleApiKeyUsage: mock(async () => ({ apiKeys: [] })),
+  listOrganizationAdministrationMembers: mock(async () => ({
+    members: [
+      member("m1", "user:mira", "Mira Holt", "owner"),
+      member("m2", "external_user:kontali:anna", "anna", "member"),
+      member("m3", "external_user:kontali:lars", "lars", "member"),
+    ],
   })),
   getConsoleSettings: mock(async () => ({
     organizationId,
@@ -70,6 +86,34 @@ const client = {
     token: "og_live_ab12_secret_token_value",
   })),
 };
+
+function apiKey(
+  id: string,
+  name: string,
+  prefix: string,
+  lastUsedAt: string,
+  keyWorkspaceId: string | null = null,
+) {
+  return {
+    id,
+    accountId: organizationId,
+    workspaceId: keyWorkspaceId,
+    name,
+    description: null,
+    prefix,
+    permissions: [],
+    ...(keyWorkspaceId ? {} : { access: "full", workspaceScope: { kind: "all" } }),
+    expiresAt: null,
+    revokedAt: null,
+    lastUsedAt,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function member(id: string, subjectId: string, name: string, role: string) {
+  return { id, subjectId, name, email: null, role, status: "active" };
+}
 
 let container: HTMLDivElement;
 let root: Root;
@@ -149,6 +193,15 @@ describe("Console sessions", () => {
   });
 });
 
+describe("Console members", () => {
+  test("leaves the product's end users out of members", async () => {
+    await render(createElement(ConsoleMembersRoute));
+    expect(container.textContent).toContain("Mira Holt");
+    expect(container.textContent).not.toContain("anna");
+    expect(container.textContent).toContain("End users of your product aren't listed (2)");
+  });
+});
+
 describe("Console settings", () => {
   test("changes the review level", async () => {
     await render(createElement(ConsoleSettingsRoute));
@@ -172,6 +225,20 @@ describe("Console settings", () => {
 });
 
 describe("Console API keys", () => {
+  test("tells an organization key from a workspace key with the same name", async () => {
+    await render(createElement(ConsoleApiKeysRoute));
+    const rows = [...container.querySelectorAll('[role="row"]')].filter((row) =>
+      row.textContent?.includes("Production server"),
+    );
+    expect(rows).toHaveLength(2);
+    // The key in daily use comes first.
+    expect(rows[0]!.textContent).toContain("og_live_live");
+    expect(rows[0]!.textContent).toContain("Organization");
+    expect(rows[0]!.textContent).toContain("All workspaces");
+    expect(rows[1]!.textContent).toContain("Workspace");
+    expect(rows[1]!.textContent).toContain("Analysts");
+  });
+
   test("creates a key and shows its token once", async () => {
     await render(createElement(ConsoleNewApiKeyRoute));
     expect(container.textContent).not.toContain("og_live_ab12_secret_token_value");

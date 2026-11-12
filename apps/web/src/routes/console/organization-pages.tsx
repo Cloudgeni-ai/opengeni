@@ -16,6 +16,7 @@ import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   ConsoleLoadError,
   ConsolePage,
+  formatCount,
   formatMicros,
   rangeLabel,
   useConsole,
@@ -65,13 +66,20 @@ function roleLabel(role: string): string {
   return role === "owner" ? "Owner" : role === "admin" ? "Admin" : "Member";
 }
 
+/** Your product's end users can hold an organization membership; they aren't people on your team. */
+export function isEndUserSubject(subjectId: string): boolean {
+  return subjectId.startsWith("external_user:");
+}
+
 export function ConsoleMembersRoute() {
   const { client, organizationId } = useConsole();
   const members = useConsoleQuery(
     () => client.listOrganizationAdministrationMembers(organizationId),
     [client, organizationId],
   );
-  const rows = (members.data?.members ?? []).filter((member) => member.status !== "revoked");
+  const current = (members.data?.members ?? []).filter((member) => member.status !== "revoked");
+  const rows = current.filter((member) => !isEndUserSubject(member.subjectId));
+  const endUsers = current.length - rows.length;
   return (
     <ConsolePage>
       <PageHeader
@@ -87,29 +95,36 @@ export function ConsoleMembersRoute() {
       ) : !members.data ? (
         <ListRowSkeleton count={4} />
       ) : (
-        <RowList
-          variant="table"
-          label="Members"
-          nameLabel="Member"
-          columns={[{ id: "role", label: "Role", width: 112 }]}
-        >
-          {rows.map((member) => (
-            <ListRow
-              key={member.id}
-              title={member.name ?? member.email ?? "Unnamed member"}
-              description={member.name && member.email ? member.email : undefined}
-              status={
-                member.status === "active" ? undefined : (
-                  <StatusBadge
-                    variant="dot"
-                    status={member.status === "suspended" ? "suspended" : "invited"}
-                  />
-                )
-              }
-              cells={{ role: roleLabel(member.role) }}
-            />
-          ))}
-        </RowList>
+        <>
+          <RowList
+            variant="table"
+            label="Members"
+            nameLabel="Member"
+            columns={[{ id: "role", label: "Role", width: 112 }]}
+          >
+            {rows.map((member) => (
+              <ListRow
+                key={member.id}
+                title={member.name ?? member.email ?? "Unnamed member"}
+                description={member.name && member.email ? member.email : undefined}
+                status={
+                  member.status === "active" ? undefined : (
+                    <StatusBadge
+                      variant="dot"
+                      status={member.status === "suspended" ? "suspended" : "invited"}
+                    />
+                  )
+                }
+                cells={{ role: roleLabel(member.role) }}
+              />
+            ))}
+          </RowList>
+          {endUsers > 0 ? (
+            <p className="mt-4 text-xs text-fg-muted">
+              End users of your product aren't listed ({formatCount(endUsers)}).
+            </p>
+          ) : null}
+        </>
       )}
     </ConsolePage>
   );
