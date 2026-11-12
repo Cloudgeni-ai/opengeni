@@ -1033,6 +1033,82 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     `observability.prometheusRule.enabled`), scoping each host to its
     release through the leader's `compute_fleet_host_info`, and the
     **Opengeni · Compute** dashboard shows them.
+- **What the control service counts of each host.** The leader reports,
+  from the fleet's store, each host's agent restarts
+  (`compute_fleet_host_agent_restarts`). Each run of a host's agent tells
+  when it started (`run`, with what it can take on), and the store counts
+  every later run it hears of once, whichever replica hears it and in
+  whatever order renewals arrive: its agent stopped by its watchdog when
+  stuck, crashed, upgraded or the host rebooted. A run that stops before
+  it first says what it can take on is not counted, and hosts of an
+  earlier release tell none. A restarted agent keeps the lease it held, so
+  its epoch (`compute_fleet_host_epoch`) moves only when the host
+  registers afresh: after a reboot, or once it was given up on. Every
+  replica also reports, for each host it holds, those fresh
+  registrations (`compute_control_host_registrations_total`) and the
+  requests the host refused as full
+  (`compute_control_host_refusals_total`, by `kind`: `wake` of a sandbox
+  it holds, `place` of one created on it or given to it to adopt). These
+  need no host metrics, so they alert with `computeControl.metrics.port`
+  alone:
+  - `OpenGeniComputeHostAgentRestarting`: a host's agent restarts changed
+    at least `computeControl.alerts.agentRestarts` (2) times in six hours,
+    for a minute. The count is kept in the store, so it survives
+    compute-control rollouts and changes of leader. One in-place upgrade
+    or reboot restarts each agent once and does not fire it; raise the
+    threshold where agents are upgraded in place more often.
+  - `OpenGeniComputeHostRefusingWakes`: a host refused
+    `computeControl.alerts.refusedWakes` (3) wakes or more as full in half
+    an hour, and refused one in the last ten minutes, for a quarter of an
+    hour; a single burst that stops does not fire it.
+  - `OpenGeniComputeHostUnreachable` (critical): a host has not renewed
+    its 30-second lease for over 20 seconds, for a minute, and keeps
+    firing for 15 minutes after, so a host the leader gives up (its
+    series then goes) is still delivered past Alertmanager's group wait.
+    The leader waits for a silent host that holds sandboxes for its
+    give-up time (`give_up_after`, 120 seconds by default); a silent host
+    with no sandboxes is usually given up before this fires and raises
+    `OpenGeniComputeHostGivenUp`, but fires this too if fencing it is
+    slow or keeps failing (`OpenGeniComputeHostGiveUpFailing`). A
+    planned reboot that keeps a host holding sandboxes away for over about
+    80 seconds fires it too; silence it for planned maintenance.
+  - `OpenGeniComputeFleetFull`: the host group is at its maximum size
+    (`compute_fleet_group_size` against `compute_fleet_group_max_size`)
+    and no live host can promise `computeControl.alerts.spareMemoryMib`
+    more (free plus reclaimable memory; 4096 by default, about one
+    sandbox's memory request), for a quarter of an hour. It looks at
+    memory only, and exists only for a group the service sizes; 0 turns
+    it off.
+  - `OpenGeniComputeCreatesFailing`: over
+    `computeControl.alerts.createFailureRatio` (a tenth) of
+    `POST /v1/sandboxes` that did not fail for the caller's own mistake
+    failed, for lack of room or in the service, a host or the store, over
+    half an hour with `computeControl.alerts.createMinimum` (5) or more
+    and at least two failures.
+    Creates through the E2B front door are not counted.
+- **Read a host's journal in Cloud Logging.** The host's journal reaches
+  its serial console (the GCE Ubuntu image forwards the system log to the
+  console; staging's hosts show `compute-host` lines there), and the
+  Terraform module turns on the instance's
+  serial port logging (`journal_to_cloud_logging`, on by default), so
+  Cloud Logging keeps it (30 days by default) with nothing running on
+  the host, and it stays readable after the host is gone:
+
+  ```sh
+  gcloud logging read --project <project> --freshness 1h \
+    'logName="projects/<project>/logs/serialconsole.googleapis.com%2Fserial_port_1_output"
+     AND labels."compute.googleapis.com/resource_name"="<host name>"
+     AND textPayload:"compute-host"'
+  ```
+
+  Search for `wake refused: host full`, `is stuck`, or `compute.alarm` the
+  same way. Hosts made from an earlier template ship theirs once the
+  project's or the instance's metadata has `serial-port-logging-enable`
+  set to `TRUE`, without a restart. An organization policy
+  (`compute.disableSerialPortLogging`) can forbid it, and then refuses to
+  create hosts from a template that asks for it; set
+  `journal_to_cloud_logging` to false there and read the console with
+  `gcloud compute instances get-serial-port-output`.
 - **Distinguish booking headroom from filesystem space.**
   `compute_fleet_host_disk_booking_headroom_bytes` is what more wakes may book after
   subtracting worst-case sandbox growth and the host's reserve from available

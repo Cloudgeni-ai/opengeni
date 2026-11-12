@@ -19,6 +19,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_8,
     MIGRATION_9,
     MIGRATION_10,
+    MIGRATION_11,
 ];
 
 /// Version 1: the tables, made if missing.
@@ -219,6 +220,14 @@ insert into compute_captured_images (image)
     select substr(name, 8) from compute_pointers
         where name ~ '^rootfs-[0-9a-f]{64}$' and octet_length(pointer) > 0
     on conflict (image) do nothing;
+";
+
+/// Version 11: the latest run of each host's agent it told of, and how
+/// many later runs it told of than the one before (`HostRow::run`,
+/// `HostRow::restarts`).
+const MIGRATION_11: &str = "
+alter table compute_hosts add column if not exists run bigint;
+alter table compute_hosts add column if not exists restarts bigint not null default 0;
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take
