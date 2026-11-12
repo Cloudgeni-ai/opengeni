@@ -176,7 +176,6 @@ impl Options {
 /// Runs a pager process with the arguments after the subcommand. It prints
 /// `ready` on standard output once both sockets listen and never writes
 /// there again; everything else goes to standard error.
-#[must_use]
 pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     let options = match Options::parse(args) {
         Ok(options) => options,

@@ -145,11 +145,11 @@ async fn report_activity<E: Engine>(
     incarnation: u64,
     meter: Option<&Meter>,
 ) -> Infallible {
-    let Some(meter) = meter else {
-        return std::future::pending().await;
-    };
-    loop {
-        (meter.send)(Reading::of(engine, vm, incarnation));
-        tokio::time::sleep(meter.every).await;
+    match meter {
+        None => std::future::pending().await,
+        Some(meter) => loop {
+            (meter.send)(Reading::of(engine, vm, incarnation));
+            tokio::time::sleep(meter.every).await;
+        },
     }
 }
