@@ -1076,6 +1076,14 @@ temporal:
     username: opengeni
     existingSecret: ""
     passwordKey: POSTGRES_PASSWORD
+  metrics:
+    # Temporal's own Prometheus endpoint: frontend, history and matching request
+    # latency and errors, persistence latency, and task queue backlog. These are
+    # what tell a slow Temporal server apart from a slow client or network. The
+    # Service exposes it as "metrics"; a ServiceMonitor scrapes it when
+    # observability.serviceMonitor.enabled is set, and networkPolicy.monitoring
+    # admits the scraper. null turns the endpoint off.
+    port: 9090
   resources:
     requests:
       cpu: 250m
