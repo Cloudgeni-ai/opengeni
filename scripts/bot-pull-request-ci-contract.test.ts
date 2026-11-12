@@ -125,7 +125,9 @@ case "$1 $2" in
   "api "*pulls*)
     [ -f "$STUB_DIR/lookup_fails" ] && exit 1
     cat "$STUB_DIR/pr_state" 2>/dev/null || echo ;;
-  "api "*check-runs*) cat "$STUB_DIR/checks" 2>/dev/null || printf '0\\t0\\t0\\n' ;;
+  "api "*check-runs*)
+    [ -f "$STUB_DIR/checks_fail" ] && exit 1
+    cat "$STUB_DIR/checks" 2>/dev/null || printf '0\\t0\\t0\\n' ;;
 esac
 `;
 const STUB_BUN = `#!/usr/bin/env bash
@@ -241,7 +243,7 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
       const setChecks = (runs: number, active = 0, passed = 0) =>
         writeFile(join(stub, "checks"), `${runs}\t${active}\t${passed}\n`);
       const failLookup = () => writeFile(join(stub, "lookup_fails"), "");
-      return { root, refresh, setPr, setChecks, failLookup };
+      return { root, stub, refresh, setPr, setChecks, failLookup };
     }
 
     test("opens the pull request and dispatches PR CI on the pushed head", async () => {
@@ -288,7 +290,7 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
       }
     });
 
-    test("pushes new pins, except while the pull request is in a merge batch", async () => {
+    test("pushes new pins, except while the pull request is in a merge batch or may join one", async () => {
       const { root, refresh, setChecks, setPr } = await fixture();
       try {
         const first = await refresh({ [pin]: "pin=2\n" });
@@ -298,11 +300,70 @@ describe.each(Object.keys(PIN_WORKFLOWS) as (keyof typeof PIN_WORKFLOWS)[])(
         expect(held.head).toBe(first.head);
         expect(held.log).not.toContain("workflow run");
 
+        // Queued with green PR CI, the batcher may start a batch with it before
+        // labelling it in-batch, so it is held too, whether queued by label or
+        // by auto-merge.
+        for (const queued of [
+          "OPEN queue-ready",
+          "OPEN auto-merge",
+          "OPEN queue-priority,auto-merge",
+        ]) {
+          await setPr(queued);
+          const waiting = await refresh({ [pin]: "pin=3\n" });
+          expect(waiting.head, queued).toBe(first.head);
+          expect(waiting.log, queued).not.toContain("workflow run");
+          expect(waiting.log, queued).not.toContain("pr edit");
+        }
+
+        // Queued with red PR CI, it cannot be batched, so it is updated.
         await setPr("OPEN queue-ready");
+        await setChecks(1, 0, 0);
         const moved = await refresh({ [pin]: "pin=3\n" });
         expect(moved.head).not.toBe(first.head);
         expect(moved.log).toContain("pr edit");
         expect(moved.log).toContain(`head_sha=${moved.head}`);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("updates an open pull request that is not queued, even with green PR CI", async () => {
+      const { root, refresh, setChecks, setPr } = await fixture();
+      try {
+        const first = await refresh({ [pin]: "pin=2\n" });
+        await setChecks(1, 0, 1);
+        await setPr("OPEN queue-priority");
+        const moved = await refresh({ [pin]: "pin=3\n" });
+        expect(moved.head).not.toBe(first.head);
+        expect(moved.log).toContain("pr edit");
+        expect(moved.log).toContain(`head_sha=${moved.head}`);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("fails without pushing when PR CI on a queued head cannot be read", async () => {
+      const { root, refresh, setPr, stub } = await fixture();
+      try {
+        const first = await refresh({ [pin]: "pin=2\n" });
+        await setPr("OPEN queue-ready");
+        await writeFile(join(stub, "checks_fail"), "");
+        const failed = await refresh({ [pin]: "pin=3\n" }, 1);
+        expect(failed.head).toBe(first.head);
+        expect(failed.log).not.toContain("workflow run");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("updates a queued pull request that has no PR CI run yet", async () => {
+      const { root, refresh, setPr } = await fixture();
+      try {
+        const first = await refresh({ [pin]: "pin=2\n" });
+        await setPr("OPEN queue-ready");
+        // No PR CI has run on the head yet, so nothing can batch it.
+        const moved = await refresh({ [pin]: "pin=3\n" });
+        expect(moved.head).not.toBe(first.head);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
