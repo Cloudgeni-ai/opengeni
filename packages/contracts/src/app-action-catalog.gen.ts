@@ -2984,15 +2984,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/catalog",
     "request": [],
     "response": [
-      "ToolGatewayApprovalResponse",
-      "ToolGatewayCallResponse",
-      "ToolGatewayCatalog",
-      "ToolGatewayDeclarationsResponse"
+      "ToolGatewayCatalog"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/tools/declarations",
@@ -3000,15 +2994,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/declarations",
     "request": [],
     "response": [
-      "ToolGatewayApprovalResponse",
-      "ToolGatewayCallResponse",
-      "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/vault-providers/connections",
@@ -7424,16 +7412,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/manifest",
     "request": [],
     "response": [
-      "ToolGatewayInvokeResponse",
-      "ToolGatewayManifestResponse",
-      "ToolGatewayResolvedTool",
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewayManifestResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/resolve",
@@ -7441,16 +7422,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/resolve",
     "request": [],
     "response": [
-      "ToolGatewayInvokeResponse",
-      "ToolGatewayManifestResponse",
-      "ToolGatewayResolvedTool",
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewayResolvedTool"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/site-consent",
@@ -7460,13 +7434,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewaySiteConsentRequest"
     ],
     "response": [
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewaySiteConsentResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/target-approvals",

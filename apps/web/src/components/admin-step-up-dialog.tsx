@@ -153,6 +153,7 @@ export function AdminStepUpDialog({
     return (
       <FormDialog
         open
+        aboveOtherDialogs
         onOpenChange={(open) => !open && close(false)}
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
@@ -179,6 +180,7 @@ export function AdminStepUpDialog({
     return (
       <FormDialog
         open
+        aboveOtherDialogs
         onOpenChange={(open) => !open && close(confirmed.current)}
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
@@ -231,6 +233,7 @@ export function AdminStepUpDialog({
     return (
       <FormDialog
         open
+        aboveOtherDialogs
         onOpenChange={(open) => !open && close(false)}
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
@@ -257,6 +260,7 @@ export function AdminStepUpDialog({
   return (
     <FormDialog
       open
+      aboveOtherDialogs
       onOpenChange={(open) => !open && close(confirmed.current)}
       size="sm"
       leading={<KeyRoundIcon aria-hidden />}

@@ -38,7 +38,9 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     footerStart,
     onOpenChange,
     onSubmit,
+    aboveOtherDialogs,
   }: {
+    aboveOtherDialogs?: boolean;
     title: ReactNode;
     description?: ReactNode;
     submitLabel: ReactNode;
@@ -49,7 +51,7 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     onOpenChange: (open: boolean) => void;
     onSubmit: () => unknown;
   }) => (
-    <div role="dialog">
+    <div role="dialog" data-above-other-dialogs={aboveOtherDialogs ? "" : undefined}>
       <h2>{title}</h2>
       <p>{description}</p>
       {children}
@@ -145,6 +147,8 @@ describe("AdminStepUpDialog", () => {
     );
     await flush();
     expect(view.container.querySelector("h2")?.textContent).toBe("Confirm it's you");
+    // Any open surface can raise it, the chat's connect dialog included.
+    expect(view.container.querySelector("[data-above-other-dialogs]")).not.toBeNull();
     // Once per session, not every few minutes.
     expect(view.container.textContent).toContain("You won't be asked again until you sign out.");
     await view.click("Use passkey");
@@ -181,6 +185,7 @@ describe("AdminStepUpDialog", () => {
     });
     await flush();
     expect(view.container.querySelector("h2")?.textContent).toBe("Add a passkey");
+    expect(view.container.querySelector("[data-above-other-dialogs]")).not.toBeNull();
     await view.click("Add passkey");
     expect((await change).status).toBe(403);
     expect(navigations).toEqual([{ to: "/settings/security" }]);

@@ -499,22 +499,59 @@ function gatePermission(sources: readonly string[]): { permission?: string } {
 }
 
 /**
- * Response bodies the public surface manifest can't name because the SDK
- * types them by hand, matched against "METHOD /path". Each names a schema
- * exported by @opengeni/contracts that describes what the route returns, so
- * a secret in it (a sign-in code) marks the action.
+ * What a route returns, matched against "METHOD /path", where the public
+ * surface manifest can't name it: the SDK types it by hand, or one SDK method
+ * serves several routes, so the manifest gives each of them every response
+ * that method can see. Each names a schema exported by @opengeni/contracts
+ * that describes what the route returns, so a secret in it (a sign-in code)
+ * marks the action, and a secret only another route returns (a tool approval
+ * token) doesn't mark a plain read. Takes precedence over the manifest.
  */
 export const ACTION_RESPONSE_SCHEMAS: ReadonlyArray<{ pattern: RegExp; response: string }> = [
   {
     pattern: /^POST \/v1\/\w+\/:\w+\/(codex|supergrok)\/connect\/start$/,
     response: "SubscriptionDeviceSignInStart",
   },
+  {
+    pattern: /^GET \/v1\/workspaces\/:workspaceId\/tools\/catalog$/,
+    response: "ToolGatewayCatalog",
+  },
+  {
+    pattern: /^GET \/v1\/workspaces\/:workspaceId\/tools\/declarations$/,
+    response: "ToolGatewayDeclarationsResponse",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/tools\/manifest$/,
+    response: "ToolGatewayManifestResponse",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/tools\/resolve$/,
+    response: "ToolGatewayResolvedTool",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/tools\/site-consent$/,
+    response: "ToolGatewaySiteConsentResponse",
+  },
 ];
 
-function inlineResponseSchemas(method: string, path: string): string[] {
+/**
+ * The override for a route, checked so it can only narrow: where the manifest
+ * names responses, the override must be one of them, so a typo or a broad
+ * pattern can't silently drop a secret the route really returns.
+ */
+function declaredResponseSchemas(
+  method: string,
+  path: string,
+  manifested: readonly string[],
+): string[] | null {
   const key = `${method} ${path}`;
   const match = ACTION_RESPONSE_SCHEMAS.find((rule) => rule.pattern.test(key));
-  return match ? [match.response] : [];
+  if (!match) return null;
+  if (manifested.length > 0 && !manifested.includes(match.response))
+    throw new Error(
+      `${key}: response override ${match.response} is not one the manifest names (${manifested.join(", ")})`,
+    );
+  return [match.response];
 }
 
 /**
@@ -619,7 +656,7 @@ export function buildActionCatalog(
         request,
         query: inputs.queryParameters,
         permission: inputs.permission,
-        response: response.length > 0 ? response : inlineResponseSchemas(method, path),
+        response: declaredResponseSchemas(method, path, response) ?? response,
       };
     })
     .filter((route) => !isActionCatalogExempt(route.path));
