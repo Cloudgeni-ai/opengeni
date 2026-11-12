@@ -48,6 +48,7 @@ import { isTransientServiceFailure } from "../lib/transient-retry";
 import { createQuietRetry } from "./lib/quiet-retry";
 import { claimHumanInputDraftOwner } from "../human-input-draft-store";
 import { forgetSignedOutBrowserData } from "../sign-out-browser-data";
+import { prepareRecordingsForSignOut, recordingOwnerKey } from "../meetings/sign-out-recordings";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
 import {
@@ -2586,6 +2587,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   async function handleManagedSignOut() {
+    // Recordings still uploading from this device: the person waits for
+    // them (and stays signed in) or discards them first.
+    const owner = recordingOwnerKey(authSession?.user.email);
+    if (!(await prepareRecordingsForSignOut(owner))) return;
     // Unmount authenticated readers before sign-out can invalidate their
     // cookie. Keep the neutral surface until an ambiguous response is
     // reconciled against the authoritative session.
@@ -2656,6 +2661,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       // navigate because its initiating mutation can still fail.
       // Nobody is signed in any more, so forget what this tab kept for them.
       forgetSignedOutBrowserData();
+      // Nobody here could be asked about recordings still on this device.
+      void prepareRecordingsForSignOut(null, { ask: false });
       authPrincipalIdRef.current = null;
       setAuthSession(null);
       setSession(null);
