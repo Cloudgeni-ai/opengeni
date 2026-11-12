@@ -1553,12 +1553,12 @@ this projection at their request boundary, including SDK-driven continuations.
 Canonical history stays unchanged, so switching back
 to Chat restores its original reasoning field. Native encrypted Responses and
 signed Claude reasoning retain their exact artifacts on their own API. When
-switching API families, their readable summaries become labelled historical
-assistant text; an opaque-only item becomes an unavailable marker. Signatures
+switching API families, these reasoning items, their readable summaries and
+opaque-only items are left out of the request, never sent as text. Signatures
 and ciphertext never enter another API's request. Chat also applies the shared
 projection at its adapter boundary, covering SDK-driven continuations.
-Older replies with reasoning only in nested Chat metadata retain that text too;
-newer replies with a separate reasoning item do not duplicate it.
+Reasoning that older replies kept only in nested Chat metadata is left out
+too.
 
 Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
