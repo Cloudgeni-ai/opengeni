@@ -185,6 +185,12 @@ const RULES: Rule[] = [
       `Connect a Claude subscription ${scope} from a long-lived setup token the person created with Claude Code (claude setup-token).`,
   },
   {
+    method: "POST",
+    pattern: /\/claude\/accounts\/api-key$/,
+    text: ({ scope }) =>
+      `Add an Anthropic API key to the Claude account pool ${scope}, as one more account with its own label. Its requests spend the key's Anthropic API credits, used only when no Claude plan has room; checking the key lists models and runs none.`,
+  },
+  {
     method: "GET",
     pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
     text: ({ scope }) =>
