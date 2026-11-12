@@ -371,6 +371,13 @@ describe.skipIf(!available)("two chats on one sandbox use their own GitHub pass"
     writeFileSync(join(stale, `${gitCredentialBindingHash(BINDING_ID)}-token`), "old-pass");
     const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
     utimesSync(stale, old, old);
+    // So are the box-wide binding files of earlier releases, once as old.
+    const legacyPass = join(credentials(), `${gitCredentialBindingHash(BINDING_ID)}-token`);
+    const legacyRoutes = join(credentials(), "http-broker.gitconfig");
+    writeFileSync(legacyPass, "legacy-pass");
+    writeFileSync(legacyRoutes, "");
+    utimesSync(legacyPass, old, old);
+    utimesSync(legacyRoutes, old, old);
 
     // Chat A sets up first, then chat B on the same box.
     setUp(chatA);
@@ -431,6 +438,10 @@ describe.skipIf(!available)("two chats on one sandbox use their own GitHub pass"
   test("setup removes stale chat directories and keeps the current ones", () => {
     const sessions = join(credentials(), "sessions");
     expect(existsSync(join(sessions, gitSessionKey("long-finished")))).toBe(false);
+    expect(existsSync(join(credentials(), `${gitCredentialBindingHash(BINDING_ID)}-token`))).toBe(
+      false,
+    );
+    expect(existsSync(join(credentials(), "http-broker.gitconfig"))).toBe(false);
     for (const chat of [chatA, chatB]) {
       const passFile = join(sessions, chat.key, `${gitCredentialBindingHash(BINDING_ID)}-token`);
       expect(existsSync(passFile)).toBe(true);

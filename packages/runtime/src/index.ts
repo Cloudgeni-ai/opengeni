@@ -12825,7 +12825,7 @@ export async function pinProvidedSessionManifestEnvironment(
 export async function runOwnedSandboxSetup(
   agent: Agent<any, any>,
   session: SandboxSessionLike,
-  setupSession: SandboxSessionLike,
+  ownerSetupSession: SandboxSessionLike,
   opts: {
     settings: Settings;
     environment: Record<string, string>;
@@ -12854,6 +12854,12 @@ export async function runOwnedSandboxSetup(
   },
 ): Promise<void> {
   const { settings, environment } = opts;
+  // Every setup command (rig setup included) runs in this chat's own Git
+  // credential directory, never the one of the chat that set up last.
+  const setupChatGitSessionKey = gitSessionKeyForAgent(agent);
+  const setupSession = setupChatGitSessionKey
+    ? withGitSessionSession(ownerSetupSession, setupChatGitSessionKey)
+    : ownerSetupSession;
   // ENV PIN (provided sessions): the SDK validates the FULL recomputed manifest
   // env against the live box's baked env before applying its entry-only delta
   // (validateNoEnvironmentDelta — session-fatal on ANY difference). Adopt the
@@ -15100,7 +15106,9 @@ const GIT_SESSION_DIRECTORY_LINES: readonly string[] = [
   'git_credentials_root="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
   'git_session_dir="${OPENGENI_GIT_SESSION_DIR:-$git_credentials_root/sessions/default}"',
   'export OPENGENI_GIT_SESSION_DIR="$git_session_dir"',
-  '(umask 077 && mkdir -p "$git_session_dir")',
+  // Touched on every use, so another chat's stale-directory cleanup never
+  // removes a directory this chat is writing again.
+  '(umask 077 && mkdir -p "$git_session_dir" && touch "$git_session_dir")',
 ];
 
 function gitCredentialTokenWriterCommandLines(
@@ -16206,6 +16214,8 @@ function gitCredentialHelperCommandLines(
     // Directories of chats idle for a day go: their passes expired long ago,
     // and a chat's next setup writes its directory again.
     'find "$git_credentials_root/sessions" -mindepth 1 -maxdepth 1 -type d ! -name "${git_session_dir##*/}" -mmin +1440 -exec rm -rf {} + 2>/dev/null || true',
+    // So do the box-wide binding files of earlier releases, once just as old.
+    'find "$git_credentials_root" -maxdepth 1 -type f \\( -name http-broker.gitconfig -o -name "????????????????????????????????-token" \\) -mmin +1440 -exec rm -f {} + 2>/dev/null || true',
     // A process outside any chat (a person's terminal) uses the chat whose
     // setup ran last.
     'ln -sfn "${git_session_dir##*/}" "$git_credentials_root/sessions/latest" 2>/dev/null || true',

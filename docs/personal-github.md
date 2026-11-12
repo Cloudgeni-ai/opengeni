@@ -342,7 +342,8 @@ example), and each has its own bearer. The binding file, the broker
 `insteadOf` routes, the credential helper and the `gh` wrapper logic therefore
 live in one directory per chat,
 `~/.opengeni/git-credentials/sessions/<key>` (`key` is a hash of the chat id).
-Every command the runtime runs for a chat exports that directory as
+Every command the runtime and worker run for a chat (agent commands, setup
+including rig setup, credential renewal and the chat's terminal) exports that directory as
 `OPENGENI_GIT_SESSION_DIR` and adds the chat's routes to Git through
 `GIT_CONFIG_PARAMETERS`, which Git passes on to the Git processes it starts
 (`packages/runtime/src/sandbox/git-session.ts`). The routes are never in the
@@ -352,8 +353,11 @@ helper and the `git`, `gh`, `glab` and `az` wrappers only dispatch to the
 selected directory; a process outside any chat (a terminal on the box) uses
 `sessions/latest`, the chat whose setup ran last. Renewal writes only into its
 own chat's directory, and each setup removes chat directories unused for a
-day. Paths are not an authorization boundary: the server checks every
-bearer's own chat and attempt.
+day (each use touches its directory), along with the box-wide binding files of
+earlier releases once they are as old. Paths are not an authorization
+boundary: the server checks every bearer's own chat and attempt. While a
+release rolls out, a box shared by chats on the old and the new worker can
+still see the old collision until the old worker's turns end.
 
 The broker permits only smart-HTTP discovery, upload-pack, and receive-pack.
 Before every upstream request it revalidates the exact accepted attempt,

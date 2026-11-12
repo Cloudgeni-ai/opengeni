@@ -86,7 +86,9 @@ import {
   codemodeTokenFileFromEnvironment,
   offlineAgentError,
   resolveConnectedMachineWorkspaceRoot,
+  gitSessionKey,
   withCodemodeTokenSession,
+  withGitSessionSession,
   withRunCredentialsSession,
   type ChannelASession,
   type EstablishedSandboxSession,
@@ -817,14 +819,20 @@ async function withChannelAOperation<T>(
       );
     };
     const routingSession = routed.session as RoutingSandboxSession;
+    const fileSystemAuthority = await routingSession.fileSystemAuthority();
     const credentialSession = withRunCredentialsSession(routingSession as object, session.id);
+    // On a managed box several chats can share, this chat's commands use its
+    // own Git credential directory (pass, broker routes and gh selection).
+    const gitScopedSession =
+      fileSystemAuthority.backendKind === "selfhosted"
+        ? credentialSession
+        : withGitSessionSession(credentialSession, gitSessionKey(session.id));
     const scopedSession = environment.OPENGENI_CODEMODE_TOKEN_FILE
       ? withCodemodeTokenSession(
-          credentialSession,
+          gitScopedSession,
           codemodeTokenFileFromEnvironment(environment, session.id),
         )
-      : credentialSession;
-    const fileSystemAuthority = await routingSession.fileSystemAuthority();
+      : gitScopedSession;
     const fileSystemEpoch =
       fileSystemAuthority.backendKind === "selfhosted"
         ? fileSystemAuthority.activeEpoch

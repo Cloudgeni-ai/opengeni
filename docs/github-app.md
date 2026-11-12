@@ -120,10 +120,13 @@ A linked installation that isn't active offers one fix on the GitHub page.
 `githubAppRepairNavigation` in `apps/api/src/integrations/github-app-connect.ts`).
 Opengeni asks GitHub about only that installation: one GitHub reports gone
 starts at installing the App again, and any other at its owner's sign-in. When
-GitHub can't be asked, no attempt starts: the API answers a retryable 503
-`upstream_unavailable` with `details.code: "provider_unreachable"`, and the
-dialog says GitHub couldn't be reached and offers **Check again**, which retries
-the same repair. It never falls back to the account chooser.
+GitHub doesn't answer (network failure, timeout, rate limit or a GitHub 5xx),
+no attempt starts: the API answers a retryable 503 `upstream_unavailable` with
+`details.code: "provider_unreachable"`, and the dialog says GitHub couldn't be
+reached and offers **Check again**, which retries the same repair. When the
+installation can't be checked for another reason (a host GitHub App API without
+`getInstallation`, or an App configuration or authentication error), checking
+again wouldn't help, so the account chooser opens instead.
 
 A reinstall on the same GitHub account replaces the binding it repaired, in the
 bind's transaction (`deleteGitHubInstallationBinding` with

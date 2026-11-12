@@ -9,6 +9,7 @@ import {
   gitCredentialBindingHash,
   gitCredentialBindingTokenRefreshCommand,
   gitProviderTokenRefreshCommand,
+  gitSessionKey,
   refreshGitCredentialBindingTokenFiles,
   refreshGitProviderTokenFiles,
   repositoryCloneCommand,
@@ -27,6 +28,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     statSync,
     readFileSync,
     readdirSync,
+    readlinkSync,
     utimesSync,
   } = require("node:fs") as typeof import("node:fs");
   const { tmpdir } = require("node:os") as typeof import("node:os");
@@ -2203,6 +2205,65 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
         ].join("\n"),
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the clone hook of a chat writes into that chat's own Git credential directory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-chat-dir-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const uri = "https://gitlab.com/acme/chat-owned.git";
+      // An undecorated session, as the worker's own setup session: only the
+      // hook context names the chat.
+      const session = hostShellSession(home, {
+        cwd: workspace,
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: uri,
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const binding = {
+        credentialBindingId: "gitlab/chat-owned",
+        provider: "gitlab" as const,
+        token: "chat-owned-token",
+        providerBindingCount: 1,
+      };
+      const key = gitSessionKey("session-owned-setup");
+      await runRepositoryCloneHook(
+        session as never,
+        [
+          {
+            kind: "repository" as const,
+            uri,
+            ref: "main",
+            mountPath: "repos/acme/chat-owned",
+            provider: "gitlab" as const,
+            credentialBindingId: binding.credentialBindingId,
+          },
+        ],
+        { environment: {}, gitCredentialBindings: [binding], gitSessionKey: key },
+      );
+      const sessions = join(home, ".opengeni", "git-credentials", "sessions");
+      const tokenFile = join(
+        sessions,
+        key,
+        `${gitCredentialBindingHash(binding.credentialBindingId)}-token`,
+      );
+      expect(readFileSync(tokenFile, "utf8")).toBe("chat-owned-token");
+      expect(existsSync(join(sessions, key, "helper"))).toBe(true);
+      expect(existsSync(join(sessions, "default"))).toBe(false);
+      expect(readlinkSync(join(sessions, "latest"))).toBe(key);
+      expect(
+        readFileSync(join(workspace, "repos", "acme", "chat-owned", "README.md"), "utf8"),
+      ).toBe("hello\n");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -14,7 +14,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 
-import { createSignedState, readSignedState } from "@opengeni/github";
+import { GitHubAppApiError, createSignedState, readSignedState } from "@opengeni/github";
 import { GITHUB_REST_MCP_APP_SERVER_ID } from "@opengeni/runtime/github-rest-mcp";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -326,6 +326,7 @@ test(`${providerId} repair starts at the named installation's fix, and a reinsta
   });
   let discovery = 0;
   let githubDown = false;
+  let githubRejectsApp = false;
   const proofs: number[] = [];
   const app = createApp({
     githubStateSecret: "embedded-app-state",
@@ -350,6 +351,7 @@ test(`${providerId} repair starts at the named installation's fix, and a reinsta
       // GitHub no longer has the first installation: it was uninstalled.
       getInstallation: async ({ installationId }: { installationId: number }) => {
         if (githubDown) throw new Error("GitHub is unavailable");
+        if (githubRejectsApp) throw new GitHubAppApiError("Bad credentials", 401);
         return installationId === uninstalledId
           ? null
           : { installationId, accountId: owner.accountId, suspended: false };
@@ -559,6 +561,14 @@ test(`${providerId} repair starts at the named installation's fix, and a reinsta
   const checkedAgain = await repairOnce();
   expect(checkedAgain.status).toBe(200);
   expect(stateOf((await checkedAgain.json()).nextAction.url)).toMatchObject({ phase: "bind" });
+
+  // GitHub answered but rejected the App (configuration or auth): not an
+  // outage, so the account chooser opens instead of an endless Check again.
+  githubRejectsApp = true;
+  const rejected = await begin(`github-installation:${reinstalledId}`);
+  expect(rejected.status).toBe(200);
+  expect(stateOf((await rejected.json()).nextAction.url)).toMatchObject({ phase: "discover" });
+  githubRejectsApp = false;
 
   // Only a linked installation can be repaired.
   expect((await begin(`github-installation:${uninstalledId}`)).status).toBe(409);

@@ -211,7 +211,10 @@ async function readWorkspaceGitHubInstallations(
 /**
  * One linked installation, for its repair: the stored binding and GitHub's
  * live view of it. `live` is null when GitHub no longer has the installation
- * and undefined when GitHub could not be asked. Null when it is not linked.
+ * and undefined when it is unknown. `unreachable` says GitHub was asked and
+ * didn't answer (network failure, timeout, rate limit or a GitHub 5xx), as
+ * opposed to a host that can't ask or an App configuration or auth error.
+ * Null when it is not linked.
  */
 export async function readGitHubInstallationForRepair(
   deps: ApiRouteDeps,
@@ -220,6 +223,7 @@ export async function readGitHubInstallationForRepair(
 ): Promise<{
   stored: GitHubInstallationAccess;
   live: LiveGitHubInstallation | null | undefined;
+  unreachable: boolean;
 } | null> {
   const stored = (await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId)).find(
     (installation) => installation.installationId === installationId,
@@ -228,16 +232,18 @@ export async function readGitHubInstallationForRepair(
     return null;
   }
   let live: LiveGitHubInstallation | null | undefined;
+  let unreachable = false;
   try {
     live = deps.githubAppApi?.getInstallation
       ? await deps.githubAppApi.getInstallation({ installationId })
       : deps.githubAppApi
         ? undefined
         : await getGitHubAppInstallationSummary(deps.settings, installationId);
-  } catch {
+  } catch (error) {
     live = undefined;
+    unreachable = isTransientGitHubRepositoryListFailure(error);
   }
-  return { stored, live };
+  return { stored, live, unreachable };
 }
 
 export function githubBindingStatus(

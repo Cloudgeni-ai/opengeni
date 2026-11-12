@@ -99,8 +99,11 @@ const repairAccountIdPattern = /^github-installation:([1-9][0-9]{0,15})$/u;
  * Repair of one linked installation starts at its own fix instead of the
  * account chooser: one uninstalled on GitHub goes straight to installing the
  * app again; any other goes straight to its owner's sign-in for that
- * installation. When GitHub can't be asked, no attempt starts: a retryable
- * 503 `upstream_unavailable` with `details.code: "provider_unreachable"`.
+ * installation. When GitHub was asked and didn't answer, no attempt starts: a
+ * retryable 503 `upstream_unavailable` with `details.code:
+ * "provider_unreachable"`. When the installation can't be checked for another
+ * reason (a host without `getInstallation`, an App configuration or auth
+ * error), the account chooser opens as before.
  */
 export async function githubAppRepairNavigation(
   deps: ApiRouteDeps,
@@ -119,7 +122,7 @@ export async function githubAppRepairNavigation(
     });
   // GitHub didn't answer: the fix is unknown, so nothing starts. The person
   // checks again rather than landing in a generic account chooser.
-  if (repair.live === undefined)
+  if (repair.live === undefined && repair.unreachable)
     throw new ApiHttpError(503, {
       code: "upstream_unavailable",
       message: "GitHub couldn't be reached. Check again.",
@@ -127,12 +130,16 @@ export async function githubAppRepairNavigation(
       outcomeUnknown: false,
       details: { code: "provider_unreachable", provider: "github" },
     });
-  // Gone on GitHub: install the app again. Otherwise: that installation's
-  // owner sign-in.
+  // Gone on GitHub: install the app again. Unknown without an outage (the
+  // host can't ask, or the App's own configuration failed): the account
+  // chooser covers both a reinstall and an owner sign-in. Otherwise: that
+  // installation's owner sign-in.
   const navigation =
     repair.live === null
       ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "install")
-      : githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "bind", installationId);
+      : repair.live === undefined
+        ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "discover")
+        : githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "bind", installationId);
   return {
     ...navigation,
     account: {
