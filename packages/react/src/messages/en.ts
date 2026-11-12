@@ -4984,6 +4984,10 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
   "sessionMcpCapabilityCard.onceConnectedTheAgentCan": "Once connected, the agent can:",
+  "sessionMcpCapabilityCard.addAPasskeyToTurnOn":
+    "Add a passkey to your account to turn on {name}, then connect again.",
+  "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn":
+    "Confirm it's you with your passkey to turn on {name}, then connect again.",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",

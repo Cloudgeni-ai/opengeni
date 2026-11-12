@@ -11,6 +11,7 @@ import {
   isPersonalIntegrationSetupCandidate,
   permissionSetCovers,
   personalIntegrationSetupAccess,
+  personalSetupEndpointProfile,
 } from "../src/personal-integration-setup";
 
 const reviewed = {
@@ -55,6 +56,38 @@ describe("personal integration setup", () => {
         runtime: { available: true, catalogTrust: { state: "trusted" } },
       }),
     ).toBe(true);
+  });
+
+  test("a workspace entry qualifies only at an address of a reviewed sign-in profile", () => {
+    const environment = {
+      ...reviewed,
+      source: "manual",
+      workspaceId: "workspace",
+      endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp",
+    };
+    expect(personalSetupEndpointProfile(environment.endpointUrl)).toBe("microsoft-dynamics");
+    expect(isPersonalIntegrationSetupCandidate(environment)).toBe(true);
+    expect(
+      isPersonalIntegrationSetupCandidate({
+        ...environment,
+        endpointUrl: undefined,
+        mcpUrl: environment.endpointUrl,
+      }),
+    ).toBe(true);
+    for (const item of [
+      { ...environment, endpointUrl: "https://custom.example/mcp" },
+      { ...environment, endpointUrl: "https://contoso.crm4.dynamics.com.evil.example/api/mcp" },
+      { ...environment, endpointUrl: undefined },
+      { ...environment, authKind: "api_key" },
+      { ...environment, stale: true },
+      { ...environment, runtime: { available: false } },
+    ])
+      expect(isPersonalIntegrationSetupCandidate(item)).toBe(false);
+    expect(personalSetupEndpointProfile("https://custom.example/mcp")).toBeNull();
+    expect(personalSetupEndpointProfile(undefined)).toBeNull();
+    expect(
+      personalIntegrationSetupAccess({ permissions: ["connections:personal"] }, environment),
+    ).toBe("personal");
   });
 
   test("access: any for connect admins, personal for the narrow permission, else none", () => {
