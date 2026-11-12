@@ -25,6 +25,7 @@ import {
   listManagedWorkspaceMarkers,
   markWorkspaceManagedByApiKey,
   recordConsoleAuditEvent,
+  recordConsoleAuditEventOnce,
   rememberEndUserLabel,
   setConsoleReviewLevel,
   setConsoleWorkspaceKind,
@@ -68,7 +69,12 @@ async function organization() {
 async function session(
   accountId: string,
   workspaceId: string,
-  options: { title: string; ownerSubjectId?: string; parentSessionId?: string } = { title: "" },
+  options: {
+    title: string;
+    ownerSubjectId?: string;
+    parentSessionId?: string;
+    siteVisitor?: boolean;
+  } = { title: "" },
 ) {
   const created = await createSession(client.db, {
     accountId,
@@ -96,6 +102,10 @@ async function session(
           owner_organization_membership_id = (select id from organization_memberships
             where account_id = ${accountId} and subject_id = ${options.ownerSubjectId})
         where id = ${created.id}`;
+    }
+    if (options.siteVisitor) {
+      // A Site visitor's conversation is stored workspace-shared but is theirs alone.
+      await tx`update sessions set site_access_root_id = ${crypto.randomUUID()} where id = ${created.id}`;
     }
     if (options.parentSessionId) {
       await tx`update sessions set parent_session_id = ${options.parentSessionId},
@@ -127,6 +137,7 @@ test("owners and admins review shared and end-user sessions, never Only me chats
     ownerSubjectId: `user:${crypto.randomUUID()}`,
   });
   await session(accountId, managedId, { title: "Sub-agent", parentSessionId: sharedId });
+  await session(accountId, managedId, { title: "Site visitor", siteVisitor: true });
   await shared.admin`insert into feedback_submissions
       (account_id, workspace_id, subject_id, principal_kind, idempotency_key, session_id, sentiment)
     values (${accountId}, ${managedId}, ${endUser}, 'external_user', ${crypto.randomUUID()},
@@ -215,7 +226,8 @@ test("owners and admins review shared and end-user sessions, never Only me chats
     { since: new Date(Date.now() - 86_400_000).toISOString(), until: new Date().toISOString() },
     { endUsersFor: new Set([managedId]) },
   );
-  expect(counts.sessions.get(managedId)).toBe(3);
+  // Only me and Site visitor chats are not counted either.
+  expect(counts.sessions.get(managedId)).toBe(2);
   expect(counts.sessions.get(teamId)).toBe(0);
   expect(counts.endUsers).toBe(1);
 });
@@ -251,7 +263,7 @@ test("review level, workspace kind and the audit log", async () => {
   expect(await isManagedWorkspace(client.db, accountId, managedId)).toBe(false);
 
   const sessionId = crypto.randomUUID();
-  await recordConsoleAuditEvent(client.db, {
+  const viewedId = await recordConsoleAuditEvent(client.db, {
     accountId,
     actorSubjectId: adminSubjectId,
     actorLabel: "Admin",
@@ -260,6 +272,18 @@ test("review level, workspace kind and the audit log", async () => {
     sessionId,
     detail: {},
   });
+  // Paging the transcript right after opening it reuses the open's entry.
+  expect(
+    await recordConsoleAuditEventOnce(client.db, {
+      accountId,
+      actorSubjectId: adminSubjectId,
+      actorLabel: "Admin",
+      action: "session.transcript_viewed",
+      workspaceId: managedId,
+      sessionId,
+      detail: {},
+    }),
+  ).toBe(viewedId);
   const first = await listConsoleAuditEvents(client.db, { accountId, limit: 2 });
   expect(first.events.map((event) => event.action)).toEqual([
     "session.transcript_viewed",

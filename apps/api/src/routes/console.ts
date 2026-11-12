@@ -55,6 +55,7 @@ import {
   listManagedWorkspaceMarkers,
   listSessionEventPage,
   recordConsoleAuditEvent,
+  recordConsoleAuditEventOnce,
   setConsoleReviewLevel,
   setConsoleWorkspaceKind,
   withConsoleSessionRead,
@@ -364,7 +365,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/workspaces/:workspaceId/sessions/:sessionId/events`, async (c) => {
     const organizationId = param(c, "organizationId");
-    await requireConsoleAdministrator(c, deps, organizationId);
+    const admin = await requireConsoleAdministrator(c, deps, organizationId);
     const settings = await getConsoleReviewSettings(deps.db, organizationId);
     if (settings.reviewLevel !== "full") {
       throw new HTTPException(403, {
@@ -375,6 +376,19 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
     const query = parseRequestQuery(ConsoleSessionEventsQuery, c.req.query(), {
       status: 400,
       message: "invalid Console event query",
+    });
+    // Audited like the detail read, before any content is returned.
+    await recordConsoleAuditEventOnce(deps.db, {
+      accountId: organizationId,
+      actorSubjectId: admin.subjectId,
+      actorLabel: admin.label,
+      action: "session.transcript_viewed",
+      workspaceId: workspace.id,
+      sessionId: detail.summary.id,
+      detail: {
+        workspaceName: workspace.name.slice(0, 200),
+        ...(detail.summary.endUser ? { endUser: detail.summary.endUser.subjectId } : {}),
+      },
     });
     const page = await withConsoleSessionRead(() =>
       listSessionEventPage(deps.db, workspace.id, detail.summary.id, {

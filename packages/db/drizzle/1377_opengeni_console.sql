@@ -133,9 +133,6 @@ CREATE POLICY account_isolation ON organization_console_audit_events
 CREATE POLICY account_isolation ON organization_end_user_labels
   USING (opengeni_private.account_rls_visible(account_id))
   WITH CHECK (opengeni_private.account_rls_visible(account_id));
-CREATE POLICY console_review_read ON feedback_submissions FOR SELECT
-  USING (opengeni_private.workspace_rls_visible(account_id, workspace_id)
-    AND current_setting('opengeni.console_review', true) = 'on');
 
 DO $opengeni_console_grants$
 BEGIN
@@ -153,8 +150,13 @@ $opengeni_console_grants$;
 DO $opengeni_console_backfill$
 DECLARE
   account_row record;
-  workspace_row record;
+  candidate_ids uuid[];
+  candidate_sources text[];
+  candidate_index integer;
+  workspace_row_id uuid;
+  workspace_row_source text;
   key_id uuid;
+  organization_workspace_ids uuid[];
   previous_account text := current_setting('opengeni.account_id', true);
   previous_workspace text := current_setting('opengeni.workspace_id', true);
   previous_marker text := current_setting('opengeni.organization_tenancy_lifecycle', true);
@@ -162,17 +164,27 @@ BEGIN
   FOR account_row IN SELECT id FROM managed_accounts LOOP
     PERFORM set_config('opengeni.account_id', account_row.id::text, true);
     PERFORM set_config('opengeni.workspace_id', '', true);
-    FOR workspace_row IN
-      SELECT id, external_source FROM workspaces
-      WHERE account_id = account_row.id
-        AND external_source IS DISTINCT FROM 'opengeni:organization-membership'
-        AND coalesce(external_source, '') NOT LIKE 'better-auth:%'
-    LOOP
-      PERFORM set_config('opengeni.workspace_id', workspace_row.id::text, true);
+    SELECT coalesce(array_agg(inventory.workspace_id), '{}') INTO organization_workspace_ids
+      FROM list_organization_workspace_ids(account_row.id) inventory;
+    -- Collected up front: the loop below changes the workspace scope, so it
+    -- must not read from a cursor whose rows depend on that scope.
+    SELECT coalesce(array_agg(w.id ORDER BY w.id), '{}'),
+        coalesce(array_agg(w.external_source ORDER BY w.id), '{}')
+      INTO candidate_ids, candidate_sources
+      FROM workspaces w
+      WHERE w.account_id = account_row.id
+        AND w.external_source IS DISTINCT FROM 'opengeni:organization-membership'
+        AND coalesce(w.external_source, '') NOT LIKE 'better-auth:%'
+        -- Shared workspaces only: never a member's personal workspace.
+        AND w.id = ANY (organization_workspace_ids);
+    FOR candidate_index IN 1 .. coalesce(array_length(candidate_ids, 1), 0) LOOP
+      workspace_row_id := candidate_ids[candidate_index];
+      workspace_row_source := candidate_sources[candidate_index];
+      PERFORM set_config('opengeni.workspace_id', workspace_row_id::text, true);
       SELECT substring(membership.subject_id FROM 9)::uuid INTO key_id
         FROM workspace_memberships membership
         WHERE membership.account_id = account_row.id
-          AND membership.workspace_id = workspace_row.id
+          AND membership.workspace_id = workspace_row_id
           AND membership.role = 'owner'
           AND membership.subject_id ~ '^api_key:[0-9a-f-]{36}$'
         ORDER BY membership.created_at
@@ -183,7 +195,7 @@ BEGIN
         SELECT substring(event.actor_service_subject FROM 9)::uuid INTO key_id
           FROM organization_workspace_lifecycle_events event
           WHERE event.account_id = account_row.id
-            AND event.workspace_id = workspace_row.id
+            AND event.workspace_id = workspace_row_id
             AND event.kind = 'create'
             AND event.actor_service_subject IS NOT NULL
           ORDER BY event.created_at
@@ -191,10 +203,14 @@ BEGIN
         PERFORM set_config('opengeni.organization_tenancy_lifecycle',
           coalesce(previous_marker, ''), true);
       END IF;
-      IF key_id IS NOT NULL OR workspace_row.external_source IS NOT NULL THEN
+      -- Opengeni's own sources (`opengeni:additional-organization-default`,
+      -- `opengeni:local`, `opengeni:configured`) are team workspaces unless a
+      -- key created them.
+      IF key_id IS NOT NULL OR (workspace_row_source IS NOT NULL
+        AND workspace_row_source NOT LIKE 'opengeni:%') THEN
         INSERT INTO organization_managed_workspaces
           (account_id, workspace_id, source, created_by_api_key_id)
-        VALUES (account_row.id, workspace_row.id, 'backfill', key_id)
+        VALUES (account_row.id, workspace_row_id, 'backfill', key_id)
         ON CONFLICT (workspace_id) DO NOTHING;
       END IF;
       key_id := NULL;
@@ -216,3 +232,9 @@ BEGIN
   PERFORM set_config('opengeni.workspace_id', coalesce(previous_workspace, ''), true);
 END
 $opengeni_console_backfill$;
+
+-- Last, so the ACCESS EXCLUSIVE lock on feedback_submissions is not held
+-- through the backfill.
+CREATE POLICY console_review_read ON feedback_submissions FOR SELECT
+  USING (opengeni_private.workspace_rls_visible(account_id, workspace_id)
+    AND current_setting('opengeni.console_review', true) = 'on');

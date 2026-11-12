@@ -204,6 +204,8 @@ export const ConsoleSessionListResponse = /* @__PURE__ */ defineSchema(() =>
     reviewLevel: ConsoleReviewLevel,
     sessions: z.array(ConsoleSessionSummary),
     nextCursor: primitives.nullableString,
+    /** True when the organization has more managed workspaces than one list reads. */
+    truncated: z.boolean().default(false),
   }),
 );
 export type ConsoleSessionListResponse = z.infer<typeof ConsoleSessionListResponse>;

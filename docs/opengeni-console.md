@@ -16,8 +16,9 @@ organization key). The API marks it in `organization_managed_workspaces` with
 the creating key. Migration 1377 backfilled existing shared workspaces from
 their creation provenance: an `api_key:` owner membership, a key-created
 organization workspace lifecycle event, or an external identity
-(`externalSource`) set by an SDK integration. Personal workspaces are never
-managed. An owner or admin can mark or unmark a shared workspace in Console;
+(`externalSource`) set by an SDK integration. Opengeni's own sources
+(`opengeni:*`, such as an added organization's default workspace) do not count
+on their own. Personal workspaces are never managed. An owner or admin can mark or unmark a shared workspace in Console;
 each change is audited. Every other shared workspace is a **team** workspace.
 
 The main app shows managed workspaces exactly as before.
@@ -38,7 +39,8 @@ Within Console, for an owner or admin:
 | Shared session | Listed and readable | Cost and counts only |
 | Private session of a product end user (`external_user:` owner) | Listed and readable | Cost and counts only |
 | Private ("Only me") chat of an Opengeni account | Never shown | Never shown |
-| Sub-agent session | Part of its root session's transcript and cost | Cost only |
+| Sub-agent session | Not listed; its cost counts toward its root session | Cost only |
+| Site visitor conversation | Never shown | Never shown |
 
 Personal workspaces are never listed. Reads run as the system sees the tenant
 (no session actor) under the ordinary workspace tenancy RLS, and the
@@ -65,7 +67,9 @@ An organization setting, `organization_session_review_settings`:
 
 Every session detail open writes `session.transcript_viewed` (full) or
 `session.metadata_viewed` (metadata) to `organization_console_audit_events`
-before the response is returned, with the reader, workspace, session and end
+before the response is returned; a transcript events read writes
+`session.transcript_viewed` too, unless the same reader already has one for that
+session from the last ten minutes, with the reader, workspace, session and end
 user. Review level changes and workspace kind changes are also logged. The
 runtime role may only insert and read the log. Owners and admins read it in
 Console Settings.
@@ -97,13 +101,16 @@ mirrored by `@opengeni/sdk` methods. Contracts: `packages/contracts/src/console.
 | `PUT workspaces/:workspaceId` `{ kind }` | `updateConsoleWorkspace` |
 | `GET sessions?limit&cursor&workspaceId&q` | `listConsoleSessions` |
 | `GET workspaces/:workspaceId/sessions/:sessionId` (audited) | `getConsoleSession` |
-| `GET workspaces/:workspaceId/sessions/:sessionId/events?after&limit` | `listConsoleSessionEvents` |
+| `GET workspaces/:workspaceId/sessions/:sessionId/events?after&limit` (audited) | `listConsoleSessionEvents` |
 | `GET` / `PUT settings` `{ reviewLevel }` | `getConsoleSettings` / `updateConsoleSettings` |
 | `GET audit-log?limit&cursor&sessionId` | `listConsoleAuditLog` |
 | `GET api-keys?range` | `getConsoleApiKeyUsage` |
 
 Keys are created and revoked with the ordinary organization API-key routes
 (`createOrganizationApiKey`, `deleteOrganizationApiKey`).
+
+The session list reads the organization's 2,000 most recently created managed
+workspaces and sets `truncated: true` when there are more.
 
 ## Not yet
 

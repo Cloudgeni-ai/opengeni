@@ -29,10 +29,14 @@ import { sql, type SQL } from "drizzle-orm";
 import { rawRows, withAccountRls, withoutSessionRlsActor, type Database } from "./database";
 import { fromPostgresLosslessText } from "./lossless-json";
 
-/** The private-visibility predicate every Console session read uses. */
+/**
+ * The private-visibility predicate every Console session read uses. Site
+ * conversations are excluded: a visitor's Site chat is theirs alone, even when
+ * it is stored as workspace-shared.
+ */
 export const CONSOLE_REVIEWABLE_SESSION_SQL = (alias: string): SQL =>
   sql.raw(
-    `(${alias}.visibility = 'workspace_shared' or (${alias}.visibility = 'user_private' and ${alias}.owner_subject_id like 'external_user:%'))`,
+    `(${alias}.site_access_root_id is null and (${alias}.visibility = 'workspace_shared' or (${alias}.visibility = 'user_private' and ${alias}.owner_subject_id like 'external_user:%')))`,
   );
 
 /** Metered spend of a ledger row, in micro-USD (the credit the organization was charged). */
@@ -319,6 +323,31 @@ export async function recordConsoleAuditEvent(db: Database, input: AuditInput): 
   return await withAccountRls(db, input.accountId, (tx) => insertAudit(tx, input));
 }
 
+/**
+ * Records a read unless the same reader already has the same entry for this
+ * session within the last ten minutes (opening a transcript reads its detail,
+ * then pages its events).
+ */
+export async function recordConsoleAuditEventOnce(
+  db: Database,
+  input: AuditInput,
+): Promise<string> {
+  return await withAccountRls(db, input.accountId, async (tx) => {
+    const [recent] = await rawRows<{ id: string }>(
+      tx,
+      sql`select id from organization_console_audit_events
+        where account_id = ${input.accountId}::uuid
+          and actor_subject_id = ${input.actorSubjectId.slice(0, 512)}
+          and action = ${input.action}
+          and session_id is not distinct from ${input.sessionId}::uuid
+          and created_at > now() - interval '10 minutes'
+        order by created_at desc
+        limit 1`,
+    );
+    return recent?.id ?? (await insertAudit(tx, input));
+  });
+}
+
 type AuditCursor = { at: string; id: string };
 
 export function encodeConsoleCursor(value: Record<string, string>): string {
@@ -591,7 +620,8 @@ export async function consoleSessionCounts(
             max(updated_at) as last_at
           from sessions
           where account_id = ${accountId}::uuid and workspace_id = ${workspaceId}::uuid
-            and parent_session_id is null`,
+            and parent_session_id is null
+            and ${CONSOLE_REVIEWABLE_SESSION_SQL("sessions")}`,
       );
       sessions.set(workspaceId, num(row?.sessions));
       if (row?.last_at) lastActivity.set(workspaceId, iso(row.last_at));
@@ -681,7 +711,11 @@ export async function listConsoleSessions(
     q: string | null;
     includeContent: boolean;
   },
-): Promise<{ sessions: ConsoleSessionSummary[]; nextCursor: string | null }> {
+): Promise<{
+  sessions: ConsoleSessionSummary[];
+  nextCursor: string | null;
+  truncated: boolean;
+}> {
   const names = new Map(input.workspaces.map((workspace) => [workspace.id, workspace.name]));
   const workspaceIds = input.workspaces.map((workspace) => workspace.id);
   const q = input.includeContent && input.q ? searchPattern(input.q) : null;
@@ -729,6 +763,7 @@ export async function listConsoleSessions(
         candidates.length > input.limit && last
           ? encodeConsoleCursor({ u: last.updated_us, i: last.id })
           : null,
+      truncated: workspaceIds.length > CONSOLE_MAX_WORKSPACE_READS,
     };
   });
 }
