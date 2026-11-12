@@ -750,6 +750,9 @@ type TargetState = {
    * LOCATOR_WAIT_MS after they start: a re-find keeps the action's deadline. */
   locatorDeadline?: number | null;
   accessibility: CdpAccessibilitySnapshot | null;
+  /** actionEffectCount when `accessibility` was read; unset for a snapshot
+   * carried over from an earlier attachment. */
+  accessibilityReadAtEffect?: number;
   /** When Chromium's accessibility tree for this tab was last rebuilt, how
    * many nodes its last read had, and whether the next read is the first of a
    * call or batch action (see accessibilityRebuildWanted). */
@@ -6067,6 +6070,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.assertCurrentTargetState(state);
       if (budget) state.accessibilityBounded = budget.unread > 0;
       state.accessibility = accessibility;
+      state.accessibilityReadAtEffect = state.actionEffectCount;
       state.accessibilityNodeCount = nodes.length;
       if (rebuilding) state.accessibilityRebuiltAt = Date.now();
       return accessibility;
@@ -8596,6 +8600,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // A reference already identifies one concrete node. Revalidate that node
     // against Chromium instead of reading every unrelated node before input.
     // Frame/engine cases without this exact proof retain full-tree resolution.
+    // The snapshot the ref came from, while no input was sent since it was
+    // read: a page that redraws after the caller's own input is a page the
+    // caller has not seen.
+    const previous =
+      locator.kind === "ref" && state.accessibilityReadAtEffect === state.actionEffectCount
+        ? state.accessibility
+        : null;
+    const previousDocument = state.documentGeneration;
     if (locator.kind === "ref" && this.engine === "chromium") {
       const cached = state.accessibility?.entriesByRef.get(locator.ref);
       if (cached?.backendDOMNodeId != null && cached.frameId === state.frame.id) {
@@ -8605,7 +8617,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const accessibility = await this.refreshAccessibility(state, read);
     if (locator.kind === "ref") {
-      const entry = accessibility.entriesByRef.get(locator.ref);
+      const entry =
+        accessibility.entriesByRef.get(locator.ref) ??
+        (previous && state.documentGeneration === previousDocument
+          ? redrawnReference(previous, accessibility, locator.ref)
+          : undefined);
       if (!entry || entry.backendDOMNodeId === null) {
         throw new InteractionDefiniteDriverError(
           "locator_not_found",
@@ -12371,6 +12387,40 @@ function uniqueEntries(entries: CdpAccessibilityEntry[]): CdpAccessibilityEntry 
 function sameAccessibleName(name: string | null, requested: string): boolean {
   const normalize = (value: string) => value.replace(/\s+/gu, " ").trim().toLocaleLowerCase();
   return name !== null && normalize(name) === normalize(requested);
+}
+
+/**
+ * The element a ref named, when the page redrew it in the same document (a
+ * list or inbox that re-renders its rows): the one element whose role, name
+ * and frame are the ref's, when exactly one had them in the snapshot the ref
+ * came from and exactly one has them now. Anything less certain leaves the
+ * ref stale.
+ */
+function redrawnReference(
+  previous: CdpAccessibilitySnapshot,
+  current: CdpAccessibilitySnapshot,
+  ref: string,
+): CdpAccessibilityEntry | undefined {
+  const named = previous.entriesByRef.get(ref);
+  if (
+    !named ||
+    named.backendDOMNodeId === null ||
+    !named.name?.trim() ||
+    named.nameWithheld === true ||
+    named.role === "generic" ||
+    named.role === "text" ||
+    previous.incomplete ||
+    current.incomplete
+  )
+    return undefined;
+  const same = (entry: CdpAccessibilityEntry) =>
+    entry.backendDOMNodeId !== null &&
+    entry.role === named.role &&
+    entry.frameId === named.frameId &&
+    entry.name === named.name;
+  if (previous.entries.filter(same).length !== 1) return undefined;
+  const now = current.entries.filter(same);
+  return now.length === 1 ? now[0] : undefined;
 }
 
 const AMBIGUOUS_LOCATOR_LISTED_MATCHES = 5;
