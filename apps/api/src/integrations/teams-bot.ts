@@ -188,6 +188,7 @@ import {
   teamsOrganizationAgentMembersOnlyText,
   teamsOrganizationAgentNotEligibleText,
   teamsOrganizationAgentNoticeText,
+  teamsOrganizationAgentUnavailableText,
   teamsOrganizationAgentRouteId,
   teamsOrganizationAgentSessionOptions,
   type TeamsMemberFacts,
@@ -1689,13 +1690,22 @@ async function routeTeamsPersonalMessage(
   const directory = await loadTeamsRouteDirectory(deps.db, i, identity.subjectId);
   const remember = (target: TeamsChatTarget) =>
     setTeamsChatChoice(deps.db, i, { ...who, ...target });
-  const optionLabels = (target: TeamsChatTarget) => ({
-    workspaceLabel:
-      directory.candidates.find((c) => c.workspaceId === target.workspaceId)?.label ?? "",
-    agentName: target.agentId
-      ? (directory.agents.find((a) => a.id === target.agentId)?.name ?? null)
-      : null,
-  });
+  const optionLabels = (target: TeamsChatTarget) => {
+    const agent = target.agentId
+      ? directory.agents.find(
+          (a) => a.id === target.agentId && a.targetWorkspaceId === target.workspaceId,
+        )
+      : undefined;
+    return {
+      // An agent anyone in the organization may use can live in a workspace
+      // that isn't one of the person's.
+      workspaceLabel:
+        directory.candidates.find((c) => c.workspaceId === target.workspaceId)?.label ??
+        agent?.targetWorkspaceLabel ??
+        "",
+      agentName: agent?.name ?? null,
+    };
+  };
   // A card option counts only while it is still one of the person's options.
   const stillOffered = (target: TeamsChatTarget) => teamsRouteTargetOffered(directory, target);
   const showCard = async (waiting: TeamsMessage | null) => {
@@ -1981,7 +1991,12 @@ async function enqueueRoutedMessage(
         error instanceof Error &&
         (error.message === "teams_route_unavailable" || error.message === "teams_reach_changed")
       )
-        return await refuse();
+        return organizationAgent
+          ? await reply(
+              "organization_agent_unavailable",
+              teamsOrganizationAgentUnavailableText(organizationAgent.name),
+            )
+          : await refuse();
       throw error;
     }
     if (!queued.queued) return { status: 200 };
@@ -2871,7 +2886,16 @@ async function drainRoute(
       if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
         const noticeKind =
           error.message === "teams_session_audience_changed" ? "audience_changed" : "admission";
-        await enqueueTeamsOutput(deps.db, i, r, -1, [admissionNotice(deps, r, noticeKind).text], {
+        // An organization agent's asker can't act on Opengeni's workspace
+        // pages: they are told the agent isn't available, without a link.
+        const noticeText = organizationAgent
+          ? teamsOrganizationAgentUnavailableText(
+              (await routeAgentLabel())?.name ??
+                (inbound.payload as TeamsRoutedPayload).teamsRouting?.agentName ??
+                "This agent",
+            )
+          : admissionNotice(deps, r, noticeKind).text;
+        await enqueueTeamsOutput(deps.db, i, r, -1, [noticeText], {
           eventId: inbound.event_id,
           kind: noticeKind,
         });
@@ -2917,12 +2941,27 @@ async function drainRoute(
       // Replies say who answered and where: an agent's always (Teams shows
       // one bot name), and a one-off `in <Workspace>: …` message's, which
       // otherwise says nothing about the workspace it went to.
+      // What this chat's own messages said about routing, per turn, once per pass.
+      const turnRouting = new Map<string, Promise<Record<string, unknown>[]>>();
+      const routingOf = (turnId: string) => {
+        let pending = turnRouting.get(turnId);
+        if (!pending) {
+          pending = getTeamsTurnRouting(deps.db, i, r, turnId);
+          turnRouting.set(turnId, pending);
+        }
+        return pending;
+      };
+      // An organization agent's chat is visible to its workspace, whose
+      // members can start turns in it with their own access. Only turns the
+      // asker's own Teams messages started are sent to them.
+      const forThisChat = async (turnId: string | null | undefined) =>
+        !organizationAgent || (Boolean(turnId) && (await routingOf(turnId!)).length > 0);
       const replyHeader = async (turnId: string | null) => {
         const agent = await routeAgentLabel();
         if (agent)
           return teamsReplyHeader({ agentName: agent.name, workspaceName: agent.workspaceName });
         if (!turnId) return null;
-        const oneOff = (await getTeamsTurnRouting(deps.db, i, r, turnId)).find(
+        const oneOff = (await routingOf(turnId)).find(
           (routing) => routing.oneOff === true && typeof routing.workspaceLabel === "string",
         );
         return oneOff
@@ -2938,6 +2977,11 @@ async function drainRoute(
       );
       for (const event of page.events) {
         const payload = event.payload as Record<string, unknown>;
+        if (!(await forThisChat(event.turnId))) {
+          // Moves the route past another person's turn without sending it.
+          await enqueueTeamsOutput(deps.db, i, r, event.sequence, []);
+          continue;
+        }
         if (event.type === "turn.completed") {
           const reply =
             typeof payload.output === "string" && payload.output.trim()
@@ -3035,7 +3079,7 @@ async function drainRoute(
   }
   try {
     const notice =
-      Number(output.source_sequence) === -1
+      Number(output.source_sequence) === -1 && !isTeamsOrganizationAgentRoute(r)
         ? admissionNotice(
             deps,
             r,

@@ -140,6 +140,11 @@ export function teamsOrganizationAgentMembersOnlyText(agentName: string): string
   return `**${agentName}** only answers members of this Opengeni organization. No chat was started.`;
 }
 
+/** When an organization agent's chat can't take a message: the agent closed, or access changed. */
+export function teamsOrganizationAgentUnavailableText(agentName: string): string {
+  return `**${agentName}** isn't available to you right now. Send **switch** to choose another workspace or agent. No chat was started.`;
+}
+
 /** Shown once, on the first reply of a person's chat with an organization agent. */
 export function teamsOrganizationAgentNoticeText(
   agentName: string,

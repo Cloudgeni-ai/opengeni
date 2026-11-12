@@ -834,7 +834,13 @@ With it on:
   migration. During a rollout a replica without this release fails closed on
   these routes: it refuses their admission (the agent principal fails its
   proof check) and drops their replies (the session isn't the person's Only
-  me one), so a person may need to ask again.
+  me one), and it forgets a stored choice of such an agent ("You can no
+  longer start chats in …"), so a person may need to ask or switch again.
+  Unlike Slack's agent picker, the Teams switch card lists these agents
+  (after the person's own), because a Teams 1:1 chat has no other place to
+  discover them. A person's own agent keeps its name when an organization
+  agent elsewhere has the same one. Turns that workspace members start in
+  the shared chat in Opengeni are not sent to the asker.
 - **Authority** is read live at enqueue (before and inside the enqueue
   transaction), at admission and before delivery: active organization
   membership, the person's live authority in the target workspace (membership

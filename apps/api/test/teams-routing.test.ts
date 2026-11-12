@@ -347,3 +347,49 @@ describe("agents anyone in the organization may use", () => {
     expect(teamsReplyHeader({ agentName: null, workspaceName: null })).toBeNull();
   });
 });
+
+describe("names shared by an organization agent and the person's own agent", () => {
+  const openHelper = {
+    id: "open-helper",
+    name: "Planner",
+    nameKey: "planner",
+    targetAccountId: "org",
+    targetWorkspaceId: "finance",
+    targetWorkspaceLabel: "Finance",
+    usable: true,
+    member: false,
+    open: true,
+  };
+  test("the person's own agent keeps its name", () => {
+    const base = directory();
+    const d = { ...base, agents: [...base.agents, openHelper] };
+    const resolved = resolveTeamsRoute({
+      text: "Planner: go",
+      appName: "Opengeni",
+      directory: d,
+      choice: null,
+    });
+    expect(resolved).toEqual(
+      expect.objectContaining({
+        kind: "resolved",
+        target: { workspaceId: "research", agentId: "planner" },
+      }),
+    );
+    expect(teamsRouteOptionNamed(d, "Planner")).toEqual(
+      expect.objectContaining({ agentId: "planner" }),
+    );
+  });
+  test("two organization agents with one name are ambiguous", () => {
+    const d = directory({
+      agents: [
+        openHelper,
+        { ...openHelper, id: "other", targetWorkspaceId: "sales", targetWorkspaceLabel: "Sales" },
+      ],
+    });
+    expect(
+      resolveTeamsRoute({ text: "Planner: go", appName: "Opengeni", directory: d, choice: null })
+        .kind,
+    ).toBe("denied");
+    expect(teamsRouteOptionNamed(d, "Planner")).toBe("ambiguous");
+  });
+});

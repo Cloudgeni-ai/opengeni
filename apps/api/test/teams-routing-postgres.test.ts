@@ -639,3 +639,39 @@ test("a one-off in <Workspace>: message continues that workspace's chat, and its
   await f.pump();
   expect(f.delivered.at(-1)).toBe("**Home**\n\nBudget attached");
 });
+
+test("an organization agent picked by name says where it works, and only the asker's own turns reach Teams", async () => {
+  const f = await fixture();
+  await f.agent(f.finance, "Auditor", { open: true });
+  expect(await f.say("switch Auditor")).toEqual([
+    "Now using **Auditor** in **Finance**. New messages go to this agent. Send **switch** to change.",
+  ]);
+  expect(await f.say("Check the books")).toEqual([]);
+  await f.pump();
+  const session = await f.latestSession();
+  expect(session.route_id).toStartWith("teams-agent:");
+  // A member of Finance continues the shared chat in Opengeni: their turn stays out of Teams.
+  await appendSessionEvents(client.db, session.workspace_id, session.session_id, [
+    {
+      type: "turn.completed",
+      turnId: crypto.randomUUID(),
+      payload: { output: "Member-only notes" },
+    },
+  ]);
+  await f.answer(session, "Books checked");
+  await f.pump();
+  expect(f.delivered.some((text) => text.includes("Member-only notes"))).toBe(false);
+  expect(f.delivered.at(-1)).toBe("**Auditor** · Finance\n\nBooks checked");
+});
+
+test("an organization agent closed after a message is queued starts nothing", async () => {
+  const f = await fixture();
+  await f.agent(f.finance, "Auditor", { open: true });
+  expect(await f.say("Auditor: check the books")).toEqual([]);
+  await shared.admin`update agents set organization_access=false where account_id=${f.accountId} and name='Auditor'`;
+  await f.pump();
+  expect(await shared.admin`select 1 from sessions where workspace_id=${f.finance}`).toHaveLength(
+    0,
+  );
+  expect(f.delivered).toEqual([]);
+});

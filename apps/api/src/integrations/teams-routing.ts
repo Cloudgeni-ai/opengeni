@@ -132,7 +132,13 @@ function workspaceLabel(directory: TeamsRouteDirectory, workspaceId: string): st
   return directory.candidates.find((c) => c.workspaceId === workspaceId)?.label ?? null;
 }
 
-/** The agents a name can mean: one per name, preferring ones the person can use. */
+/**
+ * The agents a name can mean: one per name, preferring agents of the
+ * person's own workspaces, then agents anyone in the organization may use,
+ * then ones they can't use. A name is ambiguous only between agents of the
+ * best group, so an agent another workspace opens to the organization never
+ * takes a name away from the person's own agent.
+ */
 function nameableAgents(directory: TeamsRouteDirectory): {
   agents: TeamsRouteAgent[];
   ambiguous: Map<string, TeamsRouteAgent[]>;
@@ -146,9 +152,10 @@ function nameableAgents(directory: TeamsRouteDirectory): {
   const agents: TeamsRouteAgent[] = [];
   const ambiguous = new Map<string, TeamsRouteAgent[]>();
   for (const [key, list] of byKey) {
-    const usable = list.filter((agent) => agent.usable);
-    if (usable.length > 1) ambiguous.set(key, usable);
-    agents.push(usable[0] ?? list[0]!);
+    const own = list.filter((agent) => agent.member);
+    const best = own.length ? own : list.filter((agent) => agent.usable);
+    if (best.length > 1) ambiguous.set(key, best);
+    agents.push(best[0] ?? list[0]!);
   }
   return { agents, ambiguous };
 }
@@ -253,7 +260,15 @@ export function teamsRouteOptionNamed(
 ): TeamsRouteOption | "ambiguous" | null {
   const options = teamsRouteTargets(directory);
   const wanted = slackAgentNameKey(name.replace(/^\+/u, ""));
-  const matches = options.filter((option) => slackAgentNameKey(option.title) === wanted);
+  const named = options.filter((option) => slackAgentNameKey(option.title) === wanted);
+  // The person's own workspaces and agents come before agents other
+  // workspaces open to the organization, as when an agent is addressed.
+  const own = named.filter(
+    (option) =>
+      option.agentId === null ||
+      directory.agents.some((agent) => agent.id === option.agentId && agent.member),
+  );
+  const matches = own.length ? own : named;
   if (matches.length > 1) return "ambiguous";
   return matches[0] ?? null;
 }
@@ -267,7 +282,10 @@ export function resolveTeamsRoute(input: {
 }): TeamsRouteResolution {
   const { directory } = input;
   const { candidates } = directory;
-  const many = candidates.length + directory.agents.filter((a) => a.usable).length > 1;
+  // Whether the person has a real choice among their own workspaces and
+  // agents. Agents other workspaces open to the organization don't count
+  // (their chats always say where they went).
+  const many = candidates.length + directory.agents.filter((a) => a.member).length > 1;
   const label = (workspaceId: string) => workspaceLabel(directory, workspaceId);
   // A remembered agent is live while the person can use it there, even in a
   // workspace they aren't a member of (an agent anyone in the organization
