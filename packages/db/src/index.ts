@@ -92816,6 +92816,12 @@ export type EnqueueCapabilitySetupContinuationInput = {
   sessionId: string;
   capabilityId: string;
   /**
+   * The capability's MCP endpoint. An agent's request to add a server
+   * (custom_mcp_setup_request) posts its card before the capability exists, so
+   * that card names the endpoint rather than a capability id.
+   */
+  endpointUrl?: string;
+  /**
    * The card is a connected account's own notice (expired access, more access
    * a tool needs) rather than a capability card: find it by this connection.
    */
@@ -93041,9 +93047,10 @@ async function latestAuthCardTx(
   tx: Database,
   input: Pick<
     EnqueueCapabilitySetupContinuationInput,
-    "workspaceId" | "sessionId" | "capabilityId" | "connectionId"
+    "workspaceId" | "sessionId" | "capabilityId" | "connectionId" | "endpointUrl"
   >,
 ): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
+  const capabilityCard = sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`;
   return await tx
     .select({
       id: schema.sessionEvents.id,
@@ -93058,7 +93065,9 @@ async function latestAuthCardTx(
         eq(schema.sessionEvents.type, "tool.auth_needed"),
         input.connectionId
           ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
-          : sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+          : input.endpointUrl
+            ? sql`(${capabilityCard} or ${schema.sessionEvents.payload} -> 'setupRequest' ->> 'endpointUrl' = ${input.endpointUrl})`
+            : capabilityCard,
       ),
     )
     .orderBy(desc(schema.sessionEvents.sequence))

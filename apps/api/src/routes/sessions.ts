@@ -3311,6 +3311,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         capabilityName: string;
         toolsVerified: boolean;
         connectionId?: string;
+        endpointUrl?: string;
       };
       if ("connectionId" in payload) {
         // A connected account's own card: the person reconnected it or gave it
@@ -3380,6 +3381,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           capabilityId: item.id,
           capabilityName: item.name,
           toolsVerified: readiness === "ready",
+          // A server the agent asked to add was carded before it existed.
+          ...("endpointUrl" in item && item.kind === "mcp" && item.endpointUrl
+            ? { endpointUrl: item.endpointUrl }
+            : {}),
         };
       }
       const result = await enqueueCapabilitySetupContinuation(db, {
