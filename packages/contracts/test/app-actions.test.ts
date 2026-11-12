@@ -593,10 +593,17 @@ test("actions that handle secrets are marked in the catalog, so the chat route l
     "listApiKeys",
     "getWorkspace",
     "updateWorkspace",
+    // Reading the workspace's tools returns no approval token; only the
+    // approval routes the same SDK client serves do.
+    "GET /v1/workspaces/:workspaceId/tools/catalog",
+    "GET /v1/workspaces/:workspaceId/tools/declarations",
     "noSuchAction",
   ]) {
     expect([id, appActionCallHandlesSecrets({ id })]).toEqual([id, false]);
   }
+  expect(
+    appActionCallHandlesSecrets({ id: "POST /v1/workspaces/:workspaceId/tools/approvals" }),
+  ).toBe(true);
   // Bounded: most of the app stays reachable.
   expect(ACTION_CATALOG.filter(appActionHandlesSecrets).length).toBeLessThan(80);
 });

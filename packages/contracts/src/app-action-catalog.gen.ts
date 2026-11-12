@@ -2984,15 +2984,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/catalog",
     "request": [],
     "response": [
-      "ToolGatewayApprovalResponse",
-      "ToolGatewayCallResponse",
-      "ToolGatewayCatalog",
-      "ToolGatewayDeclarationsResponse"
+      "ToolGatewayCatalog"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/tools/declarations",
@@ -3000,15 +2994,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/declarations",
     "request": [],
     "response": [
-      "ToolGatewayApprovalResponse",
-      "ToolGatewayCallResponse",
-      "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/vault-providers/connections",

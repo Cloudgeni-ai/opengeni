@@ -499,22 +499,33 @@ function gatePermission(sources: readonly string[]): { permission?: string } {
 }
 
 /**
- * Response bodies the public surface manifest can't name because the SDK
- * types them by hand, matched against "METHOD /path". Each names a schema
- * exported by @opengeni/contracts that describes what the route returns, so
- * a secret in it (a sign-in code) marks the action.
+ * What a route returns, matched against "METHOD /path", where the public
+ * surface manifest can't name it: the SDK types it by hand, or one SDK method
+ * serves several routes, so the manifest gives each of them every response
+ * that method can see. Each names a schema exported by @opengeni/contracts
+ * that describes what the route returns, so a secret in it (a sign-in code)
+ * marks the action, and a secret only another route returns (a tool approval
+ * token) doesn't mark a plain read. Takes precedence over the manifest.
  */
 export const ACTION_RESPONSE_SCHEMAS: ReadonlyArray<{ pattern: RegExp; response: string }> = [
   {
     pattern: /^POST \/v1\/\w+\/:\w+\/(codex|supergrok)\/connect\/start$/,
     response: "SubscriptionDeviceSignInStart",
   },
+  {
+    pattern: /^GET \/v1\/workspaces\/:workspaceId\/tools\/catalog$/,
+    response: "ToolGatewayCatalog",
+  },
+  {
+    pattern: /^GET \/v1\/workspaces\/:workspaceId\/tools\/declarations$/,
+    response: "ToolGatewayDeclarationsResponse",
+  },
 ];
 
-function inlineResponseSchemas(method: string, path: string): string[] {
+function declaredResponseSchemas(method: string, path: string): string[] | null {
   const key = `${method} ${path}`;
   const match = ACTION_RESPONSE_SCHEMAS.find((rule) => rule.pattern.test(key));
-  return match ? [match.response] : [];
+  return match ? [match.response] : null;
 }
 
 /**
@@ -619,7 +630,7 @@ export function buildActionCatalog(
         request,
         query: inputs.queryParameters,
         permission: inputs.permission,
-        response: response.length > 0 ? response : inlineResponseSchemas(method, path),
+        response: declaredResponseSchemas(method, path) ?? response,
       };
     })
     .filter((route) => !isActionCatalogExempt(route.path));
