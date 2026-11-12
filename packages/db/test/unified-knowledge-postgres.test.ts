@@ -1241,7 +1241,7 @@ describe("unified Knowledge storage", () => {
     const atlas = await create("Atlas", "group", [lab.entryId]);
     const finding = await create("Atlas finding", "note", [atlas.entryId]);
     const other = await create("Real product", "group");
-    const shared = await create("Shared finding", "note", [atlas.entryId, other.entryId]);
+    const alsoElsewhere = await create("Shared finding", "note", [atlas.entryId, other.entryId]);
     const earlier = await create("Already archived", "group", [lab.entryId]);
     const earlierArchive = await archiveKnowledgeEntry(client.db, f.human, {
       operationId: crypto.randomUUID(),
@@ -1268,12 +1268,12 @@ describe("unified Knowledge storage", () => {
     expect(await roots()).toEqual([other.entryId]);
     for (const id of [lab.entryId, atlas.entryId, finding.entryId])
       expect(await archived(id)).toBe(true);
-    expect(await archived(shared.entryId)).toBe(false);
+    expect(await archived(alsoElsewhere.entryId)).toBe(false);
     expect(
       (await listKnowledgeEntries(client.db, f.human, { groupId: other.entryId })).entries.map(
         (entry) => entry.id,
       ),
-    ).toEqual([shared.entryId]);
+    ).toEqual([alsoElsewhere.entryId]);
     expect((await archive()).replayed).toBe(true);
 
     // Undo restores the collection and everything archived with it.
@@ -1290,7 +1290,7 @@ describe("unified Knowledge storage", () => {
       (await listKnowledgeEntries(client.db, f.human, { groupId: atlas.entryId })).entries
         .map((entry) => entry.id)
         .sort(),
-    ).toEqual([finding.entryId, shared.entryId].sort());
+    ).toEqual([finding.entryId, alsoElsewhere.entryId].sort());
     // A collection archived on its own before stays archived.
     expect(await archived(earlier.entryId)).toBe(true);
     expect(earlierArchive.outcome).toBe("archived");
@@ -1358,6 +1358,13 @@ describe("unified Knowledge storage", () => {
       expectedVersion: 0,
       entry: { title: "Acme", kind: "group", content: "" },
     });
+    // Also in a live collection, so archiving Acme doesn't take it along.
+    const kept = await saveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: { title: "Contracts", kind: "group", content: "" },
+    });
     const fact = await saveKnowledgeEntry(client.db, f.human, {
       operationId: crypto.randomUUID(),
       entryId: crypto.randomUUID(),
@@ -1366,7 +1373,7 @@ describe("unified Knowledge storage", () => {
         title: "Renewal",
         kind: "fact",
         content: "Renewal on 1 December",
-        groupIds: [group.entryId],
+        groupIds: [group.entryId, kept.entryId],
         relationships: [{ entryId: group.entryId, relation: "applies_to" }],
       },
     });
@@ -1383,7 +1390,7 @@ describe("unified Knowledge storage", () => {
     const read = await getKnowledgeEntry(client.db, f.human, fact.entryId);
     expect(read?.revision.entry).toMatchObject({
       content: "Renewal on 1 December",
-      groupIds: [],
+      groupIds: [kept.entryId],
       relationships: [],
     });
     expect(
@@ -1391,7 +1398,7 @@ describe("unified Knowledge storage", () => {
     ).toEqual([]);
     const stored = await shared!
       .admin`SELECT body FROM knowledge_entry_revisions WHERE id=${fact.revisionId}`;
-    expect(stored[0]?.body.groupIds).toEqual([group.entryId]);
+    expect(stored[0]?.body.groupIds).toEqual([group.entryId, kept.entryId]);
   });
 
   test("Review first saves without pausing and keeps the published revision until exact approval", async () => {
