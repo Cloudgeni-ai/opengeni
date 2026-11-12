@@ -24,6 +24,11 @@ to its connection URL (`microsoftDynamicsMcpEndpoint`) and names the scopes.
 | `OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET` | Its client secret. Set both or neither. |
 | `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` | Accept Finance and Operations URLs. |
 
+Finance and Operations was verified on 12 Nov 2026 against a real environment
+(`opengeni-fno-test.operations.ch.dynamics.com`) through the staging connector:
+card, Entra sign-in and an ERP MCP read with an explicit company. The flag is on
+in Opengeni's staging and production environments.
+
 The Entra app needs:
 
 - redirect URI `<public API origin>/v1/integrations/oauth/callback` (Web platform);
