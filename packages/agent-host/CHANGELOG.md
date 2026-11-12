@@ -1,5 +1,16 @@
 # @opengeni/agent-host
 
+## 6.17.0
+
+### Patch Changes
+
+- Updated dependencies [43aa19d]
+- Updated dependencies [deccb54]
+- Updated dependencies [389de66]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+  - @opengeni/sdk@6.17.0
+
 ## 6.16.0
 
 ### Patch Changes
