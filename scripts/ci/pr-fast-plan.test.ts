@@ -318,6 +318,25 @@ test("authored tests take the budget first; the direct sample fills one shard, c
   // The per-shard target keeps a deadline margin for estimate error, and the
   // deadline it is derived from is the one the shard job enforces.
   expect(PR_E2E_SHARD_TARGET_SECONDS * 2).toBeLessThanOrEqual(E2E_SHARD_DEADLINE_SECONDS);
+  // Shards are added until the busiest one, packed as the shard job packs it,
+  // fits the target: three 0.55-target files fit two shards on average but
+  // not in any packing.
+  const thirds = ["a", "b", "c"].map((name) => `test/e2e/third-${name}.browser.e2e.ts`);
+  const fitted = selectPrBrowserE2e(
+    { ...directPlan, changedFiles: thirds, e2eTests: thirds },
+    laneContext({
+      seconds: () => PR_E2E_SHARD_TARGET_SECONDS * 0.55,
+      touchedWorkspaces: new Set(),
+    }),
+  );
+  expect(Math.ceil(fitted.summary.e2eEstimatedSeconds / PR_E2E_SHARD_TARGET_SECONDS)).toBe(2);
+  expect(fitted.e2eShards).toBe(3);
+  // One file over the target cannot be split, so it adds no shard by itself.
+  const single = selectPrBrowserE2e(
+    { ...directPlan, changedFiles: [authored[0]!], e2eTests: [authored[0]!] },
+    laneContext({ seconds, touchedWorkspaces: new Set() }),
+  );
+  expect(single.e2eShards).toBe(1);
   expect(PR_E2E_BUDGET_SECONDS).toBeLessThanOrEqual(PR_E2E_SHARD_CAP * PR_E2E_SHARD_TARGET_SECONDS);
   expect(
     require("node:fs").readFileSync(".github/workflows/ci-e2e-shards.yml", "utf8") as string,
