@@ -1082,6 +1082,17 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
 
+API and worker readiness probes evaluate the same posture on every probe, with
+one difference in how they read it: each probe first computes a fingerprint of
+the schema, privilege, ownership, policy, trigger, role and membership catalog
+rows the inspection depends on, in the inspection's own snapshot, and re-reads
+those catalogs only when the fingerprint changed since the previous probe.
+Identity, activation and cutover receipts are read live on every probe. Any
+DDL, GRANT, REVOKE or role change changes the fingerprint, so a stray grant
+still fails the next probe. The release-gate assertion and the startup check
+always read every catalog. See
+[the readiness catalog fingerprint benchmark](benchmarks/readiness-catalog-fingerprint.md).
+
 After a successful install or upgrade, the default-on `catalogImport` hook Job
 imports the committed reviewed integrations snapshot. It receives the runtime
 Secret for object-storage configuration but overrides `OPENGENI_DATABASE_URL`

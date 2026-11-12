@@ -52,6 +52,8 @@ dependencies {
   implementation 'androidx.core:core-telecom:1.0.1'
   implementation 'androidx.core:core:1.13.1'
   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+  // JVM tests of the foreground service start rules (src/test).
+  testImplementation 'junit:junit:4.13.2'
   // The app already has both; this links the same ones.
   if (expoNotifications != null) {
     implementation expoNotifications

@@ -1550,7 +1550,7 @@ export const englishMessages = {
   "connectSetup.organizationApprovalPossibleTitle": "Microsoft didn't give access",
   "connectSetup.organizationApprovalRequiredTitle": "Your IT needs to approve {product} first",
   "connectSetup.organizationApprovalUnfinished":
-    "If the sign-in page said an admin has to approve {product}, send your IT the message with the approval details. After they approve, sign in again.",
+    "If the sign-in page said an admin has to approve {product}, send your IT the message with the approval details. If you sent a request from that page instead, wait for IT to approve it. Then sign in again.",
   "connectSetup.organizationApprovalUnfinishedTitle": "Didn't get to finish signing in?",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",

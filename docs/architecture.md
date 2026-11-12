@@ -486,6 +486,12 @@ audit only. Replaceable fanout follows commit. Separate conversation history
 uses sequence cursors; `packages/db/src/session-event-slices.ts` transfers bounded
 message-scalar slices, never whole histories. Exact tool-name/call-ID filters use
 trigger-maintained metadata to avoid detoasting skipped arguments and outputs.
+A session's inline Skill folders are its largest value, so the `sessions` row
+model omits them: whole-row reads, `.returning()` and event-write locks never
+detoast them. Only readers that return a complete `Session` select them, through
+`schema.sessionSkillSets` in the same statement, and responses that never carry
+them (the compact chat projection) read with `skills: "omit"`. See
+[the measurements](benchmarks/session-skills-row-model.md).
 Exact tool-name pages merge two disjoint ordered index branches in one statement:
 bounded non-null name projections and legacy/oversized-name fallbacks. Each
 branch retains its keyset and limit; names keep the database collation and no

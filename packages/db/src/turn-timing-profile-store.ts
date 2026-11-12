@@ -115,6 +115,7 @@ const projectedPayload = sql`jsonb_strip_nulls(case e.type
   when 'sandbox.operation.started' then jsonb_build_object('name', e.payload->'name')
   when 'sandbox.operation.completed' then jsonb_build_object('name', e.payload->'name')
   when 'sandbox.operation.failed' then jsonb_build_object('name', e.payload->'name')
+  when 'session.context.compaction.started' then jsonb_build_object('trigger', e.payload->'trigger')
   else '{}'::jsonb
 end)`;
 
@@ -259,6 +260,7 @@ async function upsertProfile(
     modelNetworkMs: s.model_network,
     modelUnsplitMs: s.model_unsplit,
     modelStalledMs: s.model_stalled,
+    compactionMs: s.compaction,
     webSearchMs: s.web_search,
     mcpToolMs: s.mcp_tool,
     sandboxToolMs: s.sandbox_tool,

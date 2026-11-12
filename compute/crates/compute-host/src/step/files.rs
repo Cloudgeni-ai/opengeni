@@ -36,9 +36,8 @@ pub(super) fn wake_profile(paths: &Paths) -> PathBuf {
     paths.dir.join("wake-profile.json")
 }
 
-/// The clone of the disk a checkpoint takes while its VM is paused, which
-/// it archives once the VM runs again. Outside the jail: only the host
-/// writes or reads it.
+/// The clone of the disk a checkpoint takes and archives while its VM runs
+/// on. Outside the jail: only the host writes or reads it.
 pub(crate) fn checkpoint_disk(paths: &Paths) -> PathBuf {
     paths.dir.join("checkpoint.disk")
 }

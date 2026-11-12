@@ -256,11 +256,10 @@ fn snapshots(lab: &Lab) -> usize {
         .sum()
 }
 
-/// A host lost while its sandbox runs on past a checkpoint leaves a copy
-/// whose memory is of a past the sandbox's programs had already left: the
-/// next owner takes the copy up from its files, deleting its memory image
-/// from the store and raising the programs-lost alarm, and the sandbox
-/// boots with its files as they were then.
+/// A host lost while its sandbox runs on past a checkpoint leaves a copy of
+/// its files alone, since a checkpoint saves no memory (ADR 34): the next
+/// owner takes the copy up from its files, raising the programs-lost alarm,
+/// and the sandbox boots with its files as they were then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_sandbox_is_checkpointed_and_boots_elsewhere_from_its_files_then() {
     let Some(dir) = shared_extents() else {
@@ -343,7 +342,7 @@ async fn a_running_sandbox_is_checkpointed_and_boots_elsewhere_from_its_files_th
         .unwrap();
     assert!(
         matches!(stored, Owned::Done(Some(Claimed { memory: false, .. }))),
-        "and is gone from the store's copy, so no later owner restores it: {stored:?}"
+        "the store's copy holds no memory for any owner to restore: {stored:?}"
     );
     let restores = two.world.restores.load(Ordering::Relaxed);
     assert_eq!(
@@ -375,7 +374,7 @@ async fn a_checkpoint_that_finds_a_later_owner_drops_this_hosts_copy() {
     let two = Lab::start_stored(Lab::root_in(&dir), Arc::default(), Directory::new(&shelf)).await;
     let sandbox = id(7);
     one.create(sandbox, CHECKPOINTED).await;
-    one.run(sandbox, &["set kept"]).await;
+    one.run(sandbox, &["write kept"]).await;
     let written = unix_ms();
     checkpointed_since(&one, sandbox, written).await;
     // The fleet gave the sandbox to another host while this one still runs
@@ -405,27 +404,34 @@ async fn a_checkpoint_that_finds_a_later_owner_drops_this_hosts_copy() {
         assert!(dropped.elapsed() < Duration::from_secs(10), "its VM ends");
         sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(two.run(sandbox, &["get"]).await, ["kept"]);
+    // The checkpoint holds its disk alone (ADR 34).
+    assert_eq!(two.run(sandbox, &["disk"]).await, ["kept"]);
     one.assert_clean();
     two.assert_clean();
 }
 
+/// A checkpoint copies the disk while the guest runs: it never pauses the
+/// VM nor takes a memory snapshot, so use beside it neither waits for it
+/// nor cancels it, however long its upload takes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn use_during_a_checkpoint_neither_waits_for_it_nor_cancels_it() {
     let Some(dir) = shared_extents() else {
         return;
     };
-    let snapshot = Duration::from_millis(600);
-    let delays = Delays {
-        snapshot,
-        ..Delays::default()
+    let root = Lab::root_in(&dir);
+    let config = Lab::config(&root, HostPolicy::default());
+    let upload = Duration::from_millis(600);
+    let store = Slow {
+        inner: Directory::new(root.join("shelf")),
+        delay: upload,
     };
-    let (one, _two) = hosts_in(&dir, delays).await;
+    let one = Lab::launch(root, Arc::default(), Delays::default(), config, store).await;
     let sandbox = id(2);
     one.create(sandbox, CHECKPOINTED).await;
     one.run(sandbox, &["set kept"]).await;
     let written = unix_ms();
     let before = snapshots(&one);
+    let resumes = one.world.resumes.load(Ordering::Relaxed);
     one.wait_until("a checkpoint under way", |status: &HostStatus| {
         Lab::sandbox(status, sandbox).step.as_deref() == Some("checkpoint")
     })
@@ -436,9 +442,9 @@ async fn use_during_a_checkpoint_neither_waits_for_it_nor_cancels_it() {
     let Reply::Woken { waited_us, .. } = woken else {
         panic!("{woken:?}");
     };
-    assert!(asked.elapsed() < snapshot / 2, "{:?}", asked.elapsed());
+    assert!(asked.elapsed() < upload / 2, "{:?}", asked.elapsed());
     assert!(
-        u128::from(waited_us) < (snapshot / 2).as_micros(),
+        u128::from(waited_us) < (upload / 2).as_micros(),
         "{woken:?}"
     );
     assert_eq!(one.run(sandbox, &["get"]).await, ["kept"]);
@@ -449,10 +455,11 @@ async fn use_during_a_checkpoint_neither_waits_for_it_nor_cancels_it() {
     );
     let done = checkpointed_since(&one, sandbox, written).await;
     assert_eq!(done.level, LevelName::Running);
+    assert_eq!(snapshots(&one) - before, 0, "a checkpoint takes no memory");
     assert_eq!(
-        snapshots(&one) - before,
-        1,
-        "the checkpoint was not cancelled and taken again"
+        one.world.resumes.load(Ordering::Relaxed),
+        resumes,
+        "nor pauses the VM it copies"
     );
     one.assert_clean();
 }

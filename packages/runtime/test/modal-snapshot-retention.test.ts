@@ -431,6 +431,65 @@ describe("Opengeni Modal 0.9 snapshot policy", () => {
     });
   });
 
+  describe("a tar session restoring a directory snapshot", () => {
+    const directorySnapshot = new TextEncoder().encode(
+      'MODAL_SANDBOX_DIR_SNAPSHOT_V1\n{"snapshot_id":"im-dir","workspace_persistence":"snapshot_directory"}',
+    );
+    const hydrating = (persistence: Persistence, fail = false) => {
+      const session = fakeSession(persistence, {
+        snapshotDirectory: async () => ({ imageId: "im-next" }),
+      });
+      const modes: string[] = [];
+      return {
+        modes,
+        session: Object.assign(session, {
+          hydrateWorkspace: async (_data: Uint8Array) => {
+            modes.push(session.state.workspacePersistence);
+            if (fail) throw new Error("mount failed");
+          },
+        }),
+      };
+    };
+
+    test("mounts it in the snapshot's mode and saves tars afterwards", async () => {
+      const { session, modes } = hydrating("tar");
+      installOpenGeniModalSnapshotPolicy(session);
+
+      await session.hydrateWorkspace(directorySnapshot);
+
+      expect(modes).toEqual(["snapshot_directory"]);
+      expect(session.state.workspacePersistence).toBe("tar");
+    });
+
+    test("stays a tar session when the mount fails", async () => {
+      const { session } = hydrating("tar", true);
+      installOpenGeniModalSnapshotPolicy(session);
+
+      await expect(session.hydrateWorkspace(directorySnapshot)).rejects.toThrow("mount failed");
+
+      expect(session.state.workspacePersistence).toBe("tar");
+    });
+
+    test("hydrates a tar archive as a tar session", async () => {
+      const { session, modes } = hydrating("tar");
+      installOpenGeniModalSnapshotPolicy(session);
+
+      await session.hydrateWorkspace(new TextEncoder().encode("a tar archive"));
+
+      expect(modes).toEqual(["tar"]);
+    });
+
+    test("leaves a directory session as it is", async () => {
+      const { session, modes } = hydrating("snapshot_directory");
+      installOpenGeniModalSnapshotPolicy(session);
+
+      await session.hydrateWorkspace(directorySnapshot);
+
+      expect(modes).toEqual(["snapshot_directory"]);
+      expect(session.state.workspacePersistence).toBe("snapshot_directory");
+    });
+  });
+
   test("leaves tar persistence unchanged", async () => {
     const session = fakeSession("tar");
     const originalPersistWorkspace = session.persistWorkspace;

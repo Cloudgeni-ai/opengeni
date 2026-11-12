@@ -7,6 +7,7 @@ import {
   defineSignal,
   deprecatePatch,
   isCancellation,
+  log,
   patched,
   setHandler,
   TimeoutFailure,
@@ -18,6 +19,7 @@ import { validProviderOverloadRecoveryDelay } from "../activities/agent-turn/pro
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  SESSION_READ_ONLY_FAILURE_TYPE,
   POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
   POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
   PRE_CLAIM_FAILURE_MESSAGE,
@@ -250,6 +252,19 @@ function workerDeathFailure(
     return null;
   }
   return { timeoutType: cause.timeoutType };
+}
+
+/**
+ * The control activity proved the session read-only (archived, being
+ * archived, or imported): the database refuses its write on every retry, so
+ * the activity failed non-retryably instead of retrying forever.
+ */
+export function isSessionReadOnlyFailure(error: unknown): boolean {
+  return (
+    error instanceof ActivityFailure &&
+    error.cause instanceof ApplicationFailure &&
+    error.cause.type === SESSION_READ_ONLY_FAILURE_TYPE
+  );
 }
 
 /**
@@ -582,7 +597,18 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // This DB-only activity uses an unbounded Temporal retry policy. The
       // workflow cannot peek, close, or continue-as-new until the exact
       // physical proof commits its idempotent receipt and wake transaction.
-      await activity.persistSessionAttemptQuiescence(proof);
+      // The one exception is a session that became read-only (its content was
+      // archived after the turn was cancelled, before this late proof
+      // arrived): the receipt can never commit and nothing can be admitted,
+      // so the proof is moot and the next peek closes this workflow. If the
+      // content is restored, the missing receipt is reconciled through
+      // Temporal like any other lost proof.
+      try {
+        await activity.persistSessionAttemptQuiescence(proof);
+      } catch (error) {
+        if (!isSessionReadOnlyFailure(error)) throw error;
+        log.warn("Session attempt quiescence proof dropped: session is read-only");
+      }
       pendingQuiescenceProofs.delete(key);
       persistedQuiescenceProofs.add(key);
     }
@@ -790,6 +816,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       includeDeletion: true,
     });
     if (peek.kind === "deleted") return;
+    // Archived or imported: the database admits no work and accepts no
+    // receipt for this session, so there is nothing for this workflow to do.
+    if (peek.kind === "read-only") return;
     if (peek.kind === "unavailable" || peek.kind === "attempt-owned") {
       if (
         peek.kind === "attempt-owned" &&
@@ -869,13 +898,21 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (peek.kind === "cancellation-wait") {
       // The receipt wake can arrive while reconciliation returns an older pending result.
       const beforeReconciliationSignalVersion = signalVersion;
-      const reconciliation = await activity.reconcileSessionAttemptQuiescence({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        attemptId: peek.attemptId,
-        workflowId,
-      });
+      let reconciliation: Awaited<ReturnType<typeof activity.reconcileSessionAttemptQuiescence>>;
+      try {
+        reconciliation = await activity.reconcileSessionAttemptQuiescence({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          attemptId: peek.attemptId,
+          workflowId,
+        });
+      } catch (error) {
+        // Archived between the peek and this receipt write: see the peek's
+        // read-only close above.
+        if (!isSessionReadOnlyFailure(error)) throw error;
+        return;
+      }
       if (reconciliation.action === "quiesced") continue;
       // Logical settlement is complete, but the exact predecessor activity has
       // not yet durably proved sandbox/tool quiescence. Wait only briefly for

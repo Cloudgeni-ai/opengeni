@@ -67,6 +67,7 @@
         "pages": [
           "guides/excel-add-in",
           "guides/microsoft-teams",
+          "guides/microsoft-dynamics",
           "guides/developer-plugin",
           "guides/self-host",
           "run-locally",

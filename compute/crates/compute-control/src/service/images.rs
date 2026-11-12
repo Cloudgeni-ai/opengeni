@@ -35,7 +35,8 @@ impl<S: Store> Service<S> {
     /// the live host with those programs `turn` places after the first by
     /// name and recorded now. `None` while that host is building it, when
     /// it built it with other programs (recorded, for whoever wants them),
-    /// or when no live host has them to build it.
+    /// when no live host has them to build it, or while the image recorded
+    /// for it is being forgotten, after which it is built again.
     ///
     /// # Errors
     ///
@@ -51,9 +52,7 @@ impl<S: Store> Service<S> {
         let key = built_key(source, guest);
         if let Some(image) = self.store.image_built(&key).await? {
             // Another replica recorded it: this name uses it now too.
-            return Ok(Some(
-                self.store.record_built(&key, name, image, now_ms()).await?,
-            ));
+            return Ok(self.store.record_built(&key, name, image, now_ms()).await?);
         }
         let live: Vec<_> = self
             .view
@@ -92,10 +91,13 @@ impl<S: Store> Service<S> {
                         .record_built(&plain, name, *image, now_ms())
                         .await?;
                 }
-                let kept = self
+                let Some(kept) = self
                     .store
                     .record_built(&built, name, *image, now_ms())
-                    .await?;
+                    .await?
+                else {
+                    return Ok(None);
+                };
                 tracing::info!(
                     host = %target.name,
                     %source,

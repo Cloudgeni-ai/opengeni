@@ -899,8 +899,7 @@ async fn a_guest_whose_pager_died_boots_afresh() {
     assert!(matches!(removed, Reply::Done), "{removed:?}");
 }
 
-/// The next event of a checkpoint of `id` that ended done, and the
-/// microseconds it kept the guest paused.
+/// The next event of a checkpoint of `id` that ended done.
 async fn checkpoint_done(
     events: &mut tokio::sync::mpsc::Receiver<compute_host::observe::Event>,
     id: Id,
@@ -950,24 +949,19 @@ async fn status(client: &Client) -> compute_host::protocol::HostStatus {
 /// starts a thousand higher.
 const CHECKPOINT_UID: u32 = (1 << 30) + 4000;
 
-/// A sandbox in use is checkpointed while it runs, its guest paused only
-/// while its memory and disk are captured: a whole image the first time, a
-/// diff merged into it after. Losing its host then costs only what it did
-/// since. Another host adopts it under a later owner epoch and wakes it
-/// from the checkpoint with its programs, memory and files as they were,
-/// and the first host's next checkpoint finds itself fenced off and drops
-/// its copy.
-///
-/// The fleet takes a lost host's sandboxes up from their files alone (see
-/// [`Request::Adopt`]), since their programs ran on past the copy; this
-/// adopt takes the checkpoint whole, as a hand-off's copy is taken, to
-/// check the image it carries, which is also the base of the next save.
+/// A sandbox in use is checkpointed while it runs: its disk alone is
+/// copied, and its guest is never paused. Losing its host then costs its
+/// running programs, as it always would, and what it wrote since. Another
+/// host adopts it under a later owner epoch, even whole as a hand-off's
+/// copy is taken, and boots it from the checkpoint's disk with its files as
+/// they were, and the first host's next checkpoint finds itself fenced off
+/// and drops its copy.
 ///
 /// Both hosts keep sandboxes in one store that stamps each with its owner,
 /// as a fleet's does: the bucket `COMPUTE_TEST_STORE` names, or else one
 /// in memory.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_checkpoint_of_a_running_guest_brings_it_back_on_another_host() {
+async fn a_checkpoint_of_a_running_guest_boots_it_on_another_host_with_its_files() {
     let Some(lab) = lab() else { return };
     let store = std::env::var("COMPUTE_TEST_STORE")
         .ok()
@@ -1020,7 +1014,7 @@ async fn a_checkpoint_of_a_running_guest_brings_it_back_on_another_host() {
     assert!(matches!(created, Reply::Done), "{created:?}");
     let setup = exec(&one.client, id, SETUP).await;
     let pid = field(&setup, "pid").to_owned();
-    let (sum, count) = checkpoint_twice(&one, &mut events, id, &pid).await;
+    checkpoint_twice(&one, &mut events, id, &pid).await;
     // What it does from now on is in no copy.
     exec(
         &one.client,
@@ -1030,7 +1024,7 @@ async fn a_checkpoint_of_a_running_guest_brings_it_back_on_another_host() {
     .await;
     // Its host is cut off, and the fleet gives it to another under a later
     // owner epoch.
-    adopt_checkpointed(&two, id, config, &pid, (&sum, count)).await;
+    adopt_checkpointed(&two, id, config).await;
     // The first host's next checkpoint finds a later owner and drops its
     // copy, ending its VM.
     let fenced = Instant::now();
@@ -1092,57 +1086,74 @@ async fn checkpointing(
     Some((agent, events))
 }
 
-/// Waits out `id`'s first checkpoint (a whole image) and, once its memory
-/// and disk changed, its second (a diff), and prints how long each kept
-/// the guest paused. Returns its data's checksum and its counter as the
-/// second captured them.
+/// Waits out `id`'s first checkpoint and, once its disk and memory
+/// changed, one whose clone was taken after the change, and prints how
+/// long each took. None pauses the guest: process `pid` runs throughout.
+///
+/// A checkpoint that takes longer than the time between two is followed
+/// at once by the next, whose clone may then be taken before the change
+/// is written: that one does not hold it, and the one after is awaited.
+///
+/// The guest writes its change out itself. A checkpoint copies the disk
+/// and no memory, so it holds what has reached the disk; these hosts set
+/// no restore notice port, so nothing here asks the guest to write its
+/// disks out before the clone, as a deployed host does.
 async fn checkpoint_twice(
     agent: &Agent,
     events: &mut tokio::sync::mpsc::Receiver<compute_host::observe::Event>,
     id: Id,
     pid: &str,
-) -> (String, u64) {
+) {
     let first = checkpoint_done(events, id).await;
     let output = exec(
         &agent.client,
         id,
-        &format!("{}\necho kept > /kept", check(pid)),
+        &format!("{}\necho kept > /kept; sync", check(pid)),
     )
     .await;
     assert_eq!(field(&output, "alive"), "yes", "{output}");
-    let sum = field(&output, "sum").to_owned();
-    let count = field(&output, "count").parse().unwrap();
-    let second = checkpoint_done(events, id).await;
+    let written = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let mut later = Vec::new();
+    let checkpointed = loop {
+        later.push(checkpoint_done(events, id).await);
+        let checkpointed = status(&agent.client)
+            .await
+            .sandboxes
+            .into_iter()
+            .find(|sandbox| sandbox.id == id)
+            .unwrap();
+        if checkpointed
+            .backed_up_ms
+            .is_some_and(|cloned| u128::from(cloned) >= written)
+        {
+            break checkpointed;
+        }
+        assert!(later.len() < 4, "no checkpoint cloned after the change");
+    };
+    for event in std::iter::once(&first).chain(&later) {
+        assert!(
+            event.get("compute.paused_us").is_none(),
+            "a checkpoint paused its guest: {event:?}"
+        );
+    }
     eprintln!(
-        "checkpoint pauses: first (whole image) {} us, then (diff) {} us; \
-         steps took {} us and {} us",
-        micros(&first, "compute.paused_us"),
-        micros(&second, "compute.paused_us"),
+        "checkpoints took {} us and then {:?} us",
         micros(&first, "compute.duration_us"),
-        micros(&second, "compute.duration_us"),
+        later
+            .iter()
+            .map(|event| micros(event, "compute.duration_us"))
+            .collect::<Vec<_>>(),
     );
-    let checkpointed = status(&agent.client)
-        .await
-        .sandboxes
-        .into_iter()
-        .find(|sandbox| sandbox.id == id)
-        .unwrap();
     assert_eq!(checkpointed.level, LevelName::Running);
-    assert!(checkpointed.backed_up_ms.is_some());
-    (sum, count)
 }
 
-/// Adopts `id` on `agent` under owner epoch 2 and checks that its guest
-/// woke as its last checkpoint left it: process `pid` still counting from
-/// at least `count`, its data reading `sum`, its disk holding what it wrote
-/// before, and nothing it did after.
-async fn adopt_checkpointed(
-    agent: &Agent,
-    id: Id,
-    config: SandboxConfig,
-    pid: &str,
-    (sum, count): (&str, u64),
-) {
+/// Adopts `id` on `agent` under owner epoch 2, whole, and checks that its
+/// guest booted from its last checkpoint's disk: its programs and memory
+/// gone, its disk holding what it wrote before, and nothing it did after.
+async fn adopt_checkpointed(agent: &Agent, id: Id, config: SandboxConfig) {
     let adopted = agent
         .client
         .call(&Request::Adopt {
@@ -1158,19 +1169,18 @@ async fn adopt_checkpointed(
     let output = exec(
         &agent.client,
         id,
-        &format!(
-            "{}\necho disk=$(cat /kept)\necho lost=$(cat /lost /dev/shm/lost 2>/dev/null | wc -l)",
-            check(pid)
-        ),
+        "test -e /dev/shm/count || echo booted=yes\necho disk=$(cat /kept)\necho lost=$(cat /lost /dev/shm/lost 2>/dev/null | wc -l)",
     )
     .await;
     eprintln!(
-        "woke on the second host from the checkpoint in {:?}",
+        "booted on the second host from the checkpoint in {:?}",
         started.elapsed()
     );
-    assert_eq!(field(&output, "alive"), "yes", "{output}");
-    assert_eq!(field(&output, "was"), sum, "memory as at the checkpoint");
-    assert!(field(&output, "count").parse::<u64>().unwrap() >= count);
+    assert_eq!(
+        field(&output, "booted"),
+        "yes",
+        "no memory came back: {output}"
+    );
     assert_eq!(field(&output, "disk"), "kept", "{output}");
     assert_eq!(
         field(&output, "lost"),

@@ -620,6 +620,30 @@ describe("computeControl", () => {
     expect(scraped.from).toEqual([monitoring]);
   });
 
+  test("keeps its ServiceMonitor out of the core workloads' monitoring template", async () => {
+    // Not in servicemonitor.yaml: an operator rendering only the core
+    // workloads' monitoring with --show-only (such as an observability
+    // reconcile that refuses any other resource) must not pick it up.
+    const values = {
+      ...enabled,
+      computeControl: { ...enabled.computeControl, metrics: { port: 9464 } },
+      observability: { serviceMonitor: { enabled: true } },
+    };
+    const monitors = (template: string) =>
+      render(values, [
+        "--api-versions",
+        "monitoring.coreos.com/v1",
+        "--show-only",
+        `templates/${template}`,
+      ]).then((manifests) => manifests.map((m) => `${m.kind}/${m.metadata.name}`));
+    expect(await monitors("compute-control-servicemonitor.yaml")).toEqual([
+      "ServiceMonitor/cc-opengeni-compute-control",
+    ]);
+    expect(await monitors("servicemonitor.yaml")).not.toContain(
+      "ServiceMonitor/cc-opengeni-compute-control",
+    );
+  });
+
   test("has no metrics listener, ServiceMonitor or hosts' metrics unless a port is set", async () => {
     const manifests = await render(
       { ...enabled, observability: { serviceMonitor: { enabled: true } } },
