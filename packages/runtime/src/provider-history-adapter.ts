@@ -1,6 +1,10 @@
 import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
 import { isAnthropicWebSearchItem } from "./anthropic-web-search";
-import { claudeSignedThinkingBlock, claudeThinkingSecret } from "./opaque-reasoning-replay";
+import {
+  claudeSignedThinkingBlock,
+  claudeThinkingSecret,
+  isClaudeThinkingContentPart,
+} from "./opaque-reasoning-replay";
 import {
   isHostedSearchEvidenceRecord,
   projectHostedSearchEvidence,
@@ -436,40 +440,52 @@ export function projectHistoryForProvider(
   const goalOnce = collapseRepeatedSessionGoalContexts(items);
   // A search record never separates a tool call from its result on any API.
   const projected = withSearchRecordsAfterOpenCalls(
-    goalOnce.map((item) => {
-      const form = options.searchRecordForm;
-      const evidence = projectHostedSearchEvidence(item, {
-        preserveAnthropicNative: nativeClaude,
-        ...(form ? { form } : {}),
-      });
-      if (nativeClaude && form && isAnthropicWebSearchItem(evidence))
-        return withSearchRecordForm(evidence, form);
-      return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
-    }),
+    withoutOmittedReasoning(
+      goalOnce.map((item): Projected => {
+        const form = options.searchRecordForm;
+        const evidence = projectHostedSearchEvidence(item, {
+          preserveAnthropicNative: nativeClaude,
+          ...(form ? { form } : {}),
+        });
+        if (nativeClaude && form && isAnthropicWebSearchItem(evidence))
+          return withSearchRecordForm(evidence, form);
+        return nativeClaude ? evidence : withoutClaudeMessageMetadata(evidence);
+      }),
+    ),
   );
-  const input = projected.every((item, index) => item === items[index]) ? items : projected;
+  const input =
+    projected.length === items.length && projected.every((item, index) => item === items[index])
+      ? items
+      : projected;
   return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
 }
 
 /**
  * Claude citations ride on assistant text parts as `providerData.anthropic`.
  * The Responses and Chat converters would serialize that metadata onto the
- * wire, so other providers get the plain text. Canonical history keeps it for
- * a later switch back to Claude, which must replay it exactly.
+ * wire, so other providers get the plain text. A part holding Claude's
+ * thinking (`isClaudeThinkingContentPart`) is left out instead, and a message
+ * left with nothing is left out too. Canonical history keeps both for a later
+ * switch back to Claude, which must replay them exactly.
  */
-function withoutClaudeCitationMetadata(item: Record<string, unknown>): Record<string, unknown> {
+function withoutClaudeMessageMetadata(item: Record<string, unknown>): Projected {
   if (item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content))
     return item;
   let changed = false;
-  const content = item.content.map((part) => {
+  const content = item.content.flatMap((part) => {
+    if (isClaudeThinkingContentPart(part)) {
+      changed = true;
+      return [];
+    }
     const metadata = part?.providerData;
-    if (!metadata || typeof metadata !== "object" || !("anthropic" in metadata)) return part;
+    if (!metadata || typeof metadata !== "object" || !("anthropic" in metadata)) return [part];
     changed = true;
     const { anthropic: _anthropic, ...rest } = metadata as Record<string, unknown>;
     const { providerData: _providerData, ...plain } = part;
-    return Object.keys(rest).length ? { ...plain, providerData: rest } : plain;
+    return [Object.keys(rest).length ? { ...plain, providerData: rest } : plain];
   });
-  return changed ? { ...item, content } : item;
+  if (!changed) return item;
+  return content.length ? { ...item, content } : OMITTED_REASONING;
 }
 
 /** Bound on the raw text carried by a request-local invalid-arguments wrapper. */

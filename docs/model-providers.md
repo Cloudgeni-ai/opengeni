@@ -1167,8 +1167,8 @@ use `openrouter/<upstream>`. This deployment rail is independent of any
 workspace-owned OpenRouter connection.
 
 For explicit `anthropic/…` Chat targets on any OpenRouter rail, the request
-adapter moves unsigned historical reasoning into labeled assistant text instead
-of sending it as native thinking. It preserves signed text and encrypted
+adapter leaves unsigned historical reasoning out of the request instead of
+sending it as native thinking or as text. It preserves signed text and encrypted
 reasoning details and leaves stored history unchanged. This also handles older
 non-streamed replies whose reasoning was nested inside text metadata. Other
 Chat targets retain their native reasoning fields.
@@ -1416,8 +1416,8 @@ models and workspaces exactly as for OpenRouter.
 
 - **Claude targets.** Opper exposes Claude through Anthropic, Bedrock, Vertex,
   and Azure. For any Opper Chat target whose id names Claude (pool, pinned route,
-  or `eu.anthropic.claude-…` alias), the request adapter moves unsigned
-  historical reasoning into labeled assistant text, exactly like OpenRouter
+  or `eu.anthropic.claude-…` alias), the request adapter leaves unsigned
+  historical reasoning out of the request, exactly like OpenRouter
   `anthropic/…` targets. Signed text and encrypted details are preserved and
   stored history is unchanged.
 - **Gemini targets.** The request-local `$ref` → `_$ref` tool-output projection
@@ -1545,8 +1545,8 @@ while opaque blocks remain separate. Explicit empty detail arrays are preserved.
 Parallel plaintext aliases do not emit a duplicate delta. This behavior is
 shared by configured providers and Chat BYOK routes. See the
 [structured reasoning contract](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
-When switching to Responses or native Claude, plaintext Chat reasoning becomes
-labelled historical assistant text; it is not sent as an empty foreign reasoning
+When switching to Responses or native Claude, plaintext Chat reasoning is left
+out of the request; it is never sent as text or as an empty foreign reasoning
 artifact. Responses also omits Chat reply-message metadata from text/refusal
 blocks and nested Chat function envelopes from tool calls. Both adapters apply
 this projection at their request boundary, including SDK-driven continuations.
@@ -2623,9 +2623,11 @@ so no display mode returns them verbatim, and because a summary is only ever a
 thought it cannot replace a reply. Replay sends
 each signed block back unchanged in its original position, so history bytes
 match what Claude returned; history stored while updates were briefly recorded
-as assistant messages replays the same signed block. Other APIs see a newly
-stored summary only as labelled historical reasoning; summaries stored as
-assistant messages during that window are not rewritten. Other Claude models keep
+as assistant messages replays the same signed block. Other APIs never see a
+summary: newly stored ones are reasoning items left out of their requests, and
+the text parts of summaries stored as assistant messages during that window are
+left out of other APIs' requests and the Chat compaction transcript. Stored
+history is not rewritten. Other Claude models keep
 `display: "summarized"` and their existing reasoning items.
 
 Native Claude HTTP and SSE errors retain status and bounded retry/request

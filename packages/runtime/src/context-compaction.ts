@@ -52,6 +52,7 @@ import {
   projectHostedSearchEvidence,
   withSearchRecordsAfterOpenCalls,
 } from "./hosted-search-evidence";
+import { isClaudeThinkingContentPart } from "./opaque-reasoning-replay";
 
 import {
   latestReasoningConfiguration,
@@ -2755,7 +2756,7 @@ function renderItem(item: CompactionItem): string {
   const type = itemType(item) ?? "unknown";
   if (type === "message") {
     const role = itemRole(item) ?? "assistant";
-    return `[${role}] ${messageText(item)}`;
+    return `[${role}] ${messageText(withoutClaudeThinkingParts(item))}`;
   }
   if (type === "reasoning") {
     return "[reasoning] (omitted)";
@@ -2767,6 +2768,17 @@ function renderItem(item: CompactionItem): string {
     return `[tool_call ${type}] ${callText(item)}`;
   }
   return `[${type}] ${safeStringify(item)}`;
+}
+
+/**
+ * Claude thinking stored on an assistant text part (legacy progress-update
+ * history) is reasoning, never transcript text, so the Chat transcript leaves
+ * it out like any other reasoning.
+ */
+function withoutClaudeThinkingParts(item: CompactionItem): CompactionItem {
+  const content = (item as { content?: unknown }).content;
+  if (!Array.isArray(content) || !content.some(isClaudeThinkingContentPart)) return item;
+  return { ...item, content: content.filter((part) => !isClaudeThinkingContentPart(part)) };
 }
 
 function resultText(item: CompactionItem): string {

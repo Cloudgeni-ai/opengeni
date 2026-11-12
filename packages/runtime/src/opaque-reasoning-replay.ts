@@ -18,6 +18,21 @@ import { opaqueProviderArtifactFingerprint } from "@opengeni/codex";
  * leaves them out.
  */
 
+/**
+ * A message content part that holds Claude's thinking: history stored while
+ * Claude progress updates were briefly recorded as assistant messages keeps
+ * the signed block on the part (`providerData.anthropic.block`). Claude gets
+ * the block back natively; every other API and transcript leaves the part out,
+ * because its text is Claude's reasoning, never words written for the person.
+ */
+export function isClaudeThinkingContentPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false;
+  const metadata = (part as { providerData?: { anthropic?: { block?: { type?: unknown } } } })
+    .providerData;
+  const type = metadata?.anthropic?.block?.type;
+  return type === "thinking" || type === "redacted_thinking";
+}
+
 /** Claude's signed thinking block on a reasoning item, when it has one. */
 export function claudeSignedThinkingBlock(
   item: Record<string, unknown>,
