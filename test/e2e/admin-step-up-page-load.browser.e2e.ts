@@ -37,6 +37,8 @@ let edge: ReturnType<typeof Bun.serve> | undefined;
 let origin = "";
 let cookies: { name: string; value: string }[] = [];
 let workspaceId = "";
+let connectionId = "";
+let oauthReturnItem: { id: string; providerDomain: string } | undefined;
 
 type Refusal = { method: string; path: string; status: number; code: unknown };
 
@@ -169,11 +171,22 @@ beforeAll(async () => {
   })) as { id?: string; workspace?: { id: string } };
   workspaceId = (workspace.workspace?.id ?? workspace.id)!;
   await shared.admin`update auth_sessions set mfa_verified_at = now() where token = ${token}`;
-  await call("POST", `/v1/workspaces/${workspaceId}/connections`, {
+  const connection = (await call("POST", `/v1/workspaces/${workspaceId}/connections`, {
     providerDomain: "page-load.example.test",
     kind: "api_key",
     credential: { headers: { "X-Api-Key": "fixture-key" } },
-  });
+  })) as { id?: string; connection?: { id: string } };
+  connectionId = (connection.connection?.id ?? connection.id)!;
+  // As if it came from OAuth consent.
+  await shared.admin`update connections set kind = 'oauth2' where id = ${connectionId}`;
+  // A custom MCP capability to return to from that connection's OAuth consent.
+  const capability = (await call("POST", `/v1/workspaces/${workspaceId}/capabilities`, {
+    kind: "mcp",
+    name: "Page Load MCP",
+    endpointUrl: "https://page-load.example.test/mcp",
+    authModel: "oauth2",
+  })) as { id: string };
+  oauthReturnItem = { id: capability.id, providerDomain: "page-load.example.test" };
   await shared.admin`update auth_sessions set mfa_verified_at = null where token = ${token}`;
 
   browser = await chromium.launch(
@@ -267,6 +280,32 @@ describe("admin pages with the passkey step-up required", () => {
       expect(result.refusals, `${name}: refusals`).toEqual([]);
       expect(result.prompted, `${name}: passkey prompt`).toBe(0);
     }
+    await context.close();
+  }, 300_000);
+
+  // Returning from a connection's OAuth consent enables the capability on page
+  // load. That was the prompt owners saw when they had only opened the page.
+  test("returning from a connection's OAuth consent doesn't prompt", async () => {
+    expect(oauthReturnItem, "an MCP catalog item").toBeDefined();
+    const context = await browser!.newContext({ viewport: { width: 1440, height: 960 } });
+    await context.addCookies(
+      cookies.map((cookie) => ({ ...cookie, url: origin, httpOnly: true, sameSite: "Lax" })),
+    );
+    const page = await context.newPage();
+    const params = new URLSearchParams({
+      integration_oauth: "success",
+      connect_item: oauthReturnItem!.id,
+      connectionId,
+      providerDomain: oauthReturnItem!.providerDomain,
+      ownership: "workspace",
+    });
+    const result = await open(page, `/workspaces/${workspaceId}/capabilities?${params}`);
+    await page.screenshot({ path: `${EVIDENCE_DIR}/oauth-return.png` });
+    console.log("admin step-up oauth return", JSON.stringify(result));
+    expect(
+      result.refusals.filter((refusal) => refusal.code === ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE),
+    ).toEqual([]);
+    expect(result.prompted).toBe(0);
     await context.close();
   }, 300_000);
 });
