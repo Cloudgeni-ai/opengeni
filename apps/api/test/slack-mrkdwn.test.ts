@@ -378,6 +378,13 @@ describe("Markdown tables in Slack", () => {
       "| Who | Note |",
       "| --- | --- |",
       "| <@U123> | ping |",
+      "",
+      "| Link | Note |",
+      "| --- | --- |",
+      "| <https://a.example|docs> | ok |",
+      "",
+      "## a | b",
+      "|-|-|",
     ].join("\n");
     const cell =
       "Open (https://app.example/workspaces/w/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)";
@@ -400,7 +407,26 @@ describe("Markdown tables in Slack", () => {
         "| Who | Note |",
         "| --- | --- |",
         "| <@U123> | ping |",
+        "",
+        "| Link | Note |",
+        "| --- | --- |",
+        "| <https://a.example|docs> | ok |",
+        "",
+        "*a | b*",
+        "|-|-|",
       ].join("\n"),
+    );
+  });
+
+  test("wide characters and bracketed link targets line up", () => {
+    const reply = [
+      "| Name | Path |",
+      "| --- | --- |",
+      "| 日本語 | [a b](<sandbox:/a b>) |",
+      "| ab | c |",
+    ].join("\n");
+    expect(slackMrkdwnFromMarkdown(reply)).toBe(
+      ["```", "Name   | Path", "-------|-----", "日本語 | a b", "ab     | c", "```"].join("\n"),
     );
   });
 

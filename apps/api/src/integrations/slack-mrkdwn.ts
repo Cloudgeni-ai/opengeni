@@ -82,8 +82,8 @@ const LINKED_IMAGE = /\[[ \t]*!\[([^[\]\n]*)\]\((?:[^()\n]|\([^()\n]*\))*\)[ \t]
  */
 const TABLE_END =
   /^\s*$|^ {0,3}(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,}|[-*+][ \t]|\d{1,9}[.)][ \t]|>|([-*_])(?:[ \t]*\1){2,}[ \t]*$)/u;
-/** Slack's own mention, channel and special tokens. */
-const SLACK_TOKEN = /<[@#!][^<>\n]*>/u;
+/** Slack's own tokens: mentions, channels and links already in Slack form. */
+const SLACK_TOKEN = /<(?:[@#!]|https?:|mailto:)[^<>\n]*>/u;
 
 /** One cell of a GFM table's delimiter row, such as `---` or `:-:`. */
 const TABLE_DELIMITER_CELL = /^:?-+:?$/u;
@@ -281,7 +281,12 @@ function tableAt(
 ): { rows: string[][]; lines: number } | null {
   const header = lines[index]!;
   const delimiter = lines[index + 1];
-  if (!header.includes("|") || delimiter === undefined || !isTableDelimiter(delimiter)) {
+  if (
+    !header.includes("|") ||
+    TABLE_END.test(header) ||
+    delimiter === undefined ||
+    !isTableDelimiter(delimiter)
+  ) {
     return null;
   }
   // A code block would show a mention or channel token as raw text.
@@ -324,8 +329,9 @@ function tableCellText(cell: string, objectLinkUrl: SlackObjectLinkUrl): string 
   return cell
     .replace(/\\\|/gu, "|")
     .replace(
-      /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*<?((?:[^\s()<>]|\([^\s()<>]*\))*)>?(?:\s+"[^"\n]*")?\s*\)/gu,
-      (_match, label: string, href: string) => {
+      /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*(?:<([^<>\n]*)>|((?:[^\s()<>]|\([^\s()<>]*\))*))(?:\s+"[^"\n]*")?\s*\)/gu,
+      (_match, label: string, bracketed: string | undefined, bare: string | undefined) => {
+        const href = bracketed ?? bare ?? "";
         const text = withImagesAsAltText(label).trim();
         const url = /^(?:https?:|mailto:)/iu.test(href) ? href : objectLinkUrl(href);
         if (!url) return text || href;
@@ -347,14 +353,14 @@ function slackTable(rows: readonly string[][]): string[] {
   const widths = Array.from({ length: columns }, () => 1);
   for (const row of rows) {
     for (let column = 0; column < columns; column += 1) {
-      widths[column] = Math.max(widths[column]!, [...(row[column] ?? "")].length);
+      widths[column] = Math.max(widths[column]!, displayWidth(row[column] ?? ""));
     }
   }
   const line = (cells: readonly string[]) =>
     widths
       .map((width, column) => {
         const cell = cells[column] ?? "";
-        return cell + " ".repeat(width - [...cell].length);
+        return cell + " ".repeat(Math.max(0, width - displayWidth(cell)));
       })
       .join(" | ")
       .trimEnd();
@@ -365,6 +371,21 @@ function slackTable(rows: readonly string[][]): string[] {
     ...rows.slice(1).map(line),
     "```",
   ];
+}
+
+/** East Asian wide and fullwidth characters, and emoji, take two columns. */
+const WIDE_CHARACTER =
+  /[\u{1100}-\u{115F}\u{2E80}-\u{303E}\u{3041}-\u{33FF}\u{3400}-\u{4DBF}\u{4E00}-\u{9FFF}\u{A000}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE30}-\u{FE4F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{20000}-\u{3FFFD}]|\p{Extended_Pictographic}/u;
+/** Combining marks and joiners take no column of their own. */
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u{200B}-\u{200D}\u{FE00}-\u{FE0F}]/u;
+
+/** How many columns `text` takes in a monospaced code block. */
+function displayWidth(text: string): number {
+  let width = 0;
+  for (const character of text) {
+    width += ZERO_WIDTH.test(character) ? 0 : WIDE_CHARACTER.test(character) ? 2 : 1;
+  }
+  return width;
 }
 
 function closesFence(line: string, fence: { character: string; length: number }): boolean {
