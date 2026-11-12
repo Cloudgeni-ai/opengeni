@@ -1,6 +1,6 @@
 /** Lines the composer field shows before it scrolls, room allowing. */
 export const COMPOSER_FIELD_LINES = 6;
-/** Lines it always shows before it scrolls, however little room there is. */
+/** Lines it shows before it scrolls whenever they fit (see {@link composerFieldSize}). */
 export const COMPOSER_FIELD_MIN_LINES = 4;
 
 /**
@@ -8,8 +8,10 @@ export const COMPOSER_FIELD_MIN_LINES = 4;
  *
  * With text in it, the field sizes itself from its content and scrolls only
  * once it reaches `maxHeight`: up to {@link COMPOSER_FIELD_LINES} lines, fewer
- * when they would take more than a quarter of the screen, never fewer than
- * {@link COMPOSER_FIELD_MIN_LINES}. An empty field is pinned to one line, so a
+ * when they would take more than a quarter of the screen, but at least
+ * {@link COMPOSER_FIELD_MIN_LINES}. The field never takes more than half the
+ * room above the keyboard, so with large text on a landscape phone or a
+ * split-screen iPad it may scroll sooner. An empty field is pinned to one line, so a
  * long placeholder can't make it taller and a cleared field (after Send)
  * shrinks back.
  *
@@ -27,12 +29,17 @@ export function composerFieldSize(input: {
   minHeight: number;
   hasText: boolean;
   windowHeight: number;
+  /** How much of the window the keyboard covers; 0 when it's down. */
+  keyboardHeight?: number;
 }): { height?: number; minHeight: number; maxHeight: number } {
   const { line, padding, minHeight, hasText, windowHeight } = input;
-  const lines = Math.max(
+  const room = Math.max(0, windowHeight - (input.keyboardHeight ?? 0));
+  const preferred = Math.max(
     COMPOSER_FIELD_MIN_LINES,
-    Math.min(COMPOSER_FIELD_LINES, Math.floor((windowHeight / 4 - padding) / line)),
+    Math.floor((windowHeight / 4 - padding) / line),
   );
+  const fits = Math.floor((room / 2 - padding) / line);
+  const lines = Math.max(1, Math.min(COMPOSER_FIELD_LINES, preferred, fits));
   const maxHeight = padding + lines * line;
   const oneLine = Math.max(minHeight, padding + line);
   return hasText ? { minHeight: oneLine, maxHeight } : { height: oneLine, minHeight, maxHeight };

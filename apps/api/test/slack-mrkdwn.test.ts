@@ -292,6 +292,31 @@ describe("Opengeni object links in Slack", () => {
     // A path that leaves the console after normalization isn't linked.
     expect(links("/workspaces/../admin")).toBeNull();
   });
+
+  test("a clickable thumbnail links with its alt text", () => {
+    const file = "artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e";
+    expect(slackMrkdwnFromMarkdown(`[![Preview](${file})](${file})`, links)).toBe(
+      `<${app}/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e?fromSession=${sessionId}|Preview>`,
+    );
+    expect(
+      slackMrkdwnFromMarkdown("[![Shot](sandbox:/tmp/a.png)](sandbox:/tmp/a.png)", links),
+    ).toBe("Shot");
+  });
+
+  test("a pipe can't end the address early", () => {
+    expect(slackMrkdwnFromMarkdown(`[x](/workspaces/${workspaceId}/a|evil)`, links)).toBe(
+      `<${app}/a%7Cevil|x>`,
+    );
+  });
+
+  test("sandbox paths with parentheses and bare /workspace/ paths show their labels", () => {
+    expect(
+      slackMrkdwnFromMarkdown(
+        "[a(1).txt](sandbox:/workspace/a(1).txt) and [main.ts](/workspace/src/main.ts)",
+        links,
+      ),
+    ).toBe("a(1).txt and main.ts");
+  });
 });
 
 describe("Markdown tables in Slack", () => {
@@ -321,6 +346,39 @@ describe("Markdown tables in Slack", () => {
       ].join("\n"),
     );
     expect(slackMrkdwnKeepingObjectLinks(reply)).toContain("| :--- | ---: |");
+  });
+
+  test("cells keep Opengeni links' addresses, extra cells drop, and a heading ends the table", () => {
+    const links = slackObjectLinkUrl({
+      baseUrl: "https://app.example",
+      workspaceId: "w",
+      sessionId: "not-a-uuid",
+    });
+    const reply = [
+      "| File | Note |",
+      "| --- | --- |",
+      "| [Open](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e) | ok | extra |",
+      "## Next | step",
+    ].join("\n");
+    const cell =
+      "Open (https://app.example/workspaces/w/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)";
+    expect(slackMrkdwnFromMarkdown(reply, links)).toBe(
+      [
+        "```",
+        `${"File".padEnd(cell.length)} | Note`,
+        `${"-".repeat(cell.length)}-|-----`,
+        `${cell} | ok`,
+        "```",
+        "*Next | step*",
+      ].join("\n"),
+    );
+  });
+
+  test("long runs of spaces don't slow formatting down", () => {
+    const spaces = " ".repeat(80_000);
+    const started = performance.now();
+    slackMrkdwnFromMarkdown(`| a |\n|${spaces}-|\nx${spaces}y`);
+    expect(performance.now() - started).toBeLessThan(500);
   });
 
   test("pipes that aren't a table, and tables in code, stay as written", () => {

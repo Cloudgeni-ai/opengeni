@@ -12,7 +12,7 @@ test("with text the field sizes itself, up to six lines on a phone", () => {
   expect(size.minHeight).toBe(40);
 });
 
-test("never fewer than four lines before it scrolls, even with large text on a small screen", () => {
+test("four lines before it scrolls with large text on a small screen", () => {
   const large = composerFieldSize({
     ...stacked,
     line: Math.ceil(22 * 2.4),
@@ -24,6 +24,23 @@ test("never fewer than four lines before it scrolls, even with large text on a s
   expect(
     composerFieldSize({ ...stacked, line: 30, hasText: true, windowHeight: 700 }).maxHeight,
   ).toBe(16 + 5 * 30);
+});
+
+test("with little room above the keyboard it takes at most half of it", () => {
+  // A landscape phone with large text: four lines wouldn't fit beside the keyboard.
+  const landscape = composerFieldSize({
+    ...stacked,
+    line: 33,
+    hasText: true,
+    windowHeight: 390,
+    keyboardHeight: 200,
+  });
+  expect(landscape.maxHeight).toBe(16 + 2 * 33);
+  // A portrait phone with the keyboard up keeps all six.
+  expect(
+    composerFieldSize({ ...stacked, hasText: true, windowHeight: 844, keyboardHeight: 336 })
+      .maxHeight,
+  ).toBe(16 + 6 * 22);
 });
 
 test("an empty field is pinned to one line", () => {

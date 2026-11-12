@@ -15,7 +15,8 @@ export const OPENGENI_MAINTENANCE_ERROR_CODE = "maintenance";
  * `OpenGeniApiError.details.code` when this deployment can never deliver a
  * native app's push registration (`registerNativePushDevice`): it doesn't list
  * the app's bundle identifier or package name, or it has no push credentials
- * for the platform. Retrying won't help.
+ * for the platform. Retrying won't help. Same value as the contracts export,
+ * kept here so this module stays free of the contracts root (and zod).
  */
 export const NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE = "native_push_unavailable";
 

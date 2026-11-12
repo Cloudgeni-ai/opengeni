@@ -15,6 +15,7 @@ const workspaceId = "11111111-1111-4111-8111-111111111111";
 const missingUuid = "22222222-2222-4222-8222-222222222222";
 const salesId = "33333333-3333-4333-8333-333333333333";
 const personalId = "44444444-4444-4444-8444-444444444444";
+const siteId = "66666666-6666-4666-8666-666666666666";
 let artifactId = "does-not-exist";
 let artifactKind = "generated_image";
 const playback = mock(async () => ({ url: "https://media.example/video.mp4" }));
@@ -93,6 +94,10 @@ const context = {
       };
     },
     getFile: async () => fileAsset,
+    resolveArtifactLink: async (_workspaceId: string, id: string) => {
+      if (id !== siteId) throw new Error("Artifact not found");
+      return { artifactId: id, kind: "site" };
+    },
   },
 };
 mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
@@ -160,6 +165,29 @@ test("malformed retained-file ids show unavailable copy and the Artifacts back l
     const link = rendered.container.querySelector("a");
     expect(link?.textContent?.trim()).toBe("Artifacts");
     expect(link?.getAttribute("href")).toBe(`/workspaces/${workspaceId}/artifacts`);
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("a Site's UUID on the file page opens the Site", async () => {
+  // Slack replies link `artifact:<uuid>` here; Sites share the UUID format.
+  artifactId = siteId;
+  loadError = new OpenGeniApiError(
+    404,
+    JSON.stringify({ error: { message: "artifact not found" } }),
+    { correlationId: "corr-site" },
+  );
+  const rendered = await renderRoute();
+  try {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(rendered.router.state.location.pathname).toBe(
+      `/workspaces/${workspaceId}/sites/${siteId}`,
+    );
+    expect(rendered.container.textContent).not.toContain("Artifact unavailable");
   } finally {
     await rendered.unmount();
   }

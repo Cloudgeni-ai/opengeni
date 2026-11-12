@@ -8,6 +8,7 @@ import { useEffect, useState, type ComponentRef, type ReactNode, type Ref } from
 import {
   AccessibilityInfo,
   ActivityIndicator,
+  Keyboard,
   Platform,
   Pressable,
   Text,
@@ -210,6 +211,7 @@ export function SessionComposer(props: SessionComposerProps) {
   // Track the keyboard directly: React Native's KeyboardAvoidingView mis-measures
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
+  const keyboardHeight = useKeyboardHeight();
   const floating = props.floating ?? false;
   // Only Liquid Glass lets the conversation scroll beneath the composer, and
   // then under a scroll-edge fade like the system bars: the glass picks up the
@@ -262,6 +264,7 @@ export function SessionComposer(props: SessionComposerProps) {
       minHeight: inline ? 36 : 40,
       hasText: Boolean(props.value),
       windowHeight,
+      keyboardHeight,
     });
     return { minHeight, maxHeight, ...(ios && height !== undefined ? { height } : {}) };
   };
@@ -897,4 +900,23 @@ function CallAction({ call, messages }: { call: ComposerCall; messages: NativeTi
       )}
     </Pressable>
   );
+}
+
+/**
+ * The keyboard's height once it has settled, for layout that only needs to
+ * know how much room is left (the animated lift tracks it frame by frame).
+ */
+function useKeyboardHeight(): number {
+  const [height, setHeight] = useState(() => Keyboard.metrics()?.height ?? 0);
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardDidShow", (event) =>
+      setHeight(event.endCoordinates.height),
+    );
+    const hidden = Keyboard.addListener("keyboardDidHide", () => setHeight(0));
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
+  return height;
 }

@@ -31,7 +31,7 @@ import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
  * (`stripOpaqueCitationTokens` in `packages/react/src/timeline/projection.ts`).
  */
 const PROVIDER_CITATION_TOKEN =
-  /[ \t]*\u{E200}(?:cite|filecite)(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
+  /(?<![ \t])[ \t]*\u{E200}(?:cite|filecite)(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
 /** Stray citation delimiters, for example from a token cut short upstream. */
 const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
 
@@ -66,14 +66,15 @@ const MARKDOWN_LINK =
 /**
  * A Markdown link or image to an Opengeni object: `artifact:<id>`,
  * `session:<id>`, `sandbox:<path>` (bare or in angle brackets, for paths with
- * spaces) or a console path under `/workspaces/`. Slack can't open these, so
+ * spaces), a console path under `/workspaces/`, or a bare sandbox path under
+ * `/workspace/`. Slack can't open these, so
  * they become a link to the object's console page, or just their label.
  */
 const OPENGENI_OBJECT_LINK =
-  /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*(<(?:artifact|session|sandbox):[^<>\n]*>|(?:artifact|session|sandbox):[^\s()<>]*|\/workspaces\/[^\s()<>]*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/giu;
+  /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*(<(?:artifact|session|sandbox):[^<>\n]*>|(?:artifact|session|sandbox):(?:[^\s()<>]|\([^\s()<>]*\))*|\/workspaces?\/(?:[^\s()<>]|\([^\s()<>]*\))*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/giu;
 
-/** A GFM table's delimiter row, such as `| --- | :-: |`. */
-const TABLE_DELIMITER = /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/u;
+/** One cell of a GFM table's delimiter row, such as `---` or `:-:`. */
+const TABLE_DELIMITER_CELL = /^:?-+:?$/u;
 
 /** Bare URLs are set aside after links: they may legitimately contain `__` or `**`. */
 const BARE_URL = /\bhttps?:\/\/[^\s<>]+/gu;
@@ -136,7 +137,8 @@ export function slackObjectLinkUrl(input: {
       ) {
         return null;
       }
-      return url.toString();
+      // `|` ends a Slack link's address; `URL` leaves it in paths.
+      return url.toString().replace(/\|/gu, "%7C");
     } catch {
       return null;
     }
@@ -239,10 +241,10 @@ function slackMrkdwn(markdown: string, options: SlackMrkdwnOptions | null): stri
       continue;
     }
     if (options?.objects) {
-      const rows = tableAt(lines, index);
-      if (rows) {
-        output.push(...slackTable(rows));
-        index += rows.length;
+      const table = tableAt(lines, index, options.objectLinkUrl);
+      if (table) {
+        output.push(...slackTable(table.rows));
+        index += table.lines - 1;
         continue;
       }
     }
@@ -253,41 +255,67 @@ function slackMrkdwn(markdown: string, options: SlackMrkdwnOptions | null): stri
 }
 
 /**
- * The rows of a GFM table starting at `index` (its delimiter row excluded),
- * or null: a header row with a pipe, then a delimiter row with as many
- * columns, then every following non-blank row with a pipe.
+ * The GFM table starting at `index`, or null: a header row with a pipe, then a
+ * delimiter row with as many columns, then every following row with a pipe up
+ * to a blank line, heading or fence. Like GFM, each row keeps the header's
+ * columns: a short row is padded, and cells past the header's are dropped.
  */
-function tableAt(lines: readonly string[], index: number): string[][] | null {
+function tableAt(
+  lines: readonly string[],
+  index: number,
+  objectLinkUrl: SlackObjectLinkUrl,
+): { rows: string[][]; lines: number } | null {
   const header = lines[index]!;
   const delimiter = lines[index + 1];
-  if (!header.includes("|") || delimiter === undefined || !delimiter.includes("|")) return null;
-  if (!TABLE_DELIMITER.test(delimiter)) return null;
-  const columns = tableCells(header);
-  if (columns.length === 0 || tableCells(delimiter).length !== columns.length) return null;
-  const rows = [columns];
-  for (let next = index + 2; next < lines.length; next += 1) {
-    const line = lines[next]!;
-    if (!line.trim() || !line.includes("|")) break;
-    rows.push(tableCells(line));
+  if (!header.includes("|") || delimiter === undefined || !isTableDelimiter(delimiter)) {
+    return null;
   }
-  return rows;
+  const columns = tableCells(header, objectLinkUrl);
+  if (columns.length === 0 || splitTableRow(delimiter).length !== columns.length) return null;
+  const rows = [columns];
+  let next = index + 2;
+  for (; next < lines.length; next += 1) {
+    const line = lines[next]!;
+    if (!line.trim() || !line.includes("|") || ATX_HEADING.test(line) || FENCE_OPEN.test(line)) {
+      break;
+    }
+    rows.push(tableCells(line, objectLinkUrl).slice(0, columns.length));
+  }
+  return { rows, lines: next - index };
 }
 
-function tableCells(row: string): string[] {
+function isTableDelimiter(line: string): boolean {
+  if (!line.includes("|") || !line.includes("-")) return false;
+  return splitTableRow(line).every((cell) => TABLE_DELIMITER_CELL.test(cell.trim()));
+}
+
+/** A row's cells as written: outer pipes dropped, split on unescaped pipes. */
+function splitTableRow(row: string): string[] {
   let text = row.trim();
   if (text.startsWith("|")) text = text.slice(1);
   if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
-  return text.split(/(?<!\\)\|/u).map((cell) => tableCellText(cell.trim()));
+  return text.split(/(?<!\\)\|/u);
 }
 
-/** A cell as plain text: code shows no inline formatting or link syntax. */
-function tableCellText(cell: string): string {
+function tableCells(row: string, objectLinkUrl: SlackObjectLinkUrl): string[] {
+  return splitTableRow(row).map((cell) => tableCellText(cell.trim(), objectLinkUrl));
+}
+
+/**
+ * A cell as plain text, since the table becomes a code block: a link shows its
+ * label and address, and inline formatting and code marks are dropped.
+ */
+function tableCellText(cell: string, objectLinkUrl: SlackObjectLinkUrl): string {
   return cell
     .replace(/\\\|/gu, "|")
     .replace(
-      /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*<?([^\s<>]*)>?(?:\s+"[^"\n]*")?\s*\)/gu,
-      (_match, label: string, url: string) =>
-        /^(?:https?:|mailto:)/iu.test(url) && label !== url ? `${label} (${url})` : label || url,
+      /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*<?((?:[^\s()<>]|\([^\s()<>]*\))*)>?(?:\s+"[^"\n]*")?\s*\)/gu,
+      (_match, label: string, href: string) => {
+        const text = withImagesAsAltText(label).trim();
+        const url = /^(?:https?:|mailto:)/iu.test(href) ? href : objectLinkUrl(href);
+        if (!url) return text || href;
+        return text && text !== url ? `${text} (${url})` : url;
+      },
     )
     .replace(BOLD_ASTERISK, "$1")
     .replace(BOLD_UNDERSCORE, "$1")
@@ -297,13 +325,16 @@ function tableCellText(cell: string): string {
 
 /**
  * A table as an aligned code block. The first row is the header, underlined;
- * a row with fewer cells is padded, and one with more keeps them.
+ * a row with fewer cells is padded.
  */
 function slackTable(rows: readonly string[][]): string[] {
-  const columns = Math.max(...rows.map((row) => row.length));
-  const widths = Array.from({ length: columns }, (_, column) =>
-    Math.max(1, ...rows.map((row) => [...(row[column] ?? "")].length)),
-  );
+  const columns = rows[0]!.length;
+  const widths = Array.from({ length: columns }, () => 1);
+  for (const row of rows) {
+    for (let column = 0; column < columns; column += 1) {
+      widths[column] = Math.max(widths[column]!, [...(row[column] ?? "")].length);
+    }
+  }
   const line = (cells: readonly string[]) =>
     widths
       .map((width, column) => {
@@ -366,7 +397,8 @@ function slackInline(
       const url = objectLinkUrl(href);
       if (url) return keep(slackLink(restore(label, kept), url));
       // Nothing to open in Slack: the label reads on, as ordinary text.
-      return label.trim() ? label : keep(href);
+      const readable = withImagesAsAltText(label);
+      return readable.trim() ? readable : keep(href);
     });
   }
   working = working.replace(BARE_URL, keep);
@@ -391,8 +423,13 @@ function restore(text: string, kept: readonly string[]): string {
   return text.replace(PLACEHOLDER, (_match, index: string) => kept[Number(index)] ?? "");
 }
 
+/** Image syntax inside a link label, as in a clickable thumbnail, reads as its alt text. */
+function withImagesAsAltText(label: string): string {
+  return label.replace(/!\[([^[\]\n]*)\]\([^\n]*?\)/gu, "$1");
+}
+
 function slackLink(label: string, url: string): string {
-  const text = label
+  const text = withImagesAsAltText(label)
     .replace(BOLD_ASTERISK, "$1")
     .replace(BOLD_UNDERSCORE, "$1")
     .replace(/`/gu, "")
