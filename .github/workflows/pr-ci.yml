@@ -36,6 +36,10 @@ jobs:
       head: ${{ steps.identity.outputs.head }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
       web_bundle: ${{ steps.plan.outputs.web_bundle }}
+      e2e_count: ${{ steps.plan.outputs.e2e_count }}
+      e2e_matrix: ${{ steps.plan.outputs.e2e_matrix }}
+      browser_lane_count: ${{ steps.plan.outputs.browser_lane_count }}
+      browser_lane_matrix: ${{ steps.plan.outputs.browser_lane_matrix }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -61,10 +65,30 @@ jobs:
           bun scripts/ci/pr-fast-plan.ts --plan "$RUNNER_TEMP/pr-impact.json" --output "$RUNNER_TEMP/pr-plan.json"
           echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
           echo "web_bundle=$(jq '.prWebBundle == true' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "e2e_count=$(jq '.e2eTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "browser_lane_count=$(jq '.browserAcceptanceLanes | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          # A skipped reusable call still needs a syntactically valid matrix.
+          echo "e2e_matrix=$(jq -c 'if (.prE2eMatrix | length) == 0 then [{index:0,number:1,total:1}] else .prE2eMatrix end' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "browser_lane_matrix=$(jq -c 'if (.prBrowserLaneMatrix | length) == 0 then [{lane:"none",engine:"chromium"}] else .prBrowserLaneMatrix end' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/pr-lane-plan"
+          cp "$RUNNER_TEMP/pr-plan.json" "$RUNNER_TEMP/pr-lane-plan/impact-plan.json"
+          {
+            echo '### PR browser and E2E selection'
+            echo
+            echo '```json'
+            jq '.prBrowserE2e' "$RUNNER_TEMP/pr-plan.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pr-impact-plan
           path: ${{ runner.temp }}/pr-plan.json
+          if-no-files-found: error
+      # The reusable E2E lane reads impact-plan.json, as in Batch CI.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-lane-plan
+          path: ${{ runner.temp }}/pr-lane-plan/impact-plan.json
           if-no-files-found: error
 
   fast:
@@ -128,9 +152,31 @@ jobs:
           bun scripts/ci/batch-setup.ts postgres
           bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json" --shard 0 --shards 1
 
+  # Batch CI's own E2E and browser jobs, for the impacted subset that
+  # pr-fast-plan.ts selects, so a PR's deterministic browser failure is found
+  # here instead of failing a batch. They start with the fast checks.
+  e2e:
+    name: PR impacted E2E
+    needs: plan
+    if: ${{ needs.plan.outputs.e2e_count != '0' }}
+    uses: ./.github/workflows/ci-e2e-shards.yml
+    with:
+      ref: ${{ needs.plan.outputs.head }}
+      plan_artifact: pr-lane-plan
+      matrix: ${{ needs.plan.outputs.e2e_matrix }}
+
+  browser:
+    name: PR browser acceptance
+    needs: plan
+    if: ${{ needs.plan.outputs.browser_lane_count != '0' }}
+    uses: ./.github/workflows/ci-browser-acceptance.yml
+    with:
+      ref: ${{ needs.plan.outputs.head }}
+      matrix: ${{ needs.plan.outputs.browser_lane_matrix }}
+
   ready:
     name: PR CI
-    needs: [plan, fast]
+    needs: [plan, fast, e2e, browser]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -139,7 +185,13 @@ jobs:
         env:
           PLAN: ${{ needs.plan.result }}
           FAST: ${{ needs.fast.result }}
+          E2E: ${{ needs.e2e.result }}
+          E2E_COUNT: ${{ needs.plan.outputs.e2e_count }}
+          BROWSER: ${{ needs.browser.result }}
+          BROWSER_LANE_COUNT: ${{ needs.plan.outputs.browser_lane_count }}
         run: |
           set -euo pipefail
           test "$PLAN" = success
           test "$FAST" = success
+          if [ "$E2E_COUNT" = 0 ]; then test "$E2E" = skipped; else test "$E2E" = success; fi
+          if [ "$BROWSER_LANE_COUNT" = 0 ]; then test "$BROWSER" = skipped; else test "$BROWSER" = success; fi

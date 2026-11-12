@@ -1606,7 +1606,8 @@ describe("workflow fail-closed contracts", () => {
   });
 
   test("CI runs the compact session-search header regression with real database evidence", () => {
-    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    // ci.yml and pr-ci.yml both call this reusable browser acceptance job.
+    const ci = readFileSync(".github/workflows/ci-browser-acceptance.yml", "utf8");
     const step = ci.slice(
       ci.indexOf("      - name: Compact session-search header browser acceptance"),
       ci.indexOf("      - name: Queue surface browser acceptance"),
@@ -1628,7 +1629,10 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("name: Admit automation Version PR");
     expect(ci).toContain("name: Report exact-head automation CI");
     expect(ci).toContain("name: Deployment artifacts");
-    expect(ci).toContain("name: Browser and visual acceptance");
+    expect(ci).toContain("uses: ./.github/workflows/ci-browser-acceptance.yml");
+    expect(readFileSync(".github/workflows/ci-browser-acceptance.yml", "utf8")).toContain(
+      "name: Browser and visual acceptance",
+    );
     expect(ci).toContain("name: Real-service and recovery tests");
     expect(ci).toContain("name: Package and bundle contracts");
     expect(ci).toContain("name: React Native Metro to Hermes session bundle");
