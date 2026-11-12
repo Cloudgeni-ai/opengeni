@@ -7372,6 +7372,60 @@ describe("interaction attempt tools", () => {
     ).rejects.toThrow("window capture is not available");
   });
 
+  test("observes a window from its tree, saying why, when its picture is refused", async () => {
+    const target = computerTarget();
+    const observation = { ...computerObservation(target), frameId: null };
+    const message = `${target.id} is still open, but no usable picture of it could be taken, even when tried again a moment later, for example while a dialog sticks out past it. Its elements can still be read and used with semantic actions; observe it again for pixels once the dialog is closed.`;
+    let capture: () => never = () => {
+      throw new OpenGeniApiError(
+        422,
+        JSON.stringify({
+          error: { code: "validation_failed", message, retryable: false, outcomeUnknown: false },
+        }),
+      );
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => observation,
+        captureComputerTarget: async () => capture(),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const observe = () =>
+      definitions[0]!.execute(
+        { computerSessionId, targetId: target.id },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+    const result = await observe();
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).not.toHaveProperty("capturedFrame");
+    expect(result.content).toEqual([
+      { type: "text", text: computerObservationText(observation) },
+      { type: "text", text: `No screenshot: ${message}` },
+    ]);
+
+    // An outage is not a refused picture: the observation still fails.
+    capture = () => {
+      throw new OpenGeniApiError(
+        503,
+        JSON.stringify({
+          error: {
+            code: "upstream_unavailable",
+            message: "The workspace is temporarily unavailable — retry.",
+            retryable: true,
+            outcomeUnknown: false,
+          },
+        }),
+      );
+    };
+    const outage = await observe();
+    expect(outage.isError).toBe(true);
+    expect(outage.structuredContent).toMatchObject({ error: { code: "upstream_unavailable" } });
+  });
+
   test("returns browser pixels only when a still image is requested", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);

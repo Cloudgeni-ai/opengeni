@@ -398,6 +398,37 @@ describe("ComputerDriver", () => {
     }
   });
 
+  test("observes a window whose picture is refused without a frame fence", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.observationFrameId = null;
+    transport.captureError = new ComputerBackendError(
+      "unsupported",
+      "window-1 is still open, but no usable picture of it could be taken",
+      false,
+      false,
+    );
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      await expect(driver.observe("window-1")).resolves.toMatchObject({ frameId: null });
+      // Any other failure of the primer still fails the observation.
+      transport.captureError = new ComputerBackendError(
+        "target_not_found",
+        "CUA window is no longer present",
+        false,
+        false,
+      );
+      await expect(driver.observe("window-1")).rejects.toMatchObject({
+        code: "target_not_found",
+      });
+    } finally {
+      await driver.close();
+    }
+  });
+
   test("keeps a still captured beside an observation the newest frame", async () => {
     // The runtime captures a still while it observes, and hands the still's
     // frame on. A native helper lets only the newest frame keep authority.

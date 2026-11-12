@@ -3062,7 +3062,8 @@ export function createInteractionAttemptToolDefinitions(
           : undefined;
       if (context.caller.kind === "model") rememberComputerReading(output);
       const shown = (base && computerObservationDiff(base, output)) || output;
-      return output.capturedFrame
+      // A window without a frame carries why beside this text.
+      return output.capturedFrame || output.target.kind !== "app"
         ? computerObservationText(shown)
         : `${computerObservationText(shown)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`;
     },
@@ -3099,6 +3100,14 @@ export function createInteractionAttemptToolDefinitions(
           const { frame, error } = await capture;
           if (frame === null) {
             if (observation.target.kind === "app") return observation;
+            // The elements were read and only the picture was refused, for a
+            // reason the API states (a sheet sticking out past its window,
+            // say): the elements are still worth returning, with why there is
+            // no screenshot. An outage or an unknown outcome still fails.
+            if (error instanceof OpenGeniApiError && !error.outcomeUnknown && error.status < 500)
+              return new InteractionExecutionResult(observation, [
+                { type: "text", text: `No screenshot: ${apiErrorReason(error)}` },
+              ]);
             throw error;
           }
           if (observation.target.targetGeneration !== frame.targetGeneration) {
@@ -6734,6 +6743,19 @@ function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+/** The API's own explanation of a failed request, without the status and
+ * reference the SDK adds around it. */
+function apiErrorReason(error: OpenGeniApiError): string {
+  try {
+    const message: unknown = (JSON.parse(error.body) as { error?: { message?: unknown } }).error
+      ?.message;
+    if (typeof message === "string" && message.trim()) return boundedErrorMessage(message.trim());
+  } catch {
+    // Not the API's JSON error body.
+  }
+  return boundedErrorMessage(error.message);
 }
 
 function boundedErrorMessage(message: string): string {
