@@ -369,7 +369,7 @@ describe("admin passkey step-up", () => {
     await unconfirm(owner.userId);
     // The desktop app's window: the same person's own session, not confirmed.
     const appSession = await passwordSession(rt, owner.userId);
-    expect(await stepUpCode(await rename(rt, appSession, organization))).toBe(
+    expect(await stepUpCode(await invite(rt, appSession, organization))).toBe(
       ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
     );
     const start = async (cookie: string) => {
@@ -424,7 +424,7 @@ describe("admin passkey step-up", () => {
     // holds the app's session also needs the code the browser shows, so a
     // forwarded link can't lend the person's passkey to a stolen session.
     const code = await confirmInBrowser(handoffId);
-    expect(await stepUpCode(await rename(rt, appSession, organization))).toBe(
+    expect(await stepUpCode(await invite(rt, appSession, organization))).toBe(
       ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
     );
     // Only the session that started it can claim it.
@@ -437,8 +437,8 @@ describe("admin passkey step-up", () => {
     );
     const claimed = await claim(appSession, handoffId, code);
     expect(claimed.status, await claimed.clone().text()).toBe(200);
-    expect((await rename(rt, appSession, organization)).status).toBe(200);
-    expect(await stepUpCode(await rename(rt, otherSession, organization))).toBe(
+    expect((await invite(rt, appSession, organization)).status).toBeLessThan(300);
+    expect(await stepUpCode(await invite(rt, otherSession, organization))).toBe(
       ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
     );
 
@@ -465,7 +465,7 @@ describe("admin passkey step-up", () => {
     expect(await codeOf(await claim(appSession, guessed, guessedCode))).toBe(
       "PASSKEY_HANDOFF_EXPIRED",
     );
-    expect(await stepUpCode(await rename(rt, appSession, organization))).toBe(
+    expect(await stepUpCode(await invite(rt, appSession, organization))).toBe(
       ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
     );
 
