@@ -78,7 +78,7 @@
     },
     {
       "path": ".github/workflows/model-request-review.yml",
-      "sha256": "588b74302270dbdca9bfffa76ef47f635f228a007c1643f91474fa64fbcad275"
+      "sha256": "a07b0841fd2f469fa2efc4d12cd6cb5723dfdc888ce67e0cffbd5a84f62b54cd"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
