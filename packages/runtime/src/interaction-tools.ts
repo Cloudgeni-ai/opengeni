@@ -5488,9 +5488,9 @@ function compatibleInteractionPlacement(
     return current === null || placementFieldsMatch(candidate, current);
   }
   // A session on a Connected Machine the chat is not routed to cannot be used
-  // from here: the server retires it on contact. Opening a new one instead
-  // returns the error that says how to move the chat to that machine. The
-  // chat's own sandbox group stays usable from any route.
+  // from here: it keeps running there until the chat moves back. Opening a new
+  // one instead returns the error that says how to move the chat to that
+  // machine. The chat's own sandbox group stays usable from any route.
   if (
     requested.kind === "connected_machine" &&
     current !== null &&

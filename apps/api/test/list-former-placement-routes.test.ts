@@ -4,11 +4,12 @@ import { join } from "node:path";
 
 const sourceUrl = new URL("../src/", import.meta.url);
 
-// A browser or Desktop on a Connected Machine its task has moved away from is
-// retired, but only recorded so when something next uses it. Listing must not
-// offer it as live: an agent that reuses a listed browser is otherwise refused.
+// A browser or Desktop on a Connected Machine its chat has moved away from
+// keeps running there with its profile, so the chat can move back and continue
+// in it. Reading a list must never retire it: the app polls these lists, so a
+// brief move would otherwise lose the browser and its sign-ins within seconds.
 describe("listing browsers and Desktops left on the task's former machine", () => {
-  test("the listing records the move and shows them lost; others are untouched", async () => {
+  test("the listing changes nothing, whatever machine the chat is on now", async () => {
     const directory = await mkdtemp("/tmp/og-api-list-former-placement-");
     const script = join(directory, "synthetic-list-former-placement.ts");
     await writeFile(script, `(${listFormerPlacementFixture.toString()})()`, { mode: 0o600 });
@@ -31,10 +32,9 @@ describe("listing browsers and Desktops left on the task's former machine", () =
             resource,
             scenario: "active on former machine",
             status: 200,
-            lifecycles: ["lost"],
-            // Recorded as moved, what the move left on the former machine is
-            // ended in the background, and the listing is read again.
-            calls: ["list", "record move", "retire others", "list"],
+            // Still live: no move is recorded and nothing is retired.
+            lifecycles: ["starting"],
+            calls: ["list"],
           },
           {
             resource,
