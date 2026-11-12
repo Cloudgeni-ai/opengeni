@@ -89,14 +89,20 @@ export function skillRefusalMessage(
   if (error.code === "40001" || error.code === "23505") {
     return `Nothing was saved: ${error.message}. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.`;
   }
-  switch (learningSaveCorrection(error.message)) {
-    case "skill_scope_kept":
+  const fix = learningSaveCorrection(error.message);
+  switch (fix) {
+    case "scope_kept":
       return "Nothing was saved: an edit keeps the Skill's own scope. Retry without scope, with a new operation ID.";
     case "reference_unavailable":
-      return "Nothing was saved: this Skill revision is unavailable. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.";
+      return "Nothing was saved: this Skill revision or source is unavailable here. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.";
     case "evidence_not_shared":
+    case "source_not_shared":
     case null:
       break;
+    default: {
+      const unhandled: never = fix;
+      throw new Error(`unhandled learning save correction ${unhandled}`);
+    }
   }
   switch (refusal?.reason) {
     case "site_agent":
