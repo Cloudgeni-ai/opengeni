@@ -37,6 +37,7 @@ import {
   projectHistoryForProvider,
   responsesRouteDeclaresAdditionalTools,
   withArtifactOrigin,
+  withToolCallArtifactOrigin,
 } from "./provider-history-adapter";
 import {
   appendChatReasoningDetails,
@@ -144,6 +145,7 @@ function chatRequest(
   request: ModelRequest,
   modelId: string,
   declaredReasoning?: DeclaredModelReasoning,
+  artifactScope?: string,
 ): ModelRequest {
   request = withDeclaredReasoning(request, declaredReasoning);
   const input =
@@ -151,10 +153,75 @@ function chatRequest(
       ? request.input
       : (projectHistoryForProvider(request.input, "chat", {
           hoistsSystemMessages: chatRouteHoistsSystemMessages(modelId),
+          ...(artifactScope !== undefined ? { artifactScope } : {}),
         }) as ModelRequest["input"]);
   return projectChatReasoning(
     projectChatToolImages(input === request.input ? request : { ...request, input }),
   );
+}
+
+/** Tool-call delta fields the SDK's stream converter consumes itself. */
+const SDK_STREAMED_TOOL_CALL_FIELDS: ReadonlySet<string> = new Set([
+  "index",
+  "id",
+  "type",
+  "function",
+]);
+
+type StreamedToolCallFields = { callId?: string; fields: Record<string, unknown> };
+
+/**
+ * Collect what a streamed tool-call delta carries beyond the call itself,
+ * keyed by the delta's index, for example Gemini's
+ * `extra_content.google.thought_signature`. The SDK's stream converter keeps
+ * only the id, name and arguments, while its non-streamed reply keeps the
+ * rest as the call's providerData; Gemini refuses the next request when the
+ * signature is missing from the replayed call.
+ */
+function collectStreamedToolCallFields(
+  delta: unknown,
+  into: Map<number, StreamedToolCallFields>,
+): void {
+  const calls =
+    delta && typeof delta === "object" ? (delta as { tool_calls?: unknown }).tool_calls : undefined;
+  if (!Array.isArray(calls)) return;
+  for (const call of calls) {
+    if (!call || typeof call !== "object") continue;
+    const record = call as Record<string, unknown>;
+    if (typeof record.index !== "number") continue;
+    let entry = into.get(record.index);
+    if (!entry) into.set(record.index, (entry = { fields: {} }));
+    if (typeof record.id === "string" && record.id && entry.callId === undefined)
+      entry.callId = record.id;
+    for (const [key, value] of Object.entries(record)) {
+      if (SDK_STREAMED_TOOL_CALL_FIELDS.has(key) || value === undefined || value === null) continue;
+      entry.fields[key] = value;
+    }
+  }
+}
+
+/** Put each streamed call's own provider fields back on its assembled function_call. */
+function withStreamedToolCallFields<T>(
+  output: T[],
+  streamed: Map<number, StreamedToolCallFields>,
+): T[] {
+  const byCallId = new Map<string, Record<string, unknown>>();
+  for (const { callId, fields } of streamed.values())
+    if (callId !== undefined && Object.keys(fields).length > 0) byCallId.set(callId, fields);
+  if (byCallId.size === 0) return output;
+  return output.map((item) => {
+    const record = item as Record<string, unknown>;
+    const fields =
+      record?.type === "function_call" && typeof record.callId === "string"
+        ? byCallId.get(record.callId)
+        : undefined;
+    if (!fields) return item;
+    const providerData =
+      record.providerData && typeof record.providerData === "object"
+        ? (record.providerData as Record<string, unknown>)
+        : {};
+    return { ...record, providerData: { ...fields, ...providerData } } as T;
+  });
 }
 
 /**
@@ -213,21 +280,42 @@ function sdkChatInputTokenDetails(details: Record<string, unknown>): Record<stri
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   private readonly modelId: string;
   private readonly declaredReasoning: DeclaredModelReasoning | undefined;
+  /**
+   * The serving provider's id. Tool calls carrying that provider's own fields
+   * record it, so only this provider receives those fields again.
+   */
+  private readonly artifactScope: string | undefined;
 
   constructor(
     client: ConstructorParameters<typeof OpenAIChatCompletionsModel>[0],
     model: ConstructorParameters<typeof OpenAIChatCompletionsModel>[1],
     declaredReasoning?: DeclaredModelReasoning,
+    artifactScope?: string,
   ) {
     super(client, model);
     this.modelId = model;
     this.declaredReasoning = declaredReasoning;
+    this.artifactScope = artifactScope;
+  }
+
+  private request(request: ModelRequest): ModelRequest {
+    return chatRequest(request, this.modelId, this.declaredReasoning, this.artifactScope);
+  }
+
+  private withToolCallOrigins<T>(output: T[]): T[] {
+    const scope = this.artifactScope;
+    if (scope === undefined) return output;
+    let changed = false;
+    const tagged = output.map((item) => {
+      const next = withToolCallArtifactOrigin(item, scope);
+      changed ||= next !== item;
+      return next;
+    });
+    return changed ? tagged : output;
   }
 
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(
-      chatRequest(request, this.modelId, this.declaredReasoning),
-    );
+    const response = await super.getResponse(this.request(request));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
@@ -238,7 +326,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
       {
         ...response,
         output: withChatReasoning(
-          response.output,
+          this.withToolCallOrigins(response.output),
           chatReasoning(primaryChatChoice(response.providerData)?.message),
           chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
         ),
@@ -253,9 +341,8 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let reasoningDetails: Record<string, unknown>[] | undefined;
     let reportedCostUsd: string | undefined;
     let inputTokensDetails: Record<string, unknown> | undefined;
-    for await (const event of super.getStreamedResponse(
-      chatRequest(request, this.modelId, this.declaredReasoning),
-    )) {
+    const toolCallFields = new Map<number, StreamedToolCallFields>();
+    for await (const event of super.getStreamedResponse(this.request(request))) {
       if (event.type === "model") {
         const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
         // Mirror the SDK's last non-null usage snapshot, not a sum of chunks.
@@ -269,6 +356,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
         }
         const delta = chatReasoning(primaryChatChoice(event.event)?.delta);
         const details = chatReasoningDetails(primaryChatChoice(event.event)?.delta);
+        collectStreamedToolCallFields(primaryChatChoice(event.event)?.delta, toolCallFields);
         if (details) appendChatReasoningDetails((reasoningDetails ??= []), details);
         if (delta)
           reasoning = {
@@ -310,7 +398,13 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
                       },
                     }
                   : {}),
-                output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
+                output: withChatReasoning(
+                  this.withToolCallOrigins(
+                    withStreamedToolCallFields(event.response.output, toolCallFields),
+                  ),
+                  reasoning,
+                  reasoningDetails,
+                ),
               },
               reportedCostUsd,
             ),
@@ -584,7 +678,7 @@ export function buildModelInstance(
       instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
     );
   return provider.api === "chat"
-    ? new OpenGeniChatCompletionsModel(client, modelId, declaredReasoning)
+    ? new OpenGeniChatCompletionsModel(client, modelId, declaredReasoning, provider.id)
     : new OpenGeniResponsesModel(client, modelId, provider, declaredReasoning);
 }
 

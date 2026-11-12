@@ -860,6 +860,7 @@ export {
   vercelGatewayRoutingFetch,
   warmCodexResponsesWebSocket,
 } from "./model-provider";
+export { unwrappedErrorBody } from "./replayable-json-body";
 export {
   InferenceRegionRestrictedError,
   assertSideFeatureRoute,
