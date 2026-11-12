@@ -1251,7 +1251,7 @@ function InvitePage({
       submitLabel={count > 1 ? `Send ${count} invitations` : "Send invitation"}
       submitAnalyticsAction="invite_member"
       pendingLabel="Sending…"
-      footerStart="Invitations expire in 7 days."
+      footerStart="Invitations expire in 48 hours."
       onSubmit={async () => {
         setSeatLimitError(null);
         setShowErrors(true);

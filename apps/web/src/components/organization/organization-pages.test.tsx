@@ -403,7 +403,7 @@ describe("organization directory", () => {
       expect(requests).toHaveLength(2);
       expect(requests[1]).toEqual(requests[0]);
       expect(requests[1]!.operationId).toBe(requests[0]!.operationId);
-      expect(requests[1]!.expiresAt).toBe("2026-10-05T12:00:00.000Z");
+      expect(requests[1]!.expiresAt).toBe("2026-09-30T12:00:00.000Z");
       expect(requests[1]!.initialWorkspaceIds).toEqual(["ws-design", "ws-platform"]);
       expect(replay.failed).toEqual([]);
       expect(replay.sent).toEqual([receipts.values().next().value!.invitation]);
@@ -463,7 +463,7 @@ describe("organization directory", () => {
         });
         expect(requests).toHaveLength(2);
         expect(requests[1]!.operationId).not.toBe(requests[0]!.operationId);
-        expect(requests[1]!.expiresAt).toBe("2026-10-05T12:03:00.000Z");
+        expect(requests[1]!.expiresAt).toBe("2026-09-30T12:03:00.000Z");
         expect(requests[1]).toMatchObject({
           email: (change.emails ?? input.emails)[0],
           role: change.role ?? input.role,
