@@ -66,7 +66,7 @@
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "b663503108f16d920bffba626bfe196c17811abb596d64267ca174c971a15c36"
+      "sha256": "e5254544416edee1427b37931a2ebc1ee5f489ef83c9f7095a31a7c3cf8fd3bd"
     },
     {
       "path": ".github/workflows/merge-content.yml",
@@ -1471,7 +1471,7 @@
       "workflow": ".github/workflows/merge-batcher.yml",
       "job": "pass",
       "step": "Run one pass",
-      "sha256": "76dc09a121599165ef19d190af152fe64a05c16681a902909c855cc462f342f9"
+      "sha256": "4eb14398ac47147c8a3d583e5e45d1a0672904b6d9b93e9c2e27a67ba88c27f4"
     },
     {
       "workflow": ".github/workflows/merge-content.yml",
