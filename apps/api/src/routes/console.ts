@@ -305,16 +305,10 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
       q: query.q ?? null,
       includeContent,
     });
-    return c.json(
-      ConsoleSessionListResponse.parse({ reviewLevel: settings.reviewLevel, ...page }),
-    );
+    return c.json(ConsoleSessionListResponse.parse({ reviewLevel: settings.reviewLevel, ...page }));
   });
 
-  async function reviewableSession(
-    c: Context,
-    organizationId: string,
-    includeContent: boolean,
-  ) {
+  async function reviewableSession(c: Context, organizationId: string, includeContent: boolean) {
     const workspaceId = param(c, "workspaceId");
     const sessionId = param(c, "sessionId");
     const { managed } = await managedWorkspaces(deps, organizationId);
@@ -440,10 +434,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw error;
     }
     const names = new Map(
-      (await listConsoleOrganizationWorkspaces(deps.db, organizationId)).map((w) => [
-        w.id,
-        w.name,
-      ]),
+      (await listConsoleOrganizationWorkspaces(deps.db, organizationId)).map((w) => [w.id, w.name]),
     );
     return c.json(
       ConsoleAuditEventListResponse.parse({

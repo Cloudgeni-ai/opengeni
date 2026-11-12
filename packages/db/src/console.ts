@@ -816,7 +816,11 @@ async function summarizeSessions(
       firstMessage: options.includeContent ? (fact?.first ?? null) : null,
       visibility: row.visibility === "user_private" ? "private" : "workspace",
       endUser: subject
-        ? { subjectId: subject, externalId: label?.external_id ?? null, source: label?.source ?? null }
+        ? {
+            subjectId: subject,
+            externalId: label?.external_id ?? null,
+            source: label?.source ?? null,
+          }
         : null,
       status: row.status,
       feedback: { positive: fact?.positive ?? 0, negative: fact?.negative ?? 0 },
