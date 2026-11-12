@@ -167,8 +167,9 @@ ordinary subject/host list scope, reads immutable command launch targets, and us
 the existing session command cancellation path; it does not create a separate
 process registry or agent tool surface.
 
-Hosted tool-call `status` survives replay; other annotations are stripped
-(`packages/codex/src/hosted-call-status.ts`).
+`status` survives replay on every item type whose Responses input schema requires
+it (hosted calls, apply_patch, computer, local shell, program output); other
+annotations are stripped (`packages/codex/src/replay-status.ts`).
 
 ### 3.1 Postgres is durable truth; NATS is transport
 

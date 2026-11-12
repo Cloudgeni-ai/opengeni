@@ -795,6 +795,49 @@ describe("pinned Responses large-output boundary", () => {
     }
   });
 
+  test("native apply_patch history replays with its required status after a switch to Codex", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    const operation = { type: "update_file", path: "src/a.ts", diff: "@@\n-a\n+b\n" };
+    // Rows persisted before the fix, exactly as stored in production: the
+    // canonical history had already dropped `status`.
+    const legacyRows = [
+      {
+        providerData: {},
+        id: "apc_legacy",
+        type: "apply_patch_call",
+        callId: "call_legacy",
+        operation,
+      },
+      { type: "apply_patch_call_output", callId: "call_legacy" },
+    ];
+    // Rows produced by a turn on another billing route after the fix.
+    const liveRows = [
+      { type: "apply_patch_call", callId: "call_live", status: "completed", operation },
+      {
+        type: "apply_patch_call_output",
+        callId: "call_live",
+        status: "failed",
+        output: "patch did not apply",
+      },
+    ].map((item) => JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(item))));
+
+    const wire = normalizedCodexRequestBody(
+      { input: getInputItems([...legacyRows, ...liveRows] as never) },
+      (s) => s,
+    );
+    expect(wire.input).toEqual([
+      { type: "apply_patch_call", call_id: "call_legacy", status: "in_progress", operation },
+      { type: "apply_patch_call_output", call_id: "call_legacy", status: "completed" },
+      { type: "apply_patch_call", call_id: "call_live", status: "completed", operation },
+      {
+        type: "apply_patch_call_output",
+        call_id: "call_live",
+        status: "failed",
+        output: "patch did not apply",
+      },
+    ]);
+  });
+
   test("serializes a 10,000-part mixed bounded result entirely inside the pinned wire union", async () => {
     const { getInputItems } = await pinnedResponsesModule();
     const raw = {

@@ -33,6 +33,22 @@ describe("Codex-parity model tool-output truncation", () => {
     }
   });
 
+  test("persistence preserves schema-required status on apply_patch and computer items", () => {
+    for (const item of [
+      {
+        type: "apply_patch_call",
+        callId: "call_patch",
+        status: "completed",
+        operation: { type: "update_file", path: "a.ts", diff: "@@\n-a\n+b\n" },
+      },
+      { type: "apply_patch_call_output", callId: "call_patch", status: "failed", output: "x" },
+      { type: "computer_call", callId: "call_cua", status: "completed", action: { type: "wait" } },
+    ]) {
+      const persisted = JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(item)));
+      expect(persisted).toEqual(item);
+    }
+  });
+
   test("keeps a schema-valid screenshot receipt intact after text budget exhaustion", () => {
     const marker = {
       type: "retained_artifact",
