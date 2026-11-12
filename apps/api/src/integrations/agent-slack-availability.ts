@@ -19,7 +19,8 @@
  * refused when an agent is created, renamed or shared (`agentSlackNameRefusal`),
  * and an older agent that has such a name simply stays out of that Slack
  * workspace; its page says why (`agentSlackUnavailableReason`). When two older
- * agents share a name, the older one keeps it.
+ * agents share a name, the older one keeps it. An agent is in every linked
+ * Slack workspace that takes its name, at once.
  */
 import {
   slackAgentNameKey,
@@ -57,10 +58,8 @@ export type LinkedSlackInstallation = {
 /**
  * The Slack workspaces linked to a workspace: the active Opengeni Slack apps
  * installed in it or shared with it by its organization, each with an active
- * installation binding. In a fixed order, which is also where a new agent
- * goes while an agent is in one Slack workspace at a time: the workspace's
- * own Slack apps first, then those its organization shares, each by Slack
- * workspace name.
+ * installation binding. In a fixed order: the workspace's own Slack apps
+ * first, then those its organization shares, each by Slack workspace name.
  */
 export async function linkedSlackInstallations(
   deps: Pick<ApiRouteDeps, "db">,
@@ -177,59 +176,53 @@ async function takenNames(
 }
 
 /**
- * Make one shared agent available in the first linked Slack workspace that
- * takes its name, in `linked`'s order. One Slack workspace per agent until the
- * agents contract step (the legacy `slack_agents` row shares the agent's id).
- * Opengeni does this on its own, so the agent's version stays.
+ * Make one shared agent available in one linked Slack workspace, unless its
+ * name is refused there. Opengeni does this on its own, so the agent's
+ * version stays.
  */
 async function placeAgent(
   deps: Pick<ApiRouteDeps, "db">,
   home: Home,
   agent: Pick<AgentRecord, "id" | "name" | "createdBySubjectId">,
-  linked: readonly LinkedSlackInstallation[],
+  installation: LinkedSlackInstallation,
   cache: TakenNames,
 ): Promise<void> {
-  for (const installation of linked) {
-    try {
-      const taken = await takenNames(deps, installation, cache);
-      if (nameRefusal(agent.name, agent.id, installation, taken)) continue;
-      const saved = await putAgentSlackInstall(deps.db, home, {
-        agentId: agent.id,
-        connectionId: installation.connectionId,
-        slackTeamId: installation.slackTeamId,
-        installWorkspaceId: installation.installHome.workspaceId,
-        actorSubjectId: agent.createdBySubjectId,
-        automatic: true,
-      });
-      if (saved.kind === "saved") {
-        taken.set(slackAgentNameKey(agent.name), agent.id);
-        return;
-      }
-      // Another server placed it at the same moment.
-      if (saved.kind === "single_install") return;
-      // Its name was taken there at the same moment: try the next one.
-      if (saved.kind === "name_taken") cache.delete(installation.connectionId);
-    } catch (error) {
-      console.warn("[agent-slack-availability] could not make an agent available in Slack", {
-        agentId: agent.id,
-        connectionId: installation.connectionId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+  try {
+    const taken = await takenNames(deps, installation, cache);
+    if (nameRefusal(agent.name, agent.id, installation, taken)) return;
+    const saved = await putAgentSlackInstall(deps.db, home, {
+      agentId: agent.id,
+      connectionId: installation.connectionId,
+      slackTeamId: installation.slackTeamId,
+      installWorkspaceId: installation.installHome.workspaceId,
+      actorSubjectId: agent.createdBySubjectId,
+      automatic: true,
+    });
+    if (saved.kind === "saved") taken.set(slackAgentNameKey(agent.name), agent.id);
+    // Its name was taken there at the same moment: read the names again.
+    if (saved.kind === "name_taken") cache.delete(installation.connectionId);
+  } catch (error) {
+    console.warn("[agent-slack-availability] could not make an agent available in Slack", {
+      agentId: agent.id,
+      connectionId: installation.connectionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
 /**
- * Make every shared agent of an organization that is in no Slack workspace
- * yet available where it can be, oldest first, so that when two share a name
- * the older one keeps it. Never throws.
+ * Make every shared agent of the installation's organization whose workspace
+ * is linked to this Slack workspace, and that it doesn't answer to yet,
+ * available there, oldest first, so that when two share a name the older one
+ * keeps it. Never throws.
  */
-async function catchUpOrganization(
+async function catchUpInstallation(
   deps: Pick<ApiRouteDeps, "db">,
   installHome: Home,
+  connectionId: string,
 ): Promise<boolean> {
   try {
-    const missing = await listAgentsMissingFromSlack(deps.db, installHome);
+    const missing = await listAgentsMissingFromSlack(deps.db, installHome, { connectionId });
     if (missing.length === 0) return true;
     const names: TakenNames = new Map();
     const linkedByWorkspace = new Map<string, LinkedSlackInstallation[]>();
@@ -243,12 +236,14 @@ async function catchUpOrganization(
           : await linkedSlackInstallations(deps, home);
         linkedByWorkspace.set(agent.workspaceId, linked);
       }
-      if (linked.length > 0) await placeAgent(deps, home, agent, linked, names);
+      const installation = linked.find((candidate) => candidate.connectionId === connectionId);
+      if (installation) await placeAgent(deps, home, agent, installation, names);
     }
     return true;
   } catch (error) {
     console.warn("[agent-slack-availability] could not bring an organization's agents up to date", {
       accountId: installHome.accountId,
+      connectionId,
       error: error instanceof Error ? error.message : String(error),
     });
     return false;
@@ -270,8 +265,8 @@ export async function agentSlackNameRefusal(
   if (await isPersonalWorkspace(deps, home)) return null;
   const linked = await linkedSlackInstallations(deps, home);
   if (linked.length === 0) return null;
-  await catchUpOrganization(deps, linked[0]!.installHome);
   for (const installation of linked) {
+    await catchUpInstallation(deps, installation.installHome, installation.connectionId);
     const refusal = nameRefusal(
       input.name,
       input.agentId,
@@ -284,12 +279,11 @@ export async function agentSlackNameRefusal(
 }
 
 /**
- * Make a shared agent available where it can be, after the organization's
- * older agents: its own workspace's Slack apps first, then those its
- * organization shares with it. Best effort: a Slack workspace whose name
- * rules it breaks, or where another agent has its name, is skipped; the agent
- * page says why. Only reading the agent's current availabilities can throw.
- * Returns them.
+ * Make a shared agent available in every Slack workspace linked to its
+ * workspace, after the organization's older agents. Best effort: a Slack
+ * workspace whose name rules it breaks, or where another agent has its name,
+ * is skipped; the agent page says why. Only reading the agent's current
+ * availabilities can throw. Returns them.
  */
 export async function ensureAgentInLinkedSlack(
   deps: Pick<ApiRouteDeps, "db">,
@@ -297,7 +291,7 @@ export async function ensureAgentInLinkedSlack(
   agent: Pick<AgentRecord, "id" | "visibility">,
 ): Promise<AgentSlackInstallRecord[]> {
   const installs = await listAgentSlackInstalls(deps.db, home, [agent.id]);
-  if (installs.length > 0 || agent.visibility !== "workspace") return installs;
+  if (agent.visibility !== "workspace") return installs;
   let linked: LinkedSlackInstallation[];
   try {
     if (await isPersonalWorkspace(deps, home)) return installs;
@@ -309,9 +303,15 @@ export async function ensureAgentInLinkedSlack(
     });
     return installs;
   }
-  if (linked.length === 0) return installs;
-  // The agent is one of the organization's agents in no Slack workspace yet.
-  await catchUpOrganization(deps, linked[0]!.installHome);
+  const missing = linked.filter(
+    (installation) =>
+      !installs.some((install) => install.connectionId === installation.connectionId),
+  );
+  if (missing.length === 0) return installs;
+  // The agent is one of the organization's agents not in these Slack workspaces yet.
+  for (const installation of missing) {
+    await catchUpInstallation(deps, installation.installHome, installation.connectionId);
+  }
   return await listAgentSlackInstalls(deps.db, home, [agent.id]);
 }
 
@@ -322,8 +322,8 @@ const INSTALLATION_SYNC_INTERVAL_MS = 60_000;
 
 /**
  * Before an installation reads its agents for routing, make every shared
- * agent of its organization that is in no Slack workspace yet available where
- * it can be. Cheap when nothing is missing (one read), and at most once a
+ * agent of its organization that belongs there and isn't yet available
+ * there. Cheap when nothing is missing (one read), and at most once a
  * minute per installation and process; creating, renaming and sharing an
  * agent do it at once anyway. Never throws: Slack keeps working with the
  * agents it already has.
@@ -344,7 +344,7 @@ export async function ensureSlackInstallationAgents(
   if (last !== undefined && now - last < INSTALLATION_SYNC_INTERVAL_MS) return;
   synced.set(connectionId, now);
   // Try again on the next read rather than waiting out the interval.
-  if (!(await catchUpOrganization(deps, installHome))) synced.delete(connectionId);
+  if (!(await catchUpInstallation(deps, installHome, connectionId))) synced.delete(connectionId);
 }
 
 /** Why a shared agent isn't available in one linked Slack workspace, or null when it is. */
@@ -361,7 +361,6 @@ export async function agentSlackUnavailableReason(
   if (installs.some((install) => install.connectionId === installation.connectionId)) return null;
   if (agent.visibility !== "workspace") return "agent_slack_requires_workspace_visibility";
   if (input.personalWorkspace) return "agent_slack_personal_workspace";
-  if (installs.length > 0) return "agent_slack_single_install";
   const refusal = nameRefusal(
     agent.name,
     agent.id,

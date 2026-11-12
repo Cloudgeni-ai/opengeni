@@ -179,7 +179,19 @@ export function appContext(
   return {
     client,
     workspaces: [{ id: WORKSPACE_ID, name: "Platform", kind: "shared", accountId: "account-1" }],
-    accessContext: { subjectId: "user-me", subjectLabel: "Maja", workspaceGrants: [] },
+    accessContext: {
+      subjectId: "user-me",
+      subjectLabel: "Maja",
+      workspaceGrants: [],
+      accountGrants: [
+        {
+          accountId: "account-1",
+          subjectId: "user-me",
+          permissions: ["account:read"],
+          metadata: { accountName: "Acme" },
+        },
+      ],
+    },
     managedSelfContext: null,
     ...patch,
   } as unknown as AppContextValue;

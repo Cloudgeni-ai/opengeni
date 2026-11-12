@@ -256,9 +256,16 @@ export function buildTimeline(
   // Messages drawn from streamed text that no completion has settled yet. A
   // Steer that cuts the answer short leaves its unfinished text here.
   const unsettledStreamedMessages = new Set<AgentMessageItem>();
-  // Steer bubbles drawn while the current turn still ran. The turn's answer
-  // was written before them, so a handover keeps that answer above them.
-  let steerBubblesAwaitingHandover: UserMessageItem[] = [];
+  // Steer bubbles drawn while a turn still ran, with that turn. The turn's
+  // answer was written before them, so its handover keeps that answer above
+  // them. A Steer accepted while no turn ran starts its own turn: everything
+  // after it was written after it, so it waits for no handover.
+  let steerBubblesAwaitingHandover: Array<{ bubble: UserMessageItem; turnId: string }> = [];
+  // The turn running at this point of the history. A bounded replay can begin
+  // inside a turn, so that turn's own activity also counts as running, unless
+  // its end is already in view (late receipts follow some ends).
+  let runningTurnId: string | null = null;
+  const endedTurnIds = new Set<string>();
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -543,6 +550,35 @@ export function buildTimeline(
       presentationTurnId = turnId;
     }
     if (
+      turnId &&
+      !event.duplicateOfEventId &&
+      (!event.turnAssociation || event.turnAssociation === "current")
+    ) {
+      if (event.type === "turn.started") {
+        runningTurnId = turnId;
+        endedTurnIds.delete(turnId);
+        // Only one turn runs at a time: a Steer drawn during another turn
+        // can no longer be handed over by it.
+        steerBubblesAwaitingHandover = steerBubblesAwaitingHandover.filter(
+          (awaiting) => awaiting.turnId === turnId,
+        );
+      } else if (
+        event.type === "turn.completed" ||
+        event.type === "turn.failed" ||
+        event.type === "turn.cancelled" ||
+        event.type === "turn.superseded"
+      ) {
+        endedTurnIds.add(turnId);
+        if (runningTurnId === turnId) runningTurnId = null;
+      } else if (
+        runningTurnId === null &&
+        isAgentActivityEvent(event.type) &&
+        !endedTurnIds.has(turnId)
+      ) {
+        runningTurnId = turnId;
+      }
+    }
+    if (
       openWaitNotice &&
       (event.type === "user.message" ||
         event.type === "system.update.delivered" ||
@@ -693,8 +729,11 @@ export function buildTimeline(
           occurredAt: event.occurredAt,
         };
         items.push(userMessage);
-        if (payload.delivery === "steer" || payload.routing === "accepted_for_steering") {
-          steerBubblesAwaitingHandover.push(userMessage);
+        if (
+          runningTurnId !== null &&
+          (payload.delivery === "steer" || payload.routing === "accepted_for_steering")
+        ) {
+          steerBubblesAwaitingHandover.push({ bubble: userMessage, turnId: runningTurnId });
         }
         break;
       }
@@ -2023,10 +2062,13 @@ export function buildTimeline(
           // while this request still streamed: a late completion must not
           // carry finished text below it either.
           const cutOffText = stringValue(payload.cutOffText);
+          // Only the Steers drawn while this turn ran; a history without a
+          // turn id cannot tell, so it keeps every waiting Steer.
+          const handoverBubbles = steerBubblesAwaitingHandover
+            .filter((awaiting) => turnId === null || awaiting.turnId === turnId)
+            .map((awaiting) => awaiting.bubble);
           const steerBoundary = Math.min(
-            ...steerBubblesAwaitingHandover
-              .map((bubble) => items.indexOf(bubble))
-              .filter((index) => index >= 0),
+            ...handoverBubbles.map((bubble) => items.indexOf(bubble)).filter((index) => index >= 0),
             items.length,
           );
           const isTurnMessage = (item: TimelineItem): item is AgentMessageItem =>
@@ -2066,8 +2108,8 @@ export function buildTimeline(
               items.splice(index, 1);
               unsettledStreamedMessages.delete(item);
             }
-            if (steerBubblesAwaitingHandover.length > 0) {
-              const bubbleIndexes = steerBubblesAwaitingHandover
+            if (handoverBubbles.length > 0) {
+              const bubbleIndexes = handoverBubbles
                 .map((bubble) => items.indexOf(bubble))
                 .filter((index) => index >= 0);
               if (bubbleIndexes.length > 0) insertAt = Math.min(...bubbleIndexes);
