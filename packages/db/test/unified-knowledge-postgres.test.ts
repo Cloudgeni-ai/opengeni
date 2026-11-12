@@ -1242,6 +1242,18 @@ describe("unified Knowledge storage", () => {
     const finding = await create("Atlas finding", "note", [atlas.entryId]);
     const other = await create("Real product", "group");
     const alsoElsewhere = await create("Shared finding", "note", [atlas.entryId, other.entryId]);
+    const cited = await create("Cited finding", "note", [atlas.entryId]);
+    const citing = await saveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: {
+        title: "Citing note",
+        kind: "note",
+        content: "Builds on the cited finding",
+        relationships: [{ entryId: cited.entryId, relation: "related_to" }],
+      },
+    });
     const earlier = await create("Already archived", "group", [lab.entryId]);
     const earlierArchive = await archiveKnowledgeEntry(client.db, f.human, {
       operationId: crypto.randomUUID(),
@@ -1265,10 +1277,12 @@ describe("unified Knowledge storage", () => {
     const receipt = await archive();
     expect(receipt.outcome).toBe("archived");
     // Nothing inside surfaces at the top level, and agents stop using it.
-    expect(await roots()).toEqual([other.entryId]);
+    expect(await roots()).toEqual([other.entryId, citing.entryId].sort());
     for (const id of [lab.entryId, atlas.entryId, finding.entryId])
       expect(await archived(id)).toBe(true);
+    // Held or cited by something live outside it: stays.
     expect(await archived(alsoElsewhere.entryId)).toBe(false);
+    expect(await archived(cited.entryId)).toBe(false);
     expect(
       (await listKnowledgeEntries(client.db, f.human, { groupId: other.entryId })).entries.map(
         (entry) => entry.id,
@@ -1283,17 +1297,44 @@ describe("unified Knowledge storage", () => {
       revisionId: experiment.revisionId,
       expectedVersion: receipt.version,
     });
-    expect(await roots()).toEqual([experiment.entryId, other.entryId].sort());
+    expect(await roots()).toEqual([experiment.entryId, other.entryId, citing.entryId].sort());
     for (const id of [lab.entryId, atlas.entryId, finding.entryId])
       expect(await archived(id)).toBe(false);
     expect(
       (await listKnowledgeEntries(client.db, f.human, { groupId: atlas.entryId })).entries
         .map((entry) => entry.id)
         .sort(),
-    ).toEqual([finding.entryId, alsoElsewhere.entryId].sort());
+    ).toEqual([finding.entryId, alsoElsewhere.entryId, cited.entryId].sort());
     // A collection archived on its own before stays archived.
     expect(await archived(earlier.entryId)).toBe(true);
     expect(earlierArchive.outcome).toBe("archived");
+  });
+
+  test("an agent archiving a collection takes what is only inside it along", async () => {
+    const f = await fixture();
+    const { agent } = await attempt(f, "automatic");
+    const create = (title: string, kind: "group" | "note", groupIds: string[] = []) =>
+      saveKnowledgeEntry(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        entry: { title, kind, content: `${title} description`, groupIds },
+      });
+    const collection = await create("Benchmark run", "group");
+    const nested = await create("Benchmark findings", "group", [collection.entryId]);
+    const note = await create("Benchmark note", "note", [nested.entryId]);
+    const receipt = await archiveKnowledgeEntry(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      entryId: collection.entryId,
+      expectedVersion: collection.version,
+    });
+    expect(receipt.outcome).toBe("archived");
+    const live = await getKnowledgeEntries(client.db, f.human, [nested.entryId, note.entryId]);
+    expect(live).toEqual([null, null]);
+    const gone = await getKnowledgeEntries(client.db, f.human, [nested.entryId, note.entryId], {
+      view: "archived",
+    });
+    expect(gone.map((entry) => entry?.archived)).toEqual([true, true]);
   });
 
   test("collection cycles are rejected across published, proposed and restored membership", async () => {
