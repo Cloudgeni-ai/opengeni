@@ -13,7 +13,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const firstContractMigration = "1373_agent_slack_install_workspace.sql";
+const firstContractMigration = "1378_agent_slack_install_workspace.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;

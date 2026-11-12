@@ -12,7 +12,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
-const firstMigrationAfterSeed = "1374_agent_slack_installs_install_workspace_fk.sql";
+const firstMigrationAfterSeed = "1379_agent_slack_installs_install_workspace_fk.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;
