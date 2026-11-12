@@ -225,9 +225,10 @@ export const FIRST_PARTY_MCP_CALLER_META_KEY = "opengeniCaller";
 /**
  * MCP request `_meta` key the worker's tool discovery sets (to `true`) when a
  * search that clearly names one integration the person can connect shows its
- * Connect card through `capability_authorization_request`. Such a call shows
- * the card at most once per chat. It only narrows what the call does, so a
- * caller that sets it can never gain anything.
+ * Connect card through `capability_authorization_request`. Such a call reuses
+ * the same kind of card (a first connection, or a reconnect of the same
+ * connection) already shown since the person's latest message instead of
+ * posting another. It only narrows what the call does.
  */
 export const TOOL_DISCOVERY_CARD_META_KEY = "opengeni/toolDiscoveryCard";
 

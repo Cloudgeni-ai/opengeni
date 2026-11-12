@@ -22,13 +22,19 @@ that name a connectable integration):
 ```
 
 The plural form ("If the task needs one ... its capabilityId ...") gains the
-same sentence. New forms when the search showed the card (the second sentence
-of the first is the card tool's own result message, unchanged):
+same sentence. When the card call fails or times out, the notice keeps its old
+text, without the added sentence, because whether a card was posted is unknown.
+New forms when the search showed the card (the card tool's result message,
+unchanged for a new card, follows):
 
 ```text
 + Not connected yet: <name> (capabilityId "<id>"). Its Connect card is now shown in this chat. <card tool message>
-+ Not connected yet: <name> (capabilityId "<id>"). Its Connect card is already in this chat; nothing is connected yet.
++ Not connected yet: <name> (capabilityId "<id>"). This card is already in this chat, so it was not posted again. <card tool message>
 ```
+
+The second form's first sentence after the name is a new prefix of the
+`capability_authorization_request` result message, used only for a card tool
+discovery already showed since the person's latest message.
 
 Both are general: they state whether a card is in the chat, for any
 integration, model or route, and add no instruction beyond that fact.

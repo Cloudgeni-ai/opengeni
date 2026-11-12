@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
+  appendSessionEvents,
   appendTurnCapabilityCardOnce,
   createDb,
   withWorkspaceSessionActivityRls,
@@ -112,7 +113,8 @@ async function seedSession() {
     executionGeneration = 1,
     requestedSandboxId: string | null = null,
     purpose: string | null = null,
-    options: { wholeSession?: boolean } = {},
+    options: { sinceLatestMessage?: boolean } = {},
+    kind: { reason?: string; connectionId?: string } = {},
   ) =>
     appendTurnCapabilityCardOnce(
       db,
@@ -128,7 +130,8 @@ async function seedSession() {
           serverId: "opengeni",
           toolName: "run_on",
           providerDomain: "opengeni.local",
-          reason: "missing_connection",
+          reason: kind.reason ?? "missing_connection",
+          ...(kind.connectionId ? { connectionId: kind.connectionId } : {}),
           capability: { id: capabilityId, name: capabilityId, action: "connect" },
           ...(requestedSandboxId ? { requestedSandboxId } : {}),
           ...(purpose ? { purpose } : {}),
@@ -158,7 +161,11 @@ async function seedSession() {
         where id = ${turn.turnId}
       `;
     });
-  return { startTurn, endTurn, card, cards };
+  const personWrites = async () =>
+    await appendSessionEvents(db, workspaceId, sessionId, [
+      { type: "user.message", payload: { text: "another message" } },
+    ]);
+  return { startTurn, endTurn, card, cards, personWrites };
 }
 
 describe("appendTurnCapabilityCardOnce", () => {
@@ -267,30 +274,74 @@ describe("appendTurnCapabilityCardOnce", () => {
     expect(await chat.cards(turn.turnId)).toHaveLength(1);
   });
 
-  test("wholeSession: a card any turn of the chat shows is reused, other capabilities are not", async () => {
+  test("sinceLatestMessage: a card from an earlier turn is reused until the person writes", async () => {
     if (!available) return;
     const chat = await seedSession();
+    const once = { sinceLatestMessage: true };
     const first = await chat.startTurn();
-    const once = { wholeSession: true };
     const shown = await chat.card(first, "mcp:clickup", 1, null, null, once);
     expect(shown.existingEventId).toBeNull();
     expect(shown.events).toHaveLength(1);
     await chat.endTurn(first);
+    // A later turn the person did not start (a continuation) reuses it.
     const second = await chat.startTurn();
-    // The same capability in a later turn reuses the first turn's card.
     const again = await chat.card(second, "mcp:clickup", 1, null, null, once);
     expect(again.accepted).toBe(true);
     expect(again.events).toHaveLength(0);
     expect(again.existingEventId).toBe(shown.events[0]!.id);
-    // Another capability, or a per-turn caller, still gets its own card.
+    // Another capability still gets its own card.
     const other = await chat.card(second, "mcp:airtable", 1, null, null, once);
     expect(other.existingEventId).toBeNull();
-    const perTurn = await chat.card(second, "mcp:clickup");
-    expect(perTurn.existingEventId).toBeNull();
-    expect(perTurn.events).toHaveLength(1);
-    expect((await chat.cards(second.turnId)).map((row) => row.capabilityId)).toEqual([
-      "mcp:airtable",
+    expect(other.events).toHaveLength(1);
+    await chat.endTurn(second);
+    // Once the person has written, an earlier card may be stale: post anew.
+    await chat.personWrites();
+    const third = await chat.startTurn();
+    const fresh = await chat.card(third, "mcp:clickup", 1, null, null, once);
+    expect(fresh.existingEventId).toBeNull();
+    expect(fresh.events).toHaveLength(1);
+    expect((await chat.cards(third.turnId)).map((row) => row.capabilityId)).toEqual([
       "mcp:clickup",
     ]);
+  });
+
+  test("a first-connection card never stands in for a reconnect card, in either scope", async () => {
+    if (!available) return;
+    const chat = await seedSession();
+    const turn = await chat.startTurn();
+    const connectionId = crypto.randomUUID();
+    const reconnect = { reason: "refresh_failed", connectionId };
+    for (const options of [{}, { sinceLatestMessage: true }]) {
+      const capabilityId = `mcp:linear-${Object.keys(options).length}`;
+      const first = await chat.card(turn, capabilityId, 1, null, null, options);
+      expect(first.events).toHaveLength(1);
+      const reconnectCard = await chat.card(turn, capabilityId, 1, null, null, options, reconnect);
+      expect(reconnectCard.existingEventId).toBeNull();
+      expect(reconnectCard.events).toHaveLength(1);
+      // The same reconnect is reused; another connection's is not.
+      const sameReconnect = await chat.card(turn, capabilityId, 1, null, null, options, reconnect);
+      expect(sameReconnect.existingEventId).toBe(reconnectCard.events[0]!.id);
+      const otherReconnect = await chat.card(turn, capabilityId, 1, null, null, options, {
+        reason: "refresh_failed",
+        connectionId: crypto.randomUUID(),
+      });
+      expect(otherReconnect.existingEventId).toBeNull();
+    }
+    expect(await chat.cards(turn.turnId)).toHaveLength(6);
+  });
+
+  test("sinceLatestMessage: a replaced attempt never posts, and only reuses a current card", async () => {
+    if (!available) return;
+    const chat = await seedSession();
+    const once = { sinceLatestMessage: true };
+    const turn = await chat.startTurn();
+    const miss = await chat.card(turn, "mcp:clickup", 2, null, null, once);
+    expect(miss.accepted).toBe(false);
+    expect(miss.existingEventId).toBeNull();
+    expect(await chat.cards(turn.turnId)).toHaveLength(0);
+    const live = await chat.card(turn, "mcp:clickup", 1, null, null, once);
+    const reuse = await chat.card(turn, "mcp:clickup", 2, null, null, once);
+    expect(reuse.events).toHaveLength(0);
+    expect(reuse.existingEventId).toBe(live.events[0]!.id);
   });
 });

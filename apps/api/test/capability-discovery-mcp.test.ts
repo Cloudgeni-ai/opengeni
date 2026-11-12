@@ -124,7 +124,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await server.close();
     }
   });
-  test("a card tool discovery shows is shown once per chat; a model call is unchanged", async () => {
+  test("a card tool discovery shows is not posted again until the person writes; a model call is unchanged", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const selection: FirstPartyMcpToolName[] = [
       "capability_catalog_search",
@@ -167,16 +167,19 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         eventId: shown[0]!.id,
       });
       expect(mcpJson(first)).not.toHaveProperty("alreadyShown");
-      // A repeated search names the card already in the chat.
+      // A repeated search names the card already in the chat, keeping the
+      // status and guidance of a posted card.
       const again = await request(true);
       expect(mcpJson(again)).toMatchObject({
         status: "authorization_requested",
+        action: "connect",
         cardShown: true,
         alreadyShown: true,
         eventId: shown[0]!.id,
+        message: `This card is already in this chat, so it was not posted again. ${(mcpJson(first) as { message: string }).message}`,
       });
       expect(await cards()).toHaveLength(1);
-      // The model's own call still shows its card, as before.
+      // The model's own call still posts its card, as before.
       const model = await request(false);
       expect(mcpJson(model)).toMatchObject({ cardShown: true });
       expect(mcpJson(model)).not.toHaveProperty("alreadyShown");
@@ -1111,6 +1114,8 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       // continuation), which records no grant of its own.
       sentEarlier = false,
       capabilityId = "api:integration:microsoft-outlook-mail",
+      // Asked by tool discovery rather than the model.
+      fromDiscovery = false,
     ) => {
       // The human this agent acts for: a member with exactly these
       // permissions, or (null) someone in their own workspace with no
@@ -1194,6 +1199,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
             capabilityId,
             rationale: "Reading the newest emails needs access to the person's inbox.",
           },
+          ...(fromDiscovery ? { _meta: { [TOOL_DISCOVERY_CARD_META_KEY]: true } } : {}),
         });
         expect(result.isError).not.toBe(true);
         const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
@@ -1211,6 +1217,14 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       status: "authorization_requested",
       action: "connect",
       eventId: expect.any(String),
+      cardShown: true,
+      message:
+        "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.",
+    });
+    // A card tool discovery shows has the same semantics: the same card and
+    // the same guidance for a person who can't connect from here.
+    expect(await request(conversation, undefined, false, undefined, true)).toMatchObject({
+      status: "authorization_requested",
       cardShown: true,
       message:
         "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.",

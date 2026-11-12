@@ -8086,22 +8086,26 @@ function registerCapabilityDiscoveryTools(
         action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
         ...(reconnect ? { reconnect } : {}),
-        oncePerSession: fromDiscovery,
+        // Tool discovery's card is not posted again until the person writes.
+        // A model call always posts: a card whose state changed (a machine
+        // just connected) is worth showing again.
+        ...(fromDiscovery ? { once: "since_latest_message" as const } : {}),
       });
       // Every result says whether a card is in the chat, so a caller can
-      // never report one that was not shown.
+      // never report one that was not shown. A card already there keeps the
+      // status and guidance it would have had, and says it was not reposted.
       const shown = { cardShown: eventId !== null, ...(alreadyShown ? { alreadyShown } : {}) };
-      if (alreadyShown) {
-        return json({
-          capabilityId: item.id,
-          status: "authorization_requested",
-          eventId,
-          ...shown,
-          message: `The ${item.name} card is already in this chat from earlier; nothing is connected yet.`,
-        });
-      }
+      const posted = (body: { message: string } & Record<string, unknown>) =>
+        json(
+          alreadyShown
+            ? {
+                ...body,
+                message: `This card is already in this chat, so it was not posted again. ${body.message}`,
+              }
+            : body,
+        );
       if (reconnect) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "authorization_requested",
           action: "connect",
@@ -8114,7 +8118,7 @@ function registerCapabilityDiscoveryTools(
         });
       }
       if (machineCardWhenReady) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "ready",
           eventId,
@@ -8123,7 +8127,7 @@ function registerCapabilityDiscoveryTools(
         });
       }
       if (githubCardWhenReady) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "ready",
           eventId,
@@ -8134,7 +8138,7 @@ function registerCapabilityDiscoveryTools(
               : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
-      return json({
+      return posted({
         capabilityId: item.id,
         status: "authorization_requested",
         action: setup.action,
@@ -8550,16 +8554,17 @@ async function appendCapabilityCardEvent(
     /** The account that stopped working which this card reconnects. */
     reconnect?: ConnectionNeedingReconnect;
     /**
-     * Show the card only when no turn of this chat already shows a current
-     * card for the capability; `alreadyShown` then names that card.
+     * Post the card only when no current card of the same kind for the
+     * capability is already shown in this turn, or (`since_latest_message`)
+     * since the person's latest message; `alreadyShown` then names that card.
      */
-    oncePerSession?: boolean;
+    once?: "turn" | "since_latest_message";
   },
 ): Promise<{ eventId: string | null; alreadyShown: boolean }> {
   const { item } = input;
   const claims = exactAgentCommandContext(grant, sessionId);
   const payload = capabilityCardPayload(item, input);
-  if (input.oncePerSession) {
+  if (input.once) {
     const once = await appendTurnCapabilityCardOnce(
       deps.db,
       grant.workspaceId,
@@ -8570,7 +8575,7 @@ async function appendCapabilityCardEvent(
       item.id,
       { type: "tool.auth_needed", payload },
       null,
-      { wholeSession: true },
+      { sinceLatestMessage: input.once === "since_latest_message" },
     );
     await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, once.events);
     if (!once.accepted) {

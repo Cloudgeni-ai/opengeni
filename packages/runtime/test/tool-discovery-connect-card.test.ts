@@ -183,41 +183,47 @@ describe("a search that clearly names one connectable integration shows its card
         });
       }
     });
-  }
 
-  test("near-miss names: a near spelling, or a name written without its inner capital", async () => {
-    for (const [query, integration] of [
-      ["show the vendors from Airtabel", AIRTABLE],
-      ["find the contacts in hubsopt", HUBSPOT],
-      ["find the contacts in hubspot", HUBSPOT],
-    ] as const) {
-      const { requested, request } = cardTool();
-      const result = await runtimeWith("generic_dispatch", {
-        matches: [integration],
-        request,
-      }).prepareSearch({ query });
-      expect(requested).toEqual([integration]);
-      expect(outputOf(result).connectCard).toMatchObject({ shown: true });
-    }
-  });
-
-  test("a card already in the chat is not shown again, and the result says it is there", async () => {
-    const { requested, request } = cardTool(() => ({ eventId: "event-0", alreadyShown: true }));
-    const result = await runtimeWith("generic_dispatch", {
-      matches: [CLICKUP],
-      request,
-    }).prepareSearch({ query: "create a ClickUp task" });
-    expect(requested).toEqual([CLICKUP]);
-    expect(outputOf(result).notConnected).toBe(
-      'Not connected yet: ClickUp (capabilityId "mcp:clickup"). Its Connect card is already in this chat; nothing is connected yet.',
-    );
-    expect(outputOf(result).connectCard).toEqual({
-      shown: true,
-      capabilityId: "mcp:clickup",
-      eventId: "event-0",
-      alreadyShown: true,
+    test(`${transport}: near-miss names: a near spelling, or a name written without its inner capital`, async () => {
+      for (const [query, integration] of [
+        ["show the vendors from Airtabel", AIRTABLE],
+        ["find the contacts in hubsopt", HUBSPOT],
+        ["find the contacts in hubspot", HUBSPOT],
+      ] as const) {
+        const { requested, request } = cardTool();
+        const result = await runtimeWith(transport, {
+          matches: [integration],
+          request,
+        }).prepareSearch({ query });
+        expect(requested).toEqual([integration]);
+        expect(outputOf(result).connectCard).toMatchObject({ shown: true });
+      }
     });
-  });
+
+    test(`${transport}: a card already in the chat is not shown again, and the result says it is there`, async () => {
+      const already =
+        "This card is already in this chat, so it was not posted again. The recommendation was posted for human confirmation.";
+      const { requested, request } = cardTool(() => ({
+        eventId: "event-0",
+        alreadyShown: true,
+        message: already,
+      }));
+      const result = await runtimeWith(transport, {
+        matches: [CLICKUP],
+        request,
+      }).prepareSearch({ query: "create a ClickUp task" });
+      expect(requested).toEqual([CLICKUP]);
+      expect(outputOf(result).notConnected).toBe(
+        `Not connected yet: ClickUp (capabilityId "mcp:clickup"). ${already}`,
+      );
+      expect(outputOf(result).connectCard).toEqual({
+        shown: true,
+        capabilityId: "mcp:clickup",
+        eventId: "event-0",
+        alreadyShown: true,
+      });
+    });
+  }
 
   test("an early decision that is never accepted shows no card", async () => {
     const { requested, request } = cardTool();
@@ -288,22 +294,33 @@ describe("searches that keep today's behaviour and show no card", () => {
     expect(outputOf(result).connectCard).toEqual({ shown: false });
   });
 
-  test("when the card tool shows nothing or fails, the search names the integration as before", async () => {
-    for (const answer of [
-      // ready, unavailable or input required: no card in the chat
-      () => null,
-      // not in this attempt's catalog, refused by policy, or failed
-      () => new Error("tool not found"),
-    ]) {
-      const { requested, request } = cardTool(answer);
-      const result = await runtimeWith("openai_native", {
+  test("when the card tool shows no card, the search names the integration as before", async () => {
+    // ready, unavailable or input required: no card in the chat
+    const { requested, request } = cardTool(() => null);
+    const result = await runtimeWith("openai_native", {
+      matches: [CLICKUP],
+      request,
+    }).prepareSearch({ query: "create a ClickUp task" });
+    expect(requested).toEqual([CLICKUP]);
+    expect(outputOf(result).notConnected).toBe(NOT_SHOWN(CLICKUP));
+    expect(outputOf(result).connectCard).toEqual({ shown: false });
+    expect(result.notice).toBe(NOT_SHOWN(CLICKUP));
+  });
+
+  test("when the card call fails or times out, the search says nothing about a card", async () => {
+    // Not in this attempt's catalog, refused by policy (approval required),
+    // or timed out after the card may have been posted.
+    for (const message of ["tool not found", "approval required", "The operation timed out."]) {
+      const { requested, request } = cardTool(() => new Error(message));
+      const result = await runtimeWith("generic_dispatch", {
         matches: [CLICKUP],
         request,
       }).prepareSearch({ query: "create a ClickUp task" });
       expect(requested).toEqual([CLICKUP]);
-      expect(outputOf(result).notConnected).toBe(NOT_SHOWN(CLICKUP));
-      expect(outputOf(result).connectCard).toEqual({ shown: false });
-      expect(result.notice).toBe(NOT_SHOWN(CLICKUP));
+      expect(outputOf(result).notConnected).toBe(
+        'Not connected yet: ClickUp (capabilityId "mcp:clickup"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.',
+      );
+      expect(outputOf(result)).not.toHaveProperty("connectCard");
     }
   });
 
@@ -383,7 +400,7 @@ describe("the card request goes through the card tool", () => {
       connectCardReceiptFromResult(
         text({ eventId: "e", cardShown: true, alreadyShown: true, message: "already" }),
       ),
-    ).toEqual({ eventId: "e", alreadyShown: true });
+    ).toEqual({ eventId: "e", alreadyShown: true, message: "already" });
     expect(connectCardReceiptFromResult(text({ status: "ready", cardShown: false }))).toBeNull();
     expect(connectCardReceiptFromResult(text({ status: "unavailable" }))).toBeNull();
     expect(connectCardReceiptFromResult(text({ cardShown: true, eventId: null }))).toBeNull();

@@ -265,8 +265,8 @@ type ConnectableIntegrations = {
 };
 
 /**
- * Whether a Connect card is in the chat after a search tried to show it: shown
- * now, already shown earlier in this chat, or (null) not shown.
+ * A Connect card in the chat after a search showed it: shown now, or already
+ * shown since the person's latest message.
  */
 export type ConnectCardReceipt = {
   eventId: string;
@@ -276,8 +276,16 @@ export type ConnectCardReceipt = {
 };
 
 /**
+ * Whether a search's Connect card is in the chat: a receipt, null when the
+ * card tool answered without one, or "unknown" when the call failed or timed
+ * out and the card may or may not have been posted.
+ */
+export type ConnectCardOutcome = ConnectCardReceipt | null | "unknown";
+
+/**
  * Shows an integration's Connect card in this chat, as a call of the card tool
- * would, at most once per chat. Null when no card is in the chat.
+ * would, not again until the person writes. Null when the tool answered that
+ * no card is in the chat.
  */
 export type ConnectCardRequest = (
   integration: ConnectableIntegration,
@@ -394,7 +402,7 @@ export function connectableIntegrationsNamedIn(
  */
 export function connectableIntegrationNotice(
   integrations: readonly ConnectableIntegration[],
-  card?: ConnectCardReceipt | null,
+  card?: ConnectCardOutcome,
 ): string {
   const listed = integrations
     .map(
@@ -402,24 +410,32 @@ export function connectableIntegrationNotice(
         `${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)})`,
     )
     .join(", ");
-  if (card)
-    return card.alreadyShown
-      ? `Not connected yet: ${listed}. Its Connect card is already in this chat; nothing is connected yet.`
-      : `Not connected yet: ${listed}. Its Connect card is now shown in this chat.${card.message ? ` ${card.message}` : ""}`;
+  if (card && card !== "unknown") {
+    // The card tool's own message says what the card does, and for a card
+    // already in the chat that it was not posted again.
+    const said = card.alreadyShown
+      ? (card.message ?? "Its Connect card is already in this chat.")
+      : `Its Connect card is now shown in this chat.${card.message ? ` ${card.message}` : ""}`;
+    return `Not connected yet: ${listed}. ${said}`;
+  }
+  // Whether a card was posted is unknown after a failed call, so the notice
+  // then says nothing about it.
+  const none = card === "unknown" ? "" : " No card is shown until you do.";
   return integrations.length === 1
-    ? `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.`
-    : `Not connected yet: ${listed}. If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.`;
+    ? `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.${none}`
+    : `Not connected yet: ${listed}. If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.${none}`;
 }
 
 /**
  * The structured counterpart of connectableIntegrationNotice: whether a
  * Connect card is in the chat, and which event shows it. A reply can rely on
- * it instead of assuming a card was shown.
+ * it instead of assuming a card was shown. Undefined when that is unknown.
  */
 export function connectCardField(
   integration: ConnectableIntegration | undefined,
-  card: ConnectCardReceipt | null | undefined,
-): Record<string, unknown> {
+  card: ConnectCardOutcome | undefined,
+): Record<string, unknown> | undefined {
+  if (card === "unknown") return undefined;
   return card && integration
     ? {
         shown: true,
@@ -617,6 +633,12 @@ export function catalogConnectableIntegrationLookup(server: {
   };
 }
 
+/**
+ * How long an accepted search waits for its Connect card: posting it reads the
+ * catalog and writes the card, so it gets longer than the catalog read alone.
+ */
+const CONNECT_CARD_TIMEOUT_MS = 10_000;
+
 /** The person-facing reason on a Connect card a search shows. */
 function discoveryCardRationale(integration: ConnectableIntegration): string {
   return `Connect ${integration.name} so the agent can use it for this task.`;
@@ -644,7 +666,7 @@ export function catalogConnectCardRequest(server: {
   ): Promise<unknown>;
 }): ConnectCardRequest {
   return async (integration, signal) => {
-    const timeout = AbortSignal.timeout(CONNECTABLE_LOOKUP_TIMEOUT_MS);
+    const timeout = AbortSignal.timeout(CONNECT_CARD_TIMEOUT_MS);
     const options = { signal: signal ? AbortSignal.any([signal, timeout]) : timeout };
     const args = {
       capabilityId: integration.capabilityId,
@@ -683,9 +705,7 @@ export function connectCardReceiptFromResult(result: unknown): ConnectCardReceip
     return {
       eventId: parsed.eventId,
       alreadyShown: parsed.alreadyShown === true,
-      ...(typeof parsed.message === "string" && parsed.message && parsed.alreadyShown !== true
-        ? { message: parsed.message }
-        : {}),
+      ...(typeof parsed.message === "string" && parsed.message ? { message: parsed.message } : {}),
     };
   }
   return null;
@@ -1318,15 +1338,17 @@ export class LazyToolRuntime {
     const connectable = decision.connectable;
     if (!connectable?.named.length) return decision;
     const integration = connectable.clearlyNamed;
-    let card: ConnectCardReceipt | null = null;
+    let card: ConnectCardOutcome = null;
     if (integration && this.connectCardRequest) {
       try {
         card = await this.connectCardRequest(integration, signal);
       } catch {
         // Cancellation belongs to the owning turn. Any other failure (no card
-        // tool this attempt, a policy refusal) leaves the search naming the
-        // integration as before.
+        // tool this attempt, a policy refusal, a timeout) leaves the search
+        // naming the integration as before, without saying whether a card was
+        // posted.
         signal?.throwIfAborted();
+        card = "unknown";
       }
     }
     const notice = this.withNotice(
@@ -1334,15 +1356,15 @@ export class LazyToolRuntime {
       "notConnected",
       connectableIntegrationNotice(connectable.named, card),
     );
+    const field = connectCardField(integration, card);
     return {
       ...decision,
-      result: {
-        ...notice,
-        output: JSON.stringify({
-          ...JSON.parse(notice.output),
-          connectCard: connectCardField(integration, card),
-        }),
-      },
+      result: field
+        ? {
+            ...notice,
+            output: JSON.stringify({ ...JSON.parse(notice.output), connectCard: field }),
+          }
+        : notice,
     };
   }
 
@@ -1645,12 +1667,14 @@ export class LazyToolRuntime {
       const named = connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
         notOwned,
       );
-      // Clearly named: the only one named, and named distinctively.
+      // Clearly named: the only one named, and named distinctively (which
+      // beside strong matches every named integration already is).
       const clearlyNamed =
         named.length === 1 &&
-        connectableIntegrationsNamedIn(query, matches, true).some(
-          (integration) => integration.capabilityId === named[0]!.capabilityId,
-        )
+        (besideStrongMatches ||
+          connectableIntegrationsNamedIn(query, matches, true).some(
+            (integration) => integration.capabilityId === named[0]!.capabilityId,
+          ))
           ? named[0]
           : undefined;
       return { named, ...(clearlyNamed ? { clearlyNamed } : {}) };

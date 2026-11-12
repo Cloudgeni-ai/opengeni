@@ -581,17 +581,24 @@ accepted (never from an early decision a dropped response may discard), the
 worker calls `capability_authorization_request` through the attempt's own tool
 gateway with request `_meta` `TOOL_DISCOVERY_CARD_META_KEY`, so the card,
 authorization, tool selection and policy are exactly those of a model call. That
-marker makes the call post the card at most once per chat
-(`appendTurnCapabilityCardOnce` with `wholeSession`); a repeat returns
-`alreadyShown` and the existing `eventId`. Model calls are unchanged. The search
-result then says the card is shown. Searches naming several integrations, or a
-name only as an ordinary word ("linear regression", "airtable" in lower case),
-and any call that shows no card (ready, unavailable, not in this chat's tools,
-refused, failed) keep the plain `notConnected` notice. Every search result that
-names a connectable integration carries `connectCard: { shown, capabilityId?,
-eventId?, alreadyShown? }`, and every `capability_authorization_request` result
-carries `cardShown`, so neither the agent nor a client has to infer whether a
-card was shown.
+marker makes the call reuse the same kind of card (a first connection, or a
+reconnect of the same connection) already shown since the person's latest
+message (`appendTurnCapabilityCardOnce` with `sinceLatestMessage`) instead of
+posting another; the result keeps the status and guidance of a posted card,
+adds `alreadyShown`, names the existing `eventId`, and says it was not posted
+again. Once the person writes, an earlier card may be stale and a search may
+post a fresh one. Model calls are unchanged: they always post, so a card whose
+state changed (a machine just connected) can be shown again. Searches naming
+several integrations, or a name only as an ordinary word ("linear regression",
+"airtable" in lower case), and a card call that answers without a card (ready,
+unavailable, input required) keep the plain `notConnected` notice, which then
+says no card is shown. A card call that fails or times out (not in this chat's
+tools, approval required, no answer) keeps the notice without saying whether a
+card was shown. Otherwise every search result that names a connectable
+integration carries `connectCard: { shown, capabilityId?, eventId?,
+alreadyShown? }`, and every `capability_authorization_request` result carries
+`cardShown`, so neither the agent nor a client has to infer whether a card was
+shown.
 
 ### Recovery from tool-search misses
 
