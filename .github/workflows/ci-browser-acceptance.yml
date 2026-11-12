@@ -30,7 +30,7 @@ jobs:
         include: ${{ fromJSON(inputs.matrix) }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 1
@@ -276,7 +276,7 @@ jobs:
           ${{ always() && matrix.lane == 'accounts' &&
           (steps.browser_accounts.outcome == 'success' ||
           steps.browser_accounts.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-account-acceptance-${{ matrix.engine }}
           if-no-files-found: error
@@ -296,7 +296,7 @@ jobs:
           matrix.lane == 'knowledge' &&
           (steps.session_pin_browser.outcome == 'success' ||
           steps.session_pin_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sessionpin-session-pin-visual-evidence
           if-no-files-found: error
@@ -314,7 +314,7 @@ jobs:
           ${{ always() && matrix.lane == 'interaction' &&
           (steps.session_search_header_browser.outcome == 'success' ||
           steps.session_search_header_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: session-search-header-evidence
           if-no-files-found: error
@@ -323,7 +323,7 @@ jobs:
 
       - name: Upload Codex quota visual evidence
         if: ${{ always() && matrix.lane == 'interaction' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: codex-quota-codex-quota-entitlement-visual-evidence
           if-no-files-found: error
@@ -336,7 +336,7 @@ jobs:
 
       - name: Upload responsive knowledge-surface evidence
         if: ${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: responsive-knowledge-surface-evidence
           if-no-files-found: error
@@ -361,7 +361,7 @@ jobs:
           matrix.lane == 'onboarding' &&
           (steps.organization_onboarding.outcome == 'success' ||
           steps.organization_onboarding.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: organization-onboarding-acceptance-evidence
           if-no-files-found: error
@@ -380,7 +380,7 @@ jobs:
           matrix.lane == 'workbench' &&
           (steps.workbench_browser.outcome == 'success' ||
           steps.workbench_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: workbench-visual-evidence
           if-no-files-found: error
@@ -397,7 +397,7 @@ jobs:
           matrix.lane == 'workbench' &&
           (steps.editable_artifact_browser.outcome == 'success' ||
           steps.editable_artifact_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: editable-artifact-visual-evidence
           if-no-files-found: error

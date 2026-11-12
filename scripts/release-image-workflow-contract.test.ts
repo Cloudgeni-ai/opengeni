@@ -169,13 +169,13 @@ describe("release image workflow contract", () => {
     expect(builds.map((step) => [step.id, step.uses, step.if, step["continue-on-error"]])).toEqual([
       [
         "first",
-        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+        "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
         undefined,
         true,
       ],
       [
         "retry",
-        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+        "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
         "${{ steps.first.outcome == 'failure' }}",
         undefined,
       ],
@@ -1595,9 +1595,9 @@ describe("release image workflow contract", () => {
     expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: plan");
     expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
     expect(publish).toContain("bun scripts/verify-release-packages.ts");
-    expect(publish).toContain("actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10");
+    expect(publish).toContain("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1");
     expect(publish).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
-    expect(publish).toContain("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
+    expect(publish).toContain("actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1");
     expect(publish).not.toMatch(/actions\/(?:checkout|setup-node)@v[0-9]/);
     expect(publish).not.toMatch(/oven-sh\/setup-bun@v[0-9]/);
     expect(sourceGate).toBeGreaterThan(-1);
@@ -1825,7 +1825,7 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("https://get.opengeni.ai/install.");
 
     expect(agentRelease).toContain(
-      "uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+      "uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3",
     );
     expect(agentRelease).not.toContain("softprops/action-gh-release@v2");
     expect(agentRelease).toContain("tag_name: agent-v${{ needs.guard.outputs.version }}");
