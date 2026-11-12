@@ -50,6 +50,7 @@ fn capacity() -> Capacity {
         reads_packs: true,
         sets_aside: true,
         run: None,
+        after_asked_stop: false,
         info: None,
     }
 }
@@ -227,6 +228,15 @@ fn in_run(run: u64) -> Capacity {
     }
 }
 
+/// What a host can take on, told by run `run` of its agent, which started
+/// after the run before it was asked to stop.
+fn in_run_asked(run: u64) -> Capacity {
+    Capacity {
+        after_asked_stop: true,
+        ..in_run(run)
+    }
+}
+
 /// The latest run of `host`'s agent, and its restarts, as the store holds
 /// them.
 async fn restarts<S: Store>(store: &S, host: HostId) -> (Option<u64>, u64) {
@@ -284,12 +294,47 @@ async fn agent_restarts<S: Store>(store: S) {
     assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
     let mut again = register(&name, random(), Vec::new());
     again.capacity.run = Some(400);
-    assert_eq!(registered(&store, &again).await.0, host);
+    let (same, epoch) = registered(&store, &again).await;
+    assert_eq!(same, host);
     assert_eq!(restarts(&store, host).await, (Some(400), 3));
+    // Upgraded in place: the run before it was asked to stop, so the new
+    // run is taken in but is no fault, by renewal or report alike.
+    let renew = Renew {
+        host: host.0,
+        epoch,
+        seq: 1,
+        capacity: Some(in_run_asked(500)),
+    };
+    assert!(store.renew(&renew, names).await.unwrap());
+    assert_eq!(restarts(&store, host).await, (Some(500), 3));
+    let report = Report {
+        host: host.0,
+        epoch,
+        capacity: in_run_asked(600),
+    };
+    assert!(store.report(&report, names).await.unwrap());
+    assert_eq!(restarts(&store, host).await, (Some(600), 3));
+    // Rebooted on purpose, it registers afresh after an asked stop: not
+    // counted either. One that crashed after is.
+    let count = renewals(&store, host).await.expect("counted");
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
+    let mut planned = register(&name, random(), Vec::new());
+    planned.capacity = in_run_asked(700);
+    let (same, epoch) = registered(&store, &planned).await;
+    assert_eq!(same, host);
+    assert_eq!(restarts(&store, host).await, (Some(700), 3));
+    let crashed = Renew {
+        host: host.0,
+        epoch,
+        seq: 1,
+        capacity: Some(in_run(800)),
+    };
+    assert!(store.renew(&crashed, names).await.unwrap());
+    assert_eq!(restarts(&store, host).await, (Some(800), 4));
 }
 
 #[tokio::test]
-async fn each_later_run_of_a_hosts_agent_is_counted_once() {
+async fn each_later_run_of_a_hosts_agent_not_asked_for_is_counted_once() {
     each(agent_restarts, agent_restarts).await;
 }
 

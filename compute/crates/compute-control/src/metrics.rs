@@ -458,7 +458,7 @@ fn host_gauges() -> [HostGauge; 13] {
         ),
         (
             "compute_fleet_host_agent_restarts",
-            "Times a host's agent started again: each later run of its agent it told of (after its watchdog stopped it, a crash, an upgrade or a reboot), counted once, as the fleet's store keeps it. Its changes count restarts whichever replica leads, across restarts of the service. Hosts of an earlier release tell no runs.",
+            "Times a host's agent started again without being asked to: each later run of its agent it told of that followed its watchdog stopping it, a crash, a stop that hung or losing its machine, counted once, as the fleet's store keeps it. A start after a stop it was asked for (an upgrade, a restart, a planned reboot) is not counted. Its changes count restarts whichever replica leads, across restarts of the service. Hosts of an earlier release tell no runs.",
             |host| Num::Whole(host.restarts),
         ),
         (

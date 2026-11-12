@@ -1061,9 +1061,13 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - `OpenGeniComputeHostAgentRestarting`: a host's agent restarts changed
     at least `computeControl.alerts.agentRestarts` (2) times in six hours,
     for a minute. The count is kept in the store, so it survives
-    compute-control rollouts and changes of leader. One in-place upgrade
-    or reboot restarts each agent once and does not fire it; raise the
-    threshold where agents are upgraded in place more often.
+    compute-control rollouts and changes of leader. Only restarts nobody
+    asked for count: the watchdog stopping the agent, a crash, a stop that
+    hung, or the machine going down. An agent asked to stop (an upgrade, a
+    `systemctl restart`, a planned reboot) leaves a mark in the host's root
+    once its stop is done, and the next run tells the service it found it,
+    so any number of releases a day fires nothing. A host of an earlier
+    release leaves no mark, so the upgrade onto this one still counts once.
   - `OpenGeniComputeHostRefusingWakes`: a host refused
     `computeControl.alerts.refusedWakes` (3) wakes or more as full in half
     an hour, and refused one in the last ten minutes, for a quarter of an
