@@ -11,6 +11,21 @@ import {
  */
 export const OPENGENI_MAINTENANCE_ERROR_CODE = "maintenance";
 
+/**
+ * `OpenGeniApiError.details.code` when this deployment can never deliver a
+ * native app's push registration (`registerNativePushDevice`): it doesn't list
+ * the app's bundle identifier or package name, or it has no push credentials
+ * for the platform. Retrying won't help.
+ */
+export const NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE = "native_push_unavailable";
+
+/** Was this push registration refused because the deployment can't push to the app? */
+export function isNativePushUnavailableError(error: unknown): error is OpenGeniApiError {
+  return (
+    error instanceof OpenGeniApiError && error.details?.code === NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE
+  );
+}
+
 /** Error for a non-2xx Opengeni API response. */
 export class OpenGeniApiError extends Error {
   readonly status: number;

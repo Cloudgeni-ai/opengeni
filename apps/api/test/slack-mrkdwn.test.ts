@@ -5,7 +5,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingObjectLinks,
   slackMrkdwnKeepingProviderTracking,
+  slackObjectLinkUrl,
   stripProviderCitationMarkers,
 } from "../src/integrations/slack-mrkdwn";
 
@@ -143,9 +145,11 @@ describe("slackMrkdwnFromMarkdown", () => {
     );
   });
 
-  test("leaves links Slack cannot open as written", () => {
+  test("shows Opengeni links Slack has no address for as their label, never raw syntax", () => {
     const text = "Open [the report](artifact:3f2a) or [the file](sandbox:/workspace/out.md).";
-    expect(slackMrkdwnFromMarkdown(text)).toBe(text);
+    expect(slackMrkdwnFromMarkdown(text)).toBe("Open the report or the file.");
+    // The rendering earlier releases bound to operations keeps them as written.
+    expect(slackMrkdwnKeepingObjectLinks(text)).toBe(text);
   });
 
   test("turns every heading level into one bold line without nested emphasis", () => {
@@ -230,6 +234,98 @@ describe("source links from a hosted web search", () => {
     expect(slackMrkdwnKeepingProviderTracking(answer)).toContain(
       "<https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai|example.com>",
     );
+  });
+});
+
+// A Slack reply on staging (12 Nov 2026) showed an artifact image as literal
+// `![Preview of the new Receipts row](artifact:5b2905c5-...)`.
+describe("Opengeni object links in Slack", () => {
+  const workspaceId = "3e7157ca-9d54-4c0d-b5fb-135454e3cb35";
+  const sessionId = "0f5b9a52-5d0e-4c55-9f53-0c6d3e6a2b11";
+  const links = slackObjectLinkUrl({
+    baseUrl: "https://staging.app.opengeni.ai",
+    workspaceId,
+    sessionId,
+  });
+  const app = `https://staging.app.opengeni.ai/workspaces/${workspaceId}`;
+
+  test("an artifact image becomes a link to the file in Opengeni", () => {
+    const reply = [
+      "I'll queue it once CI is green.",
+      "",
+      "![Preview of the new Receipts row](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)",
+    ].join("\n");
+    expect(slackMrkdwnFromMarkdown(reply, links)).toBe(
+      [
+        "I'll queue it once CI is green.",
+        "",
+        `<${app}/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e?fromSession=${sessionId}|Preview of the new Receipts row>`,
+      ].join("\n"),
+    );
+  });
+
+  test("every Opengeni link form opens where the console opens it", () => {
+    const reply = [
+      "- [Report](artifact:5B2905C5-68C6-4D43-9C30-FDCEFBD3A74E) and **[the deck](artifact:0123456789abcdef0123456789abcdef)**",
+      "- Asked in [the review chat](session:7d1c0d7e-31a8-4d0c-9a52-2f6b0e5f4c21)",
+      `- Site: [dashboard](/workspaces/${workspaceId}/artifacts/9b2f7c2e-6e0a-4f1b-8f3e-2f1d0c9b8a7e)`,
+      "- Code: [main.ts](sandbox:/workspace/src/main.ts:12), [My notes](<sandbox:/workspace/My Notes/a.md>) and ![](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)",
+      "- As written in code: `[x](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)`",
+    ].join("\n");
+    expect(slackMrkdwnFromMarkdown(reply, links)).toBe(
+      [
+        `• <${app}/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e?fromSession=${sessionId}|Report> and *<${app}/artifacts/editable/0123456789abcdef0123456789abcdef?fromSession=${sessionId}|the deck>*`,
+        `• Asked in <${app}/sessions/7d1c0d7e-31a8-4d0c-9a52-2f6b0e5f4c21|the review chat>`,
+        `• Site: <${app}/artifacts/9b2f7c2e-6e0a-4f1b-8f3e-2f1d0c9b8a7e|dashboard>`,
+        `• Code: main.ts, My notes and <${app}/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e?fromSession=${sessionId}>`,
+        "• As written in code: `[x](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)`",
+      ].join("\n"),
+    );
+  });
+
+  test("a deployment without a web address shows the labels", () => {
+    const none = slackObjectLinkUrl({ baseUrl: null, workspaceId, sessionId });
+    expect(
+      slackMrkdwnFromMarkdown("![Chart](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)", none),
+    ).toBe("Chart");
+    expect(none(`/workspaces/${workspaceId}/sessions/${sessionId}`)).toBeNull();
+    // A path that leaves the console after normalization isn't linked.
+    expect(links("/workspaces/../admin")).toBeNull();
+  });
+});
+
+describe("Markdown tables in Slack", () => {
+  test("become an aligned code block with plain cells", () => {
+    const reply = [
+      "Results:",
+      "",
+      "| Check | Status |",
+      "| :--- | ---: |",
+      "| **Unit** tests | `pass` |",
+      "| [CI](https://ci.example.com/1) | a \\| b |",
+      "",
+      "Done.",
+    ].join("\n");
+    expect(slackMrkdwnFromMarkdown(reply)).toBe(
+      [
+        "Results:",
+        "",
+        "```",
+        "Check                         | Status",
+        "------------------------------|-------",
+        "Unit tests                    | pass",
+        "CI (https://ci.example.com/1) | a | b",
+        "```",
+        "",
+        "Done.",
+      ].join("\n"),
+    );
+    expect(slackMrkdwnKeepingObjectLinks(reply)).toContain("| :--- | ---: |");
+  });
+
+  test("pipes that aren't a table, and tables in code, stay as written", () => {
+    const text = ["a | b", "not a delimiter", "```", "| x |", "| - |", "```"].join("\n");
+    expect(slackMrkdwnFromMarkdown(text)).toBe(text);
   });
 });
 
