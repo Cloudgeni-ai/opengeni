@@ -15093,12 +15093,29 @@ const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   const tag = String(this.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea") {
     const actual = String(this.value);
-    if (actual === String(expected)) return true;
+    const wanted = String(expected);
+    if (actual === wanted) return true;
     // A field that groups digits as they are typed (card, phone and account
     // numbers) holds the same digits. No stripping of digits, letters,
     // decimal points, slashes or other meaningful changes.
-    return /^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(String(expected)) &&
-      actual.replace(/[\\s-]/g, "") === String(expected).replace(/[\\s-]/g, "");
+    if (/^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(wanted) &&
+      actual.replace(/[\\s-]/g, "") === wanted.replace(/[\\s-]/g, "")) return true;
+    // A phone field formats the number as it is typed: brackets around the
+    // area code, or the country code put in front ("+47 412 34 567" for
+    // "41234567", "+44 7700 900123" for "07700 900123"). Only phone-length
+    // numbers, and a "+" the requested value had is never dropped.
+    const phone = /^\\+?[0-9\\s()-]+$/;
+    if (!phone.test(actual.trim()) || !phone.test(wanted.trim())) return false;
+    const actualDigits = actual.replace(/[^0-9]/g, "");
+    const wantedDigits = wanted.replace(/[^0-9]/g, "");
+    if (wantedDigits.length < 6) return false;
+    const actualInternational = actual.trim().startsWith("+");
+    const wantedInternational = wanted.trim().startsWith("+");
+    if (actualInternational === wantedInternational) return actualDigits === wantedDigits;
+    if (!actualInternational) return false;
+    return [wantedDigits, wantedDigits.replace(/^0/, "")].some((national) =>
+      actualDigits.length - national.length >= 1 && actualDigits.length - national.length <= 3 &&
+      actualDigits.endsWith(national));
   }
   if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);
   return false;
