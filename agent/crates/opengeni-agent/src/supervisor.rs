@@ -83,6 +83,47 @@ const BULK_CHANNEL_DEPTH: usize = 1024;
 /// pairs toward the bulk publisher task. `None` between generations.
 type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>>>;
 
+/// The current generation's control connection. `None` between generations.
+///
+/// Work that outlives the generation that started it reports through this,
+/// not through the connection it was started on: a generation lasts only as
+/// long as its broker credential (minutes), and its connection is closed when
+/// it ends, so anything published on it later is lost.
+type ControlLane = Arc<std::sync::RwLock<Option<async_nats::Client>>>;
+
+/// Binds a generation's control connection to its link's lane while it serves.
+struct ServingControl<'a>(&'a ControlLane);
+
+impl<'a> ServingControl<'a> {
+    fn bind(lane: &'a ControlLane, client: &async_nats::Client) -> Self {
+        *lane.write().expect("control lane lock") = Some(client.clone());
+        Self(lane)
+    }
+}
+
+impl Drop for ServingControl<'_> {
+    fn drop(&mut self) {
+        *self.0.write().expect("control lane lock") = None;
+    }
+}
+
+/// Where a self-update reports its progress: the link's current control
+/// connection, or the one its request arrived on while there is none yet.
+struct UpdateReporter {
+    lane: ControlLane,
+    requested_on: async_nats::Client,
+}
+
+impl UpdateReporter {
+    fn client(&self) -> async_nats::Client {
+        self.lane
+            .read()
+            .expect("control lane lock")
+            .clone()
+            .unwrap_or_else(|| self.requested_on.clone())
+    }
+}
+
 /// Keeps a compute link's relay credential current with what its host sends
 /// on [`crate::compute::RELAY_SUBJECT`], for as long as the generation lasts.
 /// The host sends the latest credential on each subscription, so a new
@@ -743,6 +784,9 @@ struct WorkspaceLink<P: Platform> {
     /// `None` between generations (frames drop; replay heals — fire-and-forget
     /// by protocol design).
     bulk_tx: BulkLane,
+    /// The CURRENT generation's control connection, for work that outlives
+    /// the generation it started on (see [`ControlLane`]).
+    control: ControlLane,
     /// Upload identity is local to this exact connection/process instance.
     uploads: Arc<std::sync::Mutex<crate::uploads::Uploads>>,
     replies: Arc<std::sync::Mutex<crate::rpc_replay::Registry>>,
@@ -766,6 +810,7 @@ impl<P: Platform> WorkspaceLink<P> {
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
+            control: Arc::new(std::sync::RwLock::new(None)),
             uploads: Arc::new(std::sync::Mutex::new(crate::uploads::Uploads::default())),
             replies: Arc::new(std::sync::Mutex::new(crate::rpc_replay::Registry::default())),
             desktop_status: std::sync::RwLock::new(None),
@@ -799,6 +844,7 @@ impl<P: Platform> WorkspaceLink<P> {
             // Rebinding this same Arc lets retained pumps replay through the
             // successor's authenticated bulk connection.
             replacement.bulk_tx = previous.bulk_tx.clone();
+            replacement.control = previous.control.clone();
             replacement.replies = previous.replies.clone();
         }
         replacement
@@ -1657,6 +1703,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             bulk_lost: bulk_transport_lost,
             reconnect,
         } = ends;
+        let _serving = ServingControl::bind(&link.control, client);
         let mut heartbeat = tokio::time::interval(DEFAULT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut hb_seq: u64 = 0;
@@ -2161,7 +2208,10 @@ impl<P: Platform + 'static> Supervisor<P> {
             return;
         }
 
-        let client = client.clone();
+        let reporter = UpdateReporter {
+            lane: link.control.clone(),
+            requested_on: client.clone(),
+        };
         let events_subject = link.events_subject();
         let agent_id = link.creds.agent_id.clone();
         let engine = self.engine.clone();
@@ -2185,7 +2235,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         // transport generation ending must not cancel a verified binary swap.
         tokio::spawn(async move {
             publish_agent_update_progress(
-                &client,
+                &reporter.client(),
                 &events_subject,
                 &agent_id,
                 &update,
@@ -2198,7 +2248,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             )
             .await;
             publish_agent_update_progress(
-                &client,
+                &reporter.client(),
                 &events_subject,
                 &agent_id,
                 &update,
@@ -2299,7 +2349,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         }
                     };
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2343,7 +2393,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     warn!(reason = ?update_drain.unavailable_reason(), "self-update could not confirm producer cleanup");
                     update_drain.finish_update(&update.operation_id);
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2380,7 +2430,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     );
                     // Say what the update is waiting for, once per reason.
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2422,7 +2472,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                             crate::update::ManagedUpdatePhase::Applying => v1::AgentUpdateStage::Applying,
                         };
                         publish_agent_update_progress(
-                            &client, &events_subject, &agent_id, &update, stage, "", "", false, false, &[],
+                            &reporter.client(), &events_subject, &agent_id, &update, stage, "", "", false, false, &[],
                         ).await;
                     }
                     joined = &mut apply => break joined,
@@ -2453,6 +2503,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             };
             match result {
                 Ok(Ok(applied)) => {
+                    let client = reporter.client();
                     publish_agent_update_progress(
                         &client,
                         &events_subject,
@@ -2482,7 +2533,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                             | "signed_app_update_failed_rolled_back"
                     );
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2504,7 +2555,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     }
                     warn!(%error, "self-update worker failed");
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -4722,6 +4773,124 @@ mod tests {
             UpdateReservation::Started
         );
         assert!(supervisor.update_drain.reserve_work(None).is_none());
+    }
+
+    /// A generation lasts only as long as its broker credential, and its
+    /// connection is closed when it ends. An update waiting for idle outlives
+    /// it, and keeps reporting through the link's next connection.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::too_many_lines)] // one linear request, generation change and receipt
+    async fn update_progress_follows_the_current_connection() {
+        use opengeni_agent_platform::NativePlatform;
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP update progress transport regression: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let observer = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let first_generation = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let next_generation = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let dir = tempfile::tempdir_in("/dev/shm").unwrap();
+        let definition = SupervisorLink::new(
+            "update-progress-generations",
+            Arc::new(NativePlatform::with_root(dir.path())),
+            it::test_credentials(&url),
+        );
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let mut inbound = first_generation.subscribe("progress.in").await.unwrap();
+        let mut replies = observer.subscribe("progress.out").await.unwrap();
+        let mut events = observer.subscribe(link.events_subject()).await.unwrap();
+        observer.flush().await.unwrap();
+        first_generation.flush().await.unwrap();
+        *link.control.write().unwrap() = Some(first_generation.clone());
+
+        // Routed work keeps the update waiting for idle.
+        let routed = supervisor.update_drain.reserve_work(None).unwrap();
+        let operation = uuid::Uuid::new_v4().to_string();
+        let request = ControlRequest {
+            request_id: "update-progress".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::AgentUpdateApply(
+                v1::AgentUpdateApplyRequest {
+                    operation_id: operation.clone(),
+                    target_version: "0.1.0".into(),
+                    channel: "stable".into(),
+                    expected_current_version: "0.0.0".into(),
+                    expected_current_sha256: String::new(),
+                    release_base_url: "http://127.0.0.1:1".into(),
+                },
+            )),
+        };
+        observer
+            .publish_with_reply(
+                "progress.in",
+                "progress.out",
+                request.encode_to_vec().into(),
+            )
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut tasks = JoinSet::new();
+        supervisor
+            .route_message(&link, &first_generation, message, &mut tasks)
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), replies.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let waiting_on = |kinds: &'static [&'static str]| {
+            let operation = operation.clone();
+            move |event: &AgentEvent| {
+                matches!(&event.event, Some(Event::AgentUpdateProgress(p))
+                    if p.operation_id == operation
+                        && p.stage == v1::AgentUpdateStage::WaitingForIdle as i32
+                        && p.error_code == "update_busy_work"
+                        && p.blockers.iter().map(|b| b.kind.as_str()).eq(kinds.iter().copied()))
+            }
+        };
+        assert!(
+            it::wait_for_event(
+                &mut events,
+                Duration::from_secs(5),
+                waiting_on(&["native_request"])
+            )
+            .await
+        );
+
+        // The generation the request arrived on ends and the link reconnects.
+        *link.control.write().unwrap() = None;
+        first_generation.close();
+        *link.control.write().unwrap() = Some(next_generation.clone());
+
+        // What holds the update changes; the update says so on the new connection.
+        let light = supervisor
+            .engine
+            .admit(&"light-job".into(), JobClass::Light, "fixture")
+            .await
+            .unwrap();
+        assert!(
+            it::wait_for_event(
+                &mut events,
+                Duration::from_secs(5),
+                waiting_on(&["native_light_running", "native_request"])
+            )
+            .await,
+            "progress after the request's generation ended must reach the control plane"
+        );
+        assert!(supervisor.update_drain.is_accepted(&operation));
+
+        // Cancel before the work settles: tests must never reach a real apply.
+        supervisor.update_drain.finish_update(&operation);
+        drop(light);
+        drop(routed);
     }
 
     #[cfg(target_os = "linux")]

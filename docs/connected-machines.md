@@ -1599,6 +1599,20 @@ version remains authoritative for current/ahead status; an old version still
 shows the failed attempt and can retry. A reconnect by the same process does not
 terminate its own active update, and superseded processes cannot settle it.
 
+An update outlives the connection its request arrived on: each connection
+lasts only as long as its five-minute broker credential and is closed when it
+ends. The agent reports update progress through its current connection. An
+unfinished update the server has not heard about for 30 minutes (an unanswered
+request after 10) counts as lost: a waiting agent repeats its wait every
+minute and only the download is quieter. Agents before 0.1.161 reported
+through the connection the request arrived on, so progress sent after it ended
+could be lost, and a failed or still-waiting update could read as
+`waiting_for_idle` with no blockers for good. The next heartbeat, or
+**Update now**, replaces a lost update with a
+request for the release promoted now. An agent still carrying the old one
+refuses it as `update_busy_updating` and is asked again after the busy backoff;
+its successor's Hello settles the machine either way.
+
 The running agent captures its executable install path before admitting managed
 updates. Unix apply, rollback/retry, and successor exec use that stable path: a
 late executable lookup can name the old deleted inode after atomic replacement.
