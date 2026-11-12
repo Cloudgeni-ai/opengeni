@@ -2383,7 +2383,7 @@ export function createAppComposition(
       parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
-      let outcome: "ok" | "failed" = "failed";
+      let outcome: "ok" | "failed" | "aborted" = "failed";
       try {
         const response =
           operation === "resolve"
@@ -2426,7 +2426,10 @@ export function createAppComposition(
         // A caller that disconnects aborts the target work through `signal`.
         // That is a client disconnect, not a server failure: answer with the
         // client-gone convention (mcp/request-abort.ts), 499 and no body.
-        if (c.req.raw.signal.aborted) return new Response(null, { status: 499 });
+        if (c.req.raw.signal.aborted) {
+          outcome = "aborted";
+          return new Response(null, { status: 499 });
+        }
         throw error;
       } finally {
         recordWorkspaceToolTargetOperation(routeDeps.observability, {

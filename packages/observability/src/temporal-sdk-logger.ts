@@ -154,11 +154,15 @@ function failureMessageTemplate(message: string): string {
     .slice(0, FAILURE_MESSAGE_MAX_LENGTH);
 }
 
-/** The innermost error in a `cause` chain: a workflow failure wraps the
- * activity failure, which wraps the thrown error that explains it. */
-function deepestCause(error: object): object {
+/** The error that explains a failure: the outermost code-authored error in
+ * its `cause` chain (which usually wraps a driver error), otherwise the
+ * innermost cause, since a workflow failure wraps the activity failure, which
+ * wraps the thrown error. */
+function explainingCause(error: object): object {
   let current = error;
   for (let depth = 0; depth < 8; depth += 1) {
+    const name = reviewedFailureName(current);
+    if (name !== undefined && CODE_AUTHORED_MESSAGE_FAILURE_NAMES.has(name)) return current;
     const cause = ownField(current, "cause");
     if (!cause || typeof cause !== "object") break;
     current = cause;
@@ -167,7 +171,7 @@ function deepestCause(error: object): object {
 }
 
 function failureMessageFacts(error: object): TemporalFailureFacts {
-  const cause = deepestCause(error);
+  const cause = explainingCause(error);
   const message = ownField(cause, "message");
   if (typeof message !== "string" || message.trim() === "") return {};
   const template = failureMessageTemplate(message);

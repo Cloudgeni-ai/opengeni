@@ -109,6 +109,29 @@ test("a code-authored invariant failure logs its message template without identi
   expect(workflow.failureMessageHash).toBe(activity.failureMessageHash);
 });
 
+test("a code-authored wrapper explains a failure instead of the driver error it wraps", () => {
+  class DatabaseTransactionError extends Error {
+    override name = "DatabaseTransactionError";
+  }
+  const postgres = Object.assign(new Error(`duplicate key value ${SENTINEL}`), {
+    name: "PostgresError",
+    severity: "ERROR",
+    code: "23505",
+  });
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    error: new DatabaseTransactionError("Database transaction settlement failed", {
+      cause: postgres,
+    }),
+  });
+  expect(lines[0]!.text).not.toContain(SENTINEL);
+  expect(JSON.parse(lines[0]!.text)).toMatchObject({
+    failureName: "DatabaseTransactionError",
+    failureMessage: "Database transaction settlement failed",
+    sqlState: "23505",
+  });
+});
+
 test("other failure messages are reduced to a stable hash of their template", () => {
   sdkLogger().warn("Activity failed", {
     sdkComponent: "activity",

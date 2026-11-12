@@ -194,6 +194,8 @@ const webAppStateHost: AppStateHost = {
 export function RootRouteComponent() {
   // Providers wrap the rendered page, so they follow the rendered route.
   const pathname = useRouterState({ select: renderedRoutePathname });
+  // Analytics reports the address the person is on, not the route still shown.
+  const locationPathname = useRouterState({ select: (state) => state.location.pathname });
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
@@ -617,7 +619,7 @@ export function RootRouteComponent() {
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
             isPublicAuthRoute={isPublicAuthRoute}
-            pathname={pathname}
+            pathname={locationPathname}
             search={analyticsSearch}
           />
         </Suspense>

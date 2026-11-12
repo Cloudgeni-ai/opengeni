@@ -378,7 +378,13 @@ export async function reconcileSessionTitleOperation(
     const current = await getSessionTitleOperation(db, input);
     // Deleting a chat deletes its title operation; there is nothing left to
     // name or settle, so this is the expected end rather than a failure.
-    if (!current) return { action: "terminal" };
+    if (!current) {
+      service.observability.debug("Session title operation ended with its chat", {
+        operationId: operation.id,
+        errorClass: error instanceof Error ? error.name : "UnknownError",
+      });
+      return { action: "terminal" };
+    }
     if (
       (current?.state === "pending" || current?.state === "responded") &&
       isRetryableTitleAdmissionError(error)

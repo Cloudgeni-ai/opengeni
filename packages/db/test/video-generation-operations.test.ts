@@ -432,6 +432,18 @@ describe("durable video generation operation", () => {
         "service:video-generation-reconciliation",
       );
       expect(reconciled.status).toBe("ready");
+      if (personal) {
+        // Without the owner, a service actor still cannot see the Only-me chat's video.
+        await expect(
+          withSessionRlsActorContext(
+            {
+              subjectId: "service:video-generation-reconciliation",
+              privateFileOwnerSubjectId: settled.operation.privateFileOwnerSubjectId ?? null,
+            },
+            () => mediaGenerationResultForStoredOperation(client.db, settled.operation),
+          ),
+        ).rejects.toThrow("Completed video generation lost its retained artifact");
+      }
       expect(
         (
           await withOwner(() =>

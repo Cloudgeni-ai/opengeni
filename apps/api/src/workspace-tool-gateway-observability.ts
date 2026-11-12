@@ -19,7 +19,7 @@ export function recordWorkspaceToolTargetOperation(
   observability: Observability | null | undefined,
   input: {
     operation: "resolve" | "invoke" | "target-approvals" | "manifest";
-    outcome: "ok" | "failed";
+    outcome: "ok" | "failed" | "aborted";
     durationSeconds: number;
   },
 ): void {
