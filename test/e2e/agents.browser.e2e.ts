@@ -74,7 +74,8 @@ describe("agents in the browser", () => {
 
   test("an agent's page shows how to call it in each linked Slack workspace", async () => {
     const page = await open("agent");
-    await page.getByText("@Opengeni Release manager").waitFor();
+    // One handle per linked Slack workspace, so wait on the first.
+    await page.getByText("@Opengeni Release manager").first().waitFor();
     // There is no switch to make it available: it is, wherever it can be.
     expect(await page.getByRole("switch", { name: /^Available in/u }).count()).toBe(0);
     // It is in every linked Slack workspace at once, each with its own intros.
