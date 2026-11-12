@@ -46,6 +46,22 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
   type ChildEnvironment = Record<string, string | undefined>;
 
+  /** The default chat's own Git credential directory on a box. */
+  function chatGitDirectory(home: string): string {
+    return join(home, ".opengeni", "git-credentials", "sessions", "default");
+  }
+
+  /** What a chat's commands carry: its own credential directory and broker
+   *  routes, which are no longer in the box's global Git config. */
+  function chatGitEnv(home: string): ChildEnvironment {
+    const directory = chatGitDirectory(home);
+    return {
+      HOME: home,
+      OPENGENI_GIT_SESSION_DIR: directory,
+      GIT_CONFIG_PARAMETERS: `'include.path=${join(directory, "http-broker.gitconfig")}'`,
+    };
+  }
+
   /** A sandbox-like environment: isolated HOME plus the sandbox provisioning
    *  target the runtime's lifecycle hooks set. `undefined` removes a name. */
   function isolatedProcessEnv(overrides: ChildEnvironment = {}): NodeJS.ProcessEnv {
@@ -300,6 +316,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         join(
           tokenDirectory(home),
           "git-credentials",
+          // A command that names no chat writes the default chat directory.
+          "sessions",
+          "default",
           `${gitCredentialBindingHash("hooked")}-token`,
         );
       // A sandbox-shaped session: the virtual /workspace maps onto a temporary
@@ -920,7 +939,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       );
       expect(run.status).toBe(0);
 
-      const credentialDir = join(home, ".opengeni", "git-credentials");
+      const credentialDir = join(home, ".opengeni", "git-credentials", "sessions", "default");
       expect(
         readFileSync(
           join(credentialDir, `${gitCredentialBindingHash("installation/one")}-token`),
@@ -1022,7 +1041,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { HOME: home },
+          env: chatGitEnv(home),
           encoding: "utf8",
         }).trim(),
       ).toBe("https://broker.example.test/git/session/binding/private.git");
@@ -1039,7 +1058,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(fill()).toContain("password=broker-bearer-one");
       expect(existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token"))).toBe(false);
       expect(
-        readFileSync(join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"), "utf8"),
+        readFileSync(join(chatGitDirectory(home), "http-broker.gitconfig"), "utf8"),
       ).not.toContain("broker-bearer-one");
 
       expect(() =>
@@ -1074,7 +1093,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(fill()).toContain("password=broker-bearer-two");
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { HOME: home },
+          env: chatGitEnv(home),
           encoding: "utf8",
         }).trim(),
       ).toBe("https://broker.example.test/git/session/binding/private.git");
@@ -1095,13 +1114,11 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ).toBe(0);
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { HOME: home },
+          env: chatGitEnv(home),
           encoding: "utf8",
         }).trim(),
       ).toBe("https://gitlab.com/acme/private.git");
-      expect(
-        readFileSync(join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"), "utf8"),
-      ).toBe("");
+      expect(readFileSync(join(chatGitDirectory(home), "http-broker.gitconfig"), "utf8")).toBe("");
       expect(fill("gitlab.com", "acme/private.git")).toContain("password=direct-contained-token");
       const staleBrokerFill = fill();
       expect(staleBrokerFill).toContain("password=\n");
@@ -1321,7 +1338,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const effectiveUrl = (url: string) =>
         execFileSync("git", ["ls-remote", "--get-url", url], {
           cwd: root,
-          env: { HOME: home },
+          env: chatGitEnv(home),
           encoding: "utf8",
         }).trim();
       // The brokered repositories, and paths below them, still reach the broker.
@@ -2678,9 +2695,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       if (Bun.which("flock")) {
         // Serialised per box: each preparation replaced the helper chain whole.
         expect(helpers).toEqual(["", helper]);
-        expect(globalConfig("--get-all", "include.path")).toEqual([
-          join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"),
-        ]);
+        // Broker routes are per chat, never in the box's global config.
+        expect(() => globalConfig("--get-all", "include.path")).toThrow();
+        expect(existsSync(join(chatGitDirectory(home), "http-broker.gitconfig"))).toBe(true);
       } else {
         // Unserialised (no flock): writes still all land, and the chain after
         // the last reset is only our helper.

@@ -337,6 +337,24 @@ the bearer through a private sandbox editor/file ingress; the token-free
 lifecycle command only atomically moves those bytes into the stable binding
 file, so the bearer never enters command text or process arguments.
 
+Several chats can share one sandbox (a parent and the workers it starts, for
+example), and each has its own bearer. The binding file, the broker
+`insteadOf` routes, the credential helper and the `gh` wrapper logic therefore
+live in one directory per chat,
+`~/.opengeni/git-credentials/sessions/<key>` (`key` is a hash of the chat id).
+Every command the runtime runs for a chat exports that directory as
+`OPENGENI_GIT_SESSION_DIR` and adds the chat's routes to Git through
+`GIT_CONFIG_PARAMETERS`, which Git passes on to the Git processes it starts
+(`packages/runtime/src/sandbox/git-session.ts`). The routes are never in the
+box's global Git config: Git takes the first of two equally long `insteadOf`
+rules, so a global rule would beat the chat's own. The box-wide credential
+helper and the `git`, `gh`, `glab` and `az` wrappers only dispatch to the
+selected directory; a process outside any chat (a terminal on the box) uses
+`sessions/latest`, the chat whose setup ran last. Renewal writes only into its
+own chat's directory, and each setup removes chat directories unused for a
+day. Paths are not an authorization boundary: the server checks every
+bearer's own chat and attempt.
+
 The broker permits only smart-HTTP discovery, upload-pack, and receive-pack.
 Before every upstream request it revalidates the exact accepted attempt,
 connection/grant generations, current repository selection, live GitHub user
@@ -406,7 +424,7 @@ person, `gh` behaves as before. In gateway mode the wrapper starts a small
 local proxy for that one command and points `gh` at it with a private,
 temporary config (`http_unix_socket`). The proxy sends `api.github.com` and
 `uploads.github.com` requests to the API's gateway with the bearer read fresh
-from the binding file; requests to other hosts (for example redirects to
+from the chat's own binding file; requests to other hosts (for example redirects to
 download logs or archives) go direct, without credentials. Because the
 checkout's remote stays `https://github.com/<owner>/<repo>`, `gh` resolves the
 repository as usual. `gh repo clone` and the Git commands `gh` runs clone and

@@ -1021,6 +1021,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // Managed boxes receive the bearer through their protected per-session
         // token file. Connected Machines use transient per-exec delivery above,
         // so they must not run the file-seeding lifecycle hook.
+        // Each chat on a shared box keeps its own Git credential files.
+        ...(activeSandboxBackend !== "selfhosted"
+          ? { gitCredentialSessionId: input.sessionId }
+          : {}),
         ...(activeSandboxBackend !== "selfhosted" && codemodeToken
           ? {
               codemodeTokenSeed: codemodeToken,

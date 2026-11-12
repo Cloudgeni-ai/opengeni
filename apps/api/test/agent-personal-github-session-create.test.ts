@@ -79,7 +79,10 @@ function githubRepository(fullName: string, id: string, push: boolean) {
   };
 }
 
-async function personWithYourGitHub(allRepositories: "read" | "write" | null) {
+async function personWithYourGitHub(
+  allRepositories: "read" | "write" | null,
+  options: { withoutAttempt?: boolean } = {},
+) {
   if (!shared || !dbClient) throw new Error("PostgreSQL test database unavailable");
   const db = dbClient.db;
   const userId = `agent-personal-${crypto.randomUUID()}`;
@@ -312,8 +315,9 @@ async function personWithYourGitHub(allRepositories: "read" | "write" | null) {
     metadata: {
       sessionId: root.id,
       turnId: claimed.turn.id,
-      attemptId,
-      executionGeneration: claimed.turn.executionGeneration,
+      ...(options.withoutAttempt
+        ? {}
+        : { attemptId, executionGeneration: claimed.turn.executionGeneration }),
       firstPartyMcpTools: TOOLS,
     },
   });
@@ -588,6 +592,22 @@ describe("agent-created workers act as the person (real PostgreSQL)", () => {
       repositoryCount: 1,
       allRepositories: { enabled: true, access: "write" },
     });
+  });
+
+  test("All my repositories without an agent attempt says so, not reconnect", async () => {
+    if (!shared) return;
+    const person = await personWithYourGitHub("write", { withoutAttempt: true });
+    const created = await person.child([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/elsewhere",
+        ref: "main",
+        connectionType: "github_personal",
+      },
+    ]);
+    expect("error" in created && created.error).toContain("has no running agent attempt");
+    expect("error" in created && created.error).not.toContain("reconnect");
+    expect(person.githubCalls).toEqual([]);
   });
 
   test("an enterprise managed user's own repositories (owner with an underscore) work", async () => {
