@@ -11,6 +11,7 @@ import { ModelsRefreshControl } from "./models-refresh-control";
 import {
   ClaudeUsage,
   ClaudeUsageReadout,
+  claudeUsageCreditsChip,
   claudeUsageReadings,
   claudeUsageReportedAt,
   useClaudeUsage,
@@ -859,3 +860,43 @@ for (const cold of [true, false]) {
     expect(container.textContent).not.toContain("75% left");
   });
 }
+
+test("the account page says whether usage credits are on, off or not reported", async () => {
+  const state = (extraUsage: ClaudeSubscriptionUsage["extraUsage"]): ClaudeUsageState => ({
+    value: {
+      ...usage(),
+      refreshStatus: "available",
+      ...(extraUsage === undefined ? {} : { extraUsage }),
+    },
+    loading: false,
+    refreshing: false,
+    error: false,
+    canRefresh: false,
+    refresh: async () => {},
+  });
+  const reported = {
+    state: "enabled" as const,
+    isEnabled: false,
+    monthlyLimit: 5000,
+    usedCredits: 5000,
+    utilization: 100,
+    currency: "USD",
+    disabledReason: null,
+  };
+  await act(async () => root.render(<ClaudeUsage state={state(reported)} />));
+  expect(container.textContent).toContain(
+    "Usage credits are on: Claude can bill usage past the plan limits to this account. $50.00 of $50.00 used this month.",
+  );
+  await act(async () =>
+    root.render(<ClaudeUsage state={state({ ...reported, state: "not_configured" })} />),
+  );
+  expect(container.textContent).toContain("Usage credits are off.");
+  for (const unknown of [undefined, null, { ...reported, state: null }]) {
+    await act(async () => root.render(<ClaudeUsage state={state(unknown)} />));
+    expect(container.textContent).toContain("Claude hasn't reported whether usage credits are on.");
+    expect(container.textContent).not.toContain("Usage credits are off");
+  }
+  expect(claudeUsageCreditsChip({ ...reported, state: "disabled" })).toBeNull();
+  expect(claudeUsageCreditsChip(null)).toBeNull();
+  expect(claudeUsageCreditsChip(reported)).not.toBeNull();
+});

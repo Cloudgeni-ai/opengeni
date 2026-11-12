@@ -1,9 +1,11 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useId, useRef } from "react";
+import { claudeUsageCreditsState, type ClaudeExtraUsage } from "@opengeni/contracts";
+import { useCallback, useEffect, useId, useRef, type ReactNode } from "react";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { RelativeTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
 import { UsageMeterGroup, type UsageWindowReading } from "@opengeni/react/ui/usage-meter";
 import {
@@ -364,6 +366,66 @@ export function ClaudeUsage({
           Sign in again
         </Button>
       ) : null}
+      {value ? <ClaudeUsageCreditsNote extraUsage={value.extraUsage} /> : null}
     </DetailSection>
+  );
+}
+
+/** Why an account row says "Usage credits on". */
+const USAGE_CREDITS_ON =
+  "Usage credits are on: Claude can bill usage past the plan limits to this account.";
+
+/**
+ * An account row's chip while its paid usage credits are on. Off and
+ * unknown say nothing on the row; the account page says which.
+ */
+export function claudeUsageCreditsChip(extraUsage: ClaudeExtraUsage | null | undefined): ReactNode {
+  return claudeUsageCreditsState(extraUsage) === "on" ? (
+    <MetaChip variant="outline" title={USAGE_CREDITS_ON}>
+      {/* Short on phones, where the account's name needs the room. */}
+      <span className="sm:hidden" aria-hidden="true">
+        Credits on
+      </span>
+      <span className="max-sm:sr-only">Usage credits on</span>
+    </MetaChip>
+  ) : null;
+}
+
+function money(minorUnits: number, currency: string): string | null {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(
+      minorUnits / 100,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** This month's spend against the cap, when Claude reported both. */
+function usageCreditsSpend(extraUsage: ClaudeExtraUsage | null | undefined): string | null {
+  if (!extraUsage?.currency || extraUsage.usedCredits === null) return null;
+  const used = money(extraUsage.usedCredits, extraUsage.currency);
+  const cap =
+    extraUsage.monthlyLimit === null ? null : money(extraUsage.monthlyLimit, extraUsage.currency);
+  if (!used) return null;
+  return cap ? `${used} of ${cap} used this month.` : `${used} used this month.`;
+}
+
+/** The account page's usage-credits sentence: on, off, or not reported yet. */
+export function ClaudeUsageCreditsNote({
+  extraUsage,
+}: {
+  extraUsage: ClaudeExtraUsage | null | undefined;
+}) {
+  const state = claudeUsageCreditsState(extraUsage);
+  const spend = state === "on" ? usageCreditsSpend(extraUsage) : null;
+  return (
+    <p className="mt-3 text-xs leading-4.5 text-fg-muted">
+      {state === "on"
+        ? `${USAGE_CREDITS_ON}${spend ? ` ${spend}` : ""}`
+        : state === "off"
+          ? "Usage credits are off."
+          : "Claude hasn't reported whether usage credits are on."}
+    </p>
   );
 }
