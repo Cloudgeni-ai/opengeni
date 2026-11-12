@@ -6150,6 +6150,24 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/interaction-events/stream",
       "sdk": [
         "OpenGeniClient.openWorkspaceInteractionRevisionStream"
@@ -11916,7 +11934,8 @@
         "$.availability": "ref(AgentSlackAvailability)! null",
         "$.connectionId": "string!",
         "$.slackTeamId": "string!",
-        "$.slackTeamName": "string! null"
+        "$.slackTeamName": "string! null",
+        "$.unavailable": "enum! null=[\"\\\"agent_child_chat\\\"\",\"\\\"agent_limit_reached\\\"\",\"\\\"agent_not_found\\\"\",\"\\\"agent_requires_private_chat\\\"\",\"\\\"agent_slack_always_available\\\"\",\"\\\"agent_slack_name_invalid\\\"\",\"\\\"agent_slack_name_taken\\\"\",\"\\\"agent_slack_personal_workspace\\\"\",\"\\\"agent_slack_requires_workspace_visibility\\\"\",\"\\\"agent_slack_single_install\\\"\",\"\\\"agent_version_conflict\\\"\",\"\\\"slack_bot_unavailable\\\"\"]"
       }
     },
     "AgentSlackIntroRequest": {
@@ -38951,6 +38970,7 @@
       "createMemoryRecordingChunkStore": "value",
       "defaultSystemAudioSource": "value",
       "desktopSystemAudioSource": "value",
+      "discardLocalRecordingsOf": "value",
       "displaySystemAudioSource": "value",
       "LiveFetch": "type",
       "LiveMediaTrack": "type",
@@ -38964,6 +38984,7 @@
       "LiveTranscriptTransport": "type",
       "LiveWebSocket": "type",
       "LiveWebSocketConstructor": "type",
+      "localRecordingsOf": "value",
       "OpenGeniRecordingsClient": "value",
       "OpenGeniRecordingsTransport": "type",
       "preferredRecordingMimeType": "value",
@@ -39164,7 +39185,8 @@
       "TeamsInstallOptions": "type",
       "TeamsLinkSignInStart": "type",
       "TeamsMicrosoftSignInResult": "type",
-      "TeamsMicrosoftSignInStart": "type"
+      "TeamsMicrosoftSignInStart": "type",
+      "TeamsReach": "type"
     },
     "@opengeni/sdk/tenant-workspaces": {
       "createWorkspaceIdResolver": "value",
@@ -40222,8 +40244,11 @@
       "BrowserEditableArtifactWorkbenchProps": "type",
       "ChatInteractiveBlock": "value",
       "ChatInteractiveBlockProps": "type",
+      "configureContentHosting": "value",
+      "ContentHostingConfig": "type",
       "DEFAULT_ARTIFACT_LABELS": "value",
       "DeferredChatMedia": "value",
+      "displayImageSrc": "value",
       "DocumentArtifactSurface": "value",
       "DocumentArtifactSurfaceProps": "type",
       "DocumentCommit": "type",
@@ -40327,6 +40352,7 @@
       "SpreadsheetSelection": "type",
       "SpreadsheetViewport": "type",
       "useArtifactLabels": "value",
+      "useDisplayImageSrc": "value",
       "useRetainedImageObjectUrl": "value"
     },
     "@opengeni/react/artifacts/document": {
@@ -41068,6 +41094,11 @@
       "MeetingRecorderStore": "type",
       "MeetingRecorderStoreProvider": "value",
       "MeetingStartRequest": "type",
+      "prepareRecordingsForSignOut": "value",
+      "recordingOwnerKey": "value",
+      "setSignOutRecordingsPrompt": "value",
+      "SignOutRecordingsChoice": "type",
+      "SignOutRecordingsPrompt": "type",
       "useMeetingRecorder": "value",
       "useMeetingRecorderLostTrack": "value",
       "useMeetingRecorderState": "value",
@@ -41249,6 +41280,7 @@
       "ImportRecordingAudioInput": "type",
       "interleaveUnrecordedMarks": "value",
       "languageName": "value",
+      "LiveRecordingCapture": "type",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
       "meetingHereStatus": "value",
@@ -41259,8 +41291,14 @@
       "meetingTitle": "value",
       "meetingUploadFailure": "value",
       "ownerLiveLaneName": "value",
+      "prepareRecordingsForSignOut": "value",
+      "recordingOwnerKey": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
+      "registerLiveRecordingCapture": "value",
+      "setSignOutRecordingsPrompt": "value",
+      "SignOutRecordingsChoice": "type",
+      "SignOutRecordingsPrompt": "type",
       "speakerColorSlots": "value",
       "speakerDisplayName": "value",
       "speakerIsNamed": "value",

@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useState, type ReactNode } from
 
 import { cn } from "../lib/cn";
 import { cachedLogoFit, measureLogoFit, type LogoFit } from "../logo-fit";
+import { displayImageSrc } from "../lib/content-hosting";
 
 /* ----------------------------------------------------------------------------
    LogoTile (design brief, "Also build").
@@ -181,7 +182,7 @@ function LogoImage({
     >
       <img
         ref={measureIfLoaded}
-        src={src}
+        src={displayImageSrc(src)}
         alt=""
         loading="lazy"
         decoding="async"

@@ -37,7 +37,11 @@ import {
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
-import { textModelCapabilities } from "@opengeni/core/transcription-service";
+import {
+  createSpeechToTextDeployment,
+  createTranscriptionService,
+  textModelCapabilities,
+} from "@opengeni/core/transcription-service";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -1580,7 +1584,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     ).rejects.toMatchObject({
       type: "provider_network",
     });
-    expect(first.warnings).toEqual([]);
+    // The failed request is logged with what the provider said, nothing else.
+    expect(first.warnings).toEqual(["Transcription provider request failed"]);
     lost = false;
     expect(
       await activities(storage, provider).activities.transcribeRecordingVersion(recording.input),
@@ -1910,6 +1915,17 @@ function dictationActivities(
   storage: ReturnType<typeof memoryStorage>,
   transcribe: TranscriptionService["transcribe"],
 ) {
+  return dictationActivitiesWith(storage, {
+    limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+    available: () => true,
+    transcribe,
+  });
+}
+
+function dictationActivitiesWith(
+  storage: ReturnType<typeof memoryStorage>,
+  service: TranscriptionService,
+) {
   const services = async () =>
     ({
       db: client!.db,
@@ -1918,11 +1934,6 @@ function dictationActivities(
       observability: { warn: () => undefined, info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;
-  const service: TranscriptionService = {
-    limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
-    available: () => true,
-    transcribe,
-  };
   return createRecordingActivities(services, {
     registry: createRecordingTranscriptionProviderRegistry([]),
     loadApiKey: async () => null,
@@ -2023,6 +2034,94 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     ).rejects.toThrow();
     // Already gone is done.
     expect(await run.expireDictation(dictation.input)).toEqual({ deleted: 0, purged: false });
+  });
+
+  test("a provider request that hangs for a short dictation is dropped and sent again at once, and the dictation completes", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage);
+    const settings = testSettings({ voiceInputFfmpegPath: ffmpegPath });
+    const sent: Array<{ requestId: string | undefined; signal: AbortSignal }> = [];
+    const provider: RecordingTranscriptionProvider = {
+      id: "voice-one",
+      name: "Voice one",
+      funding: "deployment",
+      // Documents answering in a tenth of the audio's length and retrying
+      // after 20 ms; the real provider documents real time and seconds.
+      requestTiming: { realTimeFactor: 0.1, retryDelaysMilliseconds: [20] },
+      models: [
+        {
+          model: "voice-input",
+          name: "Voice input",
+          capabilities: textModelCapabilities({
+            maxDurationSeconds: 600,
+            maxFileBytes: 25_000_000,
+          }),
+          usdPerHour: null,
+        },
+      ],
+      async transcribe(request) {
+        const signal = request.signal!;
+        sent.push({ requestId: request.scope?.requestId, signal });
+        if (sent.length === 1) {
+          // Accepted and never answered: only an abort ends it.
+          return await new Promise<never>((_, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        return {
+          languages: ["en"],
+          audioMilliseconds: 3_000,
+          diarized: false,
+          words: [],
+          text: "Send the numbers.",
+        };
+      },
+    };
+    const warnings: Array<{ message: string; attributes: Record<string, string | number> }> = [];
+    const run = dictationActivitiesWith(
+      storage,
+      createTranscriptionService({
+        settings,
+        db: client.db,
+        deployment: createSpeechToTextDeployment(
+          { settings },
+          { providers: [provider], isEuOnly: async () => false },
+        ),
+        maxDurationSeconds: 600,
+        warn: (message, attributes) => warnings.push({ message, attributes }),
+      }),
+    );
+    const startedAt = performance.now();
+    expect(await run.transcribeRecordingVersion(dictation.input)).toEqual({
+      outcome: "complete",
+      expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS,
+    });
+    // Three seconds of audio is ready in well under three seconds, though
+    // its first request never answered.
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    const attempt = `${dictation.input.versionId}:a1:0`;
+    expect(sent.map((request) => request.requestId)).toEqual([attempt, `${attempt}:r1`]);
+    expect(sent[0]!.signal.aborted).toBe(true);
+    expect(warnings).toEqual([
+      {
+        message: "Transcription provider request failed",
+        attributes: expect.objectContaining({
+          provider: "voice-one",
+          model: "voice-input",
+          attempt: 1,
+          outcome: "retrying",
+          reason: "overdue",
+          delayMs: 20,
+          correlationId: attempt,
+        }),
+      },
+    ]);
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...dictation.actor,
+      recordingId: dictation.input.recordingId,
+    });
+    expect(page.segments.map((segment) => segment.text)).toEqual(["Send the numbers."]);
   });
 
   test("a dictation over two minutes is cut into WAV pieces, heard at once and in order", async () => {

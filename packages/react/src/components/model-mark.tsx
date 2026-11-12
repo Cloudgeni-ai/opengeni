@@ -11,6 +11,7 @@ import { useState, type ReactNode, type SVGProps } from "react";
 import { cn } from "../lib/cn";
 import { ClaudeMark } from "./claude-mark";
 import { GrokMark } from "./grok-mark";
+import { displayImageSrc } from "../lib/content-hosting";
 
 /** ChatGPT / OpenAI mark (Simple Icons path), currentColor like the other marks. */
 export function ChatGptMark(props: SVGProps<SVGSVGElement>) {
@@ -50,7 +51,7 @@ export function ModelMark(props: {
   const mark =
     logoUrl && logoUrl !== failedUrl ? (
       <img
-        src={logoUrl}
+        src={displayImageSrc(logoUrl)}
         alt=""
         className="size-full object-contain"
         referrerPolicy="no-referrer"

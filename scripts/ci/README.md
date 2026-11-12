@@ -1,3 +1,30 @@
+# PR browser and E2E selection
+
+`pr-fast-plan.ts` also chooses which of Batch's E2E files and browser
+acceptance lanes PR CI runs (`docs/main-ci.md`, "PR CI"). It starts from the
+impact plan, so the PR never runs a test Batch would not, and records its
+choice in the plan's `prBrowserE2e` summary:
+
+- authored tests first: a changed E2E or browser acceptance test, or one that
+  imports (transitively, through relative imports outside workspaces) a
+  changed helper or fixture. A workspace test-support file those imports
+  reach (under a package's `test/`, or named `*fixture(s)`) also counts, but
+  is not followed further. They select their browser acceptance lanes, and
+  E2E files use up to `PR_E2E_BUDGET_SECONDS`; authored E2E files over the
+  budget are named in a warning annotation;
+- then E2E tests whose own or declared workspaces a changed file belongs to,
+  cheapest first, within `PR_E2E_DIRECT_BUDGET_SECONDS` (about one shard);
+- shard count is the estimate over `PR_E2E_SHARD_TARGET_SECONDS`, at most
+  `PR_E2E_SHARD_CAP`. The target is half the shard deadline, because a shard
+  has measured up to about 1.6 times its estimate; the whole budget is the
+  cap times the target. Estimates come from `e2e-shard-profile.json`; without
+  a usable profile a file counts as one minute.
+
+Batch impact is transitive, so most product PRs select nearly every browser
+test there. Running all of them on each PR push would add about eleven jobs
+per run; this selection keeps the PR cost near one job per run. Tests that
+do not fit are listed as deferred and still run in Batch.
+
 # Test shard timing profiles
 
 `run-test-shard.ts` uses deterministic longest-first placement, then runs each
@@ -14,6 +41,9 @@ content, dependency lock, Bun pin and browser runner; each file's weight is its
 lower-median observed interval, and `fileSources` names the job that observed
 it. These are planning observations, not performance guarantees or
 cross-source efficacy claims.
+Since the shard job moved to the reusable `ci-e2e-shards.yml`, Batch names it
+`Impacted E2E / Impacted E2E shard N/M`; PR CI's
+`PR impacted E2E / Impacted E2E shard N/M` runs a subset and is not a source.
 
 The profile is used only when its schema, tier, units and platform/architecture
 match; a missing or malformed profile falls back to deterministic source-byte

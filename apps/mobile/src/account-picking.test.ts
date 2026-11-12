@@ -116,6 +116,18 @@ mock.module("@/app-link-registry", () => ({ openLinkFromApp: () => undefined }))
 mock.module("@/feedback/recent-errors", () => ({ recordingRequests: (each: unknown) => each }));
 mock.module("@/voice-commands", () => ({ forgetVoiceCommands: async () => undefined }));
 mock.module("@/web-sign-in", () => ({ signInThroughWeb: async () => webSignIn }));
+// What the person answers about recordings still uploading, and what was removed.
+let recordingsChoice: "none" | "wait" | "discard" = "none";
+const recordingSteps: string[] = [];
+mock.module("@/sign-out-recordings", () => ({
+  prepareAccountRecordingsForSignOut: async (id: string, ask: boolean) => {
+    recordingSteps.push(`prepare:${id}:${ask ? "ask" : "discard"}`);
+    return recordingsChoice !== "wait";
+  },
+  forgetAccountRecordings: (id: string) => {
+    recordingSteps.push(`forget:${id}`);
+  },
+}));
 
 const { AccountProvider, useAccount, usePickAccount } = await import("./account");
 registerDom();
@@ -138,6 +150,8 @@ async function mount(
   writeGate = null;
   webSignIn = { kind: "cancelled" };
   signedInSubject = "user:work";
+  recordingsChoice = "none";
+  recordingSteps.length = 0;
   const probe = {} as Probe;
   function Read() {
     probe.state = useAccount();
@@ -663,6 +677,39 @@ test("a retry from the sheet makes the readable account the one in use", async (
     expect(outcome).toBe("signIn");
     expect(probe.state.account?.id).toBe("personal");
     expect(probe.state.status).toBe("ready");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("signing out asks about recordings still uploading: waiting keeps the account, discarding removes them", async () => {
+  const { probe, view } = await mount(
+    { accounts: [work, personal], activeId: "work" },
+    { work: "ogapp_work", personal: "ogapp_personal" },
+  );
+  try {
+    recordingsChoice = "wait";
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await probe.state.signOut("work");
+      await flush();
+    });
+    expect(result).toBe(false);
+    expect(recordingSteps).toEqual(["prepare:work:ask"]);
+    expect(tokenWrites).toEqual([]);
+    expect(probe.state.accounts.map((each) => each.id)).toEqual(["work", "personal"]);
+
+    recordingsChoice = "discard";
+    recordingSteps.length = 0;
+    await act(async () => {
+      result = await probe.state.signOut("work", { askAboutRecordings: false });
+      await flush();
+    });
+    expect(result).toBe(true);
+    // Asked before anything changed; the folder goes once the account is gone.
+    expect(recordingSteps).toEqual(["prepare:work:discard", "forget:work"]);
+    expect(tokenWrites).toEqual(["forget:work"]);
+    expect(probe.state.accounts.map((each) => each.id)).toEqual(["personal"]);
   } finally {
     await view.unmount();
   }

@@ -696,6 +696,12 @@ const SettingsSchema = z.object({
   // Google Calendar shares the Gmail OAuth client; enable once its consent screen lists the Calendar scopes.
   googleCalendarEnabled: EnvBoolean.default(false),
   microsoftTeamsToolsEnabled: EnvBoolean.default(false),
+  // Pre-registered multi-tenant Microsoft Entra app for Microsoft Dynamics MCP
+  // servers (Dataverse/Dynamics 365 Sales; Finance & Operations behind its own
+  // flag). Microsoft offers no dynamic client registration for these servers.
+  microsoftDynamicsClientId: z.string().optional(),
+  microsoftDynamicsClientSecret: z.string().optional(),
+  microsoftDynamicsFinanceOperationsEnabled: EnvBoolean.optional(),
   microsoftTeamsAllowedWorkspaceIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -783,6 +789,14 @@ const SettingsSchema = z.object({
   // Lets a Microsoft 365 Global or Teams Administrator of an admitted tenant
   // connect it from Teams without an operator allowlist entry.
   teamsBotSelfServeSetupEnabled: EnvBoolean.default(false),
+  // Teams 1:1 chats reach every workspace of the connected organization the
+  // linked person can start work in (switch, "in <Workspace>: …", agents by
+  // name), as Slack routing does, within the organization admin's "Available
+  // in Opengeni" setting, and any active full member of that organization may
+  // link. Off keeps the installation's workspace and the person's Personal
+  // workspace. Turn on only once no previous-release replica serves traffic.
+  // Env: OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED.
+  teamsWorkspaceRoutingEnabled: EnvBoolean.default(false),
   teamsBotClientId: z.string().uuid().optional(),
   teamsBotClientSecret: z.string().min(1).optional(),
   teamsBotTenantId: z.string().uuid().optional(),
@@ -2361,6 +2375,10 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Owners and admins confirm admin changes in a browser session confirmed
+  // with a passkey (CASA 3.3.1). Off by default; production sets required.
+  // Applies only where passkey sign-in is offered.
+  adminPasskeyStepUp: z.enum(["off", "required"]).default("off"),
   // URL schemes the native app may receive its sign-in code on
   // (`<scheme>://auth/callback`). A host shipping its own build of the app
   // adds its scheme here.
@@ -6055,6 +6073,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
     googleCalendarEnabled: optional("OPENGENI_GOOGLE_CALENDAR_ENABLED"),
     microsoftTeamsToolsEnabled: optional("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED"),
+    microsoftDynamicsClientId: optional("OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID"),
+    microsoftDynamicsClientSecret: optional("OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET"),
+    microsoftDynamicsFinanceOperationsEnabled: optional(
+      "OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED",
+    ),
     microsoftTeamsAllowedWorkspaceIds: optional("OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS"),
     teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
     teamsBotAllowedTenantIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS"),
@@ -6062,6 +6085,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     teamsBotAllowedGroupChatIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS"),
     teamsBotSetupAdminIds: optional("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS"),
     teamsBotSelfServeSetupEnabled: optional("OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED"),
+    teamsWorkspaceRoutingEnabled: optional("OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED"),
     teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
     teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),
     teamsBotTenantId: optional("OPENGENI_TEAMS_BOT_TENANT_ID"),
@@ -6629,6 +6653,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    adminPasskeyStepUp: optional("OPENGENI_ADMIN_PASSKEY_STEP_UP"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined
         ? undefined
@@ -12751,6 +12776,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when OPENGENI_INTEGRATIONS_ENABLED=true outside local/test",
       );
     }
+  }
+  if (
+    Boolean(settings.microsoftDynamicsClientId?.trim()) !==
+    Boolean(settings.microsoftDynamicsClientSecret?.trim())
+  ) {
+    throw new Error(
+      "OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID and OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET must be configured together",
+    );
   }
   if (Boolean(settings.slackClientId) !== Boolean(settings.slackClientSecret)) {
     throw new Error(

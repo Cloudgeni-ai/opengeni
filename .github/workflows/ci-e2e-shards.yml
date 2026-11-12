@@ -1,0 +1,113 @@
+name: Impacted E2E shards
+
+# One job definition for the impacted E2E lane. ci.yml (main and merge-batcher
+# batches) runs the full impacted set; pr-ci.yml runs the PR's capped subset
+# (scripts/ci/pr-fast-plan.ts), so a PR's own deterministic E2E failure shows
+# on the PR instead of failing a whole batch.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to check out and test.
+        required: true
+        type: string
+      plan_artifact:
+        description: Artifact of this run holding impact-plan.json; its e2eTests are run.
+        required: true
+        type: string
+      matrix:
+        description: JSON list of {index, number, total} shards.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-shards:
+    name: Impacted E2E shard ${{ matrix.number }}/${{ matrix.total }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(inputs.matrix) }}
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download exact impact plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.plan_artifact }}
+
+      - name: Stabilize Ubuntu package downloads
+        run: |
+          for source_file in \
+            /etc/apt/apt-mirrors.txt \
+            /etc/apt/sources.list \
+            /etc/apt/sources.list.d/ubuntu.sources; do
+            if [[ -f "$source_file" ]]; then
+              sudo sed -i \
+                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                "$source_file"
+            fi
+          done
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
+
+      # Firefox is included because the impact plan can select the artifact
+      # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts). WebKit is
+      # included because multi-engine product E2E files such as the Gateway
+      # settings acceptance launch it directly. A Chromium-only install makes
+      # either class fail before exercising application behavior.
+      - name: Install pinned browser runtimes
+        uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
+        with:
+          browsers: chromium firefox webkit
+
+      - name: Run exactly the impacted E2E tests
+        timeout-minutes: 13
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name e2e-${{ matrix.number }}
+          --output ci-profile/e2e-${{ matrix.number }}.json
+          --timeout-seconds 720
+          -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e
+          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+          --file-profile ci-profile/e2e-${{ matrix.number }}-files.json
+
+      - name: Upload E2E resource profile on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-profile-e2e-${{ matrix.number }}
+          path: |
+            ci-profile/e2e-${{ matrix.number }}.json
+            ci-profile/e2e-${{ matrix.number }}-files.json
+          if-no-files-found: ignore
+          retention-days: 14

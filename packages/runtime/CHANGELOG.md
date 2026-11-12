@@ -1,5 +1,57 @@
 # @opengeni/runtime
 
+## 6.17.0
+
+### Minor Changes
+
+- 668c5ed: Add a Microsoft Dynamics connection. Dynamics 365 Sales and other Dataverse environments sign in with Microsoft Entra ID through a deployment-registered app (`OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID` / `_CLIENT_SECRET`) and get generic Dataverse tools over the environment's Web API: list and describe tables, OData and FetchXML queries, and create, update and delete records (changes ask first by default). Finance and Operations uses Microsoft's ERP MCP server behind `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED`.
+
+### Patch Changes
+
+- 65809d3: A model stream that ends with a temporary provider server error now retries the same turn instead of failing it. Azure OpenAI reports a mid-stream failure as an `error` event whose `type` names the HTTP status (`server_error` for 500, `too_many_requests` for 429) beside an open-ended specific `code`. An unrecognized code now defers to that documented status type, and Azure's service codes (`ServiceUnavailable`, `InternalServerError`, `BadGateway`, `GatewayTimeout`) and bare `500`/`502`/`503`/`504` codes are recognized. Safety, request and quota codes still stop the turn (Azure `DeploymentNotFound` and `model_not_found`, `invalid_value` and `unsupported_parameter` are now recognized request codes), and message wording alone still never triggers a retry. A streamed failure that does stop the turn now records the provider's bounded error code and type (`providerErrorCode`, `providerErrorType`) on `turn.failed`.
+- c72631f: When the compute service answers a sandbox restart with `503 unavailable` (most often because the host is restarting its own agent), commands now say so. The agent is told that the restart could not be carried out or confirmed, so the machine was probably not restarted, and that it should check running commands with `command_read` before re-running anything. Before, it was told that the workspace machine itself had stopped and that restarting it had failed. A new `host_unavailable` value of `UnresponsiveAgentRecovery` covers this case.
+
+  `command_read` and `command_wait` also keep to their requested wait when live output refreshes hang on an unreachable machine. One bound covers all the commands in a read, and cancelling stops the wait. They return the retained output, marked as not fresh, instead of waiting minutes past the deadline.
+
+- 10c2cce: A client tool search starts deciding as soon as its call is complete in the stream, instead of after the provider's terminal event. Ranking, the decision model and the integration lookup now overlap the rest of the response, which on fast models is often several hundred milliseconds, so the response settles and the next request starts sooner. The search result is the same: the decision reads the turn's search state but records nothing until its call is accepted, and a response that never completes leaves no trace of its search.
+- deccb54: Your GitHub's action approvals have a fourth choice, **Settings and deletions** (group `sensitive` in `GET`/`PATCH /v1/workspaces/:workspaceId/github/action-policies` and the `updateGitHubActionPolicy` app action), next to Create and update work, Submit reviews and Merge pull requests. It covers what agents do as the person with `gh` and Git that is hard to undo: repository settings, secrets, variables and environments, deletions, tag and default-branch rewrites, and requests the gateway doesn't recognise. These used to ask every time with no way to change it; they now follow this choice. It defaults to Ask, so nothing changes until the person picks Allow (or Block). A connection-wide Allow for every GitHub tool doesn't cover it, and a connection-wide Block covers it only while it has no choice of its own. Writes whose repositories the gateway can't confirm (account and organization writes, unreadable requests, unresolvable GraphQL nodes, judged per GraphQL mutation so a bundled write on an allowed repository can't vouch for another) still always ask while the person allows only chosen repositories (or removed one from the chat), because the repository allowlist can't apply to them; with All my repositories at write access they follow the policy too. An approved request that is sent again keeps the policy action it was recorded under, so it still runs if the gateway classifies it differently the second time. The workspace app has no such group: a personal actor's `groups` carries `sensitive` (`PersonalGitHubActionPolicyGroup`, also the type of the update request's `group`), and setting it for the app answers 400.
+
+  Deleting or force-updating an agent's own branch now follows Create and update work when `gh` encodes the branch's slashes (`git/refs/heads%2Fmy%2Fbranch`, as `gh pr merge --delete-branch` sends), instead of always asking.
+
+- abd1271: Modal sessions restored from a directory snapshot save as tar archives when `OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar` is set.
+
+  - Before, such a session kept writing Modal directory snapshots for the rest of its life, so moving a deployment to tar persistence only reached new workspaces.
+  - The directory snapshot is mounted into a destination created in tar mode. It is the last native snapshot the session reads, and every later save goes to the deployment's own object storage.
+  - A box that is still live keeps the mode it was created in until it is next restored. Sessions saved as filesystem snapshots are unchanged.
+
+- e3cb3c1: Your GitHub accepts repository owners whose logins contain an underscore, as enterprise managed users' do (`octocat_acme`). Choosing, searching, attaching and using such repositories now works everywhere personal GitHub checks an owner: the repository chooser and its stored selection (migration 1370 widens the database check, 1371 validates it), a typed repository URL in the chat's repository picker, agent-created workers and schedules, the `gh` gateway, the account repository tools and the repository identity shown to the agent. Owners still need 1 to 39 letters, digits, `-` or `_`, starting with a letter or digit. The documentation also states that a schedule an agent saves with Your GitHub repositories runs as the person only while those repositories stay in their chosen list (or All my repositories) and the account stays connected, and never falls back to the workspace's GitHub app.
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+- Updated dependencies [1fcdfaa]
+- Updated dependencies [f2b4d85]
+- Updated dependencies [389de66]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+  - @opengeni/config@6.17.0
+  - @opengeni/contracts@6.17.0
+  - @opengeni/sdk@6.17.0
+  - @opengeni/observability@6.17.0
+  - @opengeni/capabilities@6.17.0
+  - @opengeni/codemode@6.17.0
+  - @opengeni/codex@6.17.0
+  - @opengeni/decisions@6.17.0
+  - @opengeni/interaction@6.17.0
+  - @opengeni/tool-gateway@6.17.0
+  - @opengeni/vaults@6.17.0
+  - @opengeni/jev@6.17.0
+  - @opengeni/agent-proto@6.17.0
+  - @opengeni/network@6.17.0
+  - @opengeni/xai-subscription@6.17.0
+
 ## 6.16.0
 
 ### Patch Changes

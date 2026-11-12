@@ -51,7 +51,10 @@ const REFUSALS = {
     403,
     "Opengeni can't be connected for this Teams organization yet. Contact Opengeni support.",
   ],
-  shared_workspace_required: [422, "Choose a shared workspace to connect Teams to."],
+  shared_workspace_required: [
+    422,
+    "Connect Teams from a shared workspace, not a Personal workspace.",
+  ],
   workspace_linked_elsewhere: [
     409,
     "This workspace is linked to another Teams organization. Choose another workspace.",
@@ -115,6 +118,12 @@ const REFUSALS = {
   link_consumer_tenant: [
     403,
     "Opengeni can only link a work or school Microsoft account. Sign in to Teams with one and message Opengeni again.",
+  ],
+  // With workspace routing, any active full member of the organization that
+  // connected Teams can link; nobody else can.
+  link_not_organization_member: [
+    403,
+    "You need an Opengeni account in the organization that connected Teams. Ask your Opengeni administrator for an invite.",
   ],
   // Replaced by a message that names both accounts when they are known.
   link_identity_mismatch: [

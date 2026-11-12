@@ -1,3 +1,7 @@
+import {
+  oauthBrowserBindingForStart,
+  oauthCallbackBrowser,
+} from "../integrations/oauth-browser-binding";
 import { createHash, createHmac } from "node:crypto";
 import {
   authorizationHoldsOrganizationAdministration,
@@ -1377,6 +1381,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+        browserBinding: oauthBrowserBindingForStart(c, settings, access, {
+          externalContinuation: externalActorContinuationForAuthorization(access),
+        }),
         requestUrl: c.req.url,
         payload,
       },
@@ -1404,6 +1411,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+          browserBinding: oauthBrowserBindingForStart(c, settings, access, {
+            externalContinuation: externalActorContinuationForAuthorization(access),
+          }),
           requestUrl: c.req.url,
           payload: withDesktopAppReturnPath(c, parsed),
         }),
@@ -1415,7 +1425,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     // An administrator returning from an approval link derived from a
     // Microsoft sign-in that uses this callback, not a connect attempt.
-    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
+    // A plain approval link (as in the setup guide) carries no state; Microsoft
+    // still returns admin_consent or the tenant, which no sign-in has.
+    if (
+      c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE ||
+      (!c.req.query("state") &&
+        !c.req.query("code") &&
+        (c.req.query("admin_consent") !== undefined || c.req.query("tenant") !== undefined))
+    )
       return microsoftAdminConsentResultPage(
         {
           adminConsent: c.req.query("admin_consent"),
@@ -1430,6 +1447,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error_description")
         ? { errorDescription: c.req.query("error_description") }
         : {}),
+      browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     };
     const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
@@ -1449,7 +1467,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/integrations/provider-oauth/callback", async (c) => {
     assertIntegrationsEnabled();
     // An administrator returning from the Microsoft approval link, not a connect attempt.
-    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
+    // A plain approval link (as in the setup guide) carries no state; Microsoft
+    // still returns admin_consent or the tenant, which no sign-in has.
+    if (
+      c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE ||
+      (!c.req.query("state") &&
+        !c.req.query("code") &&
+        (c.req.query("admin_consent") !== undefined || c.req.query("tenant") !== undefined))
+    )
       return microsoftAdminConsentResultPage(
         {
           adminConsent: c.req.query("admin_consent"),
@@ -1464,6 +1489,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error_description")
         ? { errorDescription: c.req.query("error_description") }
         : {}),
+      browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     });
     if (result.exactReturn)

@@ -54,6 +54,9 @@ import {
   type ToolbarFilterValue,
 } from "../../../ui/toolbar";
 import { useAppContext } from "../../app-context";
+import { HTML_FRAME_STILL_POLICY } from "@opengeni/contracts/html-frame-host";
+import { useContentHosting } from "../../../lib/content-hosting";
+import { htmlFrameHostSrc, useHtmlFrameHost } from "../../../components/artifacts/html-frame-host";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { invalidateArtifactCatalog } from "../../lib/use-artifact-catalog";
 import { useDuplicateSite } from "../../lib/use-duplicate-site";
@@ -533,8 +536,7 @@ export function ArtifactRow({
  * on the srcdoc document before any of its markup is parsed or speculatively
  * preloaded. The in-document policy keeps other browsers covered.
  */
-const SITE_STILL_POLICY =
-  "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'";
+const SITE_STILL_POLICY = HTML_FRAME_STILL_POLICY;
 // `csp` is a standard iframe attribute React passes through but doesn't type.
 const SITE_STILL_FRAME_POLICY = { csp: SITE_STILL_POLICY };
 export function siteStillDocument(html: string) {
@@ -595,17 +597,58 @@ function SiteStill({
       className="pointer-events-none absolute inset-0 overflow-hidden bg-white dark:brightness-[0.88]"
       inert
     >
+      <SiteStillFrame title={`Preview of ${item.title}`} html={html} />
+    </div>
+  );
+}
+
+const SITE_STILL_FRAME_CLASS =
+  "absolute top-0 left-0 h-[300%] w-[300%] origin-top-left scale-[0.3333] border-0 bg-white";
+
+/**
+ * The still itself. With an HTML frame host configured (a page with a strict
+ * policy, see `configureContentHosting`), the frame host renders it in
+ * `still` mode: the written document starts with the same blocking policy,
+ * and the frame may run only the host's loader (it lacks every other
+ * sandbox permission).
+ */
+function SiteStillFrame({ title, html }: { title: string; html: string }) {
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const frameHostSrc = htmlFrameHostSrc(useContentHosting().htmlFrameHost);
+  const frameHost = useHtmlFrameHost({
+    frameRef,
+    enabled: frameHostSrc !== null,
+    html,
+    mode: "still",
+  });
+  if (frameHostSrc) {
+    return (
       <iframe
-        title={`Preview of ${item.title}`}
-        sandbox=""
-        {...SITE_STILL_FRAME_POLICY}
-        srcDoc={siteStillDocument(html)}
+        key={html}
+        ref={frameRef}
+        title={title}
+        sandbox="allow-scripts"
+        referrerPolicy="no-referrer"
+        src={frameHostSrc}
+        onLoad={frameHost.onFrameLoad}
         loading="lazy"
         tabIndex={-1}
         aria-hidden
-        className="absolute top-0 left-0 h-[300%] w-[300%] origin-top-left scale-[0.3333] border-0 bg-white"
+        className={SITE_STILL_FRAME_CLASS}
       />
-    </div>
+    );
+  }
+  return (
+    <iframe
+      title={title}
+      sandbox=""
+      {...SITE_STILL_FRAME_POLICY}
+      srcDoc={siteStillDocument(html)}
+      loading="lazy"
+      tabIndex={-1}
+      aria-hidden
+      className={SITE_STILL_FRAME_CLASS}
+    />
   );
 }
 

@@ -518,6 +518,16 @@ describe("GitHub owner-authority binding routes", () => {
     );
     expect(response.status).toBe(200);
     const html = await response.text();
+    // The chooser's GET forms lead to a redirect to GitHub, which browsers
+    // check against form-action too.
+    const formAction = response.headers
+      .get("content-security-policy")
+      ?.split(";")
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith("form-action "));
+    expect(formAction?.split(" ")).toEqual(
+      expect.arrayContaining(["'self'", "https://github.com"]),
+    );
     expect(html).toContain("owner");
     expect(html).toContain("owners-org");
     expect(html).toContain(`/v1/workspaces/${workspaceId}/github/installations/select`);

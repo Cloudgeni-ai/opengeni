@@ -7,6 +7,7 @@ import {
   type PullFile,
 } from "./github";
 import { MIGRATIONS_DIR } from "../migration-ordinals";
+import { MAINTAINER, evaluate, loadGuardedPatterns } from "../ci/model-request-review";
 import {
   REGENERATION_ARTIFACT,
   REGENERATION_FILE,
@@ -32,7 +33,8 @@ import {
   parseManifest,
   renumberable,
   renderManifest,
-  runningBatch,
+  ownMembers,
+  runningBatches,
   squashTitle,
   takenNumbers,
   type Action,
@@ -100,6 +102,12 @@ export interface PassOptions {
   now?: () => number;
   log?: (line: string) => void;
   randomId?: () => string;
+  /**
+   * Guarded model request path patterns; by default the model request section
+   * of main's `.github/CODEOWNERS`, read once per pass. A missing or malformed
+   * section stops the pass rather than landing anything unchecked.
+   */
+  modelRequestPatterns?: string[];
 }
 
 interface Context {
@@ -108,6 +116,9 @@ interface Context {
   now: () => number;
   log: (line: string) => void;
   randomId: () => string;
+  modelRequestPatterns: string[];
+  /** The author of each queued PR, as last observed, for the model request review. */
+  authors: Map<number, string | null>;
   /** GraphQL node IDs of queued PRs with auto-merge on, for ejection. */
   autoMerge: Map<number, string>;
   /** Head, branch and changed files of each queued PR whose migration the pass moves. */
@@ -134,6 +145,8 @@ function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Conte
     now: options.now ?? Date.now,
     log: options.log ?? ((line) => console.log(line)),
     randomId: options.randomId ?? (() => crypto.randomUUID().replaceAll("-", "").slice(0, 12)),
+    modelRequestPatterns: options.modelRequestPatterns ?? loadGuardedPatterns(),
+    authors: new Map(),
     autoMerge: new Map(),
     renumbering: new Map(),
     regenerating: new Map(),
@@ -153,6 +166,7 @@ async function observe(ctx: Context): Promise<Observation> {
   ctx.renumbering.clear();
   ctx.regenerating.clear();
   ctx.queuedSlots.clear();
+  ctx.authors.clear();
   // Main's numbered files per directory, read once a pass and only when needed.
   const mainNumbered = new Map<string, Promise<NumberedFile[]>>();
   const onMain = (directory: string) => {
@@ -166,6 +180,7 @@ async function observe(ctx: Context): Promise<Observation> {
   for (const pull of await gh.queuedPulls(QUEUE_LABEL)) {
     if (pull.draft || !pull.sameRepository) continue;
     if (pull.autoMergeAt !== null) ctx.autoMerge.set(pull.number, pull.id);
+    ctx.authors.set(pull.number, pull.author ?? null);
     const check = await gh.check(pull.headSha, PR_CHECK);
     const ownRun = check?.workflow === PR_WORKFLOW && check.runHeadSha === pull.headSha;
     const current = ownRun && check?.status === "completed";
@@ -173,6 +188,17 @@ async function observe(ctx: Context): Promise<Observation> {
     const version = pull.headRef === VERSION_BRANCH;
     const changed = green ? await gh.pullFiles(pull.number) : [];
     const files = changed?.flatMap((f) => (f.previous ? [f.path, f.previous] : [f.path])) ?? null;
+    // A PR that changes what Opengeni sends to model providers waits, like a PR
+    // whose CI has not passed, until the maintainer approves its current head.
+    // Too many files to list needs that approval too.
+    const modelReview = green
+      ? await modelRequestReview(ctx, pull.number, pull.headSha, files)
+      : null;
+    const awaitingModelReview = modelReview !== null && !modelReview.pass;
+    if (awaitingModelReview)
+      ctx.log(
+        `Holding #${pull.number}: it changes model request files and ${MAINTAINER} has not approved ${pull.headSha.slice(0, 10)}`,
+      );
     const added = numberedFiles(
       (changed ?? []).filter((f) => ADDED.has(f.status)).map((f) => f.path),
     );
@@ -254,7 +280,7 @@ async function observe(ctx: Context): Promise<Observation> {
       title: pull.title,
       headSha: pull.headSha,
       queuedAt,
-      greenAt: green ? (check?.completedAt ?? now) : null,
+      greenAt: green && !awaitingModelReview ? (check?.completedAt ?? now) : null,
       conflict,
       parked: conflict === null ? parked : null,
       renumber: conflict === null ? renumber : [],
@@ -266,6 +292,7 @@ async function observe(ctx: Context): Promise<Observation> {
       ...(headAt === undefined ? {} : { headAt }),
       // Too many files to list is treated like a CI change: it runs alone.
       controlPlane: files === null || isControlPlane(files),
+      ...(awaitingModelReview ? { awaitingModelReview: true as const } : {}),
     });
     ctx.queuedSlots.set(
       pull.number,
@@ -291,9 +318,58 @@ async function observe(ctx: Context): Promise<Observation> {
       ),
     };
     if (manifest.base === mainSha) batch.sameTree = await sameTree(ctx, batch, commit, pulls);
+    else if (manifest.stackedOn) batch.parentLanded = await parentLanded(gh, manifest, mainSha);
     batches.push(batch);
   }
   return { now, mainSha, pulls, batches };
+}
+
+/**
+ * Whether main is exactly the members of the batch this one was built on,
+ * landed in order on this batch's base: one first-parent step each, each
+ * carrying that batch's landing marker and the tree CI tested at that point.
+ */
+async function parentLanded(gh: GitHub, manifest: Manifest, mainSha: string): Promise<boolean> {
+  const { stackedOn } = manifest;
+  if (!stackedOn) return false;
+  let sha: string | undefined = mainSha;
+  for (let index = stackedOn.count - 1; index >= 0; index--) {
+    if (sha === undefined) return false;
+    const commit = await gh.commit(sha);
+    if (
+      commit.tree !== manifest.members[index]!.tree ||
+      !commit.message.split("\n").includes(`Batch: ${stackedOn.id}`)
+    )
+      return false;
+    sha = commit.parents[0];
+  }
+  return sha === manifest.base;
+}
+
+/**
+ * The model request review verdict for a PR head (scripts/ci/model-request-review.ts).
+ * `files` are its changed paths with renamed-from paths, or null when too many
+ * to list; read here when not given.
+ */
+async function modelRequestReview(
+  ctx: Context,
+  number: number,
+  headSha: string,
+  files?: string[] | null,
+) {
+  const paths =
+    files !== undefined
+      ? files
+      : ((await ctx.gh.pullFiles(number))?.flatMap((f) =>
+          f.previous ? [f.path, f.previous] : [f.path],
+        ) ?? null);
+  return evaluate({
+    patterns: ctx.modelRequestPatterns,
+    files: paths,
+    headSha,
+    author: ctx.authors.get(number) ?? null,
+    reviews: () => ctx.gh.reviews(number),
+  });
 }
 
 /**
@@ -339,9 +415,13 @@ async function sameTree(
       )
       .map((p) => [p.number, p.headSha]),
   );
+  // Only its own members: the ones it was built on are rechecked in their batch.
   const moved = manifest.members.flatMap((member, index) => {
     const head = heads.get(member.number);
-    return head !== undefined && head !== member.head && !member.version
+    return index >= (manifest.stackedOn?.count ?? 0) &&
+      head !== undefined &&
+      head !== member.head &&
+      !member.version
       ? [{ member, index, head }]
       : [];
   });
@@ -429,17 +509,31 @@ async function park(ctx: Context, number: number, headSha: string, reason: strin
   );
 }
 
-async function abandon(ctx: Context, batch: Batch, reason: string, changed?: number) {
+async function abandon(
+  ctx: Context,
+  batch: Batch,
+  reason: string,
+  changed?: number,
+  alsoRestarted: number[] = [],
+) {
   ctx.log(`Abandoning ${batch.branch}: ${reason}`);
   for (const ci of batch.runs) if (ci.status !== "completed") await ctx.gh.cancelRun(ci.id);
   await ctx.gh.deleteBranch(batch.branch);
   if (changed !== undefined && !ctx.ejected.has(changed))
-    await tellChanged(ctx, batch.manifest, reason, changed);
+    await tellChanged(ctx, batch.manifest, reason, changed, alsoRestarted);
 }
 
 /** Show whoever changed a member what that cost. Best effort: never fails the pass. */
-async function tellChanged(ctx: Context, manifest: Manifest, reason: string, changed: number) {
-  const others = manifest.members.filter((m) => m.number !== changed).map((m) => `#${m.number}`);
+async function tellChanged(
+  ctx: Context,
+  manifest: Manifest,
+  reason: string,
+  changed: number,
+  alsoRestarted: number[],
+) {
+  const others = [...ownMembers(manifest).map((m) => m.number), ...alsoRestarted]
+    .filter((n) => n !== changed)
+    .map((n) => `#${n}`);
   const restarted = others.length
     ? ` It restarted CI for ${others.join(", ")}, which are tested again without this PR.`
     : "";
@@ -475,15 +569,18 @@ async function markMembers(ctx: Context) {
       if (manifest && branch.name === `${BATCH_PREFIX}${manifest.id}`)
         batches.push({ createdAt: commit.date, manifest });
     }
-    const running = runningBatch(batches);
-    const members = running?.manifest.members.map((m) => m.number) ?? [];
+    // The members of the running batch and of the one built on it, if any.
+    const { front, stacked } = runningBatches(batches);
+    const members = [front, stacked].flatMap((b) =>
+      b ? ownMembers(b.manifest).map((m) => m.number) : [],
+    );
     const { add, remove } = inBatchChanges(members, await gh.labelled(IN_BATCH_LABEL));
     if (add.length)
       await attempt(`create the ${IN_BATCH_LABEL} label`, () =>
         gh.ensureLabel(IN_BATCH_LABEL, IN_BATCH_COLOR, IN_BATCH_DESCRIPTION),
       );
     for (const number of add) {
-      ctx.log(`Marking #${number} ${IN_BATCH_LABEL} (batch ${running!.manifest.id})`);
+      ctx.log(`Marking #${number} ${IN_BATCH_LABEL}`);
       await attempt(`mark #${number}`, () => gh.addLabel(number, IN_BATCH_LABEL));
     }
     for (const number of remove) {
@@ -796,8 +893,26 @@ async function land(ctx: Context, batch: Batch) {
     await abandon(ctx, batch, "its tip is not the candidate it describes");
     return;
   }
-  if ((await gh.mainSha()) !== manifest.base) return;
-  for (const member of manifest.members) {
+  // On its base; a batch built on another only on that one landed as tested.
+  const main = await gh.mainSha();
+  if (manifest.stackedOn ? !(await parentLanded(gh, manifest, main)) : main !== manifest.base)
+    return;
+  // The model request review, once more on the exact heads about to land: a
+  // member's new head with the tested tree lands even before PR CI ran on it,
+  // so the hold at observation never saw that head.
+  for (const member of ownMembers(manifest)) {
+    const head = batch.sameTree?.[member.number] ?? member.head;
+    if (!(await modelRequestReview(ctx, member.number, head)).pass) {
+      await abandon(
+        ctx,
+        batch,
+        `#${member.number} needs the maintainer's approval of its model request changes on ${head.slice(0, 10)}`,
+        member.number,
+      );
+      return;
+    }
+  }
+  for (const member of ownMembers(manifest)) {
     const sha = await gh.mergePull(member.number, {
       sha: batch.sameTree?.[member.number] ?? member.head,
       method: member.version ? "merge" : "squash",
@@ -850,14 +965,36 @@ async function build(
   pending: number[][],
   blame: string[] = [],
   aheadOfBisection?: true,
+  stackedOn?: Batch,
 ) {
   const { gh } = ctx;
   const base = await gh.mainSha();
   const id = ctx.randomId();
   const scratch = `${BUILD_PREFIX}${id}`;
   const built: Member[] = [];
-  let head = base;
-  await gh.createBranch(scratch, base);
+  // Built on another batch, it starts from that batch's last merge (its tip
+  // without the manifest commit), on the same base, and carries its members.
+  let start = base;
+  const carried: Member[] = [];
+  if (stackedOn) {
+    const parentManifest = stackedOn.manifest;
+    const tip = await gh.commit(stackedOn.tip);
+    const last = tip.parents[0];
+    if (
+      // It must stand on main: on its base, or on the batch it was built on landed.
+      (parentManifest.stackedOn ? stackedOn.parentLanded !== true : parentManifest.base !== base) ||
+      last === undefined ||
+      tip.tree !== parentManifest.members.at(-1)!.tree ||
+      (await gh.commit(last)).tree !== tip.tree
+    ) {
+      ctx.log(`Not building on batch ${parentManifest.id}: it is not the candidate it describes`);
+      return;
+    }
+    start = last;
+    carried.push(...ownMembers(parentManifest));
+  }
+  let head = start;
+  await gh.createBranch(scratch, start);
   try {
     for (const pull of members) {
       // Main moved since this pass observed it; the next pass holds for it.
@@ -882,7 +1019,10 @@ async function build(
         if (pull.version)
           ctx.log(`Not building Version PR #${pull.number}: it conflicts with main`);
         else if (head === base) await park(ctx, pull.number, pull.headSha, CONFLICTING);
-        else ctx.log(`Deferring #${pull.number}: it conflicts with an earlier PR in this batch`);
+        else
+          ctx.log(
+            `Deferring #${pull.number}: it conflicts with an earlier PR in this batch or the one it is built on`,
+          );
         continue;
       }
       head = result.sha;
@@ -895,19 +1035,23 @@ async function build(
       });
     }
     if (!built.length) return;
+    const stacked = stackedOn
+      ? { stackedOn: { id: stackedOn.manifest.id, count: carried.length } }
+      : {};
     const manifest: Manifest = {
       schemaVersion: 2,
       id,
       base,
-      members: built,
+      members: [...carried, ...built],
       pending,
       ...(blame.length ? { blame } : {}),
       ...(aheadOfBisection ? { aheadOfBisection } : {}),
+      ...stacked,
     };
     const tip = await gh.createCommit(built.at(-1)!.tree, [head], renderManifest(manifest));
     await gh.createBranch(`${BATCH_PREFIX}${id}`, tip);
     ctx.log(
-      `Started batch ${id} on ${base.slice(0, 10)}: ${built.map((m) => `#${m.number}`).join(", ")}`,
+      `Started batch ${id} on ${stackedOn ? `batch ${stackedOn.manifest.id}` : base.slice(0, 10)}: ${built.map((m) => `#${m.number}`).join(", ")}`,
     );
   } finally {
     await gh.deleteBranch(scratch);
@@ -917,7 +1061,7 @@ async function build(
 async function act(ctx: Context, action: Action) {
   switch (action.kind) {
     case "abandon":
-      return abandon(ctx, action.batch, action.reason, action.changed);
+      return abandon(ctx, action.batch, action.reason, action.changed, action.alsoRestarted);
     case "retry":
       for (const ci of action.runs) await retry(ctx, ci);
       return;
@@ -932,7 +1076,14 @@ async function act(ctx: Context, action: Action) {
     case "regenerate":
       return regenerateGenerated(ctx, action.number);
     case "build":
-      return build(ctx, action.members, action.pending, action.blame, action.aheadOfBisection);
+      return build(
+        ctx,
+        action.members,
+        action.pending,
+        action.blame,
+        action.aheadOfBisection,
+        action.stackedOn,
+      );
     case "hold":
       await noteVersionHold(ctx, action);
       return;
@@ -998,7 +1149,9 @@ export function describe(action: Action): string {
     case "retry":
       return `retry failed jobs of ${action.runs.map((r) => r.url).join(", ")}`;
     case "land":
-      return `land ${action.batch.branch}: ${action.batch.manifest.members.map((m) => `#${m.number}`).join(", ")}`;
+      return `land ${action.batch.branch}: ${ownMembers(action.batch.manifest)
+        .map((m) => `#${m.number}`)
+        .join(", ")}`;
     case "eject":
       return `eject #${action.number}: ${action.reason}`;
     case "park":
@@ -1008,7 +1161,7 @@ export function describe(action: Action): string {
     case "regenerate":
       return `regenerate #${action.number}'s conflicting generated files, or skip it if other files conflict`;
     case "build":
-      return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}${action.blame?.length ? `, bisecting a failure in ${action.blame.join(", ")}` : ""}`;
+      return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.stackedOn ? ` on ${action.stackedOn.branch}` : ""}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}${action.blame?.length ? `, bisecting a failure in ${action.blame.join(", ")}` : ""}`;
     case "hold":
       return action.behind
         ? `hold the queue for Version PR #${action.number}: main changed files it also changes, so it waits to be regenerated`

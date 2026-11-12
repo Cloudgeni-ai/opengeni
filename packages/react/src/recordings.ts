@@ -81,3 +81,14 @@ export type {
   TranscriptTurn,
   TranscriptUnrecordedMark,
 } from "./recordings-model";
+export {
+  prepareRecordingsForSignOut,
+  recordingOwnerKey,
+  registerLiveRecordingCapture,
+  setSignOutRecordingsPrompt,
+} from "./meetings/sign-out-recordings";
+export type {
+  LiveRecordingCapture,
+  SignOutRecordingsChoice,
+  SignOutRecordingsPrompt,
+} from "./meetings/sign-out-recordings";

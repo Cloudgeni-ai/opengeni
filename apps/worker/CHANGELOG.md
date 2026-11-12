@@ -1,5 +1,71 @@
 # @opengeni/worker-bundle
 
+## 6.17.0
+
+### Patch Changes
+
+- 65809d3: A model stream that ends with a temporary provider server error now retries the same turn instead of failing it. Azure OpenAI reports a mid-stream failure as an `error` event whose `type` names the HTTP status (`server_error` for 500, `too_many_requests` for 429) beside an open-ended specific `code`. An unrecognized code now defers to that documented status type, and Azure's service codes (`ServiceUnavailable`, `InternalServerError`, `BadGateway`, `GatewayTimeout`) and bare `500`/`502`/`503`/`504` codes are recognized. Safety, request and quota codes still stop the turn (Azure `DeploymentNotFound` and `model_not_found`, `invalid_value` and `unsupported_parameter` are now recognized request codes), and message wording alone still never triggers a retry. A streamed failure that does stop the turn now records the provider's bounded error code and type (`providerErrorCode`, `providerErrorType`) on `turn.failed`.
+- 7f5d964: Model request audits for a stream already under way (headers, first byte or event, progress) are written in the background, in order, so the provider's response no longer waits on a database append. The started and terminal audits stay awaited.
+- c72631f: When the compute service answers a sandbox restart with `503 unavailable` (most often because the host is restarting its own agent), commands now say so. The agent is told that the restart could not be carried out or confirmed, so the machine was probably not restarted, and that it should check running commands with `command_read` before re-running anything. Before, it was told that the workspace machine itself had stopped and that restarting it had failed. A new `host_unavailable` value of `UnresponsiveAgentRecovery` covers this case.
+
+  `command_read` and `command_wait` also keep to their requested wait when live output refreshes hang on an unreachable machine. One bound covers all the commands in a read, and cancelling stops the wait. They return the retained output, marked as not fresh, instead of waiting minutes past the deadline.
+
+- 1fcdfaa: A session workflow no longer retries a quiescence receipt forever when the session was archived after its turn was cancelled. The database refuses every write for an archived or imported session, so the receipt activity now proves the session is read-only, logs what the database refused, and fails non-retryably; the workflow drops the moot receipt and closes, and the session peek reports read-only sessions so nothing else is attempted. Temporal "Activity failed" log lines now also carry reviewed failure facts (error class, ApplicationFailure type and retryability, SQLSTATE, the constant reason and function our own database code raised, and the persistence stage) instead of only "temporal sdk failure logged".
+- f2b4d85: A dictation or recording whose speech-to-text request hangs no longer sits in "Transcribing" until the connection ends and Temporal's 30-second retry comes round. A provider can now declare the request timing it documents (`requestTiming` on a speech-to-text provider): Azure Speech's fast transcription answers faster than real time and recommends retrying transient failures after 2, 4, 8, 16 and 32 seconds. A request unanswered after its audio's length, or one that fails with a transient error, is sent again on that schedule; a late request keeps running beside its retry and whichever answers first is used, and the others are stopped. Rate limits and permanent failures still end the request at once, and after the provider's recommended retries the activity's own retry takes over as before. Providers that declare nothing are sent once, as before.
+
+  Each failed provider request is now logged ("Transcription provider request failed") with the provider, which request it was, how long it ran, our error code and what the provider said: its HTTP status, error code, scrubbed message and request id (Azure's `apim-request-id`), or the transport's code and message when the connection dropped. The observability boundary admits `providerRequestId`, `providerErrorMessage` (scrubbed and bounded like a client error message) and `recordingPurpose` under their own grammars. "recording processed" and "recording transcript failed" now give their code as `reason` instead of `errorCode`, which the boundary read as an operational error and reduced to a bare `OperationError`.
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [65809d3]
+- Updated dependencies [d189da5]
+- Updated dependencies [c72631f]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [10c2cce]
+- Updated dependencies [deccb54]
+- Updated dependencies [849c7f8]
+- Updated dependencies [668c5ed]
+- Updated dependencies [abd1271]
+- Updated dependencies [e3cb3c1]
+- Updated dependencies [1fcdfaa]
+- Updated dependencies [f2b4d85]
+- Updated dependencies [7797a90]
+- Updated dependencies [389de66]
+- Updated dependencies [2a1d906]
+- Updated dependencies [bd3671d]
+- Updated dependencies [8f94b2c]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+- Updated dependencies [b2372f2]
+- Updated dependencies [4d7c96e]
+  - @opengeni/config@6.17.0
+  - @opengeni/contracts@6.17.0
+  - @opengeni/core@6.17.0
+  - @opengeni/db@6.17.0
+  - @opengeni/sdk@6.17.0
+  - @opengeni/runtime@6.17.0
+  - @opengeni/observability@6.17.0
+  - @opengeni/subscriptions@6.17.0
+  - @opengeni/documents@6.17.0
+  - @opengeni/github@6.17.0
+  - @opengeni/storage@6.17.0
+  - @opengeni/capabilities@6.17.0
+  - @opengeni/codemode@6.17.0
+  - @opengeni/codex@6.17.0
+  - @opengeni/decisions@6.17.0
+  - @opengeni/events@6.17.0
+  - @opengeni/interaction@6.17.0
+  - @opengeni/tool-gateway@6.17.0
+  - @opengeni/vaults@6.17.0
+  - @opengeni/vaults-bitwarden@6.17.0
+  - @opengeni/vaults-keeper@6.17.0
+  - @opengeni/vaults-onepassword@6.17.0
+  - @opengeni/vaults-protonpass@6.17.0
+  - @opengeni/jev@6.17.0
+  - @opengeni/agent-proto@6.17.0
+  - @opengeni/network@6.17.0
+  - @opengeni/xai-subscription@6.17.0
+
 ## 6.16.0
 
 ### Patch Changes

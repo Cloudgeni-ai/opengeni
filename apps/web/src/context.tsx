@@ -82,6 +82,22 @@ const DesktopDictationRoot = lazy(() =>
   })),
 );
 
+// Loaded right after the shell renders, off the eager graph. Until it mounts,
+// a sign-out with recordings still uploading discards them without asking.
+const SignOutRecordingsDialog = lazy(() =>
+  import("@/components/sign-out-recordings-dialog").then((module) => ({
+    default: module.SignOutRecordingsDialog,
+  })),
+);
+
+// Loaded right after the shell renders, off the eager graph. A refusal that
+// arrives before it mounts is shown as the plain error it is.
+const AdminStepUpDialog = lazy(() =>
+  import("@/components/admin-step-up-dialog").then((module) => ({
+    default: module.AdminStepUpDialog,
+  })),
+);
+
 const OrganizationOnboardingPanel = lazy(() =>
   import("@/components/organization-onboarding-panel").then((module) => ({
     default: module.OrganizationOnboardingPanel,
@@ -520,11 +536,19 @@ export function RootRouteComponent() {
     : keyAuthRequired && !hasAccessKey
       ? null
       : (accessContext?.subjectId ?? undefined);
+  // Their recordings on this device carry their sign-in email, the one key a
+  // browser account's sign-out knows them by.
+  const recorderOwner = managedAuthRequired
+    ? authSession === undefined
+      ? undefined
+      : (authSession?.user.email ?? null)
+    : null;
   const recordSurface = (surface: ReactNode, key?: number) => (
     <ConsoleMeetingRecorderProvider
       key={key}
       workspaceId={routedWorkspace?.id ?? null}
       person={recorderPerson}
+      owner={recorderOwner}
       fallbackWorkspaceId={defaultWorkspaceId}
       client={client}
     >
@@ -560,6 +584,10 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <Suspense fallback={null}>
+        <SignOutRecordingsDialog />
+        <AdminStepUpDialog />
+      </Suspense>
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}

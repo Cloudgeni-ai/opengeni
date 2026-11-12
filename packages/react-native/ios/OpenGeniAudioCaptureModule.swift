@@ -52,6 +52,16 @@ public final class OpenGeniAudioCaptureModule: Module {
     Function("activeRecordingId") { AudioCapture.shared.recordingId }
 
     Function("setLivePcm") { (enabled: Bool) in AudioCapture.shared.setLivePcm(enabled) }
+
+    // Recordings not uploaded yet stay off iCloud backups and new-device
+    // restores: the folder (and everything in it) is marked excluded.
+    Function("excludeFromBackup") { (path: String) in
+      var url = URL(string: path).flatMap { $0.isFileURL ? $0 : nil } ?? URL(fileURLWithPath: path)
+      try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+      var values = URLResourceValues()
+      values.isExcludedFromBackup = true
+      try url.setResourceValues(values)
+    }
   }
 }
 

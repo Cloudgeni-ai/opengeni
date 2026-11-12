@@ -1,5 +1,27 @@
 # @opengeni/documents
 
+## 6.17.0
+
+### Patch Changes
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [849c7f8]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+- Updated dependencies [1fcdfaa]
+- Updated dependencies [2a1d906]
+- Updated dependencies [8f94b2c]
+- Updated dependencies [241ce71]
+- Updated dependencies [b2372f2]
+  - @opengeni/config@6.17.0
+  - @opengeni/contracts@6.17.0
+  - @opengeni/db@6.17.0
+  - @opengeni/storage@6.17.0
+  - @opengeni/network@6.17.0
+
 ## 6.16.0
 
 ### Patch Changes

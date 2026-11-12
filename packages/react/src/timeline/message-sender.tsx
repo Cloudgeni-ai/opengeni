@@ -2,6 +2,7 @@ import { createContext, useContext, type ReactNode } from "react";
 
 import { cn } from "../lib/cn";
 import type { MessageSender, UserMessageItem } from "./types";
+import { displayImageSrc } from "../lib/content-hosting";
 
 /**
  * Draws who sent a person's message. The host decides: return null for the
@@ -52,7 +53,7 @@ export function MessageSenderLabel({
     >
       {avatarUrl ? (
         <img
-          src={avatarUrl}
+          src={displayImageSrc(avatarUrl)}
           alt=""
           className="size-4 shrink-0 rounded-full object-cover"
           referrerPolicy="no-referrer"

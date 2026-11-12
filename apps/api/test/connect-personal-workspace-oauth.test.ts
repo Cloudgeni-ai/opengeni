@@ -311,7 +311,7 @@ async function completeConnectAttempt(
   callbackPath: string,
 ): Promise<Record<string, unknown>> {
   const base = `/v1/workspaces/${human.personalWorkspaceId}/connect/attempts`;
-  const returnUrl = `https://HOST.example:443/settings?x=%2f#${providerId}`;
+  const returnUrl = `https://APP.example.test:443/settings?x=%2f#${providerId}`;
   const begin = await app.request(base, {
     method: "POST",
     headers: jsonHeaders(human),
@@ -506,7 +506,7 @@ describe("OAuth connectors in the owner's Personal workspace", () => {
       body: JSON.stringify({
         providerId: "x",
         ownership: "workspace",
-        returnUrl: `https://HOST.example:443/settings#x`,
+        returnUrl: `https://APP.example.test:443/settings#x`,
         idempotencyKey: crypto.randomUUID(),
       }),
     });
