@@ -1,7 +1,7 @@
-// Agents contract orphans (1387): on a database at 1378, Slack records whose
+// Agents contract orphans (1389): on a database at 1380, Slack records whose
 // agent has no installation row for their connection, and an installation row
 // whose workspace is gone, are cleaned up the way each new key's delete rule
-// would, so 1388 validates every key.
+// would, so 1390 validates every key.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +12,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
-const firstMigrationAfterSeed = "1379_agent_slack_installs_install_workspace_fk.sql";
+const firstMigrationAfterSeed = "1381_agent_slack_installs_install_workspace_fk.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;
@@ -36,7 +36,7 @@ afterAll(async () => {
   if (prefix) await rm(prefix, { recursive: true, force: true });
 }, 180_000);
 
-describe.skipIf(!realDatabase)("1387 agents contract orphans", () => {
+describe.skipIf(!realDatabase)("1389 agents contract orphans", () => {
   test("orphaned Slack records are unlinked or deleted as their key's delete rule would, and every key validates", async () => {
     const admin = owned!.admin;
     const accountId = crypto.randomUUID();

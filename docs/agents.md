@@ -29,7 +29,7 @@ Slack routes, interactions, proposals, intro posts, suggestions, the
   `visibility`, `owner_subject_id` (required for Only me), `name`, `name_key`
   (`lower(btrim(name))`, a clash hint, deliberately not unique), `description`,
   `avatar` (optional; initials otherwise), `memory_enabled` and
-  `memory_collection_id`, `organization_access` (migration 1377; anyone in
+  `memory_collection_id`, `organization_access` (migration 1379; anyone in
   the organization, on a shared agent), `current_revision`, `origin` (`slack_agent`,
   `bot_template`, `app` or `slack`), `source_session_id`, creator, `version`
   for optimistic concurrency. `UNIQUE (id, account_id)` anchors the composite
@@ -42,14 +42,14 @@ Slack routes, interactions, proposals, intro posts, suggestions, the
   agent and Slack connection, owned by the agent's home workspace so a rename
   updates it in the same transaction. `name_key` is the Slack handle key (same
   normalisation as `slack_agents.name_key`), unique per connection; `open` is
-  the open-use switch; `install_workspace_id` (migration 1378) is the Slack
+  the open-use switch; `install_workspace_id` (migration 1380) is the Slack
   installation's own workspace, where its routes and Slack records live.
   Deleting that workspace deletes the row. The announcement channel stays per
   installation in `slack_agent_update_settings`.
 - The Slack records keyed by agent (`slack_channel_routes`,
   `slack_interactions`, `slack_agent_user_states`, `slack_agent_proposals`,
   `slack_agent_intro_posts`, `slack_agent_suggestions`) reference
-  `agent_slack_installs (agent_id, connection_id)` (migrations 1381 to 1394):
+  `agent_slack_installs (agent_id, connection_id)` (migrations 1383 to 1396):
   one agent in one installation, exactly what a `slack_agents` row was.
   Turning Slack off in an installation deletes its routes, user states, intro
   records and suggestions there and unlinks its chats and proposals
@@ -104,7 +104,7 @@ From the expand release until the contract, older binaries wrote
 `bot_templates` and `slack_agents`. `AFTER INSERT OR UPDATE OR DELETE`
 triggers (1243) mirrored those writes into the agents tables; they did nothing
 while `opengeni.agents_dual_write = '1'`, which the API switch set while it
-wrote both shapes. The contract (1395) drops the triggers. Their functions stay
+wrote both shapes. The contract (1397) drops the triggers. Their functions stay
 until the legacy drop, because the previous release's readiness check expects
 them.
 
@@ -229,7 +229,7 @@ and other integrations (Teams) read the same way.
   checks are in `apps/api/src/integrations/organization-agents.ts`
   (`agentOpenToOrganization`, `organizationAgentAskerPerson`); Slack's own
   team and conversation check stays in `slack-open-agents.ts`.
-- Storage: `agents.organization_access` (migration 1377, default false, a
+- Storage: `agents.organization_access` (migration 1379, default false, a
   rolling column the previous release ignores) on a `workspace` agent; the API
   says `organization`. No backfill (FORCE RLS would hide the rows from the
   migration principal). Every write keeps `open` on each of its installations
@@ -246,28 +246,28 @@ and other integrations (Teams) read the same way.
 
 ### Contract
 
-Migrations 1378 to 1397, after the API switch is the previous release. Each
+Migrations 1380 to 1399, after the API switch is the previous release. Each
 file that adds or drops a foreign key holds one key, so it locks the
 referencing table and then the referenced one, the order writers take them in.
 
-1. 1378 adds `agent_slack_installs.install_workspace_id` and copies it from
+1. 1380 adds `agent_slack_installs.install_workspace_id` and copies it from
    `slack_agents.workspace_id`, and raises each
    agent's `version` to its legacy row's where that was higher (the legacy
    Slack agents API showed the greater of the two). A trigger on
    `slack_agents` fills the column for the previous release's writes during
-   the rollout. 1379 adds its foreign key to `workspaces` `NOT VALID` and 1380
+   the rollout. 1381 adds its foreign key to `workspaces` `NOT VALID` and 1382
    indexes it concurrently.
-2. 1381 to 1386 add the per-installation foreign keys `NOT VALID`, one table
+2. 1383 to 1388 add the per-installation foreign keys `NOT VALID`, one table
    each (routes, interactions, user states, proposals, intro records,
-   suggestions). 1387 then cleans up rows that would fail them, as each key's
+   suggestions). 1389 then cleans up rows that would fail them, as each key's
    `ON DELETE` action would have: installation rows whose workspace is gone
    are deleted, chats and proposals naming an agent with no installation row
    for their connection are unlinked (kept), and such routes, user states,
    intro records and suggestions are deleted; a `NOTICE` reports the count
-   per table. 1388 validates the keys, including 1379's.
-3. 1389 to 1394 drop the foreign keys to `slack_agents`, one table each, and
-   1395 drops the sync triggers.
-4. 1396 and 1397 add unique indexes per installation (`connection_id`,
+   per table. 1390 validates the keys, including 1381's.
+3. 1391 to 1396 drop the foreign keys to `slack_agents`, one table each, and
+   1397 drops the sync triggers.
+4. 1398 and 1399 add unique indexes per installation (`connection_id`,
    agent, Slack person or channel) concurrently; the API writes against them.
 
 The API no longer writes `bot_templates` or `slack_agents`. It only deletes an

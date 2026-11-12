@@ -923,7 +923,7 @@ export const RETIRING_FEATURE_TABLES = {
     "knowledge_source_sync_states",
     "knowledge_source_sync_wakes",
   ],
-  // The agents contract (1378 to 1397): nothing reads or writes the legacy bot
+  // The agents contract (1380 to 1399): nothing reads or writes the legacy bot
   // templates and Slack agents tables any more; the legacy drop removes them.
   agentsLegacy: ["bot_templates", "slack_agents"],
 } as const;
@@ -1892,7 +1892,7 @@ const AGENTS_TRIGGER_ROUTINES = ["guard_session_agent_id_immutable()"] as const;
 
 /**
  * Agents trigger functions bound to the legacy tables: 1243's sync functions
- * (their triggers were dropped by 1395) and 1378's installation workspace
+ * (their triggers were dropped by 1397) and 1380's installation workspace
  * fill. Checked like any owner-internal helper while present; the legacy drop
  * removes them with the tables, so readiness also accepts them absent.
  */
