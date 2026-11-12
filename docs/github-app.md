@@ -112,6 +112,27 @@ silently rewrite that delegation. GitHub installation suspension, deletion, or
 repository removal remains effective immediately through live listing and
 installation-token APIs.
 
+### Repairing an installation
+
+A linked installation that isn't active offers one fix on the GitHub page.
+**Reinstall** and **Authorize** start Connect for that installation
+(`reconnectAccountId: "github-installation:<id>"`, see
+`githubAppRepairNavigation` in `apps/api/src/integrations/github-app-connect.ts`).
+Opengeni asks GitHub about only that installation: one GitHub reports gone
+starts at installing the App again, and any other at its owner's sign-in. When
+GitHub can't be asked, no attempt starts: the API answers a retryable 503
+`upstream_unavailable` with `details.code: "provider_unreachable"`, and the
+dialog says GitHub couldn't be reached and offers **Check again**, which retries
+the same repair. It never falls back to the account chooser.
+
+A reinstall on the same GitHub account replaces the binding it repaired, in the
+bind's transaction (`deleteGitHubInstallationBinding` with
+`replacedByInstallationId`). The old installation's approval choices move to
+the new one, never over a choice already made there, and keep who set them and
+when. The old installation's choices are then removed. The removal is audited
+like **Remove** (`connection.disconnected`, naming the replacement and the
+removed choices), and each moved choice is audited under the person repairing.
+
 ### The allowlist follows GitHub
 
 The owner's consent covers the repositories the installation shares, as GitHub
