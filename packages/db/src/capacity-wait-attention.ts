@@ -1,4 +1,7 @@
-import { subscriptionCapacityWaitNeedsAction } from "@opengeni/subscriptions";
+import {
+  subscriptionCapacityWaitNeedsAction,
+  subscriptionCapacityWaitReasonText,
+} from "@opengeni/subscriptions";
 
 /**
  * When a subscription capacity wait needs a person's (or a parent agent's)
@@ -65,22 +68,36 @@ export function capacityWaitNotificationKey(turnId: string): string {
   return `capacity-wait:${turnId}`;
 }
 
-/** The person's inbox notification for a top-level chat's long capacity wait. */
+/**
+ * The person's inbox notification for a top-level chat's long capacity wait.
+ * A busy pool says plainly that the message will be answered as soon as an
+ * account has room, and names a time only when placement knows the earliest
+ * reset of an account that can serve the turn. Any other reason keeps its
+ * own explanation.
+ */
 export function capacityWaitNotificationPayload(input: {
   turnId: string;
   provider: string;
   resetsAt: Date | null;
+  waitReason?: string;
 }) {
   const name = capacityWaitProviderName(input.provider);
   const reset = capacityWaitResetText(input.resetsAt);
+  const reason = input.waitReason ?? "no_eligible_capacity";
+  const explained =
+    reason === "no_eligible_capacity" ? null : subscriptionCapacityWaitReasonText(reason, name);
+  const status = explained
+    ? `${explained}${reset ? ` Expected around ${reset}.` : ""}`
+    : `All ${name} subscriptions are busy. Your message will be answered as soon as one has room${
+        reset ? `, expected around ${reset}` : ""
+      }.`;
+  const sooner = subscriptionCapacityWaitNeedsAction(reason)
+    ? ""
+    : " To continue sooner, switch the chat to another model; its waiting turn continues on that model.";
   return {
     key: capacityWaitNotificationKey(input.turnId),
     title: `Chat waiting for ${name} capacity`,
-    body: `${
-      reset
-        ? `No ${name} subscription has capacity until about ${reset}.`
-        : `No ${name} subscription has capacity, and no reset time is known.`
-    } The chat continues by itself then. To continue sooner, switch the chat to another model; its waiting turn continues on that model.`,
+    body: `${status}${sooner}`,
     urgency: "normal" as const,
     replaced: false,
   };

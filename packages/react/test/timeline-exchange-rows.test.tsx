@@ -632,7 +632,8 @@ describe("capacity limit rows", () => {
     ];
   }
 
-  const GUIDANCE = "Try again after your quota resets, or switch to another model or provider.";
+  const GUIDANCE =
+    "Your message will be answered as soon as there is room. To continue sooner, switch to another model.";
   const statusRow = (container: HTMLElement) => {
     const status = container.querySelector("[data-og-exchange-status]");
     const header = status?.closest<HTMLElement>("[data-og-work-header]");
@@ -640,7 +641,7 @@ describe("capacity limit rows", () => {
     return { status, header };
   };
 
-  test("a blocked turn says Usage limit reached once, with no clock and no empty disclosure", async () => {
+  test("a blocked turn says Waiting for capacity once, with no clock and no empty disclosure", async () => {
     const r = await renderComponent(
       <MessageTimeline events={blocked()} turnSummary={{ rolling: true }} />,
     );
@@ -648,14 +649,14 @@ describe("capacity limit rows", () => {
       await flush();
       const { status, header } = statusRow(r.container);
       // Five hours parked on a limit: no elapsed time is counted.
-      expect(status.textContent).toBe("Usage limit reached");
-      expect(header.textContent).toBe("Usage limit reached");
+      expect(status.textContent).toBe("Waiting for capacity");
+      expect(header.textContent).toBe("Waiting for capacity");
       expect(r.container.querySelector("[data-og-exchange-wait-detail]")?.textContent).toBe(
         GUIDANCE,
       );
       expect(r.container.textContent).not.toMatch(/automatic|continues/i);
       expect(r.container.textContent).not.toContain("No Codex subscription");
-      expect(r.container.textContent?.split(/limit reached/i).length).toBe(2);
+      expect(r.container.textContent?.split(/waiting for capacity/i).length).toBe(2);
       expect(r.container.querySelector("[role=status]")).toBeNull();
       // Nothing to reveal: no chevron, no toggle, no fold content.
       expect(header.tagName).not.toBe("BUTTON");
@@ -682,7 +683,7 @@ describe("capacity limit rows", () => {
     try {
       await flush();
       const { status, header } = statusRow(r.container);
-      expect(status.textContent).toBe("Usage limit reached");
+      expect(status.textContent).toBe("Waiting for capacity");
       expect(r.container.querySelector("[data-og-exchange-wait-detail]")?.textContent).toBe(
         GUIDANCE,
       );
@@ -706,7 +707,7 @@ describe("capacity limit rows", () => {
     try {
       await flush();
       const trigger = statusTrigger(r.container);
-      expect(trigger.textContent).toStartWith("Usage limit reached");
+      expect(trigger.textContent).toStartWith("Waiting for capacity");
       expect(trigger.textContent).not.toMatch(/\d+[smh]\b/);
       expect(trigger.querySelector(".lucide-chevron-right")).not.toBeNull();
       const guidance = () =>

@@ -4747,11 +4747,12 @@ const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
 const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|account_forbidden)$/;
 
 /**
- * A quota or capacity wait reads as "Usage limit reached" with one plain line
- * of guidance. It never promises that the work continues by itself: the
- * reader decides whether to wait for the quota to reset or to switch. Only a
- * wait that a person must resolve (reconnect, re-enable, choose another
- * account) keeps its recorded, actionable reason and is not labelled a limit.
+ * A quota or capacity wait reads as "Waiting for capacity" with one plain
+ * line: the message is answered as soon as there is room (the waiting turn
+ * stays queued and resumes by itself when an account can serve it), or
+ * sooner on another model. It names no time: the timeline cannot keep a
+ * time current. Only a wait that a person must resolve (reconnect,
+ * re-enable, choose another account) keeps its recorded, actionable reason.
  */
 function capacityWaitPresentation(
   t: OpenGeniText,
@@ -4789,8 +4790,9 @@ function capacityWaitPresentation(
   };
 }
 
-const CAPACITY_LIMIT_LABEL = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
-const CAPACITY_LIMIT_DETAIL = (t: OpenGeniText) => t("timeline.projection.tryAgainAfterYourQuota");
+const CAPACITY_LIMIT_LABEL = (t: OpenGeniText) => t("timeline.projection.waitingForCapacity");
+const CAPACITY_LIMIT_DETAIL = (t: OpenGeniText) =>
+  t("timeline.projection.messageAnsweredWhenThereIsRoom");
 
 /** Lifecycle evidence that a capacity wait is over. */
 function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {
