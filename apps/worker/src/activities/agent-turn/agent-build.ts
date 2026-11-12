@@ -1074,6 +1074,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         openingToolNames: openingToolNamesForTurn(resolvedModel, turn.metadata),
         toolSearchDecisionModel: configuredToolDecisionModel({
           settings: runSettings,
+          observability,
           onUnavailable: () =>
             observability.warn(
               "Configured decision model is unavailable; using lexical tool discovery",
