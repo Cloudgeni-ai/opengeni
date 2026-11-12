@@ -2953,7 +2953,10 @@ async function drainRoute(
       };
       // An organization agent's chat is visible to its workspace, whose
       // members can start turns in it with their own access. Only turns the
-      // asker's own Teams messages started are sent to them.
+      // asker's own Teams messages started are sent to them. This relies on
+      // an inbox row being linked to its turn (settleTeamsMessage) before
+      // that turn's events are drained: admission and appends settle it
+      // earlier in the same pass, so an own turn is never skipped.
       const forThisChat = async (turnId: string | null | undefined) =>
         !organizationAgent || (Boolean(turnId) && (await routingOf(turnId!)).length > 0);
       const replyHeader = async (turnId: string | null) => {

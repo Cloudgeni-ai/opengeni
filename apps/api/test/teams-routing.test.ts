@@ -379,6 +379,16 @@ describe("names shared by an organization agent and the person's own agent", () 
       expect.objectContaining({ agentId: "planner" }),
     );
   });
+  test("switch <name> prefers the person's workspace to an organization agent of the same name", () => {
+    const base = directory();
+    const d = {
+      ...base,
+      agents: [...base.agents, { ...openHelper, name: "Home", nameKey: "home" }],
+    };
+    expect(teamsRouteOptionNamed(d, "Home")).toEqual(
+      expect.objectContaining({ workspaceId: "home", agentId: null }),
+    );
+  });
   test("two organization agents with one name are ambiguous", () => {
     const d = directory({
       agents: [
