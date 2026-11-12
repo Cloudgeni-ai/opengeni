@@ -269,10 +269,10 @@ export function ConsoleSessionsRoute() {
             label="Sessions"
             nameLabel="Session"
             columns={[
-              { id: "workspace", label: "Workspace", width: 132 },
+              { id: "workspace", label: "Workspace", width: 124 },
               { id: "user", label: "End user", width: 120 },
-              { id: "feedback", label: "Feedback", width: 88 },
-              { id: "turns", label: "Turns", width: 56, align: "end" },
+              { id: "feedback", label: "Feedback", width: 64 },
+              { id: "turns", label: "Turns", width: 48, align: "end" },
               { id: "cost", label: "Cost", width: 72, align: "end", leadsWhenFolded: true },
               { id: "updated", label: "Updated", width: 104, align: "end" },
             ]}
