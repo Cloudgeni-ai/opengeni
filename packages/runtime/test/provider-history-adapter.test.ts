@@ -296,24 +296,18 @@ describe("projectHistoryForProvider", () => {
     }
   });
 
-  test("legacy Chat raw reasoning becomes inert assistant context without truncation or mutation", () => {
+  test("legacy Chat raw reasoning is left out of another API, never resent as text", () => {
     const text = "Synthetic reasoning. ".repeat(2000);
+    const answer = { type: "message", role: "assistant", content: "Answer" };
     const items = [
       { type: "reasoning", content: [], rawContent: [{ type: "reasoning_text", text }] },
+      answer,
     ];
     const before = JSON.stringify(items);
     for (const api of ["responses", "anthropic-messages"] as const) {
       const projected = projectHistoryForProvider(items, api);
-      expect(projected).toEqual([
-        {
-          type: "message",
-          role: "assistant",
-          status: "completed",
-          content: [
-            { type: "output_text", text: `[Historical reasoning from another model]\n${text}` },
-          ],
-        },
-      ]);
+      expect(projected).toEqual([answer]);
+      expect(JSON.stringify(projected)).not.toContain("Synthetic reasoning");
       expect(projectHistoryForProvider(projected, api)).toBe(projected);
       expect(JSON.stringify(items)).toBe(before);
     }
@@ -390,12 +384,13 @@ describe("projectHistoryForProvider", () => {
     const before = JSON.stringify(items);
     const projected = projectHistoryForProvider(items, "responses");
     expect(projected[0]!.content).toEqual([
-      { type: "output_text", text: "[Historical reasoning from another model]\nSummary" },
       { type: "output_text", text: "Answer" },
       { type: "refusal", refusal: "Cannot help" },
       items[0]!.content[2],
     ]);
-    expect((projected[0]!.content as unknown[])[3]).toBe(items[0]!.content[2]);
+    // The legacy reasoning that rode in the reply metadata is left out too.
+    expect(JSON.stringify(projected)).not.toContain("Summary");
+    expect((projected[0]!.content as unknown[])[2]).toBe(items[0]!.content[2]);
     expect(JSON.stringify(items)).toBe(before);
     expect(projectHistoryForProvider(projected, "responses")).toBe(projected);
     const claude = projectHistoryForProvider(items, "anthropic-messages");

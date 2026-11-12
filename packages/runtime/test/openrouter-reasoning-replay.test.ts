@@ -90,10 +90,10 @@ for (const kind of [
           expect(message.reasoning).toBeUndefined();
           expect(message.reasoning_content).toBeUndefined();
         }
-        expect(JSON.stringify(messages).split("Check the fixture.")).toHaveLength(2);
-        expect(JSON.stringify(messages)).toContain(
-          "Historical reasoning without a provider signature",
-        );
+        // Unsigned reasoning is left out, never resent to Claude as text.
+        expect(JSON.stringify(messages)).not.toContain("Check the fixture.");
+        expect(JSON.stringify(messages)).not.toContain("Historical reasoning");
+        expect(JSON.stringify(messages)).toContain("Fixture answer.");
         expect(JSON.stringify(persisted)).toBe(before);
         expect(before).toContain("Check the fixture.");
       });
@@ -145,19 +145,16 @@ test("Claude guard preserves signed/encrypted details, tool pairing, content ext
   expect(projected.messages[0]).toEqual(body.messages[0]);
   expect(projected.messages[2]?.reasoning_details).toEqual([]);
   expect(projected.messages[2]?.content).toEqual([
-    {
-      type: "text",
-      text: "[Historical reasoning without a provider signature]\nUnsigned fixture.",
-    },
     { type: "text", text: "Checking.", cache_control: { type: "ephemeral" } },
   ]);
+  expect(JSON.stringify(projected)).not.toContain("Unsigned fixture.");
   expect(projected.messages[2]?.tool_calls).toEqual(body.messages[2]?.tool_calls);
   expect(projected.messages[3]).toEqual(body.messages[3]);
   expect(JSON.stringify(body)).toBe(before);
   expect(policy()({ path: "/chat/completions", body: projected })).toBeUndefined();
 });
 
-test("Claude guard handles unsigned details without discarding distinct readable text", () => {
+test("Claude guard leaves unsigned reasoning out instead of resending it as text", () => {
   for (const details of [
     undefined,
     [],
@@ -168,6 +165,7 @@ test("Claude guard handles unsigned details without discarding distinct readable
     const body = {
       model: "anthropic/claude-fixture",
       messages: [
+        { role: "user", content: "Start" },
         {
           role: "assistant",
           content: null,
@@ -175,23 +173,20 @@ test("Claude guard handles unsigned details without discarding distinct readable
           reasoning_content: "Alias fixture.",
           reasoning_details: details,
         },
+        { role: "user", content: "Next" },
       ],
     };
     const before = JSON.stringify(body);
     const projected = policy()({ path: "/chat/completions", body })!.body!;
-    const message = (projected.messages as Record<string, any>[])[0]!;
-    expect(message.reasoning).toBeUndefined();
-    expect(message.reasoning_content).toBeUndefined();
-    expect(JSON.stringify(message.content)).toContain("Alias fixture.");
-    if (details?.[0]?.type === "reasoning.text") {
-      expect(JSON.stringify(message.content)).toContain("Other fixture.");
-      expect(message.reasoning_details).toEqual([]);
-    }
+    // The assistant message held only unsigned reasoning, so it is removed.
+    expect(projected.messages).toEqual([body.messages[0], body.messages[2]]);
+    expect(JSON.stringify(projected)).not.toContain("Alias fixture.");
+    expect(JSON.stringify(projected)).not.toContain("Other fixture.");
     expect(JSON.stringify(body)).toBe(before);
   }
 });
 
-test("mixed signed and unsigned details retain native blocks and project only unsigned text", () => {
+test("mixed signed and unsigned details retain native blocks and leave unsigned text out", () => {
   const unsigned = {
     type: "reasoning.text",
     text: "Unsigned fixture.",
@@ -213,7 +208,8 @@ test("mixed signed and unsigned details retain native blocks and project only un
   )[0]!;
   expect(message.reasoning_details).toEqual([signed, encrypted]);
   expect(message.reasoning).toBeUndefined();
-  expect(JSON.stringify(message.content)).toContain("Unsigned fixture.");
+  expect(message.content).toBe("Answer.");
+  expect(JSON.stringify(message.content)).not.toContain("Unsigned fixture.");
   expect(JSON.stringify(message.content)).not.toContain("Signed fixture.");
   expect(JSON.stringify(message.content)).not.toContain("opaque-fixture");
 });

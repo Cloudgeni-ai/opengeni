@@ -463,16 +463,14 @@ describe("Claude progress updates before a tool call", () => {
     expect(JSON.stringify(assistant.content)).toBe(JSON.stringify(updatesContent));
   });
 
-  test("other providers see the update only as labelled historical reasoning, never the signed block", () => {
+  test("other providers never see the update: no signed block and no text in its place", () => {
     const projected = projectHistoryForProvider(expectedOutput as never[], "responses");
-    expect(projected[1]).toEqual({
-      type: "message",
-      role: "assistant",
-      status: "completed",
-      content: [
-        { type: "output_text", text: `[Historical reasoning from another model]\n${UPDATE}` },
-      ],
-    });
+    expect(projected).toEqual(
+      (expectedOutput as Array<Record<string, unknown>>).filter(
+        (item) => item.type !== "reasoning",
+      ) as never,
+    );
+    expect(JSON.stringify(projected)).not.toContain(UPDATE);
     expect(JSON.stringify(projected)).not.toContain(progress.signature);
   });
 
