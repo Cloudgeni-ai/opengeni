@@ -364,9 +364,13 @@ describe("admin passkey step-up", () => {
     const start = async (cookie: string) => {
       const started = await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", cookie);
       expect(started.status, await started.clone().text()).toBe(200);
-      const handoff = (await started.json()) as { handoffId: string; expiresInSeconds: number };
+      const handoff = (await started.json()) as {
+        handoffId: string;
+        expiresAt: string;
+        expiresInSeconds: number;
+      };
       expect(handoff.expiresInSeconds).toBeGreaterThan(0);
-      return handoff.handoffId;
+      return handoff;
     };
     const confirmInBrowser = async (handoffId: string) => {
       const options = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
@@ -389,7 +393,7 @@ describe("admin passkey step-up", () => {
       ((await response.json()) as { code?: unknown }).code;
     const wrong = (code: string) => String((Number(code) + 1) % 1_000_000).padStart(6, "0");
 
-    const handoffId = await start(appSession);
+    const { handoffId } = await start(appSession);
     // Someone else can't use it, and nothing is claimable before the passkey.
     const stranger = await passwordPerson(rt);
     const strangerOptions = await call(
@@ -437,7 +441,7 @@ describe("admin passkey step-up", () => {
 
     // Guessing the code voids the handoff after a few tries.
     await unconfirm(owner.userId);
-    const guessed = await start(appSession);
+    const { handoffId: guessed } = await start(appSession);
     const guessedCode = await confirmInBrowser(guessed);
     for (let attempt = 1; attempt < 5; attempt += 1) {
       expect(await codeOf(await claim(appSession, guessed, wrong(guessedCode)))).toBe(
@@ -456,10 +460,13 @@ describe("admin passkey step-up", () => {
 
     // An expired handoff can't be confirmed.
     const expiring = await start(appSession);
-    await admin`update auth_verifications set expires_at = now() - interval '1 second'
-      where identifier = ${`opengeni-passkey-handoff:${expiring}`}`;
+    // Identifiers are stored hashed; the handoff's own expiry finds its row.
+    const expired = await admin`update auth_verifications
+      set expires_at = now() - interval '1 second'
+      where value like ${`%"expiresAt":"${expiring.expiresAt}"%`}`;
+    expect(expired.count).toBe(1);
     const late = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
-      handoffId: expiring,
+      handoffId: expiring.handoffId,
     });
     expect(await codeOf(late)).toBe("PASSKEY_HANDOFF_EXPIRED");
 
