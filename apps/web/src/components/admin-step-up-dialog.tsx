@@ -4,9 +4,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
 import { Button } from "@opengeni/react/ui/button";
-import { Field } from "@opengeni/react/ui/field";
+import { Field, TextInput } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
-import { Input } from "@opengeni/react/ui/input";
 
 import {
   AuthApiError,
@@ -215,13 +214,14 @@ export function AdminStepUpDialog({
         }}
       >
         <Field label="Code from your browser">
-          <Input
+          <TextInput
+            mono
             value={code}
             onChange={(event) => setCode(event.target.value.replace(/\D/gu, "").slice(0, 6))}
             inputMode="numeric"
             autoComplete="one-time-code"
             placeholder="123456"
-            className="font-mono tabular-nums"
+            className="tabular-nums"
           />
         </Field>
       </FormDialog>
