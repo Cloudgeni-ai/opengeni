@@ -708,9 +708,10 @@ describe("an accepted Send moves the draft past the revision it went ahead from"
       sessionId: value.session.id,
       subjectId: value.grant.subjectId,
     };
-    const inRls = <T>(run: (db: typeof client.db) => Promise<T>) =>
+    type ScopedDb = Parameters<typeof submitHumanPromptInTransaction>[0];
+    const inRls = <T>(run: (db: ScopedDb) => Promise<T>) =>
       withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
-        db.transaction((tx) => run(tx as unknown as typeof db)),
+        db.transaction((tx) => run(tx as unknown as ScopedDb)),
       );
     return {
       save: (expectedRevision: number, text: string) =>
