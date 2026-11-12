@@ -52,6 +52,7 @@ function draftServer() {
   let failNextSubmit = false;
   let refuseNextSubmit = false;
   let loseNextSubmitReply: { landed: boolean } | null = null;
+  let dropNextSave = false;
   let holdNextSave: Promise<void> | null = null;
   let holdNextRead: Promise<void> | null = null;
   let holdNextSubmit: Promise<void> | null = null;
@@ -76,6 +77,16 @@ function draftServer() {
       const held = holdNextSave;
       holdNextSave = null;
       if (held) await held;
+      if (dropNextSave) {
+        dropNextSave = false;
+        // Offline: the save never reached the server.
+        throw new OpenGeniApiError(0, "", {
+          code: "network_error",
+          retryable: true,
+          outcomeUnknown: true,
+          mutation: true,
+        });
+      }
       if (failSaves) {
         saves.push(`${request.expectedRevision} ${request.text}: refused`);
         throw draftChanged();
@@ -229,6 +240,10 @@ function draftServer() {
     /** The next Send gets no reply; `landed` says whether the server took it. */
     loseNextSubmitReply(landed: boolean) {
       loseNextSubmitReply = { landed };
+    },
+    /** The next draft save never reaches the server. */
+    dropNextSave() {
+      dropNextSave = true;
     },
   };
 }
@@ -763,6 +778,65 @@ for (const path of ["an idle Send", "a busy Send"] as const) {
         expect(new Set(server.submits.map((submit) => submit.clientEventId)).size).toBe(1);
         await until(() => server.slot.text === "");
         expect(server.slot.text).toBe("");
+        expect(hook.result.current.value).toBe("");
+      } finally {
+        await hook.unmount();
+      }
+    });
+
+    test("refused with a 503 while Opengeni is updating, is kept as the draft until delivered", async () => {
+      const server = draftServer();
+      const hook = await mountOn(server);
+      try {
+        await flush(20);
+        server.failNextSubmit();
+        await actRun(() => hook.result.current.setValue(MESSAGE));
+        await actRun(() => {
+          void hook.result.current.send();
+        });
+        await until(() => server.slot.text === MESSAGE);
+        expect(server.slot.text).toBe(MESSAGE);
+        expect(server.delivered).toEqual([]);
+        if (path === "a busy Send") {
+          // Refused before anything was accepted: back in the untouched box.
+          expect(hook.result.current.value).toBe(MESSAGE);
+          await actRun(() => {
+            void hook.result.current.send();
+          });
+        } else {
+          // Held and retried by itself; the box stays empty.
+          expect(hook.result.current.value).toBe("");
+        }
+        await until(() => server.delivered.length > 0);
+        expect(server.delivered).toEqual([MESSAGE]);
+        await until(() => server.slot.text === "");
+        expect(server.slot.text).toBe("");
+        expect(hook.result.current.value).toBe("");
+      } finally {
+        await hook.unmount();
+      }
+    });
+
+    test("kept while offline, its draft write goes out once the browser is back online", async () => {
+      const server = draftServer();
+      const hook = await mountOn(server);
+      try {
+        await flush(20);
+        server.loseNextSubmitReply(false);
+        server.dropNextSave();
+        await actRun(() => hook.result.current.setValue(MESSAGE));
+        await actRun(() => {
+          void hook.result.current.send();
+        });
+        await until(() => server.submits.length > 0);
+        await flush(100);
+        expect(server.slot.text).toBe("");
+
+        await actRun(() => {
+          window.dispatchEvent(new Event("online"));
+        });
+        await until(() => server.slot.text === MESSAGE);
+        expect(server.slot.text).toBe(MESSAGE);
         expect(hook.result.current.value).toBe("");
       } finally {
         await hook.unmount();

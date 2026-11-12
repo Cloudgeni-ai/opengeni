@@ -1038,6 +1038,13 @@ export function useComposer(
   // Send saves first, so that write is taken as this page's own and not kept
   // as another device's newer draft.
   const draftWriteUnconfirmedRef = useRef(false);
+  // A send kept as the draft (see `keepUnconfirmedSendInDraft`) whose write
+  // got no answer, to try again when the connection is back.
+  const unkeptSendRef = useRef<{
+    payload: SaveComposerDraftRequest;
+    basis: number;
+    owner: { targetKey: string; generation: number };
+  } | null>(null);
   const onSent = useCallback(
     (text: string, input: SendMessageInput) => {
       notifyComposerObserver(options.onSent, text, input);
@@ -1999,7 +2006,8 @@ export function useComposer(
    * refused and the sent text never comes back, and another device's newer
    * draft is never written over. A send that lands later clears a draft
    * holding exactly what it sent. Typing since the send waits as autosave
-   * does while a send is unsettled, then saves over this as usual. The
+   * does while a send is unsettled, then saves over this as usual. A write
+   * that got no answer is tried again when the connection comes back. The
    * caller holds the draft slot.
    */
   const keepUnconfirmedSendInDraft = useCallback(
@@ -2010,6 +2018,7 @@ export function useComposer(
     ): Promise<void> => {
       const owned = () =>
         targetKeyRef.current === owner.targetKey && targetGeneration.current === owner.generation;
+      unkeptSendRef.current = null;
       const current = draftRef.current;
       if (
         !sessionId ||
@@ -2039,14 +2048,44 @@ export function useComposer(
       } catch (cause) {
         // Refused: the send was accepted after all, or another device saved
         // something newer; the draft stays as it is. With no answer the
-        // server may hold this write, so the next send saves first.
+        // server may hold this write, so the next send saves first, and it
+        // is tried again once the connection is back.
         if (isOutcomeUnknownError(cause) || isTransientServiceFailure(cause)) {
           draftWriteUnconfirmedRef.current = true;
+          if (owned()) unkeptSendRef.current = { payload, basis, owner };
         }
       }
     },
     [adoptDraftBase, client, durableDrafts, keepNewerDraftAfterSend, sessionId, workspaceId],
   );
+  // A kept-send write that got no answer goes out again once the browser is
+  // back online or the page wakes, under the same revision fence.
+  useEffect(() => {
+    if (!sessionId || !durableDrafts) return;
+    const retry = () => {
+      const unkept = unkeptSendRef.current;
+      if (!unkept) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void (async () => {
+        const release = await acquireDraftSlot();
+        try {
+          if (unkeptSendRef.current === unkept) {
+            await keepUnconfirmedSendInDraft(unkept.payload, unkept.basis, unkept.owner);
+          }
+        } finally {
+          release();
+        }
+      })();
+    };
+    window.addEventListener("online", retry);
+    document.addEventListener("visibilitychange", retry);
+    window.addEventListener("pageshow", retry);
+    return () => {
+      window.removeEventListener("online", retry);
+      document.removeEventListener("visibilitychange", retry);
+      window.removeEventListener("pageshow", retry);
+    };
+  }, [acquireDraftSlot, durableDrafts, keepUnconfirmedSendInDraft, sessionId]);
 
   /**
    * Submit a durable send at `first.revision`. A server older than "Send
