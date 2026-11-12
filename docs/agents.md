@@ -429,7 +429,7 @@ once (`agent_suggestion IS NULL` in the update), so concurrent calls leave one
 card.
 
 The tool changes nothing. It records the suggestion on the chat
-(`sessions.agent_suggestion`, migration `1363_session_agent_suggestion.sql`,
+(`sessions.agent_suggestion`, migration `1372_session_agent_suggestion.sql`,
 display state that never reaches the model and that forks copy, returned as
 `Session.agentSuggestion`) and the chat shows it as a card. **Make this an
 agent…** opens the same form as the header's menu
