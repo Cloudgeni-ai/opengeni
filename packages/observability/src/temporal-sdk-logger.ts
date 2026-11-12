@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Attributes, Observability } from "./index";
 
 /**
@@ -113,7 +114,76 @@ export type TemporalFailureFacts = {
   dbReason?: string;
   dbFunctions?: string;
   persistenceStage?: string;
+  failureMessage?: string;
+  failureMessageHash?: string;
 };
+
+/**
+ * Failure classes whose messages are code-authored constants with only
+ * identifiers interpolated. Their message template (identifiers, numbers and
+ * quoted values replaced) is safe to log; every other message is reduced to
+ * a hash of its template so a repeating failure stays groupable.
+ */
+const CODE_AUTHORED_MESSAGE_FAILURE_NAMES: ReadonlySet<string> = new Set([
+  "SessionControlInvariantError",
+  "SessionEventPersistenceError",
+  "DatabaseTransactionError",
+]);
+const FAILURE_MESSAGE_MAX_LENGTH = 200;
+const FAILURE_MESSAGE_TEMPLATE_PATTERN = /^[A-Za-z][A-Za-z0-9 <>.,:;()'_-]{0,199}$/;
+const FAILURE_MESSAGE_HASH_PATTERN = /^m_[0-9a-f]{12}$/;
+
+/** Replace identifiers, numbers, quoted values and any token that is not a
+ * plain word, so only the code-authored wording remains. */
+function failureMessageTemplate(message: string): string {
+  return message
+    .slice(0, 4_096)
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<id>")
+    .replace(/"[^"]*"|`[^`]*`|'[^'\s]*'/g, "<q>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .map((token) => {
+      const match = /^([(]?)(.*?)([.,:;)]*)$/.exec(token)!;
+      const core = match[2]!;
+      if (core === "" || core === "<id>" || core === "<q>" || /^[A-Za-z][a-z'_-]*$/.test(core))
+        return token;
+      return `${match[1]}${/^\d+$/.test(core) ? "<n>" : "<v>"}${match[3]}`;
+    })
+    .join(" ")
+    .slice(0, FAILURE_MESSAGE_MAX_LENGTH);
+}
+
+/** The innermost error in a `cause` chain: a workflow failure wraps the
+ * activity failure, which wraps the thrown error that explains it. */
+function deepestCause(error: object): object {
+  let current = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const cause = ownField(current, "cause");
+    if (!cause || typeof cause !== "object") break;
+    current = cause;
+  }
+  return current;
+}
+
+function failureMessageFacts(error: object): TemporalFailureFacts {
+  const cause = deepestCause(error);
+  const message = ownField(cause, "message");
+  if (typeof message !== "string" || message.trim() === "") return {};
+  const template = failureMessageTemplate(message);
+  if (template === "") return {};
+  const facts: TemporalFailureFacts = {
+    failureMessageHash: `m_${createHash("sha256").update(template).digest("hex").slice(0, 12)}`,
+  };
+  const name = reviewedFailureName(cause);
+  if (
+    name !== undefined &&
+    CODE_AUTHORED_MESSAGE_FAILURE_NAMES.has(name) &&
+    FAILURE_MESSAGE_TEMPLATE_PATTERN.test(template)
+  )
+    facts.failureMessage = template;
+  return facts;
+}
 
 function ownField(value: unknown, key: string): unknown {
   if (!value || typeof value !== "object") return undefined;
@@ -153,6 +223,7 @@ export function temporalFailureFacts(error: unknown): TemporalFailureFacts {
   if (!error || typeof error !== "object") return facts;
   const failureName = reviewedFailureName(error);
   if (failureName) facts.failureName = failureName;
+  Object.assign(facts, failureMessageFacts(error));
   if (failureName === "ApplicationFailure") {
     const type = ownField(error, "type");
     if (typeof type === "string" && TEMPORAL_TYPE_NAME_PATTERN.test(type)) facts.failureType = type;
@@ -217,7 +288,7 @@ export function projectTemporalFailureFacts(
   attributes: Record<string, unknown>,
 ): TemporalFailureFacts {
   const { failureName, failureType, nonRetryable, sqlState, dbReason, dbFunctions } = attributes;
-  const { persistenceStage } = attributes;
+  const { persistenceStage, failureMessage, failureMessageHash } = attributes;
   return {
     ...(typeof failureName === "string" && REVIEWED_FAILURE_NAMES.has(failureName)
       ? { failureName }
@@ -238,6 +309,13 @@ export function projectTemporalFailureFacts(
     ...(typeof persistenceStage === "string" &&
     FAILURE_PERSISTENCE_STAGE_PATTERN.test(persistenceStage)
       ? { persistenceStage }
+      : {}),
+    ...(typeof failureMessage === "string" && FAILURE_MESSAGE_TEMPLATE_PATTERN.test(failureMessage)
+      ? { failureMessage }
+      : {}),
+    ...(typeof failureMessageHash === "string" &&
+    FAILURE_MESSAGE_HASH_PATTERN.test(failureMessageHash)
+      ? { failureMessageHash }
       : {}),
   };
 }

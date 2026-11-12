@@ -13625,16 +13625,25 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
   });
 }
 
+/**
+ * One path segment inside the file's own mount directory. Separators, NUL and
+ * the `.`/`..` segments are what can leave that directory; a name that only
+ * contains two dots (`notes..txt`, `v1..2.csv`) is an ordinary file name.
+ */
+function isSafeSandboxFilename(filename: string): boolean {
+  return (
+    filename.length > 0 &&
+    filename !== "." &&
+    filename !== ".." &&
+    !filename.includes("/") &&
+    !filename.includes("\\") &&
+    !filename.includes("\0")
+  );
+}
+
 function assertSafeSandboxFilename(filename: string, fileId: string): void {
-  if (
-    !filename ||
-    filename.includes("/") ||
-    filename.includes("\\") ||
-    filename === "." ||
-    filename === ".." ||
-    filename.includes("..")
-  ) {
-    throw new Error(`Invalid sandbox file name for ${fileId}: ${filename}`);
+  if (!isSafeSandboxFilename(filename)) {
+    throw new Error(`Invalid sandbox file name for ${fileId}`);
   }
 }
 

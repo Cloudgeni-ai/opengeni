@@ -376,6 +376,9 @@ export async function reconcileSessionTitleOperation(
     );
   } catch (error) {
     const current = await getSessionTitleOperation(db, input);
+    // Deleting a chat deletes its title operation; there is nothing left to
+    // name or settle, so this is the expected end rather than a failure.
+    if (!current) return { action: "terminal" };
     if (
       (current?.state === "pending" || current?.state === "responded") &&
       isRetryableTitleAdmissionError(error)

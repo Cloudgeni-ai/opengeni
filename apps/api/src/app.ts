@@ -2422,6 +2422,12 @@ export function createAppComposition(
         );
         outcome = "ok";
         return c.json(response, operation === "target-approvals" ? 201 : 200);
+      } catch (error) {
+        // A caller that disconnects aborts the target work through `signal`.
+        // That is a client disconnect, not a server failure: answer with the
+        // client-gone convention (mcp/request-abort.ts), 499 and no body.
+        if (c.req.raw.signal.aborted) return new Response(null, { status: 499 });
+        throw error;
       } finally {
         recordWorkspaceToolTargetOperation(routeDeps.observability, {
           operation,

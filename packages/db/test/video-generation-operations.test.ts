@@ -9,6 +9,7 @@ import {
   markVideoGenerationProviderStarted,
   markVideoGenerationRetaining,
   markVideoGenerationSubmissionIntent,
+  mediaGenerationResultForReconciledOperation,
   mediaGenerationResultForStoredOperation,
   rescheduleVideoGenerationOperation,
   settleVideoGenerationFailure,
@@ -17,6 +18,7 @@ import {
 } from "../src/video-generation";
 import {
   bootstrapWorkspace,
+  ensureManagedAccessForUser,
   withRlsContext,
   withSessionRlsActorContext,
   getFile,
@@ -56,29 +58,52 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function baseFixture() {
+async function baseFixture(options: { privateSession?: boolean } = {}) {
   const suffix = crypto.randomUUID();
-  const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "test",
-    accountExternalId: `video-account-${suffix}`,
-    accountName: "Video test account",
-    workspaceExternalSource: "test",
-    workspaceExternalId: `video-workspace-${suffix}`,
-    workspaceName: "Video test workspace",
-    subjectId: `video-subject-${suffix}`,
-  });
-  const grant = access.workspaceGrants[0]!;
-  const session = await createSession(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    initialMessage: "Generate a short video",
-    resources: [],
-    metadata: {},
-    model: "scripted-model",
-    reasoningEffort: "medium" as const,
-    latencyMode: "standard" as const,
-    sandboxBackend: "none",
-  });
+  // An Only-me chat needs a managed human who owns it.
+  const access = options.privateSession
+    ? await ensureManagedAccessForUser(client.db, {
+        userId: suffix,
+        email: `${suffix}@example.test`,
+        name: "Video test owner",
+      })
+    : await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: `video-account-${suffix}`,
+        accountName: "Video test account",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `video-workspace-${suffix}`,
+        workspaceName: "Video test workspace",
+        subjectId: `video-subject-${suffix}`,
+      });
+  const grant = options.privateSession
+    ? access.workspaceGrants.find(
+        (item) =>
+          item.workspaceId === (access as { defaultWorkspaceId?: string }).defaultWorkspaceId,
+      )!
+    : access.workspaceGrants[0]!;
+  const create = () =>
+    createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Generate a short video",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      ...(options.privateSession
+        ? {
+            visibility: "user_private" as const,
+            subjectId: grant.subjectId,
+            createdBy: { kind: "subject" as const, subjectId: grant.subjectId },
+          }
+        : {}),
+    });
+  const session = options.privateSession
+    ? await withSessionRlsActorContext({ subjectId: grant.subjectId }, create)
+    : await create();
   await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -99,8 +124,8 @@ async function baseFixture() {
   return { grant, session, claim, attemptId };
 }
 
-async function fixture() {
-  const base = await baseFixture();
+async function fixture(options: { privateSession?: boolean } = {}) {
+  const base = await baseFixture(options);
   const { grant } = base;
   const connection = await createConnection(client.db, {
     accountId: grant.accountId,
@@ -215,7 +240,10 @@ describe("durable video generation operation", () => {
     "keeps one logical paid operation and settles its owned artifact/File (personal=%s)",
     async (personal) => {
       if (!available) return;
-      const { grant, session, claim, attemptId, connection, policy } = await fixture();
+      // A personal video belongs to an Only-me chat.
+      const { grant, session, claim, attemptId, connection, policy } = await fixture({
+        privateSession: personal,
+      });
       const operationId = crypto.randomUUID();
       const artifactId = crypto.randomUUID();
       const fileId = crypto.randomUUID();
@@ -396,6 +424,14 @@ describe("durable video generation operation", () => {
           `/workspace/generated-videos/generated-video-${artifactId}.mp4`,
         );
       }
+      // The reconciliation service delivers the result to the chat even when
+      // only the chat's owner can see it.
+      const reconciled = await mediaGenerationResultForReconciledOperation(
+        client.db,
+        settled.operation,
+        "service:video-generation-reconciliation",
+      );
+      expect(reconciled.status).toBe("ready");
       expect(
         (
           await withOwner(() =>

@@ -14,7 +14,13 @@ import {
 import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
-import { rawRows, withRlsContext, withWorkspaceRls } from "./database";
+import {
+  rawRows,
+  withoutSessionRlsActor,
+  withRlsContext,
+  withSessionRlsActorContext,
+  withWorkspaceRls,
+} from "./database";
 import * as schema from "./schema";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
@@ -1245,6 +1251,48 @@ export async function mediaGenerationResultForStoredOperation(
     operation,
     readyReceipt: receipt,
   });
+}
+
+/**
+ * The terminal result of a stored operation, read by a background service
+ * for the chat that requested it. An Only-me chat and its rows are visible to
+ * its owner alone, so the service reads on that owner's behalf; the
+ * operation's private file owner keeps an Only-me file readable.
+ */
+export async function mediaGenerationResultForReconciledOperation(
+  db: Database,
+  operation: VideoGenerationOperation,
+  serviceSubjectId: string,
+): Promise<MediaGenerationResult> {
+  const sessionId = operation.sessionId;
+  const privateOwnerSubjectId = sessionId
+    ? await withoutSessionRlsActor(() =>
+        withWorkspaceRls(db, operation.workspaceId, async (scopedDb) => {
+          const [row] = await scopedDb
+            .select({
+              visibility: schema.sessions.visibility,
+              ownerSubjectId: schema.sessions.ownerSubjectId,
+            })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, operation.workspaceId),
+                eq(schema.sessions.id, sessionId),
+              ),
+            )
+            .limit(1);
+          return row?.visibility === "user_private" ? (row.ownerSubjectId ?? null) : null;
+        }),
+      )
+    : null;
+  return await withSessionRlsActorContext(
+    {
+      subjectId: serviceSubjectId,
+      initiatingHumanSubjectId: privateOwnerSubjectId,
+      privateFileOwnerSubjectId: operation.privateFileOwnerSubjectId ?? null,
+    },
+    () => mediaGenerationResultForStoredOperation(db, operation),
+  );
 }
 
 export async function getVideoGenerationOperationSummary(

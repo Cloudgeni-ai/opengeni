@@ -13,8 +13,7 @@ import {
   markVideoGenerationSubmissionUncertain,
   markVideoGenerationTerminalUpdate,
   markVideoGenerationTerminalUpdateInTransaction,
-  mediaGenerationResultForStoredOperation,
-  withSessionRlsActorContext,
+  mediaGenerationResultForReconciledOperation,
   rescheduleVideoGenerationOperation,
   settleVideoGenerationFailure,
   settleVideoGenerationReady,
@@ -631,12 +630,10 @@ async function terminalPayload(
   service: TurnActivityServices,
   operation: VideoGenerationOperationWithReferences,
 ): Promise<MediaGenerationResult> {
-  return withSessionRlsActorContext(
-    {
-      subjectId: "service:video-generation-reconciliation",
-      privateFileOwnerSubjectId: operation.privateFileOwnerSubjectId ?? null,
-    },
-    () => mediaGenerationResultForStoredOperation(service.db, operation),
+  return mediaGenerationResultForReconciledOperation(
+    service.db,
+    operation,
+    "service:video-generation-reconciliation",
   );
 }
 

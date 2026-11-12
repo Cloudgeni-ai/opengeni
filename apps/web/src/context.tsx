@@ -47,6 +47,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
+import { renderedRoutePathname } from "@/lib/rendered-route-pathname";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { Toaster } from "@opengeni/react/app/components/toaster";
@@ -191,9 +192,8 @@ const webAppStateHost: AppStateHost = {
 };
 
 export function RootRouteComponent() {
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
-  });
+  // Providers wrap the rendered page, so they follow the rendered route.
+  const pathname = useRouterState({ select: renderedRoutePathname });
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
