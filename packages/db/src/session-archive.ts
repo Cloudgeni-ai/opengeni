@@ -830,6 +830,15 @@ export const SESSION_ARCHIVE_STORE_AFTER_SECONDS =
   SESSION_ARCHIVE_UNDO_SECONDS + SESSION_ARCHIVE_UNDO_GRACE_SECONDS;
 
 /**
+ * Seconds a chat's sandbox is kept after the Archive action, so a chat
+ * restored within a day still has its files. Well past the Undo window
+ * ({@link SESSION_ARCHIVE_STORE_AFTER_SECONDS}), so an Undo never races the
+ * sandbox's end. A chat stored by the idle archiver was already unused for
+ * weeks and waits no longer.
+ */
+export const ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS = 24 * 60 * 60;
+
+/**
  * Days a person's own message keeps a sub-chat "in use": a sub-chat someone
  * talks to directly is a chat they rely on (for example a long-running owner
  * an agent started), not a finished worker.

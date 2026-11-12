@@ -494,21 +494,24 @@ describe("the compute sandbox of archived chats", () => {
     });
   }
 
-  /** Archived a minute ago: past the window in which Undo takes it back. */
+  /** Archived 25 hours ago: past the day its sandbox is kept for. */
   async function archive(workspaceId: string, sessionId: string) {
-    await admin`update sessions set archived_at = now() - interval '1 minute'
+    await admin`update sessions set archived_at = now() - interval '25 hours'
       where workspace_id = ${workspaceId} and id = ${sessionId}`;
   }
 
-  test("an Archive that Undo can still take back keeps the sandbox", async () => {
+  test("a chat archived less than a day ago keeps its sandbox", async () => {
     if (!available) return;
     const { session, ids } = await fixture("compute");
     await releaseLastHolder(ids);
-    await admin`update sessions set archived_at = now()
-      where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
-    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(false);
-    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
-    await admin`update sessions set archived_at = now() - interval '14 seconds'
+    // Within Undo, just past it, and an hour short of a day.
+    for (const ago of ["0 seconds", "14 seconds", "23 hours"]) {
+      await admin`update sessions set archived_at = now() - ${ago}::interval
+        where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+      expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(false);
+      expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+    }
+    await admin`update sessions set archived_at = now() - interval '24 hours 1 minute'
       where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
     expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(true);
   }, 60_000);
@@ -572,7 +575,7 @@ describe("the compute sandbox of archived chats", () => {
 
     const working = await fixture("compute");
     await releaseLastHolder(working.ids);
-    await admin`update sessions set archived_at = now() - interval '1 minute', status = 'queued'
+    await admin`update sessions set archived_at = now() - interval '25 hours', status = 'queued'
       where workspace_id = ${working.ids.workspaceId} and id = ${working.session.id}`;
     expect(await endComputeGroupOfArchivedChats(db, working.ids)).toBe(false);
   }, 60_000);

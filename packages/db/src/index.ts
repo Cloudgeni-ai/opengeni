@@ -62,7 +62,7 @@ export * from "./credential-profiles";
 export * from "./connected-machine-audience";
 export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
-import { SESSION_ARCHIVE_STORE_AFTER_SECONDS, sessionRetentionFromRow } from "./session-archive";
+import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
   subscriptionCapacityWaitReasonText,
@@ -57467,11 +57467,12 @@ export async function endComputeGroupOfArchivedChats(
 ): Promise<boolean> {
   const chat = sql`chat`;
   const root = sql`root`;
-  // Archived for good: an Archive whose Undo window is still open is not yet
-  // one, so an Undo returns the chat with the sandbox it had.
+  // Archived for a day: a chat restored sooner, by Undo or later, returns
+  // with the sandbox it had. One stored by the idle archiver (no archived_at)
+  // was unused for weeks already.
   const archived = (alias: SQL) =>
     sql`(${sessionArchivedSql(alias)} and (${alias}.archived_at is null
-      or ${alias}.archived_at <= now() - make_interval(secs => ${SESSION_ARCHIVE_STORE_AFTER_SECONDS})))`;
+      or ${alias}.archived_at <= now() - make_interval(secs => ${ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS})))`;
   const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
     withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
       // The tenancy lock is held: the statements below get only the time left.
