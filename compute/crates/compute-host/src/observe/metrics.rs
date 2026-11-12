@@ -14,7 +14,7 @@ use compute_core::{Failure, Level, Outcome, Step};
 // Every way a step ends, and the classes durations are kept by, as named
 // on events and metrics.
 use compute_protocol::host_metrics::{
-    ACTIVITIES, DIRECTIONS, HEALTH, OUTCOME_CLASSES, PRESSURES, SIGNALS, STALLS,
+    ACTIVITIES, BYTE_KINDS, DIRECTIONS, HEALTH, OUTCOME_CLASSES, PRESSURES, SIGNALS, STALLS,
     STEP_OUTCOMES as OUTCOMES,
 };
 
@@ -528,6 +528,7 @@ pub use compute_protocol::host_metrics::PRESSURE_RESOURCES;
 pub struct Metrics {
     steps: [[[AtomicU64; OUTCOMES.len()]; Cause::ALL.len()]; Step::COUNT],
     step_time: [[Histogram; OUTCOME_CLASSES.len()]; Step::COUNT],
+    step_bytes: [[[AtomicU64; BYTE_KINDS.len()]; Cause::ALL.len()]; Step::COUNT],
     requests: [[AtomicU64; RESULTS]; RequestKind::ALL.len()],
     request_time: [Histogram; RequestKind::ALL.len()],
     streams_opened: AtomicU64,
@@ -550,6 +551,7 @@ impl Default for Metrics {
         Self {
             steps: from_fn(|_| from_fn(|_| zeros())),
             step_time: std::array::from_fn(|_| std::array::from_fn(|_| Histogram::default())),
+            step_bytes: from_fn(|_| from_fn(|_| zeros())),
             requests: from_fn(|_| zeros()),
             request_time: std::array::from_fn(|_| Histogram::default()),
             streams_opened: AtomicU64::new(0),
@@ -582,6 +584,19 @@ impl Metrics {
         self.steps[step.index()][index_of(&Cause::ALL, &cause)][outcome_index(outcome)]
             .fetch_add(1, Relaxed);
         self.step_time[step.index()][outcome_class(outcome)].record(took);
+    }
+
+    /// Adds `count` bytes a finished step moved as `kind`, one of
+    /// [`BYTE_KINDS`]: what it uploaded to or copied within object
+    /// storage, fetched from it, or gave back to the host. A kind not
+    /// listed is not counted.
+    pub(crate) fn step_bytes(&self, step: Step, cause: Cause, kind: &str, count: u64) {
+        let Some(kind) = BYTE_KINDS.iter().position(|known| *known == kind) else {
+            debug_assert!(false, "{kind} is not a listed byte kind");
+            return;
+        };
+        self.step_bytes[step.index()][index_of(&Cause::ALL, &cause)][kind]
+            .fetch_add(count, Relaxed);
     }
 
     /// Counts a request answered in `took` with `result`.
@@ -735,6 +750,7 @@ impl Metrics {
                     );
                 }
             }
+            self.visit_step_bytes(step, each);
         }
         for (kind_index, kind) in RequestKind::ALL.iter().enumerate() {
             for result in std::iter::once(None).chain(ERROR_CODES.map(Some)) {
@@ -795,6 +811,28 @@ impl Metrics {
             }
         }
         visit_gauges(&self.gauges(), each);
+    }
+
+    fn visit_step_bytes(&self, step: Step, each: &mut impl Visitor) {
+        for (cause_index, cause) in Cause::ALL.iter().enumerate() {
+            for (kind, bytes) in BYTE_KINDS
+                .iter()
+                .zip(&self.step_bytes[step.index()][cause_index])
+            {
+                let bytes = bytes.load(Relaxed);
+                if bytes > 0 {
+                    each.sum(
+                        "compute.step.moved",
+                        &[
+                            ("compute.step", crate::protocol::step_name(step)),
+                            ("compute.cause", cause.name()),
+                            ("compute.bytes.kind", kind),
+                        ],
+                        bytes,
+                    );
+                }
+            }
+        }
     }
 
     fn visit_shrinks(&self, each: &mut impl Visitor) {
@@ -1092,5 +1130,73 @@ mod tests {
             1
         );
         assert_eq!(metrics.requests(RequestKind::Touch, None), 0);
+    }
+
+    #[test]
+    fn step_bytes_add_up_by_step_cause_and_kind() {
+        struct Sums(Vec<(Vec<(&'static str, &'static str)>, u64)>);
+        impl Visitor for Sums {
+            fn sum(
+                &mut self,
+                name: &'static str,
+                labels: &[(&'static str, &'static str)],
+                value: u64,
+            ) {
+                if name == "compute.step.moved" {
+                    self.0.push((labels.to_vec(), value));
+                }
+            }
+            fn sum_since_boot(
+                &mut self,
+                _: &'static str,
+                _: &[(&'static str, &'static str)],
+                _: u64,
+            ) {
+            }
+            fn gauge(&mut self, _: &'static str, _: &[(&'static str, &'static str)], _: u64) {}
+            fn gauge_seconds(
+                &mut self,
+                _: &'static str,
+                _: &[(&'static str, &'static str)],
+                _: f64,
+            ) {
+            }
+            fn histogram(
+                &mut self,
+                _: &'static str,
+                _: &[(&'static str, &'static str)],
+                _: &HistogramReading,
+            ) {
+            }
+        }
+        let metrics = Metrics::default();
+        metrics.step_bytes(Step::Checkpoint, Cause::Schedule, "uploaded", 3);
+        metrics.step_bytes(Step::Checkpoint, Cause::Schedule, "uploaded", 4);
+        metrics.step_bytes(Step::Checkpoint, Cause::Idle, "copied", 5);
+        let mut sums = Sums(Vec::new());
+        metrics.visit(&mut sums);
+        let checkpoint = crate::protocol::step_name(Step::Checkpoint);
+        assert_eq!(
+            sums.0,
+            vec![
+                (
+                    vec![
+                        ("compute.step", checkpoint),
+                        ("compute.cause", "idle"),
+                        ("compute.bytes.kind", "copied"),
+                    ],
+                    5
+                ),
+                (
+                    vec![
+                        ("compute.step", checkpoint),
+                        ("compute.cause", "schedule"),
+                        ("compute.bytes.kind", "uploaded"),
+                    ],
+                    7
+                ),
+            ],
+            "only kinds that moved bytes are sent"
+        );
     }
 }
