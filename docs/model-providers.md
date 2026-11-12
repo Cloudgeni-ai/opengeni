@@ -2733,7 +2733,9 @@ unsupported effort on a known adaptive model is rejected before network I/O.
 Historical models requiring fixed thinking budgets are not enabled through
 adaptive-thinking controls. Invalid streams fail closed, incomplete tools
 are never executed, and truncated compaction summaries are rejected. The adapter
-does not silently retry failed requests or rotate credentials.
+does not silently retry failed requests or rotate credentials, except that an
+organization Anthropic API connection with several keys sends a request refused
+for lack of credits again on the session's next key (below).
 HTTP error details are read for at most 5 seconds (or the shorter configured
 stream idle timeout) and 64 KiB. A stalled or broken diagnostic body does not
 hide the HTTP status, request ID or Retry-After header; caller cancellation
@@ -2747,6 +2749,47 @@ policy rejection even when HTTP is 200 and content is empty. It uses the existin
 policy-refusal presentation, never completes an empty successful response, and
 never executes tools from refused output. These failures retain the request ID
 without persisting arbitrary provider explanation text.
+
+### Several Anthropic API keys for an organization
+
+An organization's Anthropic API connection can hold several API keys, for
+example one per Anthropic organization whose credits it uses. The connection's
+own key is the first member, unchanged: an organization with one key works
+exactly as before, and model ids stay `organization-anthropic/…`. Organization
+admins add further keys under Models on the Anthropic API page, or through
+`/v1/organizations/:organizationId/model-providers/anthropic/api-keys` (list,
+add, rename, remove, and `serve-again`). Adding a key checks it with
+Anthropic's free `GET /v1/models` and records the Anthropic organization from
+its `anthropic-organization-id` header; no model request is sent. Keys are
+stored encrypted on the connection row (`api_key_members`) and never returned.
+The connection's own key is replaced or disconnected through the connection;
+replacing it gives it a new member id (`primary-v<version>`).
+
+These keys serve only `organization-anthropic/` models. Claude subscription
+models (`claude/…`, `organization-claude-subscription/…`) never use them, and
+no route ever falls back from one to the other.
+
+Each session keeps one key: the runtime orders the keys by rendezvous hashing
+of the session's prompt cache key over the member ids
+(`anthropicApiKeyOrder`), and sends with the first key that still serves.
+Anthropic's prompt cache, signed thinking and server search results belong to
+the key's Anthropic organization, so a session moves only when its key can't
+serve it; adding or removing a key moves only the sessions that ranked it
+first. Only the `x-api-key` header differs between keys; the request body is
+the one the session would send with any key.
+
+When Anthropic refuses a key because its organization can't pay (HTTP 402, a
+`billing_error`, a spend-limit error, or HTTP 400 "credit balance is too low"),
+the same request goes to the session's next key, and the worker records the
+refusal (`api_key_credit_refusals`), so later turns leave that key out. A
+refused key stays out until an admin chooses **Serve again** (after adding
+credits) or adds it again; there is no timed recheck, because promotional and
+prepaid credits don't come back by themselves. Rate limits and overload are
+not refusals and keep their ordinary handling on the same key. When every key
+is refused the request fails without being sent, with
+`anthropic_api_keys_out_of_credits`. Nothing buys credits, enables top-ups or
+extra usage: each key's spending is governed by its own Anthropic
+organization's billing settings.
 
 
 ### Claude subscription request identity

@@ -15588,6 +15588,17 @@ export const organizationModelProviderConnections = pgTable(
     compatibleApi: text("compatible_api").$type<"chat" | "responses">(),
     /** OpenAI-compatible endpoints only: an optional display name. */
     label: text("label"),
+    /**
+     * Anthropic API connections only: the organization's further API keys.
+     * The connection's own key is the first member.
+     */
+    apiKeyMembers: jsonb("api_key_members").$type<StoredAnthropicApiKeyMember[]>(),
+    /**
+     * Anthropic API connections only: member id to the time Anthropic refused
+     * that key for lack of credits (the connection's own key is
+     * `primary-v<version>`).
+     */
+    apiKeyCreditRefusals: jsonb("api_key_credit_refusals").$type<Record<string, string>>(),
     /** How the connection signs in; Microsoft Entra ID methods are Azure OpenAI only. */
     authMethod: text("auth_method")
       .$type<OrganizationModelProviderAuthMethod>()
@@ -15650,8 +15661,27 @@ export const organizationModelProviderConnections = pgTable(
       "organization_model_provider_connections_auth_method_chk",
       sql`${table.authMethod} in ('api_key', 'entra_client_secret', 'entra_deployment_identity') and (${table.authMethod} = 'api_key' or ${table.providerKind} = 'azure_openai')`,
     ),
+    apiKeyMembersCheck: check(
+      "organization_model_provider_connections_api_key_members_chk",
+      sql`${table.apiKeyMembers} is null or (${table.providerKind} = 'anthropic' and jsonb_typeof(${table.apiKeyMembers}) = 'array' and jsonb_array_length(${table.apiKeyMembers}) <= 63)`,
+    ),
+    apiKeyRefusalsCheck: check(
+      "organization_model_provider_connections_api_key_refusals_chk",
+      sql`${table.apiKeyCreditRefusals} is null or (${table.providerKind} = 'anthropic' and jsonb_typeof(${table.apiKeyCreditRefusals}) = 'object')`,
+    ),
   }),
 );
+
+/** One further API key of an organization's Anthropic API connection. */
+export type StoredAnthropicApiKeyMember = {
+  id: string;
+  label: string;
+  credentialEncrypted: string;
+  credentialDigest: string;
+  anthropicOrganizationId: string | null;
+  createdAt: string;
+  createdBySubjectId: string;
+};
 
 export const organizationModelProviderConnectionOperations = pgTable(
   "organization_model_provider_connection_operations",

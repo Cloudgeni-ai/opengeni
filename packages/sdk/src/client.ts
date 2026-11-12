@@ -509,6 +509,10 @@ import type {
   DeleteOrganizationProviderCustomModelRequest,
   OrganizationCompatibleEndpoint,
   OrganizationCompatibleEndpointsResponse,
+  OrganizationAnthropicApiKey,
+  OrganizationAnthropicApiKeysResponse,
+  AddOrganizationAnthropicApiKeyRequest,
+  UpdateOrganizationAnthropicApiKeyRequest,
   CreateOrganizationCompatibleEndpointRequest,
   ReplaceOrganizationCompatibleEndpointKeyRequest,
   CreateOrganizationCompatibleEndpointModelRequest,
@@ -6654,6 +6658,60 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "GET",
       `/v1/workspaces/${workspaceId}/model-policy`,
+    );
+  }
+
+  /** List the API keys of the organization's Anthropic API connection (never their values). */
+  async listOrganizationAnthropicApiKeys(
+    organizationId: string,
+  ): Promise<OrganizationAnthropicApiKeysResponse> {
+    return await this.requestJson<OrganizationAnthropicApiKeysResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys`,
+    );
+  }
+
+  /** Add a further API key to the organization's Anthropic API connection. */
+  async addOrganizationAnthropicApiKey(
+    organizationId: string,
+    request: AddOrganizationAnthropicApiKeyRequest,
+  ): Promise<OrganizationAnthropicApiKey> {
+    return await this.requestJson<OrganizationAnthropicApiKey>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys`,
+      request,
+    );
+  }
+
+  /** Rename one further API key of the organization's Anthropic API connection. */
+  async updateOrganizationAnthropicApiKey(
+    organizationId: string,
+    keyId: string,
+    request: UpdateOrganizationAnthropicApiKeyRequest,
+  ): Promise<OrganizationAnthropicApiKey> {
+    return await this.requestJson<OrganizationAnthropicApiKey>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys/${encodeURIComponent(keyId)}`,
+      request,
+    );
+  }
+
+  /** Remove one further API key of the organization's Anthropic API connection. */
+  async removeOrganizationAnthropicApiKey(organizationId: string, keyId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys/${encodeURIComponent(keyId)}`,
+    );
+  }
+
+  /** Let an API key Anthropic refused for lack of credits serve again. */
+  async serveOrganizationAnthropicApiKeyAgain(
+    organizationId: string,
+    keyId: string,
+  ): Promise<OrganizationAnthropicApiKey> {
+    return await this.requestJson<OrganizationAnthropicApiKey>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys/${encodeURIComponent(keyId)}/serve-again`,
     );
   }
 

@@ -5018,6 +5018,35 @@ export type OrganizationCompatibleEndpointsResponse = {
   endpoints: OrganizationCompatibleEndpoint[];
 };
 /**
+ * One API key of an organization's Anthropic API connection, which can hold
+ * several. The connection's own key is the first; each session keeps one key
+ * while it serves. Never includes the key itself.
+ */
+export type OrganizationAnthropicApiKey = {
+  id: string;
+  /** Null for the connection's own key. */
+  label: string | null;
+  /** Whether this is the connection's own key (replaced or disconnected with the connection). */
+  connectionKey: boolean;
+  /** The Anthropic organization the key belongs to, when known. */
+  anthropicOrganizationId: string | null;
+  /** When Anthropic refused the key because its organization is out of credits; null while it serves. */
+  creditRefusedAt: string | null;
+  createdAt: string;
+};
+export type OrganizationAnthropicApiKeysResponse = {
+  connectionVersion: number;
+  keys: OrganizationAnthropicApiKey[];
+};
+/** Add a further key; the API checks it with Anthropic's free model listing first. */
+export type AddOrganizationAnthropicApiKeyRequest = {
+  apiKey: string;
+  label: string;
+};
+export type UpdateOrganizationAnthropicApiKeyRequest = {
+  label: string;
+};
+/**
  * Connect an endpoint with its first model; the API checks it with a short
  * test request first. Without `reasoning`, the model's levels are read from
  * the endpoint's model listing when it publishes them; `null` declares none.
