@@ -2224,9 +2224,13 @@ const workingAuthority = {
 };
 
 describe("same-working-directory controller restart", () => {
-  test.each(["failed-close", "failed-detach", "suspend-write", "completion-write"] as const)(
-    "%s during shutdown cannot admit recovery",
-    async (failure) => {
+  test.each(
+    (["failed-close", "failed-detach", "suspend-write", "completion-write"] as const).flatMap(
+      (failure) => (["live", "exited"] as const).map((browser) => [failure, browser] as const),
+    ),
+  )(
+    "%s during shutdown admits recovery only once the browser is gone (%s)",
+    async (failure, browser) => {
       await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
         const first = await BrowserSupervisor.open({
           rootDirectory,
@@ -2274,17 +2278,37 @@ describe("same-working-directory controller restart", () => {
         let launches = 0;
         const second = await BrowserSupervisor.open({
           rootDirectory,
-          inspectOwnedProcess: async () => "exited",
+          inspectOwnedProcess: async () => browser,
           createDriver: async (context) => {
             launches++;
-            return fakeDriver(context);
+            return {
+              ...fakeDriver(context),
+              ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            };
           },
         });
         try {
-          await expect(
-            second.createSession({ ...options, recoverExistingWorkingDirectory: true }),
-          ).rejects.toThrow("preserved");
-          expect(launches).toBe(0);
+          const recovery = second.createSession({
+            ...options,
+            recoverExistingWorkingDirectory: true,
+          });
+          if (browser === "live") {
+            // The stopped controller's transport may still hold a live browser.
+            await expect(recovery).rejects.toThrow("preserved");
+            expect(launches).toBe(0);
+          } else {
+            // The browser died with its controller: its profile is relaunched,
+            // as after an idle release, with its sign-ins intact.
+            await recovery;
+            expect(launches).toBe(1);
+            expect(
+              (
+                second as unknown as {
+                  sessions: Map<string, { workingReceipt: BrowserWorkingRuntimeReceipt }>;
+                }
+              ).sessions.get(options.browserSessionId)!.workingReceipt,
+            ).toMatchObject({ intent: "launch", state: "completed" });
+          }
         } finally {
           await second.close();
           // Explicit cleanup is still allowed for the retained synthetic holder.
