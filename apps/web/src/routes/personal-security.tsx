@@ -6,8 +6,11 @@ import { apiBaseUrl } from "@/api";
 import {
   browserSupportsPasskeys,
   createPasskey,
+  openInBrowser,
   passkeyAlreadyRegistered,
   passkeyPromptDismissed,
+  passkeyPromptUnavailable,
+  passkeysNeedBrowser,
 } from "@/lib/passkeys";
 import {
   SIGN_IN_METHOD_ORIGIN_MESSAGE,
@@ -184,7 +187,25 @@ export function SecurityController({
   const [revision, setRevision] = useState(0);
   const [committed, setCommitted] = useState(false);
   const [passkeysSupported] = useState(browserSupportsPasskeys);
+  const [passkeysInBrowser] = useState(() => passkeysNeedBrowser());
   const isCurrent = useCallback(() => live.current && owner.current === userId, [userId]);
+  // A passkey added in the browser shows here when the person comes back.
+  useEffect(() => {
+    if (!passkeysInBrowser) return;
+    const refresh = () => {
+      if (inFlight.current) return;
+      void api
+        .list()
+        .then((next) => {
+          if (isCurrent() && !inFlight.current) setInventory(next);
+        })
+        .catch(() => {
+          // The next focus, or Refresh, tries again.
+        });
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [api, isCurrent, passkeysInBrowser]);
   useEffect(() => {
     live.current = true;
     owner.current = userId;
@@ -370,7 +391,9 @@ export function SecurityController({
             ? "This device or password manager already has a passkey for your account."
             : passkeyPromptDismissed(caught)
               ? "No passkey was added. Try again when you're ready."
-              : "Couldn't create a passkey here. Try again, or use another device or security key.",
+              : passkeyPromptUnavailable(caught)
+                ? "Your browser didn't show a passkey prompt. Try again, or open Opengeni in another browser."
+                : "Couldn't create a passkey here. Try again, or use another device or security key.",
         );
         return;
       }
@@ -492,12 +515,21 @@ export function SecurityController({
                   items: inventory.passkeys ?? [],
                   available: inventory.passkeysAvailable === true,
                   supported: passkeysSupported,
+                  inBrowser: passkeysInBrowser,
                   canRemove: inventory.canRemovePasskey === true,
                   onlyMethod: passkeyOnly,
                 }
               : null
           }
           onAddPasskey={() => {
+            if (passkeysInBrowser) {
+              openInBrowser(new URL("/settings/security", window.location.origin).toString());
+              setError(null);
+              setSuccess(
+                "Add your passkey in the browser window that opened. It shows here when you come back.",
+              );
+              return;
+            }
             void addPasskey();
           }}
           onRemovePasskey={(passkeyId) => mutate("passkey/remove", { passkeyId })}

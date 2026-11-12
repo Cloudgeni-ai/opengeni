@@ -28,6 +28,7 @@ import {
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
+import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
 import { withAdminStepUp } from "./lib/admin-step-up";
 import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
 import {
@@ -1078,16 +1079,40 @@ export async function signInPasskey(): Promise<unknown> {
 }
 
 /** Confirms it's this signed-in person with one of their passkeys, for admin changes. */
-export async function confirmAdminWithPasskey(): Promise<void> {
+export async function confirmAdminWithPasskey(handoffId?: string): Promise<void> {
   const ceremony = await authRequest<PasskeyCeremony>("/passkey/step-up/options", {
     method: "POST",
-    body: "{}",
+    body: JSON.stringify(handoffId ? { handoffId } : {}),
   });
   const response = await askForPasskey(ceremony);
   await authRequest<unknown>("/passkey/step-up", {
     method: "POST",
     body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
   });
+}
+
+/** A step-up for this session, confirmed in the person's own browser (see `PASSKEY_STEP_UP_HANDOFF_PATH`). */
+export type PasskeyStepUpHandoff = { handoffId: string; code: string; expiresAt: string };
+
+export async function startPasskeyStepUpHandoff(): Promise<PasskeyStepUpHandoff> {
+  return await authRequest<PasskeyStepUpHandoff>("/passkey/step-up/handoff", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+/** The handoff the browser page was opened for, to show its code. */
+export async function readPasskeyStepUpHandoff(handoffId: string): Promise<PasskeyStepUpHandoff> {
+  return await authRequest<PasskeyStepUpHandoff>(
+    `/passkey/step-up/handoff/${encodeURIComponent(handoffId)}`,
+    { method: "GET" },
+  );
+}
+
+/** Whether this session is confirmed with a passkey. */
+export async function passkeyStepUpConfirmed(): Promise<boolean> {
+  const status = await authRequest<{ confirmed: boolean }>("/passkey/step-up", { method: "GET" });
+  return status.confirmed === true;
 }
 
 /** Creates an account with only a name and a new passkey, and signs in to it. */
@@ -1122,6 +1147,7 @@ function authReturnBase(): string {
   if (organizationSecurity) return organizationSecurity;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
+    window.location.pathname === PASSKEY_STEP_UP_HANDOFF_PATH ||
     window.location.pathname === "/site-auth/authorize"
     ? `${window.location.pathname}${window.location.search}`
     : "/";

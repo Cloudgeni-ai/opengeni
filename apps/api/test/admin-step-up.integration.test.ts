@@ -348,6 +348,86 @@ describe("admin passkey step-up", () => {
     expect((await call(rt, "POST", "/v1/auth/passkey/step-up/options", "")).status).toBe(403);
   }, 120_000);
 
+  test("an app that can't show passkey prompts hands its step-up to the person's browser", async () => {
+    const rt = runtime();
+    const owner = await passkeyPerson(rt, "Desktop Owner");
+    const organization = await createOrganization(rt, owner.cookie);
+    await unconfirm(owner.userId);
+    // The desktop app's window: the same person's own session, not confirmed.
+    const appSession = await passwordSession(rt, owner.userId);
+    expect(await stepUpCode(await rename(rt, appSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+    const status = async (cookie: string) =>
+      (
+        (await (await call(rt, "GET", "/v1/auth/passkey/step-up", cookie)).json()) as {
+          confirmed: boolean;
+        }
+      ).confirmed;
+    expect(await status(appSession)).toBe(false);
+
+    const started = await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", appSession);
+    expect(started.status, await started.clone().text()).toBe(200);
+    const handoff = (await started.json()) as { handoffId: string; code: string };
+    expect(handoff.code).toMatch(/^\d{6}$/u);
+
+    // The browser page shows the same code to the same person only.
+    const shown = await call(
+      rt,
+      "GET",
+      `/v1/auth/passkey/step-up/handoff/${handoff.handoffId}`,
+      owner.cookie,
+    );
+    expect(shown.status).toBe(200);
+    expect(await shown.json()).toMatchObject({ code: handoff.code });
+    const stranger = await passkeyPerson(rt, "Stranger");
+    const foreign = await call(
+      rt,
+      "GET",
+      `/v1/auth/passkey/step-up/handoff/${handoff.handoffId}`,
+      stranger.cookie,
+    );
+    expect(foreign.status).toBe(403);
+    expect(await foreign.json()).toMatchObject({ code: "PASSKEY_HANDOFF_OTHER_ACCOUNT" });
+    const strangerOptions = await call(
+      rt,
+      "POST",
+      "/v1/auth/passkey/step-up/options",
+      stranger.cookie,
+      { handoffId: handoff.handoffId },
+    );
+    expect(strangerOptions.status).toBe(403);
+
+    // The person confirms in their browser with their passkey: the app's
+    // session is confirmed too, and its admin change goes through.
+    const options = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
+      handoffId: handoff.handoffId,
+    });
+    expect(options.status).toBe(200);
+    const ceremony = (await options.json()) as { challengeId: string; options: never };
+    const confirmed = await call(rt, "POST", "/v1/auth/passkey/step-up", owner.cookie, {
+      challengeId: ceremony.challengeId,
+      response: softwarePasskeyAssertion(owner.passkey, ceremony.options, { origin: ORIGIN }),
+    });
+    expect(confirmed.status, await confirmed.clone().text()).toBe(200);
+    expect(await status(appSession)).toBe(true);
+    expect((await rename(rt, appSession, organization)).status).toBe(200);
+
+    // A handoff is used once.
+    const again = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
+      handoffId: handoff.handoffId,
+    });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ code: "PASSKEY_HANDOFF_EXPIRED" });
+
+    // Without a passkey there is nothing to hand over; signed out, nothing to start.
+    const passwordOnly = await passwordPerson(rt);
+    const none = await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", passwordOnly.cookie);
+    expect(none.status).toBe(409);
+    expect(await none.json()).toMatchObject({ code: "PASSKEY_NONE_REGISTERED" });
+    expect((await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", "")).status).toBe(403);
+  }, 120_000);
+
   test("an admin without a passkey is told to add one", async () => {
     const rt = runtime();
     const owner = await passwordPerson(rt);

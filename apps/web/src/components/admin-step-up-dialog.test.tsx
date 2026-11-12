@@ -18,7 +18,14 @@ class AuthApiError extends Error {
     super(code ?? "failed");
   }
 }
-mock.module("@/api", () => ({ AuthApiError, confirmAdminWithPasskey: async () => {} }));
+mock.module("@/api", () => ({
+  AuthApiError,
+  confirmAdminWithPasskey: async () => {},
+  startPasskeyStepUpHandoff: async () => {
+    throw new Error("not in this test");
+  },
+  passkeyStepUpConfirmed: async () => false,
+}));
 // The Radix dialog is a portal; this inline stand-in keeps its contract.
 mock.module("@opengeni/react/ui/form-dialog", () => ({
   FormDialog: ({
@@ -26,6 +33,7 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     description,
     submitLabel,
     error,
+    children,
     onOpenChange,
     onSubmit,
   }: {
@@ -33,12 +41,14 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     description?: ReactNode;
     submitLabel: ReactNode;
     error?: ReactNode;
+    children?: ReactNode;
     onOpenChange: (open: boolean) => void;
     onSubmit: () => unknown;
   }) => (
     <div role="dialog">
       <h2>{title}</h2>
       <p>{description}</p>
+      {children}
       {error ? <p role="alert">{error}</p> : null}
       <button
         type="button"
@@ -58,12 +68,13 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
 }));
 
 const { AdminStepUpDialog } = await import("./admin-step-up-dialog");
+type StepUpHandoffApi = import("./admin-step-up-dialog").StepUpHandoffApi;
 const { withAdminStepUp } = await import("@/lib/admin-step-up");
 const { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } =
   await import("@opengeni/contracts/managed-sign-in-methods");
 
 beforeAll(() => {
-  GlobalRegistrator.register();
+  GlobalRegistrator.register({ url: "https://opengeni.test/workspaces" });
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -82,11 +93,19 @@ const refusal = (passkeyRegistered: boolean) =>
     { status: 403 },
   );
 
-async function mount(confirm: () => Promise<void>) {
+async function mount(confirm: () => Promise<void>, browser?: { handoff: StepUpHandoffApi }) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  await act(async () => root.render(<AdminStepUpDialog confirm={confirm} />));
+  await act(async () =>
+    root.render(
+      browser ? (
+        <AdminStepUpDialog confirm={confirm} inBrowser handoff={browser.handoff} />
+      ) : (
+        <AdminStepUpDialog confirm={confirm} inBrowser={false} />
+      ),
+    ),
+  );
   return {
     container,
     unmount: () => act(async () => root.unmount()),
@@ -159,6 +178,114 @@ describe("AdminStepUpDialog", () => {
     await view.click("Add passkey");
     expect((await change).status).toBe(403);
     expect(navigations).toEqual([{ to: "/settings/security" }]);
+    await view.unmount();
+  });
+});
+
+describe("AdminStepUpDialog in the desktop app", () => {
+  const wait = (ms: number) => act(async () => new Promise((resolve) => setTimeout(resolve, ms)));
+  const browser = (confirmedAfter: number, expiresInMs = 60_000) => {
+    const opened: string[] = [];
+    let checks = 0;
+    const handoff: StepUpHandoffApi = {
+      start: async () => ({
+        handoffId: "8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21",
+        code: "482913",
+        expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
+      }),
+      confirmed: async () => {
+        checks += 1;
+        return checks >= confirmedAfter;
+      },
+      open: (url) => opened.push(url),
+      pollMs: 5,
+    };
+    return { handoff, opened, checks: () => checks };
+  };
+
+  test("hands the passkey to the browser on the same server, then the refused change goes through", async () => {
+    let nativeCeremonies = 0;
+    const { handoff, opened } = browser(3);
+    const view = await mount(
+      async () => {
+        nativeCeremonies += 1;
+      },
+      { handoff },
+    );
+    let sends = 0;
+    const change = withAdminStepUp(
+      async () => {
+        sends += 1;
+        return sends === 1 ? refusal(true) : Response.json({ saved: true });
+      },
+      { input: "/v1/workspaces/w/model-account-settings", init: { method: "PUT", body: "{}" } },
+    );
+    await flush();
+    await view.click("Continue in browser");
+    expect(opened).toEqual([
+      `${window.location.origin}/confirm-passkey?handoff=8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21`,
+    ]);
+    expect(view.container.querySelector("h2")?.textContent).toBe("Confirm in your browser");
+    expect(view.container.textContent).toContain("482 913");
+    await view.click("Open browser again");
+    expect(opened).toHaveLength(2);
+    await wait(60);
+    expect((await change).status).toBe(200);
+    expect(sends).toBe(2);
+    // The app never runs a passkey ceremony itself: it would never settle.
+    expect(nativeCeremonies).toBe(0);
+    expect(view.container.querySelector("[role=dialog]")).toBeNull();
+    await view.unmount();
+  });
+
+  test("never waits forever: an expired handoff says so and can be cancelled", async () => {
+    const { handoff } = browser(Number.POSITIVE_INFINITY, 20);
+    const view = await mount(async () => {}, { handoff });
+    const change = withAdminStepUp(async () => refusal(true), {
+      input: "/v1/x",
+      init: { method: "POST", body: "{}" },
+    });
+    await flush();
+    await view.click("Continue in browser");
+    await wait(80);
+    expect(view.container.querySelector("[role=alert]")?.textContent).toBe(
+      "The confirmation in your browser expired. Try again.",
+    );
+    expect(view.container.querySelector("h2")?.textContent).toBe("Confirm it's you");
+    await view.click("Cancel");
+    expect((await change).status).toBe(403);
+    await view.unmount();
+  });
+
+  test("cancelling while waiting stops asking the server", async () => {
+    const tracked = browser(Number.POSITIVE_INFINITY);
+    const view = await mount(async () => {}, { handoff: tracked.handoff });
+    const change = withAdminStepUp(async () => refusal(true), {
+      input: "/v1/x",
+      init: { method: "POST", body: "{}" },
+    });
+    await flush();
+    await view.click("Continue in browser");
+    await wait(20);
+    await view.click("Cancel");
+    expect((await change).status).toBe(403);
+    const after = tracked.checks();
+    await wait(40);
+    expect(tracked.checks()).toBe(after);
+    await view.unmount();
+  });
+
+  test("someone without a passkey adds one in the browser", async () => {
+    const { handoff, opened } = browser(1);
+    const view = await mount(async () => {}, { handoff });
+    const change = withAdminStepUp(async () => refusal(false), {
+      input: "/v1/x",
+      init: { method: "POST", body: "{}" },
+    });
+    await flush();
+    await view.click("Add in browser");
+    expect((await change).status).toBe(403);
+    expect(opened).toEqual([`${window.location.origin}/settings/security`]);
     await view.unmount();
   });
 });

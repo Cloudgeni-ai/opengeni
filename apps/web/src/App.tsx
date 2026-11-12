@@ -62,6 +62,7 @@ import {
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
@@ -209,6 +210,10 @@ const LazyAccountAuthRoute = lazyRouteComponent(
 const LazyPersonalSecurityRoute = lazyRouteComponent(
   () => import("@/routes/personal-security"),
   "PersonalSecurityRoute",
+);
+const LazyConfirmPasskeyRoute = lazyRouteComponent(
+  () => import("@/routes/confirm-passkey"),
+  "ConfirmPasskeyRoute",
 );
 const LazyNativeSignInRoute = lazyRouteComponent(
   () => import("@/routes/native-sign-in"),
@@ -463,6 +468,13 @@ const personalSecurityRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "settings/security",
   component: LazyPersonalSecurityRoute,
+});
+// Where the desktop app sends the person's browser to confirm an admin change
+// with their passkey, since passkey prompts can't open in the app itself.
+const confirmPasskeyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: PASSKEY_STEP_UP_HANDOFF_PATH.slice(1),
+  component: LazyConfirmPasskeyRoute,
 });
 // Where the Opengeni phone app's sign-in opens in the system auth browser:
 // sign in with any web method, then allow the device (code + PKCE).
@@ -1099,6 +1111,7 @@ const routeTree = rootRoute.addChildren([
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
+  confirmPasskeyRoute,
   nativeSignInRoute,
   siteAuthorizeRoute,
   ...(import.meta.env.DEV

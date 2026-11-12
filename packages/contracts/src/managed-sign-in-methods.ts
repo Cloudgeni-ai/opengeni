@@ -98,6 +98,36 @@ export const ManagedPasskeyStepUpResponse = /* @__PURE__ */ defineSchema(() =>
     confirmed: primitives.boolean,
   }),
 );
+
+/**
+ * The console page where a person confirms, in their own browser, a step-up
+ * started in an app that can't show passkey prompts itself (the desktop app).
+ * It carries the handoff id as `?handoff=`.
+ */
+export const PASSKEY_STEP_UP_HANDOFF_PATH = "/confirm-passkey";
+
+/** Starting a step-up; `handoffId` confirms the app session that handed it over too. */
+export const ManagedPasskeyStepUpOptionsRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ handoffId: primitives.uuid.optional() }).strict(),
+);
+
+/**
+ * A step-up handed to the person's browser. The code shows in the app and on
+ * the browser page, so the person confirms only what they started.
+ */
+export const ManagedPasskeyStepUpHandoff = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    handoffId: primitives.uuid,
+    code: z.string().regex(/^\d{6}$/u),
+    expiresAt: z.string(),
+  }),
+);
+export type ManagedPasskeyStepUpHandoff = z.infer<typeof ManagedPasskeyStepUpHandoff>;
+
+/** Whether this browser session is confirmed with a passkey. */
+export const ManagedPasskeyStepUpStatus = /* @__PURE__ */ defineSchema(() =>
+  z.object({ confirmed: primitives.boolean }),
+);
 export const ManagedSignInMethods = /* @__PURE__ */ defineSchema(() =>
   z.object({
     identityId: primitives.uuid,
