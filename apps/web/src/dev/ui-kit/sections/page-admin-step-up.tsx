@@ -2,18 +2,38 @@ import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed
 import { Button } from "@opengeni/react/ui/button";
 import { Section } from "@opengeni/react/ui/section";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { useState } from "react";
 
-import { AdminStepUpDialog } from "@/components/admin-step-up-dialog";
+import { AdminStepUpDialog, type StepUpHandoffApi } from "@/components/admin-step-up-dialog";
 import { withAdminStepUp } from "@/lib/admin-step-up";
+import { ConfirmPasskeyRoute } from "@/routes/confirm-passkey";
 import { KitSection, KitCanvas } from "../kit";
 
 /*
  * DEV only. The production step-up prompt and the console's resend path.
  * Sample data stands in for the API: the first save is refused the way the
  * API refuses an admin change, and "Use passkey" waits a moment instead of a
- * real passkey ceremony.
+ * real passkey ceremony. "In the desktop app" shows the browser handoff: the
+ * sample browser confirms a few seconds after it "opens".
  */
+
+function sampleHandoff(): StepUpHandoffApi {
+  let openedAt = 0;
+  return {
+    start: async () => {
+      openedAt = Date.now();
+      return {
+        handoffId: "8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21",
+        code: "482913",
+        expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      };
+    },
+    confirmed: async () => openedAt > 0 && Date.now() - openedAt > 6_000,
+    open: () => {},
+    pollMs: 1_000,
+  };
+}
 
 function refusal(passkeyRegistered: boolean): Response {
   return Response.json(
@@ -61,17 +81,46 @@ function SampleAdminChange({ passkeyRegistered }: { passkeyRegistered: boolean }
 }
 
 export default function AdminStepUpSection() {
+  const [desktop, setDesktop] = useState(false);
+  const [handoff] = useState(sampleHandoff);
   return (
     <KitSection sectionKey="page-admin-step-up">
       <KitCanvas>
         <Section title="General">
           <SettingRowGroup>
+            <SettingRow
+              label="In the desktop app"
+              description="Passkeys open in the person's browser on the same server."
+              control={
+                <Switch
+                  checked={desktop}
+                  onCheckedChange={setDesktop}
+                  aria-label="In the desktop app"
+                />
+              }
+            />
             <SampleAdminChange passkeyRegistered />
             <SampleAdminChange passkeyRegistered={false} />
           </SettingRowGroup>
         </Section>
       </KitCanvas>
-      <AdminStepUpDialog confirm={() => new Promise((resolve) => setTimeout(resolve, 900))} />
+      <AdminStepUpDialog
+        key={desktop ? "desktop" : "browser"}
+        inBrowser={desktop}
+        handoff={handoff}
+        confirm={() => new Promise((resolve) => setTimeout(resolve, 900))}
+      />
+      <KitCanvas>
+        <div className="flex min-h-80">
+          <ConfirmPasskeyRoute
+            handoff="8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21"
+            api={{
+              read: async () => ({ code: "482913" }),
+              confirm: () => new Promise((resolve) => setTimeout(resolve, 900)),
+            }}
+          />
+        </div>
+      </KitCanvas>
     </KitSection>
   );
 }

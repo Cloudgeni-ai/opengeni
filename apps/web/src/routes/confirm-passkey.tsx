@@ -43,10 +43,17 @@ export function handoffUnavailableMessage(error: unknown): string {
   return "Couldn't load this confirmation. Check your connection and reload this page.";
 }
 
-export function ConfirmPasskeyRoute({ api = defaultApi }: { api?: ConfirmPasskeyApi }) {
+export function ConfirmPasskeyRoute({
+  api = defaultApi,
+  handoff,
+}: {
+  api?: ConfirmPasskeyApi;
+  /** The handoff to confirm; by default the page's `?handoff=`. */
+  handoff?: string;
+}) {
   const handoffId = useMemo(
-    () => new URLSearchParams(window.location.search).get("handoff") ?? "",
-    [],
+    () => handoff ?? new URLSearchParams(window.location.search).get("handoff") ?? "",
+    [handoff],
   );
   const [state, setState] = useState<State>({ kind: "loading" });
   const [error, setError] = useState<string | null>(null);
