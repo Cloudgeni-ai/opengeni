@@ -303,24 +303,40 @@ export async function restoreKnowledgeEntry(
 ) {
   const request = KnowledgeEntryRestoreRequest.parse(input);
   return inKnowledgeContext(db, context, async (tx) => {
-    // Read before the restore: the archive that this restore undoes.
-    const [archived] = await rawRows<{ operation_id: string }>(
-      tx,
-      sql`SELECT o.operation_id FROM knowledge_entries e
-        JOIN knowledge_entry_operations o ON o.account_id=e.account_id AND o.entry_id=e.id
-          AND o.receipt->>'revisionId'=e.latest_revision_id::text AND o.receipt->>'outcome'='archived'
-        WHERE e.account_id=${context.accountId}::uuid AND e.id=${request.entryId}::uuid AND e.archived
-        LIMIT 1`,
+    // Read before the restore: what the archive this restore undoes took along.
+    const cascade = RestoreCascade.parse(
+      await cascadeRead(tx, context, request.entryId, "restore"),
     );
     const receipt = await applyIn(tx, context, { ...request, operation: "restore" });
-    if (archived && receipt.outcome === "published" && !receipt.replayed) {
-      await restoreArchivedWith(
-        tx,
-        context,
-        request.entryId,
-        archived.operation_id,
-        request.operationId,
+    if (cascade.archiveOperationId && receipt.outcome === "published" && !receipt.replayed) {
+      const archiveOperationId = cascade.archiveOperationId;
+      let pending = cascade.members.filter(
+        (member) =>
+          member.archiveOperationId ===
+          archivedWithOperationId(context.accountId, archiveOperationId, member.entryId),
       );
+      // A member's collections and evidence must be live again before it is.
+      while (pending.length) {
+        const left: typeof pending = [];
+        for (const member of pending) {
+          const restored = await skipUnavailable(tx, (savepoint) =>
+            applyIn(savepoint, context, {
+              operationId: archivedWithOperationId(
+                context.accountId,
+                request.operationId,
+                member.entryId,
+              ),
+              entryId: member.entryId,
+              revisionId: member.publishedRevisionId,
+              expectedVersion: member.version,
+              operation: "restore",
+            }),
+          );
+          if (!restored) left.push(member);
+        }
+        if (left.length === pending.length) break;
+        pending = left;
+      }
     }
     return receipt;
   });
@@ -351,14 +367,20 @@ export async function archiveKnowledgeEntry(
     .parse(input);
   return inKnowledgeContext(db, context, async (tx) => {
     // Read the tree while the collection is still live.
-    const members = await collectionMembers(tx, context.accountId, request.entryId);
+    const { members } = ArchiveCascade.parse(
+      await cascadeRead(tx, context, request.entryId, "archive"),
+    );
     const receipt = await applyIn(tx, context, { ...request, operation: "archive" });
     if (receipt.outcome !== "archived" || receipt.replayed || !members.length) return receipt;
     for (const member of onlyInside(request.entryId, members)) {
       await skipUnavailable(tx, (savepoint) =>
         applyIn(savepoint, context, {
-          operationId: archivedWithOperationId(context.accountId, request.operationId, member.id),
-          entryId: member.id,
+          operationId: archivedWithOperationId(
+            context.accountId,
+            request.operationId,
+            member.entryId,
+          ),
+          entryId: member.entryId,
           expectedVersion: member.version,
           operation: "archive",
         }),
@@ -368,57 +390,57 @@ export async function archiveKnowledgeEntry(
   });
 }
 
-type CollectionMember = { id: string; version: number; parents: string[] };
+const ArchiveCascade = z.object({
+  members: z.array(
+    z.object({
+      entryId: z.uuid(),
+      version: z.number().int().positive(),
+      parentIds: z.array(z.uuid()),
+      heldElsewhere: z.boolean(),
+    }),
+  ),
+});
+type CollectionMember = z.infer<typeof ArchiveCascade>["members"][number];
 
-/** Every live published entry under a collection, with its live parent collections. */
-async function collectionMembers(
+const RestoreCascade = z.object({
+  archiveOperationId: z.uuid().nullable().optional(),
+  members: z.array(
+    z.object({
+      entryId: z.uuid(),
+      version: z.number().int().positive(),
+      publishedRevisionId: z.uuid(),
+      archiveOperationId: z.uuid(),
+    }),
+  ),
+});
+
+/** What a collection's archive or restore takes along; read through the authorization seam. */
+async function cascadeRead(
   tx: Database,
-  accountId: string,
-  collectionId: string,
-): Promise<CollectionMember[]> {
-  const rows = await rawRows<{
-    id: string;
-    version: number;
-    parents: string[] | null;
-  }>(
+  context: KnowledgeContext,
+  entryId: string,
+  mode: "archive" | "restore",
+) {
+  const [row] = await rawRows<{ result: unknown }>(
     tx,
-    sql`WITH RECURSIVE tree(id) AS (
-        SELECT root.id FROM knowledge_entries root
-          JOIN knowledge_entry_revisions r ON r.account_id=root.account_id AND r.id=root.latest_revision_id
-          WHERE root.account_id=${accountId}::uuid AND root.id=${collectionId}::uuid
-            AND NOT root.archived AND r.body->>'kind'='group'
-        UNION
-        SELECT c.id FROM tree
-          JOIN knowledge_entry_links l ON l.account_id=${accountId}::uuid AND l.target_entry_id=tree.id
-            AND l.relation='group'
-          JOIN knowledge_entries c ON c.account_id=l.account_id AND c.id=l.entry_id
-            AND l.revision_id=c.published_revision_id AND NOT c.archived
-      )
-      SELECT c.id, c.version, (SELECT array_agg(DISTINCT l.target_entry_id::text)
-          FROM knowledge_entry_links l
-          JOIN knowledge_entries g ON g.account_id=l.account_id AND g.id=l.target_entry_id AND NOT g.archived
-          WHERE l.account_id=c.account_id AND l.entry_id=c.id AND l.revision_id=c.published_revision_id
-            AND l.relation='group') AS parents
-      FROM tree JOIN knowledge_entries c ON c.account_id=${accountId}::uuid AND c.id=tree.id
-      WHERE tree.id<>${collectionId}::uuid
-      ORDER BY c.id`,
+    sql`SELECT knowledge_entry_read(${context.accountId}::uuid,${context.workspaceId}::uuid,
+      ${JSON.stringify(context.actor)}::jsonb,
+      ${JSON.stringify({ operation: "collection_cascade", mode, entryId })}::jsonb) AS result`,
   );
-  return rows.map((row) => ({
-    id: row.id,
-    version: Number(row.version),
-    parents: row.parents ?? [],
-  }));
+  return row?.result;
 }
 
 /** Members whose every live collection is being archived, parents first. */
 function onlyInside(collectionId: string, members: CollectionMember[]): CollectionMember[] {
-  const inside = new Map(members.map((member) => [member.id, member]));
+  const inside = new Map(
+    members.filter((member) => !member.heldElsewhere).map((member) => [member.entryId, member]),
+  );
   const archiving = (id: string) => id === collectionId || inside.has(id);
   for (let changed = true; changed;) {
     changed = false;
     for (const member of inside.values()) {
-      if (member.parents.some((parent) => !archiving(parent))) {
-        inside.delete(member.id);
+      if (member.parentIds.some((parent) => !archiving(parent))) {
+        inside.delete(member.entryId);
         changed = true;
       }
     }
@@ -428,70 +450,15 @@ function onlyInside(collectionId: string, members: CollectionMember[]): Collecti
   while (ordered.length < inside.size) {
     const before = ordered.length;
     for (const member of inside.values()) {
-      if (placed.has(member.id)) continue;
-      if (member.parents.every((parent) => placed.has(parent) || !inside.has(parent))) {
+      if (placed.has(member.entryId)) continue;
+      if (member.parentIds.every((parent) => placed.has(parent))) {
         ordered.push(member);
-        placed.add(member.id);
+        placed.add(member.entryId);
       }
     }
     if (ordered.length === before) break;
   }
   return ordered;
-}
-
-/** Restore what an archive took with it, parents before their members. */
-async function restoreArchivedWith(
-  tx: Database,
-  context: KnowledgeContext,
-  collectionId: string,
-  archiveOperationId: string,
-  restoreOperationId: string,
-) {
-  const rows = await rawRows<{
-    id: string;
-    version: number;
-    published_revision_id: string;
-    operation_id: string;
-  }>(
-    tx,
-    sql`WITH RECURSIVE tree(id) AS (
-        SELECT ${collectionId}::uuid
-        UNION
-        SELECT c.id FROM tree
-          JOIN knowledge_entry_links l ON l.account_id=${context.accountId}::uuid
-            AND l.target_entry_id=tree.id AND l.relation='group'
-          JOIN knowledge_entries c ON c.account_id=l.account_id AND c.id=l.entry_id
-            AND l.revision_id=c.latest_revision_id AND c.archived
-      )
-      SELECT c.id, c.version, c.published_revision_id, o.operation_id
-      FROM tree JOIN knowledge_entries c ON c.account_id=${context.accountId}::uuid AND c.id=tree.id
-      JOIN knowledge_entry_operations o ON o.account_id=c.account_id AND o.entry_id=c.id
-        AND o.receipt->>'revisionId'=c.latest_revision_id::text AND o.receipt->>'outcome'='archived'
-      WHERE tree.id<>${collectionId}::uuid AND c.archived AND c.published_revision_id IS NOT NULL
-      ORDER BY c.id`,
-  );
-  let pending = rows.filter(
-    (row) =>
-      row.operation_id === archivedWithOperationId(context.accountId, archiveOperationId, row.id),
-  );
-  // A member's collections and evidence must be live again before it is.
-  while (pending.length) {
-    const left: typeof pending = [];
-    for (const row of pending) {
-      const restored = await skipUnavailable(tx, (savepoint) =>
-        applyIn(savepoint, context, {
-          operationId: archivedWithOperationId(context.accountId, restoreOperationId, row.id),
-          entryId: row.id,
-          revisionId: row.published_revision_id,
-          expectedVersion: Number(row.version),
-          operation: "restore",
-        }),
-      );
-      if (!restored) left.push(row);
-    }
-    if (left.length === pending.length) break;
-    pending = left;
-  }
 }
 
 /** Stable per archive and member, so a member's archive is traceable to its collection's. */
