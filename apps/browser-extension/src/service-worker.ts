@@ -60,6 +60,12 @@ const FRAME_REMOVAL_WINDOW_MS = 30_000;
 // A removal still running after this long (a page whose renderer hangs) is
 // given up, as one Chrome refused, so it holds nothing up.
 const FRAME_REMOVAL_TIMEOUT_MS = 3_000;
+// The removal's scripts only walk the page's elements, so they run at once in
+// every frame: by default Chrome holds a script back until every frame of the
+// tab has finished loading, and on a page with a frame that keeps loading (an
+// ad or tracker that never answers, say) the removal would time out with the
+// password manager's frame still in place.
+const FRAME_REMOVAL_INJECTION = { world: "ISOLATED", injectImmediately: true } as const;
 // Extensions known to add such frames, named in the error when one keeps doing it.
 const FRAME_EXTENSION_NAMES: Readonly<Record<string, string>> = {
   aeblfdkhhhdcdjpifhhbdiojplfjncoa: "1Password",
@@ -903,24 +909,19 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
   const run = (target: chrome.scripting.InjectionTarget) =>
     chrome.scripting.executeScript({
       target,
-      world: "ISOLATED",
+      ...FRAME_REMOVAL_INJECTION,
       func: removeFramesOfOtherExtensions,
       args: [chrome.runtime.id],
     });
-  let blankCreated: BlankCreatedFrames | null = null;
-  try {
-    blankCreated = await blankCreatedExtensionFrames(tabId);
-  } catch (error) {
-    // A page that does not answer is not asked again.
-    if (error instanceof FrameRemovalTimeout) return [];
-  }
   let results: Awaited<ReturnType<typeof run>>;
+  // Whether every frame Chrome lets this extension script ran the removal.
+  let everyFrame = true;
   try {
     results = await withinFrameRemovalTimeout(run({ tabId, allFrames: true }));
   } catch (error) {
     // A page that does not answer is not asked again.
     if (error instanceof FrameRemovalTimeout) return [];
-    blankCreated = null;
+    everyFrame = false;
     try {
       results = await withinFrameRemovalTimeout(run({ tabId }));
     } catch {
@@ -938,12 +939,22 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
       ),
     ),
   ];
+  // Only a page whose other extensions' frames were not found by their
+  // address is searched for ones created blank.
+  let blankCreated: BlankCreatedFrames | null = null;
+  if (removed.length === 0 && everyFrame) {
+    try {
+      blankCreated = await blankCreatedExtensionFrames(tabId);
+    } catch {
+      // A page that does not answer, or went away meanwhile.
+    }
+  }
   if (blankCreated !== null) {
     try {
       const removals = await withinFrameRemovalTimeout(
         chrome.scripting.executeScript({
           target: { tabId, frameIds: blankCreated.parentFrameIds },
-          world: "ISOLATED",
+          ...FRAME_REMOVAL_INJECTION,
           func: removeUnseenFrames,
           args: [blankCreated.token],
         }),
@@ -1075,7 +1086,7 @@ async function blankCreatedExtensionFrames(tabId: number): Promise<BlankCreatedF
     withinFrameRemovalTimeout(
       chrome.scripting.executeScript({
         target: { tabId, allFrames: true },
-        world: "ISOLATED",
+        ...FRAME_REMOVAL_INJECTION,
         func,
         args,
       }),
