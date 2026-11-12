@@ -43,6 +43,10 @@ describe("Codex-parity model tool-output truncation", () => {
       },
       { type: "apply_patch_call_output", callId: "call_patch", status: "failed", output: "x" },
       { type: "computer_call", callId: "call_cua", status: "completed", action: { type: "wait" } },
+      {
+        type: "unknown",
+        providerData: { type: "local_shell_call", call_id: "call_ls", status: "completed" },
+      },
     ]) {
       const persisted = JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(item)));
       expect(persisted).toEqual(item);

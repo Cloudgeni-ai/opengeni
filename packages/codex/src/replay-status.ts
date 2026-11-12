@@ -13,8 +13,9 @@
  * The list mirrors every `ResponseInputItem` variant of the `openai` SDK whose
  * `status` is non-optional; `packages/runtime/src/replay-status-contract.ts`
  * fails to typecheck when the SDK adds or removes one. `message` is excluded:
- * its input form (`EasyInputMessage`) has no status. `hosted_tool_call` is the
- * Agents SDK's own envelope for the hosted calls and carries their status.
+ * it also has input forms with optional status (`EasyInputMessage`), and Codex
+ * rejects status on messages. `hosted_tool_call` is the Agents SDK's own
+ * envelope for the hosted calls and carries their status.
  */
 export const REPLAY_STATUS_ITEM_TYPES = [
   "hosted_tool_call",

@@ -19,7 +19,8 @@ type Equal<A, B> =
 type Assert<T extends true> = T;
 
 /**
- * `message` is excluded: its input form (`EasyInputMessage`) has no status.
+ * `message` is excluded: it also has input forms with optional status
+ * (`EasyInputMessage`), and Codex rejects status on messages.
  * `hosted_tool_call` is the Agents SDK envelope for the hosted calls.
  */
 export type ReplayStatusMatchesResponsesInputSchema = Assert<

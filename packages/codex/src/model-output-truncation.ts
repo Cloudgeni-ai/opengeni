@@ -67,7 +67,13 @@ export function omitOutputOnlyHistoryItemFields<T extends ModelHistoryItem>(
   if (!item || typeof item !== "object") {
     return item as unknown as WithoutOutputOnlyHistoryItemFields<T>;
   }
-  if (preservesReplayStatus(item.type)) {
+  // The Agents SDK carries item types it has no protocol shape for (such as
+  // `local_shell_call`) as `{ type: "unknown", providerData: <wire item> }`.
+  const wireType =
+    item.type === "unknown" && item.providerData && typeof item.providerData === "object"
+      ? (item.providerData as Record<string, unknown>).type
+      : item.type;
+  if (preservesReplayStatus(wireType)) {
     return item as unknown as WithoutOutputOnlyHistoryItemFields<T>;
   }
   const providerData =
