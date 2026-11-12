@@ -14,10 +14,12 @@
  *
  * The output is part of the Slack post and update ledgers' request digest, so a
  * change to it changes the bytes an in-flight operation is bound to. Delivery
- * (`deliverSlackModelText` in `slack-interactions.ts`) falls back only to the
- * unformatted text; a later output change must keep the previous rendering
- * reachable the same way, or operations started before the deploy conflict on
- * every retry.
+ * (`deliverSlackModelText` in `slack-interactions.ts`) retries an operation
+ * with each earlier rendering (`slackMrkdwnKeeping*`) and then the unformatted
+ * text; a later output change must keep the previous rendering reachable the
+ * same way, or operations started before the deploy conflict on every retry.
+ * Opengeni links carry the deployment's web address, so it is part of those
+ * bytes too: changing it strands operations still in flight.
  */
 
 import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
@@ -31,7 +33,7 @@ import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
  * (`stripOpaqueCitationTokens` in `packages/react/src/timeline/projection.ts`).
  */
 const PROVIDER_CITATION_TOKEN =
-  /[ \t]*\u{E200}(?:cite|filecite)(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
+  /(?<![ \t])[ \t]*\u{E200}(?:cite|filecite)(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
 /** Stray citation delimiters, for example from a token cut short upstream. */
 const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
 
@@ -55,13 +57,42 @@ const CODE_SPAN_OR_SLACK_TOKEN =
 
 /**
  * A Markdown link or image whose target is a web or mail address. Other
- * targets, such as Opengeni's own `artifact:` and `sandbox:` links, mean
- * nothing in Slack and are left as written rather than turned into dead links.
+ * targets, such as Opengeni's own `artifact:` and `sandbox:` links, are
+ * {@link OPENGENI_OBJECT_LINK}s.
  * One level of balanced parentheses is allowed in the URL (as in Wikipedia
  * links), and an optional link title is dropped.
  */
 const MARKDOWN_LINK =
   /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])+)\]\(\s*((?:https?:\/\/|mailto:)(?:[^\s()<>|]|\([^\s()<>|]*\))+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\s*\)/gu;
+
+/**
+ * A Markdown link or image to an Opengeni object: `artifact:<id>`,
+ * `session:<id>`, `sandbox:<path>` (bare or in angle brackets, for paths with
+ * spaces), a console path under `/workspaces/`, or a bare sandbox path under
+ * `/workspace/`. Slack can't open these, so
+ * they become a link to the object's console page, or just their label.
+ */
+const OPENGENI_OBJECT_LINK =
+  /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*(<(?:artifact|session|sandbox):[^<>\n]*>|(?:artifact|session|sandbox):(?:[^\s()<>]|\([^\s()<>]*\))*|\/workspaces?\/(?:[^\s()<>]|\([^\s()<>]*\))*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/giu;
+
+/** A link whose label is just an image, as in a clickable thumbnail: `[![alt](src)](`. */
+const LINKED_IMAGE = /\[[ \t]*!\[([^[\]\n]*)\]\((?:[^()\n]|\([^()\n]*\))*\)[ \t]*\]\(/gu;
+
+/**
+ * A line that starts another block and so ends a table: blank, a heading, a
+ * fence, a list item, a quote or a thematic break.
+ */
+const TABLE_END =
+  /^\s*$|^ {0,3}(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,}|[-*+][ \t]|\d{1,9}[.)][ \t]|>|([-*_])(?:[ \t]*\1){2,}[ \t]*$)/u;
+/** Slack's own tokens: mentions, channels and links already in Slack form. */
+const SLACK_TOKEN = /<(?:[@#!]|https?:|mailto:)[^<>\n]*>/u;
+
+/** A web link with an empty label, which {@link MARKDOWN_LINK} leaves alone. */
+const EMPTY_LABEL_WEB_LINK =
+  /(?<!!)\[[ \t]*\]\(\s*((?:https?:\/\/|mailto:)(?:[^\s()<>|]|\([^\s()<>|]*\))+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/gu;
+
+/** One cell of a GFM table's delimiter row, such as `---` or `:-:`. */
+const TABLE_DELIMITER_CELL = /^:?-+:?$/u;
 
 /** Bare URLs are set aside after links: they may legitimately contain `__` or `**`. */
 const BARE_URL = /\bhttps?:\/\/[^\s<>]+/gu;
@@ -72,6 +103,71 @@ const BOLD_UNDERSCORE =
   /(?<![\p{L}\p{N}_])__(?=[^\s_])((?:[^_\n]|_(?!_))+?)(?<=[^\s_])__(?![\p{L}\p{N}_])/gu;
 const STRIKETHROUGH = /~~(?=[^\s~])((?:[^~\n]|~(?!~))+?)(?<=[^\s~])~~/gu;
 const PLACEHOLDER = /\u0000(\d+)\u0000/gu;
+
+/**
+ * Where an Opengeni object link opens: the absolute console address of an
+ * `artifact:`, `session:` or `/workspaces/...` href, or null when it has none
+ * (a `sandbox:` path, or a deployment without a web address).
+ */
+export type SlackObjectLinkUrl = (href: string) => string | null;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const EDITABLE_ARTIFACT_ID = /^[0-9a-f]{32}$/iu;
+
+/**
+ * Console addresses for the Opengeni object links in one session's replies,
+ * as the console resolves them: `artifact:<uuid>` is a retained file,
+ * `artifact:<32 hex>` an editable artifact, `session:<uuid>` a chat, all in
+ * the session's workspace; a `/workspaces/...` path is already a console
+ * route. A file link returns to the session. Anyone opening it still signs in
+ * and needs access to the object. `sandbox:` paths have no address.
+ */
+export function slackObjectLinkUrl(input: {
+  baseUrl: string | null | undefined;
+  workspaceId: string;
+  sessionId: string;
+}): SlackObjectLinkUrl {
+  const { baseUrl, workspaceId, sessionId } = input;
+  return (href) => {
+    if (!baseUrl) return null;
+    const scheme = /^([a-z]+):/iu.exec(href)?.[1]?.toLowerCase();
+    const id = scheme ? href.slice(scheme.length + 1).toLowerCase() : "";
+    const workspace = `/workspaces/${encodeURIComponent(workspaceId)}`;
+    const back = UUID.test(sessionId) ? `?fromSession=${sessionId.toLowerCase()}` : "";
+    const path =
+      scheme === "artifact" && UUID.test(id)
+        ? `${workspace}/artifacts/files/${id}${back}`
+        : scheme === "artifact" && EDITABLE_ARTIFACT_ID.test(id)
+          ? `${workspace}/artifacts/editable/${id}${back}`
+          : scheme === "session" && UUID.test(id)
+            ? `${workspace}/sessions/${id}`
+            : scheme === undefined && href.startsWith("/workspaces/")
+              ? href
+              : null;
+    if (!path) return null;
+    try {
+      const url = new URL(path, baseUrl);
+      if (
+        (url.protocol !== "https:" && url.protocol !== "http:") ||
+        url.username ||
+        url.password ||
+        !url.pathname.startsWith("/workspaces/")
+      ) {
+        return null;
+      }
+      // `|` ends a Slack link's address; `URL` leaves it in paths.
+      return url.toString().replace(/\|/gu, "%7C");
+    } catch {
+      return null;
+    }
+  };
+}
+
+type SlackMrkdwnOptions = {
+  /** Rewrite Opengeni object links and tables; off only for earlier renderings. */
+  objects: boolean;
+  objectLinkUrl: SlackObjectLinkUrl;
+};
 
 /** Remove provider citation handles and any stray citation delimiters. */
 export function stripProviderCitationMarkers(text: string): string {
@@ -85,6 +181,10 @@ export function stripProviderCitationMarkers(text: string): string {
  * - `**bold**` and `__bold__` become `*bold*`, `***both***` becomes `*_both_*`,
  *   and `~~struck~~` becomes `~struck~`.
  * - `[label](https://...)` becomes `<https://...|label>`.
+ * - Opengeni object links (`artifact:`, `session:`, console paths), images
+ *   included, become `<console address|label>` through `objectLinkUrl`; one
+ *   with no address there (a `sandbox:` path) becomes its label.
+ * - Tables, which Slack doesn't render, become an aligned code block.
  * - `-`, `*`, and `+` bullets become Slack's `•` bullet, keeping indentation;
  *   numbered lists and block quotes are already Slack syntax and stay as they are.
  * - Fenced code blocks, at any indentation, keep their contents byte for byte.
@@ -98,8 +198,23 @@ export function stripProviderCitationMarkers(text: string): string {
  *
  * Text that uses none of this syntax comes back unchanged.
  */
-export function slackMrkdwnFromMarkdown(markdown: string): string {
-  return slackMrkdwn(withoutProviderTrackingInText(rewriteClaudeCiteTags(markdown)));
+export function slackMrkdwnFromMarkdown(
+  markdown: string,
+  objectLinkUrl: SlackObjectLinkUrl = () => null,
+): string {
+  return slackMrkdwn(withoutProviderTrackingInText(rewriteClaudeCiteTags(markdown)), {
+    objects: true,
+    objectLinkUrl,
+  });
+}
+
+/**
+ * The rendering from before Opengeni object links and tables were rewritten.
+ * An operation an earlier release bound to these bytes keeps them on retry
+ * (`deliverSlackModelText`); nothing else should use it.
+ */
+export function slackMrkdwnKeepingObjectLinks(markdown: string): string {
+  return slackMrkdwn(withoutProviderTrackingInText(rewriteClaudeCiteTags(markdown)), null);
 }
 
 /**
@@ -108,7 +223,7 @@ export function slackMrkdwnFromMarkdown(markdown: string): string {
  * (`deliverSlackModelText`); nothing else should use it.
  */
 export function slackMrkdwnKeepingProviderTracking(markdown: string): string {
-  return slackMrkdwn(rewriteClaudeCiteTags(markdown));
+  return slackMrkdwn(rewriteClaudeCiteTags(markdown), null);
 }
 
 /**
@@ -117,14 +232,15 @@ export function slackMrkdwnKeepingProviderTracking(markdown: string): string {
  * (`deliverSlackModelText`); nothing else should use it.
  */
 export function slackMrkdwnKeepingClaudeCiteTags(markdown: string): string {
-  return slackMrkdwn(markdown);
+  return slackMrkdwn(markdown, null);
 }
 
-function slackMrkdwn(markdown: string): string {
+function slackMrkdwn(markdown: string, options: SlackMrkdwnOptions | null): string {
   const lines = stripProviderCitationMarkers(markdown).split("\n");
   const output: string[] = [];
   let fence: { character: string; length: number } | null = null;
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
     if (fence) {
       if (closesFence(line, fence)) {
         output.push("```");
@@ -142,10 +258,171 @@ function slackMrkdwn(markdown: string): string {
       output.push("```");
       continue;
     }
-    output.push(slackLine(line));
+    if (options?.objects) {
+      const table = tableAt(lines, index, options.objectLinkUrl);
+      if (table) {
+        output.push(...slackTable(table.rows, table.links));
+        index += table.lines - 1;
+        continue;
+      }
+    }
+    output.push(slackLine(line, options));
   }
   if (fence) output.push("```");
   return output.join("\n");
+}
+
+/**
+ * The GFM table starting at `index`, or null: a header row with a pipe, then a
+ * delimiter row with as many columns, then every following row with a pipe up
+ * to a line that starts another block (see {@link TABLE_END}). Like GFM, each
+ * row keeps the header's columns: a short row is padded, and cells past the
+ * header's are dropped. A table with a Slack mention or channel token stays as
+ * written, so the token still works.
+ */
+function tableAt(
+  lines: readonly string[],
+  index: number,
+  objectLinkUrl: SlackObjectLinkUrl,
+): { rows: string[][]; links: TableLink[]; lines: number } | null {
+  const header = lines[index]!;
+  const delimiter = lines[index + 1];
+  if (
+    !header.includes("|") ||
+    TABLE_END.test(header) ||
+    delimiter === undefined ||
+    !isTableDelimiter(delimiter)
+  ) {
+    return null;
+  }
+  // A code block would show a mention or channel token as raw text.
+  if (SLACK_TOKEN.test(header)) return null;
+  const links: TableLink[] = [];
+  const columns = tableCells(header, objectLinkUrl, links);
+  if (columns.length === 0 || splitTableRow(delimiter).length !== columns.length) return null;
+  const rows = [columns];
+  let next = index + 2;
+  for (; next < lines.length; next += 1) {
+    const line = lines[next]!;
+    if (!line.includes("|") || TABLE_END.test(line)) break;
+    if (SLACK_TOKEN.test(line)) return null;
+    rows.push(tableCells(line, objectLinkUrl, links, columns.length));
+  }
+  return { rows, links, lines: next - index };
+}
+
+function isTableDelimiter(line: string): boolean {
+  if (!line.includes("|") || !line.includes("-")) return false;
+  return splitTableRow(line).every((cell) => TABLE_DELIMITER_CELL.test(cell.trim()));
+}
+
+/** A row's cells as written: outer pipes dropped, split on unescaped pipes. */
+function splitTableRow(row: string): string[] {
+  let text = row.trim();
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
+  return text.split(/(?<!\\)\|/u);
+}
+
+/** A link in a table: its cell shows `label [n]`, and the link follows the table. */
+type TableLink = { label: string; url: string };
+
+function tableCells(
+  row: string,
+  objectLinkUrl: SlackObjectLinkUrl,
+  links: TableLink[],
+  columns?: number,
+): string[] {
+  // Cells past the header's are dropped before their links are numbered.
+  return splitTableRow(row)
+    .slice(0, columns)
+    .map((cell) => tableCellText(cell.trim(), objectLinkUrl, links));
+}
+
+/**
+ * A cell as plain text, since the table becomes a code block: a link shows its
+ * label and a reference number, and inline formatting and code marks are
+ * dropped. Addresses would make every row as wide as the longest one.
+ */
+function tableCellText(
+  cell: string,
+  objectLinkUrl: SlackObjectLinkUrl,
+  links: TableLink[],
+): string {
+  return cell
+    .replace(/\\\|/gu, "|")
+    .replace(
+      /!?\[((?:[^[\]\n]|\[[^[\]\n]*\])*)\]\(\s*(?:<([^<>\n]*)>|((?:[^\s()<>]|\([^\s()<>]*\))*))(?:\s+"[^"\n]*")?\s*\)/gu,
+      (_match, label: string, bracketed: string | undefined, bare: string | undefined) => {
+        const href = bracketed ?? bare ?? "";
+        const text = withImagesAsAltText(label).trim();
+        const url = /^(?:https?:|mailto:)/iu.test(href) ? slackSafeUrl(href) : objectLinkUrl(href);
+        if (!url) return text || href;
+        links.push({ label: text, url });
+        return `${text || "link"} [${links.length}]`;
+      },
+    )
+    .replace(BOLD_ASTERISK, "$1")
+    .replace(BOLD_UNDERSCORE, "$1")
+    .replace(STRIKETHROUGH, "$1")
+    .replace(/`/gu, "");
+}
+
+/**
+ * A table as an aligned code block. The first row is the header, underlined;
+ * a row with fewer cells is padded.
+ */
+function slackTable(rows: readonly string[][], links: readonly TableLink[]): string[] {
+  const columns = rows[0]!.length;
+  const widths = Array.from({ length: columns }, () => 1);
+  for (const row of rows) {
+    for (let column = 0; column < columns; column += 1) {
+      widths[column] = Math.max(widths[column]!, displayWidth(row[column] ?? ""));
+    }
+  }
+  const line = (cells: readonly string[]) =>
+    widths
+      .map((width, column) => {
+        const cell = cells[column] ?? "";
+        return cell + " ".repeat(Math.max(0, width - displayWidth(cell)));
+      })
+      .join(" | ")
+      .trimEnd();
+  return [
+    "```",
+    line(rows[0]!),
+    widths.map((width) => "-".repeat(width)).join("-|-"),
+    ...rows.slice(1).map(line),
+    "```",
+    ...links.map((link, index) => `[${index + 1}] ${slackLink(link.label, link.url)}`),
+  ];
+}
+
+/**
+ * A web or mail address as a Slack link target, or null: `|` and `>` would end
+ * Slack's link early, so they and spaces are percent-encoded.
+ */
+function slackSafeUrl(href: string): string | null {
+  const url = href.replace(/\|/gu, "%7C").replace(/>/gu, "%3E").replace(/ /gu, "%20");
+  return /^(?:https?:\/\/|mailto:)[^\s<>|]+$/iu.test(url) ? url : null;
+}
+
+/**
+ * East Asian wide and fullwidth characters, and emoji shown as pictures, take
+ * two columns; text-style symbols such as © and ™ take one.
+ */
+const WIDE_CHARACTER =
+  /[\u{1100}-\u{115F}\u{2E80}-\u{303E}\u{3041}-\u{33FF}\u{3400}-\u{4DBF}\u{4E00}-\u{9FFF}\u{A000}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE30}-\u{FE4F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}/u;
+/** Combining marks (variation selectors included) and joiners take no column of their own. */
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u{200B}-\u{200D}]/u;
+
+/** How many columns `text` takes in a monospaced code block. */
+function displayWidth(text: string): number {
+  let width = 0;
+  for (const character of text) {
+    width += ZERO_WIDTH.test(character) ? 0 : WIDE_CHARACTER.test(character) ? 2 : 1;
+  }
+  return width;
 }
 
 function closesFence(line: string, fence: { character: string; length: number }): boolean {
@@ -156,21 +433,24 @@ function closesFence(line: string, fence: { character: string; length: number })
   );
 }
 
-function slackLine(line: string): string {
+function slackLine(line: string, options: SlackMrkdwnOptions | null): string {
   if (THEMATIC_BREAK.test(line)) return line;
   const heading = ATX_HEADING.exec(line);
   if (heading) {
-    const content = slackInline(heading[1]!, { heading: true }).trim();
+    const content = slackInline(heading[1]!, { heading: true, options }).trim();
     return content ? `*${content}*` : line;
   }
   const bullet = BULLET.exec(line);
   if (bullet) {
-    return `${bullet[1]}• ${slackInline(line.slice(bullet[0].length), { heading: false })}`;
+    return `${bullet[1]}• ${slackInline(line.slice(bullet[0].length), { heading: false, options })}`;
   }
-  return slackInline(line, { heading: false });
+  return slackInline(line, { heading: false, options });
 }
 
-function slackInline(text: string, options: { heading: boolean }): string {
+function slackInline(
+  text: string,
+  { heading, options }: { heading: boolean; options: SlackMrkdwnOptions | null },
+): string {
   const kept: string[] = [];
   const keep = (value: string) => {
     kept.push(value);
@@ -180,11 +460,29 @@ function slackInline(text: string, options: { heading: boolean }): string {
   // could collide with one. Slack does not render NUL; drop it.
   let working = text.replace(/\u0000/gu, "");
   working = working.replace(CODE_SPAN_OR_SLACK_TOKEN, keep);
+  // A clickable thumbnail links with its alt text, whatever either target is.
+  if (options?.objects) {
+    working = working
+      .replace(LINKED_IMAGE, "[$1](")
+      // A link with no label (a thumbnail with no alt text) shows its address.
+      .replace(EMPTY_LABEL_WEB_LINK, (_match, url: string) => keep(`<${url}>`));
+  }
   working = working.replace(MARKDOWN_LINK, (_match, label: string, url: string) =>
     keep(slackLink(restore(label, kept), url)),
   );
+  if (options?.objects) {
+    const { objectLinkUrl } = options;
+    working = working.replace(OPENGENI_OBJECT_LINK, (_match, label: string, target: string) => {
+      const href = target.startsWith("<") ? target.slice(1, -1) : target;
+      const url = objectLinkUrl(href);
+      if (url) return keep(slackLink(withImagesAsAltText(restore(label, kept)), url));
+      // Nothing to open in Slack: the label reads on, as ordinary text.
+      const readable = withImagesAsAltText(label);
+      return readable.trim() ? readable : keep(href);
+    });
+  }
   working = working.replace(BARE_URL, keep);
-  if (options.heading) {
+  if (heading) {
     // The whole heading becomes one bold span, so emphasis inside it would
     // nest and break Slack's parser. Drop the emphasis markers instead.
     working = working
@@ -203,6 +501,11 @@ function slackInline(text: string, options: { heading: boolean }): string {
 
 function restore(text: string, kept: readonly string[]): string {
   return text.replace(PLACEHOLDER, (_match, index: string) => kept[Number(index)] ?? "");
+}
+
+/** Image syntax inside a link label, as in a clickable thumbnail, reads as its alt text. */
+function withImagesAsAltText(label: string): string {
+  return label.replace(/!\[([^[\]\n]*)\]\([^\n]*?\)/gu, "$1");
 }
 
 function slackLink(label: string, url: string): string {

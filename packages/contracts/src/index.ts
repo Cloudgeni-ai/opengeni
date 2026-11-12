@@ -971,6 +971,14 @@ export const ErrorEnvelope = /* @__PURE__ */ defineSchema(() =>
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
 
 /**
+ * `details.code` when a native app's push registration can never be
+ * delivered on this deployment: it doesn't list the app's bundle identifier
+ * or package name, or it has no push credentials for the platform. Retrying
+ * won't help; the deployment's push setup has to change.
+ */
+export const NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE = "native_push_unavailable";
+
+/**
  * Why a request was refused as `unauthenticated` (HTTP 401) for want of a
  * sign-in, carried as the error envelope's `details.code`:
  *

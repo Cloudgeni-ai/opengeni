@@ -482,6 +482,8 @@ export {
   APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE,
   isRetryableStreamError,
   OPENGENI_MAINTENANCE_ERROR_CODE,
+  NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE,
+  isNativePushUnavailableError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { isTransientRequestError } from "./read-retry";
