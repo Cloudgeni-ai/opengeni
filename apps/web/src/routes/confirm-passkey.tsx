@@ -69,8 +69,8 @@ export function ConfirmPasskeyRoute({
     let live = true;
     void api
       .read(handoffId)
-      .then((handoff) => {
-        if (live) setState({ kind: "ready", code: handoff.code });
+      .then((found) => {
+        if (live) setState({ kind: "ready", code: found.code });
       })
       .catch((caught) => {
         if (live) setState({ kind: "unavailable", message: handoffUnavailableMessage(caught) });
