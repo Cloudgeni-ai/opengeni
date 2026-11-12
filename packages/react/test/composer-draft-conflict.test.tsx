@@ -294,8 +294,9 @@ describe("composer draft changed", () => {
       await until(() => server.delivered.length > 0);
 
       expect(server.delivered).toEqual(["what I send"]);
-      // Send never saved over the other tab's newer draft: it stays, and shows.
-      expect(server.saves).toEqual(["1 draft", "2 what I send: draft changed"]);
+      // Send saved nothing first, so never over the other tab's newer draft:
+      // it stays, and shows.
+      expect(server.saves).toEqual(["1 draft"]);
       expect(server.slot.text).toBe("from the other tab");
       await until(() => hook.result.current.value === "from the other tab");
       expect(hook.result.current.value).toBe("from the other tab");
@@ -325,8 +326,9 @@ describe("composer draft changed", () => {
       await until(() => server.delivered.length > 0);
 
       expect(server.delivered).toEqual(["same text"]);
-      // One refused save, then no second write: the content was already there.
-      expect(server.saves).toEqual(["1 same text: draft changed"]);
+      // Nothing is saved first; the server clears the draft holding the sent text.
+      expect(server.saves).toEqual([]);
+      expect(server.slot.text).toBe("");
       expect(hook.result.current.draftConflict).toBeNull();
       expect(hook.result.current.error).toBeNull();
       expect(
@@ -679,9 +681,9 @@ describe("composer draft changed", () => {
 
       expect(server.delivered).toEqual(["what I send"]);
       // The page's own save was the basis, so the draft holding a piece of
-      // the sent message was saved over and cleared, not kept.
-      expect(server.saves).toEqual(["1 draft", "3 what I sen", "4 what I send"]);
-      expect(server.submits.map((submit) => submit.expectedDraftRevision)).toEqual([5]);
+      // the sent message was cleared, not kept; nothing was saved first.
+      expect(server.saves).toEqual(["1 draft", "3 what I sen"]);
+      expect(server.submits.map((submit) => submit.expectedDraftRevision)).toEqual([4]);
       expect(server.slot.text).toBe("");
     } finally {
       await mounted.unmount();
