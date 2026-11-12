@@ -313,6 +313,12 @@ describe("Opengeni object links in Slack", () => {
     ).toBe("Shot");
   });
 
+  test("a thumbnail with no alt text links with its address", () => {
+    expect(slackMrkdwnFromMarkdown("[![](https://i.example/x.png)](https://example.com/a)")).toBe(
+      "<https://example.com/a>",
+    );
+  });
+
   test("a pipe can't end the address early", () => {
     expect(slackMrkdwnFromMarkdown(`[x](/workspaces/${workspaceId}/a|evil)`, links)).toBe(
       `<${app}/a%7Cevil|x>`,
@@ -346,11 +352,12 @@ describe("Markdown tables in Slack", () => {
         "Results:",
         "",
         "```",
-        "Check                         | Status",
-        "------------------------------|-------",
-        "Unit tests                    | pass",
-        "CI (https://ci.example.com/1) | a | b",
+        "Check      | Status",
+        "-----------|-------",
+        "Unit tests | pass",
+        "CI [1]     | a | b",
         "```",
+        "[1] <https://ci.example.com/1|CI>",
         "",
         "Done.",
       ].join("\n"),
@@ -386,15 +393,14 @@ describe("Markdown tables in Slack", () => {
       "## a | b",
       "|-|-|",
     ].join("\n");
-    const cell =
-      "Open (https://app.example/workspaces/w/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)";
     expect(slackMrkdwnFromMarkdown(reply, links)).toBe(
       [
         "```",
-        `${"File".padEnd(cell.length)} | Note`,
-        `${"-".repeat(cell.length)}-|-----`,
-        `${cell} | ok`,
+        "File     | Note",
+        "---------|-----",
+        "Open [1] | ok",
         "```",
+        "[1] <https://app.example/workspaces/w/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e|Open>",
         "*Next | step*",
         "```",
         "x | y",

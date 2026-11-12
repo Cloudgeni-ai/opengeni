@@ -110,7 +110,7 @@ beforeAll(() => {
 });
 afterAll(() => GlobalRegistrator.unregister());
 
-async function renderRoute(embedded = false, initialEntry = "/") {
+async function renderRoute(embedded = false, initialEntry = "/", fromSession?: string) {
   const { RetainedArtifactRoute } = await import("@opengeni/react/app/routes/retained-artifact");
   const route = createRootRoute({
     component: () => (
@@ -118,6 +118,7 @@ async function renderRoute(embedded = false, initialEntry = "/") {
         workspaceId={workspaceId}
         artifactId={artifactId}
         embedded={embedded}
+        fromSession={fromSession}
       />
     ),
   });
@@ -178,7 +179,8 @@ test("a Site's UUID on the file page opens the Site", async () => {
     JSON.stringify({ error: { message: "artifact not found" } }),
     { correlationId: "corr-site" },
   );
-  const rendered = await renderRoute();
+  const fromSession = "77777777-7777-4777-8777-777777777777";
+  const rendered = await renderRoute(false, "/", fromSession);
   try {
     await act(async () => {
       await Promise.resolve();
@@ -187,6 +189,8 @@ test("a Site's UUID on the file page opens the Site", async () => {
     expect(rendered.router.state.location.pathname).toBe(
       `/workspaces/${workspaceId}/sites/${siteId}`,
     );
+    // Back still leads to the chat the link came from.
+    expect(rendered.router.state.location.searchStr).toBe(`?fromSession=${fromSession}`);
     expect(rendered.container.textContent).not.toContain("Artifact unavailable");
   } finally {
     await rendered.unmount();

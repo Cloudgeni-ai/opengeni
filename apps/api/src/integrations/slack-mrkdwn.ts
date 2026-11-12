@@ -85,6 +85,10 @@ const TABLE_END =
 /** Slack's own tokens: mentions, channels and links already in Slack form. */
 const SLACK_TOKEN = /<(?:[@#!]|https?:|mailto:)[^<>\n]*>/u;
 
+/** A web link with an empty label, which {@link MARKDOWN_LINK} leaves alone. */
+const EMPTY_LABEL_WEB_LINK =
+  /(?<!!)\[[ \t]*\]\(\s*((?:https?:\/\/|mailto:)(?:[^\s()<>|]|\([^\s()<>|]*\))+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/gu;
+
 /** One cell of a GFM table's delimiter row, such as `---` or `:-:`. */
 const TABLE_DELIMITER_CELL = /^:?-+:?$/u;
 
@@ -255,7 +259,7 @@ function slackMrkdwn(markdown: string, options: SlackMrkdwnOptions | null): stri
     if (options?.objects) {
       const table = tableAt(lines, index, options.objectLinkUrl);
       if (table) {
-        output.push(...slackTable(table.rows));
+        output.push(...slackTable(table.rows, table.links));
         index += table.lines - 1;
         continue;
       }
@@ -278,7 +282,7 @@ function tableAt(
   lines: readonly string[],
   index: number,
   objectLinkUrl: SlackObjectLinkUrl,
-): { rows: string[][]; lines: number } | null {
+): { rows: string[][]; links: TableLink[]; lines: number } | null {
   const header = lines[index]!;
   const delimiter = lines[index + 1];
   if (
@@ -291,7 +295,8 @@ function tableAt(
   }
   // A code block would show a mention or channel token as raw text.
   if (SLACK_TOKEN.test(header)) return null;
-  const columns = tableCells(header, objectLinkUrl);
+  const links: TableLink[] = [];
+  const columns = tableCells(header, objectLinkUrl, links);
   if (columns.length === 0 || splitTableRow(delimiter).length !== columns.length) return null;
   const rows = [columns];
   let next = index + 2;
@@ -299,9 +304,9 @@ function tableAt(
     const line = lines[next]!;
     if (!line.includes("|") || TABLE_END.test(line)) break;
     if (SLACK_TOKEN.test(line)) return null;
-    rows.push(tableCells(line, objectLinkUrl).slice(0, columns.length));
+    rows.push(tableCells(line, objectLinkUrl, links).slice(0, columns.length));
   }
-  return { rows, lines: next - index };
+  return { rows, links, lines: next - index };
 }
 
 function isTableDelimiter(line: string): boolean {
@@ -317,15 +322,23 @@ function splitTableRow(row: string): string[] {
   return text.split(/(?<!\\)\|/u);
 }
 
-function tableCells(row: string, objectLinkUrl: SlackObjectLinkUrl): string[] {
-  return splitTableRow(row).map((cell) => tableCellText(cell.trim(), objectLinkUrl));
+/** A link in a table: its cell shows `label [n]`, and the link follows the table. */
+type TableLink = { label: string; url: string };
+
+function tableCells(row: string, objectLinkUrl: SlackObjectLinkUrl, links: TableLink[]): string[] {
+  return splitTableRow(row).map((cell) => tableCellText(cell.trim(), objectLinkUrl, links));
 }
 
 /**
  * A cell as plain text, since the table becomes a code block: a link shows its
- * label and address, and inline formatting and code marks are dropped.
+ * label and a reference number, and inline formatting and code marks are
+ * dropped. Addresses would make every row as wide as the longest one.
  */
-function tableCellText(cell: string, objectLinkUrl: SlackObjectLinkUrl): string {
+function tableCellText(
+  cell: string,
+  objectLinkUrl: SlackObjectLinkUrl,
+  links: TableLink[],
+): string {
   return cell
     .replace(/\\\|/gu, "|")
     .replace(
@@ -333,9 +346,10 @@ function tableCellText(cell: string, objectLinkUrl: SlackObjectLinkUrl): string 
       (_match, label: string, bracketed: string | undefined, bare: string | undefined) => {
         const href = bracketed ?? bare ?? "";
         const text = withImagesAsAltText(label).trim();
-        const url = /^(?:https?:|mailto:)/iu.test(href) ? href : objectLinkUrl(href);
+        const url = /^(?:https?:|mailto:)/iu.test(href) ? slackSafeUrl(href) : objectLinkUrl(href);
         if (!url) return text || href;
-        return text && text !== url ? `${text} (${url})` : url;
+        links.push({ label: text, url });
+        return `${text || "link"} [${links.length}]`;
       },
     )
     .replace(BOLD_ASTERISK, "$1")
@@ -348,7 +362,7 @@ function tableCellText(cell: string, objectLinkUrl: SlackObjectLinkUrl): string 
  * A table as an aligned code block. The first row is the header, underlined;
  * a row with fewer cells is padded.
  */
-function slackTable(rows: readonly string[][]): string[] {
+function slackTable(rows: readonly string[][], links: readonly TableLink[]): string[] {
   const columns = rows[0]!.length;
   const widths = Array.from({ length: columns }, () => 1);
   for (const row of rows) {
@@ -370,14 +384,24 @@ function slackTable(rows: readonly string[][]): string[] {
     widths.map((width) => "-".repeat(width)).join("-|-"),
     ...rows.slice(1).map(line),
     "```",
+    ...links.map((link, index) => `[${index + 1}] ${slackLink(link.label, link.url)}`),
   ];
+}
+
+/**
+ * A web or mail address as a Slack link target, or null: `|` and `>` would end
+ * Slack's link early, so they and spaces are percent-encoded.
+ */
+function slackSafeUrl(href: string): string | null {
+  const url = href.replace(/\|/gu, "%7C").replace(/>/gu, "%3E").replace(/ /gu, "%20");
+  return /^(?:https?:\/\/|mailto:)[^\s<>|]+$/iu.test(url) ? url : null;
 }
 
 /** East Asian wide and fullwidth characters, and emoji, take two columns. */
 const WIDE_CHARACTER =
   /[\u{1100}-\u{115F}\u{2E80}-\u{303E}\u{3041}-\u{33FF}\u{3400}-\u{4DBF}\u{4E00}-\u{9FFF}\u{A000}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE30}-\u{FE4F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{20000}-\u{3FFFD}]|\p{Extended_Pictographic}/u;
-/** Combining marks and joiners take no column of their own. */
-const ZERO_WIDTH = /[\p{Mn}\p{Me}\u{200B}-\u{200D}\u{FE00}-\u{FE0F}]/u;
+/** Combining marks (variation selectors included) and joiners take no column of their own. */
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u{200B}-\u{200D}]/u;
 
 /** How many columns `text` takes in a monospaced code block. */
 function displayWidth(text: string): number {
@@ -424,7 +448,12 @@ function slackInline(
   let working = text.replace(/\u0000/gu, "");
   working = working.replace(CODE_SPAN_OR_SLACK_TOKEN, keep);
   // A clickable thumbnail links with its alt text, whatever either target is.
-  if (options?.objects) working = working.replace(LINKED_IMAGE, "[$1](");
+  if (options?.objects) {
+    working = working
+      .replace(LINKED_IMAGE, "[$1](")
+      // A link with no label (a thumbnail with no alt text) shows its address.
+      .replace(EMPTY_LABEL_WEB_LINK, (_match, url: string) => keep(`<${url}>`));
+  }
   working = working.replace(MARKDOWN_LINK, (_match, label: string, url: string) =>
     keep(slackLink(restore(label, kept), url)),
   );

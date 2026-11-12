@@ -145,6 +145,7 @@ function RetainedArtifactDetail({
             void navigateRef.current({
               to: "/workspaces/$workspaceId/sites/$siteId",
               params: { workspaceId, siteId: artifactId },
+              ...(fromSession ? { search: { fromSession } } : {}),
               replace: true,
             });
           return;
@@ -160,7 +161,7 @@ function RetainedArtifactDetail({
       current = false;
       downloads.generation++;
     };
-  }, [key, client, workspaceId, artifactId, retry, downloads, embedded]);
+  }, [key, client, workspaceId, artifactId, retry, downloads, embedded, fromSession]);
   const loaded = state?.key === key && state.client === client ? state : null;
   const artifact = loaded?.artifact;
   const filename =
