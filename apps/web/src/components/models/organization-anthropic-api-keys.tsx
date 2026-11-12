@@ -1,6 +1,6 @@
 import type { ChatClient, OrganizationAnthropicApiKey } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { Loader2Icon, MinusCircleIcon, PlusIcon } from "lucide-react";
+import { Loader2Icon, MinusCircleIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -64,6 +64,9 @@ export function OrganizationAnthropicApiKeys({
   const [addError, setAddError] = useState<string | null>(null);
   const [busyKeyId, setBusyKeyId] = useState<string | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<OrganizationAnthropicApiKey | null>(null);
+  const [renaming, setRenaming] = useState<OrganizationAnthropicApiKey | null>(null);
+  const [newLabel, setNewLabel] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
   const keys = query.data?.keys ?? [];
 
   async function serveAgain(key: OrganizationAnthropicApiKey) {
@@ -147,6 +150,23 @@ export function OrganizationAnthropicApiKeys({
                           Serve again
                         </RowButton>
                       ) : null}
+                      {key.connectionKey ? null : (
+                        <Button
+                          type="button"
+                          size="icon-sm"
+                          variant="ghost"
+                          className="rounded-[10px] text-fg-subtle hover:text-fg pointer-coarse:size-11"
+                          disabled={busyKeyId !== null}
+                          aria-label={`Rename ${keyTitle(key)}`}
+                          onClick={() => {
+                            setNewLabel(key.label ?? "");
+                            setRenameError(null);
+                            setRenaming(key);
+                          }}
+                        >
+                          <PencilIcon aria-hidden="true" />
+                        </Button>
+                      )}
                       {key.connectionKey ? null : (
                         <Button
                           type="button"
@@ -243,6 +263,46 @@ export function OrganizationAnthropicApiKeys({
           </FormDialog>
         ) : null}
       </div>
+      <FormDialog
+        open={renaming !== null}
+        onOpenChange={(open) => {
+          if (!open) setRenaming(null);
+        }}
+        size="sm"
+        title="Rename API key"
+        submitLabel="Save name"
+        pendingLabel="Saving…"
+        error={renameError}
+        submitDisabled={!newLabel.trim()}
+        onSubmit={async () => {
+          const key = renaming;
+          if (!key) return true;
+          setRenameError(null);
+          try {
+            await client.updateOrganizationAnthropicApiKey(organizationId, key.id, {
+              label: newLabel.trim(),
+            });
+            await query.refresh();
+            return true;
+          } catch (error) {
+            setRenameError(providerRefusalText(error));
+            return false;
+          }
+        }}
+        onSubmitted={() => setRenaming(null)}
+      >
+        <FieldStack>
+          <Field label="Name">
+            <TextInput
+              value={newLabel}
+              maxLength={128}
+              autoComplete="off"
+              aria-label="New key name"
+              onChange={(event) => setNewLabel(event.target.value)}
+            />
+          </Field>
+        </FieldStack>
+      </FormDialog>
       <ConfirmDialog
         open={pendingRemoval !== null}
         onOpenChange={(open) => {

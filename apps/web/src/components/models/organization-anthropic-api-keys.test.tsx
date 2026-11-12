@@ -67,6 +67,15 @@ function freshClient(): ChatClient<OpenGeniBrowserClient> {
       keys = keys.map((key) => (key.id === keyId ? { ...key, creditRefusedAt: null } : key));
       return keys.find((key) => key.id === keyId);
     },
+    updateOrganizationAnthropicApiKey: async (
+      organizationId: string,
+      keyId: string,
+      request: { label: string },
+    ) => {
+      calls.push(["rename", organizationId, keyId, request]);
+      keys = keys.map((key) => (key.id === keyId ? { ...key, label: request.label } : key));
+      return keys.find((key) => key.id === keyId);
+    },
     addOrganizationAnthropicApiKey: async (
       organizationId: string,
       request: { apiKey: string; label: string },
@@ -168,4 +177,17 @@ test("MP-KEYS-13: adding a key sends its name and value once", async () => {
   ]);
   expect(container.querySelectorAll("[role=listitem]")).toHaveLength(3);
   expect(container.textContent).not.toContain("sk-ant-api03-third");
+});
+
+test("MP-KEYS-13: an added key is renamed; the connection's own key has no name to change", async () => {
+  await act(async () => root.render(<Harness />));
+  await settle();
+  expect(() => button("Rename Connection key")).toThrow();
+  await act(async () => button("Rename Second account").click());
+  await settle();
+  await enter(document.querySelector("input[aria-label='New key name']")!, " Renamed ");
+  await act(async () => button("Save name").click());
+  await settle();
+  expect(calls).toEqual([["rename", "org-a", refused.id, { label: "Renamed" }]]);
+  expect(container.querySelectorAll("[role=listitem]")[1]?.textContent).toContain("Renamed");
 });
