@@ -87,6 +87,35 @@ describe("rail footer account menu", () => {
     }
   });
 
+  test("lists Billing and receipts after My things only for people who can see billing", async () => {
+    const ownerUnmount = await renderOpenAccountMenu({
+      managed: true,
+      analytics: false,
+      documentationUrl: docs,
+      canReadBilling: true,
+    });
+    try {
+      const sequence = menuSequence();
+      expectNoAdjacentSeparators(sequence);
+      expect(sequence[2]).toBe("My things");
+      expect(sequence[3]).toBe("Billing and receipts");
+      expect(sequence[4]).toBe("|");
+    } finally {
+      await ownerUnmount();
+    }
+    document.body.replaceChildren();
+    const memberUnmount = await renderOpenAccountMenu({
+      managed: true,
+      analytics: false,
+      documentationUrl: docs,
+    });
+    try {
+      expect(menuSequence().join("|")).not.toContain("Billing");
+    } finally {
+      await memberUnmount();
+    }
+  });
+
   test("Appearance opens Light, Dark and System", async () => {
     const unmount = await renderOpenAccountMenu({
       managed: false,

@@ -385,18 +385,17 @@ function BillingOverview({
                     }
                   />
                 ) : null}
-                {!showPlans ? (
-                  <SettingRow
-                    label="Invoices and payment details"
-                    controlWidth="auto"
-                    control={
-                      <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
-                        Open Stripe billing
-                        <ArrowUpRightIcon aria-hidden="true" />
-                      </RowButton>
-                    }
-                  />
-                ) : null}
+                <SettingRow
+                  label="Receipts and invoices"
+                  description="For plans and credits. You can also update your card there."
+                  controlWidth="auto"
+                  control={
+                    <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
+                      View receipts
+                      <ArrowUpRightIcon aria-hidden="true" />
+                    </RowButton>
+                  }
+                />
               </SettingRowGroup>
             ) : stripe ? (
               <p className="text-xs leading-[18px] text-fg-muted">
