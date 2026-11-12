@@ -46,6 +46,7 @@ import {
   listAgentLearningOverrides,
   getAgentInstruction,
   getKnowledgeEntry,
+  getKnowledgeEntries,
   getKnowledgeEntryReach,
   listKnowledgeEntries,
   listKnowledgeReviewBatches,
@@ -1312,9 +1313,124 @@ describe("unified Knowledge storage", () => {
       entryId: company.entryId,
       expectedVersion: company.version,
     });
+    // What was only inside Acme went with it; Renewal stays in Billing.
     expect(ids(await listKnowledgeEntries(client.db, f.human, { rootOnly: true }))).toEqual(
-      [contracts.entryId, product.entryId, loose.entryId, personal.entryId].sort(),
+      [product.entryId, loose.entryId].sort(),
     );
+    expect(
+      ids(await listKnowledgeEntries(client.db, f.human, { groupId: product.entryId })),
+    ).toEqual([finding.entryId]);
+  });
+
+  test("archiving a collection archives what is only inside it, and restoring brings it back", async () => {
+    const f = await fixture();
+    const create = (title: string, kind: "group" | "note", groupIds: string[] = []) =>
+      saveKnowledgeEntry(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        entry: { title, kind, content: `${title} description`, groupIds },
+      });
+    const experiment = await create("Synthetic experiment", "group");
+    const lab = await create("Laboratory collections", "group", [experiment.entryId]);
+    const atlas = await create("Atlas", "group", [lab.entryId]);
+    const finding = await create("Atlas finding", "note", [atlas.entryId]);
+    const other = await create("Real product", "group");
+    const alsoElsewhere = await create("Shared finding", "note", [atlas.entryId, other.entryId]);
+    const cited = await create("Cited finding", "note", [atlas.entryId]);
+    const citing = await saveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: {
+        title: "Citing note",
+        kind: "note",
+        content: "Builds on the cited finding",
+        relationships: [{ entryId: cited.entryId, relation: "related_to" }],
+      },
+    });
+    const earlier = await create("Already archived", "group", [lab.entryId]);
+    const earlierArchive = await archiveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: earlier.entryId,
+      expectedVersion: earlier.version,
+    });
+    const roots = async () =>
+      (await listKnowledgeEntries(client.db, f.human, { rootOnly: true })).entries
+        .map((entry) => entry.id)
+        .sort();
+    const archived = async (id: string) =>
+      (await getKnowledgeEntries(client.db, f.human, [id], { view: "archived" }))[0]?.archived ??
+      false;
+    const operationId = crypto.randomUUID();
+    const archive = () =>
+      archiveKnowledgeEntry(client.db, f.human, {
+        operationId,
+        entryId: experiment.entryId,
+        expectedVersion: experiment.version,
+      });
+    const receipt = await archive();
+    expect(receipt.outcome).toBe("archived");
+    // Nothing only inside surfaces at the top level, and agents stop using it. The cited
+    // note stays live without a live collection, so it is listed at the top level.
+    expect(await roots()).toEqual([other.entryId, citing.entryId, cited.entryId].sort());
+    for (const id of [lab.entryId, atlas.entryId, finding.entryId])
+      expect(await archived(id)).toBe(true);
+    // Held or cited by something live outside it: stays.
+    expect(await archived(alsoElsewhere.entryId)).toBe(false);
+    expect(await archived(cited.entryId)).toBe(false);
+    expect(
+      (await listKnowledgeEntries(client.db, f.human, { groupId: other.entryId })).entries.map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([alsoElsewhere.entryId]);
+    expect((await archive()).replayed).toBe(true);
+
+    // Undo restores the collection and everything archived with it.
+    await restoreKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: experiment.entryId,
+      revisionId: experiment.revisionId,
+      expectedVersion: receipt.version,
+    });
+    expect(await roots()).toEqual([experiment.entryId, other.entryId, citing.entryId].sort());
+    for (const id of [lab.entryId, atlas.entryId, finding.entryId])
+      expect(await archived(id)).toBe(false);
+    expect(
+      (await listKnowledgeEntries(client.db, f.human, { groupId: atlas.entryId })).entries
+        .map((entry) => entry.id)
+        .sort(),
+    ).toEqual([finding.entryId, alsoElsewhere.entryId, cited.entryId].sort());
+    // A collection archived on its own before stays archived.
+    expect(await archived(earlier.entryId)).toBe(true);
+    expect(earlierArchive.outcome).toBe("archived");
+  });
+
+  test("an agent archiving a collection takes what is only inside it along", async () => {
+    const f = await fixture();
+    const { agent } = await attempt(f, "automatic");
+    const create = (title: string, kind: "group" | "note", groupIds: string[] = []) =>
+      saveKnowledgeEntry(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        entry: { title, kind, content: `${title} description`, groupIds },
+      });
+    const collection = await create("Benchmark run", "group");
+    const nested = await create("Benchmark findings", "group", [collection.entryId]);
+    const note = await create("Benchmark note", "note", [nested.entryId]);
+    const receipt = await archiveKnowledgeEntry(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      entryId: collection.entryId,
+      expectedVersion: collection.version,
+    });
+    expect(receipt.outcome).toBe("archived");
+    const live = await getKnowledgeEntries(client.db, f.human, [nested.entryId, note.entryId]);
+    expect(live).toEqual([null, null]);
+    const gone = await getKnowledgeEntries(client.db, f.human, [nested.entryId, note.entryId], {
+      view: "archived",
+    });
+    expect(gone.map((entry) => entry?.archived)).toEqual([true, true]);
   });
 
   test("collection cycles are rejected across published, proposed and restored membership", async () => {
@@ -1379,6 +1495,13 @@ describe("unified Knowledge storage", () => {
       expectedVersion: 0,
       entry: { title: "Acme", kind: "group", content: "" },
     });
+    // Also in a live collection, so archiving Acme doesn't take it along.
+    const kept = await saveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: { title: "Contracts", kind: "group", content: "" },
+    });
     const fact = await saveKnowledgeEntry(client.db, f.human, {
       operationId: crypto.randomUUID(),
       entryId: crypto.randomUUID(),
@@ -1387,7 +1510,7 @@ describe("unified Knowledge storage", () => {
         title: "Renewal",
         kind: "fact",
         content: "Renewal on 1 December",
-        groupIds: [group.entryId],
+        groupIds: [group.entryId, kept.entryId],
         relationships: [{ entryId: group.entryId, relation: "applies_to" }],
       },
     });
@@ -1404,7 +1527,7 @@ describe("unified Knowledge storage", () => {
     const read = await getKnowledgeEntry(client.db, f.human, fact.entryId);
     expect(read?.revision.entry).toMatchObject({
       content: "Renewal on 1 December",
-      groupIds: [],
+      groupIds: [kept.entryId],
       relationships: [],
     });
     expect(
@@ -1412,7 +1535,7 @@ describe("unified Knowledge storage", () => {
     ).toEqual([]);
     const stored = await shared!
       .admin`SELECT body FROM knowledge_entry_revisions WHERE id=${fact.revisionId}`;
-    expect(stored[0]?.body.groupIds).toEqual([group.entryId]);
+    expect(stored[0]?.body.groupIds).toEqual([group.entryId, kept.entryId]);
   });
 
   test("Review first saves without pausing and keeps the published revision until exact approval", async () => {

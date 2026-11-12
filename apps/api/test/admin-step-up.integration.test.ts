@@ -101,6 +101,9 @@ function sessionCookie(response: Response): string {
 }
 
 async function passkeyPerson(rt: Runtime, name: string) {
+  // Every fixture signs up from the same test address; keep the per-address
+  // sign-up limit from deciding which later test fails.
+  await admin`delete from auth_rate_limits where key like 'passkey-sign-up:%'`;
   const passkey = createSoftwarePasskey();
   const options = await call(rt, "POST", "/v1/auth/passkey/sign-up/options", "", { name });
   expect(options.status).toBe(200);
@@ -346,6 +349,145 @@ describe("admin passkey step-up", () => {
     await refusal(await rename(rt, owner.cookie, organization));
     // Signed out, nothing can be confirmed.
     expect((await call(rt, "POST", "/v1/auth/passkey/step-up/options", "")).status).toBe(403);
+  }, 120_000);
+
+  test("an app that can't show passkey prompts hands its step-up to the person's browser", async () => {
+    const rt = runtime();
+    const owner = await passkeyPerson(rt, "Desktop Owner");
+    const organization = await createOrganization(rt, owner.cookie);
+    await unconfirm(owner.userId);
+    // The desktop app's window: the same person's own session, not confirmed.
+    const appSession = await passwordSession(rt, owner.userId);
+    expect(await stepUpCode(await rename(rt, appSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+    const start = async (cookie: string) => {
+      const started = await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", cookie);
+      expect(started.status, await started.clone().text()).toBe(200);
+      const handoff = (await started.json()) as {
+        handoffId: string;
+        expiresAt: string;
+        expiresInSeconds: number;
+      };
+      expect(handoff.expiresInSeconds).toBeGreaterThan(0);
+      return handoff;
+    };
+    const confirmInBrowser = async (handoffId: string) => {
+      const options = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
+        handoffId,
+      });
+      expect(options.status, await options.clone().text()).toBe(200);
+      const ceremony = (await options.json()) as { challengeId: string; options: never };
+      const confirmed = await call(rt, "POST", "/v1/auth/passkey/step-up", owner.cookie, {
+        challengeId: ceremony.challengeId,
+        response: softwarePasskeyAssertion(owner.passkey, ceremony.options, { origin: ORIGIN }),
+      });
+      expect(confirmed.status, await confirmed.clone().text()).toBe(200);
+      const { code } = (await confirmed.json()) as { code: string };
+      expect(code).toMatch(/^\d{6}$/u);
+      return code;
+    };
+    const claim = (cookie: string, handoffId: string, code: string) =>
+      call(rt, "POST", `/v1/auth/passkey/step-up/handoff/${handoffId}/claim`, cookie, { code });
+    const codeOf = async (response: Response) =>
+      ((await response.json()) as { code?: unknown }).code;
+    const wrong = (code: string) => String((Number(code) + 1) % 1_000_000).padStart(6, "0");
+
+    const { handoffId } = await start(appSession);
+    // Someone else can't use it, and nothing is claimable before the passkey.
+    const stranger = await passwordPerson(rt);
+    const strangerOptions = await call(
+      rt,
+      "POST",
+      "/v1/auth/passkey/step-up/options",
+      stranger.cookie,
+      { handoffId },
+    );
+    expect(strangerOptions.status).toBe(403);
+    expect(await strangerOptions.json()).toMatchObject({ code: "PASSKEY_HANDOFF_OTHER_ACCOUNT" });
+    expect(await codeOf(await claim(appSession, handoffId, "000000"))).toBe(
+      "PASSKEY_HANDOFF_NOT_CONFIRMED",
+    );
+
+    // The passkey in the browser alone confirms only the browser: whoever
+    // holds the app's session also needs the code the browser shows, so a
+    // forwarded link can't lend the person's passkey to a stolen session.
+    const code = await confirmInBrowser(handoffId);
+    expect(await stepUpCode(await rename(rt, appSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+    // Only the session that started it can claim it.
+    const otherSession = await passwordSession(rt, owner.userId);
+    expect(await codeOf(await claim(otherSession, handoffId, code))).toBe(
+      "PASSKEY_HANDOFF_OTHER_SESSION",
+    );
+    expect(await codeOf(await claim(appSession, handoffId, wrong(code)))).toBe(
+      "PASSKEY_HANDOFF_WRONG_CODE",
+    );
+    const claimed = await claim(appSession, handoffId, code);
+    expect(claimed.status, await claimed.clone().text()).toBe(200);
+    expect((await rename(rt, appSession, organization)).status).toBe(200);
+    expect(await stepUpCode(await rename(rt, otherSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+
+    // A handoff is used once.
+    expect(await codeOf(await claim(appSession, handoffId, code))).toBe("PASSKEY_HANDOFF_EXPIRED");
+    const again = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
+      handoffId,
+    });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ code: "PASSKEY_HANDOFF_EXPIRED" });
+
+    // Guessing the code voids the handoff after a few tries.
+    await unconfirm(owner.userId);
+    const { handoffId: guessed } = await start(appSession);
+    const guessedCode = await confirmInBrowser(guessed);
+    for (let attempt = 1; attempt < 5; attempt += 1) {
+      expect(await codeOf(await claim(appSession, guessed, wrong(guessedCode)))).toBe(
+        "PASSKEY_HANDOFF_WRONG_CODE",
+      );
+    }
+    expect(await codeOf(await claim(appSession, guessed, wrong(guessedCode)))).toBe(
+      "PASSKEY_HANDOFF_EXPIRED",
+    );
+    expect(await codeOf(await claim(appSession, guessed, guessedCode))).toBe(
+      "PASSKEY_HANDOFF_EXPIRED",
+    );
+    expect(await stepUpCode(await rename(rt, appSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+
+    // An expired handoff can't be confirmed.
+    const expiring = await start(appSession);
+    // Identifiers are stored hashed; the handoff's own expiry finds its row.
+    const expired = await admin`update auth_verifications
+      set expires_at = now() - interval '1 second'
+      where value like ${`%"expiresAt":"${expiring.expiresAt}"%`}`;
+    expect(expired.count).toBe(1);
+    const late = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
+      handoffId: expiring.handoffId,
+    });
+    expect(await codeOf(late)).toBe("PASSKEY_HANDOFF_EXPIRED");
+
+    // Only from this site; without a passkey there is nothing to hand over;
+    // signed out, nothing to start.
+    const crossSite = await rt.app.request("/v1/auth/passkey/step-up/handoff", {
+      method: "POST",
+      headers: {
+        origin: "https://evil.example",
+        "sec-fetch-site": "cross-site",
+        "content-type": "application/json",
+        cookie: appSession,
+      },
+      body: "{}",
+    });
+    expect(crossSite.status).toBeGreaterThanOrEqual(400);
+    const passwordOnly = await passwordPerson(rt);
+    const none = await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", passwordOnly.cookie);
+    expect(none.status).toBe(409);
+    expect(await none.json()).toMatchObject({ code: "PASSKEY_NONE_REGISTERED" });
+    expect((await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", "")).status).toBe(403);
   }, 120_000);
 
   test("an admin without a passkey is told to add one", async () => {

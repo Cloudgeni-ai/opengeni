@@ -28,6 +28,7 @@ import {
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
+import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
 import { withAdminStepUp } from "./lib/admin-step-up";
 import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
 import {
@@ -1077,16 +1078,67 @@ export async function signInPasskey(): Promise<unknown> {
   });
 }
 
-/** Confirms it's this signed-in person with one of their passkeys, for admin changes. */
-export async function confirmAdminWithPasskey(): Promise<void> {
+/** How long a step-up request may take before the dialog says so, apart from the passkey prompt. */
+const STEP_UP_REQUEST_TIMEOUT_MS = 30_000;
+
+function stepUpRequestDeadline(): { signal?: AbortSignal } {
+  return typeof AbortSignal.timeout === "function"
+    ? { signal: AbortSignal.timeout(STEP_UP_REQUEST_TIMEOUT_MS) }
+    : {};
+}
+
+/**
+ * Confirms it's this signed-in person with one of their passkeys. With a
+ * handoff, the answer carries the one-time code for the app that handed it
+ * over.
+ */
+async function stepUpWithPasskey(handoffId?: string): Promise<{ code?: string }> {
   const ceremony = await authRequest<PasskeyCeremony>("/passkey/step-up/options", {
     method: "POST",
-    body: "{}",
+    body: JSON.stringify(handoffId ? { handoffId } : {}),
+    ...stepUpRequestDeadline(),
   });
   const response = await askForPasskey(ceremony);
-  await authRequest<unknown>("/passkey/step-up", {
+  return await authRequest<{ code?: string }>("/passkey/step-up", {
     method: "POST",
     body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+    ...stepUpRequestDeadline(),
+  });
+}
+
+/** Confirms it's this signed-in person with one of their passkeys, for admin changes. */
+export async function confirmAdminWithPasskey(): Promise<void> {
+  await stepUpWithPasskey();
+}
+
+/** Confirms an app's handoff in this browser; returns the code to type into the app. */
+export async function confirmPasskeyHandoff(handoffId: string): Promise<string> {
+  const { code } = await stepUpWithPasskey(handoffId);
+  if (!code) throw new Error("The server didn't return a code");
+  return code;
+}
+
+/** A step-up for this session, confirmed in the person's own browser (see `PASSKEY_STEP_UP_HANDOFF_PATH`). */
+export type PasskeyStepUpHandoff = {
+  handoffId: string;
+  expiresAt: string;
+  expiresInSeconds: number;
+};
+
+export async function startPasskeyStepUpHandoff(): Promise<PasskeyStepUpHandoff> {
+  return await authRequest<PasskeyStepUpHandoff>("/passkey/step-up/handoff", {
+    method: "POST",
+    body: "{}",
+    ...stepUpRequestDeadline(),
+  });
+}
+
+/** This session claims its handoff with the code the browser showed, which confirms it. */
+export async function claimPasskeyStepUpHandoff(handoffId: string, code: string): Promise<void> {
+  await authRequest<unknown>(`/passkey/step-up/handoff/${encodeURIComponent(handoffId)}/claim`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
+    ...stepUpRequestDeadline(),
   });
 }
 
@@ -1122,6 +1174,7 @@ function authReturnBase(): string {
   if (organizationSecurity) return organizationSecurity;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
+    window.location.pathname === PASSKEY_STEP_UP_HANDOFF_PATH ||
     window.location.pathname === "/site-auth/authorize"
     ? `${window.location.pathname}${window.location.search}`
     : "/";

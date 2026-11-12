@@ -516,7 +516,7 @@ export function registerKnowledgeEntryTools(
     "knowledge_archive",
     {
       description:
-        "Archive obsolete Knowledge while preserving its history. Prefer a correction when an entry still has useful information. Requires the current entry version and follows this task's Agent learning policy.",
+        "Archive obsolete Knowledge while preserving its history; a collection takes what is only inside it along. Prefer a correction when an entry still has useful information. Requires the current entry version and follows this task's Agent learning policy.",
       inputSchema: {
         operationId: z.uuid(),
         entryId: z.uuid(),

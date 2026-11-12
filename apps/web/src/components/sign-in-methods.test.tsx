@@ -274,3 +274,25 @@ test("a browser without WebAuthn can't start adding a passkey", async () => {
   expect(button("Add passkey").disabled).toBe(true);
   expect(host.textContent).toContain("This browser can't create passkeys.");
 });
+
+test("the desktop app adds passkeys in the browser, which asks for its own recent sign-in", async () => {
+  let added = 0;
+  await mount({
+    recentAuthRequired: true,
+    onAddPasskey: () => {
+      added += 1;
+    },
+    passkeys: {
+      items: [],
+      available: true,
+      supported: true,
+      inBrowser: true,
+      canRemove: false,
+      onlyMethod: false,
+    },
+  });
+  expect(button("Add in browser").disabled).toBe(false);
+  expect(host.textContent).toContain("Passkey prompts open in your browser.");
+  await click("Add in browser");
+  expect(added).toBe(1);
+});

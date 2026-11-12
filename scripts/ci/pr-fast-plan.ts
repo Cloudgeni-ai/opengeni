@@ -8,6 +8,7 @@ import {
 } from "./impact";
 import {
   createWorkspaceGraph,
+  deterministicShards,
   e2eShardWeights,
   workspaceForPath,
   type WorkspaceGraph,
@@ -270,14 +271,7 @@ export function selectPrBrowserE2e(plan: LanePlan, context: PrBrowserE2eContext)
   e2eTests.sort();
   const selected = new Set(e2eTests);
   const deferred = (tests: readonly string[]) => tests.filter((path) => !selected.has(path)).sort();
-  const e2eShards =
-    e2eTests.length === 0
-      ? 0
-      : Math.min(
-          PR_E2E_SHARD_CAP,
-          e2eTests.length,
-          Math.max(1, Math.ceil(estimatedSeconds / PR_E2E_SHARD_TARGET_SECONDS)),
-        );
+  const e2eShards = prE2eShardCount(e2eTests, cost, estimatedSeconds);
   const browserAcceptanceLanes = plan.browserAcceptanceLanes.filter(
     (lane) => browserDefinition || (context.laneTests[lane] ?? []).some(authored),
   );
@@ -301,6 +295,34 @@ export function selectPrBrowserE2e(plan: LanePlan, context: PrBrowserE2eContext)
       browserJobCount: browserLaneMatrix(browserAcceptanceLanes).length,
     },
   };
+}
+
+/**
+ * Enough shards for the estimated total, plus more (up to the cap) while the
+ * busiest shard, packed exactly as run-test-shard.ts packs it, is over the
+ * target. A single file over the target cannot be split, so it does not add
+ * shards on its own.
+ */
+function prE2eShardCount(
+  tests: readonly string[],
+  cost: ReadonlyMap<string, number>,
+  estimatedSeconds: number,
+) {
+  if (tests.length === 0) return 0;
+  const limit = Math.min(PR_E2E_SHARD_CAP, tests.length);
+  const largest = Math.max(...tests.map((path) => cost.get(path) ?? 0));
+  const busiest = (count: number) =>
+    Math.max(
+      ...deterministicShards("", tests, count, cost).map((files) =>
+        files.reduce((sum, path) => sum + (cost.get(path) ?? 0), 0),
+      ),
+    );
+  let count = Math.min(
+    limit,
+    Math.max(1, Math.ceil(estimatedSeconds / PR_E2E_SHARD_TARGET_SECONDS)),
+  );
+  while (count < limit && busiest(count) > Math.max(PR_E2E_SHARD_TARGET_SECONDS, largest)) count++;
+  return count;
 }
 
 /**
