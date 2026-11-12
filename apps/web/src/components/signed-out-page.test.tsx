@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ManagedAuthPanel } from "./managed-auth-panel";
 import { SignedOutPage } from "./signed-out-page";
 
-test("signed-out page speaks to everyday use first, developers second, around the existing form", () => {
+test("signed-out page sells real work in connected apps around the existing form", () => {
   const html = renderToStaticMarkup(
     <SignedOutPage>
       <ManagedAuthPanel
@@ -14,17 +14,16 @@ test("signed-out page speaks to everyday use first, developers second, around th
       />
     </SignedOutPage>,
   );
-  expect(html).toContain("Get things done,");
-  expect(html).toContain("just by asking.");
+  expect(html).toContain("Hand off real work.");
+  expect(html).toContain("Get it back done.");
   expect(html).toContain(
-    "Plan a trip, write a letter, make sense of a bill, or hand off a long task. Developers can build the same agents into their own apps.",
+    "Agents that work in the background in GitHub, Gmail, Calendar, Slack and more, and check with you before anything goes out.",
   );
-  expect(html).toContain("Ask anything, on your computer or your phone");
-  expect(html).toContain("Keeps working on long tasks, even when you close your laptop");
-  expect(html).toContain(
-    "For developers: tools, sandboxes, approvals and observability, ready to use",
-  );
-  expect(html).not.toContain("Infrastructure out of the box.");
+  expect(html).toContain("Reviews pull requests and fixes failing builds");
+  expect(html).toContain("Answers your inbox and preps tomorrow&#x27;s meetings");
+  expect(html).toContain("Uses its own computer and browser, day and night");
+  expect(html).not.toContain("Get things done,");
+  expect(html).not.toContain("subscription");
   expect(html.match(/<li\b/g)).toHaveLength(3);
   expect(html.match(/<h1\b/g)).toHaveLength(1);
   expect(html).toContain('<h2 class="text-base font-semibold">Sign in</h2>');
@@ -56,8 +55,8 @@ test("the Excel pitch speaks to Excel users and keeps the same form and links", 
   expect(html).toContain("Builds tables, formulas and summaries in your sheets");
   expect(html).toContain("Cleans up messy data and formats sheets");
   expect(html).toContain("Explains what is in a workbook");
-  expect(html).not.toContain("Get things done,");
-  expect(html).not.toContain("just by asking.");
+  expect(html).not.toContain("Hand off real work.");
+  expect(html).not.toContain("Get it back done.");
   expect(html.match(/<li\b/g)).toHaveLength(3);
   expect(html.match(/<h1\b/g)).toHaveLength(1);
   expect(html).toContain("Continue with Google");
