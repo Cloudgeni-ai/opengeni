@@ -520,12 +520,38 @@ export const ACTION_RESPONSE_SCHEMAS: ReadonlyArray<{ pattern: RegExp; response:
     pattern: /^GET \/v1\/workspaces\/:workspaceId\/tools\/declarations$/,
     response: "ToolGatewayDeclarationsResponse",
   },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/tools\/manifest$/,
+    response: "ToolGatewayManifestResponse",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/tools\/resolve$/,
+    response: "ToolGatewayResolvedTool",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/tools\/site-consent$/,
+    response: "ToolGatewaySiteConsentResponse",
+  },
 ];
 
-function declaredResponseSchemas(method: string, path: string): string[] | null {
+/**
+ * The override for a route, checked so it can only narrow: where the manifest
+ * names responses, the override must be one of them, so a typo or a broad
+ * pattern can't silently drop a secret the route really returns.
+ */
+function declaredResponseSchemas(
+  method: string,
+  path: string,
+  manifested: readonly string[],
+): string[] | null {
   const key = `${method} ${path}`;
   const match = ACTION_RESPONSE_SCHEMAS.find((rule) => rule.pattern.test(key));
-  return match ? [match.response] : null;
+  if (!match) return null;
+  if (manifested.length > 0 && !manifested.includes(match.response))
+    throw new Error(
+      `${key}: response override ${match.response} is not one the manifest names (${manifested.join(", ")})`,
+    );
+  return [match.response];
 }
 
 /**
@@ -630,7 +656,7 @@ export function buildActionCatalog(
         request,
         query: inputs.queryParameters,
         permission: inputs.permission,
-        response: declaredResponseSchemas(method, path) ?? response,
+        response: declaredResponseSchemas(method, path, response) ?? response,
       };
     })
     .filter((route) => !isActionCatalogExempt(route.path));
