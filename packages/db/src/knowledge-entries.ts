@@ -420,7 +420,7 @@ async function lockKnowledgePublication(tx: Database, context: KnowledgeContext)
 }
 
 /**
- * What a collection's archive or restore takes along (migration 1376), read
+ * What a collection's archive or restore takes along (migration 1378), read
  * through the authorization seam. Null before that migration: no cascade.
  */
 async function cascadeRead(
@@ -480,7 +480,7 @@ function onlyInside(collectionId: string, members: CascadeMember[]): CascadeMemb
 
 /**
  * A member's operation in an archive or restore that takes it along. Migration
- * 1376 derives the same id in SQL to find what an archive took along.
+ * 1378 derives the same id in SQL to find what an archive took along.
  */
 function archivedWithOperationId(operationId: string, entryId: string) {
   const hex = createHash("md5")
