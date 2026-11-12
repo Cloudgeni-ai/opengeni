@@ -238,11 +238,13 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     const sandboxBuild = parsed.jobs["sandbox-image"]?.steps?.find(
       (step) => step.id === "sandbox_image",
     );
-    expect(sandboxBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
+    // The exact source, and missing runtime inputs fail the build.
+    const exactRuntimeBuildArgs = `OPENGENI_SOURCE_SHA=${exactCiSource}\nOPENGENI_REQUIRE_ARTIFACT_RUNTIME=true\n`;
+    expect(sandboxBuild?.with?.["build-args"]).toBe(exactRuntimeBuildArgs);
     const desktopBuild = parsed.jobs["desktop-image"]?.steps?.find(
       (step) => step.id === "desktop_image",
     );
-    expect(desktopBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
+    expect(desktopBuild?.with?.["build-args"]).toBe(exactRuntimeBuildArgs);
   });
 
   test("desktop publish consumes the same verified runtime bundle as the headless sandbox", async () => {

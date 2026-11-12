@@ -2811,7 +2811,9 @@ jobs:
           build-contexts: artifact-runtime-inputs=${{ runner.temp }}/artifact-runtime
           file: docker/sandbox.Dockerfile
           platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          build-args: |
+            OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:canary-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
           labels: |
@@ -2900,7 +2902,9 @@ jobs:
           build-contexts: artifact-runtime-inputs=${{ runner.temp }}/artifact-runtime
           file: docker/desktop.Dockerfile
           platforms: linux/amd64
-          build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          build-args: |
+            OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-{0}', github.sha) || 'opengeni-desktop:ci' }}
           labels: |
