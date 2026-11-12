@@ -600,9 +600,11 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(
           model.requests.filter((request) => JSON.stringify(request).includes(created.id)),
         ).toHaveLength(1);
-        // Claiming the turn lets the next delivery acknowledge the revision.
-        await activities.dispatchSessionWorkflowWakes();
+        // Claiming the turn lets a later delivery acknowledge the revision.
+        // Each claim backs the outbox row off, so a pass can find nothing due;
+        // keep dispatching as the control worker's repair cadence does.
         await waitFor(async () => {
+          await activities.dispatchSessionWorkflowWakes();
           const row = await workflowWakeRow(admin, grant.workspaceId, created.id);
           return (row?.deliveredRevision ?? 0) >= stalledSignals[0]!.wakeRevision;
         });
