@@ -203,8 +203,10 @@ the agent's connections (`compute-guest`'s `resume` module, the host's
   connection. A stream ends once both directions ended and were
   acknowledged, or when the guest gives up reconnecting (about 30 s of its
   own running time). The host ends a stream no connection carried again
-  within 10 s after another stream of the sandbox was taken up, and every
-  stream when it stops listening for the sandbox; it holds at most 64.
+  within 10 s after another stream of the sandbox was taken up, every
+  stream when it boots the sandbox afresh (the new guest holds none of
+  them, so no command is sent into one), and every stream when it stops
+  listening for the sandbox; it holds at most 64.
 
 Inside the stream, the host answers as a NATS server would, for the subset
 the agent's client uses:
