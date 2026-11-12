@@ -1441,7 +1441,7 @@ describe("searches that name an integration the person can connect", () => {
   const loaded = (result: { tools?: { name?: unknown }[] }) =>
     result.tools?.map((t) => t.name) ?? [];
   const GMAIL_NOTICE =
-    'Not connected yet: Gmail (capabilityId "api:gmail"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.';
+    'Not connected yet: Gmail (capabilityId "api:gmail"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.';
 
   test("names only whole integration names the query contains", () => {
     const matches = CATALOG_ENTRIES.map(({ capabilityId, name }) => ({ capabilityId, name }));
@@ -1692,7 +1692,7 @@ describe("searches that name an integration the person can connect", () => {
       const result = await runtime.prepareSearch({ query: "check the box" });
       expect(loaded(result)).toContain(CARD);
       expect(JSON.parse(result.output).notConnected).toBe(
-        'Not connected yet: Box (capabilityId "registry:box"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.',
+        'Not connected yet: Box (capabilityId "registry:box"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.',
       );
     }
   });
@@ -1725,7 +1725,7 @@ describe("searches that name an integration the person can connect", () => {
       { capabilityId: "registry:weather", name: "Weather" },
     ]);
     expect(connectableIntegrationNotice([GMAIL, CALENDAR])).toBe(
-      'Not connected yet: Gmail (capabilityId "api:gmail"), Google Calendar (capabilityId "api:google-calendar"). If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.',
+      'Not connected yet: Gmail (capabilityId "api:gmail"), Google Calendar (capabilityId "api:google-calendar"). If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.',
     );
   });
 
@@ -1948,7 +1948,7 @@ describe("searches that name an integration their strong matches do not belong t
   // Not in the production catalog; a workspace adds it as a custom MCP.
   const WISPR_FLOW = { capabilityId: "mcp:wispr-flow", name: "Wispr Flow" };
   const notice = (integration: { capabilityId: string; name: string }) =>
-    `Not connected yet: ${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)}). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`;
+    `Not connected yet: ${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)}). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.`;
   const pool = (withLinear: boolean, extra: readonly ReturnType<typeof candidate>[] = []) => [
     candidate(
       SLACK_BOT,

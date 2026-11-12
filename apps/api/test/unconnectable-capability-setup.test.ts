@@ -189,6 +189,7 @@ describe("agent setup for integrations this deployment cannot connect (real Post
         expect(await tools.request(entry.id)).toEqual({
           capabilityId: entry.id,
           status: "unavailable",
+          cardShown: false,
           message: GOOGLE_NOTE,
         });
       }
@@ -238,6 +239,7 @@ describe("agent setup for integrations this deployment cannot connect (real Post
       expect(await missing.request(entries.harvey.id)).toEqual({
         capabilityId: entries.harvey.id,
         status: "unavailable",
+        cardShown: false,
         message: OPERATOR_CLIENT_NOTE,
       });
       expect(await missing.cards()).toHaveLength(0);
@@ -286,7 +288,10 @@ describe("agent setup for integrations this deployment cannot connect (real Post
       expect(await tools.search("Gmail", entries.gmail.id)).toMatchObject({
         setup: { status: "ready", nextAction: null },
       });
-      expect(await tools.request(entries.gmail.id)).toMatchObject({ status: "ready" });
+      expect(await tools.request(entries.gmail.id)).toMatchObject({
+        status: "ready",
+        cardShown: false,
+      });
       expect(await tools.cards()).toHaveLength(0);
     } finally {
       await tools.close();

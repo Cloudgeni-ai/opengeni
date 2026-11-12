@@ -5,6 +5,7 @@ import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   FIKEN_CREDENTIAL_LABEL,
   FIKEN_CREDENTIAL_ROLE,
+  TOOL_DISCOVERY_CARD_META_KEY,
   type AccessGrant,
   type FirstPartyMcpToolName,
   type SessionToolPolicy,
@@ -106,14 +107,80 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       });
       expect(request.isError).not.toBe(true);
-      expect(mcpJson(request)).toMatchObject({ status: "authorization_requested" });
       const events = (
         await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
       ).filter((event) => event.type === "tool.auth_needed");
       expect(events).toHaveLength(1);
+      expect(mcpJson(request)).toMatchObject({
+        status: "authorization_requested",
+        cardShown: true,
+        eventId: events[0]!.id,
+      });
       expect(events[0]?.payload).toMatchObject({
         capability: { id: "api:1password", action: "connect" },
       });
+    } finally {
+      await mcp.close();
+      await server.close();
+    }
+  });
+  test("a card tool discovery shows is shown once per chat; a model call is unchanged", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const selection: FirstPartyMcpToolName[] = [
+      "capability_catalog_search",
+      "capability_authorization_request",
+    ];
+    const attempt = await seedAttempt(false, selection);
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: { ...attempt, firstPartyMcpTools: selection },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "discovery-card-once", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    const cards = async () =>
+      (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+        (event) => event.type === "tool.auth_needed",
+      );
+    const request = (fromDiscovery: boolean) =>
+      mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId: "api:1password", rationale: "Connect 1Password." },
+        ...(fromDiscovery ? { _meta: { [TOOL_DISCOVERY_CARD_META_KEY]: true } } : {}),
+      });
+    try {
+      const first = await request(true);
+      expect(first.isError).not.toBe(true);
+      const shown = await cards();
+      expect(shown).toHaveLength(1);
+      expect(mcpJson(first)).toMatchObject({
+        status: "authorization_requested",
+        cardShown: true,
+        eventId: shown[0]!.id,
+      });
+      expect(mcpJson(first)).not.toHaveProperty("alreadyShown");
+      // A repeated search names the card already in the chat.
+      const again = await request(true);
+      expect(mcpJson(again)).toMatchObject({
+        status: "authorization_requested",
+        cardShown: true,
+        alreadyShown: true,
+        eventId: shown[0]!.id,
+      });
+      expect(await cards()).toHaveLength(1);
+      // The model's own call still shows its card, as before.
+      const model = await request(false);
+      expect(mcpJson(model)).toMatchObject({ cardShown: true });
+      expect(mcpJson(model)).not.toHaveProperty("alreadyShown");
+      expect(await cards()).toHaveLength(2);
     } finally {
       await mcp.close();
       await server.close();
@@ -957,6 +1024,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         status: "authorization_requested",
         action: "connect",
         eventId: expect.any(String),
+        cardShown: true,
         message:
           "The Outlook Mail Connect card was posted. It handles the Microsoft sign-in and any admin approval link, so do not repeat its steps; nothing is connected yet. When the person finishes connecting, you get an update and its tools are available then.",
       });
@@ -1143,6 +1211,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       status: "authorization_requested",
       action: "connect",
       eventId: expect.any(String),
+      cardShown: true,
       message:
         "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.",
     });

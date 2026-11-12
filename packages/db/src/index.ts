@@ -95627,6 +95627,8 @@ export async function appendSessionEventsForTurnAttempt(
  * the Chrome setup card, the same purpose). The lookup runs inside the attempt
  * write fence, which locks the session row, so parallel callers in one turn
  * cannot both append. Cards for other capabilities are never consulted.
+ * With `wholeSession`, a current card of any turn of the chat counts, so the
+ * card is shown at most once per chat.
  */
 export async function appendTurnCapabilityCardOnce(
   db: Database,
@@ -95638,6 +95640,7 @@ export async function appendTurnCapabilityCardOnce(
   capabilityId: string,
   input: AppendEventInput,
   requestedSandboxId: string | null = null,
+  options: { wholeSession?: boolean } = {},
 ): Promise<{ events: SessionEvent[]; accepted: boolean; existingEventId: string | null }> {
   let existingEventId: string | null = null;
   const payloadPurpose = (input.payload as { purpose?: unknown } | undefined)?.purpose;
@@ -95659,7 +95662,7 @@ export async function appendTurnCapabilityCardOnce(
           select id from session_events
           where workspace_id = ${workspaceId}::uuid
             and session_id = ${sessionId}::uuid
-            and turn_id = ${turnId}::uuid
+            ${options.wholeSession ? sql`` : sql`and turn_id = ${turnId}::uuid`}
             and type = 'tool.auth_needed'
             and duplicate_of_event_id is null
             and (turn_association is null or turn_association = 'current')

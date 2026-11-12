@@ -112,6 +112,7 @@ async function seedSession() {
     executionGeneration = 1,
     requestedSandboxId: string | null = null,
     purpose: string | null = null,
+    options: { wholeSession?: boolean } = {},
   ) =>
     appendTurnCapabilityCardOnce(
       db,
@@ -134,6 +135,7 @@ async function seedSession() {
         },
       },
       requestedSandboxId,
+      options,
     );
   const cards = async (turnId: string) =>
     (
@@ -263,5 +265,32 @@ describe("appendTurnCapabilityCardOnce", () => {
     expect(reuse.events).toHaveLength(0);
     expect(reuse.existingEventId).toBe(live.events[0]!.id);
     expect(await chat.cards(turn.turnId)).toHaveLength(1);
+  });
+
+  test("wholeSession: a card any turn of the chat shows is reused, other capabilities are not", async () => {
+    if (!available) return;
+    const chat = await seedSession();
+    const first = await chat.startTurn();
+    const once = { wholeSession: true };
+    const shown = await chat.card(first, "mcp:clickup", 1, null, null, once);
+    expect(shown.existingEventId).toBeNull();
+    expect(shown.events).toHaveLength(1);
+    await chat.endTurn(first);
+    const second = await chat.startTurn();
+    // The same capability in a later turn reuses the first turn's card.
+    const again = await chat.card(second, "mcp:clickup", 1, null, null, once);
+    expect(again.accepted).toBe(true);
+    expect(again.events).toHaveLength(0);
+    expect(again.existingEventId).toBe(shown.events[0]!.id);
+    // Another capability, or a per-turn caller, still gets its own card.
+    const other = await chat.card(second, "mcp:airtable", 1, null, null, once);
+    expect(other.existingEventId).toBeNull();
+    const perTurn = await chat.card(second, "mcp:clickup");
+    expect(perTurn.existingEventId).toBeNull();
+    expect(perTurn.events).toHaveLength(1);
+    expect((await chat.cards(second.turnId)).map((row) => row.capabilityId)).toEqual([
+      "mcp:airtable",
+      "mcp:clickup",
+    ]);
   });
 });

@@ -573,6 +573,26 @@ card requires no integration-management permission and creates no connection,
 installation, credential, or grant; the authenticated human completes setup.
 Provider-specific status tools remain read-only and do not synthesize cards.
 
+Tool search shows the card itself when a search clearly names one integration
+the person can connect: exactly one catalog entry is named, by a distinctive
+mention (`isDistinctiveIntegrationMention` in `@opengeni/capabilities`), and no
+strongly matching installed tool belongs to it. When the search call is
+accepted (never from an early decision a dropped response may discard), the
+worker calls `capability_authorization_request` through the attempt's own tool
+gateway with request `_meta` `TOOL_DISCOVERY_CARD_META_KEY`, so the card,
+authorization, tool selection and policy are exactly those of a model call. That
+marker makes the call post the card at most once per chat
+(`appendTurnCapabilityCardOnce` with `wholeSession`); a repeat returns
+`alreadyShown` and the existing `eventId`. Model calls are unchanged. The search
+result then says the card is shown. Searches naming several integrations, or a
+name only as an ordinary word ("linear regression", "airtable" in lower case),
+and any call that shows no card (ready, unavailable, not in this chat's tools,
+refused, failed) keep the plain `notConnected` notice. Every search result that
+names a connectable integration carries `connectCard: { shown, capabilityId?,
+eventId?, alreadyShown? }`, and every `capability_authorization_request` result
+carries `cardShown`, so neither the agent nor a client has to infer whether a
+card was shown.
+
 ### Recovery from tool-search misses
 
 Progressive discovery uses the same authorized deferred pool on every transport.

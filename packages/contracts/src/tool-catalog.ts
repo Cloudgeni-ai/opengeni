@@ -223,6 +223,15 @@ export type ToolGatewayCaller = z.infer<typeof ToolGatewayCaller>;
 export const FIRST_PARTY_MCP_CALLER_META_KEY = "opengeniCaller";
 
 /**
+ * MCP request `_meta` key the worker's tool discovery sets (to `true`) when a
+ * search that clearly names one integration the person can connect shows its
+ * Connect card through `capability_authorization_request`. Such a call shows
+ * the card at most once per chat. It only narrows what the call does, so a
+ * caller that sets it can never gain anything.
+ */
+export const TOOL_DISCOVERY_CARD_META_KEY = "opengeni/toolDiscoveryCard";
+
+/**
  * Result `_meta` key a first-party tool sets on an error result when it
  * refused the caller's arguments before doing any work (a schema mismatch, a
  * bad combination of fields, an unknown ID). The caller made the mistake, not
