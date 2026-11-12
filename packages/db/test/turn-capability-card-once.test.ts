@@ -278,6 +278,8 @@ describe("appendTurnCapabilityCardOnce", () => {
     if (!available) return;
     const chat = await seedSession();
     const once = { sinceLatestMessage: true };
+    // The person's message that starts the chat.
+    await chat.personWrites();
     const first = await chat.startTurn();
     const shown = await chat.card(first, "mcp:clickup", 1, null, null, once);
     expect(shown.existingEventId).toBeNull();
@@ -303,6 +305,24 @@ describe("appendTurnCapabilityCardOnce", () => {
     expect((await chat.cards(third.turnId)).map((row) => row.capabilityId)).toEqual([
       "mcp:clickup",
     ]);
+  });
+
+  test("sinceLatestMessage: a chat no person has written in reuses only this turn's card", async () => {
+    if (!available) return;
+    const chat = await seedSession();
+    const once = { sinceLatestMessage: true };
+    const first = await chat.startTurn();
+    const shown = await chat.card(first, "mcp:clickup", 1, null, null, once);
+    expect(shown.events).toHaveLength(1);
+    const repeat = await chat.card(first, "mcp:clickup", 1, null, null, once);
+    expect(repeat.events).toHaveLength(0);
+    expect(repeat.existingEventId).toBe(shown.events[0]!.id);
+    await chat.endTurn(first);
+    // A later run (a scheduled one) may face a changed connection: post anew.
+    const second = await chat.startTurn();
+    const fresh = await chat.card(second, "mcp:clickup", 1, null, null, once);
+    expect(fresh.existingEventId).toBeNull();
+    expect(fresh.events).toHaveLength(1);
   });
 
   test("a first-connection card never stands in for a reconnect card, in either scope", async () => {

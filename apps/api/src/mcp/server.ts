@@ -8100,7 +8100,7 @@ function registerCapabilityDiscoveryTools(
           alreadyShown
             ? {
                 ...body,
-                message: `This card is already in this chat, so it was not posted again. ${body.message}`,
+                message: `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`,
               }
             : body,
         );

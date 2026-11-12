@@ -587,7 +587,8 @@ message (`appendTurnCapabilityCardOnce` with `sinceLatestMessage`) instead of
 posting another; the result keeps the status and guidance of a posted card,
 adds `alreadyShown`, names the existing `eventId`, and says it was not posted
 again. Once the person writes, an earlier card may be stale and a search may
-post a fresh one. Model calls are unchanged: they always post, so a card whose
+post a fresh one; in a chat no person has written in (a scheduled run), only
+the current turn's card is reused. Model calls are unchanged: they always post, so a card whose
 state changed (a machine just connected) can be shown again. Searches naming
 several integrations, or a name only as an ordinary word ("linear regression",
 "airtable" in lower case), and a card call that answers without a card (ready,

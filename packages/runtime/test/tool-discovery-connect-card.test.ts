@@ -202,7 +202,7 @@ describe("a search that clearly names one connectable integration shows its card
 
     test(`${transport}: a card already in the chat is not shown again, and the result says it is there`, async () => {
       const already =
-        "This card is already in this chat, so it was not posted again. The recommendation was posted for human confirmation.";
+        "The recommendation is already in this chat for human confirmation. It was not posted again.";
       const { requested, request } = cardTool(() => ({
         eventId: "event-0",
         alreadyShown: true,

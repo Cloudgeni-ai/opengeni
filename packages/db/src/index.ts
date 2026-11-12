@@ -95631,7 +95631,8 @@ export async function appendSessionEventsForTurnAttempt(
  * same connection. With `sinceLatestMessage`, a current card of any turn since
  * the person's latest message counts instead of only this turn's: repeated
  * requests do not stack cards while the person has not written, and a card
- * from before their latest message, which may be stale, is not reused.
+ * from before their latest message, which may be stale, is not reused. A chat
+ * with no message from a person (a scheduled run) reuses only this turn's.
  */
 export async function appendTurnCapabilityCardOnce(
   db: Database,
@@ -95653,12 +95654,12 @@ export async function appendTurnCapabilityCardOnce(
     return typeof value === "string" ? value : "";
   };
   const scope = options.sinceLatestMessage
-    ? sql`and sequence > coalesce((
+    ? sql`and coalesce(sequence > (
               select max(message.sequence) from session_events message
               where message.workspace_id = ${workspaceId}::uuid
                 and message.session_id = ${sessionId}::uuid
                 and message.type = 'user.message'
-            ), 0)`
+            ), turn_id = ${turnId}::uuid)`
     : sql`and turn_id = ${turnId}::uuid`;
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
     db,

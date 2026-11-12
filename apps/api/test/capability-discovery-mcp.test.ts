@@ -176,7 +176,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         cardShown: true,
         alreadyShown: true,
         eventId: shown[0]!.id,
-        message: `This card is already in this chat, so it was not posted again. ${(mcpJson(first) as { message: string }).message}`,
+        message: `${(mcpJson(first) as { message: string }).message.replace(" was posted", " is already in this chat")} It was not posted again.`,
       });
       expect(await cards()).toHaveLength(1);
       // The model's own call still posts its card, as before.

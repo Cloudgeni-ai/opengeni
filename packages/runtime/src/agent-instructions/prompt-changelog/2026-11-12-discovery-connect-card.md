@@ -29,12 +29,13 @@ unchanged for a new card, follows):
 
 ```text
 + Not connected yet: <name> (capabilityId "<id>"). Its Connect card is now shown in this chat. <card tool message>
-+ Not connected yet: <name> (capabilityId "<id>"). This card is already in this chat, so it was not posted again. <card tool message>
++ Not connected yet: <name> (capabilityId "<id>"). <card tool message, with "was posted" read as "is already in this chat"> It was not posted again.
 ```
 
-The second form's first sentence after the name is a new prefix of the
-`capability_authorization_request` result message, used only for a card tool
-discovery already showed since the person's latest message.
+The second form is the `capability_authorization_request` result message for a
+card tool discovery already showed since the person's latest message: its
+first "was posted" becomes "is already in this chat", and "It was not posted
+again." is appended.
 
 Both are general: they state whether a card is in the chat, for any
 integration, model or route, and add no instruction beyond that fact.
