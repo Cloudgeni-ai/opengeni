@@ -4,7 +4,6 @@
  * workspace. One shared definition for the API, the SDK and every client.
  */
 import { integrationDefinitionIdFromCapabilityId } from "./integration-capability-id";
-import { microsoftDynamicsProductForMcpUrl } from "./microsoft-dynamics";
 
 /** The narrow permission. `connections:write` includes it. */
 export const PERSONAL_INTEGRATION_SETUP_PERMISSION = "connections:personal" as const;
@@ -97,47 +96,10 @@ export function deploymentCannotConnect(item: {
 }
 
 /**
- * Reviewed sign-in profiles whose addresses a workspace may add as its own
- * entries for personal setup. Opengeni reviewed the service, which addresses
- * it serves and its sign-in: each person signs in to their own account through
- * a deployment-registered app, and the deployment refuses any other
- * authorization server for those addresses. Each customer has their own
- * address (for example a Dynamics environment), so the catalog cannot list
- * them ahead of time. A profile is listed here only when every address it
- * matches is safe for anyone with the personal setup permission to add.
- */
-const PERSONAL_SETUP_ENDPOINT_PROFILES: readonly {
-  key: string;
-  matches: (endpointUrl: string) => boolean;
-}[] = [
-  {
-    key: "microsoft-dynamics",
-    matches: (endpointUrl) => microsoftDynamicsProductForMcpUrl(endpointUrl) !== null,
-  },
-];
-
-/**
- * The reviewed sign-in profile ({@link PERSONAL_SETUP_ENDPOINT_PROFILES}) an
- * MCP address belongs to, or null. Someone holding only the personal setup
- * permission may add a workspace entry for such an address and turn it on for
- * personal accounts; admins can still turn it off or remove it.
- */
-export function personalSetupEndpointProfile(
-  endpointUrl: string | null | undefined,
-): string | null {
-  if (!endpointUrl) return null;
-  return (
-    PERSONAL_SETUP_ENDPOINT_PROFILES.find((profile) => profile.matches(endpointUrl))?.key ?? null
-  );
-}
-
-/**
  * Whether a catalog integration may be turned on for personal accounts by
- * someone holding only the personal setup permission: an MCP integration that
- * signs each person in with OAuth and is either a reviewed catalog entry or a
- * workspace entry at an address of a reviewed sign-in profile
- * ({@link personalSetupEndpointProfile}). Other custom MCP servers, API-key
- * integrations and unreviewed registry entries never qualify.
+ * someone holding only the personal setup permission: a reviewed catalog MCP
+ * integration that signs each person in with OAuth. Custom MCP servers,
+ * API-key integrations and unreviewed registry entries never qualify.
  */
 export function isPersonalIntegrationSetupCandidate(item: {
   kind: string;
@@ -145,23 +107,17 @@ export function isPersonalIntegrationSetupCandidate(item: {
   authKind?: string | null | undefined;
   stale?: boolean | undefined;
   workspaceId?: string | null | undefined;
-  endpointUrl?: string | null | undefined;
-  mcpUrl?: string | null | undefined;
   runtime?:
     | { available?: boolean | undefined; catalogTrust?: { state: string } | undefined }
     | undefined;
 }): boolean {
-  if (
-    item.kind !== "mcp" ||
-    item.authKind !== "oauth2" ||
-    item.stale ||
-    item.runtime?.available !== true
-  )
-    return false;
-  if (item.workspaceId)
-    return personalSetupEndpointProfile(item.mcpUrl ?? item.endpointUrl) !== null;
   return (
+    item.kind === "mcp" &&
+    item.authKind === "oauth2" &&
     REVIEWED_SOURCES.has(item.source) &&
+    !item.stale &&
+    !item.workspaceId &&
+    item.runtime?.available === true &&
     (item.source !== "registry" || item.runtime.catalogTrust?.state === "trusted")
   );
 }

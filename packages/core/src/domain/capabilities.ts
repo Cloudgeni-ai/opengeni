@@ -99,10 +99,7 @@ import {
   type InstalledSkillSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import {
-  isPersonalIntegrationSetupCandidate,
-  personalSetupEndpointProfile,
-} from "@opengeni/contracts/personal-integration-setup";
+import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
   canonicalMcpEndpointUrl,
@@ -509,13 +506,6 @@ export async function createCatalogItem(input: {
    * on integrations. See `INTEGRATION_SETUP_PERMISSION`.
    */
   memberCreate?: { settings: Settings } | undefined;
-  /**
-   * The caller holds only the personal setup permission (requires
-   * `memberCreate`): they may add only an entry at an address of a reviewed
-   * sign-in profile (`personalSetupEndpointProfile`), with nothing else to
-   * choose, which each person then turns on for their own account.
-   */
-  personalSetup?: true | undefined;
 }): Promise<CapabilityCatalogItem> {
   // A Dynamics environment address is stored as its MCP endpoint, so a pasted
   // browser address reaches the reviewed Microsoft Dynamics sign-in.
@@ -524,18 +514,6 @@ export async function createCatalogItem(input: {
     if (endpointUrl !== input.payload.endpointUrl)
       input = { ...input, payload: { ...input.payload, endpointUrl } };
   }
-  if (
-    input.personalSetup &&
-    (!input.memberCreate ||
-      input.payload.kind !== "mcp" ||
-      personalSetupEndpointProfile(input.payload.endpointUrl) === null ||
-      input.payload.installUrl !== undefined ||
-      Object.keys(input.payload.metadata).length > 0)
-  )
-    throw new HTTPException(403, {
-      message:
-        "Without permission to add integrations, you can only add a connection with a reviewed sign-in, such as a Microsoft Dynamics environment",
-    });
   const id = input.payload.id?.trim() || generatedCapabilityId(input.payload);
 
   if (id.startsWith("skill:")) {

@@ -22,7 +22,6 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireIntegrationSetupAuthorization,
-  requireResolvedAccessGrantAuthorization,
   getConnectorToolPermissions,
   updateConnectorToolPermissions,
   getSessionMcpToolPermissions,
@@ -131,19 +130,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = requireResolvedAccessGrantAuthorization(
-      await requireAccessGrantAuthorization(c, deps, workspaceId),
-      workspaceId,
-    );
-    // Members add new servers; only admins change existing ones. The personal
-    // setup permission adds only an address of a reviewed sign-in profile,
-    // which each person then turns on for their own account.
-    const personalSetup = !hasIntegrationSetupPermission(grant);
-    if (
-      personalSetup &&
-      !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
-    )
-      throw new MissingPermissionRefusal("connections:write");
+    const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const payload = await parseRequestJson(c, CreateCapabilityCatalogItemRequest);
     return c.json(
       await createCatalogItem({
@@ -151,8 +138,8 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         payload,
+        // Members add new servers; only admins change existing ones.
         ...(hasIntegrationAdminPermission(grant) ? {} : { memberCreate: { settings } }),
-        ...(personalSetup ? { personalSetup: true } : {}),
       }),
       201,
     );

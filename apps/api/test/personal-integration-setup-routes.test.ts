@@ -24,8 +24,6 @@ const encryptionKey = Buffer.alloc(32, 41);
 const settings = testSettings({
   delegationSecret: DELEGATION_SECRET,
   environmentsEncryptionKey: encryptionKey.toString("base64"),
-  microsoftDynamicsClientId: "dynamics-client",
-  microsoftDynamicsClientSecret: "dynamics-secret",
 });
 const NARROW = ["workspace:read", "sessions:read", "sessions:control", "connections:personal"];
 
@@ -221,71 +219,6 @@ describe("enabling with connections:personal", () => {
     });
     expect(reenable.status).toBe(409);
     expect(await installationStatus(reviewedId)).toBe("disabled");
-  });
-});
-
-describe("a reviewed sign-in address with connections:personal", () => {
-  const environment = `https://personal-${crypto.randomUUID().slice(0, 8)}.crm4.dynamics.com`;
-  const add = (body: Record<string, unknown>, permissions?: string[]) =>
-    call("POST", "/capabilities", {
-      ...(permissions ? { permissions } : {}),
-      body: { kind: "mcp", name: "Microsoft Dynamics", ...body },
-    });
-
-  test("adds only an address of a reviewed sign-in profile, with nothing else to choose", async () => {
-    for (const body of [
-      { endpointUrl: "https://custom.example/mcp" },
-      { endpointUrl: environment, metadata: { mcpServerId: "chosen" } },
-      { endpointUrl: environment, installUrl: "https://install.example/" },
-    ])
-      expect((await add(body)).status).toBe(403);
-    expect(
-      (await add({ endpointUrl: environment }, ["workspace:read", "sessions:control"])).status,
-    ).toBe(403);
-  });
-
-  test("adds the environment and turns it on for personal accounts only", async () => {
-    const created = await add({ endpointUrl: `${environment}/main.aspx?appid=1` });
-    expect(created.status).toBe(201);
-    const item = (await created.json()) as {
-      id: string;
-      workspaceId: string;
-      endpointUrl: string;
-      authKind: string;
-    };
-    expect(item).toMatchObject({
-      workspaceId,
-      endpointUrl: `${environment}/api/mcp`,
-      authKind: "oauth2",
-    });
-    // Adding it again returns the same entry.
-    const again = await add({ endpointUrl: environment });
-    expect(again.status).toBe(201);
-    expect(((await again.json()) as { id: string }).id).toBe(item.id);
-
-    const providerDomain = new URL(environment).hostname;
-    const shared = await call("POST", enablePath(item.id), {
-      body: { connectionRef: { providerDomain, kind: "oauth2", subjectScope: "workspace" } },
-    });
-    expect(shared.status).toBe(403);
-    const own = await call("POST", enablePath(item.id), {
-      body: { connectionRef: { providerDomain, kind: "oauth2", subjectScope: "subject" } },
-    });
-    expect(own.status).toBe(201);
-    expect((await own.json()) as unknown).toMatchObject({
-      status: "active",
-      config: { connectionRef: { subjectScope: "subject" } },
-    });
-
-    // An admin can still turn it off; the narrow permission cannot.
-    const disablePath = `/capabilities/${encodeURIComponent(item.id)}/disable`;
-    expect((await call("POST", disablePath, { body: {} })).status).toBe(403);
-    const adminDisable = await call("POST", disablePath, {
-      permissions: ["workspace:read", "capabilities:manage", "connections:write"],
-      body: {},
-    });
-    expect(adminDisable.status).toBeLessThan(300);
-    expect(await installationStatus(item.id)).toBe("disabled");
   });
 });
 

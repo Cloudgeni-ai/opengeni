@@ -13,7 +13,6 @@ import {
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
   microsoftDynamicsProductForMcpUrl,
 } from "@opengeni/contracts/microsoft-dynamics";
-import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 
 type Props = {
   item: AuthNeededItem;
@@ -58,20 +57,11 @@ function MicrosoftDynamicsCard({ item, workspaceId, onRegistered }: Props) {
   const host = new URL(endpointUrl).hostname;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A reviewed sign-in: the personal setup permission may add it too, for
-  // each person's own account, unless the organization keeps setup for admins.
-  const canManage =
-    canAddWorkspaceIntegrations(
-      context.accessContext,
-      workspaceId,
-      context.workspaceMemberIntegrationSetup,
-    ) ||
-    (hasWorkspacePermission(
-      context.accessContext,
-      workspaceId,
-      PERSONAL_INTEGRATION_SETUP_PERMISSION,
-    ) &&
-      context.workspaceMemberIntegrationSetup !== "admins");
+  const canManage = canAddWorkspaceIntegrations(
+    context.accessContext,
+    workspaceId,
+    context.workspaceMemberIntegrationSetup,
+  );
   const existing = async () =>
     (await context.client.listCapabilities(workspaceId)).items.find(
       (entry) => entry.kind === "mcp" && entry.endpointUrl === endpointUrl && !entry.stale,
