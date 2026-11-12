@@ -120,10 +120,10 @@ impl Sim {
             let rules = if sim.rng.below(2) == 0 {
                 SleepRules {
                     checkpoint_every: Some(Duration::from_secs(120)),
-                    ..SleepRules::RECOMMENDED
+                    ..SleepRules::RECOMMENDED.keeping_memory()
                 }
             } else {
-                SleepRules::RECOMMENDED
+                SleepRules::RECOMMENDED.keeping_memory()
             };
             sim.models.insert(
                 sandbox,

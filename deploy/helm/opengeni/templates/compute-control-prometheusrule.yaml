@@ -213,7 +213,7 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'A compute host''s agent started again at least {{ $agentRestarts }} times in six hours: it keeps being stopped by its watchdog when stuck, crashing, being restarted or rebooting.'
+            summary: 'A compute host''s agent started again without being asked to at least {{ $agentRestarts }} times in six hours: it keeps being stopped by its watchdog when stuck, crashing, or losing its machine. Upgrades, restarts and planned reboots are not counted.'
             headline: 'Compute host {{ "{{ $labels.host_name }}" }} agent keeps restarting'
             value: '{{ "{{ printf `%.0f` $value }}" }} restart(s) (6 h)'
             user_impact: 'While its agent restarts, the host''s sandboxes do not answer and their wakes wait or fail.'

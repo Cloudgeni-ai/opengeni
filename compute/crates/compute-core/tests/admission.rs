@@ -22,7 +22,7 @@ const GRACE: Duration = Duration::from_secs(2);
 fn no_compress() -> SleepPolicy {
     SleepPolicy::new(SleepRules {
         compress_under_pressure: false,
-        ..SleepRules::RECOMMENDED
+        ..SleepRules::RECOMMENDED.keeping_memory()
     })
     .unwrap()
 }
@@ -588,7 +588,7 @@ fn compressing_that_frees_nothing_goes_deeper_for_the_buffer() {
     rig.send(Input::Add {
         sandbox: SandboxId(1),
         state: paused_saved(),
-        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap(),
         size: Size::whole(GIB),
         last_activity: rig.now,
     });
@@ -899,7 +899,7 @@ impl Sim {
                 let policy = if self.rng.below(2) == 0 {
                     no_compress()
                 } else {
-                    SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
+                    SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap()
                 };
                 Input::Add {
                     sandbox: id,

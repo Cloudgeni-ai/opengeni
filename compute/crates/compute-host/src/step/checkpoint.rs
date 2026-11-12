@@ -35,6 +35,7 @@ use std::sync::Arc;
 use compute_core::Outcome;
 use compute_engine::{Engine, EngineError, ErrorKind};
 
+use super::guest::Synced;
 use super::{After, Job, Live, Meter, Reading, blocking, checkpoint_disk, failure, state_failure};
 use crate::layout::{clone_jailed, remove_if_present};
 use crate::observe::notes;
@@ -66,7 +67,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         // The disk it copies must hold what the guest wrote: after a lost
         // host the sandbox boots from that disk alone.
-        if !self.sync_guest().await {
+        if self.sync_guest().await == Synced::Cancelled {
             // Cancelled while the guest was asked to write its disks out,
             // which trims them too: it may have freed space it can take
             // again, so the step counts as one that wrote, and the core

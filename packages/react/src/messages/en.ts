@@ -5759,6 +5759,8 @@ export const englishMessages = {
   "timeline.projection.filesCouldNotBeSaved":
     "This chat's files couldn't be saved before its workspace machine shut down.",
   "timeline.projection.interrupted": "Interrupted.",
+  "timeline.projection.messageAnsweredWhenThereIsRoom":
+    "Your message will be answered as soon as there is room. To continue sooner, switch to another model.",
   "timeline.projection.needsYou": "Needs you",
   "timeline.projection.restoredFromOlderSave":
     "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
@@ -5773,13 +5775,12 @@ export const englishMessages = {
   "timeline.projection.theTurnStoppedUnexpectedly": "The turn stopped unexpectedly",
   "timeline.projection.thisTaskSUsageLimit":
     "This task's usage limit is reached. A person can raise or remove the limit to continue.",
-  "timeline.projection.tryAgainAfterYourQuota":
-    "Try again after your quota resets, or switch to another model or provider.",
   "timeline.projection.usageLimitReached": "Usage limit reached",
   "timeline.projection.voiceSessionEnded":
     "Voice session ended. Remaining conversation context was sent to the agent.",
   "timeline.projection.waiting": "Waiting",
   "timeline.projection.waitingForAnAccount": "Waiting for an account.",
+  "timeline.projection.waitingForCapacity": "Waiting for capacity",
   "timeline.projection.waitingForYou": "Waiting for you",
   "timeline.projection.waitingReason": "Waiting: {reason}",
   "timeline.projection.yourPreviouslyApprovedWorkspaceInstruction":

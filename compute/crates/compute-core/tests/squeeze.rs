@@ -50,7 +50,7 @@ impl Rig {
         self.send(Input::Add {
             sandbox,
             state: State::new(Level::Running, Durability::Volatile, true),
-            policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+            policy: SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap(),
             size,
             last_activity: self.now,
         });
@@ -225,7 +225,7 @@ fn idle_sandboxes_go_before_busy_ones_are_squeezed() {
     rig.send(Input::Add {
         sandbox: idle,
         state: State::new(Level::Paused, Durability::Local, true),
-        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap(),
         size: Size::whole(4 * GIB),
         last_activity: rig.now,
     });
@@ -251,7 +251,7 @@ fn waiting(rig: &mut Rig, id: u128, bytes: u64) {
     rig.send(Input::Add {
         sandbox,
         state: State::new(Level::Saved, Durability::Local, true),
-        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap(),
         size: size(GIB, 8 * GIB),
         last_activity: rig.now,
     });
@@ -439,7 +439,7 @@ fn a_balloon_the_vm_did_not_take_is_set_again_after_a_backoff() {
     let actions = rig.send(Input::Add {
         sandbox,
         state: State::new(Level::Running, Durability::Volatile, true),
-        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap(),
         size: size(GIB, 4 * GIB),
         last_activity: rig.now,
     });
@@ -529,7 +529,7 @@ fn a_sandbox_paused_for_memory_still_wakes_by_itself_after_a_restart() {
     rig.send(Input::Add {
         sandbox,
         state: State::new(Level::Saved, Durability::Local, true),
-        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap(),
         size: size(GIB, 4 * GIB),
         last_activity: rig.now,
     });
@@ -577,7 +577,7 @@ fn a_kept_wait_for_memory_ends_for_a_sandbox_with_a_vm() {
     rig.send(Input::Add {
         sandbox,
         state: State::new(Level::Paused, Durability::Volatile, false),
-        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap(),
         size: size(GIB, 4 * GIB),
         last_activity: rig.now,
     });

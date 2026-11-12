@@ -578,6 +578,8 @@ import type {
   CancelBillingSubscriptionRequest,
   BillingSubscriptionChange,
   CreateBillingPortalResponse,
+  ListBillingReceiptsQuery,
+  ListBillingReceiptsResponse,
   CreateCheckoutRequest,
   BillingCheckoutStatus,
   CreateCheckoutResponse,
@@ -12570,6 +12572,28 @@ export class OpenGeniClient {
       "POST",
       "/v1/billing/portal",
       request,
+    );
+  }
+
+  /**
+   * The organization's payments, newest first, each with its Stripe receipt or
+   * invoice: plan invoices, credit purchases and automatic top-ups. Pass the
+   * returned nextCursor to read older payments.
+   */
+  async listBillingReceipts(
+    query: ListBillingReceiptsQuery = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ListBillingReceiptsResponse> {
+    return await this.requestJson<ListBillingReceiptsResponse>(
+      "GET",
+      "/v1/billing/receipts",
+      undefined,
+      {
+        ...(query.accountId !== undefined ? { accountId: query.accountId } : {}),
+        ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+        ...(query.limit !== undefined ? { limit: String(query.limit) } : {}),
+      },
+      options.signal ? { signal: options.signal } : {},
     );
   }
 

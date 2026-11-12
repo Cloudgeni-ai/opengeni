@@ -278,6 +278,15 @@ pub enum Input {
         /// The sandbox.
         sandbox: SandboxId,
     },
+    /// The sandbox's guest did not say it wrote its files out as its VM
+    /// was paused: writes may live in its memory alone. Until it runs
+    /// again its VM does not end unsaved, whatever its rules say: where
+    /// they would end it, its memory is saved first, as for a sandbox
+    /// whose memory is kept. Ignored unless its VM is paused.
+    Unsynced {
+        /// The sandbox.
+        sandbox: SandboxId,
+    },
     /// The sandbox's VM did not take the [`Action::Balloon`] of `request`,
     /// or it was not asked, as when the VM had paused or ended: what its
     /// balloon takes is not known. It is asked again after a backoff.
@@ -425,6 +434,13 @@ pub enum Input {
         sandbox: SandboxId,
         /// The least depth to reach.
         level: Level,
+        /// Whether its programs are to be kept on the way: a VM whose
+        /// memory is not saved is then saved before its process ends,
+        /// whatever its rules say, as for a sandbox moved while in use.
+        /// Without it the sandbox goes as its rules say, so one whose
+        /// memory is never saved ([`crate::SleepRules::keep_memory`]) has
+        /// its process ended unsaved.
+        keep: bool,
     },
     /// Boot the sandbox afresh from its disk where it is: any step under
     /// way that would keep or bring back its running programs is
@@ -892,6 +908,14 @@ impl Host {
         self.in_flight[step.index()]
     }
 
+    /// Takes a sleep request for `sandbox`; see [`Input::Sleep`].
+    fn asked_to_sleep(&mut self, sandbox: SandboxId, level: Level, keep: bool) {
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+            slot.request_sleep(level, keep);
+            self.mark(sandbox);
+        }
+    }
+
     fn apply(&mut self, now: At, input: Input, out: &mut Vec<Action>) {
         match input {
             Input::Add {
@@ -962,6 +986,7 @@ impl Host {
                     self.unsavable(sandbox, out);
                 }
             }
+            Input::Unsynced { sandbox } => self.unsynced(sandbox),
             Input::Memory { available } => self.memory_read(now, available),
             Input::Disk { available } => self.disk_read(available),
             Input::CpuBudget { millis } => self.set_cpu_budget(millis),
@@ -982,12 +1007,11 @@ impl Host {
             | Input::ShrinkFailed { .. }) => {
                 self.outgrowth_input(now, input);
             }
-            Input::Sleep { sandbox, level } => {
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    slot.request_sleep(level);
-                    self.mark(sandbox);
-                }
-            }
+            Input::Sleep {
+                sandbox,
+                level,
+                keep,
+            } => self.asked_to_sleep(sandbox, level, keep),
             Input::Restart { sandbox } => self.restart(sandbox),
             Input::Tick => {}
         }
@@ -1111,6 +1135,11 @@ impl Host {
             let (state, lost) = slot.state.without_process();
             slot.state = state;
             slot.renew();
+            // Without its process it is as deep as a sleep asked of it may
+            // have wanted, as after a sleep step that got it there.
+            if !slot.wants_awake() && slot.state.level >= slot.requested {
+                slot.requested = Level::Running;
+            }
             // A restart ends its programs on purpose.
             if lost && slot.restart.is_none() {
                 out.push(Action::Notify {

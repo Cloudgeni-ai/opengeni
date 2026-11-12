@@ -11,6 +11,7 @@ import { AppearanceSubmenu } from "@/components/appearance-menu";
 import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { DesktopAccountMenuItems, hasDesktopAccounts } from "@/components/desktop/desktop-rail";
 import { HelpMenu } from "@/components/help-menu";
+import { BillingMenuItem } from "@/components/billing-menu-item";
 import { MyThingsMenuItem } from "@/components/my-things-menu-item";
 import {
   accountMenuAriaLabel,
@@ -161,6 +162,7 @@ export function RailFooter() {
                 ) : null}
                 {newOrganization.item}
                 {managed ? <MyThingsMenuItem workspaceId={rail.workspaceId} /> : null}
+                {managed ? <BillingMenuItem workspaceId={rail.workspaceId} /> : null}
                 {managed || newOrganization.item ? <DropdownMenuSeparator /> : null}
                 <AppearanceSubmenu />
                 <HelpMenu

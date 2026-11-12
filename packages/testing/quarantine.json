@@ -70,13 +70,5 @@
     "reason": "PDF parsing occasionally hangs until the 120 s test timeout; normally about 1 s.",
     "added": "2026-11-11",
     "expires": "2026-12-11"
-  },
-  {
-    "file": "test/integration/durable-queue-control.integration.ts",
-    "test": "session create returns while Temporal stalls and the durable wake dispatcher starts its run",
-    "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7617",
-    "reason": "Times out after about 31 s waiting for the wake acknowledgement after a single dispatch; failed 3 of 4 batch attempts.",
-    "added": "2026-11-12",
-    "expires": "2026-12-12"
   }
 ]

@@ -1,5 +1,11 @@
 # @opengeni/xai-subscription
 
+## 6.17.0
+
+### Patch Changes
+
+- @opengeni/network@6.17.0
+
 ## 6.16.0
 
 ### Patch Changes

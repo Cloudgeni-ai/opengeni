@@ -1,5 +1,29 @@
 # @opengeni/react-native
 
+## 6.17.0
+
+### Patch Changes
+
+- c054f23: Android: starting or stopping a recording or a call can no longer crash the app with `RemoteServiceException: Context.startForegroundService() did not then call Service.startForeground()`. The recording and call services now start with `startService()` while the app is in the foreground, which leaves Android no `startForeground()` deadline to enforce, and use `startForegroundService()` only when Android refuses that from the background. A stop while such a start still owes `startForeground()` is deferred until the service has gone to the foreground, and the service stops itself then. A recording that fails to start at any step now releases the microphone, encoder, chunk file and service and rejects `start` with a recording error, `stop` always lets them go even when finishing the last chunk fails, and an unexpected error on the capture thread arrives as a `capture_failed` error instead of ending the app.
+- 389de66: Signing out no longer leaves a person's unsent meeting and dictation recordings on the device. When recordings of theirs are still uploading, the console, the desktop app and the mobile app first ask whether to wait for the upload (they stay signed in) or discard the recordings and sign out; with nothing pending, sign-out is unchanged. Where nobody can be asked, such as a sign-out from another tab, the recordings are discarded. Signing out of one browser account removes only that account's recordings; the last account, or signing out of all, removes every one.
+
+  For apps: stored recordings can carry an `ownerId` (`RecorderOptions`, `UploadRecordingAudioOptions` and `useRecorder`), which `localRecordingsOf` and `discardLocalRecordingsOf` use, and `useRecorder` finishes only its owner's recordings when it mounts. `prepareRecordingsForSignOut` (from `@opengeni/react/recordings` and `@opengeni/react/meetings-recorder`) runs the check before a sign-out, with `setSignOutRecordingsPrompt` for the question. On phones, the `opengeni-recordings` folder is kept off iCloud backups, the recording config plugin keeps it off Android backups and device transfers, and `forgetRecordingStore` deletes an account's folder.
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [d189da5]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [a4ef243]
+- Updated dependencies [e3cb3c1]
+- Updated dependencies [389de66]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+  - @opengeni/contracts@6.17.0
+  - @opengeni/react@6.17.0
+  - @opengeni/sdk@6.17.0
+
 ## 6.16.0
 
 ### Minor Changes

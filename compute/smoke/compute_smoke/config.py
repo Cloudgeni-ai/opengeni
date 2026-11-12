@@ -40,5 +40,10 @@ class SandboxConfig:
             sleep = dict(self.sleep)
         else:
             idle_ms = self.timeout * 1000
-            sleep = {"pause_after_ms": idle_ms, "save_after_ms": idle_ms}
+            # E2B keeps a paused sandbox's memory, so the host is asked to.
+            sleep = {
+                "pause_after_ms": idle_ms,
+                "save_after_ms": idle_ms,
+                "keep_memory": True,
+            }
         return {"vcpus": self.vcpus, "memory_mib": self.memory_mib, "sleep": sleep}

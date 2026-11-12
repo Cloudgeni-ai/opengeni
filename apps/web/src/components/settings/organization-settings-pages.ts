@@ -88,7 +88,7 @@ export function organizationSettingsDescription(
     case "insights":
       return `Spend, tokens and model calls across ${organizationName}.`;
     case "billing":
-      return "Credits, payments and workspace budgets.";
+      return "Your plan, credits, receipts and workspace budgets.";
     case "developer":
       return "API keys, webhooks and a credential provider for products built on Opengeni.";
     case "security":

@@ -259,7 +259,7 @@ impl MemoryStore {
             changed,
         };
         // A host registering afresh after a reboot runs its agent again.
-        row.ran(register.capacity.run);
+        row.ran(register.capacity.run, register.capacity.after_asked_stop);
         inner.hosts.insert(
             id,
             Host {
