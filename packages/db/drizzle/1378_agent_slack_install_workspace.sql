@@ -6,7 +6,7 @@
 --
 -- * agent_slack_installs.install_workspace_id: the installation binding's
 --   workspace (where its routes, user states and intro records live). It was
---   only on the legacy slack_agents row (slack_agents.workspace_id). 1374 adds
+--   only on the legacy slack_agents row (slack_agents.workspace_id). 1379 adds
 --   its foreign key to workspaces.
 -- * The backfill copies it from slack_agents, and raises each agent's version
 --   to its legacy row's where that is higher, so the legacy Slack agents API

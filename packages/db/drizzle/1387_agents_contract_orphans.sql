@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
 -- online-safety-exception: unbatched-data: removes or unlinks Slack records whose agent has no installation row for their connection, and installation rows whose workspace is gone. Production had none on 2026-11-05, so these statements touch a handful of rows at most.
--- Agents contract: before 1383 validates the foreign keys 1374 and 1376 to
--- 1381 added NOT VALID, clean up the rows that would fail them, the way each
+-- Agents contract: before 1388 validates the foreign keys 1379 and 1381 to
+-- 1386 added NOT VALID, clean up the rows that would fail them, the way each
 -- key's ON DELETE action would have, so validation can't fail and Slack
 -- history people can see is kept:
 --
@@ -21,7 +21,7 @@
 -- A NOTICE reports the count per table.
 --
 -- Rolling: the NOT VALID keys already refuse new orphans from every running
--- binary, so nothing written after this file commits can fail 1383. The
+-- binary, so nothing written after this file commits can fail 1388. The
 -- seven tables are FORCE ROW LEVEL SECURITY and the migration principal is
 -- their owner, so the window is lifted for the cleanup and restored before
 -- commit (docs/force-rls-migration-backfills.md); its ACCESS EXCLUSIVE locks

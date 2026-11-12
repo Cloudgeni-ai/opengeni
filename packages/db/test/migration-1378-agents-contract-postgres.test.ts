@@ -1,4 +1,4 @@
-// Agents contract (1373 to 1392) on a database left by the expand release
+// Agents contract (1378 to 1397) on a database left by the expand release
 // (1243-1276): legacy slack_agents rows with their agent_slack_installs rows
 // and every kind of Slack record that pointed at slack_agents.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -46,7 +46,7 @@ afterAll(async () => {
 
 type Install = { connectionId: string; workspaceId: string; label: string };
 
-describe.skipIf(!realDatabase)("1373 to 1392 agents contract", () => {
+describe.skipIf(!realDatabase)("1378 to 1397 agents contract", () => {
   test("moves every Slack record onto the agent's installation and keeps its delete rules", async () => {
     const admin = owned!.admin;
     const accountId = crypto.randomUUID();

@@ -10,7 +10,7 @@
  * proposals, intro records, suggestions) point at its installation row.
  *
  * Nothing here reads or writes the legacy `bot_templates` and `slack_agents`
- * tables any more (the contract step, migrations 1373 to 1392), except that
+ * tables any more (the contract step, migrations 1378 to 1397), except that
  * removing an agent or its Slack name deletes its leftover `slack_agents` row
  * (clearLegacySlackRows), so the previous release is not refused by it.
  *
@@ -133,7 +133,7 @@ export type AgentSlackInstallRecord = {
   /**
    * The Slack installation's own workspace (where the installation binding
    * and its routes live). Null only for a row an older release wrote whose
-   * legacy row was never found (see migration 1373).
+   * legacy row was never found (see migration 1378).
    */
   installWorkspaceId: string | null;
 };
@@ -1445,7 +1445,7 @@ export async function getSlackAgentProjection(
           ${
             input.installWorkspaceId
               ? // A row still missing its workspace (an installation whose legacy
-                // row was never found, see migration 1373) is shown in the caller's.
+                // row was never found, see migration 1378) is shown in the caller's.
                 sql`and (i.install_workspace_id = ${input.installWorkspaceId}::uuid
                   or i.install_workspace_id is null)`
               : sql``

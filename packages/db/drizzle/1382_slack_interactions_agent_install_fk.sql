@@ -1,8 +1,8 @@
 -- deployment-mode: rolling
 -- Agents contract (docs/agents.md, "Contract"): slack_interactions.slack_agent_id also
 -- references the agent's installation row, agent_slack_installs (agent_id,
--- connection_id), ON DELETE SET NULL (slack_agent_id). Added NOT VALID; 1383 validates it and
--- 1385 drops the old key to slack_agents.
+-- connection_id), ON DELETE SET NULL (slack_agent_id). Added NOT VALID; 1388 validates it and
+-- 1390 drops the old key to slack_agents.
 --
 -- A slack_agents row was one agent in one Slack installation, so its exact
 -- equivalent is the agent's agent_slack_installs row for that connection:

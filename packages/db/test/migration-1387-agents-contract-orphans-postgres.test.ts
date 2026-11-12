@@ -1,7 +1,7 @@
-// Agents contract orphans (1382): on a database at 1373, Slack records whose
+// Agents contract orphans (1387): on a database at 1378, Slack records whose
 // agent has no installation row for their connection, and an installation row
 // whose workspace is gone, are cleaned up the way each new key's delete rule
-// would, so 1383 validates every key.
+// would, so 1388 validates every key.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,7 +36,7 @@ afterAll(async () => {
   if (prefix) await rm(prefix, { recursive: true, force: true });
 }, 180_000);
 
-describe.skipIf(!realDatabase)("1382 agents contract orphans", () => {
+describe.skipIf(!realDatabase)("1387 agents contract orphans", () => {
   test("orphaned Slack records are unlinked or deleted as their key's delete rule would, and every key validates", async () => {
     const admin = owned!.admin;
     const accountId = crypto.randomUUID();

@@ -5,10 +5,10 @@
 // tables, revision and sessions.agent_id immutability, and the wider legacy
 // checks.
 //
-// The contract (1390) drops the two sync triggers; their functions stay until
+// The contract (1395) drops the two sync triggers; their functions stay until
 // the legacy drop. This suite puts the triggers back on its own database so it
 // keeps covering the expand-era behaviour, which runs in production from 1243
-// until 1390.
+// until 1395.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { sql as drizzleSql } from "drizzle-orm";

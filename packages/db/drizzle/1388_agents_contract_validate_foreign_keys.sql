@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Agents contract: validate the foreign keys 1374 and 1376 to 1381 added NOT
+-- Agents contract: validate the foreign keys 1379 and 1381 to 1386 added NOT
 -- VALID. Validation takes SHARE UPDATE EXCLUSIVE on each referencing table and
 -- ROW SHARE on the referenced one, so reads and writes continue while it
 -- scans.
@@ -7,7 +7,7 @@
 -- Every referencing table carries the installation's connection_id, and every
 -- slack_agents row has had its agent_slack_installs row since 1243 (backfill,
 -- sync trigger, then the API's dual write), so existing rows satisfy the keys.
--- 1382 removed or unlinked any row that still would not, and the NOT VALID
+-- 1387 removed or unlinked any row that still would not, and the NOT VALID
 -- keys refuse new ones.
 SET LOCAL lock_timeout = '5s';
 

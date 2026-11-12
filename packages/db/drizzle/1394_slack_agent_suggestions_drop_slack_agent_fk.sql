@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- contract-step: since #7274 (with #7000, #7156 and #7281) every binary writes agent_slack_installs itself, so no running binary needs slack_agent_suggestions's foreign key to slack_agents; slack_agent_suggestions_agent_install_fk (validated in 1383) replaces it.
+-- contract-step: since #7274 (with #7000, #7156 and #7281) every binary writes agent_slack_installs itself, so no running binary needs slack_agent_suggestions's foreign key to slack_agents; slack_agent_suggestions_agent_install_fk (validated in 1388) replaces it.
 -- Agents contract: drop slack_agent_suggestions's foreign key to slack_agents.
 --
 -- One key per file: dropping it locks slack_agent_suggestions and then slack_agents, the
