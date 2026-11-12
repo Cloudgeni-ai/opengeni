@@ -10,6 +10,7 @@ import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
   canonicalModalCheckpointProviderBinding,
+  decodeNativeSnapshotRef,
   type ModalCheckpointProviderBinding,
 } from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
@@ -164,6 +165,7 @@ type MutableModalSandboxSession = {
     workspacePersistence?: string;
     snapshotFilesystemTimeoutMs?: number;
   };
+  hydrateWorkspace?: (data: Uint8Array, options?: unknown) => Promise<void>;
   execCommand?: ChannelASession["execCommand"];
   getSynchronousCommandOutput?: ChannelASession["getSynchronousCommandOutput"];
   cancelPendingExecCommand?: () => Promise<void>;
@@ -666,6 +668,34 @@ function installModalPendingExecCancellation(session: MutableModalSandboxSession
 }
 
 /**
+ * Let a session that saves portable tars restore a directory snapshot. Modal
+ * mounts a directory snapshot over the workspace of any live sandbox, but the
+ * SDK accepts one only while the session's own saves are directory snapshots
+ * too. A deployment that moved to tar persistence must still restore each
+ * session's last native snapshot, so the session presents the snapshot's mode
+ * for the mount alone: every later save is a tar of the mounted workspace.
+ */
+function installModalDirectorySnapshotHydrationForTar(session: MutableModalSandboxSession): void {
+  if (typeof session.hydrateWorkspace !== "function") return;
+  const hydrateWorkspace = session.hydrateWorkspace.bind(session);
+  session.hydrateWorkspace = async (data: Uint8Array, options?: unknown) => {
+    const state = session.state;
+    if (
+      state?.workspacePersistence !== "tar" ||
+      decodeNativeSnapshotRef(data)?.provider !== "modal_snapshot_directory"
+    ) {
+      return await hydrateWorkspace(data, options);
+    }
+    state.workspacePersistence = "snapshot_directory";
+    try {
+      return await hydrateWorkspace(data, options);
+    } finally {
+      state.workspacePersistence = "tar";
+    }
+  };
+}
+
+/**
  * Bridge the pinned Agents Extensions Modal adapter to Modal 0.9's provider
  * contracts. The wrapper re-checks the private provider sandbox on every
  * capture because snapshot_filesystem hydration replaces that object.
@@ -712,6 +742,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
       ),
     );
   }
+  installModalDirectorySnapshotHydrationForTar(mutable);
   const persistWorkspace = mutable.persistWorkspace.bind(session);
   mutable.persistWorkspace = async (options?: ModalWorkspaceCaptureOptions) => {
     assertPinnedModalSdk(mutable);
