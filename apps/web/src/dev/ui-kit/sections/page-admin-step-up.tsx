@@ -20,7 +20,7 @@ function refusal(passkeyRegistered: boolean): Response {
     {
       error: {
         code: "forbidden",
-        message: "Confirm it's you with your passkey to change admin settings.",
+        message: "Confirm it's you with your passkey to change who has access.",
         details: { code: ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE, passkeyRegistered },
       },
     },
@@ -29,7 +29,7 @@ function refusal(passkeyRegistered: boolean): Response {
 }
 
 function SampleAdminChange({ passkeyRegistered }: { passkeyRegistered: boolean }) {
-  const [name, setName] = useState("Northwind");
+  const [role, setRole] = useState("Member");
   const [status, setStatus] = useState<string | null>(null);
   const save = async () => {
     let sends = 0;
@@ -38,10 +38,10 @@ function SampleAdminChange({ passkeyRegistered }: { passkeyRegistered: boolean }
         sends += 1;
         return sends === 1 ? refusal(passkeyRegistered) : Response.json({ ok: true });
       },
-      { input: "/v1/organizations/sample", init: { method: "PATCH", body: "{}" } },
+      { input: "/v1/organizations/sample/members/sample", init: { method: "PATCH", body: "{}" } },
     );
     if (response.ok) {
-      setName((current) => (current === "Northwind" ? "Northwind Labs" : "Northwind"));
+      setRole((current) => (current === "Member" ? "Admin" : "Member"));
       setStatus("Saved");
     } else {
       setStatus("Not saved");
@@ -49,11 +49,11 @@ function SampleAdminChange({ passkeyRegistered }: { passkeyRegistered: boolean }
   };
   return (
     <SettingRow
-      label="Organization name"
-      description={`${name}${status ? ` · ${status}` : ""}`}
+      label={passkeyRegistered ? "Ada Lovelace" : "Grace Hopper (no passkey yet)"}
+      description={`${role}${status ? ` · ${status}` : ""}`}
       control={
         <Button variant="secondary" size="sm" onClick={() => void save()}>
-          {passkeyRegistered ? "Rename" : "Rename (no passkey yet)"}
+          Change role
         </Button>
       }
     />
@@ -64,7 +64,7 @@ export default function AdminStepUpSection() {
   return (
     <KitSection sectionKey="page-admin-step-up">
       <KitCanvas>
-        <Section title="General">
+        <Section title="Members">
           <SettingRowGroup>
             <SampleAdminChange passkeyRegistered />
             <SampleAdminChange passkeyRegistered={false} />

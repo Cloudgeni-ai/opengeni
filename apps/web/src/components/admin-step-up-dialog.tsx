@@ -62,7 +62,7 @@ export function AdminStepUpDialog({
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
         title="Add a passkey"
-        description="Admin settings need a passkey to confirm it's you. Add one to your account, then try again."
+        description="Changing who has access needs a passkey. Add one to your account, then try again."
         submitLabel="Add passkey"
         onSubmit={() => {
           close(false);
@@ -78,7 +78,7 @@ export function AdminStepUpDialog({
       size="sm"
       leading={<KeyRoundIcon aria-hidden />}
       title="Confirm it's you"
-      description="Use your passkey to change admin settings. You won't be asked again until you sign out."
+      description="Use your passkey to change who has access. You won't be asked again until you sign out."
       submitLabel="Use passkey"
       pendingLabel="Waiting for your passkey…"
       error={error}

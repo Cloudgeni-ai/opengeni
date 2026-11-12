@@ -1139,9 +1139,8 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Pages",
     title: "Admin passkey step-up",
     purpose:
-      "An admin change asks the owner or admin to confirm with their passkey, then goes through; someone without a passkey is sent to add one.",
-    usedOn:
-      "Every admin change: members, invitations, billing, API keys, shared integrations, settings",
+      "Changing who has access asks the owner or admin to confirm with their passkey, then goes through; someone without a passkey is sent to add one.",
+    usedOn: "Members, roles and invitations; creating API keys; shared connections",
     load: () => import("./page-admin-step-up"),
   },
   {

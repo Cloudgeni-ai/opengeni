@@ -1509,10 +1509,12 @@ them, and readiness requires them from then on. A release that still has the
   does: sessions don't record which passkey opened them, so ending all of them
   is the only way to shut out a removed passkey.
 - `OPENGENI_ADMIN_PASSKEY_STEP_UP=required` (default `off`) makes owners and
-  admins make admin changes from a browser session confirmed with a passkey:
-  members, roles and invitations, billing and plans, API keys, shared
-  integrations and connections, and organization and workspace settings, and
-  creating a personal API key. A session signed in with a passkey is confirmed;
+  admins change who can access the organization and its data from a browser
+  session confirmed with a passkey: members, roles, invitations, service
+  accounts and ownership recovery; creating organization and workspace API keys
+  (or changing what one may do), and creating a personal API key; and creating,
+  changing or removing shared connections, including Gmail. Settings, billing,
+  policies, integration installs and revoking keys are not asked. A session signed in with a passkey is confirmed;
   otherwise the API refuses with `ADMIN_PASSKEY_STEP_UP_REQUIRED` in the error
   details, the console asks for the passkey once and sends the change again,
   and the session stays confirmed until it ends (`auth_sessions.mfa_verified_at`,

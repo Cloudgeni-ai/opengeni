@@ -1244,7 +1244,7 @@ test("an admin asked to confirm with a passkey is told so, not that only an admi
         403,
         JSON.stringify({
           error: {
-            message: "Add a passkey to your account to change admin settings.",
+            message: "Add a passkey to your account to change who has access.",
             details: { code: "ADMIN_PASSKEY_STEP_UP_REQUIRED", passkeyRegistered: false },
           },
         }),
