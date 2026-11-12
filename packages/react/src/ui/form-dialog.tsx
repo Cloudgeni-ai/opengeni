@@ -698,6 +698,8 @@ export function FormDialog({
    * Show above every other open dialog, including the chat's connect dialog
    * (which sits above host page chrome). For a prompt any open surface can
    * raise and that must be answered first, such as the admin passkey step-up.
+   * Only the overlay and the dialog are raised: menus, selects and tooltips
+   * opened from inside it still render at their own layer, so keep it to plain fields.
    */
   aboveOtherDialogs?: boolean | undefined;
 }) {
