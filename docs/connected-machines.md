@@ -1364,8 +1364,11 @@ counters, never silently truncated.
 Foreground output can be released within a long turn once the exact tool's
 call/result receipt and structural output event are durable. The receipt preserves
 recovery while a parallel SDK call batch is still incomplete. Only completed
-operations owned by that tool are eligible: parallel results and unscoped setup
-work remain retained until their own durability boundary. Each final
+operations owned by that tool are eligible: parallel results remain retained
+until their own durability boundary. An operation no tool call owns (platform
+setup, workspace capture, Git and file reads) carries a random id that nothing
+can resume, so it is released as soon as its result returns to its caller,
+without waiting for any boundary and without a journal entry. Each final
 acknowledgement still follows journal persistence; failed persistence or publish
 keeps the frontier available for retry. Turn completion finalizes remaining
 accepted output. Durably adopted background commands keep their separate output
