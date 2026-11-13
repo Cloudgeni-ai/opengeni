@@ -35,6 +35,8 @@ export type NativeNangoIntegration = Readonly<{
   destinations: readonly NangoDestination[];
   /** Read-only provider request that names the connected account. */
   accountIdentity: Readonly<{ url: string; field: string }>;
+  /** The fixed scopes Nango's managed app grants, unless the definition lists others. */
+  managedScopes: readonly string[];
 }>;
 
 export const NATIVE_NANGO_INTEGRATIONS: readonly NativeNangoIntegration[] = Object.freeze([
@@ -50,6 +52,7 @@ export const NATIVE_NANGO_INTEGRATIONS: readonly NativeNangoIntegration[] = Obje
       url: "https://gmail.googleapis.com/gmail/v1/users/me/profile",
       field: "emailAddress",
     }),
+    managedScopes: Object.freeze(["https://mail.google.com/"]),
   }),
   Object.freeze({
     integrationKey: "google-calendar",
@@ -63,6 +66,7 @@ export const NATIVE_NANGO_INTEGRATIONS: readonly NativeNangoIntegration[] = Obje
       url: "https://www.googleapis.com/calendar/v3/calendars/primary",
       field: "id",
     }),
+    managedScopes: Object.freeze(["https://www.googleapis.com/auth/calendar"]),
   }),
   Object.freeze({
     integrationKey: "google-drive",
@@ -80,6 +84,7 @@ export const NATIVE_NANGO_INTEGRATIONS: readonly NativeNangoIntegration[] = Obje
       url: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
       field: "user.emailAddress",
     }),
+    managedScopes: Object.freeze(["https://www.googleapis.com/auth/drive"]),
   }),
 ]);
 

@@ -500,7 +500,11 @@ async function persistNangoConnection(
     input.integration,
     input.nangoConnectionId,
   );
-  const grantedScopes = input.integration.definition.scopes ?? [];
+  // A managed app grants fixed scopes; recording them lets the reviewed
+  // bridges admit exactly the tools those scopes cover.
+  const grantedScopes = [
+    ...(input.integration.definition.scopes ?? input.integration.native?.managedScopes ?? []),
+  ];
   // The same account connected again: keep its connection, settings and grants.
   const sameAccount = input.identity.label
     ? existing.find((connection) =>

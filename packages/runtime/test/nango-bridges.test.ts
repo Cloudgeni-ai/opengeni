@@ -10,6 +10,12 @@ import {
 } from "../src/google-calendar-rest-mcp";
 import { DRIVE_MCP_BRIDGE_ADAPTER, DriveMcpServer, OFFICIAL_DRIVE_MCP_URL } from "../src/drive-mcp";
 import { NANGO_TOOLS_MCP_BRIDGE_ADAPTER, NangoToolsMcpServer } from "../src/nango-tools-mcp";
+import { nativeNangoIntegrationByKey } from "@opengeni/contracts/nango";
+import { GMAIL_EXTRA_TOOLS, gmailToolSupportsScopes } from "../src/gmail-rest-tools";
+import {
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
+  googleCalendarToolSupportsScopes,
+} from "../src/google-calendar-rest-mcp";
 import { sendWithCredential, type NangoUsageReport } from "../src/nango-transport";
 
 const proxy = (integrationKey: string, providerConfigKey: string) => ({
@@ -382,5 +388,28 @@ describe("generic Nango tools bridge", () => {
     });
     const read = await server.callToolResult("unknown-tool", {});
     expect(read.isError).toBe(true);
+  });
+});
+
+describe("Nango-managed Google scopes", () => {
+  test("the managed apps' fixed scopes admit every reviewed tool, so no consent loop starts", () => {
+    const gmail = nativeNangoIntegrationByKey("gmail")!.managedScopes;
+    for (const name of [
+      "search_threads",
+      "get_thread",
+      "create_draft",
+      "send_draft",
+      "list_drafts",
+      ...GMAIL_EXTRA_TOOLS.map((tool) => tool.name),
+    ]) {
+      expect(gmailToolSupportsScopes(name, gmail)).toBe(true);
+    }
+    const calendar = nativeNangoIntegrationByKey("google-calendar")!.managedScopes;
+    for (const tool of GOOGLE_CALENDAR_REST_MCP_TOOLS) {
+      expect(googleCalendarToolSupportsScopes(tool.name, calendar)).toBe(true);
+    }
+    expect(nativeNangoIntegrationByKey("google-drive")!.managedScopes).toEqual([
+      "https://www.googleapis.com/auth/drive",
+    ]);
   });
 });

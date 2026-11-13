@@ -63,6 +63,7 @@ function gmailServerSettings() {
           providerDomain: "gmailmcp.googleapis.com",
           subjectScope: "subject" as const,
           kind: "oauth2" as const,
+          scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
         },
       },
     ],
@@ -106,6 +107,9 @@ describe("integration backend switch", () => {
     // Flipping back leaves the native reference exactly as stored.
     const [native] = applyNangoBackendsToSettings(gmailServerSettings(), NANGO_OFF).mcpServers;
     expect(native!.connectionRef!.providerDomain).toBe("gmailmcp.googleapis.com");
+    expect(native!.connectionRef!.scopes).toEqual([
+      "https://www.googleapis.com/auth/gmail.readonly",
+    ]);
     // Installations always store the native catalog identity.
     expect(catalogProviderDomain("nango:gmail")).toBe("gmailmcp.googleapis.com");
     expect(catalogProviderDomain("nango:linkedin")).toBe("nango:linkedin");

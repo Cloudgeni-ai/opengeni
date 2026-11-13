@@ -2540,6 +2540,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/billing/integration-usage",
+    "method": "GET",
+    "path": "/v1/billing/integration-usage",
+    "request": [],
+    "query": [
+      "accountId",
+      "since",
+      "until"
+    ],
+    "response": []
+  },
+  {
     "id": "GET /v1/config/content-security",
     "method": "GET",
     "path": "/v1/config/content-security",
@@ -2562,6 +2574,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/image-proxy/ticket",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/integrations/nango/connect",
+    "method": "GET",
+    "path": "/v1/integrations/nango/connect",
+    "request": [],
+    "query": [
+      "state"
+    ],
     "response": []
   },
   {
@@ -7178,6 +7200,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "sessions:control"
+  },
+  {
+    "id": "POST /v1/integrations/nango/connect/complete",
+    "method": "POST",
+    "path": "/v1/integrations/nango/connect/complete",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/integrations/nango/webhook",
+    "method": "POST",
+    "path": "/v1/integrations/nango/webhook",
+    "request": [],
+    "response": []
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",

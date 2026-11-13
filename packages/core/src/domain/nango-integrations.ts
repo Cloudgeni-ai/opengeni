@@ -80,7 +80,9 @@ export function applyNangoBackendsToSettings<T extends Pick<Settings, "mcpServer
       ref.providerDomain.trim().toLowerCase() !== native.nativeProviderDomain
     )
       return server;
-    const { connectionId: _nativeConnection, ...rest } = ref;
+    // Requested incremental scopes do not apply: a managed app's scopes are
+    // fixed, and each bridge gates its tools on the recorded grants.
+    const { connectionId: _nativeConnection, scopes: _requestedScopes, ...rest } = ref;
     return {
       ...server,
       connectionRef: {

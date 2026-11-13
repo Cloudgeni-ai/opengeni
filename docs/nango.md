@@ -95,9 +95,11 @@ signature).
   returns Nango proxy headers (`Connection-Id`, `Provider-Config-Key`) and a
   URL rewrite instead of a token; each bridge validates the Google destination
   exactly as before, then sends the request to `<Nango base>/proxy/<path>`.
-  Mutations keep the no-replay rule. Scope checks use the managed app's fixed
-  scopes; a tool needing a scope the app lacks returns the normal
-  not-available error instead of a consent card.
+  Mutations keep the no-replay rule. A Nango connection records the managed
+  app's fixed scopes (`https://mail.google.com/`, `…/auth/calendar`,
+  `…/auth/drive`, or the definition's `scopes`) as its grants, and requested
+  incremental scopes are dropped, so the incremental-consent path never runs;
+  a tool needing a scope the app lacks returns the normal not-available error.
 - Drive under Nango: Google's hosted Drive MCP server is unreachable through
   Nango, so read tools are served from Drive REST through the proxy:
   `search_files`, `list_recent_files`, `get_file_metadata`,
@@ -107,7 +109,7 @@ signature).
 - Config-only integrations (LinkedIn, X, future ones): the in-process Nango
   tools bridge lists the integration's deployed Nango actions (name,
   description, input schema), filtered by `definition.tools.allow`, and runs
-  them with `POST /action/trigger`. Writes (a non-GET endpoint, or listed in
+  them with `POST /connections/{id}/tools/{name}/calls`. Writes (a non-GET endpoint, or listed in
   `definition.tools.write`) default to Ask first; reads are allowed. Tool
   descriptions are Nango's action metadata.
 
@@ -162,8 +164,8 @@ SELECT set_integration_backend('linkedin', 'nango', 'linkedin', true,
   'operator-name', 'Offer LinkedIn through Nango');
 ```
 
-`x` works the same way (for example provider config key `twitter-v2`); while
-it is on, the native X social connector is hidden. In organizations using
+`x` (provider config key `twitter-v2`) and Facebook Pages (`facebook`) work the
+same way, using Nango's pre-built tools. While `x` is on Nango, the native X social connector is hidden. In organizations using
 allowlist acquisition, add the integration key to the policy.
 
 ### Remove or flip back
