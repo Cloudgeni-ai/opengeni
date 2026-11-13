@@ -33,6 +33,7 @@ const demoInputs = {
   computer: resolve(__dirname, "computer.html"),
   thisComputer: resolve(__dirname, "this-computer.html"),
   composerResponsive: resolve(__dirname, "composer-responsive.html"),
+  modelLevels: resolve(__dirname, "model-levels.html"),
   commandUx: resolve(__dirname, "command-ux.html"),
   sessionHistoryImport: resolve(__dirname, "session-history-import.html"),
   embeddedChat: resolve(__dirname, "embedded-chat.html"),

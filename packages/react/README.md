@@ -1776,9 +1776,52 @@ or through `OpenGeniChat.conversationProps`:
 />
 ```
 
-`modelPickerProps` accepts only `groupPresentation` and `messages`; it does not
-enable a hidden picker or change policy, model availability or callbacks. Keep
+`modelPickerProps` accepts `groupPresentation`, `messages` and `levels`; it does
+not enable a hidden picker or change policy, model availability or callbacks. Keep
 model-picker visibility controlled by `modelPicker` and the client configuration.
+
+#### Model levels
+
+Hosts that want fewer choices can replace the full picker with two or three
+named levels. Each level is one catalog model at one reasoning effort, and may
+offer Ultrafast:
+
+```tsx
+const levels: ModelLevel[] = [
+  { id: "standard", label: "Standard", model: "example/everyday", effort: "high" },
+  { id: "thorough", label: "Thorough", model: "example/frontier", effort: "high", ultrafast: true },
+];
+
+<OpenGeniChat
+  client={client}
+  workspaceId={workspaceId}
+  conversationProps={{ modelPickerProps: { levels: showFullPicker ? undefined : levels } }}
+/>;
+```
+
+The composer then shows a small inline level control instead of the model
+menu. People tap or swipe it to change level, and the arrow keys step through
+levels. Ultrafast appears only on levels with `ultrafast: true` whose model the
+catalog says can run it, any number of them, and it always takes a deliberate
+gesture: press and hold the control (or hold Space) until the charge fills, then
+let go. On the last level, pushing past the end (or holding the arrow key there)
+works too. A tap never turns it on. The first time someone lands on such a level
+the control says "Hold for Ultrafast" once, and its usage cost shows when it
+turns on.
+
+Omit `levels`, or pass an empty list, to show the full picker; that is the
+switch for people who should keep every model. Levels whose model the workspace
+cannot run are left out, and with none left the full picker is shown. A new
+chat starts on the first level, so list the everyday level first. A chat
+already on a model or effort outside the levels keeps it: the control shows
+that model's name until the person picks a level. Levels restrict the picker
+only; they do not limit which models the API accepts.
+
+`ModelLevelPicker` is the control itself and takes the same props as
+`ModelPolicyPicker` plus `levels`; `ComposerModelPicker` picks between the two.
+Both are exported from `@opengeni/react` and `@opengeni/react/composer`, and
+`@opengeni/react/model-levels` exports the renderer-neutral `modelLevelsView`
+and `modelLevelChoice` used by both the web and the native control.
 
 For a rendered example, open the composer-responsive demo with `?branding=host`.
 

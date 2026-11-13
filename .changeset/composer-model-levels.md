@@ -1,0 +1,6 @@
+---
+"@opengeni/react": minor
+"@opengeni/react-native": minor
+---
+
+Hosts can replace the composer's full model picker with two or three named levels. Pass `modelPickerProps.levels` to `SessionConversation`, `NewConversation` or `OpenGeniChat.conversationProps`: each `ModelLevel` is a label, one catalog model, one reasoning effort and whether it offers Ultrafast. The composer then shows a small inline level control that people tap or swipe; Ultrafast can be offered on any level and takes a deliberate press and hold (or a push past the end of the last level), and shows its usage cost when it turns on. Omitting `levels` keeps the full picker, levels the workspace cannot run are left out, a new chat starts on the first level, and an existing chat on another model keeps it and shows its name until a level is picked. `ModelLevelPicker` and `ComposerModelPicker` are exported from `@opengeni/react` and `@opengeni/react/composer`, the renderer-neutral `modelLevelsView` and `modelLevelChoice` from `@opengeni/react/model-levels`, and React Native hosts get the same control as `ModelLevelControl` from `@opengeni/react-native/timeline`, with `onSelectionFeedback` for haptics and `startOnFirstLevel` for new-chat screens.
