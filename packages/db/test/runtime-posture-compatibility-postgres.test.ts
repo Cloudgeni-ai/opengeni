@@ -423,7 +423,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110, 1149, 1210, 1239, 1272, 1274 and 1361 make",
+  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110, 1149, 1210, 1239, 1272, 1274, 1361 and 1405 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -441,6 +441,7 @@ realTest(
       "ring_agent_call_v1(uuid, boolean)",
       "summarize_queued_turns_by_hold()",
       "list_uncompacted_recording_tracks_v1(integer, text)",
+      "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
     ]) {
       try {
         await admin.unsafe(

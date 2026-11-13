@@ -139,9 +139,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, settling a call sends no ended push and those phones ring out.
  * 1359 withholds the session content collector and its inventory; until they
  * are granted, unreferenced content blobs stay until the session is archived.
- * 1404 withholds the inventory of cold sandboxes whose chats are all
- * archived; until it is granted, such a non-compute sandbox keeps its saved
- * workspace until its chats are deleted (as before).
+ * 1404 withheld the inventory of cold sandboxes whose chats are all archived
+ * and 1405 grants it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -152,7 +151,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
-  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
