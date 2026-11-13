@@ -5,6 +5,7 @@ import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   FIKEN_CREDENTIAL_LABEL,
   FIKEN_CREDENTIAL_ROLE,
+  TOOL_DISCOVERY_CARD_META_KEY,
   type AccessGrant,
   type FirstPartyMcpToolName,
   type SessionToolPolicy,
@@ -106,14 +107,83 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       });
       expect(request.isError).not.toBe(true);
-      expect(mcpJson(request)).toMatchObject({ status: "authorization_requested" });
       const events = (
         await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
       ).filter((event) => event.type === "tool.auth_needed");
       expect(events).toHaveLength(1);
+      expect(mcpJson(request)).toMatchObject({
+        status: "authorization_requested",
+        cardShown: true,
+        eventId: events[0]!.id,
+      });
       expect(events[0]?.payload).toMatchObject({
         capability: { id: "api:1password", action: "connect" },
       });
+    } finally {
+      await mcp.close();
+      await server.close();
+    }
+  });
+  test("a card tool discovery shows is not posted again until the person writes; a model call is unchanged", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const selection: FirstPartyMcpToolName[] = [
+      "capability_catalog_search",
+      "capability_authorization_request",
+    ];
+    const attempt = await seedAttempt(false, selection);
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: { ...attempt, firstPartyMcpTools: selection },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "discovery-card-once", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    const cards = async () =>
+      (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+        (event) => event.type === "tool.auth_needed",
+      );
+    const request = (fromDiscovery: boolean) =>
+      mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId: "api:1password", rationale: "Connect 1Password." },
+        ...(fromDiscovery ? { _meta: { [TOOL_DISCOVERY_CARD_META_KEY]: true } } : {}),
+      });
+    try {
+      const first = await request(true);
+      expect(first.isError).not.toBe(true);
+      const shown = await cards();
+      expect(shown).toHaveLength(1);
+      expect(mcpJson(first)).toMatchObject({
+        status: "authorization_requested",
+        cardShown: true,
+        eventId: shown[0]!.id,
+      });
+      expect(mcpJson(first)).not.toHaveProperty("alreadyShown");
+      // A repeated search names the card already in the chat, keeping the
+      // status and guidance of a posted card.
+      const again = await request(true);
+      expect(mcpJson(again)).toMatchObject({
+        status: "authorization_requested",
+        action: "connect",
+        cardShown: true,
+        alreadyShown: true,
+        eventId: shown[0]!.id,
+        message: `${(mcpJson(first) as { message: string }).message.replace(" was posted", " is already in this chat")} It was not posted again.`,
+      });
+      expect(await cards()).toHaveLength(1);
+      // The model's own call still posts its card, as before.
+      const model = await request(false);
+      expect(mcpJson(model)).toMatchObject({ cardShown: true });
+      expect(mcpJson(model)).not.toHaveProperty("alreadyShown");
+      expect(await cards()).toHaveLength(2);
     } finally {
       await mcp.close();
       await server.close();
@@ -957,6 +1027,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         status: "authorization_requested",
         action: "connect",
         eventId: expect.any(String),
+        cardShown: true,
         message:
           "The Outlook Mail Connect card was posted. It handles the Microsoft sign-in and any admin approval link, so do not repeat its steps; nothing is connected yet. When the person finishes connecting, you get an update and its tools are available then.",
       });
@@ -1043,6 +1114,8 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       // continuation), which records no grant of its own.
       sentEarlier = false,
       capabilityId = "api:integration:microsoft-outlook-mail",
+      // Asked by tool discovery rather than the model.
+      fromDiscovery = false,
     ) => {
       // The human this agent acts for: a member with exactly these
       // permissions, or (null) someone in their own workspace with no
@@ -1126,6 +1199,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
             capabilityId,
             rationale: "Reading the newest emails needs access to the person's inbox.",
           },
+          ...(fromDiscovery ? { _meta: { [TOOL_DISCOVERY_CARD_META_KEY]: true } } : {}),
         });
         expect(result.isError).not.toBe(true);
         const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
@@ -1143,6 +1217,15 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       status: "authorization_requested",
       action: "connect",
       eventId: expect.any(String),
+      cardShown: true,
+      message:
+        "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.",
+    });
+    // A card tool discovery shows has the same semantics: the same card and
+    // the same guidance for a person who can't connect from here.
+    expect(await request(conversation, undefined, false, undefined, true)).toMatchObject({
+      status: "authorization_requested",
+      cardShown: true,
       message:
         "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.",
     });

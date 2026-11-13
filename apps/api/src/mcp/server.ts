@@ -107,6 +107,7 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  TOOL_DISCOVERY_CARD_META_KEY,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
@@ -5125,7 +5126,7 @@ function registerFleetTools(
         if (setup.status === "unavailable") {
           return json({ kind: "selfhosted", status: "unavailable", message: setup.detail });
         }
-        const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+        const { eventId } = await appendCapabilityCardEvent(deps, grant, sessionId, {
           item,
           action: "connect",
           rationale: "Connect your computer so this chat can run on it.",
@@ -7982,8 +7983,11 @@ function registerCapabilityDiscoveryTools(
           ),
       },
     },
-    async ({ capabilityId, rationale, connectionId }) => {
+    async ({ capabilityId, rationale, connectionId }, extra) => {
       await authorize();
+      // Tool discovery shows a card for a search that clearly names one
+      // integration; it shows that card at most once per chat.
+      const fromDiscovery = extra?._meta?.[TOOL_DISCOVERY_CARD_META_KEY] === true;
       const current = await catalog();
       const item =
         [...current.items, ...recommendations()].find(
@@ -8003,6 +8007,7 @@ function registerCapabilityDiscoveryTools(
         return json({
           capabilityId: item.id,
           status: "input_required",
+          cardShown: false,
           message: MICROSOFT_DYNAMICS_SETUP_DETAIL,
         });
       }
@@ -8044,6 +8049,7 @@ function registerCapabilityDiscoveryTools(
         return json({
           capabilityId: item.id,
           status: "ready",
+          cardShown: false,
           message: setup.detail,
         });
       }
@@ -8051,6 +8057,7 @@ function registerCapabilityDiscoveryTools(
         return json({
           capabilityId: item.id,
           status: "unavailable",
+          cardShown: false,
           message: setup.detail,
         });
       }
@@ -8074,48 +8081,69 @@ function registerCapabilityDiscoveryTools(
       const personCannotConnect =
         person !== null &&
         inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
-      const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+      const { eventId, alreadyShown } = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
         ...(reconnect ? { reconnect } : {}),
+        // Tool discovery's card is not posted again until the person writes.
+        // A model call always posts: a card whose state changed (a machine
+        // just connected) is worth showing again.
+        ...(fromDiscovery ? { once: "since_latest_message" as const } : {}),
       });
+      // Every result says whether a card is in the chat, so a caller can
+      // never report one that was not shown. A card already there keeps the
+      // status and guidance it would have had, and says it was not reposted.
+      const shown = { cardShown: eventId !== null, ...(alreadyShown ? { alreadyShown } : {}) };
+      const posted = (body: { message: string } & Record<string, unknown>) =>
+        json(
+          alreadyShown
+            ? {
+                ...body,
+                message: `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`,
+              }
+            : body,
+        );
       if (reconnect) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "authorization_requested",
           action: "connect",
           connectionId: reconnect.connectionId,
           eventId,
+          ...shown,
           message: personCannotConnect
             ? `The card was posted, but this person can't reconnect ${item.name} from here: their access doesn't allow it, and the card tells them so. Tell them ${reconnect.account} stopped working on ${connectionReconnectDay(reconnect.since)} and that whoever manages this app has to reconnect it. Nothing is reconnected.`
             : `The card to reconnect ${capabilityReconnectAccountLabel(item, reconnect)} was posted. It signs in again to that same account, which stopped working on ${connectionReconnectDay(reconnect.since)}; nothing is reconnected yet. Tell the person plainly that it stopped working and that the card reconnects it. It works from their next message after reconnecting.`,
         });
       }
       if (machineCardWhenReady) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "ready",
           eventId,
+          ...shown,
           message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on a connected machine.`,
         });
       }
       if (githubCardWhenReady) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "ready",
           eventId,
+          ...shown,
           message:
             item.id === PERSONAL_GITHUB_CAPABILITY_ID
               ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories the agent may use as them.`
               : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
-      return json({
+      return posted({
         capabilityId: item.id,
         status: "authorization_requested",
         action: setup.action,
         eventId,
+        ...shown,
         message: personCannotConnect
           ? item.kind === "plugin"
             ? `The card was posted, but this person can't install the ${item.name} plugin: installing plugins needs permission to manage this workspace's plugins, and the card tells them so. Don't ask them to use the card. Tell them a workspace admin has to install it. Nothing is installed.`
@@ -8525,11 +8553,39 @@ async function appendCapabilityCardEvent(
     toolName?: string;
     /** The account that stopped working which this card reconnects. */
     reconnect?: ConnectionNeedingReconnect;
+    /**
+     * Post the card only when no current card of the same kind for the
+     * capability is already shown in this turn, or (`since_latest_message`)
+     * since the person's latest message; `alreadyShown` then names that card.
+     */
+    once?: "turn" | "since_latest_message";
   },
-): Promise<string | null> {
+): Promise<{ eventId: string | null; alreadyShown: boolean }> {
   const { item } = input;
   const claims = exactAgentCommandContext(grant, sessionId);
   const payload = capabilityCardPayload(item, input);
+  if (input.once) {
+    const once = await appendTurnCapabilityCardOnce(
+      deps.db,
+      grant.workspaceId,
+      sessionId,
+      claims.callerTurnId,
+      claims.callerExecutionGeneration,
+      claims.callerAttemptId,
+      item.id,
+      { type: "tool.auth_needed", payload },
+      null,
+      { sinceLatestMessage: input.once === "since_latest_message" },
+    );
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, once.events);
+    if (!once.accepted) {
+      throw new Error("The calling turn was replaced before the authorization request committed.");
+    }
+    return {
+      eventId: once.existingEventId ?? once.events[0]?.id ?? null,
+      alreadyShown: once.existingEventId !== null,
+    };
+  }
   const appended = await appendAndPublishTurnEventsFenced(
     deps.db,
     deps.bus,
@@ -8543,7 +8599,7 @@ async function appendCapabilityCardEvent(
   if (!appended.accepted) {
     throw new Error("The calling turn was replaced before the authorization request committed.");
   }
-  return appended.events[0]?.id ?? null;
+  return { eventId: appended.events[0]?.id ?? null, alreadyShown: false };
 }
 
 /** The `tool.auth_needed` payload that renders a capability card in the chat. */

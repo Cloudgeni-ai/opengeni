@@ -288,6 +288,7 @@ import {
 import {
   LazyToolModelProvider,
   catalogConnectableIntegrationLookup,
+  catalogConnectCardRequest,
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
@@ -4530,6 +4531,7 @@ function maybeInstallLazyToolTransport(
       return published;
     },
     options.toolRouterExpected !== false,
+    harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
