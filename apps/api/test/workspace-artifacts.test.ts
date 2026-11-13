@@ -1972,7 +1972,7 @@ async function persistArtifactAttemptCatalog(
     entries: identities.map(({ approval = "none", ...identity }) => ({
       identity,
       modelName: `${identity.serverId}__${identity.toolName}`,
-      codemodePath: [identity.serverId, identity.toolName],
+      codemodePath: [identity.serverId.replace(/[^A-Za-z0-9_$]/gu, "_"), identity.toolName],
       inputSchema: { type: "object" },
       source: identity.serverId === "docs" ? "docs" : "mcp",
       approval,
