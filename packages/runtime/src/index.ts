@@ -1,10 +1,22 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+export {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+  type NangoUsageReport,
+} from "./nango-transport";
 // Nothing was sent: callers render the message, which names the choices.
 export {
   McpAccountParameterChoiceError,
   isMcpAccountParameterChoiceError,
 } from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
+import type { NangoIntegrationDefinition, NangoProxyTransport } from "@opengeni/contracts/nango";
+import {
+  NANGO_TOOLS_MCP_BRIDGE_ADAPTER,
+  type NangoToolsMcpBridgeContext,
+} from "./nango-tools-mcp";
+import type { NangoUsageRecorder } from "./nango-transport";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
   CommandCompletionDelivery,
@@ -1167,7 +1179,8 @@ type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
   DataverseWebApiMcpBridgeContext &
   BusinessCentralApiMcpBridgeContext &
-  DriveMcpBridgeContext;
+  DriveMcpBridgeContext &
+  NangoToolsMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
   BuiltInMcpBridgeContext
@@ -1178,6 +1191,7 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
   BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
+  NANGO_TOOLS_MCP_BRIDGE_ADAPTER,
 ]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
@@ -1208,6 +1222,8 @@ export type ResolveConnectionCredentialInput = {
   preflightAcceptsRefreshableExpiry?: boolean;
   /** Frozen provider authority generation captured by the calling integration/catalog. */
   expectedAuthorityGeneration?: number;
+  /** Transports the bridge can apply; a Nango connection resolves only with `nango_proxy`. */
+  acceptedTransports?: readonly "nango_proxy"[];
 };
 
 export type ResolveConnectionCredentialResult =
@@ -1220,6 +1236,10 @@ export type ResolveConnectionCredentialResult =
       /** Metadata-only immutable authority binding supplied by the trusted worker resolver. */
       operationAuthorityDigest?: string;
       expiresAt?: Date | null;
+      /** The provider's actual grants, when the connection broker knows them. */
+      grantedScopes?: string[];
+      /** Send the provider request through this Nango proxy (docs/nango.md). */
+      proxy?: NangoProxyTransport;
     }
   | {
       status: "auth_needed";
@@ -6236,6 +6256,10 @@ export type PrepareToolsOptions = {
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
   materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
+  /** Best-effort Nango usage accounting for proxy requests and tool calls. */
+  recordNangoUsage?: NangoUsageRecorder;
+  /** Operator definitions of the Nango-backed integrations, read once per turn. */
+  nangoIntegrationDefinitions?: ReadonlyMap<string, NangoIntegrationDefinition>;
   readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
   /** Private host callback that materializes exact bytes a reviewed connector downloaded. */
   materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
@@ -6916,7 +6940,12 @@ export async function prepareAgentTools(
                 request.destinationUrl,
                 request.toolName,
                 request.forceRefresh === true,
+                "acceptedTransports" in request ? request.acceptedTransports : undefined,
               ),
+            ...(options.recordNangoUsage ? { recordNangoUsage: options.recordNangoUsage } : {}),
+            ...(options.nangoIntegrationDefinitions
+              ? { nangoIntegrationDefinitions: options.nangoIntegrationDefinitions }
+              : {}),
             onAuthNeeded: async (payload) => {
               await publishAuthNeeded(options, payload);
             },
@@ -8467,6 +8496,7 @@ async function resolveConnectionForRequest(
   destinationUrl: string,
   toolName: string | undefined,
   forceRefresh: boolean,
+  acceptedTransports?: readonly "nango_proxy"[],
 ): Promise<ResolveConnectionCredentialResult> {
   if (!options.workspaceId || !options.resolveCredential) {
     return {
@@ -8490,6 +8520,7 @@ async function resolveConnectionForRequest(
     forceRefresh,
     ...(toolName ? { toolName } : {}),
     ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+    ...(acceptedTransports?.length ? { acceptedTransports } : {}),
   };
   try {
     return await measureMcpPhase(

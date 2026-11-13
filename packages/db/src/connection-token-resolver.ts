@@ -699,7 +699,10 @@ export function buildConnectionTokenResolver(
       // Reviewed bridges gate each tool on the provider's actual OAuth grants.
       ...(cred.providerDomain.toLowerCase() === "slack.com"
         ? { grantedScopes: normalizeSlackScopes(cred.grantedScopes) }
-        : cred.kind === "oauth2"
+        : cred.kind === "oauth2" &&
+            // A Nango-managed app's fixed scopes are known only when the
+            // integration definition lists them; otherwise the provider decides.
+            !(isNangoProviderDomain(cred.providerDomain) && cred.grantedScopes.length === 0)
           ? { grantedScopes: [...cred.grantedScopes] }
           : {}),
       ...(connectionUseAttribution ? { connectionUseAttribution } : {}),
