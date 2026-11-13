@@ -189,7 +189,7 @@ import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations
 import { withAccountIdentityState } from "../integrations/oauth-account-identity";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
-import { revokeGoogleOAuthGrantForDisconnect } from "../integrations/google-oauth-revocation";
+import { prepareGoogleOAuthDisconnect } from "../integrations/google-oauth-revocation";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -1377,6 +1377,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Each writer records the disconnect in its own transaction.
     const audit = disconnectAuditActor(c, { subjectId: grant.subjectId, grant });
+    // Google OAuth: drop the stored tokens in the revoke write, then end the
+    // grant at Google once that write committed.
+    const googleDisconnect =
+      isPersonalGitHub || isOpenGeniSlackBotConnection(existing) || workspaceProviderKind
+        ? undefined
+        : await prepareGoogleOAuthDisconnect(deps, existing, grant.subjectId);
     const connection = isPersonalGitHub
       ? await disconnectPersonalGitHub(deps, {
           workspaceId,
@@ -1414,11 +1420,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               existing.version,
               {
                 audit,
-                // Google OAuth: end the grant at Google and drop the stored tokens.
-                replacementCredentialEncrypted: await revokeGoogleOAuthGrantForDisconnect(
-                  deps,
-                  existing,
-                ),
+                replacementCredentialEncrypted: googleDisconnect?.replacementCredentialEncrypted,
               },
             );
     if (!connection) {
@@ -1426,6 +1428,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // A Nango connection is deleted in Nango too, so its billing stops.
     await deleteNangoConnectionFor({ db, settings }, existing);
+    await googleDisconnect?.revokeAtGoogle?.();
     return c.json(ConnectionResponse.parse({ connection }));
   });
 

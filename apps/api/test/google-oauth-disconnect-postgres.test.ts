@@ -15,7 +15,8 @@ import { createApp } from "../src/app";
 import { GOOGLE_OAUTH_REVOKE_URL } from "../src/integrations/google-oauth-revocation";
 
 /* Disconnecting a Google OAuth connection ends the grant at Google and leaves
-   no Google tokens in the revoked row, even when Google is unreachable. Other
+   no Google tokens in the revoked row, even when Google is unreachable. The
+   grant stays at Google while another live connection may share it. Other
    providers keep status-only revocation. Through the real app and PostgreSQL. */
 
 const origin = "http://opengeni.test";
@@ -119,7 +120,12 @@ async function storedCredential(connectionId: string): Promise<{ status: string;
   };
 }
 
-async function googleConnection(person: Person, personal: boolean, tokenEndpoint: string) {
+async function googleConnection(
+  person: Person,
+  personal: boolean,
+  tokenEndpoint: string,
+  options: { metadata?: Record<string, unknown>; refreshToken?: string } = {},
+) {
   return await createConnection(client.db, {
     accountId: person.accountId,
     workspaceId: person.workspaceId,
@@ -130,15 +136,32 @@ async function googleConnection(person: Person, personal: boolean, tokenEndpoint
       encryptionKey,
       JSON.stringify({
         access_token: "google-access-secret",
-        refresh_token: "google-refresh-secret",
+        refresh_token: options.refreshToken ?? "google-refresh-secret",
         token_type: "Bearer",
         token_endpoint: tokenEndpoint,
         client_id: "opengeni-client.apps.googleusercontent.com",
         client_secret: "google-client-secret",
       }),
     ),
+    ...(options.metadata ? { metadata: options.metadata } : {}),
     createdBySubjectId: person.subjectId,
   });
+}
+
+async function disconnect(person: Person, connectionId: string): Promise<void> {
+  const removed = await app.request(
+    `/v1/workspaces/${person.workspaceId}/connections/${connectionId}`,
+    { method: "DELETE", headers: browser(person.cookie) },
+  );
+  expect(removed.status, await removed.clone().text()).toBe(200);
+  const stored = await storedCredential(connectionId);
+  expect(stored.status).toBe("revoked");
+  expect(stored.plain).not.toContain("refresh-secret");
+  expect(stored.plain).not.toContain("google-access-secret");
+}
+
+function revokedAtGoogle(): string[] {
+  return revokeRequests.map((request) => new URLSearchParams(request.body).get("token") ?? "");
 }
 
 describe("Google OAuth disconnect", () => {
@@ -215,5 +238,43 @@ describe("Google OAuth disconnect", () => {
     const stored = await storedCredential(connection.id);
     expect(stored.status).toBe("revoked");
     expect(stored.plain).toContain("google-refresh-secret");
+  });
+
+  test("keeps the grant at Google while another live connection of the account may use it", async () => {
+    const person = await signedInPerson();
+    // Gmail and Drive of one Google account share Opengeni's Google client, so
+    // revoking one grant at Google would cut off the other.
+    const gmail = await googleConnection(person, true, GOOGLE_TOKEN_ENDPOINT, {
+      metadata: { googleSubject: "google-sub-1", gmailEmail: "ada@example.test" },
+      refreshToken: "gmail-refresh-secret",
+    });
+    const drive = await googleConnection(person, false, GOOGLE_TOKEN_ENDPOINT, {
+      metadata: { googleSubject: "google-sub-1", googleDriveEmail: "ada@example.test" },
+      refreshToken: "drive-refresh-secret",
+    });
+    // Another Google account and another provider never hold this grant.
+    const otherAccount = await googleConnection(person, true, GOOGLE_TOKEN_ENDPOINT, {
+      metadata: { googleSubject: "google-sub-2" },
+      refreshToken: "other-account-refresh-secret",
+    });
+    await googleConnection(person, true, "https://auth.example.test/token", {
+      refreshToken: "other-provider-refresh-secret",
+    });
+
+    await disconnect(person, gmail.id);
+    expect(revokedAtGoogle()).toEqual([]);
+
+    await disconnect(person, drive.id);
+    expect(revokedAtGoogle()).toEqual(["drive-refresh-secret"]);
+
+    // A connection without verified account identity may be the same account.
+    const unidentified = await googleConnection(person, true, GOOGLE_TOKEN_ENDPOINT, {
+      refreshToken: "unidentified-refresh-secret",
+    });
+    revokeRequests = [];
+    await disconnect(person, otherAccount.id);
+    expect(revokedAtGoogle()).toEqual([]);
+    await disconnect(person, unidentified.id);
+    expect(revokedAtGoogle()).toEqual(["unidentified-refresh-secret"]);
   });
 });
