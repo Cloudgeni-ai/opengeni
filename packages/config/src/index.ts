@@ -10893,8 +10893,10 @@ function reviewedProviderModelPricing(
   // else its base model's catalogue rate. Without either it stays unknown
   // unless a reviewed route rule below applies.
   if (model.listPricing) return normalizeModelPricingSchedule(model.listPricing);
-  if (model.listPricingModelId)
-    return connectedModelBasePricing(model.listPricingModelId, configured);
+  const based = model.listPricingModelId
+    ? connectedModelBasePricing(model.listPricingModelId, configured)
+    : undefined;
+  if (based) return based;
   const upstream = model.upstreamModelId ?? model.id;
   let priceId: string | undefined;
   let nativeClaude = false;

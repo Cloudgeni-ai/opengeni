@@ -151,6 +151,9 @@ export function ModelListPriceDialog({
   const cachedMicros = cached.trim() ? parseDollars(cached) : undefined;
   const rateError = (value: string, micros: number | null | undefined) =>
     value.trim() && micros === null ? "Enter a price in US dollars, such as 2.50." : undefined;
+  // A cache-write rate set through the API has no field here; editing keeps it.
+  const cacheWrite =
+    current?.basis === "custom" ? current.pricing.cacheWriteMicrosPerMillionTokens : undefined;
   const customPricing: ConnectedModelListPricing | null =
     inputMicros !== null && outputMicros !== null && cachedMicros !== null
       ? {
@@ -159,6 +162,7 @@ export function ModelListPriceDialog({
           ...(cachedMicros === undefined
             ? {}
             : { cachedInputMicrosPerMillionTokens: cachedMicros }),
+          ...(cacheWrite === undefined ? {} : { cacheWriteMicrosPerMillionTokens: cacheWrite }),
         }
       : null;
   const next: ConnectedModelListPrice | null =

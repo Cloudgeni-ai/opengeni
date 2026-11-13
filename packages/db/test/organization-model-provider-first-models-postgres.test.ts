@@ -162,6 +162,8 @@ test("a deployment's price is versioned: a repeat is a no-op and a stale edit co
   expect(created).toMatchObject({ listPricingModelId: "gpt-6-astra", listPricing: null });
   const pricing = {
     inputMicrosPerMillionTokens: 2_000_000,
+    // jsonb stores keys in its own order: a repeat must still match it.
+    cachedInputMicrosPerMillionTokens: 200_000,
     outputMicrosPerMillionTokens: 8_000_000,
   };
   const set = (

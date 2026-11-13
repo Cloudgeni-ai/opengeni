@@ -1229,7 +1229,7 @@ export async function setOrganizationCustomModelListPriceInScope(
   const columns = connectedModelListPriceColumns(input.price);
   const unchanged =
     current.priceBasisModelId === columns.priceBasisModelId &&
-    JSON.stringify(current.listPricing) === JSON.stringify(columns.listPricing);
+    sameListPricing(current.listPricing, columns.listPricing);
   if (current.version === input.expectedVersion + 1 && unchanged) return current;
   if (current.version !== input.expectedVersion) throw new OrganizationModelProviderConflictError();
   const [row] = await scopedDb
@@ -1239,6 +1239,23 @@ export async function setOrganizationCustomModelListPriceInScope(
     .returning();
   if (!row) throw new OrganizationModelProviderConflictError();
   return row;
+}
+
+/**
+ * Whether two stored rates are the same rate, field by field: jsonb keeps
+ * its own key order, so a serialized comparison would miss a repeat.
+ */
+export function sameListPricing(
+  left: ConnectedModelListPricing | null,
+  right: ConnectedModelListPricing | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  return (
+    left.inputMicrosPerMillionTokens === right.inputMicrosPerMillionTokens &&
+    left.cachedInputMicrosPerMillionTokens === right.cachedInputMicrosPerMillionTokens &&
+    left.cacheWriteMicrosPerMillionTokens === right.cacheWriteMicrosPerMillionTokens &&
+    left.outputMicrosPerMillionTokens === right.outputMicrosPerMillionTokens
+  );
 }
 
 /** {@link setOrganizationCustomModelListPriceInScope} for an OpenAI model or Azure deployment. */

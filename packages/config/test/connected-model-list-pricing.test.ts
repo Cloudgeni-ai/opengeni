@@ -73,6 +73,13 @@ describe("connected model list pricing", () => {
         MODEL_ID
       ],
     ).toBeUndefined();
+    // An OpenAI model keeps OpenAI's own list rate when its stored base model has none.
+    const openai = withOrganizationDirectCatalogProvider(base(), "openai", {
+      models: [{ upstreamModelId: "gpt-6-astra", listPricingModelId: "not-a-catalogue-model" }],
+    });
+    expect(
+      configuredModelListPricingSchedules(openai)["organization-openai/gpt-6-astra"],
+    ).toBeDefined();
   });
 
   test("the operator's explicit rate for the base model is the base price", () => {

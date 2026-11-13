@@ -488,6 +488,8 @@ OpenAI-compatible model keys. A model has one of:
   as `priceBasisModelIds`.
 - **Its own rate** (`{ "basis": "custom", "pricing": { … } }`): input, optional
   cached-input and output USD micros per 1M tokens. It overrides a base model.
+  An operator `OPENGENI_MODEL_PRICING_JSON` entry for the model's exact
+  product id still comes first.
 - **No price** (`null`). An organization OpenAI model named by its OpenAI
   model id keeps OpenAI's list rate when Opengeni has one. Anything else stays
   **unpriced**: its calls
@@ -505,6 +507,10 @@ administrator sets its price with the price button on its row or
 `PUT …/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price`,
 with `{ expectedVersion, listPrice }`. Each model reports its `listPrice` and
 `listPriceKnown`.
+
+A base model's rate is the model's catalogue list rate. Azure's regional and
+data-zone deployments can cost more than that, so their estimate can be low;
+enter the deployment's own rate when that matters.
 
 A workspace's own model key works the same way: a new OpenAI or Azure OpenAI
 key takes the base model the provider reports when it is connected (an
