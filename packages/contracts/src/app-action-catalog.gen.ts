@@ -7999,6 +7999,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "PUT /v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "PUT /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "PUT",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",

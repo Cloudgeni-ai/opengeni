@@ -15801,6 +15801,14 @@ export const organizationModelProviderCustomModels = pgTable(
     defaultReasoningEffort: text("default_reasoning_effort").$type<
       "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     >(),
+    /**
+     * OpenAI, Azure OpenAI and OpenAI-compatible models only: the catalogue
+     * model whose list rate prices this model's usage estimates (an Azure
+     * deployment's base model). Null when unknown or `list_pricing` is set.
+     */
+    priceBasisModelId: text("price_basis_model_id"),
+    /** The administrator's own list rate for the model, in USD micros per 1M tokens. */
+    listPricing: jsonb("list_pricing").$type<ConnectedModelListPricing>(),
     version: integer("version").notNull().default(1),
     createOperationId: uuid("create_operation_id").notNull(),
     createRequestHash: text("create_request_hash").notNull(),
@@ -15873,8 +15881,20 @@ export const organizationModelProviderCustomModels = pgTable(
       "organization_model_provider_custom_models_delete_receipt_chk",
       sql`(${table.deleteOperationId} is null and ${table.deleteRequestHash} is null) or (${table.deleteOperationId} is not null and ${table.deleteRequestHash} ~ '^[a-f0-9]{64}$' and ${table.retiredAt} is not null)`,
     ),
+    listPriceCheck: check(
+      "organization_model_provider_custom_models_list_price_chk",
+      sql`(${table.priceBasisModelId} is null or ${table.listPricing} is null) and ((${table.priceBasisModelId} is null and ${table.listPricing} is null) or ${table.providerKind} in ('openai', 'azure_openai', 'openai_compatible')) and (${table.priceBasisModelId} is null or (octet_length(${table.priceBasisModelId}) between 1 and 256 and ${table.priceBasisModelId} ~ '^[!-~]+$')) and (${table.listPricing} is null or jsonb_typeof(${table.listPricing}) = 'object')`,
+    ),
   }),
 );
+
+/** An administrator's own list rate for a connected model, in USD micros per 1M tokens. */
+export type ConnectedModelListPricing = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+};
 
 export * from "./workspace-instruction-policies-schema";
 export * from "./company-profile-schema";

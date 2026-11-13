@@ -3752,6 +3752,14 @@ const RegistryModelSchema = z
     hostedWebSearchContextSize: z.enum(["low", "medium", "high"]).optional(),
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
+    // Reference price of a model whose provider reports no cost (an Azure
+    // deployment, an OpenAI-compatible endpoint): the catalogue model whose
+    // list rate it shares, such as a deployment's base model, or its own
+    // explicit rate, which wins. Usage estimates, spend limits and Insights
+    // only: never debit authority or executable identity, so it is outside
+    // the definition digest and changing it never strands an accepted turn.
+    listPricingModelId: z.string().min(1).max(256).optional(),
+    listPricing: ModelPricingSchema.optional(),
     // Where this route processes data, overriding the provider's declaration.
     // Only operator registry providers may declare it; see docs/eu-only-inference.md.
     residency: ModelResidencyDeclaration.optional(),
@@ -4206,6 +4214,8 @@ const DeploymentRegistryProviderKind = z.enum(["api-key", "anonymous"]);
 
 const DeploymentRegistryModelSchema = RegistryModelSchema.safeExtend({
   pricing: z.never().optional(),
+  listPricingModelId: z.never().optional(),
+  listPricing: z.never().optional(),
 }).strict();
 
 const DeploymentRegistryProviderSchema = RegistryProviderSchema.safeExtend({
@@ -8114,7 +8124,10 @@ function organizationDirectRegistryProvider(
   provider: OrganizationDirectModelProvider,
   input: {
     endpoint?: string | null | undefined;
-    models: readonly { upstreamModelId: string; label?: string | null }[];
+    models: readonly ({
+      upstreamModelId: string;
+      label?: string | null;
+    } & ConnectedModelListPrice)[];
     apiKey?: string;
     azureEntra?: AzureEntraProviderCredential;
   },
@@ -8142,6 +8155,7 @@ function organizationDirectRegistryProvider(
         hostedWebSearch: false,
       }),
       toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      ...connectedModelListPriceFields(model),
     });
   }
   if (models.length === 0) return null;
@@ -8310,11 +8324,11 @@ export type OrganizationCompatibleEndpointOverlay = {
   baseUrl: string;
   api: "chat" | "responses";
   label?: string | null;
-  models: readonly {
+  models: readonly ({
     upstreamModelId: string;
     label?: string | null;
     reasoning?: CompatibleModelReasoning | null;
-  }[];
+  } & ConnectedModelListPrice)[];
   /** Present only at execution, after the worker decrypts the endpoint's key. */
   apiKey?: string;
 };
@@ -8347,6 +8361,7 @@ export function withOrganizationCompatibleProviders(
         label: model.label?.trim() || model.upstreamModelId,
         capabilities: compatibleModelCapabilities(settings, model.reasoning),
         toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+        ...connectedModelListPriceFields(model),
       });
     }
     if (models.length === 0) continue;
@@ -10726,6 +10741,110 @@ export function configuredModelListPricingSchedules(
 }
 
 /**
+ * A connected model's stored reference price (see the registry model's
+ * `listPricing`): an explicit rate, or the catalogue model it is priced
+ * from, such as an Azure deployment's base model.
+ */
+export type ConnectedModelListPrice = {
+  listPricingModelId?: string | null | undefined;
+  listPricing?: ModelPricing | null | undefined;
+};
+
+function connectedModelListPriceFields(model: ConnectedModelListPrice): {
+  listPricingModelId?: string;
+  listPricing?: ModelPricing;
+} {
+  if (model.listPricing) return { listPricing: model.listPricing };
+  if (model.listPricingModelId) return { listPricingModelId: model.listPricingModelId };
+  return {};
+}
+
+function connectedModelBasePricing(
+  modelId: string,
+  configured: Record<string, ModelPricingScheduleV1>,
+): ModelPricingScheduleV1 | undefined {
+  return configured[modelId] ?? reviewedModelListPricing[modelId] ?? defaultModelPricing[modelId];
+}
+
+/**
+ * Catalogue models with a known list rate that a connected model can be
+ * priced from: the reviewed and built-in rates plus the operator's explicit
+ * `OPENGENI_MODEL_PRICING_JSON` entries.
+ */
+export function connectedModelPriceBasisModelIds(settings: Settings): string[] {
+  return [
+    ...new Set([
+      ...Object.keys(reviewedModelListPricing),
+      ...Object.keys(defaultModelPricing),
+      ...Object.keys(parseModelPricingJson(settings.modelPricingJson)),
+    ]),
+  ].sort();
+}
+
+/**
+ * The priceable catalogue model a provider reported serving, or null. Azure
+ * OpenAI answers with a deployment's base model, often with its
+ * `-YYYY-MM-DD` snapshot suffix; only that exact form or the exact id
+ * matches, never a prefix, label or fuzzy match.
+ */
+export function connectedModelPriceBasisFromReportedModel(
+  settings: Settings,
+  reportedModel: unknown,
+): string | null {
+  if (typeof reportedModel !== "string") return null;
+  const ids = new Set(connectedModelPriceBasisModelIds(settings));
+  if (ids.has(reportedModel)) return reportedModel;
+  const snapshot = /^(.+)-\d{4}-\d{2}-\d{2}$/u.exec(reportedModel);
+  return snapshot?.[1] && ids.has(snapshot[1]) ? snapshot[1] : null;
+}
+
+/** Whether usage of this configured product model gets a list-price estimate. */
+export function modelListPriceKnown(settings: Settings, productModelId: string): boolean {
+  return configuredModelListPricingSchedules(settings)[productModelId] !== undefined;
+}
+
+/**
+ * How an organization's OpenAI model, Azure deployment or OpenAI-compatible
+ * endpoint model is priced, for its administrators: the stored price and
+ * whether its usage gets an estimate under the same rules as its calls.
+ * The route's endpoint does not affect pricing, so a fixed one stands in.
+ */
+export function organizationConnectedModelListPrice(
+  settings: Settings,
+  kind: "openai" | "azure_openai" | "openai_compatible",
+  model: { upstreamModelId: string } & ConnectedModelListPrice,
+): {
+  listPrice:
+    | { basis: "model"; modelId: string }
+    | { basis: "custom"; pricing: ModelPricing }
+    | null;
+  listPriceKnown: boolean;
+} {
+  const stored = connectedModelListPriceFields(model);
+  const listPrice = stored.listPricing
+    ? { basis: "custom" as const, pricing: stored.listPricing }
+    : stored.listPricingModelId
+      ? { basis: "model" as const, modelId: stored.listPricingModelId }
+      : null;
+  const entry = { upstreamModelId: model.upstreamModelId, ...stored };
+  const endpointId = "00000000-0000-4000-8000-000000000000";
+  const overlay =
+    kind === "openai_compatible"
+      ? withOrganizationCompatibleProviders(settings, [
+          { id: endpointId, baseUrl: "https://endpoint.invalid/v1", api: "chat", models: [entry] },
+        ])
+      : withOrganizationDirectCatalogProvider(settings, kind, {
+          endpoint: "https://resource.openai.azure.com/openai/v1",
+          models: [entry],
+        });
+  const productModelId =
+    kind === "openai_compatible"
+      ? organizationCompatibleModelId(endpointId, model.upstreamModelId)
+      : `${organizationDirectModelIdPrefix(kind)}${model.upstreamModelId}`;
+  return { listPrice, listPriceKnown: modelListPriceKnown(overlay, productModelId) };
+}
+
+/**
  * A reviewed upstream list rate may also describe a namespaced product route.
  * Never infer a rate by stripping arbitrary prefixes, matching labels, or
  * treating every OpenAI-compatible endpoint as the original provider.
@@ -10738,6 +10857,12 @@ function reviewedProviderModelPricing(
   model: RegistryProvider["models"][number],
   configured: Record<string, ModelPricingScheduleV1>,
 ): ModelPricingScheduleV1 | undefined {
+  // A connected model's own declared price comes first: its explicit rate,
+  // else its base model's catalogue rate. Without either it stays unknown
+  // unless a reviewed route rule below applies.
+  if (model.listPricing) return normalizeModelPricingSchedule(model.listPricing);
+  if (model.listPricingModelId)
+    return connectedModelBasePricing(model.listPricingModelId, configured);
   const upstream = model.upstreamModelId ?? model.id;
   let priceId: string | undefined;
   let nativeClaude = false;

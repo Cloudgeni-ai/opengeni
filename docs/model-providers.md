@@ -470,6 +470,41 @@ signs in once first and returns a safe 422 if Entra refuses it; the identity
 needs the `Cognitive Services OpenAI User` role on the resource. Ownership,
 reach and administration are the same as for a key connection.
 
+#### What organization OpenAI, Azure OpenAI and endpoint models cost
+
+These providers never report what a call cost, so a call is priced from the
+model's **list price**. That price feeds usage estimates, Insights, per-task
+usage limits and workspace allowances that count usage paid outside Opengeni
+credits (`unbilledUsage: "list_price"`). Nothing is charged, and the price is
+never debit authority or part of a model's definition version, so changing it
+never strands an accepted turn. A model has one of:
+
+- **A base model** (`{ "basis": "model", "modelId": "gpt-6-astra" }`): the
+  catalogue model whose list rate it shares, such as an Azure deployment's base
+  model. It must have a known rate (a reviewed or built-in rate, or an
+  operator `OPENGENI_MODEL_PRICING_JSON` entry); the list responses name these
+  as `priceBasisModelIds`.
+- **Its own rate** (`{ "basis": "custom", "pricing": { … } }`): input, optional
+  cached-input and output USD micros per 1M tokens. It overrides a base model.
+- **No price** (`null`). An organization OpenAI model named by its OpenAI
+  model id keeps OpenAI's list rate when Opengeni has one. Anything else stays
+  **unpriced**: its calls
+  are recorded with an unknown cost (never $0), task limits show them as
+  unpriced and allowances can't count them, and the model's row says so.
+
+When a deployment is added, or saved with the key, Azure's answer to the setup
+check names the base model it serves (for example `gpt-6-astra-2026-03-05`);
+when that is a priceable catalogue model, exactly or without its `-YYYY-MM-DD`
+snapshot suffix, it becomes the deployment's price. A deployment added before
+this, or whose base model has no known rate, stays unpriced until an
+administrator sets its price with the price button on its row or
+`PUT /v1/organizations/:id/model-providers/:kind/custom-models/:customModelId/list-price`
+(`openai` and `azure_openai`) or
+`PUT …/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price`,
+with `{ expectedVersion, listPrice }`. Each model reports its `listPrice` and
+`listPriceKnown`. A new price applies to calls after it; earlier unpriced calls
+keep their unknown cost.
+
 #### Organization OpenAI-compatible endpoints
 
 Organization owners/admins connect their own OpenAI-compatible endpoints from

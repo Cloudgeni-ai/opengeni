@@ -17,9 +17,9 @@ import {
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { defaultModelRequestHash } from "./model-catalog";
 import * as schema from "./schema";
-import type { OrganizationModelProviderAuthMethod } from "./schema";
+import type { ConnectedModelListPricing, OrganizationModelProviderAuthMethod } from "./schema";
 
-export type { OrganizationModelProviderAuthMethod } from "./schema";
+export type { ConnectedModelListPricing, OrganizationModelProviderAuthMethod } from "./schema";
 
 /** Providers whose organization key runs models, with custom models to choose. */
 export type OrganizationModelCatalogProviderKind =
@@ -125,11 +125,35 @@ export type OrganizationModelProviderCustomModel = {
   providerKind: OrganizationModelCatalogProviderKind;
   upstreamModelId: string;
   label: string | null;
+  /** OpenAI and Azure OpenAI only: the catalogue model whose list rate prices it. */
+  listPricingModelId: string | null;
+  /** OpenAI and Azure OpenAI only: the administrator's own list rate. */
+  listPricing: ConnectedModelListPricing | null;
   version: number;
   retiredAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 };
+
+/**
+ * What a connected model's usage costs: the catalogue model it is priced
+ * from (an Azure deployment's base model), its own rate, or unknown (null).
+ */
+export type ConnectedModelListPrice =
+  | { basis: "model"; modelId: string }
+  | { basis: "custom"; pricing: ConnectedModelListPricing }
+  | null;
+
+/** The stored columns of a {@link ConnectedModelListPrice}. */
+export function connectedModelListPriceColumns(price: ConnectedModelListPrice): {
+  priceBasisModelId: string | null;
+  listPricing: ConnectedModelListPricing | null;
+} {
+  return {
+    priceBasisModelId: price?.basis === "model" ? price.modelId : null,
+    listPricing: price?.basis === "custom" ? price.pricing : null,
+  };
+}
 
 /** Exact accepted source; never resolve the caller's current pool at this fence. */
 export type OrganizationClaudeModelAdmissionAuthority =
@@ -258,6 +282,8 @@ export function mapOrganizationModelProviderCustomModel(
     providerKind: row.providerKind as OrganizationModelCatalogProviderKind,
     upstreamModelId: row.upstreamModelId,
     label: row.label,
+    listPricingModelId: row.priceBasisModelId,
+    listPricing: row.listPricing,
     version: row.version,
     retiredAt: row.retiredAt,
     createdAt: row.createdAt,
@@ -318,6 +344,12 @@ export async function upsertOrganizationModelProviderConnection(
      * Bound into the request hash when present.
      */
     models?: readonly string[];
+    /**
+     * The price the server detected for a new model in `models` while
+     * checking it (Azure's reported base model). Not part of the request
+     * identity; a model the organization already offers keeps its own.
+     */
+    modelListPrices?: Readonly<Record<string, ConnectedModelListPrice>>;
     operationId: string;
     expectedVersion?: number;
   },
@@ -422,6 +454,9 @@ export async function upsertOrganizationModelProviderConnection(
         upstreamModelId,
         // One operation per model of this request, so the save stays replayable.
         operationId: derivedOperationId(`${input.operationId}:model:${upstreamModelId}`),
+        ...(input.modelListPrices && Object.hasOwn(input.modelListPrices, upstreamModelId)
+          ? { listPrice: input.modelListPrices[upstreamModelId]! }
+          : {}),
       });
     }
     return connection;
@@ -1010,6 +1045,12 @@ export async function createOrganizationModelProviderCustomModel(
     upstreamModelId: string;
     label?: string;
     operationId: string;
+    /**
+     * OpenAI and Azure OpenAI only: the price the server detected while
+     * checking the model (Azure's reported base model). Not part of the
+     * request identity, so a replay returns the first result.
+     */
+    listPrice?: ConnectedModelListPrice;
   },
 ): Promise<OrganizationModelProviderCustomModel> {
   return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
@@ -1072,6 +1113,10 @@ export async function createOrganizationModelProviderCustomModel(
         providerKind: input.providerKind,
         upstreamModelId: input.upstreamModelId,
         label: input.label ?? null,
+        ...(input.listPrice !== undefined &&
+        (input.providerKind === "openai" || input.providerKind === "azure_openai")
+          ? connectedModelListPriceColumns(input.listPrice)
+          : {}),
         createOperationId: input.operationId,
         createRequestHash: requestHash,
         createdBySubjectId: input.actorSubjectId,
@@ -1139,4 +1184,76 @@ export async function retireOrganizationModelProviderCustomModel(
     if (!row) throw new OrganizationModelProviderConflictError();
     return mapModel(row);
   });
+}
+
+type CustomModelRow = typeof schema.organizationModelProviderCustomModels.$inferSelect;
+
+/**
+ * Set what an organization OpenAI, Azure OpenAI or OpenAI-compatible model's
+ * usage costs, inside the administrator's scope. The version guards
+ * concurrent edits; repeating the change that produced the current version
+ * returns the model unchanged. A missing or retired model is a conflict.
+ */
+export async function setOrganizationCustomModelListPriceInScope(
+  scopedDb: Database,
+  input: {
+    organizationId: string;
+    providerKind: "openai" | "azure_openai" | "openai_compatible";
+    /** OpenAI-compatible models only: the endpoint the model belongs to. */
+    connectionId?: string;
+    customModelId: string;
+    expectedVersion: number;
+    price: ConnectedModelListPrice;
+  },
+): Promise<CustomModelRow> {
+  const models = schema.organizationModelProviderCustomModels;
+  await scopedDb.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider-models:${input.organizationId}:${input.providerKind}`}, 0))`,
+  );
+  const [current] = await scopedDb
+    .select()
+    .from(models)
+    .where(
+      and(
+        eq(models.accountId, input.organizationId),
+        eq(models.providerKind, input.providerKind),
+        input.connectionId === undefined
+          ? isNull(models.connectionId)
+          : eq(models.connectionId, input.connectionId),
+        eq(models.id, input.customModelId),
+        isNull(models.retiredAt),
+      ),
+    )
+    .limit(1);
+  if (!current) throw new OrganizationModelProviderConflictError();
+  const columns = connectedModelListPriceColumns(input.price);
+  const unchanged =
+    current.priceBasisModelId === columns.priceBasisModelId &&
+    JSON.stringify(current.listPricing) === JSON.stringify(columns.listPricing);
+  if (current.version === input.expectedVersion + 1 && unchanged) return current;
+  if (current.version !== input.expectedVersion) throw new OrganizationModelProviderConflictError();
+  const [row] = await scopedDb
+    .update(models)
+    .set({ ...columns, version: current.version + 1, updatedAt: new Date() })
+    .where(and(eq(models.id, current.id), eq(models.version, current.version)))
+    .returning();
+  if (!row) throw new OrganizationModelProviderConflictError();
+  return row;
+}
+
+/** {@link setOrganizationCustomModelListPriceInScope} for an OpenAI model or Azure deployment. */
+export async function setOrganizationModelProviderCustomModelListPrice(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    providerKind: "openai" | "azure_openai";
+    customModelId: string;
+    expectedVersion: number;
+    price: ConnectedModelListPrice;
+  },
+): Promise<OrganizationModelProviderCustomModel> {
+  return await withOrganizationProviderAdministrator(db, input, async (scopedDb) =>
+    mapModel(await setOrganizationCustomModelListPriceInScope(scopedDb, input)),
+  );
 }

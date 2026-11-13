@@ -3901,15 +3901,86 @@ export const DeleteOrganizationProviderCustomModelRequest =
 export type DeleteOrganizationProviderCustomModelRequest = z.infer<
   typeof DeleteOrganizationProviderCustomModelRequest
 >;
-export const OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+/**
+ * An administrator's own list rate for a connected model, in USD micros
+ * (1 USD = 1,000,000) per 1M tokens. Without a cached-input rate, cached
+ * input is priced as input.
+ */
+export const ConnectedModelListPricing = /* @__PURE__ */ defineSchema(() => {
+  const rate = z.number().int().min(0).max(1_000_000_000_000);
+  return z
+    .object({
+      inputMicrosPerMillionTokens: rate,
+      cachedInputMicrosPerMillionTokens: rate.optional(),
+      cacheWriteMicrosPerMillionTokens: rate.optional(),
+      outputMicrosPerMillionTokens: rate,
+    })
+    .strict();
+});
+export type ConnectedModelListPricing = z.infer<typeof ConnectedModelListPricing>;
+
+/**
+ * What a connected model's usage costs, for usage estimates, spend limits
+ * and Insights (never a charge): the catalogue model whose list rate it
+ * shares, such as an Azure deployment's base model, or the administrator's
+ * own rate.
+ */
+export const ConnectedModelListPrice = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("basis", [
+    z
+      .object({
+        basis: z.literal("model"),
+        modelId: primitives.string
+          .min(1)
+          .max(256)
+          .regex(/^[!-~]+$/),
+      })
+      .strict(),
+    z.object({ basis: z.literal("custom"), pricing: ConnectedModelListPricing }).strict(),
+  ]),
+);
+export type ConnectedModelListPrice = z.infer<typeof ConnectedModelListPrice>;
+
+export const OrganizationProviderCustomModel = /* @__PURE__ */ defineSchema(() =>
+  WorkspaceGatewayCustomModel.extend({
+    /**
+     * OpenAI, Azure OpenAI and OpenAI-compatible models only (their providers
+     * report no cost): the price the model was given, or null.
+     */
+    listPrice: ConnectedModelListPrice.nullable().optional(),
+    /**
+     * OpenAI, Azure OpenAI and OpenAI-compatible models only: whether its
+     * usage gets a cost estimate. False means its calls are recorded as
+     * unpriced and spend limits can't count them.
+     */
+    listPriceKnown: z.boolean().optional(),
+  }),
+);
 export type OrganizationProviderCustomModel = z.infer<typeof OrganizationProviderCustomModel>;
 export const OrganizationProviderCustomModelsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     models: z.array(OrganizationProviderCustomModel),
+    /**
+     * OpenAI and Azure OpenAI only: catalogue models with a known list rate
+     * that a model can be priced from.
+     */
+    priceBasisModelIds: z.array(primitives.string).optional(),
   }),
 );
 export type OrganizationProviderCustomModelsResponse = z.infer<
   typeof OrganizationProviderCustomModelsResponse
+>;
+/** Set or clear (null) what an organization model's usage costs. */
+export const SetOrganizationCustomModelListPriceRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      expectedVersion: primitives.positiveInteger,
+      listPrice: ConnectedModelListPrice.nullable(),
+    })
+    .strict(),
+);
+export type SetOrganizationCustomModelListPriceRequest = z.infer<
+  typeof SetOrganizationCustomModelListPriceRequest
 >;
 
 export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
@@ -4142,7 +4213,11 @@ export const OrganizationCompatibleEndpoint = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrganizationCompatibleEndpoint = z.infer<typeof OrganizationCompatibleEndpoint>;
 export const OrganizationCompatibleEndpointsResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ endpoints: z.array(OrganizationCompatibleEndpoint) }),
+  z.object({
+    endpoints: z.array(OrganizationCompatibleEndpoint),
+    /** Catalogue models with a known list rate that a model can be priced like. */
+    priceBasisModelIds: z.array(primitives.string).optional(),
+  }),
 );
 export type OrganizationCompatibleEndpointsResponse = z.infer<
   typeof OrganizationCompatibleEndpointsResponse
