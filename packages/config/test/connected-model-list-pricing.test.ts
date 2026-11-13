@@ -12,8 +12,11 @@ import {
   withOrganizationAzureOpenAICatalogProvider,
   withOrganizationAzureOpenAICredential,
   withOrganizationCompatibleProviders,
+  withDirectModelProviders,
   withOrganizationDirectCatalogProvider,
+  workspaceModelKeyListPriceKnown,
 } from "../src";
+import { directModelConnectionSpec } from "@opengeni/contracts";
 
 const ENDPOINT = "https://contoso.openai.azure.com/openai/v1";
 const DEPLOYMENT = "prod-reasoning";
@@ -124,5 +127,42 @@ describe("connected model list pricing", () => {
     expect(connectedModelPriceBasisFromReportedModel(settings, "gpt-6-astra-mini")).toBeNull();
     expect(connectedModelPriceBasisFromReportedModel(settings, "my-gpt-6-astra")).toBeNull();
     expect(connectedModelPriceBasisFromReportedModel(settings, undefined)).toBeNull();
+  });
+
+  test("a workspace's own model key is priced by the same rules, from its stored price", () => {
+    const key = (listPrice?: unknown) => ({
+      id: "00000000-0000-4000-8000-000000000001",
+      version: 3,
+      subjectId: null,
+      kind: "api_key",
+      status: "active",
+      providerDomain: "contoso.openai.azure.com",
+      metadata: {
+        credentialRole: "direct_azure_openai",
+        directModelProvider: { provider: "azure_openai", model: DEPLOYMENT, endpoint: ENDPOINT },
+      },
+      ...(listPrice === undefined ? {} : { listPrice }),
+    });
+    const modelId = directModelConnectionSpec(key())!.modelId;
+    const priced = (listPrice?: unknown) =>
+      configuredModelListPricingSchedules(
+        withDirectModelProviders(base(), [key(listPrice) as never]),
+      )[modelId];
+    expect(priced()).toBeUndefined();
+    expect(workspaceModelKeyListPriceKnown(base(), key(null) as never)).toBe(false);
+    expect(priced({ basis: "model", modelId: "gpt-6-astra" })).toEqual(
+      defaultModelPricing["gpt-6-astra"]!,
+    );
+    expect(priced({ basis: "custom", pricing: CUSTOM })).toEqual({ default: CUSTOM });
+    expect(
+      workspaceModelKeyListPriceKnown(
+        base(),
+        key({ basis: "model", modelId: "gpt-6-astra" }) as never,
+      ),
+    ).toBe(true);
+    // Any other connection has no price to know.
+    expect(
+      workspaceModelKeyListPriceKnown(base(), { ...key(), metadata: {} } as never),
+    ).toBeUndefined();
   });
 });

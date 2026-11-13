@@ -1112,6 +1112,8 @@ export type {
   ConnectedModelListPricing,
   ConnectedModelListPrice,
   SetOrganizationCustomModelListPriceRequest,
+  SetWorkspaceModelKeyListPriceRequest,
+  ModelPriceBasisModelsResponse,
   WorkspaceModelAccessPolicy,
   OrganizationModelDefaults,
   UpdateOrganizationModelDefaultsRequest,

@@ -2882,6 +2882,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/model-price-basis-models",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/model-price-basis-models",
+    "request": [],
+    "response": [],
+    "permission": "connections:read"
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/models",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/models",
@@ -7999,24 +8007,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "PUT /v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
-    "method": "PUT",
-    "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
-    "request": [
-      "SetOrganizationCustomModelListPriceRequest"
-    ],
-    "response": []
-  },
-  {
-    "id": "PUT /v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price",
-    "method": "PUT",
-    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price",
-    "request": [
-      "SetOrganizationCustomModelListPriceRequest"
-    ],
-    "response": []
-  },
-  {
     "id": "PUT /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "PUT",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
@@ -8062,6 +8052,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "secretFields": [
       "request.token"
     ]
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/connections/:connectionId/list-price",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/list-price",
+    "request": [
+      "SetWorkspaceModelKeyListPriceRequest"
+    ],
+    "response": []
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/credential-profile",
@@ -9410,6 +9409,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setOrganizationCompatibleEndpointModelListPrice",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
     "id": "setOrganizationCompatibleEndpointModelReasoning",
     "method": "PUT",
     "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/reasoning",
@@ -9418,6 +9428,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
+    "id": "setOrganizationProviderCustomModelListPrice",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": [
+      "OrganizationProviderCustomModel"
     ]
   },
   {

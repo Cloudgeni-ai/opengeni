@@ -10,14 +10,15 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 
 /* ----------------------------------------------------------------------------
-   What an organization OpenAI model, Azure OpenAI deployment or
-   OpenAI-compatible endpoint model costs. Their providers report no cost, so
-   usage estimates, Insights and spend limits use this price: the list rate
-   of the model it's served like (an Azure deployment's base model), or the
-   administrator's own rate. Without one its usage is unpriced, never $0.
+   What an OpenAI model, Azure OpenAI deployment or OpenAI-compatible
+   endpoint model costs, whether the organization or one workspace connected
+   it. Their providers report no cost, so usage estimates, Insights and spend
+   limits use this price: the list rate of the model it's served like (an
+   Azure deployment's base model), or the administrator's own rate. Without
+   one its usage is unpriced, never $0.
    -------------------------------------------------------------------------- */
 
-/** The price fields an organization model carries, when its provider reports no cost. */
+/** The price fields a connected model carries, when its provider reports no cost. */
 export interface PricedModelLike {
   id: string;
   upstreamModelId: string;

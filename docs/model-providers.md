@@ -470,14 +470,16 @@ signs in once first and returns a safe 422 if Entra refuses it; the identity
 needs the `Cognitive Services OpenAI User` role on the resource. Ownership,
 reach and administration are the same as for a key connection.
 
-#### What organization OpenAI, Azure OpenAI and endpoint models cost
+#### What OpenAI, Azure OpenAI and endpoint models you connect cost
 
 These providers never report what a call cost, so a call is priced from the
 model's **list price**. That price feeds usage estimates, Insights, per-task
 usage limits and workspace allowances that count usage paid outside Opengeni
 credits (`unbilledUsage: "list_price"`). Nothing is charged, and the price is
 never debit authority or part of a model's definition version, so changing it
-never strands an accepted turn. A model has one of:
+never strands an accepted turn. This applies the same way to an
+organization's models and to a workspace's own OpenAI, Azure OpenAI and
+OpenAI-compatible model keys. A model has one of:
 
 - **A base model** (`{ "basis": "model", "modelId": "gpt-6-astra" }`): the
   catalogue model whose list rate it shares, such as an Azure deployment's base
@@ -502,8 +504,21 @@ administrator sets its price with the price button on its row or
 (`openai` and `azure_openai`) or
 `PUT …/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price`,
 with `{ expectedVersion, listPrice }`. Each model reports its `listPrice` and
-`listPriceKnown`. A new price applies to calls after it; earlier unpriced calls
-keep their unknown cost.
+`listPriceKnown`.
+
+A workspace's own model key works the same way: a new OpenAI or Azure OpenAI
+key takes the base model the provider reports when it is connected (an
+OpenAI-compatible endpoint's own answer is not trusted for this), and a
+workspace admin sets or clears its price with the price button on the key's
+row or `PUT /v1/workspaces/:workspaceId/connections/:connectionId/list-price`
+with `{ listPrice }`; `GET /v1/workspaces/:workspaceId/model-price-basis-models`
+lists the base models. The price is not part of the key's version, so the
+key's model keeps its id. Workspace connection lists report each key's
+`listPrice` and `listPriceKnown`.
+
+A new price applies to calls after it; earlier unpriced calls keep their
+unknown cost. Insights shows them as unpriced, never as $0: a spend total
+that leaves them out says how many calls in the period are not priced.
 
 #### Organization OpenAI-compatible endpoints
 

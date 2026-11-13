@@ -369,6 +369,7 @@ import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organizati
 import { registerOrganizationConnectorRoutes } from "./routes/organization-connectors";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
+import { registerWorkspaceModelKeyPriceRoutes } from "./routes/workspace-model-key-prices";
 import { registerVaultProviderRoutes, vaultProviderRegistryFor } from "./routes/vault-providers";
 import { registerConnectRoutes } from "./routes/connect";
 
@@ -2718,6 +2719,7 @@ export function createAppComposition(
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerPersonalGitHubGatewayRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
+  registerWorkspaceModelKeyPriceRoutes(app, routeDeps);
   registerVaultProviderRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
 

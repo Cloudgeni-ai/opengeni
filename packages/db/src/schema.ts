@@ -2005,6 +2005,13 @@ export const connections = pgTable(
     verifiedInstallAt: timestamp("verified_install_at", { withTimezone: true }),
     verifiedInstallVersion: integer("verified_install_version"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    // A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
+    // only: what its model's usage costs, for usage estimates and spend limits
+    // (see organizationModelProviderCustomModels). The catalogue model whose
+    // list rate it shares, or the administrator's own rate; both null when
+    // unknown. Never part of `version`, so the model's id is unaffected.
+    priceBasisModelId: text("price_basis_model_id"),
+    listPricing: jsonb("list_pricing").$type<ConnectedModelListPricing>(),
     createdBySubjectId: text("created_by_subject_id"),
     updatedBySubjectId: text("updated_by_subject_id"),
     // Explicit execution authority. Workspace rows have no member authority;
@@ -2091,6 +2098,10 @@ export const connections = pgTable(
     authorityGenerationValid: check(
       "connections_authority_generation_check",
       sql`${table.authorityGeneration} > 0`,
+    ),
+    listPriceValid: check(
+      "connections_list_price_chk",
+      sql`(${table.priceBasisModelId} is null or ${table.listPricing} is null) and ((${table.priceBasisModelId} is null and ${table.listPricing} is null) or (${table.subjectId} is null and ${table.kind} = 'api_key' and ${table.metadata} ? 'directModelProvider')) and (${table.priceBasisModelId} is null or (octet_length(${table.priceBasisModelId}) between 1 and 256 and ${table.priceBasisModelId} ~ '^[!-~]+$')) and (${table.listPricing} is null or jsonb_typeof(${table.listPricing}) = 'object')`,
     ),
     authority: foreignKey({
       name: "connections_authority_fk",

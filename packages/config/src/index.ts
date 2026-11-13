@@ -7856,6 +7856,8 @@ export function withDirectModelProviders(
     status: string;
     providerDomain: string;
     metadata: Record<string, unknown>;
+    /** What the key's model costs (see `ConnectedModelListPrice`); null when unknown. */
+    listPrice?: WorkspaceModelKeyListPrice | null | undefined;
     apiKey?: string;
   }[],
 ): Settings {
@@ -7884,6 +7886,9 @@ export function withDirectModelProviders(
             label: spec.model,
             capabilities: compatibleModelCapabilities(settings, spec.reasoning),
             toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+            ...connectedModelListPriceFields(
+              workspaceModelKeyListPriceFields(connection.listPrice),
+            ),
           },
         ],
       });
@@ -7907,6 +7912,7 @@ export function withDirectModelProviders(
             hostedWebSearch: false,
           }),
           toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+          ...connectedModelListPriceFields(workspaceModelKeyListPriceFields(connection.listPrice)),
         },
       ],
     });
@@ -10757,6 +10763,32 @@ function connectedModelListPriceFields(model: ConnectedModelListPrice): {
   if (model.listPricing) return { listPricing: model.listPricing };
   if (model.listPricingModelId) return { listPricingModelId: model.listPricingModelId };
   return {};
+}
+
+/** A workspace model key's stored price, in the shape its connection carries. */
+export type WorkspaceModelKeyListPrice =
+  | { basis: "model"; modelId: string }
+  | { basis: "custom"; pricing: ModelPricing };
+
+function workspaceModelKeyListPriceFields(
+  price: WorkspaceModelKeyListPrice | null | undefined,
+): ConnectedModelListPrice {
+  if (price?.basis === "custom") return { listPricing: price.pricing };
+  if (price?.basis === "model") return { listPricingModelId: price.modelId };
+  return {};
+}
+
+/**
+ * Whether a workspace's own model key's usage gets a list-price estimate,
+ * under the same rules as its calls; undefined for any other connection.
+ */
+export function workspaceModelKeyListPriceKnown(
+  settings: Settings,
+  connection: Parameters<typeof withDirectModelProviders>[1][number],
+): boolean | undefined {
+  const spec = directModelConnectionSpec(connection);
+  if (!spec) return undefined;
+  return modelListPriceKnown(withDirectModelProviders(settings, [connection]), spec.modelId);
 }
 
 function connectedModelBasePricing(

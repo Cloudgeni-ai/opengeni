@@ -10,6 +10,7 @@ import {
 import {
   bootstrapWorkspace,
   checkWorkspaceAllowance,
+  createConnection,
   createDb,
   createSession,
   encryptEnvironmentValue,
@@ -19,9 +20,11 @@ import {
   recordModelCallFact,
   setOrganizationModelProviderCustomModelListPrice,
   setWorkspaceAllowance,
+  setWorkspaceModelKeyListPrice,
   upsertOrganizationModelProviderConnection,
   type DbClient,
 } from "@opengeni/db";
+import { directModelConnectionSpec } from "@opengeni/contracts";
 import { normalizeModelCallUsage } from "@opengeni/runtime";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -128,7 +131,12 @@ async function organizationWithDeployment(
 }
 
 /** Serve and record one 100k-input, 10k-output call, as a turn does. */
-async function serveCall(fixture: Awaited<ReturnType<typeof organizationWithDeployment>>) {
+async function serveCall(
+  fixture: Pick<
+    Awaited<ReturnType<typeof organizationWithDeployment>>,
+    "scope" | "sessionId" | "turnId" | "model"
+  >,
+) {
   const execution = await settingsWithModelProviderCredentials(client.db, {
     accountId: fixture.scope.accountId,
     workspaceId: fixture.scope.workspaceId,
@@ -156,7 +164,9 @@ async function serveCall(fixture: Awaited<ReturnType<typeof organizationWithDepl
     sessionId: fixture.sessionId,
     turnId: fixture.turnId,
     sourceKey,
-    provider: "organization-azure-openai",
+    provider: fixture.model.startsWith("workspace-")
+      ? "workspace-azure-openai"
+      : "organization-azure-openai",
     providerApi: "responses",
     model: fixture.model,
     billingPath: billing.billingPath,
@@ -171,7 +181,7 @@ async function serveCall(fixture: Awaited<ReturnType<typeof organizationWithDepl
 }
 
 async function listPriceAllowance(
-  fixture: Awaited<ReturnType<typeof organizationWithDeployment>>,
+  fixture: Pick<Awaited<ReturnType<typeof organizationWithDeployment>>, "scope">,
   includedCredits: number,
 ) {
   await setWorkspaceAllowance(client.db, {
@@ -184,7 +194,9 @@ async function listPriceAllowance(
   });
 }
 
-const exhausted = (fixture: Awaited<ReturnType<typeof organizationWithDeployment>>) =>
+const exhausted = (
+  fixture: Pick<Awaited<ReturnType<typeof organizationWithDeployment>>, "scope">,
+) =>
   checkWorkspaceAllowance(client.db, {
     ...fixture.scope,
     fundedWithoutCredits: true,
@@ -269,4 +281,97 @@ test("a deployment without a price is recorded as unknown, never $0, and can be 
   });
   expect((await serveCall(fixture)).billing.pricingSource).toBe("configured_list_price");
   expect(await exhausted(fixture)).toMatchObject({ code: "allowance_exhausted" });
+});
+
+/** The same workspace with its own Azure OpenAI key for one deployment. */
+async function workspaceWithModelKey(deployment: string) {
+  const fixture = await organizationWithDeployment(`org-${deployment}`, null);
+  const connection = await createConnection(client.db, {
+    accountId: fixture.scope.accountId,
+    workspaceId: fixture.scope.workspaceId,
+    subjectId: null,
+    providerDomain: "contoso.openai.azure.com",
+    kind: "api_key",
+    createdBySubjectId: fixture.scope.subjectId,
+    credentialEncrypted: encryptEnvironmentValue(
+      environmentsEncryptionKeyBytes(settings)!,
+      JSON.stringify({ apiKey: "azure-workspace-key" }),
+    ),
+    metadata: {
+      credentialRole: "direct_azure_openai",
+      directModelProvider: { provider: "azure_openai", model: deployment, endpoint: ENDPOINT },
+    },
+  });
+  const model = directModelConnectionSpec(connection)!.modelId;
+  const setPrice = (price: Parameters<typeof setWorkspaceModelKeyListPrice>[1]["price"]) =>
+    setWorkspaceModelKeyListPrice(client.db, {
+      accountId: fixture.scope.accountId,
+      workspaceId: fixture.scope.workspaceId,
+      connectionId: connection.id,
+      actorSubjectId: fixture.scope.subjectId,
+      price,
+    });
+  return { ...fixture, model, connection, setPrice };
+}
+
+test("a workspace's own Azure key is priced the same way, without changing its model's id", async () => {
+  if (!shared) return;
+  const fixture = await workspaceWithModelKey("team-reasoning");
+  await listPriceAllowance(fixture, 1);
+  const unknown = await serveCall(fixture);
+  expect(unknown.billing).toMatchObject({ estimatedProviderCostMicros: null, pricingSource: null });
+  expect(await exhausted(fixture)).toBeNull();
+
+  const priced = await fixture.setPrice({ basis: "model", modelId: "gpt-6-astra" });
+  expect(priced).toMatchObject({
+    version: fixture.connection.version,
+    listPrice: { basis: "model", modelId: "gpt-6-astra" },
+  });
+  expect(directModelConnectionSpec(priced!)!.modelId).toBe(fixture.model);
+  const expected =
+    BASE_RATE.inputMicrosPerMillionTokens / 10 + BASE_RATE.outputMicrosPerMillionTokens / 100;
+  const { billing } = await serveCall(fixture);
+  expect(billing).toMatchObject({
+    billingPath: "external",
+    pricingSource: "configured_list_price",
+    estimatedProviderCostMicros: expected,
+  });
+  expect(await exhausted(fixture)).toMatchObject({ code: "allowance_exhausted" });
+
+  // An explicit rate overrides the base model; clearing it is unknown again.
+  await fixture.setPrice({
+    basis: "custom",
+    pricing: { inputMicrosPerMillionTokens: 2_000_000, outputMicrosPerMillionTokens: 8_000_000 },
+  });
+  expect((await serveCall(fixture)).billing.estimatedProviderCostMicros).toBe(280_000);
+  expect(await fixture.setPrice(null)).toMatchObject({ listPrice: null });
+  expect((await serveCall(fixture)).billing.estimatedProviderCostMicros).toBeNull();
+});
+
+test("only a workspace's own model key can carry a price", async () => {
+  if (!shared) return;
+  const fixture = await workspaceWithModelKey("team-other");
+  const other = await createConnection(client.db, {
+    accountId: fixture.scope.accountId,
+    workspaceId: fixture.scope.workspaceId,
+    subjectId: null,
+    providerDomain: "api.example.com",
+    kind: "api_key",
+    createdBySubjectId: fixture.scope.subjectId,
+    credentialEncrypted: "fixture-ciphertext-not-a-key",
+    metadata: {},
+  });
+  expect(
+    await setWorkspaceModelKeyListPrice(client.db, {
+      accountId: fixture.scope.accountId,
+      workspaceId: fixture.scope.workspaceId,
+      connectionId: other.id,
+      actorSubjectId: fixture.scope.subjectId,
+      price: { basis: "model", modelId: "gpt-6-astra" },
+    }),
+  ).toBeNull();
+  await expect(
+    shared!
+      .admin`update connections set price_basis_model_id = 'gpt-6-astra' where id = ${other.id}::uuid`,
+  ).rejects.toThrow(/connections_list_price_chk/);
 });

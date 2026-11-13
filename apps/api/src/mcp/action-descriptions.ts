@@ -192,6 +192,18 @@ const RULES: Rule[] = [
   },
   {
     method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/connections\/:connectionId\/list-price$/,
+    text: () =>
+      "Set what a workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key's model costs, for usage estimates and spend limits: the catalogue model it is priced like (an Azure deployment's base model), an explicit rate in USD micros per 1M tokens, or null for unknown. Workspace admins.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/model-price-basis-models$/,
+    text: () =>
+      "List the catalogue models with a known list rate that a workspace model key can be priced like.",
+  },
+  {
+    method: "PUT",
     pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
     text: () =>
       "Change which workspaces and which models a model connection can serve. Workspaces: all (optionally including Personal workspaces), selected ones, or none. Models: all including new ones, or only chosen ones. A workspace's own subscription account stays its workspace's when shared with selected workspaces; serving all workspaces, Personal workspaces or people needs moveToOrganization: true on the organization route, after which only organization admins manage it. Applies to new chats and schedules; running work keeps going.",

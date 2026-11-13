@@ -4520,6 +4520,20 @@
       ]
     },
     {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/connections/:connectionId/list-price",
+      "sdk": [
+        "OpenGeniClient.setWorkspaceModelKeyListPrice"
+      ],
+      "request": [
+        "SetWorkspaceModelKeyListPriceRequest"
+      ],
+      "response": [
+        "ConnectionMetadata",
+        "ConnectionResponse"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults",
       "sdk": [
@@ -6995,6 +7009,17 @@
       ],
       "request": [],
       "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/model-price-basis-models",
+      "sdk": [
+        "OpenGeniClient.listModelPriceBasisModels"
+      ],
+      "request": [],
+      "response": [
+        "ModelPriceBasisModelsResponse"
+      ]
     },
     {
       "method": "GET",
@@ -16408,6 +16433,8 @@
         "$.lastError": "string! null",
         "$.lastRefreshAt": "string! null",
         "$.lastUsedAt": "string! null",
+        "$.listPrice": "ref(ConnectedModelListPrice)? null",
+        "$.listPriceKnown": "boolean?",
         "$.metadata": "object!",
         "$.metadata{}": "unknown",
         "$.providerDomain": "string!",
@@ -24193,6 +24220,16 @@
         "$": "enum=[\"\\\"azure_data_zone\\\"\",\"\\\"azure_global\\\"\",\"\\\"azure_regional\\\"\",\"\\\"bedrock_geo_profile\\\"\",\"\\\"bedrock_global_profile\\\"\",\"\\\"bedrock_regional\\\"\",\"\\\"gateway\\\"\",\"\\\"provider_default\\\"\",\"\\\"self_hosted\\\"\",\"\\\"subscription\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
+    "ModelPriceBasisModelsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.priceBasisModelIds": "array!",
+        "$.priceBasisModelIds[]": "string"
+      }
+    },
     "ModelPricingScheduleV1": {
       "io": [
         "output"
@@ -30591,6 +30628,15 @@
       "shape": {
         "$": "object",
         "$.rigId": "string! null"
+      }
+    },
+    "SetWorkspaceModelKeyListPriceRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.listPrice": "ref(ConnectedModelListPrice)! null"
       }
     },
     "SharedSession": {
@@ -37579,6 +37625,7 @@
       "ModelDecisionResponse": "type",
       "ModelDisplayInput": "type",
       "modelDisplayName": "value",
+      "ModelPriceBasisModelsResponse": "type",
       "ModelPricingScheduleV1": "type",
       "ModelPricingV1": "type",
       "modelSlug": "value",
@@ -38126,6 +38173,7 @@
       "SetVaultItemApprovalRequest": "type",
       "SetWorkspaceAllowanceRequest": "type",
       "SetWorkspaceArtifactStatusRequest": "type",
+      "SetWorkspaceModelKeyListPriceRequest": "type",
       "SharedSession": "type",
       "SharedSessionMessage": "type",
       "signOpenGeniPayload": "value",
@@ -44192,6 +44240,7 @@
       "listMachines",
       "listMcpTrustedIssuerEvents",
       "listMcpTrustedIssuers",
+      "listModelPriceBasisModels",
       "listNetworkRoutes",
       "listOfficeWorkbooks",
       "listOpenGeniSlackAgentChannels",
@@ -44437,6 +44486,7 @@
       "setWorkspaceArtifactStatus",
       "setWorkspaceDefaultRig",
       "setWorkspaceInferenceState",
+      "setWorkspaceModelKeyListPrice",
       "setWorkspacePauseTimer",
       "signOutNativeApp",
       "startApiIntegrationOAuth",
@@ -45033,6 +45083,7 @@
       "listMachines",
       "listMcpTrustedIssuerEvents",
       "listMcpTrustedIssuers",
+      "listModelPriceBasisModels",
       "listNetworkRoutes",
       "listOfficeWorkbooks",
       "listOpenGeniSlackAgentChannels",
@@ -45275,6 +45326,7 @@
       "setWorkspaceArtifactStatus",
       "setWorkspaceDefaultRig",
       "setWorkspaceInferenceState",
+      "setWorkspaceModelKeyListPrice",
       "setWorkspacePauseTimer",
       "signOutNativeApp",
       "startApiIntegrationOAuth",
@@ -45902,6 +45954,7 @@
       "listMachines",
       "listMcpTrustedIssuerEvents",
       "listMcpTrustedIssuers",
+      "listModelPriceBasisModels",
       "listNetworkRoutes",
       "listOfficeWorkbooks",
       "listOpenGeniSlackAgentChannels",
@@ -46155,6 +46208,7 @@
       "setWorkspaceArtifactStatus",
       "setWorkspaceDefaultRig",
       "setWorkspaceInferenceState",
+      "setWorkspaceModelKeyListPrice",
       "setWorkspacePauseTimer",
       "signOutNativeApp",
       "startApiIntegrationOAuth",
@@ -48268,6 +48322,9 @@
       "listMcpTrustedIssuers": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListMcpTrustedIssuersResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "listModelPriceBasisModels": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelPriceBasisModelsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "listNetworkRoutes": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -49026,6 +49083,9 @@
       ],
       "setWorkspaceInferenceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceInferenceControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setWorkspaceModelKeyListPrice": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetWorkspaceModelKeyListPriceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConnectionMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setWorkspacePauseTimer": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"WorkspacePauseTimerRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"ok\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -51090,6 +51150,9 @@
       "listMcpTrustedIssuers": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListMcpTrustedIssuersResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "listModelPriceBasisModels": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelPriceBasisModelsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "listNetworkRoutes": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -51824,6 +51887,9 @@
       ],
       "setWorkspaceInferenceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceInferenceControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setWorkspaceModelKeyListPrice": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetWorkspaceModelKeyListPriceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConnectionMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setWorkspacePauseTimer": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"WorkspacePauseTimerRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"ok\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -53652,6 +53718,9 @@
       "listMcpTrustedIssuers": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListMcpTrustedIssuersResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "listModelPriceBasisModels": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelPriceBasisModelsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "listNetworkRoutes": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -54365,6 +54434,9 @@
       ],
       "setWorkspaceInferenceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceInferenceControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setWorkspaceModelKeyListPrice": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetWorkspaceModelKeyListPriceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConnectionMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setWorkspacePauseTimer": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"WorkspacePauseTimerRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"ok\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -56457,6 +56529,9 @@
       "listMcpTrustedIssuers": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListMcpTrustedIssuersResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "listModelPriceBasisModels": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelPriceBasisModelsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "listNetworkRoutes": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -57182,6 +57257,9 @@
       ],
       "setWorkspaceInferenceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceInferenceControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setWorkspaceModelKeyListPrice": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetWorkspaceModelKeyListPriceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConnectionMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setWorkspacePauseTimer": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"WorkspacePauseTimerRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"ok\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -59056,6 +59134,9 @@
       "listMcpTrustedIssuers": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListMcpTrustedIssuersResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "listModelPriceBasisModels": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelPriceBasisModelsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "listNetworkRoutes": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"NetworkRouteListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -59781,6 +59862,9 @@
       ],
       "setWorkspaceInferenceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceInferenceControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setWorkspaceModelKeyListPrice": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetWorkspaceModelKeyListPriceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ConnectionMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setWorkspacePauseTimer": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"WorkspacePauseTimerRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"ok\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

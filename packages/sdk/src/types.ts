@@ -1109,6 +1109,18 @@ export type ConnectionMetadata = {
    * connections and from older servers.
    */
   accountIdentity?: "verified" | "reconnect" | "single" | undefined;
+  /**
+   * A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
+   * only (those providers report no cost): the price its model was given, or
+   * null. Absent for other connections and from older servers.
+   */
+  listPrice?: ConnectedModelListPrice | null | undefined;
+  /**
+   * A workspace's own model key only, in workspace connection lists: whether
+   * its model's usage gets a cost estimate. False means its calls are
+   * recorded as unpriced and spend limits can't count them.
+   */
+  listPriceKnown?: boolean | undefined;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: string;
@@ -5011,6 +5023,17 @@ export type OrganizationProviderCustomModelsResponse = {
 export type SetOrganizationCustomModelListPriceRequest = {
   expectedVersion: number;
   listPrice: ConnectedModelListPrice | null;
+};
+/**
+ * Set or clear (null) what a workspace model key's model costs. Its price is
+ * not part of the key's version, so no version is expected.
+ */
+export type SetWorkspaceModelKeyListPriceRequest = {
+  listPrice: ConnectedModelListPrice | null;
+};
+/** Catalogue models with a known list rate that a connected model can be priced like. */
+export type ModelPriceBasisModelsResponse = {
+  priceBasisModelIds: string[];
 };
 export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;

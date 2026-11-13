@@ -3982,6 +3982,21 @@ export const SetOrganizationCustomModelListPriceRequest = /* @__PURE__ */ define
 export type SetOrganizationCustomModelListPriceRequest = z.infer<
   typeof SetOrganizationCustomModelListPriceRequest
 >;
+/**
+ * Set or clear (null) what a workspace model key's model costs. Its price is
+ * not part of the key's version, so no version is expected.
+ */
+export const SetWorkspaceModelKeyListPriceRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ listPrice: ConnectedModelListPrice.nullable() }).strict(),
+);
+export type SetWorkspaceModelKeyListPriceRequest = z.infer<
+  typeof SetWorkspaceModelKeyListPriceRequest
+>;
+/** Catalogue models with a known list rate that a connected model can be priced like. */
+export const ModelPriceBasisModelsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ priceBasisModelIds: z.array(primitives.string) }),
+);
+export type ModelPriceBasisModelsResponse = z.infer<typeof ModelPriceBasisModelsResponse>;
 
 export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -15241,6 +15256,18 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
      * one). Absent for other connections and from older servers.
      */
     accountIdentity: z.enum(["verified", "reconnect", "single"]).optional(),
+    /**
+     * A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
+     * only (those providers report no cost): the price its model was given,
+     * or null. Absent for other connections and from older servers.
+     */
+    listPrice: ConnectedModelListPrice.nullable().optional(),
+    /**
+     * A workspace's own model key only, in workspace connection lists:
+     * whether its model's usage gets a cost estimate. False means its calls
+     * are recorded as unpriced and spend limits can't count them.
+     */
+    listPriceKnown: z.boolean().optional(),
     createdBySubjectId: primitives.nullableString,
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,

@@ -348,3 +348,79 @@ test("the price dialog saves an administrator's own rate in micros", async () =>
   expect(saved.at(-1)).toEqual({ expectedVersion: 2, listPrice: null });
   expect(container.querySelector("[data-testid=detail]")?.textContent).toContain("No price yet");
 });
+
+test("a workspace's own model key shows its price and can have it removed in place", async () => {
+  const { WorkspaceModelKeyRows } = await import("./workspace-model-keys");
+  const priced: unknown[] = [];
+  const keyClient = {
+    ...client,
+    listModelPriceBasisModels: async () => ({ priceBasisModelIds: ["gpt-6-astra"] }),
+    setWorkspaceModelKeyListPrice: async (
+      _workspaceId: string,
+      _connectionId: string,
+      request: unknown,
+    ) => {
+      priced.push(request);
+      return {};
+    },
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
+  const key = (id: string, model: string, listPrice: unknown, listPriceKnown: boolean) => ({
+    id,
+    accountId: "00000000-0000-4000-8000-0000000000a1",
+    workspaceId: "00000000-0000-4000-8000-0000000000b1",
+    subjectId: null,
+    providerDomain: "contoso.openai.azure.com",
+    kind: "api_key",
+    status: "active",
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 2,
+    metadata: {
+      credentialRole: "direct_azure_openai",
+      directModelProvider: {
+        provider: "azure_openai",
+        model,
+        endpoint: "https://contoso.openai.azure.com/openai/v1",
+      },
+    },
+    listPrice,
+    listPriceKnown,
+    createdBySubjectId: null,
+    updatedBySubjectId: null,
+    createdAt: "2026-11-05T00:00:00.000Z",
+    updatedAt: "2026-11-05T00:00:00.000Z",
+  });
+  function Rows() {
+    useConsoleSharedQueries(keyClient);
+    return (
+      <WorkspaceModelKeyRows
+        client={keyClient}
+        workspaceId="00000000-0000-4000-8000-0000000000b1"
+        keys={[
+          key(
+            "00000000-0000-4000-8000-0000000000c1",
+            "team-reasoning",
+            { basis: "model", modelId: "gpt-6-astra" },
+            true,
+          ) as never,
+          key("00000000-0000-4000-8000-0000000000c2", "team-in-house", null, false) as never,
+        ]}
+        scope="Everyone in Design"
+        canManage
+        onChange={() => undefined}
+      />
+    );
+  }
+  await act(async () => root.render(<Rows />));
+  await settle();
+  expect(container.textContent).toContain("Priced like gpt-6-astra");
+  expect(container.textContent).toContain("No price yet, so spend limits can’t count its usage");
+  await act(async () => button("Price for team-reasoning").click());
+  await settle();
+  await act(async () => button("Remove price").click());
+  await settle();
+  expect(priced).toEqual([{ listPrice: null }]);
+});
