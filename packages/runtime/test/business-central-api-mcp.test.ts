@@ -196,13 +196,22 @@ describe("Business Central API bridge", () => {
     const { instance, calls } = server((call) =>
       call.init.method === "DELETE" || call.url.includes("Microsoft.NAV.")
         ? new Response(null, { status: 204 })
-        : Response.json({ "@odata.etag": 'W/"2"', id: OTHER, displayName: "Halcyon" }),
+        : Response.json({
+            "@odata.etag": 'W/"2"',
+            id: OTHER,
+            displayName: "Halcyon",
+            city: "",
+            currencyId: "00000000-0000-0000-0000-000000000000",
+            balanceDue: 0,
+          }),
     );
     const created = await instance.callToolResult("business_central_create_record", {
       entity: "customers",
       record: { displayName: "Halcyon" },
     });
-    expect(created.structuredContent).toEqual({ record: { id: OTHER, displayName: "Halcyon" } });
+    expect(created.structuredContent).toEqual({
+      record: { id: OTHER, displayName: "Halcyon", balanceDue: 0 },
+    });
     await instance.callToolResult("business_central_update_record", {
       entity: `salesOrders(${OTHER})/salesOrderLines`,
       id: OTHER,

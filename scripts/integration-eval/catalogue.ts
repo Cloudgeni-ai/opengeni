@@ -709,6 +709,28 @@ export const CASES: readonly EvalCase[] = [
     prompt: 'Create an account in Dynamics 365 named "Halcyon eval {RUN} denied".',
     verify: "receipts_only",
   },
+  // Business Central: the same connection, a Business Central environment.
+  {
+    id: "microsoft_dynamics.read.bc-customer-balance",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt: "In Business Central, what's the balance due for the customer Trey Research?",
+    expectAnswer: [i("22[ ,.\u00a0]?856")],
+  },
+  {
+    id: "microsoft_dynamics.read.bc-customer-city",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt: "Which city is the customer Relecloud in, according to Business Central?",
+    expectAnswer: [i("[åa]lesund")],
+  },
+  {
+    id: "microsoft_dynamics.write.bc-customer",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    prompt: 'Create a customer in Business Central named "Halcyon eval {RUN}".',
+    verify: "receipts_only",
+  },
   {
     id: "microsoft_dynamics.clarify.unnamed-crm",
     integration: "microsoft_dynamics",

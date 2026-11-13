@@ -386,7 +386,7 @@ export class BusinessCentralApiMcpServer implements LocalMcpBridgeServer {
           { method: "POST", path: `${prefix}/${entity}`, body: recordArg(args.record) },
           signal,
         );
-        return { record: tidy(payload) };
+        return { record: withoutEmpty(tidy(payload)) };
       }
       case "business_central_update_record": {
         const prefix = await this.companyPath(toolName, args.company, signal);
@@ -402,7 +402,7 @@ export class BusinessCentralApiMcpServer implements LocalMcpBridgeServer {
           },
           signal,
         );
-        return { record: tidy(payload) };
+        return { record: withoutEmpty(tidy(payload)) };
       }
       case "business_central_delete_record": {
         const prefix = await this.companyPath(toolName, args.company, signal);
@@ -877,6 +877,22 @@ function tidy(row: Record<string, unknown>): Record<string, unknown> {
         : value;
   }
   return out;
+}
+
+/**
+ * A written record returns every field; empty ones (blank text, the empty
+ * GUID, the empty date) only add noise.
+ */
+function withoutEmpty(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(row).filter(
+      ([, value]) =>
+        value !== null &&
+        value !== "" &&
+        value !== "00000000-0000-0000-0000-000000000000" &&
+        value !== "0001-01-01",
+    ),
+  );
 }
 
 function decodeUriComponentSafe(value: string): string {
