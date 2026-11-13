@@ -19,7 +19,11 @@ import type {
 } from "@opengeni/contracts";
 
 import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
-import { dataverseWebApiBase } from "@opengeni/contracts/microsoft-dynamics";
+import {
+  BUSINESS_CENTRAL_API_ROOT,
+  businessCentralApiBase,
+  dataverseWebApiBase,
+} from "@opengeni/contracts/microsoft-dynamics";
 import {
   PERSONAL_GITHUB_REQUESTED_SCOPES,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -1013,7 +1017,7 @@ function connectionBindingMatches(
           binding === canonicalHttpUrl(OFFICIAL_SLACK_MCP_URL) &&
           isOfficialSlackRestDestination(destination, ref)
         ) &&
-        !isDataverseWebApiDestination(destination, binding, ref))
+        !isMicrosoftDynamicsApiDestination(destination, binding, ref))
     ) {
       return false;
     }
@@ -1047,16 +1051,21 @@ export function connectionMetadataMatchesBinding(
 }
 
 /**
- * The Dataverse bridge runs a Dataverse MCP connection's tools against the same
- * environment's Web API: same origin as the bound MCP endpoint, under the Web
- * API root only.
+ * The Microsoft Dynamics bridges run a connection's tools against its
+ * environment's API: a Dataverse MCP endpoint's Web API (same origin, under
+ * the Web API root), or the Business Central API. Every Business Central
+ * environment is the same Entra resource on one host, so a person's grant
+ * reaches each environment they connect, whichever of their Business Central
+ * connections is current.
  */
-function isDataverseWebApiDestination(
+function isMicrosoftDynamicsApiDestination(
   destinationUrl: string,
   binding: string,
   ref: McpServerConnectionRef,
 ): boolean {
-  const base = dataverseWebApiBase(binding);
+  const base =
+    dataverseWebApiBase(binding) ??
+    (businessCentralApiBase(binding) ? BUSINESS_CENTRAL_API_ROOT : null);
   if (!base || ref.kind !== "oauth2") return false;
   const url = new URL(destinationUrl);
   const root = new URL(base);

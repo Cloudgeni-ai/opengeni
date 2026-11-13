@@ -3059,19 +3059,27 @@ export function nativeConnectionCapabilityRecommendations(
   }
   if (options.microsoftDynamics) {
     const products = options.microsoftDynamics.financeOperations
-      ? "Dynamics 365 Sales, Customer Service and other Dataverse apps, or Finance and Operations"
-      : "Dynamics 365 Sales, Customer Service and other Dataverse apps";
+      ? "Dynamics 365 Sales, Customer Service and other Dataverse apps, Business Central, or Finance and Operations"
+      : "Dynamics 365 Sales, Customer Service and other Dataverse apps, or Business Central";
     items.push(
       CapabilityCatalogItem.parse({
         id: MICROSOFT_DYNAMICS_CAPABILITY_ID,
         kind: "api",
         source: "built_in",
         name: MICROSOFT_DYNAMICS_CONNECTION_NAME,
-        description: `Read and update the person's ${products} data (accounts, contacts, leads, opportunities, activities and any other table) as them, with their Microsoft work account.`,
+        description: `Read and update the person's ${products} data (accounts, contacts, opportunities, customers, invoices and any other table) as them, with their Microsoft work account.`,
         // Product names only: a question that names no system must not rank
         // Dynamics above other CRMs.
         category: "sales",
-        tags: ["dynamics", "dynamics 365", "microsoft dynamics", "d365", "dataverse", "power apps"],
+        tags: [
+          "dynamics",
+          "dynamics 365",
+          "microsoft dynamics",
+          "d365",
+          "dataverse",
+          "power apps",
+          "business central",
+        ],
         homepageUrl: "https://dynamics.microsoft.com",
         providerDomain: "dynamics.com",
         authModel: "oauth2_authorization_code",

@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  businessCentralApiBase,
+  businessCentralEnvironment,
   canonicalMcpEndpointUrl,
   dataverseWebApiBase,
   microsoftDynamicsDefaultScope,
+  microsoftDynamicsEnvironmentAddress,
   microsoftDynamicsMcpEndpoint,
   microsoftDynamicsProductForMcpUrl,
 } from "../src/microsoft-dynamics";
@@ -92,5 +95,82 @@ describe("Microsoft Dynamics MCP endpoints", () => {
       "https://contoso.crm17.dynamics.com/api/data/v9.2/",
     );
     expect(dataverseWebApiBase("https://usmf.operations.dynamics.com/mcp")).toBeNull();
+  });
+
+  const BC_TENANT = "017dcee4-abab-4d45-9546-a26f65d15431";
+  const BC_ROOT = `https://api.businesscentral.dynamics.com/v2.0/${BC_TENANT}/Production/api/v2.0`;
+
+  test("a Business Central web client or API address becomes its environment's API root", () => {
+    expect(
+      microsoftDynamicsMcpEndpoint(
+        `https://businesscentral.dynamics.com/${BC_TENANT.toUpperCase()}/Production?company=CRONUS%20NO&page=22`,
+      ),
+    ).toEqual({ product: "business_central", mcpUrl: BC_ROOT });
+    expect(
+      microsoftDynamicsMcpEndpoint("businesscentral.dynamics.com/contoso.onmicrosoft.com/Sandbox-1"),
+    ).toEqual({
+      product: "business_central",
+      mcpUrl:
+        "https://api.businesscentral.dynamics.com/v2.0/contoso.onmicrosoft.com/Sandbox-1/api/v2.0",
+    });
+    // Without an environment the web client opens the default one, Production.
+    expect(
+      microsoftDynamicsMcpEndpoint(`https://businesscentral.dynamics.com/${BC_TENANT}?company=X`),
+    ).toEqual({ product: "business_central", mcpUrl: BC_ROOT });
+    expect(
+      microsoftDynamicsMcpEndpoint(`https://businesscentral.dynamics.com/?tenant=${BC_TENANT}`),
+    ).toEqual({ product: "business_central", mcpUrl: BC_ROOT });
+    expect(microsoftDynamicsMcpEndpoint("https://businesscentral.dynamics.com/Sandbox")).toEqual({
+      product: "business_central",
+      mcpUrl: "https://api.businesscentral.dynamics.com/v2.0/Sandbox/api/v2.0",
+    });
+    expect(microsoftDynamicsMcpEndpoint(`${BC_ROOT}/companies?$top=1`)).toEqual({
+      product: "business_central",
+      mcpUrl: BC_ROOT,
+    });
+    for (const value of [
+      "https://businesscentral.dynamics.com/not an environment",
+      "https://api.businesscentral.dynamics.com/v2.0/Production/api/microsoft/automation/v2.0",
+      "https://api.businesscentral.dynamics.com/v1.0/Production/api/v2.0",
+      "https://mcp.businesscentral.dynamics.com",
+    ])
+      expect(microsoftDynamicsMcpEndpoint(value)).toBeNull();
+  });
+
+  test("only the canonical Business Central API root is a connection URL", () => {
+    expect(microsoftDynamicsProductForMcpUrl(BC_ROOT)).toBe("business_central");
+    expect(
+      microsoftDynamicsProductForMcpUrl(
+        "https://api.businesscentral.dynamics.com/v2.0/Production/api/v2.0",
+      ),
+    ).toBe("business_central");
+    for (const url of [
+      `${BC_ROOT}/`,
+      `${BC_ROOT}/companies`,
+      `${BC_ROOT}?x=1`,
+      BC_ROOT.replace(BC_TENANT, BC_TENANT.toUpperCase()),
+      `https://businesscentral.dynamics.com/${BC_TENANT}/Production`,
+    ])
+      expect(microsoftDynamicsProductForMcpUrl(url)).toBeNull();
+    expect(businessCentralEnvironment(BC_ROOT)).toEqual({
+      tenant: BC_TENANT,
+      environment: "Production",
+    });
+    expect(businessCentralApiBase(BC_ROOT)).toBe(`${BC_ROOT}/`);
+    expect(businessCentralApiBase("https://contoso.crm17.dynamics.com/api/mcp")).toBeNull();
+    expect(dataverseWebApiBase(BC_ROOT)).toBeNull();
+    expect(microsoftDynamicsDefaultScope(BC_ROOT)).toBe(
+      "https://api.businesscentral.dynamics.com/Financials.ReadWrite.All",
+    );
+    expect(
+      canonicalMcpEndpointUrl(`https://businesscentral.dynamics.com/${BC_TENANT}/Production`),
+    ).toBe(BC_ROOT);
+    expect(microsoftDynamicsEnvironmentAddress(BC_ROOT)).toBe(
+      `businesscentral.dynamics.com/${BC_TENANT}/Production`,
+    );
+    expect(
+      microsoftDynamicsEnvironmentAddress("https://contoso.crm17.dynamics.com/api/mcp"),
+    ).toBe("contoso.crm17.dynamics.com");
+    expect(microsoftDynamicsEnvironmentAddress("https://example.com/mcp")).toBeNull();
   });
 });
