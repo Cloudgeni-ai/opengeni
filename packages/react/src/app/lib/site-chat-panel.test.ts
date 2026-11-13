@@ -2,10 +2,39 @@ import { describe, expect, test } from "bun:test";
 
 import {
   clampSiteChatWidth,
+  newlyWaitingConversation,
   readSiteChatPanelLayout,
   siteChatPanelStorageId,
   writeSiteChatPanelLayout,
 } from "./site-chat-panel";
+
+describe("a Site conversation that starts waiting for the person", () => {
+  const idle = { id: "open", status: "idle" };
+  const run = (status: string, since: string | null = null) => ({
+    id: "run",
+    status,
+    requiresActionSince: since,
+  });
+
+  test("is opened once, when its wait starts", () => {
+    let state = newlyWaitingConversation([run("running"), idle], new Set(), "open");
+    expect(state.next).toBeNull();
+    state = newlyWaitingConversation([run("requires_action", "t1"), idle], state.seen, "open");
+    expect(state.next).toBe("run");
+    state = newlyWaitingConversation([run("requires_action", "t1"), idle], state.seen, "open");
+    expect(state.next).toBeNull();
+    // A later approval in the same conversation is a new wait.
+    state = newlyWaitingConversation([run("running"), idle], state.seen, "open");
+    state = newlyWaitingConversation([run("requires_action", "t2"), idle], state.seen, "open");
+    expect(state.next).toBe("run");
+  });
+
+  test("never switches to the conversation already open", () => {
+    const state = newlyWaitingConversation([run("requires_action", "t1")], new Set(), "run");
+    expect(state.next).toBeNull();
+    expect([...state.seen]).toEqual(["run:t1"]);
+  });
+});
 
 function memory(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));

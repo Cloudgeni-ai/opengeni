@@ -12,5 +12,5 @@ results did not, so the model had no fact to rely on. The sentence states that
 fact for any integration, model or route:
 
 ```text
-+ When the person finishes it, you get an update and continue then, so don't ask them to tell you when they're done.
++ When the person who asked finishes it, you get an update and continue then, so don't ask them to tell you when they're done.
 ```
