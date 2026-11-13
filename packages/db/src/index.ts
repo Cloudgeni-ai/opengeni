@@ -9,7 +9,6 @@ import {
 } from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
-import { agentInstructionsSql } from "./agents";
 import { jsonbNodeCountSql, jsonbPropertyCountSql } from "./jsonb-shape-counts";
 import { measureJsonObjectText } from "./json-object-text-measurement";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
@@ -45106,7 +45105,7 @@ export async function readSessionAgentPrompt(
     ? await readBoundAgentRows<{ instructions: string }>(
         db,
         scope,
-        sql`select ${agentInstructionsSql("r")} as instructions
+        sql`select r.instructions
           from agent_revisions r
           join agents a on a.workspace_id = r.workspace_id and a.id = r.agent_id
           where r.workspace_id = ${input.workspaceId}::uuid
@@ -45146,7 +45145,7 @@ export async function ensureSessionAgentInstructions(
     ? await readBoundAgentRows<{ revision: number; instructions: string | null }>(
         db,
         input,
-        sql`select a.current_revision as revision, ${agentInstructionsSql("r")} as instructions
+        sql`select a.current_revision as revision, r.instructions
           from agents a
           left join agent_revisions r
             on r.workspace_id = a.workspace_id

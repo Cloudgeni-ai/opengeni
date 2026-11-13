@@ -10,7 +10,6 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import {
-  agentInstructionsSql,
   claimSlackAgentOpenNotice,
   createAgent,
   createDb,
@@ -134,7 +133,6 @@ describe("agents data layer (restricted runtime role)", () => {
     // A First message joins the Instructions as its own paragraph.
     expect(agent.content).toMatchObject({
       instructions: "Be brief.\n\nWhen a chat starts:\nPlan it.",
-      firstMessage: "",
     });
     const [stored] = await shared.admin<{ instructions: string; first_message: string }[]>`
       select instructions, first_message from agent_revisions where agent_id = ${agent.id}`;
@@ -179,36 +177,20 @@ describe("agents data layer (restricted runtime role)", () => {
     expect(await getAgent(app.db, org.homeScope, agent.id)).toBeNull();
   }, 120_000);
 
-  test("an older First message joins the Instructions when read, and is stored that way on the next change", async () => {
+  test("an older client's First message joins the Instructions, once, even past their limit", async () => {
     const org = await organization();
     const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
-    // As an older release stores it: a revision with a First message.
-    const olderRevision = async (instructions: string, firstMessage: string) => {
-      await shared.admin.begin(async (tx) => {
-        const [row] = await tx<{ revision: number }[]>`
-          update agents set current_revision = current_revision + 1
-          where id = ${agent.id} returning current_revision as revision`;
-        await tx`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
-            instructions, first_message)
-          values (${agent.id}, ${org.accountId}, ${org.home}, ${row!.revision}, 'Release helper',
-            ${instructions}, ${firstMessage})`;
-      });
-    };
-    await olderRevision("Be brief.", "  Ask which release.  ");
-    const read = await getAgent(app.db, org.homeScope, agent.id);
-    expect(read?.content).toMatchObject({
-      instructions: "Be brief.\n\nWhen a chat starts:\nAsk which release.",
-      firstMessage: "",
-    });
-    expect(read?.hasFirstMessage).toBe(false);
-    // Any change stores it joined, once.
-    const renamed = await updateAgent(app.db, org.homeScope, {
+    const joined = await updateAgent(app.db, org.homeScope, {
       agentId: agent.id,
-      expectedVersion: read!.version,
+      expectedVersion: agent.version,
       actorSubjectId: org.owner,
-      patch: { name: "Release desk" },
+      patch: { firstMessage: "  Ask which release.  " },
     });
-    expect(renamed).toMatchObject({ kind: "updated", revised: true });
+    expect(joined).toMatchObject({
+      kind: "updated",
+      revised: true,
+      agent: { content: { instructions: "Be brief.\n\nWhen a chat starts:\nAsk which release." } },
+    });
     const [stored] = await shared.admin<{ instructions: string; first_message: string }[]>`
       select r.instructions, r.first_message from agents a
       join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
@@ -225,8 +207,7 @@ describe("agents data layer (restricted runtime role)", () => {
       patch: { firstMessage: "Ask which release." },
     });
     expect(again).toMatchObject({ kind: "updated", revised: false });
-    // New Instructions replace a stored First message: they were written over the joined text.
-    await olderRevision("Be brief.", "Ask which release.");
+    // New Instructions replace the joined text they were written over.
     const rewritten = await updateAgent(app.db, org.homeScope, {
       agentId: agent.id,
       expectedVersion: null,
@@ -235,42 +216,21 @@ describe("agents data layer (restricted runtime role)", () => {
     });
     expect(rewritten).toMatchObject({
       kind: "updated",
-      agent: { content: { instructions: "Be thorough.", firstMessage: "" } },
+      agent: { content: { instructions: "Be thorough." } },
     });
-    // Too long together: both are kept as sent, and readers still see them joined.
-    const long = "x".repeat(15_000);
+    // Too long together for a person's Instructions: still one text.
+    const long = "x".repeat(20_000);
     const kept = await createAgent(
       app.db,
       org.homeScope,
-      agentInput(org, { name: "Long one", instructions: long, firstMessage: "y".repeat(15_000) }),
+      agentInput(org, { name: "Long one", instructions: long, firstMessage: "y".repeat(20_000) }),
     );
     const [both] = await shared.admin<{ instructions: string; first_message: string }[]>`
       select instructions, first_message from agent_revisions where agent_id = ${kept.agent.id}`;
-    expect(both?.instructions.length).toBe(15_000);
-    expect(both?.first_message.length).toBe(15_000);
-    expect(kept.agent.content?.instructions.length).toBe(
-      30_002 + `${AGENT_FIRST_MESSAGE_LEAD}\n`.length,
-    );
-    // The SQL form, for reads that never map an agent, reads the same.
-    const viaSql = async (instructions: string, firstMessage: string) => {
-      const rows = (await app.db.execute(
-        sql`select ${agentInstructionsSql("r")} as joined
-          from (values (${instructions}::text, ${firstMessage}::text)) as r(instructions, first_message)`,
-      )) as unknown as { rows?: { joined: string }[] } | { joined: string }[];
-      const list = Array.isArray(rows) ? rows : (rows.rows ?? []);
-      return list[0]?.joined;
-    };
-    for (const [instructions, firstMessage] of [
-      ["Be brief.", ""],
-      ["Be brief.", "  Ask which release.\n"],
-      ["", " Ask. "],
-      ["Be brief. Ask.", "Ask."],
-      ["Line one\n", "Line two"],
-    ] as const) {
-      expect(await viaSql(instructions, firstMessage)).toBe(
-        agentInstructionsWithFirstMessage(instructions, firstMessage),
-      );
-    }
+    expect(both?.first_message).toBe("");
+    expect(both?.instructions).toBe(agentInstructionsWithFirstMessage(long, "y".repeat(20_000)));
+    expect(both?.instructions.length).toBe(40_002 + `${AGENT_FIRST_MESSAGE_LEAD}\n`.length);
+    expect(kept.agent.content?.instructions).toBe(both?.instructions);
   }, 120_000);
 
   test("Slack availability: several installations, names and projections", async () => {

@@ -122,7 +122,6 @@ export async function insertSlackAgent(
         description: input.description,
         avatar: input.avatar,
         instructions: input.instructions,
-        firstMessage: "",
         memoryEnabled: true,
         origin: input.origin ?? "app",
         sourceSessionId: null,

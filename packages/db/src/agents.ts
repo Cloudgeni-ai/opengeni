@@ -17,8 +17,6 @@
  * grants anything.
  */
 import {
-  AGENT_FIRST_MESSAGE_LEAD,
-  AGENT_INSTRUCTIONS_MAX_LENGTH,
   agentInitialsAvatar,
   agentInstructionsWithFirstMessage,
   slackAgentNameKey,
@@ -35,52 +33,20 @@ export type AgentOriginValue = "slack_agent" | "bot_template" | "app" | "slack";
 
 /** The current revision's content, read from the agent's home workspace. */
 export type AgentContent = {
-  /** With any older First message joined (`agentInstructionsWithFirstMessage`). */
   instructions: string;
-  /** Always empty: agents have one text, their Instructions. Kept for older readers. */
-  firstMessage: string;
-  /** The revision as stored, for writes. */
-  stored: { instructions: string; firstMessage: string };
   createdBySubjectId: string | null;
   createdAt: Date;
 };
 
 /**
- * Agents have one text, their Instructions; a First message an older client,
- * an older release or the legacy template API sends joins them
- * (`agentInstructionsWithFirstMessage`). Stored that way, so the First message
- * column ends up empty, unless together they pass the Instructions limit: then
- * the revision keeps both as sent, and readers still see them joined.
+ * Agents have one text, their Instructions. A First message an older client
+ * or the previous release sends joins them as its own paragraph
+ * (`agentInstructionsWithFirstMessage`); since migration 1422 every stored
+ * revision is that way, and nothing here reads `first_message` (kept, empty,
+ * for the previous release until a later step drops it).
  */
-function storedAgentContent(
-  instructions: string,
-  firstMessage: string,
-): { instructions: string; firstMessage: string } {
-  const joined = agentInstructionsWithFirstMessage(instructions, firstMessage);
-  return joined.length <= AGENT_INSTRUCTIONS_MAX_LENGTH
-    ? { instructions: joined, firstMessage: "" }
-    : { instructions, firstMessage };
-}
-
-const SQL_TRIMMED = sql.raw(`E' \\t\\n\\r\\f\\v'`);
-/** `AGENT_FIRST_MESSAGE_LEAD` and its line break, as SQL. */
-const FIRST_MESSAGE_LEAD_SQL = sql`${`${AGENT_FIRST_MESSAGE_LEAD}\n`}::text`;
-
-/**
- * A stored revision's Instructions as readers see them, with any First
- * message joined: the SQL form of `agentInstructionsWithFirstMessage`, for
- * reads that never map a whole agent (Slack routing, a chat's agent prompt).
- * `revision` is the `agent_revisions` alias.
- */
-export function agentInstructionsSql(revision: string): SQL {
-  const r = sql.raw(revision);
-  return sql`case
-      when ${r}.instructions is null then null
-      when btrim(${r}.first_message, ${SQL_TRIMMED}) = '' then ${r}.instructions
-      when strpos(${r}.instructions, btrim(${r}.first_message, ${SQL_TRIMMED})) > 0 then ${r}.instructions
-      when btrim(${r}.instructions, ${SQL_TRIMMED}) = '' then ${FIRST_MESSAGE_LEAD_SQL} || btrim(${r}.first_message, ${SQL_TRIMMED})
-      else btrim(${r}.instructions, ${SQL_TRIMMED}) || E'\\n\\n' || ${FIRST_MESSAGE_LEAD_SQL} || btrim(${r}.first_message, ${SQL_TRIMMED})
-    end`;
+function joinedInstructions(instructions: string, firstMessage: string | undefined): string {
+  return agentInstructionsWithFirstMessage(instructions, firstMessage ?? "");
 }
 
 export type AgentRecord = {
@@ -109,7 +75,6 @@ export type AgentRecord = {
   version: number;
   createdAt: Date;
   updatedAt: Date;
-  hasFirstMessage: boolean;
   /** Null in lists and where the revision is not readable. */
   content: AgentContent | null;
 };
@@ -140,7 +105,6 @@ export type AgentRevisionRecord = {
   name: string;
   description: string;
   instructions: string;
-  firstMessage: string;
   createdBySubjectId: string | null;
   createdAt: Date;
 };
@@ -165,7 +129,6 @@ type AgentRow = {
   created_at: Date | string;
   updated_at: Date | string;
   instructions?: string | null;
-  first_message?: string | null;
   revision_created_by_subject_id?: string | null;
   revision_created_at?: Date | string | null;
 };
@@ -176,14 +139,9 @@ function date(value: Date | string): Date {
 
 function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
   const content =
-    withContent &&
-    typeof row.instructions === "string" &&
-    typeof row.first_message === "string" &&
-    row.revision_created_at
+    withContent && typeof row.instructions === "string" && row.revision_created_at
       ? {
-          instructions: agentInstructionsWithFirstMessage(row.instructions, row.first_message),
-          firstMessage: "",
-          stored: { instructions: row.instructions, firstMessage: row.first_message },
+          instructions: row.instructions,
           createdBySubjectId: row.revision_created_by_subject_id ?? null,
           createdAt: date(row.revision_created_at),
         }
@@ -207,7 +165,6 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     version: Number(row.version),
     createdAt: date(row.created_at),
     updatedAt: date(row.updated_at),
-    hasFirstMessage: false,
     content,
   };
 }
@@ -319,7 +276,7 @@ export async function listAgents(
       sql`select ${AGENT_COLUMNS}
           ${
             input.withContent
-              ? sql`, r.instructions, r.first_message,
+              ? sql`, r.instructions,
                   r.created_by_subject_id as revision_created_by_subject_id,
                   r.created_at as revision_created_at`
               : sql``
@@ -353,7 +310,7 @@ export async function getAgent(
   return await withRlsContext(db, home, async (tx) => {
     const [row] = await rawRows<AgentRow>(
       tx,
-      sql`select ${AGENT_COLUMNS}, r.instructions, r.first_message,
+      sql`select ${AGENT_COLUMNS}, r.instructions,
           r.created_by_subject_id as revision_created_by_subject_id,
           r.created_at as revision_created_at
         from agents a
@@ -403,12 +360,11 @@ export async function listAgentRevisions(
       name: string;
       description: string;
       instructions: string;
-      first_message: string;
       created_by_subject_id: string | null;
       created_at: Date | string;
     }>(
       tx,
-      sql`select r.revision, r.name, r.description, r.instructions, r.first_message,
+      sql`select r.revision, r.name, r.description, r.instructions,
           r.created_by_subject_id, r.created_at
         from agent_revisions r
         where r.account_id = ${home.accountId}::uuid
@@ -423,7 +379,6 @@ export async function listAgentRevisions(
       name: row.name,
       description: row.description,
       instructions: row.instructions,
-      firstMessage: row.first_message,
       createdBySubjectId: row.created_by_subject_id,
       createdAt: date(row.created_at),
     }));
@@ -441,7 +396,8 @@ export type CreateAgentInput = {
   description: string;
   avatar: SessionAvatar | null;
   instructions: string;
-  firstMessage: string;
+  /** Older field: joins the Instructions as its own paragraph. */
+  firstMessage?: string;
   memoryEnabled: boolean;
   /** Anyone in the organization can use it (shared agents only). */
   organizationAccess?: boolean;
@@ -480,7 +436,7 @@ function privateOwnerRefusal(error: unknown, visibility: AgentVisibilityValue | 
 }
 
 async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgentInput) {
-  const stored = storedAgentContent(input.instructions, input.firstMessage);
+  const instructions = joinedInstructions(input.instructions, input.firstMessage);
   const [row] = await rawRows<AgentRow>(
     tx,
     sql`insert into agents (${sql.raw(input.id ? "id, " : "")}account_id, workspace_id, visibility,
@@ -504,17 +460,16 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
   const [revision] = await rawRows<{ created_at: Date | string }>(
     tx,
     sql`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
-        description, instructions, first_message, created_by_subject_id)
+        description, instructions, created_by_subject_id)
       values (${row.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid, 1,
-        ${input.name}, ${input.description}, ${stored.instructions}, ${stored.firstMessage},
+        ${input.name}, ${input.description}, ${instructions},
         ${input.createdBySubjectId})
       returning created_at`,
   );
   return mapAgent(
     {
       ...row,
-      instructions: stored.instructions,
-      first_message: stored.firstMessage,
+      instructions,
       revision_created_by_subject_id: input.createdBySubjectId,
       revision_created_at: revision?.created_at ?? new Date(),
     },
@@ -567,6 +522,7 @@ export type AgentPatch = {
   /** Required with `visibility`: the owner of an Only me agent, null otherwise. */
   ownerSubjectId?: string | null;
   instructions?: string;
+  /** Older field: joins the Instructions as its own paragraph. */
   firstMessage?: string;
   memoryEnabled?: boolean;
   /**
@@ -649,17 +605,9 @@ export async function updateAgent(
         installs = [];
       }
       const name = patch.name ?? current.name;
-      const was = current.content?.stored ?? { instructions: "", firstMessage: "" };
-      // New Instructions were written over the joined text the person saw, so
-      // they replace a stored First message; otherwise it joins now.
-      const { instructions, firstMessage } = storedAgentContent(
-        patch.instructions ?? was.instructions,
-        patch.firstMessage ?? (patch.instructions !== undefined ? "" : was.firstMessage),
-      );
-      const revised =
-        current.content === null ||
-        instructions !== was.instructions ||
-        firstMessage !== was.firstMessage;
+      const was = current.content?.instructions ?? "";
+      const instructions = joinedInstructions(patch.instructions ?? was, patch.firstMessage);
+      const revised = current.content === null || instructions !== was;
       const nextRevision = revised ? current.currentRevision + 1 : current.currentRevision;
       const visibility = patch.visibility ?? current.visibility;
       const ownerSubjectId =
@@ -693,10 +641,10 @@ export async function updateAgent(
       }
       if (revised) {
         await tx.execute(sql`insert into agent_revisions (agent_id, account_id, workspace_id,
-            revision, name, description, instructions, first_message, created_by_subject_id)
+            revision, name, description, instructions, created_by_subject_id)
           values (${current.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid,
             ${nextRevision}::integer, ${name}, ${patch.description ?? current.description},
-            ${instructions}, ${firstMessage}, ${input.actorSubjectId})`);
+            ${instructions}, ${input.actorSubjectId})`);
       }
       if (
         patch.name !== undefined &&
@@ -1196,7 +1144,7 @@ async function withProjectionInstructions(
     const instructions = await withRlsContext(db, { accountId, workspaceId }, async (tx) => {
       const rows = await rawRows<{ agent_id: string; instructions: string }>(
         tx,
-        sql`select a.id::text as agent_id, ${agentInstructionsSql("r")} as instructions
+        sql`select a.id::text as agent_id, r.instructions
           from agents a
           join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
           where a.workspace_id = ${workspaceId}::uuid
@@ -1227,7 +1175,7 @@ function projectionQuery(where: SQL): SQL {
       a.created_by_subject_id as agent_created_by_subject_id,
       a.version as agent_version,
       a.created_at as agent_created_at, a.updated_at as agent_updated_at,
-      ${agentInstructionsSql("r")} as instructions
+      r.instructions
     from agent_slack_installs i
     join agents a on a.id = i.agent_id and a.account_id = i.account_id
     left join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision

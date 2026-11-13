@@ -51,8 +51,8 @@ export const AGENT_FIRST_MESSAGE_LEAD = "When a chat starts:";
  * An agent's Instructions with an older First message joined as its own
  * paragraph after them, led by `AGENT_FIRST_MESSAGE_LEAD`. Nothing is added
  * when there is no First message or the Instructions already contain it, so
- * joining twice changes nothing. The database's `agentInstructionsSql` reads
- * stored revisions the same way.
+ * joining twice changes nothing. Migration 1422 joined stored revisions the
+ * same way.
  */
 export function agentInstructionsWithFirstMessage(
   instructions: string,

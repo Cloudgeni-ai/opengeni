@@ -11,6 +11,7 @@ import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
   AGENT_FIRST_MESSAGE_LEAD,
+  agentInstructionsWithFirstMessage,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   signDelegatedAccessToken,
@@ -112,7 +113,8 @@ async function slackConnection(accountId: string, workspaceId: string, label: st
 /**
  * A shared agent as an older release left it, with no Slack row yet: an
  * agent row and its first revision. A bot template became one with the
- * template text as its First message and empty Instructions.
+ * template text as its First message and empty Instructions; migration 1422
+ * joined that into the Instructions.
  */
 async function olderAgent(
   install: { accountId: string; owner: string },
@@ -127,9 +129,10 @@ async function olderAgent(
       values (${id}, ${install.accountId}, ${workspaceId}, 'workspace', ${name},
         lower(btrim(${name})), '', null, false, 1, 'bot_template', ${install.owner})`;
     await sql`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
-        description, instructions, first_message, created_by_subject_id)
+        description, instructions, created_by_subject_id)
       values (${id}, ${install.accountId}, ${workspaceId}, 1, ${name}, '',
-        ${content.instructions ?? ""}, ${content.firstMessage ?? ""}, ${install.owner})`;
+        ${agentInstructionsWithFirstMessage(content.instructions ?? "", content.firstMessage ?? "")},
+        ${install.owner})`;
   });
   return id;
 }

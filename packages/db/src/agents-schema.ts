@@ -70,8 +70,9 @@ export const agents = pgTable(
 );
 
 /**
- * Immutable agent content: Instructions (up to 20,000 characters), First
- * message, and the name and description as of the revision. Home workspace
+ * Immutable agent content: Instructions (up to 20,000 characters from a person,
+ * longer with an older First message joined), and the name and description as of
+ * the revision. `first_message` is empty since 1422. Home workspace
  * only, never organization readable; the runtime may only read and insert.
  */
 export const agentRevisions = pgTable(

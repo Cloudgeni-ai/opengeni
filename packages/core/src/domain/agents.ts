@@ -174,7 +174,7 @@ export function agentSummaryView(agent: AgentRecord, context: AgentViewContext):
     sourceSessionId: agent.sourceSessionId,
     createdBySubjectId: agent.createdBySubjectId,
     revision: agent.currentRevision,
-    hasFirstMessage: agent.hasFirstMessage,
+    hasFirstMessage: false,
     memory: {
       enabled: agent.memoryEnabled,
       collectionId: agent.memoryCollectionId,
@@ -198,12 +198,12 @@ export function agentSummaryView(agent: AgentRecord, context: AgentViewContext):
   };
 }
 
-/** One agent with its current Instructions and First message. */
+/** One agent with its current Instructions (its First message fields are always empty). */
 export function agentView(agent: AgentRecord, context: AgentViewContext): Agent {
   return {
     ...agentSummaryView(agent, context),
     instructions: agent.content?.instructions ?? "",
-    firstMessage: agent.content?.firstMessage ?? "",
+    firstMessage: "",
     revisionCreatedBySubjectId: agent.content?.createdBySubjectId ?? null,
     revisionCreatedAt: (agent.content?.createdAt ?? agent.updatedAt).toISOString(),
   };
@@ -215,7 +215,7 @@ export function agentRevisionView(revision: AgentRevisionRecord): AgentRevision 
     name: revision.name,
     description: revision.description,
     instructions: revision.instructions,
-    firstMessage: revision.firstMessage,
+    firstMessage: "",
     createdBySubjectId: revision.createdBySubjectId,
     createdAt: revision.createdAt.toISOString(),
   };
