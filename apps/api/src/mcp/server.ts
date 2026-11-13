@@ -306,12 +306,62 @@ import {
   canonicalMcpEndpointUrl,
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
+  microsoftDynamicsEnvironmentAddress,
   microsoftDynamicsMcpEndpoint,
+  microsoftDynamicsProductForMcpUrl,
   type MicrosoftDynamicsProduct,
 } from "@opengeni/contracts/microsoft-dynamics";
 
 /** What the agent needs before it can show a Microsoft Dynamics Connect card. */
 const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com, or https://businesscentral.dynamics.com/<tenant>/<environment> for Business Central; any page of it works). If they don't know it, they can open Dynamics and copy the address bar, or find Environment URL in the Power Platform admin center. Then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+
+/** The workspace's own Dynamics environments: catalog entries for an exact environment endpoint. */
+function microsoftDynamicsEnvironments(
+  items: readonly CapabilityCatalogItem[],
+): CapabilityCatalogItem[] {
+  return items.filter((item) => {
+    const url = item.mcpUrl ?? item.endpointUrl;
+    return (
+      item.kind === "mcp" &&
+      !!url &&
+      microsoftDynamicsProductForMcpUrl(url) !== null &&
+      capabilityCatalogItemIsTrustedForExposure(item)
+    );
+  });
+}
+
+/**
+ * The generic Microsoft Dynamics entry's setup once the workspace already has
+ * environments: one this caller can use is ready, and one they can still
+ * connect is offered by its own card, which needs no address. Null when there
+ * are none, so the entry asks for the environment's address as before.
+ */
+function microsoftDynamicsSetupFromEnvironments(
+  environments: readonly { item: CapabilityCatalogItem; setup: CapabilitySetupProjection }[],
+): CapabilitySetupProjection | null {
+  const describe = (list: typeof environments) =>
+    list
+      .map(({ item }) => {
+        const address = microsoftDynamicsEnvironmentAddress(item.mcpUrl ?? item.endpointUrl ?? "");
+        return `${item.name}${address ? ` (${address})` : ""}, capabilityId ${item.id}`;
+      })
+      .join("; ");
+  const ready = environments.filter(({ setup }) => setup.status === "ready");
+  if (ready.length > 0)
+    return {
+      status: "ready",
+      action: null,
+      detail: `Already connected and usable in this chat: ${describe(ready)}. Use its tools. Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
+  const connectable = environments.filter(({ setup }) => setup.status === "authorization_required");
+  if (connectable.length > 0)
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: `This workspace already has ${describe(connectable)}. Call capability_authorization_request with ${connectable.length === 1 ? "this capabilityId" : "the capabilityId of the one the person means"}; its card signs them in without asking for the address. Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
+  return null;
+}
 
 /**
  * Why a Microsoft Dynamics address can't be connected here, in words the
@@ -7767,7 +7817,9 @@ function registerCapabilityDiscoveryTools(
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
   // This is a readiness projection, never credential resolution or a new grant.
-  const setupProjections = async (items: CapabilityCatalogItem[]) => {
+  const projectSetups = async (
+    items: CapabilityCatalogItem[],
+  ): Promise<CapabilitySetupProjection[]> => {
     const availableServerIds = new Set<string>();
     const availableFirstPartyTools = new Set<string>();
     const acceptedServerIds = new Set<string>();
@@ -7839,6 +7891,25 @@ function registerCapabilityDiscoveryTools(
                   ),
       ),
     );
+  };
+  // The workspace's Dynamics environments with this caller's setup for each.
+  const dynamicsEnvironmentSetups = async (items?: readonly CapabilityCatalogItem[]) => {
+    const environments = microsoftDynamicsEnvironments(items ?? (await catalog()).items);
+    if (environments.length === 0) return [];
+    const setups = await projectSetups(environments);
+    return environments.map((item, index) => ({ item, setup: setups[index]! }));
+  };
+  // The generic Dynamics entry reflects environments already here, so an agent
+  // is not told to ask for an address of an environment that is connected.
+  const setupProjections = async (items: CapabilityCatalogItem[]) => {
+    const setups = await projectSetups(items);
+    const index = items.findIndex((item) => item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID);
+    if (index === -1 || setups[index]!.status === "unavailable") return setups;
+    const fromEnvironments = microsoftDynamicsSetupFromEnvironments(
+      await dynamicsEnvironmentSetups(),
+    );
+    if (fromEnvironments) setups[index] = fromEnvironments;
+    return setups;
   };
 
   server.registerTool(
@@ -7989,28 +8060,40 @@ function registerCapabilityDiscoveryTools(
       // integration; it shows that card at most once per chat.
       const fromDiscovery = extra?._meta?.[TOOL_DISCOVERY_CARD_META_KEY] === true;
       const current = await catalog();
-      const item =
+      let item =
         [...current.items, ...recommendations()].find(
           (candidate) => candidate.id === capabilityId,
         ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new ToolArgumentError("Unknown or untrusted capability; search the catalog again.");
       }
+      // Each Dynamics connection is one customer environment. An environment
+      // already here answers for the generic entry: ready when this caller can
+      // use it, else its own card (which needs no address) when it is the only
+      // one. Otherwise the card needs the environment's address, which only
+      // the person knows.
+      if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
+        const environments = await dynamicsEnvironmentSetups(current.items);
+        const connectable = environments.filter(
+          ({ setup }) => setup.status === "authorization_required",
+        );
+        const fromEnvironments = microsoftDynamicsSetupFromEnvironments(environments);
+        if (fromEnvironments?.status !== "ready" && connectable.length === 1) {
+          item = connectable[0]!.item;
+        } else {
+          return json({
+            capabilityId: item.id,
+            status: fromEnvironments?.status === "ready" ? "ready" : "input_required",
+            cardShown: false,
+            message: fromEnvironments?.detail ?? MICROSOFT_DYNAMICS_SETUP_DETAIL,
+          });
+        }
+      }
       const [[setup], inventory] = await Promise.all([
         setupProjections([item]),
         reconnectInventory([item]),
       ]);
       if (!setup) throw new Error("Capability setup projection is unavailable.");
-      // Each Dynamics connection is one customer environment: its card needs
-      // the environment's address, which only the person knows.
-      if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
-        return json({
-          capabilityId: item.id,
-          status: "input_required",
-          cardShown: false,
-          message: MICROSOFT_DYNAMICS_SETUP_DETAIL,
-        });
-      }
       // An account of this entry that stopped working is reconnected in place:
       // a first-time Connect cannot replace it. The agent names the one the
       // task needs; without a name, the only one here is used while no
