@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+  - @opengeni/codex@6.19.0
+  - @opengeni/xai-subscription@6.19.0
+
 ## 6.18.0
 
 ### Patch Changes

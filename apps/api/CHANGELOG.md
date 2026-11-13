@@ -1,5 +1,42 @@
 # @opengeni/api-router
 
+## 6.19.0
+
+### Patch Changes
+
+- d374c99: Agents with an image icon post in Slack again. Slack refuses a post whose picture URL is 256 characters or longer, which an image avatar's signed URL could reach on a longer host. New avatar URLs carry a 128-bit signature (older full-length URLs keep working), a picture URL that is still too long is left off, and a post Slack refuses with `invalid_arguments` while carrying a name or picture is sent once more as the app's.
+- Updated dependencies [227650c]
+- Updated dependencies [a85adef]
+- Updated dependencies [973329a]
+- Updated dependencies [7c378ac]
+- Updated dependencies [1b6b22f]
+- Updated dependencies [226fe73]
+  - @opengeni/db@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/runtime@6.19.0
+  - @opengeni/core@6.19.0
+  - @opengeni/documents@6.19.0
+  - @opengeni/events@6.19.0
+  - @opengeni/codemode@6.19.0
+  - @opengeni/artifact-tool@6.19.0
+  - @opengeni/capabilities@6.19.0
+  - @opengeni/codex@6.19.0
+  - @opengeni/config@6.19.0
+  - @opengeni/decisions@6.19.0
+  - @opengeni/github@6.19.0
+  - @opengeni/interaction@6.19.0
+  - @opengeni/observability@6.19.0
+  - @opengeni/storage@6.19.0
+  - @opengeni/tool-gateway@6.19.0
+  - @opengeni/vaults@6.19.0
+  - @opengeni/vaults-bitwarden@6.19.0
+  - @opengeni/vaults-keeper@6.19.0
+  - @opengeni/vaults-onepassword@6.19.0
+  - @opengeni/vaults-protonpass@6.19.0
+  - @opengeni/agent-proto@6.19.0
+  - @opengeni/network@6.19.0
+  - @opengeni/xai-subscription@6.19.0
+
 ## 6.18.0
 
 ### Minor Changes

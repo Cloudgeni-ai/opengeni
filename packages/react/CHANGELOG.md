@@ -1,5 +1,26 @@
 # @opengeni/react
 
+## 6.19.0
+
+### Patch Changes
+
+- 1e29039: An admin change refused because a passkey confirmation is still needed now says to confirm with a passkey (or add one) instead of "You don't have permission to do this". This is what shows when the person closes the passkey prompt. The admin passkey step-up now covers only changes to who can access an organization and its data: members, roles and invitations, creating API keys, and shared connections.
+- 973329a: Chats that share one sandbox (a parent and its workers) now each keep their own personal GitHub pass, broker routes and `gh` setup, so Git and `gh` in one chat no longer fail with "authorization is no longer current" after another chat on the box ran. The repository remote stays `https://github.com/<owner>/<repo>`, no token enters the sandbox, renewal updates only its own chat, and chat directories unused for a day are removed.
+
+  A personal repository resource that also carries stray GitHub App fields is accepted with those fields ignored (access is still checked as the person), and a request without a running agent attempt now says so instead of asking to reconnect GitHub.
+
+  Repairing an uninstalled GitHub App installation while GitHub can't be reached now says "GitHub couldn't be reached" with **Check again** (the API answers 503 `provider_unreachable`) instead of opening the account chooser. When a reinstall replaces the old installation, its approval choices move to the new one with their original setter, and the old installation's rows are removed.
+
+- b349ca0: A durable Send refused for good is now kept as the composer draft until it is removed, restored or delivered, so closing the page no longer loses it. It never overwrites a newer draft from another device. A kept send also survives the composer remounting in the same page. The composer no longer re-reads its draft on every host render while a delivered message waits for its turn: it now reads the latest `onSent`/`onSubmitted` through refs, and re-reads only when a new admission arrives.
+- 226fe73: A durable Send that gets no definitive answer (the connection drops, or Opengeni is updating) now keeps its message as the draft, so it survives closing the page and shows on the person's other devices, as it did when every Send saved the draft first. Before, a message typed and sent within the autosave pause was in no draft, and closing the tab before the send went through lost it. The draft is written only while it is still at the revision the Send went ahead from, so it never brings back a message the server already accepted and never writes over another device's newer draft. When the Send lands later, the server clears a draft holding exactly what it sent.
+
+  An accepted Send now always moves the draft past the revision it went ahead from, also when nothing was ever saved: it creates an empty draft at revision 1 instead of leaving none.
+
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/connect@6.19.0
+
 ## 6.18.0
 
 ### Minor Changes

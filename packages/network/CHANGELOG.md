@@ -1,5 +1,7 @@
 # @opengeni/network
 
+## 6.19.0
+
 ## 6.18.0
 
 ### Patch Changes

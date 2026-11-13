@@ -1,5 +1,12 @@
 # @opengeni/artifact-tool
 
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+
 ## 6.18.0
 
 ### Patch Changes
