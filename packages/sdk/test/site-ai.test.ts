@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { OpenGeniClient } from "../src/client";
-import { createOpenGeniSiteAi } from "../src/site-ai";
+import { createOpenGeniSiteAi, reopenDelay } from "../src/site-ai";
 import { streamSessionEvents, type StreamSessionEventsOptions } from "../src/stream";
 import type {
   CreateSessionRequest,
@@ -689,4 +689,10 @@ test("abort during the fresh session read promptly stops observation", async () 
   };
   await expect(ai.result("session", { signal: controller.signal })).rejects.toBe(reason);
   expect(upstream?.aborted).toBe(true);
+});
+
+test("quiet reopens while waiting back off to a ceiling", () => {
+  expect([0, 1, 2, 3, 4, 5, 6, 100].map(reopenDelay)).toEqual([
+    1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000,
+  ]);
 });

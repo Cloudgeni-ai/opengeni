@@ -18,8 +18,8 @@ import {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
-import type { AdminStepUpHandler, AdminStepUpRequest } from "../admin-step-up";
-import { ConnectCardMessage } from "../connect-card-message";
+import type { AdminStepUpHandler } from "../admin-step-up";
+import { ConnectCardMessage, type CardStepUp } from "../connect-card-message";
 import { attemptHint, type ConnectWindowHost } from "../connect-window-host";
 import { useConnect, type ConnectView } from "../hooks/use-connect";
 import { matchingActiveMcpConnections } from "../mcp-connection-status";
@@ -137,7 +137,7 @@ export type McpCapabilityConnect = {
    * `opened`: the host's step-up went elsewhere (a page it opened) without
    * confirming here, so the next action is Try again.
    */
-  stepUp: (AdminStepUpRequest & { opened: boolean }) | null;
+  stepUp: (CardStepUp & { opened: boolean }) | null;
   /** Confirm with the host's step-up, then turn it on again; or Try again. */
   confirmStepUp: () => void;
   open: () => void;
@@ -219,7 +219,7 @@ export function useMcpCapabilityConnect({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [stepUp, setStepUp] = useState<(AdminStepUpRequest & { opened: boolean }) | null>(null);
+  const [stepUp, setStepUp] = useState<(CardStepUp & { opened: boolean }) | null>(null);
   const [retryFresh, setRetryFresh] = useState(false);
   // A sign-in the person left (closed its window or stopped waiting): its
   // page may have said an administrator has to approve the app.
@@ -232,6 +232,10 @@ export function useMcpCapabilityConnect({
   const operation = useRef<AbortController | null>(null);
   const reservedPopup = useRef<(() => void) | null>(null);
   const steppingUp = useRef(false);
+  // The host's step-up already ran once. If turning on is still refused (its
+  // confirmation didn't reach this session), the card says so plainly and
+  // offers Try again instead of opening the step-up again and again.
+  const steppedUp = useRef(false);
   const startKey = useRef(crypto.randomUUID());
   const advanceKey = useRef(crypto.randomUUID());
   const startInput = useRef<string | null>(null);
@@ -407,7 +411,11 @@ export function useMcpCapabilityConnect({
               : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
           );
           if (failure instanceof ConnectCardMessage && failure.stepUp)
-            setStepUp({ ...failure.stepUp, opened: false });
+            setStepUp({
+              ...failure.stepUp,
+              hostAction: failure.stepUp.hostAction ?? false,
+              opened: false,
+            });
         }
       }
     } finally {
@@ -512,9 +520,10 @@ export function useMcpCapabilityConnect({
       ) {
         const registered = failure.details.passkeyRegistered !== false;
         // With a host step-up the card offers it as the next action.
+        const hostAction = Boolean(adminStepUp) && !steppedUp.current;
         throw new ConnectCardMessage(
           t(
-            adminStepUp
+            hostAction
               ? registered
                 ? "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOnHere"
                 : "sessionMcpCapabilityCard.addAPasskeyToTurnOnHere"
@@ -523,7 +532,7 @@ export function useMcpCapabilityConnect({
                 : "sessionMcpCapabilityCard.addAPasskeyToTurnOn",
             { name: resolved.name },
           ),
-          { stepUp: { passkeyRegistered: registered } },
+          { stepUp: { passkeyRegistered: registered, hostAction } },
         );
       }
       // The account is connected, but turning the integration on here is an
@@ -548,12 +557,13 @@ export function useMcpCapabilityConnect({
   async function confirmStepUp() {
     const asked = stepUp;
     if (!asked || operation.current || steppingUp.current) return;
-    if (asked.opened || !adminStepUp) {
+    if (asked.opened || !asked.hostAction || !adminStepUp) {
       retryTurnOn();
       return;
     }
     let confirmed = false;
     steppingUp.current = true;
+    steppedUp.current = true;
     try {
       confirmed = await adminStepUp({ passkeyRegistered: asked.passkeyRegistered });
     } catch {

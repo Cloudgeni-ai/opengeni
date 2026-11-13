@@ -320,7 +320,7 @@ function ScopedCard({
                 disabled={busy}
                 onClick={flow.confirmStepUp}
               >
-                {flow.stepUp.opened || !adminStepUp
+                {flow.stepUp.opened || !flow.stepUp.hostAction || !adminStepUp
                   ? t("sessionMcpCapabilityCard.tryAgain")
                   : flow.stepUp.passkeyRegistered
                     ? t("sessionMcpCapabilityCard.confirmItSYou")

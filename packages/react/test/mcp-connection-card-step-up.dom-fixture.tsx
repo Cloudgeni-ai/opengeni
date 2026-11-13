@@ -238,3 +238,29 @@ test("by default an embedded card opens the Opengeni app's page for the step-up"
     }
   }
 });
+
+test("a step-up that didn't reach this session falls back to the plain message, not a loop", async () => {
+  const { client, enables } = stepUpClient(true);
+  const opened: string[] = [];
+  const view = await connectUntilRefused(client, host({ opened }));
+  try {
+    await actRun(() => buttonNamed("Confirm it's you")!.click());
+    await flush();
+    expect(opened).toEqual(["/confirm-passkey"]);
+    // Still refused after the page: the card doesn't offer the page again.
+    await actRun(() => buttonNamed("Try again")!.click());
+    await flush();
+    expect(enables).toHaveLength(2);
+    expect(buttonNamed("Confirm it's you")).toBeUndefined();
+    expect(document.body.textContent).toContain(
+      "Confirm it's you with your passkey to turn on Team tools, then connect again.",
+    );
+    expect(buttonNamed("Try again")).toBeDefined();
+    await actRun(() => buttonNamed("Try again")!.click());
+    await flush();
+    expect(opened).toHaveLength(1);
+    expect(enables).toHaveLength(3);
+  } finally {
+    await view.unmount();
+  }
+});

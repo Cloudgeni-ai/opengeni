@@ -30,6 +30,8 @@ export type OpenGeniSiteAiOptions = {
    * Wait through approvals and input requests: once the person answers in
    * Opengeni, the same turn goes on and the call resolves with its final
    * result. Without it, a wait resolves at once with status `pending`.
+   * A person may answer much later, so pass a `signal` (for example
+   * `AbortSignal.timeout(...)`) to stop observing; the work goes on.
    */
   waitForApproval?: boolean;
   /** Called when the turn starts waiting for the person, so the app can say so. */
@@ -192,6 +194,8 @@ export function createOpenGeniSiteAi(
     };
     // Set while the turn waits for the person and observation waits with it.
     let waitingThrough = false;
+    // Reopens of a stream that closed without progress back off up to a ceiling.
+    let quietReopens = 0;
     try {
       let session = await readSession();
       // Reconstruct the exact prefix separately: unlike SSE coalescing, this
@@ -238,7 +242,10 @@ export function createOpenGeniSiteAi(
             session = await readSession();
             if (!waiting(session) && session.lastSequence <= after)
               throw new Error("The Site AI event stream ended before the turn settled.");
-            if (after === opened) await pause(STREAM_REOPEN_DELAY_MS, upstream.signal);
+            if (after === opened) {
+              await pause(reopenDelay(quietReopens), upstream.signal);
+              quietReopens += 1;
+            } else quietReopens = 0;
             break;
           }
           consume(next.value);
@@ -315,6 +322,16 @@ function eventCursor(event: SessionEvent): number {
 
 /** How long to wait before reopening a stream that ended while the turn waits. */
 const STREAM_REOPEN_DELAY_MS = 1000;
+/** The longest wait between quiet reopens. */
+const STREAM_REOPEN_MAX_DELAY_MS = 30_000;
+
+/** Doubles with each quiet reopen in a row, up to the ceiling. */
+export function reopenDelay(quietReopens: number): number {
+  return Math.min(
+    STREAM_REOPEN_MAX_DELAY_MS,
+    STREAM_REOPEN_DELAY_MS * 2 ** Math.min(quietReopens, 16),
+  );
+}
 
 function pause(ms: number, signal: AbortSignal): Promise<void> {
   return observe(() => new Promise<void>((resolve) => setTimeout(resolve, ms)), signal);
