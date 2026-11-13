@@ -41397,9 +41397,14 @@ export async function listSessionEventPage(
           // every recursion step. Keep the subsequent payload SELECT separate:
           // this is still metadata planning, not a new page-wide snapshot.
           // The recursive step reads its next ID through a scalar subquery so
-          // the lookup is always an index parameter. Joining `ordered` there
-          // lets the planner (PostgreSQL 16.16, 17.12, 18.7) put the payload
-          // scan below it and turn the ID match into a per-step session scan.
+          // the lookup compares the ID with a plain parameter (the subquery runs
+          // as an InitPlan). Under row-level security PostgreSQL uses a lookup
+          // as an index condition only when it is leakproof, and since the
+          // November 2026 minor releases (16.16, 17.12, 18.7; CVE-2026-116327)
+          // any non-leakproof function over a value from elsewhere in the query
+          // makes it leaky. `id = ordered.ids[bounded.row_number + 1]` written
+          // in the lookup itself is leaky because of `+`, and turns every step
+          // into a filtered scan of the whole session.
           const metadataRows = await rawRows<
             SessionEventProjectionMetadataRow & { sourceRowCount: number }
           >(

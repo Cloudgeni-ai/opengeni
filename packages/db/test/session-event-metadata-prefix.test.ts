@@ -76,6 +76,7 @@ type Plan = {
   "Actual Rows": number;
   "Actual Loops": number;
   "Shared Hit Blocks": number;
+  "Rows Removed by Filter"?: number;
   Plans?: Plan[];
 };
 const nodes = (p: Plan): Plan[] => [p, ...(p.Plans ?? []).flatMap(nodes)];
@@ -134,7 +135,12 @@ test.each(["after", "before"] as const)(
             (p) => p["Relation Name"] === "session_events" && p["Actual Loops"] > 0,
           );
           expect(payloadReads).toHaveLength(2);
+          // Each recursive step must stay a unique-index lookup under RLS. On
+          // PostgreSQL releases with the CVE-2026-116327 leakproofness fix, a
+          // non-leakproof function in the lookup (for example `+` over the
+          // previous step's row number) turns it into a filtered session scan.
           expect(payloadReads.every((p) => p["Node Type"] === "Index Scan")).toBeTrue();
+          expect(payloadReads.map((p) => p["Rows Removed by Filter"] ?? 0)).toEqual([0, 0]);
           expect(
             payloadReads.map((p) => p["Actual Rows"] * p["Actual Loops"]).sort((a, b) => a - b),
           ).toEqual([1, 2]);
