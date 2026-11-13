@@ -42,6 +42,7 @@ old one; old records stay as history.
 | 34 | [A checkpoint copies the disk alone](0034-a-checkpoint-copies-the-disk-alone.md) | Accepted |
 | 35 | [Built images nothing uses are forgotten](0035-built-images-nothing-uses-are-forgotten.md) | Accepted |
 | 36 | [Idle memory stays in RAM](0036-idle-memory-stays-in-ram.md) | Accepted |
+| 37 | [Compressing idle memory is asked for](0037-compressing-idle-memory-is-asked-for.md) | Accepted |
 
 ## Format
 

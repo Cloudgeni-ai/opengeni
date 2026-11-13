@@ -137,9 +137,11 @@ impl SleepRules {
     /// object storage after two minutes, so a typical pause between two
     /// replies already ends with every file safe against losing the host.
     /// Memory stays in host RAM alone and is freed only under pressure, by
-    /// ending the VM process. Delete the local copy after three idle days,
-    /// and a memory image a request left after 30. No checkpoints: they
-    /// need a store, and a fleet sets them for its sandboxes.
+    /// ending the VM process, idle ones longest unused first, at once and
+    /// without compressing them first (ADR 37). Delete the local copy after
+    /// three idle days, and a memory image a request left after 30. No
+    /// checkpoints: they need a store, and a fleet sets them for its
+    /// sandboxes.
     pub const RECOMMENDED: Self = Self {
         pause_after: Some(Duration::from_secs(10)),
         save_after: Some(Duration::from_secs(30)),
@@ -148,7 +150,7 @@ impl SleepRules {
         drop_after: None,
         evict_after: Some(Duration::from_secs(3 * 86_400)),
         forget_after: Some(Duration::from_secs(30 * 86_400)),
-        compress_under_pressure: true,
+        compress_under_pressure: false,
         checkpoint_every: None,
     };
 
@@ -913,7 +915,11 @@ mod tests {
 
     #[test]
     fn memory_pressure_compresses_then_ends_the_process_saving_first_if_needed() {
-        let policy = recommended();
+        let policy = SleepPolicy::new(SleepRules {
+            compress_under_pressure: true,
+            ..SleepRules::RECOMMENDED.keeping_memory()
+        })
+        .unwrap();
         let paused = state(Level::Paused, Durability::Volatile, false);
         assert_eq!(policy.relief_target(Level::Paused), Some(Level::Compressed));
         assert_eq!(policy.relief_target(Level::Compressed), Some(Level::Saved));
@@ -943,13 +949,12 @@ mod tests {
         );
     }
 
+    /// Compression is asked for, never the default (ADR 37): pressure
+    /// ends an idle sandbox's process directly.
     #[test]
     fn pressure_skips_compression_when_it_is_not_allowed() {
-        let policy = SleepPolicy::new(SleepRules {
-            compress_under_pressure: false,
-            ..SleepRules::RECOMMENDED.keeping_memory()
-        })
-        .unwrap();
+        const { assert!(!SleepRules::RECOMMENDED.compress_under_pressure) };
+        let policy = recommended();
         assert_eq!(policy.relief_target(Level::Running), Some(Level::Saved));
         assert_eq!(policy.relief_target(Level::Paused), Some(Level::Saved));
         let paused = state(Level::Paused, Durability::Local, true);

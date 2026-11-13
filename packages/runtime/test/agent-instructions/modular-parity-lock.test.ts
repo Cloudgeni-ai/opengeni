@@ -22,106 +22,106 @@ import { MODULAR_PARITY_CASES, PARITY_SETTINGS } from "./modular-parity-cases";
  * goal-free verification rule (compose.test.ts).
  */
 const LOCKED: Record<string, string> = {
-  "all/none": "31000:04090befd2dc2000ff593d58fa63a4a3c54b9b2eba5c9c31be93009d475f6a80",
-  "all/docker": "36277:e16e3c08fdd75536967f20d4b5aeccaba0233c6b54cccc5902f28871e7528ccf",
-  "all/selfhosted": "37951:77ef9ab2ee1ce0b5f860b1cf1ca0046bb1824d24b93621ea62278e84d5c441fa",
-  "all/markdown/none": "30026:ca825c42d392574e27d8a06ba805f2a6bf218edc663418097b57e821ae316185",
-  "all/markdown/docker": "34090:9637d8abf59bb2dc793179fbcc6c7a15b92135cf8216195d1aa22074ba09eaab",
+  "all/none": "30730:3d4bae19c202d860b6ecbd604bf3d0fc28395cbf9c98a97da14f6e415d8ef0f8",
+  "all/docker": "36007:b118fa7f7668cd69371300dd69fbe6acda2925db62f53d0b277ef093f44aaaed",
+  "all/selfhosted": "37681:32f91aba61e3d0f31466b1ef1cd7a033adef772df4adfd6c58f5d80bd8769358",
+  "all/markdown/none": "29756:a931848770809ba9f0bc99fcda0936104c97e3db576c021072c39d12c7ad4bef",
+  "all/markdown/docker": "33820:21f91cbf3624006d6595701999e4ee4ceb4a15cb1173533f847b1a3315d487cc",
   "all/markdown/selfhosted":
-    "35617:26d924c7bcefc2ad8c05aef3b9dc1be9afb3d623a2b6595ea4c67ae227f00e19",
-  "all/unattended/none": "31407:ea8f9bf293bbd8674712d910a19384a5515315a213dd9f685ff30fccaffc636b",
-  "all/unattended/docker": "36684:fdb854870f5a4b11474b844d61b679d3cf3c9601699e7d0ef496de2e4cf377be",
+    "35347:808040b6691155de1a4ecd9099ae3a4a29b64aea9639ffe8c8a38be2234d1889",
+  "all/unattended/none": "31137:d52a30a0e7f4955845dc8d26c1f3864e6efb52e51beef3ee4c2fee94a5e74e4e",
+  "all/unattended/docker": "36414:32fae680d4a72f9bf66366ec7cebef4f58443c90a556cbd35e2f9a8966ad10b0",
   "all/unattended/selfhosted":
-    "38358:925d5820608f00511d2d573cdc1b090a8280923fbb18c9162ffc79d95378bbda",
+    "38088:864bf5be49da87f2052282a68e65c9acacfd37675abc3b56a6f7832d50f77e97",
   "all/secret-references/none":
-    "32556:84be969686bc396e72e8e100a6cd454260fcd44bed96c652ae7d258956899d2e",
+    "32286:694681202f8fac58872032e486a19b458801ff821e5760fb9d7b4a1f85a58d48",
   "all/secret-references/docker":
-    "37833:90b20a87ffb1cebbd8bbfc3ff023cb6a2c977afc78659f60d5626a28a7663455",
+    "37563:1a348de146f14e728e0e42706225bcdd71491d8bb54f142ca924b035b712fc0f",
   "all/secret-references/selfhosted":
-    "39507:0483c4ecaf65aeaccc9d7a4265d47b45a3d82acd8aba1151b4612a91f0f977b8",
-  "all/skills-read/none": "31000:04090befd2dc2000ff593d58fa63a4a3c54b9b2eba5c9c31be93009d475f6a80",
+    "39237:f1f31a2c570b0d7383ca1ec21d12570583b4d2fb07ca390d48d8fb872dee5462",
+  "all/skills-read/none": "30730:3d4bae19c202d860b6ecbd604bf3d0fc28395cbf9c98a97da14f6e415d8ef0f8",
   "all/skills-read/docker":
-    "36277:e16e3c08fdd75536967f20d4b5aeccaba0233c6b54cccc5902f28871e7528ccf",
+    "36007:b118fa7f7668cd69371300dd69fbe6acda2925db62f53d0b277ef093f44aaaed",
   "all/skills-read/selfhosted":
-    "37951:77ef9ab2ee1ce0b5f860b1cf1ca0046bb1824d24b93621ea62278e84d5c441fa",
-  "all/identity/none": "30720:bc42fd17e0ab2eaab7349223e2be0d715ea96a4fcad87e8b8c92b9da585d2bf7",
-  "all/identity/docker": "35997:3d565b91d5c912081ac5fff9b5a024588f054d0339f6dad911154b4d64f49b16",
+    "37681:32f91aba61e3d0f31466b1ef1cd7a033adef772df4adfd6c58f5d80bd8769358",
+  "all/identity/none": "30450:1cf0f54e96edbcd3cd94673469e296a302160408ba8b5b839c499d7656d407ce",
+  "all/identity/docker": "35727:714ce68333c93acbd0e169f92f521f0356e3948c184dbd2d1e5e906d40ffd12c",
   "all/identity/selfhosted":
-    "37671:b80173a439698010199b6856e91b8c5d872f7b94c4d39579b1ab0cb24e311e02",
+    "37401:8773e8d97208ef4b8ab5dc69357c307e5b1f158bdcc28a93b6efe1e02521b3df",
   "all-without-humanInput/none":
-    "30846:e2773128d9ed477548d2a2f604c34a7002fad0ab7dca7dadfe6c68edf6ecf850",
+    "30576:55c031ecf21482f5c40af0a11916cd7584a1fc6715c7d776cdb749afd0860cd8",
   "all-without-humanInput/docker":
-    "36123:ecbc67d7726ba2edfc0570162a59614ef8a2f986dd1bd13b27d2202aac1a2878",
+    "35853:c9bead3611d3690847d03a781291d4d6399cc3bff7dffc134a15b63848c475e4",
   "all-without-humanInput/selfhosted":
-    "37797:57839b60a36721758681d38bb48524ee2c6150d5e985507a397505d32bc85a96",
+    "37527:61e6c356bc0284a88169b71fa2ab319e22b061ede39354af8e0a172c23ec5c92",
   "all-without-notifications/none":
-    "31000:04090befd2dc2000ff593d58fa63a4a3c54b9b2eba5c9c31be93009d475f6a80",
+    "30730:3d4bae19c202d860b6ecbd604bf3d0fc28395cbf9c98a97da14f6e415d8ef0f8",
   "all-without-notifications/docker":
-    "36277:e16e3c08fdd75536967f20d4b5aeccaba0233c6b54cccc5902f28871e7528ccf",
+    "36007:b118fa7f7668cd69371300dd69fbe6acda2925db62f53d0b277ef093f44aaaed",
   "all-without-notifications/selfhosted":
-    "37951:77ef9ab2ee1ce0b5f860b1cf1ca0046bb1824d24b93621ea62278e84d5c441fa",
+    "37681:32f91aba61e3d0f31466b1ef1cd7a033adef772df4adfd6c58f5d80bd8769358",
   "all-without-media/none":
-    "30103:d1304e7d1839d482dc3ef3d51f0cf715c281f931b78aea38e261f2ca4b8ad12a",
+    "29833:7211ea08ea6ca679917b7962f729542edaa650e2cb7ec74d0dc67dcc49ee102d",
   "all-without-media/docker":
-    "35358:a97222ee326d3cefac6d95d8a0d0e7514de886995322ba3b34a72268fad96e94",
+    "35088:161fdf255ffd077c7b7c6689701e3c9311acf287c85fedbc709299d5c8abc9e9",
   "all-without-media/selfhosted":
-    "37032:6497c64f743cfea8281bd138a1cf4e4c687aa3b008c4c9dce8ee9d8ce32a47f4",
+    "36762:19dea5f733f7df59e86985c1d24f02a3fcc1f938a58f1150884c847cffe93d5b",
   "all-without-subagents/none":
-    "24694:c768ad41c7fcdb47f9c293d4a2875b5ae93aab090ace5479b4586f4cfe17d48b",
+    "24424:51425cc6403e273b9fd1f89ec12a33ae3d282bdff5e07ef9360dc21d78dfec26",
   "all-without-subagents/docker":
-    "29828:f3e2f31ae5df3c0889327a510e524fc1167686d1fdc07728796127052dcc913b",
+    "29558:7e4f9c29945950a544d7ba6436e1befbc54f2955573d8d06b2a696e4fd7cd693",
   "all-without-subagents/selfhosted":
-    "31502:8428096d7548549ca47dd5bba878fb5ce6691a52f251d73d2aa5b5c807cd80a2",
+    "31232:27e52c6c0882aac2c24e557df0fc2013594d98f09ec07d963eacfc43c3eb46da",
   "all-without-schedules/none":
-    "31000:04090befd2dc2000ff593d58fa63a4a3c54b9b2eba5c9c31be93009d475f6a80",
+    "30730:3d4bae19c202d860b6ecbd604bf3d0fc28395cbf9c98a97da14f6e415d8ef0f8",
   "all-without-schedules/docker":
-    "36277:e16e3c08fdd75536967f20d4b5aeccaba0233c6b54cccc5902f28871e7528ccf",
+    "36007:b118fa7f7668cd69371300dd69fbe6acda2925db62f53d0b277ef093f44aaaed",
   "all-without-schedules/selfhosted":
-    "37951:77ef9ab2ee1ce0b5f860b1cf1ca0046bb1824d24b93621ea62278e84d5c441fa",
+    "37681:32f91aba61e3d0f31466b1ef1cd7a033adef772df4adfd6c58f5d80bd8769358",
   "all-without-browser/none":
-    "31000:04090befd2dc2000ff593d58fa63a4a3c54b9b2eba5c9c31be93009d475f6a80",
+    "30730:3d4bae19c202d860b6ecbd604bf3d0fc28395cbf9c98a97da14f6e415d8ef0f8",
   "all-without-browser/docker":
-    "36277:e16e3c08fdd75536967f20d4b5aeccaba0233c6b54cccc5902f28871e7528ccf",
+    "36007:b118fa7f7668cd69371300dd69fbe6acda2925db62f53d0b277ef093f44aaaed",
   "all-without-browser/selfhosted":
-    "37951:77ef9ab2ee1ce0b5f860b1cf1ca0046bb1824d24b93621ea62278e84d5c441fa",
+    "37681:32f91aba61e3d0f31466b1ef1cd7a033adef772df4adfd6c58f5d80bd8769358",
   "all-without-secrets/none":
-    "30846:e2773128d9ed477548d2a2f604c34a7002fad0ab7dca7dadfe6c68edf6ecf850",
+    "30576:55c031ecf21482f5c40af0a11916cd7584a1fc6715c7d776cdb749afd0860cd8",
   "all-without-secrets/docker":
-    "36123:ecbc67d7726ba2edfc0570162a59614ef8a2f986dd1bd13b27d2202aac1a2878",
+    "35853:c9bead3611d3690847d03a781291d4d6399cc3bff7dffc134a15b63848c475e4",
   "all-without-secrets/selfhosted":
-    "37797:57839b60a36721758681d38bb48524ee2c6150d5e985507a397505d32bc85a96",
+    "37527:61e6c356bc0284a88169b71fa2ab319e22b061ede39354af8e0a172c23ec5c92",
   "all-without-knowledge/none":
-    "28587:98777a172f86a1e50b8aa63a41a922c913c7826edfcc8ae0da00176b6cf5cc9a",
+    "28317:f58d5d82b5f7160653052dee1e41027dcc38a0ac48f0babea5479ef0e64f5429",
   "all-without-knowledge/docker":
-    "33864:e5d752d5feff23ba9c6a10a7f2b0cc253bf166323b6a0576c0d7f22fc30dd311",
+    "33594:cba453f402b658676f4c0c58bc28a78a6b6ee20d5504e0be049005b30ece866f",
   "all-without-knowledge/selfhosted":
-    "35538:f4fc0bcb109e2e9651b62236b1d53635c71dd5d6d7e1de701914de44295c0ae0",
+    "35268:204ee57efc33471c3fa9b8c41589250305166fef7c45acde3624a8381add9e2b",
   "all-without-workspaceFiles/none":
-    "31000:04090befd2dc2000ff593d58fa63a4a3c54b9b2eba5c9c31be93009d475f6a80",
+    "30730:3d4bae19c202d860b6ecbd604bf3d0fc28395cbf9c98a97da14f6e415d8ef0f8",
   "all-without-workspaceFiles/docker":
-    "36277:e16e3c08fdd75536967f20d4b5aeccaba0233c6b54cccc5902f28871e7528ccf",
+    "36007:b118fa7f7668cd69371300dd69fbe6acda2925db62f53d0b277ef093f44aaaed",
   "all-without-workspaceFiles/selfhosted":
-    "37951:77ef9ab2ee1ce0b5f860b1cf1ca0046bb1824d24b93621ea62278e84d5c441fa",
+    "37681:32f91aba61e3d0f31466b1ef1cd7a033adef772df4adfd6c58f5d80bd8769358",
   "all-without-workspaceConnectors/none":
-    "31000:04090befd2dc2000ff593d58fa63a4a3c54b9b2eba5c9c31be93009d475f6a80",
+    "30730:3d4bae19c202d860b6ecbd604bf3d0fc28395cbf9c98a97da14f6e415d8ef0f8",
   "all-without-workspaceConnectors/docker":
-    "36277:e16e3c08fdd75536967f20d4b5aeccaba0233c6b54cccc5902f28871e7528ccf",
+    "36007:b118fa7f7668cd69371300dd69fbe6acda2925db62f53d0b277ef093f44aaaed",
   "all-without-workspaceConnectors/selfhosted":
-    "37951:77ef9ab2ee1ce0b5f860b1cf1ca0046bb1824d24b93621ea62278e84d5c441fa",
+    "37681:32f91aba61e3d0f31466b1ef1cd7a033adef772df4adfd6c58f5d80bd8769358",
   "all-without-workspaceAdmin/none":
-    "29681:975684b981c6618876082ba99b3c2f8db2e84157f427e2a2fb4b41965292ce89",
+    "29411:37520d84c6fde1c5bd5b3a8c20bc61768e36a2ddb521aba7a6e8b92902e940fe",
   "all-without-workspaceAdmin/docker":
-    "34958:ce2a184d815ff27001c426545f513fc6ebd9699ea2684b92146f24fe80aad970",
+    "34688:5cf529d3364ab2db1fc2493a49fbc77ff2e49f0dca85b680e919993b80c9c8a2",
   "all-without-workspaceAdmin/selfhosted":
-    "36632:c77c3c9712f6645db241aab64dc695fac447fb72421c1e89ae6b68f084f281b8",
+    "36362:794b415c00eb1c6c1cf319bcc84fb620e0dca142269be341559157a82c9eba45",
   "none-with-features/docker":
-    "27431:329cabae4161559e49b2a38e4d09fc534ecb20d5db75eecb2994409077c24b8c",
+    "27161:b4f5f26780dcfdebe1d25c51bdc753b83e3cc8fb8cf7c909556ae44207cccb80",
   "none-with-features/selfhosted":
-    "29105:62f64ce1e6d0838c7f5b9e72aef55d3327d20b8a5371dac71661b8537226e9fe",
+    "28835:6aedb9580b977415a4f4d50749b0e63aa21c422c1320435a43cae88d077603f9",
   "none-with-features-and-workspace/none":
-    "22319:548a7851eb24a18de19c5a91063da0b5189ecbf7d982f3e3f8db588748726c56",
+    "22049:d5bd66efb9d6479ff1f032c1eb903a1d0dc54cbef39babd56fe56e13d92c2155",
   "none-with-features-manage/none":
-    "21071:b4122dc38b1f81964eda0f22f8edfde940c5789181e669a233bb18f2a0021a74",
+    "20801:a95d45dbf3b8d24fe285e437334bc474081bde693e6ec56643109703bee6f2a4",
 };
 
 function digest(options: BuildAgentOptions): string {

@@ -3444,6 +3444,78 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect([...leftIds].some((id) => rightIds.has(id))).toBe(false);
   }, 60_000);
 
+  test("a row that becomes due while the claim takes its fences waits for the next claim", async () => {
+    if (!available) return;
+    const fenced = await promoteTurnProcess({ outcome: "completed" });
+    const late = await promoteTurnProcess({ outcome: "completed" });
+    await admin`
+      update sandbox_retained_processes set reconcile_after = now() + interval '1 hour'
+      where id = ${late.process.id}`;
+
+    // A migration owner that bypasses row security (for example a superuser) runs
+    // the claim without the fenced-owner policy, so only the claim's own
+    // workspace selection keeps it to fenced rows.
+    await admin.unsafe(`ALTER ROLE "${shared!.ownerRole}" BYPASSRLS`);
+    // Hold the first workspace's fence exclusively so the claim stops inside its
+    // fence loop, after it has chosen which workspaces to fence.
+    const fenceHolder = await admin.reserve();
+    try {
+      await fenceHolder`begin`;
+      const [holder] = await fenceHolder<{ pid: number }[]>`
+        select pg_backend_pid() as pid,
+          pg_advisory_xact_lock(hashtextextended(
+            'session-tenancy:' || ${fenced.workspaceId}::text, 0
+          ))`;
+      const claim = claimTerminalRetainedProcesses(db, {
+        claimId: crypto.randomUUID(),
+        limit: 100,
+        claimTtlMs: 300_000,
+      }).then(
+        (claims) => ({ claims, error: null }),
+        (error: unknown) => ({ claims: null, error }),
+      );
+      const waitStarted = Date.now();
+      for (;;) {
+        const [blocked] = await admin<{ waiting: boolean }[]>`
+          select exists (
+            select 1 from pg_stat_activity activity
+            where ${holder!.pid}::integer = any(pg_blocking_pids(activity.pid))
+          ) as waiting`;
+        if (blocked!.waiting) break;
+        if (Date.now() - waitStarted > 20_000) throw new Error("claim never reached the fence");
+        await Bun.sleep(20);
+      }
+
+      // Another workspace's row becomes due and commits before the claim's next statement.
+      await admin`
+        update sandbox_retained_processes set reconcile_after = now() - interval '1 hour'
+        where id = ${late.process.id}`;
+      await fenceHolder`commit`;
+
+      const result = await claim;
+      expect(result.error).toBeNull();
+      const claimedIds = result.claims!.map((entry) => entry.process.id);
+      expect(claimedIds).toContain(fenced.process.id);
+      expect(claimedIds).not.toContain(late.process.id);
+    } finally {
+      await fenceHolder`rollback`.catch(() => undefined);
+      fenceHolder.release();
+      await admin.unsafe(`ALTER ROLE "${shared!.ownerRole}" NOBYPASSRLS`);
+    }
+
+    const [untouched] = await admin<{ claimId: string | null; attempts: number }[]>`
+      select reconcile_claim_id as "claimId", reconcile_attempts as attempts
+      from sandbox_retained_processes where id = ${late.process.id}`;
+    expect(untouched).toEqual({ claimId: null, attempts: late.process.reconcileAttempts });
+
+    const next = await claimTerminalRetainedProcesses(db, {
+      claimId: crypto.randomUUID(),
+      limit: 100,
+      claimTtlMs: 300_000,
+    });
+    expect(next.map((entry) => entry.process.id)).toContain(late.process.id);
+  }, 60_000);
+
   test("inventory functions report terminal owners and fixed expired-draining buckets", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "completed" });

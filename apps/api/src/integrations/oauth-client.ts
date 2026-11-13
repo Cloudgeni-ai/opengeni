@@ -116,6 +116,7 @@ import {
   type PinnableAuthorizationServer,
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
+import { nangoIntegrationForConnectTarget, startNangoConnect } from "./nango-connect";
 import { microsoftAuthorizationNotGranted } from "./microsoft-admin-consent";
 import { microsoftAdminConsentUrl } from "@opengeni/contracts/connect";
 import {
@@ -478,6 +479,10 @@ export async function startMcpOAuth(
   context: OAuthStartContext,
 ): Promise<OAuthStartResponse> {
   const startTarget = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
+  // The integration backend switch: a Nango-backed integration signs in
+  // through Nango Connect on the same card (docs/nango.md).
+  const nangoIntegration = await nangoIntegrationForConnectTarget(deps, startTarget);
+  if (nangoIntegration) return await startNangoConnect(deps, context, nangoIntegration);
   if (
     context.integrationKey === "google-drive" &&
     (startTarget !== OFFICIAL_DRIVE_MCP_URL || context.payload.ownership !== "personal")
@@ -3830,7 +3835,7 @@ function credentialBundle(
   };
 }
 
-function callbackReturnPath(
+export function callbackReturnPath(
   returnPath: string,
   status: "success" | "error",
   params: Record<string, string>,

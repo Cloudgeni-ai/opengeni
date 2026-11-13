@@ -196,13 +196,16 @@ async function fixture(
       );
     throw new Error(`Unexpected synthetic Microsoft destination: ${url}`);
   });
-  async function begin(mcpUrl = DATAVERSE_MCP_URL) {
+  async function begin(
+    mcpUrl = DATAVERSE_MCP_URL,
+    ownership: "personal" | "workspace" = "personal",
+  ) {
     const response = await app.request(base, {
       method: "POST",
       headers,
       body: JSON.stringify({
         providerId: "mcp-oauth",
-        ownership: "personal",
+        ownership,
         returnUrl,
         idempotencyKey: randomUUID(),
       }),
@@ -219,8 +222,11 @@ async function fixture(
       }),
     });
   }
-  async function authorize(mcpUrl = DATAVERSE_MCP_URL) {
-    const advanced = await begin(mcpUrl);
+  async function authorize(
+    mcpUrl = DATAVERSE_MCP_URL,
+    ownership: "personal" | "workspace" = "personal",
+  ) {
+    const advanced = await begin(mcpUrl, ownership);
     expect(advanced.status).toBe(200);
     const ready = await advanced.json();
     expect(ready.state).toBe("requires_user_action");
@@ -256,6 +262,9 @@ describe("Microsoft Dynamics MCP OAuth", () => {
       tokenEndpoint: `${ENTRA}/${TENANT_ID}/oauth2/v2.0/token`,
     };
     expect(() => assertAuthorizationServerNotReserved(entra, DEFAULT_OAUTH_PROFILE)).not.toThrow();
+    // Personal by default, but an admin may share one account with the workspace.
+    expect(dataverse?.defaultOwnership).toBe("personal");
+    expect(dataverse?.requiredOwnership).toBeUndefined();
   });
 
   test("signs in with the deployment's Entra app, environment scope and verified identity", async () => {
@@ -313,6 +322,22 @@ describe("Microsoft Dynamics MCP OAuth", () => {
         resource_parameter_supported: false,
         refresh_scope: `${DATAVERSE_SCOPE} offline_access openid email`,
       });
+    } finally {
+      provider.restore();
+    }
+  }, 30_000);
+
+  test("an account can be shared with the workspace", async () => {
+    const provider = await fixture();
+    try {
+      const begun = await provider.authorize(DATAVERSE_MCP_URL, "workspace");
+      const response = await provider.callback({ state: begun.state, code: "fixture-code" });
+      expect(response.status).toBe(302);
+      expect(await provider.read(begun.attempt.id)).toMatchObject({ state: "complete" });
+      const [account] = (
+        await listConnectionsMetadata(client.db, provider.identity.personalWorkspaceId)
+      ).filter((connection) => connection.providerDomain === "contoso.crm.dynamics.com");
+      expect(account?.subjectId ?? null).toBeNull();
     } finally {
       provider.restore();
     }

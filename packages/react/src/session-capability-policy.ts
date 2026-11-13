@@ -47,6 +47,19 @@ export async function attachSessionCapability(
   if (request) await client.updateSessionToolPolicy(workspaceId, sessionId, request);
 }
 
+/**
+ * Whether this chat already uses the capability, read from the session the
+ * same way adding it does: nothing left to add. Unknown (a default policy
+ * whose full selection isn't listed) reads as not yet.
+ */
+export function sessionUsesCapability(session: Session, item: SessionCapabilityToolSource) {
+  if (item.kind === "skill" || sessionCapabilityTools(item).length === 0) return true;
+  const policy = session.effectiveToolPolicy;
+  if (session.toolPolicy.mode === "workspace_default" && (!policy || policy.idsTruncated))
+    return false;
+  return sessionCapabilityChanges(session, item) === null;
+}
+
 function capabilityToolPolicyUpdate(
   t: OpenGeniText,
   session: Session,
@@ -54,15 +67,26 @@ function capabilityToolPolicyUpdate(
 ): UpdateSessionToolPolicyRequest | null {
   const tools = sessionCapabilityTools(item);
   if (item.kind === "skill" || tools.length === 0) return null;
+  if (session.toolPolicy.mode === "workspace_default") {
+    const policy = session.effectiveToolPolicy;
+    if (!policy || policy.idsTruncated)
+      throw new ConnectCardMessage(t("sessionCapabilityPolicy.connectedButTheFullSession"));
+  }
+  return sessionCapabilityChanges(session, item);
+}
+
+function sessionCapabilityChanges(
+  session: Session,
+  item: SessionCapabilityToolSource,
+): UpdateSessionToolPolicyRequest | null {
+  const tools = sessionCapabilityTools(item);
   // Session.tools includes mandatory runtime servers, which must never be
   // echoed into the human's explicit selection.
   let existing = session.tools.filter(
     (tool) => !session.effectiveToolPolicy?.mandatoryIds?.includes(tool.id),
   );
   if (session.toolPolicy.mode === "workspace_default") {
-    const policy = session.effectiveToolPolicy;
-    if (!policy || policy.idsTruncated)
-      throw new ConnectCardMessage(t("sessionCapabilityPolicy.connectedButTheFullSession"));
+    const policy = session.effectiveToolPolicy!;
     // A workspace may choose a restricted default instead of all enabled servers.
     // Preserve that exact selection if this connection needs an explicit addition.
     // selectedIds contains only explicit additions, and is normally empty for

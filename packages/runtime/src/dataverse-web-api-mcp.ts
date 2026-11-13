@@ -307,7 +307,20 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
         throw error;
       const message =
         error instanceof DataverseError ? error.message : "Dataverse tool failed. Try again.";
-      return { isError: true, content: [{ type: "text", text: message }] };
+      const code = error instanceof DataverseError ? error.code : undefined;
+      return {
+        isError: true,
+        content: [{ type: "text", text: message }],
+        // Typed, so hosts such as a Site frame can offer Reconnect or say
+        // plainly that Microsoft Dynamics refused it; nothing ran either way.
+        ...(code
+          ? {
+              structuredContent: {
+                error: { code, message, retryable: false, outcomeUnknown: false },
+              },
+            }
+          : {}),
+      };
     }
   }
 
@@ -578,6 +591,7 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
       await this.reportAuthNeeded(result, toolName);
       throw new DataverseError(
         "Sign-in to Microsoft Dynamics is needed. Reconnect the Microsoft Dynamics connection.",
+        "connection_auth_needed",
       );
     }
     if (this.connectionId && this.connectionId !== result.connectionId)
@@ -654,6 +668,7 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
       if (typeof refusalMessage === "string" && refusalMessage.trim())
         throw new DataverseError(
           `${dataverseErrorMessage(response, refusal as Record<string, unknown>)} The signed-in Microsoft account may not have access to this Dynamics environment; its Dynamics admin can add the user.`,
+          "provider_permission_denied",
         );
       await this.reportAuthNeeded(
         {
@@ -667,6 +682,7 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
       // Dataverse authenticates before it changes anything, so a 401 applied nothing.
       throw new DataverseError(
         "Microsoft Dynamics rejected the sign-in. Reconnect the Microsoft Dynamics connection.",
+        "connection_auth_needed",
       );
     }
     if (response.status === 204) {
@@ -692,7 +708,10 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
     }
     if (response.ok) return payload;
     if (mutation && response.status >= 500) throw unknownOutcome();
-    throw new DataverseError(dataverseErrorMessage(response, payload));
+    throw new DataverseError(
+      dataverseErrorMessage(response, payload),
+      response.status === 403 ? "provider_permission_denied" : undefined,
+    );
   }
 
   private async reportAuthNeeded(
@@ -890,7 +909,18 @@ function recordArg(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-class DataverseError extends Error {}
+/**
+ * A refusal the person can act on carries a typed code: sign in again
+ * (`connection_auth_needed`) or ask for access (`provider_permission_denied`).
+ */
+class DataverseError extends Error {
+  constructor(
+    message: string,
+    readonly code?: "connection_auth_needed" | "provider_permission_denied",
+  ) {
+    super(message);
+  }
+}
 class DataverseMutationOutcomeUnknownError extends IntegrationInvocationError {
   constructor(message: string) {
     super("dataverse_mutation_outcome_unknown", message, "unknown", false);

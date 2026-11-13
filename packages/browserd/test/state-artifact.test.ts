@@ -60,6 +60,9 @@ describe("encrypted browser profile artifacts", () => {
       const restored = join(directory, "restored");
       await mkdir(join(profile, "Default", "IndexedDB"), { recursive: true });
       await mkdir(join(profile, "Default", "Cache"), { recursive: true });
+      await mkdir(join(profile, "Default", "Service Worker", "CacheStorage"), {
+        recursive: true,
+      });
       await mkdir(join(profile, "Default", "IndexedDB", "OptGuideOnDeviceModel"), {
         recursive: true,
       });
@@ -76,6 +79,10 @@ describe("encrypted browser profile artifacts", () => {
           "site-state",
         ),
         writeFile(join(profile, "Default", "Cache", "discard-me"), "cache"),
+        writeFile(
+          join(profile, "Default", "Service Worker", "CacheStorage", "site-assets"),
+          "service-worker-cache",
+        ),
         writeFile(
           join(profile, "OptGuideOnDeviceModel", "model-version", "weights.bin"),
           "disposable-model",
@@ -117,6 +124,7 @@ describe("encrypted browser profile artifacts", () => {
         "durable-state",
       );
       expect(await exists(join(restored, "Default", "Cache"))).toBe(false);
+      expect(await exists(join(restored, "Default", "Service Worker"))).toBe(false);
       expect(await exists(join(restored, "OptGuideOnDeviceModel"))).toBe(false);
       expect(
         await readFile(

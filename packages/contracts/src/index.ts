@@ -185,6 +185,7 @@ export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
 export * from "./atlassian";
 export * from "./connector-destinations";
+export * from "./nango";
 export * from "./connector-attachments";
 export * from "./memory-slack-delivery";
 export * from "./image-generation";

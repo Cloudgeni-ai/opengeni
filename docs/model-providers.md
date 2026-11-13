@@ -2284,7 +2284,35 @@ The value depends only on the route and model, never on the message: like
 reasoning effort, a provider may treat it as part of the cached prompt prefix.
 A compaction request built from the turn's prepared request carries the same
 model settings, so the portable checkpoint summary is also requested at low
-verbosity. `reasoning.summary` stays `detailed`.
+verbosity, with the turn's own `reasoning.summary`.
+
+The `reasoning.summary` a turn requests is one deployment setting,
+`OPENGENI_REASONING_SUMMARY_JSON`, keyed by route and latency mode
+(`reasoningSummaryForTurn` in the same file; defaults in
+`packages/config/src/defaults.ts`). The routes are `codex` (the Codex
+subscription, every model), `openai` (direct OpenAI Responses) and `azure`
+(the Azure OpenAI Responses wire); `openai` and `azure` apply only to the
+GPT-5-family and later reasoning models that receive `text.verbosity`. Every
+other route and model sends `detailed`. Values are `auto`, `detailed` or
+`none`, which sends no summary field, so the provider writes none. The
+defaults are `detailed` on Codex except `none` for Ultrafast, and `auto` on
+direct OpenAI and Azure at every speed. On Codex the answer waits until the
+summary is written: measured on GPT-6.1 Sol at Ultrafast and medium effort,
+the first answer token came a median 1.3 s (WebSocket) to 2.4 s (HTTP) sooner
+with no summary. A value changes only the cells it names and an unknown route,
+mode or value fails startup, for example
+`OPENGENI_REASONING_SUMMARY_JSON='{"codex":{"fast":"none"}}'` also turns the
+summary off for Fast on Codex.
+
+A turn with no summary shows no thinking row: the timeline creates one only
+from streamed summary text, and private or encrypted reasoning is never shown.
+The provider's `any` first-token measurement then marks the first answer
+text, as `text` does. The summary is not part of Opengeni's prompt-cache key
+(the session id) and earlier requests are never rewritten; reasoning items
+stored with an empty summary replay unchanged. Like `service_tier`, it is
+part of the request shape a pooled Responses WebSocket compares before it
+continues the previous response, so the first request after a change of
+speed sends its full input, exactly as changing speed did before.
 
 Streaming Codex subscription requests travel over a pooled Responses
 WebSocket (`packages/network/src/responses-websocket.ts`), with the Codex

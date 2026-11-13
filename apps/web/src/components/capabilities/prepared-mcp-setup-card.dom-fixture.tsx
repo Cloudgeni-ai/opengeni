@@ -99,6 +99,7 @@ function fixture(ownership: "personal" | "workspace" = "personal") {
     disconnect: mock(async () => {}),
   } satisfies ConnectTransport;
   const update = mock(async () => ({ firstPartyMcpTools: [] }));
+  const continued = mock(async () => ({}));
   const capabilities = mock(async () => ({
     items: [
       {
@@ -121,10 +122,12 @@ function fixture(ownership: "personal" | "workspace" = "personal") {
       toolPolicyVersion: 7,
     })),
     updateSessionToolPolicy: update,
+    continueAfterCapabilitySetup: continued,
   } as unknown as ChatClient<OpenGeniBrowserClient>;
   return {
     transport,
     update,
+    continued,
     capabilities,
     props: {
       item: { ...notice, setupRequest: { ...notice.setupRequest!, ownership } },
@@ -184,6 +187,10 @@ for (const ownership of ["personal", "workspace"] as const)
         ],
       });
       expect(view.container.textContent).toContain("available from your next message");
+      // The agent carries on with the request on its own.
+      expect(f.continued.mock.calls as unknown[]).toEqual([
+        ["workspace", "session", { capabilityId: "mcp:records" }],
+      ]);
     } finally {
       await view.unmount();
     }

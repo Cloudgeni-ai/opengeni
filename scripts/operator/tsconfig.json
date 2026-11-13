@@ -10,6 +10,7 @@
     "repair-invalid-tool-names.test.ts",
     "bench-http-model-catalog.ts",
     "credit-promotion-policy.ts",
+    "nango.ts",
     "connected-machine-load-profile.ts",
     "connected-machine-load-profile.test.ts",
     "opensandbox-conformance.ts",

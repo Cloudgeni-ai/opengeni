@@ -2,7 +2,54 @@ import { expect, test } from "bun:test";
 import { reviewedConnectorToolCatalog } from "../src/domain/connector-tool-permissions";
 import { OPENGENI_SLACK_REST_USER_SCOPES } from "@opengeni/contracts/slack-rest-mcp";
 import { OFFICIAL_GMAIL_MCP_URL, OFFICIAL_GOOGLE_CALENDAR_MCP_URL } from "@opengeni/runtime";
+import { microsoftDynamicsMcpEndpoint } from "@opengeni/contracts/microsoft-dynamics";
 import curated from "../../../data/catalog/curated.json";
+
+test("Dynamics permissions list the bridge's tools agents run, never the hosted MCP server's", () => {
+  const oauth = (url: string) => ({
+    providerDomain: new URL(url).hostname,
+    kind: "oauth2" as const,
+    subjectScope: "subject" as const,
+  });
+  const dataverse = "https://contoso.crm17.dynamics.com/api/mcp";
+  const names = reviewedConnectorToolCatalog(
+    { url: dataverse, connectionRef: oauth(dataverse) },
+    [],
+    {},
+  )?.map(({ name }) => name);
+  expect(names).toContain("dataverse_query");
+  expect(names).toContain("dataverse_describe_table");
+  // allowedTools still narrows the list.
+  expect(
+    reviewedConnectorToolCatalog(
+      { url: dataverse, connectionRef: oauth(dataverse), allowedTools: ["dataverse_query"] },
+      [],
+      {},
+    )?.map(({ name }) => name),
+  ).toEqual(["dataverse_query"]);
+  const businessCentral = microsoftDynamicsMcpEndpoint(
+    "https://businesscentral.dynamics.com/11111111-1111-4111-8111-111111111111/Production",
+  )!.mcpUrl;
+  const bcHost = new URL(`${businessCentral}/`).hostname;
+  expect(
+    reviewedConnectorToolCatalog(
+      {
+        url: businessCentral,
+        connectionRef: { ...oauth(businessCentral), providerDomain: bcHost },
+      },
+      [],
+      {},
+    )?.some(({ name }) => name.startsWith("business_central_")),
+  ).toBe(true);
+  // Without the environment's own OAuth connection there is no bridge.
+  expect(
+    reviewedConnectorToolCatalog(
+      { url: dataverse, connectionRef: { ...oauth(dataverse), kind: "api_key" as const } },
+      [],
+      {},
+    ),
+  ).toBeNull();
+});
 
 test("Slack permissions use the runtime identity matcher instead of hosted discovery", () => {
   for (const url of ["https://mcp.slack.com/mcp", "https://mcp.slack.com/mcp/"]) {

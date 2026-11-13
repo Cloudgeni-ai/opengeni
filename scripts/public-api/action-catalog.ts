@@ -64,6 +64,11 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
       /^\/v1\/webhooks\/|^\/v1\/integrations\/(slack\/(commands|events|interactions)|teams\/messages)$/,
     reason: "calls from other services, signed by them",
   },
+  {
+    pattern: /^\/v1\/integrations\/nango\/(connect|connect\/complete|webhook)$/,
+    reason:
+      "the Nango Connect page and its completion, bound to a signed state, and Nango's signed webhook",
+  },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
   {
     pattern: /^\/v1\/github\/personal\/gateway\//,
@@ -369,6 +374,8 @@ const ACCESS_GATES: Readonly<Record<string, string | null>> = {
   requireFreshAccessGrant: null,
   requireIntegrationSetupAuthorization: "connections:write",
   requireMachineAccessGrant: null,
+  // An organization check: `await requireAccountPermission(c, deps, accountId, "billing:read")`.
+  requireAccountPermission: null,
   requireWorkspaceContributorGrant: "sessions:create",
   requireWorkspaceSettingsGrant: "workspace:admin",
   requireWorkspaceSettingsAuthorization: "workspace:admin",

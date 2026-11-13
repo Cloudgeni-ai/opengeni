@@ -9,6 +9,30 @@ import {
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import type { McpServerConnectionRef, ToolAuthNeededPayload } from "@opengeni/contracts";
 import type { ResolveConnectionCredentialInput, ResolveConnectionCredentialResult } from "./index";
+import { nangoProviderDomain } from "@opengeni/contracts/nango";
+import {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+} from "./nango-transport";
+import {
+  connectorAttachmentFileName,
+  type ConnectorFileMaterializationRequest,
+} from "./connector-attachments";
+import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import {
+  NANGO_DRIVE_MAX_DOWNLOAD_BYTES,
+  NANGO_DRIVE_MAX_INLINE_BYTES,
+  NANGO_DRIVE_READ_TOOLS,
+  isNangoDriveReadTool,
+  nangoDriveContentUrl,
+  nangoDriveListUrl,
+  nangoDriveMetadataUrl,
+  nangoDrivePermissionsUrl,
+  parseNangoDriveRead,
+  projectNangoDriveText,
+  type NangoDriveReadName,
+} from "./drive-nango-read-tools";
 
 export const OFFICIAL_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
 const api = "https://www.googleapis.com/drive/v3/";
@@ -146,6 +170,10 @@ export type DriveMcpBridgeContext = {
   onResolvedConnectionId?: (connectionId: string) => void;
   fetchImpl?: FetchLike;
   createRemoteServer: () => MCPServer;
+  /** Best-effort accounting for requests sent through the Nango proxy. */
+  recordNangoUsage?: NangoUsageRecorder;
+  /** Saves a downloaded file to the agent's files (Nango-served downloads). */
+  materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
 };
 type DriveToolResult = Awaited<ReturnType<NonNullable<MCPServer["callToolResult"]>>>;
 type ParsedCall = {
@@ -158,24 +186,29 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
   readonly bridge = DRIVE_MCP_BRIDGE_DESCRIPTOR;
   readonly cacheToolsList = false;
   readonly name: string;
-  private readonly remote: MCPServer;
+  /** Absent when Drive is routed through Nango: reads then come from Drive REST. */
+  private readonly remote: MCPServer | null;
   constructor(
     private readonly config: DriveMcpBridgeConfig,
     private readonly context: DriveMcpBridgeContext,
   ) {
-    this.remote = context.createRemoteServer();
-    this.name = this.remote.name;
+    this.remote = isNangoDriveConfig(config) ? null : context.createRemoteServer();
+    this.name =
+      this.remote?.name ??
+      `opengeni-drive-rest-${context.serverId.replace(/[^A-Za-z0-9_-]/gu, "_")}`;
   }
-  connect() {
-    return this.remote.connect();
+  async connect() {
+    await this.remote?.connect();
   }
-  close() {
-    return this.remote.close();
+  async close() {
+    await this.remote?.close();
   }
   async invalidateToolsCache() {
-    await this.remote.invalidateToolsCache();
+    await this.remote?.invalidateToolsCache();
   }
   async listTools() {
+    if (!this.remote)
+      return [...structuredClone(NANGO_DRIVE_READ_TOOLS), ...structuredClone(DRIVE_EXTRA_TOOLS)];
     return mergeDriveMcpTools(await this.remote.listTools());
   }
   async callTool(
@@ -193,8 +226,11 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
     options?: { signal?: AbortSignal },
   ): Promise<DriveToolResult> {
     options?.signal?.throwIfAborted();
+    if (!this.remote && isNangoDriveReadTool(name))
+      return await this.callRestRead(name, args, meta, options);
     if (!Object.hasOwn(definitions, name)) {
       const remote = this.remote;
+      if (!remote) return inputError(`Unknown Google Drive tool: ${name}`);
       if (remote.callToolResult) return remote.callToolResult(name, args, meta, options);
       return { content: await remote.callTool(name, args, meta, options) };
     }
@@ -308,41 +344,12 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
       request.headers = { "content-type": "application/json" };
     }
     const read = readNames.has(tool);
-    const credential = await this.context.resolveCredential({
-      workspaceId: this.context.workspaceId,
-      serverId: this.context.serverId,
-      connectionRef: this.config.connectionRef!,
-      destinationUrl: url.toString(),
-      toolName: name,
-      forceRefresh: false,
-      ...(this.context.subjectId ? { subjectId: this.context.subjectId } : {}),
-    });
-    if (credential.status === "auth_needed") {
-      await this.context.onAuthNeeded?.({
-        ...credential,
-        serverId: this.context.serverId,
-        toolName: name,
-      });
-      return {
-        isError: true,
-        content: [{ type: "text", text: "Reconnect Google Drive to authorize this operation." }],
-      };
-    }
-    this.context.onResolvedConnectionId?.(credential.connectionId);
-    if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest()))
-      throw new Error("Google Drive authority is no longer valid");
+    const credential = await this.resolve(name, url);
+    if (credential.status === "auth_needed") return reconnectResult();
     options?.signal?.throwIfAborted();
     let response: Response;
     try {
-      response = await (this.context.fetchImpl ?? fetch)(url, {
-        ...request,
-        headers: { ...credential.headers, ...request.headers },
-        redirect: "error",
-        signal: AbortSignal.any([
-          AbortSignal.timeout(30000),
-          ...(options?.signal ? [options.signal] : []),
-        ]),
-      });
+      response = await this.send(name, url, request, credential, options?.signal);
       if (!read && response.status >= 500) {
         await response.body?.cancel().catch(() => undefined);
         throw new DriveMutationOutcomeUnknown();
@@ -368,7 +375,220 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
       structuredContent: payload,
     };
   }
+  private async resolve(toolName: string, url: URL) {
+    const credential = await this.context.resolveCredential({
+      workspaceId: this.context.workspaceId,
+      serverId: this.context.serverId,
+      connectionRef: this.config.connectionRef!,
+      destinationUrl: url.toString(),
+      toolName,
+      forceRefresh: false,
+      acceptedTransports: NANGO_PROXY_TRANSPORTS,
+      ...(this.context.subjectId ? { subjectId: this.context.subjectId } : {}),
+    });
+    if (credential.status === "auth_needed") {
+      await this.context.onAuthNeeded?.({
+        ...credential,
+        serverId: this.context.serverId,
+        toolName,
+      });
+      return credential;
+    }
+    this.context.onResolvedConnectionId?.(credential.connectionId);
+    if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest()))
+      throw new Error("Google Drive authority is no longer valid");
+    return credential;
+  }
+  private async send(
+    toolName: string,
+    url: URL,
+    request: RequestInit,
+    credential: OkCredential,
+    signal?: AbortSignal,
+  ) {
+    return await sendWithCredential(
+      this.context.fetchImpl ?? fetch,
+      url,
+      {
+        ...request,
+        headers: { ...((request.headers as Record<string, string> | undefined) ?? {}) },
+        redirect: "error",
+        signal: AbortSignal.any([AbortSignal.timeout(30000), ...(signal ? [signal] : [])]),
+      },
+      credential,
+      {
+        ...(this.context.recordNangoUsage ? { recorder: this.context.recordNangoUsage } : {}),
+        toolName,
+      },
+    );
+  }
+  private async callRestRead(
+    name: NangoDriveReadName,
+    args: Record<string, unknown> | null,
+    meta: Record<string, unknown> | null | undefined,
+    options?: { signal?: AbortSignal },
+  ) {
+    const parsed = parseNangoDriveRead(name, args);
+    if (!parsed.ok) return inputError(parsed.error);
+    const input = parsed.input;
+    const getJson = async (
+      url: URL,
+    ): Promise<{ ok: boolean; payload: Record<string, unknown> } | null> => {
+      const credential = await this.resolve(name, url);
+      if (credential.status === "auth_needed") return null;
+      options?.signal?.throwIfAborted();
+      let response: Response;
+      try {
+        response = await this.send(name, url, { method: "GET" }, credential, options?.signal);
+      } catch (error) {
+        throw new Error("Google Drive request failed", { cause: error });
+      }
+      const payload = await readResponseJsonBounded<Record<string, unknown>>(
+        response,
+        8 * 1024 * 1024,
+        "Google Drive response",
+      );
+      return { ok: response.ok, payload };
+    };
+    if (name === "search_files" || name === "list_recent_files") {
+      const result = await getJson(nangoDriveListUrl(name, input));
+      return result ? jsonResult(result.payload, result.ok) : reconnectResult();
+    }
+    const fileId = String(input.fileId);
+    if (name === "get_file_permissions") {
+      const result = await getJson(nangoDrivePermissionsUrl(fileId));
+      return result ? jsonResult(result.payload, result.ok) : reconnectResult();
+    }
+    const metadata = await getJson(nangoDriveMetadataUrl(fileId));
+    if (!metadata) return reconnectResult();
+    if (name === "get_file_metadata" || !metadata.ok)
+      return jsonResult(metadata.payload, metadata.ok);
+    const mimeType = typeof metadata.payload.mimeType === "string" ? metadata.payload.mimeType : "";
+    const purpose = name === "read_file_content" ? "text" : "bytes";
+    const target = nangoDriveContentUrl(
+      fileId,
+      mimeType,
+      purpose,
+      typeof input.exportMimeType === "string" ? input.exportMimeType : undefined,
+    );
+    if (!(target instanceof URL)) return inputError(target.error);
+    const credential = await this.resolve(name, target);
+    if (credential.status === "auth_needed") return reconnectResult();
+    options?.signal?.throwIfAborted();
+    const response = await this.send(name, target, { method: "GET" }, credential, options?.signal);
+    if (!response.ok) {
+      const payload = await readResponseJsonBounded<Record<string, unknown>>(
+        response,
+        1024 * 1024,
+        "Google Drive response",
+      ).catch(() => ({ error: { code: response.status } }));
+      return jsonResult(payload, false);
+    }
+    const bytes = await readBoundedBytes(response, NANGO_DRIVE_MAX_DOWNLOAD_BYTES);
+    if (!bytes) return inputError("The file is larger than 10 MiB.");
+    const fileSummary = { id: fileId, name: metadata.payload.name, mimeType };
+    if (purpose === "text") {
+      const { text, truncated } = projectNangoDriveText(bytes);
+      return jsonResult({ file: fileSummary, content: text, truncated });
+    }
+    const contentMimeType = (response.headers.get("content-type") ?? mimeType)
+      .split(";", 1)[0]!
+      .trim()
+      .toLowerCase();
+    const operationId = meta?.opengeniOperationId;
+    if (
+      this.context.materializeConnectorFile &&
+      typeof operationId === "string" &&
+      UUID_PATTERN.test(operationId)
+    ) {
+      let materialized: unknown;
+      try {
+        materialized = await this.context.materializeConnectorFile({
+          serverId: this.context.serverId,
+          toolName: name,
+          connectionId: credential.connectionId ?? "",
+          operationId,
+          providerAttachmentId: { provider: "google-drive", kind: "attachment", value: fileId },
+          fileName: connectorAttachmentFileName(
+            typeof metadata.payload.name === "string" ? metadata.payload.name : "",
+            `${fileId}.bin`,
+          ),
+          mediaType: /^[\w.+-]+\/[\w.+-]+$/u.test(contentMimeType)
+            ? contentMimeType
+            : "application/octet-stream",
+          bytes,
+          authorizeProviderRequest: async () => {
+            if (options?.signal?.aborted) return false;
+            const current = await this.resolve(name, target);
+            return (
+              current.status === "ok" &&
+              current.connectionId === credential.connectionId &&
+              (!current.authorizeProviderRequest || (await current.authorizeProviderRequest()))
+            );
+          },
+        });
+      } catch (error) {
+        if (isRoutingMutationOutcomeUnknownError(error)) throw error;
+        return inputError("The Google Drive file could not be saved to the agent's files.");
+      }
+      const attachments =
+        materialized && typeof materialized === "object" && "attachments" in materialized
+          ? (materialized as { attachments: unknown }).attachments
+          : undefined;
+      if (Array.isArray(attachments))
+        return jsonResult({
+          file: fileSummary,
+          contentMimeType,
+          sizeBytes: bytes.byteLength,
+          attachments,
+        });
+      return inputError("The Google Drive file could not be saved to the agent's files.");
+    }
+    if (bytes.byteLength > NANGO_DRIVE_MAX_INLINE_BYTES)
+      return inputError(
+        "The file is larger than 1 MiB and this chat has no agent files to save it to.",
+      );
+    return jsonResult({
+      file: fileSummary,
+      contentMimeType,
+      sizeBytes: bytes.byteLength,
+      base64Content: Buffer.from(bytes).toString("base64"),
+    });
+  }
 }
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+type OkCredential = Extract<ResolveConnectionCredentialResult, { status: "ok" }>;
+function reconnectResult(): DriveToolResult {
+  return {
+    isError: true,
+    content: [{ type: "text", text: "Reconnect Google Drive to authorize this operation." }],
+  };
+}
+function jsonResult(payload: Record<string, unknown>, ok = true): DriveToolResult {
+  return {
+    ...(ok ? {} : { isError: true }),
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+    structuredContent: payload,
+  };
+}
+async function readBoundedBytes(response: Response, maxBytes: number): Promise<Uint8Array | null> {
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+
 class DriveMutationOutcomeUnknown extends Error {
   readonly code = 40102;
   readonly connectorActionOutcome = "uncertain";
@@ -382,9 +602,18 @@ class DriveMutationOutcomeUnknown extends Error {
 export function isOfficialDriveMcpConfig(config: DriveMcpBridgeConfig): boolean {
   return (
     config.url === OFFICIAL_DRIVE_MCP_URL &&
-    config.connectionRef?.providerDomain === "drivemcp.googleapis.com" &&
-    config.connectionRef.kind === "oauth2" &&
+    (config.connectionRef?.providerDomain === "drivemcp.googleapis.com" ||
+      isNangoDriveConfig(config)) &&
+    config.connectionRef?.kind === "oauth2" &&
     config.connectionRef.subjectScope === "subject"
+  );
+}
+
+/** Drive routed through Nango by the operator switch (docs/nango.md). */
+export function isNangoDriveConfig(config: DriveMcpBridgeConfig): boolean {
+  return (
+    config.url === OFFICIAL_DRIVE_MCP_URL &&
+    config.connectionRef?.providerDomain === nangoProviderDomain("google-drive")
   );
 }
 

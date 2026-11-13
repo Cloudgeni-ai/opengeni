@@ -1952,6 +1952,9 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
   "set_credit_promotion_policy(jsonb, text, text)",
+  // 1406_nango_integrations: owner-only operator setter and export.
+  "set_integration_backend(text, text, text, boolean, jsonb, text, text)",
+  "nango_affected_connections(text)",
   "set_subscription_plan_catalog(jsonb, text, text)",
   MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
@@ -1962,6 +1965,8 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "set_subscription_plan_catalog(jsonb, text, text)",
   "scheduled_task_is_exhausted(uuid)",
   "set_credit_promotion_policy(jsonb, text, text)",
+  "set_integration_backend(text, text, text, boolean, jsonb, text, text)",
+  "nango_affected_connections(text)",
   CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
   "validate_usage_allowance_config(jsonb)",
@@ -2144,6 +2149,7 @@ export const FORCE_RLS_TABLES = [
   "image_generation_operations",
   "import_batches",
   "inbound_events",
+  "integration_backend_revisions",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_facet_definitions",
@@ -2210,6 +2216,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
+  "nango_usage_events",
   "network_routes",
   "new_session_drafts",
   "organization_agent_admin_access",
@@ -2937,6 +2944,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "company_profile_snapshots",
   "deployment_model_catalog",
   "document_authority_reclassifications",
+  // 1406_nango_integrations: the operator integration backend switch.
+  "integration_backend_revisions",
   "knowledge_lifecycle_events",
   "knowledge_memories",
   "knowledge_memory_lifecycle_events",
@@ -3017,6 +3026,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
+  // 1406_nango_integrations: append-only Nango usage events.
+  "nango_usage_events",
   // 1377_opengeni_console: append-only Console audit log and end-user labels.
   "organization_console_audit_events",
   "organization_end_user_labels",
@@ -3401,6 +3412,12 @@ export type RuntimeDatabasePostureOptions = {
    * one is present it is checked like every other definer.
    */
   routinesCreatedByLaterMigrations?: readonly string[];
+  /**
+   * The same, for owner-internal target-schema helpers (named without their argument list):
+   * a helper a later migration creates may be absent. When one is present it is checked like
+   * every other helper.
+   */
+  targetRoutinesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -4718,6 +4735,7 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  const notYetCreatedTargetRoutines = new Set(options.targetRoutinesCreatedByLaterMigrations ?? []);
   for (const routine of posture.targetRoutines) {
     if (!knownTargetRoutines.has(routine.name)) {
       violations.push(...unknownRoutineViolations(routine, targetSchema, expectedRole));
@@ -4726,6 +4744,11 @@ export function evaluateRuntimeDatabasePosture(
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
     if (matches.length === 0 && AGENTS_LEGACY_TRIGGER_ROUTINE_SET.has(forbiddenRoutine)) continue;
+    if (
+      matches.length === 0 &&
+      notYetCreatedTargetRoutines.has(forbiddenRoutine.slice(0, forbiddenRoutine.indexOf("(")))
+    )
+      continue;
     if (matches.length !== 1) {
       violations.push(
         `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,

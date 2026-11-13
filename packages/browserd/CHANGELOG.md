@@ -1,5 +1,17 @@
 # @opengeni/browserd
 
+## 0.4.34
+
+### Patch Changes
+
+- 7a9593d: Pausing a managed browser no longer saves the sites' installed service workers and their Cache Storage copies of site assets. Web apps such as cloud consoles keep hundreds of MB there, which made a checkpoint many times larger than the sign-ins and site storage it is for, so pausing and resuming over a slow connection took minutes. Cookies, local storage and IndexedDB are still saved; a site installs its service worker again on the next visit.
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/interaction@6.21.0
+
 ## 0.4.33
 
 ### Patch Changes

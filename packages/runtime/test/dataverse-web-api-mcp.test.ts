@@ -330,6 +330,11 @@ describe("Dataverse Web API bridge", () => {
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("missing prvReadAccount privilege");
     expect(text(result)).toContain("security roles");
+    // Typed for hosts: Microsoft refused it for this account; nothing ran.
+    expect(result.structuredContent?.error).toMatchObject({
+      code: "provider_permission_denied",
+      outcomeUnknown: false,
+    });
   });
 
   test("a write rejected for its sign-in is retried once with a refreshed one", async () => {
@@ -353,6 +358,7 @@ describe("Dataverse Web API bridge", () => {
     expect(calls).toHaveLength(2);
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("Reconnect");
+    expect(result.structuredContent?.error?.code).toBe("connection_auth_needed");
     expect(authNeeded).toHaveLength(1);
   });
 
@@ -368,6 +374,7 @@ describe("Dataverse Web API bridge", () => {
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("not a member of the organization");
     expect(text(result)).toContain("may not have access to this Dynamics environment");
+    expect(result.structuredContent?.error?.code).toBe("provider_permission_denied");
     expect(authNeeded).toHaveLength(0);
   });
 

@@ -222,6 +222,10 @@ export function FormFrame({
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    // A dialog portalled out of another form (a confirmation opened from a
+    // field) is still its child in React, so its submit would otherwise also
+    // submit that outer form, with the field's value from before the confirm.
+    event.stopPropagation();
     if (pending || submitDisabled) return;
     setThrown(null);
     if (!onSubmit) {

@@ -21,15 +21,10 @@ function newMessages(context: AgentPromptContext): string {
           : "(a timed recheck)";
   return sentences(
     "The user may send a new message while you are still working.",
-    "Decide whether it replaces the active request or adds to it.",
-    "If it replaces it, drop the previous work and focus on the new request.",
-    "If it adds to unfinished work, handle both together.",
-    "If it only asks a question or for status, answer it without starting or resuming other work in that turn unless the user asks.",
+    "Use your judgment about how it relates to the earlier request: it may replace it, change it, add to it, or be a side question.",
+    "Act on that, and carry on with whatever earlier work still stands.",
     waitForInput &&
       `If work you already started is still in flight ${inFlightExamples}, call \`wait_for_input\` when available with the answer in its \`reply\`, so its result resumes you${goals ? ", even when a goal is active" : ""}.`,
-    goals
-      ? "If nothing is in flight, the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains."
-      : "If nothing is in flight, the answer is your final response; offer to continue when work remains.",
     "Keep a status answer to one or two sentences about progress in the user's terms, without session, credential, or tool mechanics; name a blocker only when the user must act on it, and say what they need to do.",
     'Treat "thanks", "nice", and similar replies as acknowledgement, not approval of a next step.',
   );

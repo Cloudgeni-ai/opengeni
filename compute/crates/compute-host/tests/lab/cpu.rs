@@ -20,6 +20,7 @@ const NEVER: SleepConfig = SleepConfig {
     evict_after_ms: None,
     forget_after_ms: None,
     compress: false,
+    earlier_compress: compute_host::protocol::Dropped,
     checkpoint_every_ms: None,
 };
 

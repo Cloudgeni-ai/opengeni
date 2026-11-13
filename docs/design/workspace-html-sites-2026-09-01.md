@@ -445,7 +445,45 @@ renders, answers or skips that confirmation.
   maps only through a canonical identity the same version declares for that
   tool. Another member's personal connection is never used. A viewer with
   several accounts picks one in the confirmation; a viewer with none gets the
-  existing connect card.
+  existing connect card. Agents see only their own account routes, so
+  publishing pairs every declared route the publisher owns with its
+  connector's canonical identity (`declareSiteToolsForEveryViewer`, from the
+  publisher's own bindings, within the declaration limit). A declared tool
+  that nothing in the viewer's inventory explains (an older version that pairs
+  another member's route with no connector, or a connector no longer here)
+  keeps the unavailable-tool status, 404, with `details.code`
+  `site_tool_not_available_for_viewer` and a message the Site can show; the
+  parent bridge passes that code to the Site.
+- **Failures.** Every other way a call stops reaches the viewer as a plain
+  state in the Opengeni frame and the Site as a typed `code`, never an HTTP
+  status or internal error string (the original stays in `detail`, and its
+  code in `details.code`). The parent bridge classifies it (`recoverToolCall`
+  is the host UI; the Site receives `SiteToolCallFailedError`, or for a
+  provider's refusal the unchanged result plus `structuredContent.siteToolFailure`),
+  names the system from `tools/site-consent`, and runs the call again when
+  the viewer chooses to (at most three runs):
+  - `site_tool_reconnect_required`: the account's sign-in stopped working
+    (`tool_connection_needs_attention`, or a result with `connection_auth_needed`).
+    Reconnect signs in to that same connection, the viewer's own or the
+    workspace's shared one (`site-consent` accounts carry `connectionId`,
+    `capabilityId` and `shared`). A call Opengeni refused before dispatch
+    then runs again as a new operation (the provider never received it). A
+    provider's result asking to sign in again may come after it acted, so it
+    is returned as is and never run again; the Site calls again itself.
+  - `site_tool_permission_denied`: the provider refused it for the viewer's
+    account (a result with `provider_permission_denied`, e.g. missing Dynamics
+    security roles). "Microsoft Dynamics didn't allow this for your account."
+    with Close.
+  - `site_tool_not_available_for_viewer`: only a republish changes it; Close,
+    asking the Site owner to publish again.
+  - `site_tool_outcome_unknown`: a dropped connection, a 5xx or an untyped
+    error on a call, or an explicit unknown outcome. It may have run; Close,
+    never run again.
+  - `site_tool_unavailable`: a refusal Opengeni confirms ran nothing (a 4xx,
+    or the bridge's own). Try again only when it isn't definitive (the
+    source's `retryable`, or a missing route); every attempt reuses the same
+    operation id.
+  Calls that stop the same way at once share one message and one answer.
 - **Confirmation.** `tools/invoke` answers 409 with `details.code`
   `tool_gateway_approval_required`, `site_tool_account_required` or
   `site_tool_connection_required`. The parent bridge (`createSiteToolBridge`

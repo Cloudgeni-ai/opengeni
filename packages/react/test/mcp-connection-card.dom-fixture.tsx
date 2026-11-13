@@ -1312,7 +1312,13 @@ test("an admin asked to confirm with a passkey is told so, not that only an admi
   }
 });
 
-function conversationClient(options: { failAttach?: boolean } = {}) {
+function conversationClient(
+  options: {
+    failAttach?: boolean;
+    session?: Record<string, unknown>;
+    connections?: readonly ConnectionMetadata[];
+  } = {},
+) {
   const calls: string[] = [];
   const continuations: unknown[][] = [];
   const attached = {
@@ -1322,14 +1328,15 @@ function conversationClient(options: { failAttach?: boolean } = {}) {
   } as unknown as CapabilityCatalogItem;
   const client = {
     listCapabilities: async () => ({ items: [attached] }),
-    listConnections: async () => [connection],
-    getSession: async () => ({
-      tools: [],
-      firstPartyMcpTools: [],
-      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
-      toolPolicyVersion: 3,
-      effectiveToolPolicy: { effectiveIds: [], mandatoryIds: [], idsTruncated: false },
-    }),
+    listConnections: async () => options.connections ?? [connection],
+    getSession: async () =>
+      options.session ?? {
+        tools: [],
+        firstPartyMcpTools: [],
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        toolPolicyVersion: 3,
+        effectiveToolPolicy: { effectiveIds: [], mandatoryIds: [], idsTruncated: false },
+      },
     updateSessionToolPolicy: async () => {
       calls.push("updateSessionToolPolicy");
       if (options.failAttach) throw new Error("Version conflict");
@@ -1699,6 +1706,13 @@ test("the card asks who can use a connection only when someone else could", asyn
     expect(await render({ people: ["user:me", "user:anna"], mcpUrl })).toMatchObject({
       asked: false,
     });
+  // Microsoft Dynamics is personal by default but can be shared, so the card asks.
+  expect(
+    await render({
+      people: ["user:me", "user:anna"],
+      mcpUrl: "https://contoso.crm4.dynamics.com/api/mcp",
+    }),
+  ).toMatchObject({ asked: true });
 });
 
 /**
@@ -1957,6 +1971,47 @@ test("using your own login here when only an admin can turn the capability on le
   }
 });
 
+test("after a reload a chat that already uses the connection shows it as done", async () => {
+  // A default-policy chat lists the workspace's servers in its effective
+  // selection, not as explicit additions.
+  const h = conversationClient({
+    session: {
+      tools: [{ kind: "mcp", id: "service" }],
+      firstPartyMcpTools: [],
+      toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+      toolPolicyVersion: 3,
+      effectiveToolPolicy: {
+        selectedIds: [],
+        effectiveIds: ["service"],
+        mandatoryIds: [],
+        idsTruncated: false,
+      },
+    },
+  });
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={h.client}
+      workspaceId="workspace"
+      sessionId="session"
+      capabilityId="service"
+      name="Example service"
+      returnUrl="https://host.example/"
+    />,
+  );
+  try {
+    await flush();
+    expect(document.querySelector('[data-state="complete"]')).not.toBeNull();
+    expect(
+      [...document.querySelectorAll("button")].some(
+        (node) => node.textContent === "Use in this conversation",
+      ),
+    ).toBe(false);
+    expect(h.calls).toEqual([]);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("using your own login here that waits for a passkey step-up offers it, then uses the login", async () => {
   sessionStorage.clear();
   const stepUp = { required: true };
@@ -2008,3 +2063,41 @@ test("using your own login here that waits for a passkey step-up offers it, then
     await view.unmount();
   }
 });
+
+function defaultPolicySession(effectiveIds: string[]) {
+  return {
+    tools: effectiveIds.map((id) => ({ kind: "mcp", id })),
+    firstPartyMcpTools: [],
+    toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+    toolPolicyVersion: 3,
+    effectiveToolPolicy: { selectedIds: [], effectiveIds, mandatoryIds: [], idsTruncated: false },
+  };
+}
+
+for (const [name, options] of [
+  ["a server removed from the chat", { session: defaultPolicySession([]) }],
+  [
+    "a server the chat includes without a usable account",
+    { session: defaultPolicySession(["service"]), connections: [] },
+  ],
+] as const)
+  test(`after a reload ${name} is not shown as done`, async () => {
+    const h = conversationClient(options);
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={h.client}
+        workspaceId="workspace"
+        sessionId="session"
+        capabilityId="service"
+        name="Example service"
+        returnUrl="https://host.example/"
+      />,
+    );
+    try {
+      await flush();
+      expect(document.querySelector('[data-state="complete"]')).toBeNull();
+      expect(h.calls).toEqual([]);
+    } finally {
+      await view.unmount();
+    }
+  });

@@ -48,6 +48,7 @@ import {
   listSandboxGroupRepositoryResources,
   settleSessionRepositoryCleanup,
   sessionHasToolRouterHistory,
+  recordNangoUsageEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -108,6 +109,7 @@ import {
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
+  nangoBackendsFor,
   postConnectionNeedsReauthNotice,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
@@ -529,6 +531,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: turn.initiatingHumanSubjectId ?? null,
+            integrationBackends: await nangoBackendsFor(db, runSettings),
           }).catch((error: unknown) => {
             observability.warn("Connections needing reconnect were not read", {
               error: error instanceof Error ? error.message : String(error),
@@ -1402,6 +1405,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     cancellationSignal,
     undefined,
   );
+  // Read once per attempt: a backend flip reaches the next attempt, never a
+  // tool call already in flight.
+  const nangoIntegrationDefinitions = new Map(
+    [...(await nangoBackendsFor(db, runSettings))].map(
+      ([key, integration]) => [key, integration.definition] as const,
+    ),
+  );
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
@@ -1475,6 +1485,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             }
           : {}),
         onAuthNeeded: publishToolAuthNeeded,
+        nangoIntegrationDefinitions,
+        recordNangoUsage: (report) =>
+          recordNangoUsageEvent(db, {
+            ...report,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: credentialSubjectId ?? turn.initiatingHumanSubjectId ?? null,
+          }),
         materializeConnectorAttachments,
         materializeGmailFile: async (request) => {
           throwIfWorkerShuttingDown();

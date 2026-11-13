@@ -9,6 +9,12 @@ import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import type { MCPServer } from "@openai/agents";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import { nangoProviderDomain, type NangoProxyTransport } from "@opengeni/contracts/nango";
+import {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+} from "./nango-transport";
 
 /**
  * Connection identity of Google's hosted Calendar MCP. As with Gmail, this URL
@@ -48,6 +54,8 @@ type ResolveCredentialResult =
       authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
+      /** Present for a Nango-backed connection: send through the Nango proxy. */
+      proxy?: NangoProxyTransport;
     }
   | {
       status: "auth_needed";
@@ -75,10 +83,13 @@ export type GoogleCalendarRestMcpServerOptions = {
     connectionRef: McpServerConnectionRef;
     destinationUrl: string;
     forceRefresh?: boolean;
+    acceptedTransports?: readonly "nango_proxy"[];
   }) => Promise<ResolveCredentialResult>;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => void | Promise<void>;
   onResolvedConnectionId?: (connectionId: string) => void;
   fetchImpl?: FetchLike;
+  /** Best-effort accounting for requests sent through the Nango proxy. */
+  recordNangoUsage?: NangoUsageRecorder;
   /** Test seam for the current time; defaults to Date.now. */
   now?: () => number;
 };
@@ -355,10 +366,14 @@ export function isOfficialGoogleCalendarMcpConfig(
   url: string,
   connectionRef: McpServerConnectionRef | undefined,
 ): boolean {
+  const domain = connectionRef?.providerDomain.toLowerCase();
   return (
     canonicalUrl(url) === canonicalUrl(OFFICIAL_GOOGLE_CALENDAR_MCP_URL) &&
-    connectionRef?.providerDomain.toLowerCase() === "calendarmcp.googleapis.com" &&
-    connectionRef.kind === "oauth2"
+    // The same reviewed bridge serves the native grant and, when the operator
+    // routes Calendar through Nango, the Nango connection (docs/nango.md).
+    (domain === "calendarmcp.googleapis.com" ||
+      domain === nangoProviderDomain("google-calendar")) &&
+    connectionRef?.kind === "oauth2"
   );
 }
 
@@ -388,6 +403,7 @@ export class GoogleCalendarRestMcpServer implements LocalMcpBridgeServer {
       connectionRef: this.options.connectionRef,
       destinationUrl: `${GOOGLE_CALENDAR_REST_API_BASE}/users/me/calendarList/primary`,
       forceRefresh: false,
+      acceptedTransports: NANGO_PROXY_TRANSPORTS,
       ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
     });
     if (result.status === "auth_needed") {
@@ -916,6 +932,7 @@ export class GoogleCalendarRestMcpServer implements LocalMcpBridgeServer {
         destinationUrl: url.toString(),
         toolName,
         forceRefresh,
+        acceptedTransports: NANGO_PROXY_TRANSPORTS,
         ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
       });
       if (result.status === "auth_needed") {
@@ -934,9 +951,9 @@ export class GoogleCalendarRestMcpServer implements LocalMcpBridgeServer {
         throw new CalendarAuthError("Authentication required for Google Calendar");
       }
       const context = this.requestContext.getStore();
-      const request: RequestInit = {
+      const request: RequestInit & { headers: Record<string, string> } = {
         ...init,
-        headers: { ...credential.headers, ...headersRecord(init.headers) },
+        headers: headersRecord(init.headers),
         redirect: "error",
         signal: AbortSignal.any([
           ...(init.signal || context?.signal ? [init.signal || context!.signal!] : []),
@@ -945,7 +962,10 @@ export class GoogleCalendarRestMcpServer implements LocalMcpBridgeServer {
       };
       if (!replaySafe && context) context.mutationSubmitted = true;
       try {
-        return await this.fetchImpl(url, request);
+        return await sendWithCredential(this.fetchImpl, url, request, credential, {
+          ...(this.options.recordNangoUsage ? { recorder: this.options.recordNangoUsage } : {}),
+          toolName,
+        });
       } catch (error) {
         if (!replaySafe)
           throw new CalendarOutcomeUnknownError(

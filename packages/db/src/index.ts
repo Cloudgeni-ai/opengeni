@@ -1416,6 +1416,7 @@ export * from "./managed-user-setup";
 export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
+export * from "./nango-integrations";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";

@@ -44,6 +44,7 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import {
+  fixedBridgeConnectorTools,
   GMAIL_REST_MCP_TOOLS,
   GOOGLE_CALENDAR_REST_MCP_TOOLS,
   gmailToolAvailableOnDeployment,
@@ -343,7 +344,22 @@ export function reviewedConnectorToolCatalog(
         )
       : isOfficialSlackMcpConfig(server.url, server.connectionRef)
         ? slackRestMcpToolsForScopes(grantedScopes)
-        : null;
+        : // A bridge's fixed tools: its hosted server is never what agents call.
+          (fixedBridgeConnectorTools(server.url, server.connectionRef)?.map(
+            (tool): ListedTool => ({
+              name: tool.name,
+              ...(tool.description ? { description: tool.description } : {}),
+              ...(tool.annotations
+                ? {
+                    annotations: {
+                      readOnlyHint: tool.annotations.readOnlyHint,
+                      destructiveHint: tool.annotations.destructiveHint,
+                    },
+                  }
+                : {}),
+              ...(tool._meta ? { _meta: tool._meta } : {}),
+            }),
+          ) ?? null);
   return (
     tools?.filter((tool) => !server.allowedTools || server.allowedTools.includes(tool.name)) ?? null
   );

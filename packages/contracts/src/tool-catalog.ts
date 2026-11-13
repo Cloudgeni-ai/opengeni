@@ -622,6 +622,12 @@ export const ToolGatewaySiteConsentAccount = /* @__PURE__ */ defineSchema(() =>
       identity: ToolGatewayIdentity,
       connector: primitives.string.max(200),
       account: primitives.string.max(320),
+      /** The viewer's own connection behind the route, for reconnecting it. */
+      connectionId: primitives.uuid.optional(),
+      /** The catalog capability that reconnects it, when there is one. */
+      capabilityId: primitives.string.max(200).nullable().optional(),
+      /** The connection is shared with the workspace rather than the viewer's own. */
+      shared: z.boolean().optional(),
     })
     .strict(),
 );

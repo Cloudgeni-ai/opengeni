@@ -3,10 +3,13 @@ import { readFileSync } from "node:fs";
 import { parseSync, type Node } from "oxc-parser";
 import type { Model } from "@openai/agents";
 import {
+  DEFAULT_REASONING_SUMMARIES,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
+  type ReasoningSummaries,
   type Settings,
 } from "@opengeni/config";
+import type { LatencyMode } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import {
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
@@ -135,29 +138,38 @@ describe("textVerbosityForTurn", () => {
   });
 });
 
+const LATENCY_MODES = [
+  "standard",
+  "priority",
+  "fast",
+  "ultrafast",
+] as const satisfies LatencyMode[];
+
 test("auto summaries require a supported Responses route and accepted reasoning capability", () => {
   const settings = builtinSettings();
-  expect(reasoningSummaryForTurn(resolved(settings, "gpt-5.6-sol"))).toBe("auto");
-  expect(reasoningSummaryForTurn(resolved(settings, "azure-sol/gpt-6-sol"))).toBe("auto");
+  const summaryFor = (model: Parameters<typeof reasoningSummaryForTurn>[0]) =>
+    reasoningSummaryForTurn(model, "standard", DEFAULT_REASONING_SUMMARIES);
+  expect(summaryFor(resolved(settings, "gpt-5.6-sol"))).toBe("auto");
+  expect(summaryFor(resolved(settings, "azure-sol/gpt-6-sol"))).toBe("auto");
   for (const modelId of [
     "gpt-4.1",
     "azure-sol/gpt-4.1",
     "compatible/gpt-5.6-sol",
     "accounts/fireworks/models/glm-5p2",
   ]) {
-    expect(reasoningSummaryForTurn(resolved(settings, modelId))).toBeUndefined();
+    expect(summaryFor(resolved(settings, modelId))).toBeUndefined();
   }
   const supported = resolved(settings, "gpt-5.6-sol");
   for (const modelId of ["gpt-5-chat-latest", "gpt-5.1-codex-max", "o3"]) {
     expect(
-      reasoningSummaryForTurn({
+      summaryFor({
         ...supported,
         configured: { ...supported.configured, upstreamModelId: modelId },
       }),
     ).toBeUndefined();
   }
   expect(
-    reasoningSummaryForTurn({
+    summaryFor({
       ...supported,
       configured: {
         ...supported.configured,
@@ -168,21 +180,62 @@ test("auto summaries require a supported Responses route and accepted reasoning 
       },
     }),
   ).toBeUndefined();
+  // Codex states its own value, the same `detailed` the runtime default sent.
+  expect(summaryFor(resolved(withCodexCatalogProvider(settings), "codex/gpt-6-sol"))).toBe(
+    "detailed",
+  );
   expect(
-    reasoningSummaryForTurn(resolved(withCodexCatalogProvider(settings), "codex/gpt-6-sol")),
-  ).toBeUndefined();
-  expect(
-    reasoningSummaryForTurn(
+    summaryFor(
       resolved(builtinSettings({ openaiBaseUrl: "https://proxy.example.test/v1" }), "gpt-5.6-sol"),
     ),
   ).toBeUndefined();
   const xai = withXaiSubscriptionCatalogProvider(settings);
   expect(
-    reasoningSummaryForTurn(
+    summaryFor(
       resolved(xai, `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}${XAI_SUBSCRIPTION_MODEL_SLUGS[0]}`),
     ),
   ).toBeUndefined();
-  expect(reasoningSummaryForTurn(null)).toBeUndefined();
+  expect(summaryFor(null)).toBeUndefined();
+});
+
+test("the summary follows the deployment setting for the route and latency mode", () => {
+  const settings = builtinSettings();
+  const codex = resolved(withCodexCatalogProvider(settings), "codex/gpt-6-sol");
+  const openai = resolved(settings, "gpt-5.6-sol");
+  const azure = resolved(settings, "azure-sol/gpt-6-sol");
+  const unverified = resolved(settings, "compatible/gpt-5.6-sol");
+  const byMode = (
+    model: Parameters<typeof reasoningSummaryForTurn>[0],
+    summaries: ReasoningSummaries = DEFAULT_REASONING_SUMMARIES,
+  ) => LATENCY_MODES.map((mode) => reasoningSummaryForTurn(model, mode, summaries));
+
+  expect(byMode(codex)).toEqual(["detailed", "detailed", "detailed", "none"]);
+  expect(byMode(openai)).toEqual(["auto", "auto", "auto", "auto"]);
+  expect(byMode(azure)).toEqual(["auto", "auto", "auto", "auto"]);
+  expect(byMode(unverified)).toEqual([undefined, undefined, undefined, undefined]);
+
+  const changed = builtinSettings({
+    reasoningSummaries: {
+      ...DEFAULT_REASONING_SUMMARIES,
+      codex: { ...DEFAULT_REASONING_SUMMARIES.codex, fast: "none", ultrafast: "detailed" },
+      openai: { ...DEFAULT_REASONING_SUMMARIES.openai, ultrafast: "none" },
+    },
+  });
+  expect(byMode(codex, changed.reasoningSummaries)).toEqual([
+    "detailed",
+    "detailed",
+    "none",
+    "detailed",
+  ]);
+  expect(byMode(openai, changed.reasoningSummaries)).toEqual(["auto", "auto", "auto", "none"]);
+  expect(byMode(azure, changed.reasoningSummaries)).toEqual(["auto", "auto", "auto", "auto"]);
+  // The model gate still applies before a direct OpenAI or Azure setting.
+  expect(byMode(resolved(settings, "gpt-4.1"), changed.reasoningSummaries)).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ]);
 });
 
 // Execute the exact production publisher, including its attempt fence. Only
@@ -346,7 +399,12 @@ test("a fenced summary cannot reach the event stream or timeline", async () => {
 });
 
 // Execute the production builder. Only unrelated persistence is stubbed.
-async function buildWorkerAgent(settings: Settings, modelId: string, modelOverride?: Model) {
+async function buildWorkerAgent(
+  settings: Settings,
+  modelId: string,
+  modelOverride?: Model,
+  latencyMode: LatencyMode = "standard",
+) {
   const resolvedModel = resolved(settings, modelId);
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
   context.eventing.preparedTools = await prepareAgentTools(settings, []);
@@ -401,7 +459,7 @@ async function buildWorkerAgent(settings: Settings, modelId: string, modelOverri
       turnExecutionPolicy: {
         providerId: resolvedModel.provider.id,
         reasoningEffort: "medium",
-        latencyMode: "standard",
+        latencyMode,
         upstreamModelId: resolvedModel.configured.upstreamModelId,
       } as BuildTurnAgentDeps["turnExecutionPolicy"],
       runtimeResources: [],
@@ -444,6 +502,51 @@ test("the worker builds Codex and Azure turns with low verbosity and leaves othe
   const compatible = await buildWorkerAgent(builtinSettings(), "compatible/gpt-5.6-sol");
   expect(compatible.modelSettings.text).toBeUndefined();
   expect(compatible.modelSettings.reasoning).toEqual({ effort: "medium", summary: "detailed" });
+});
+
+test("an Ultrafast Codex turn requests no summary and every other turn keeps its earlier reasoning settings", async () => {
+  const azureSettings = builtinSettings({
+    openaiProvider: "azure",
+    azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+    azureOpenaiApiKey: "az-test-key",
+  });
+  const routes = [
+    [withCodexCatalogProvider(builtinSettings()), "codex/gpt-6-sol", "detailed"],
+    [builtinSettings(), "gpt-5.6-sol", "auto"],
+    [azureSettings, "gpt-5.6-sol", "auto"],
+    [builtinSettings(), "compatible/gpt-5.6-sol", "detailed"],
+  ] as const;
+  for (const [settings, modelId, earlier] of routes) {
+    for (const mode of LATENCY_MODES) {
+      const agent = await buildWorkerAgent(settings, modelId, undefined, mode);
+      const expected =
+        modelId === "codex/gpt-6-sol" && mode === "ultrafast"
+          ? { effort: "medium" }
+          : { effort: "medium", summary: earlier };
+      // Strict: the Ultrafast Codex request has no `summary` key at all, and
+      // the others keep their exact earlier shape and key order.
+      expect(agent.modelSettings.reasoning).toStrictEqual(expected);
+      expect(JSON.stringify(agent.modelSettings.reasoning)).toBe(JSON.stringify(expected));
+    }
+  }
+
+  // One deployment setting changes it without a code change.
+  const configured = withCodexCatalogProvider(
+    builtinSettings({
+      reasoningSummaries: {
+        ...DEFAULT_REASONING_SUMMARIES,
+        codex: { ...DEFAULT_REASONING_SUMMARIES.codex, fast: "none", ultrafast: "detailed" },
+      },
+    }),
+  );
+  expect(
+    (await buildWorkerAgent(configured, "codex/gpt-6-sol", undefined, "fast")).modelSettings
+      .reasoning,
+  ).toStrictEqual({ effort: "medium" });
+  expect(
+    (await buildWorkerAgent(configured, "codex/gpt-6-sol", undefined, "ultrafast")).modelSettings
+      .reasoning,
+  ).toStrictEqual({ effort: "medium", summary: "detailed" });
 });
 
 function summaryStream() {
