@@ -34,7 +34,6 @@ import {
 } from "../session-capability-policy";
 import { workspaceHasNobodyToShareWith } from "../workspace-sharing";
 import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed-sign-in-methods";
-import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 import { organizationAppApproval, type OrganizationAppApproval } from "@opengeni/contracts/connect";
 import { organizationApprovalFor, type OrganizationApproval } from "../connect-setup-model";
 
@@ -93,9 +92,7 @@ export function ownLoginToUseHere(
 
 function personalOnlyService(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl"> | null) {
   const url = item?.mcpUrl ?? item?.endpointUrl;
-  // A Dynamics connection acts as the person, with their own Dynamics
-  // security roles: sharing it would let others act as them.
-  return !!url && (PERSONAL_ONLY_MCP_URLS.has(url) || !!microsoftDynamicsProductForMcpUrl(url));
+  return !!url && PERSONAL_ONLY_MCP_URLS.has(url);
 }
 
 /** The OAuth MCP connect card, as a renderer draws it. */

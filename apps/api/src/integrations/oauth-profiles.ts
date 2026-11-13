@@ -542,12 +542,10 @@ const MICROSOFT_DYNAMICS_PROFILE: OAuthProviderProfile = {
   },
   sendResourceParameter: false,
   sendScopeOnRefresh: true,
-  // Each person reaches Dynamics with their own security roles.
+  // Each call runs with the signed-in person's Dynamics security roles, so a
+  // connection is personal by default; an admin may still share one account
+  // with the workspace, and everyone then acts with that person's roles.
   defaultOwnership: "personal",
-  requiredOwnership: {
-    ownership: "personal",
-    message: "Microsoft Dynamics connects each person's own account",
-  },
 };
 
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [

@@ -1736,6 +1736,25 @@ describe("Site tool consent", () => {
     }
   });
 
+  test("a declared workspace-shared account works for every viewer, not only the publisher", async () => {
+    const f = createFixture();
+    try {
+      // The publisher declares the shared account's route; this viewer owns no account.
+      const declared = [f.identity(f.shared)];
+      const outcome = await invoke(
+        f,
+        f.identity(f.shared),
+        { readSiteVersion: siteVersion(declared) },
+        { authorization: targetAuthorization("human:target-call-none") },
+      );
+      expect(outcome.result.isError).not.toBe(true);
+      expect(outcome.tool.entry.identity).toEqual(f.identity(f.shared));
+      expect(usedConnections(f)).toEqual([f.shared.id]);
+    } finally {
+      f.close();
+    }
+  });
+
   test("a published Site pairs the publisher's account routes with their connector, so other viewers use their own or connect", async () => {
     const f = createFixture();
     try {
