@@ -1912,7 +1912,11 @@ async function seedAttempt(
     ...(options.tools === undefined ? {} : { firstPartyMcpTools: options.tools }),
   });
   const executionGeneration = 3;
-  const [turn] = await shared.admin<{ id: string }[]>`
+  // The binding fence reads each bound connection in the turn's own scope.
+  const [turn] = await shared.admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${targetGrant.accountId}, true),
+      set_config('opengeni.workspace_id', ${targetGrant.workspaceId}, true)`;
+    return await tx<{ id: string }[]>`
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
@@ -1923,8 +1927,9 @@ async function seedAttempt(
       ${`artifact-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish artifact',
       'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
       ${targetGrant.subjectId}, '{"accepted":true}'::jsonb,
-      ${options.mcpAccountBindings ? shared.admin.json(options.mcpAccountBindings as never) : null}::jsonb
+      ${options.mcpAccountBindings ? tx.json(options.mcpAccountBindings as never) : null}::jsonb
     ) RETURNING id`;
+  });
   const attemptId = crypto.randomUUID();
   await shared.admin.begin(async (tx) => {
     await tx`
