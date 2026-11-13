@@ -96,6 +96,14 @@ export function businessCentralEnvironment(mcpUrl: string): BusinessCentralEnvir
 }
 
 /**
+ * The API root (with its trailing slash) of a Business Central connection
+ * URL, or null for any other URL. The Business Central tools run below it.
+ */
+export function businessCentralApiBase(mcpUrl: string): string | null {
+  return microsoftDynamicsProductForMcpUrl(mcpUrl) === "business_central" ? `${mcpUrl}/` : null;
+}
+
+/**
  * How a person recognizes a Dynamics connection's environment: its host, or
  * for Business Central its web client address. Null for any other URL.
  */
@@ -210,14 +218,6 @@ export function dataverseWebApiBase(mcpUrl: string): string | null {
 }
 
 export const DATAVERSE_WEB_API_PATH = "/api/data/v9.2/";
-
-/**
- * The API root (with its trailing slash) of a Business Central connection
- * URL, or null for any other URL. The Business Central tools run below it.
- */
-export function businessCentralApiBase(mcpUrl: string): string | null {
-  return microsoftDynamicsProductForMcpUrl(mcpUrl) === "business_central" ? `${mcpUrl}/` : null;
-}
 
 /** The agent-facing catalog entry that leads to a Microsoft Dynamics Connect card. */
 export const MICROSOFT_DYNAMICS_CAPABILITY_ID = "api:microsoft-dynamics";

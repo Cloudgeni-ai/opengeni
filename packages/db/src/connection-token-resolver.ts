@@ -1017,7 +1017,8 @@ function connectionBindingMatches(
           binding === canonicalHttpUrl(OFFICIAL_SLACK_MCP_URL) &&
           isOfficialSlackRestDestination(destination, ref)
         ) &&
-        !isMicrosoftDynamicsApiDestination(destination, binding, ref))
+        !isDataverseWebApiDestination(destination, binding, ref) &&
+        !isBusinessCentralApiDestination(destination, binding, ref))
     ) {
       return false;
     }
@@ -1051,21 +1052,40 @@ export function connectionMetadataMatchesBinding(
 }
 
 /**
- * The Microsoft Dynamics bridges run a connection's tools against its
- * environment's API: a Dataverse MCP endpoint's Web API (same origin, under
- * the Web API root), or the Business Central API. Every Business Central
- * environment is the same Entra resource on one host, so a person's grant
- * reaches each environment they connect, whichever of their Business Central
- * connections is current.
+ * The Business Central bridge runs a Business Central connection's tools
+ * against the Business Central API. Every environment is the same Entra
+ * resource on one host, so a person's grant reaches each environment they
+ * connect, whichever of their Business Central connections is current.
  */
-function isMicrosoftDynamicsApiDestination(
+function isBusinessCentralApiDestination(
   destinationUrl: string,
   binding: string,
   ref: McpServerConnectionRef,
 ): boolean {
-  const base =
-    dataverseWebApiBase(binding) ??
-    (businessCentralApiBase(binding) ? BUSINESS_CENTRAL_API_ROOT : null);
+  if (!businessCentralApiBase(binding) || ref.kind !== "oauth2") return false;
+  const url = new URL(destinationUrl);
+  const root = new URL(BUSINESS_CENTRAL_API_ROOT);
+  return (
+    url.origin === root.origin &&
+    ref.providerDomain.toLowerCase() === root.hostname &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    url.pathname.startsWith(root.pathname)
+  );
+}
+
+/**
+ * The Dataverse bridge runs a Dataverse MCP connection's tools against the same
+ * environment's Web API: same origin as the bound MCP endpoint, under the Web
+ * API root only.
+ */
+function isDataverseWebApiDestination(
+  destinationUrl: string,
+  binding: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  const base = dataverseWebApiBase(binding);
   if (!base || ref.kind !== "oauth2") return false;
   const url = new URL(destinationUrl);
   const root = new URL(base);

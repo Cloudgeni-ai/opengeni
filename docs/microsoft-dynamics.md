@@ -107,7 +107,7 @@ Dynamics 365 Sales environment):
   5,000 rows.
 
 The token resolver lets a Dataverse connection's grant reach only the Web API
-root on the same host (`isMicrosoftDynamicsApiDestination`). Microsoft's error
+root on the same host (`isDataverseWebApiDestination`). Microsoft's error
 message reaches the agent; a write whose outcome is unknown (network failure,
 5xx) is reported as uncertain and never retried.
 
