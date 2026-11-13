@@ -19,7 +19,11 @@ import type {
 } from "@opengeni/contracts";
 
 import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
-import { dataverseWebApiBase } from "@opengeni/contracts/microsoft-dynamics";
+import {
+  BUSINESS_CENTRAL_API_ROOT,
+  businessCentralApiBase,
+  dataverseWebApiBase,
+} from "@opengeni/contracts/microsoft-dynamics";
 import {
   PERSONAL_GITHUB_REQUESTED_SCOPES,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -1013,7 +1017,8 @@ function connectionBindingMatches(
           binding === canonicalHttpUrl(OFFICIAL_SLACK_MCP_URL) &&
           isOfficialSlackRestDestination(destination, ref)
         ) &&
-        !isDataverseWebApiDestination(destination, binding, ref))
+        !isDataverseWebApiDestination(destination, binding, ref) &&
+        !isBusinessCentralApiDestination(destination, binding, ref))
     ) {
       return false;
     }
@@ -1043,6 +1048,33 @@ export function connectionMetadataMatchesBinding(
     connectionBindingMatches({ ...connection, credential: {} }, ref, destinationUrl) &&
     missingRequestedScopes(ref.scopes, connection.grantedScopes, connection.providerDomain)
       .length === 0
+  );
+}
+
+/**
+ * The Business Central bridge runs a Business Central connection's tools
+ * against the Business Central API. Every environment is the same Entra
+ * resource on one host, so a person's grant reaches each environment they
+ * connect, whichever of their Business Central connections is current.
+ */
+function isBusinessCentralApiDestination(
+  destinationUrl: string,
+  binding: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (!businessCentralApiBase(binding) || ref.kind !== "oauth2") return false;
+  const url = new URL(destinationUrl);
+  const root = new URL(BUSINESS_CENTRAL_API_ROOT);
+  return (
+    url.origin === root.origin &&
+    ref.providerDomain.toLowerCase() === root.hostname &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    url.pathname.startsWith(root.pathname) &&
+    // The URL parser resolves literal dot segments; refuse encoded separators and
+    // dots that a server could decode into a path outside the API root.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname)
   );
 }
 

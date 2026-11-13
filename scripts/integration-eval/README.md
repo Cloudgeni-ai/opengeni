@@ -80,6 +80,7 @@ the expected answers in `catalogue.ts` name these facts.
 | Microsoft 365 | Email "Kestrel failover drill moved" (drill moves to Thursday 14:00); OneDrive file "Kestrel runbook" ("Recovery time objective: 15 minutes"); SharePoint list "Kestrel vendor contacts" on a team site, with one item titled "Marlow & Finch". |
 | Google Drive | Document "Halcyon pricing 2026" listing Pro at 49 USD a month. |
 | Microsoft Dynamics | A Dataverse environment with Dynamics 365 Sales: account "Bluefin Logistics" (primary contact Ada Quill) with the open opportunity "Bluefin Logistics renewal", estimated revenue 18,000; account "Copperleaf Dental" in Bergen. Enable the Dataverse MCP server for non-Microsoft clients and allow the deployment's Entra app (see `docs-site/guides/microsoft-dynamics.mdx`). Write rows create accounts named `Halcyon eval <id>`; there is no verifier yet, so they are graded from receipts. |
+| Microsoft Dynamics (Business Central) | A Business Central environment on the same connection, with the CRONUS demo company: customer "Trey Research" (balance due 22,856.25) and customer "Relecloud" in Ålesund (CRONUS NO data). No setup in Business Central beyond the user's licence. Write rows create customers named `Halcyon eval <id>`, graded from receipts. |
 | Others (Notion, Asana, Stripe test mode, GitHub, HubSpot, Sentry, Airtable) | The object each row's prompt names, with the facts its expected answer checks (see `catalogue.ts`). |
 
 Write rows put the run's short id in the object's title (`Halcyon eval <id>`),

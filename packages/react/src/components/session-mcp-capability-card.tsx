@@ -1,5 +1,5 @@
 import { OrganizationApprovalHelp } from "../organization-approval-help";
-import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
+import { microsoftDynamicsEnvironmentAddress } from "@opengeni/contracts/microsoft-dynamics";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
@@ -173,11 +173,10 @@ function ScopedCard({
   const introduction = hostDescription || presentation?.introduction || "";
   const abilities = hostDescription ? [] : (presentation?.capabilities ?? []);
   const lead = introduction || item?.description || rationale;
-  // A Dynamics environment is known by its host, not its MCP endpoint.
-  const dynamics = !!item?.mcpUrl && !!microsoftDynamicsProductForMcpUrl(item.mcpUrl);
-  const address = dynamics
-    ? (item?.providerDomain ?? item?.mcpUrl ?? "")
-    : (item?.mcpUrl ?? item?.providerDomain ?? "");
+  // A Dynamics environment is known by its address, not its connection URL.
+  const environment = item?.mcpUrl ? microsoftDynamicsEnvironmentAddress(item.mcpUrl) : null;
+  const dynamics = environment !== null;
+  const address = environment ?? item?.mcpUrl ?? item?.providerDomain ?? "";
   const approval = flow.approval;
   const adminApproval = approval && approval.reason !== "unfinished" ? approval : null;
   const approvalNote = approval?.reason === "unfinished" ? approval : null;

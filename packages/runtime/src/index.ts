@@ -336,6 +336,10 @@ import {
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
   type DataverseWebApiMcpBridgeContext,
 } from "./dataverse-web-api-mcp";
+import {
+  BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  type BusinessCentralApiMcpBridgeContext,
+} from "./business-central-api-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -1156,6 +1160,7 @@ type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
   DataverseWebApiMcpBridgeContext &
+  BusinessCentralApiMcpBridgeContext &
   DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
@@ -1165,6 +1170,7 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
+  BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
 ]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
