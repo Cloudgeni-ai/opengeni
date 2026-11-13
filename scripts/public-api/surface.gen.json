@@ -42624,6 +42624,7 @@
     "@opengeni/react/this-computer.css": {},
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
+      "activityHasUnloadedSteps": "value",
       "AgentTitleParts": "type",
       "agentWorkHumanInputSummary": "value",
       "ANNOTATION_MAX_NOTE_LENGTH": "value",
@@ -42757,6 +42758,7 @@
       "timelineGroupIndexAtSequence": "value",
       "timelineGroupSequences": "value",
       "timelineTurnsWithOutput": "value",
+      "timelineTurnsWithUnloadedSteps": "value",
       "TOOL_STEP_IDS": "value",
       "ToolBody": "type",
       "ToolChip": "type",
@@ -42777,6 +42779,7 @@
       "truncatePreview": "value",
       "tryParseJson": "value",
       "TurnGroup": "type",
+      "turnGroupHasUnloadedSteps": "value",
       "TurnSummaryContext": "type",
       "TurnSummaryFacet": "type",
       "TurnSummaryFacetConfiguration": "type",

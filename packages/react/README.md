@@ -1376,7 +1376,9 @@ import type { TurnSummaryFacet } from "@opengeni/react";
 
 const updatedRecordsFacet: TurnSummaryFacet = {
   id: "updated-records",
-  summarize: ({ toolCalls }) => {
+  summarize: ({ toolCalls, unloadedSteps }) => {
+    // Only part of the turn is loaded, so a count would be too low.
+    if (unloadedSteps) return null;
     const count = toolCalls.filter((call) => call.name === "records.update").length;
     return count > 0 ? { content: `${count} records updated` } : null;
   },
@@ -1398,6 +1400,15 @@ ordered tool arguments, outputs, status, and timing. Added facets follow the
 remaining built-ins in supplied order. Duplicate IDs keep their first
 definition; remove a built-in before adding a custom facet with the same ID.
 `replace` is type-exclusive with `add` and `remove`.
+
+The snapshot holds only the steps loaded in the browser. History loads a
+turn's steps when the turn is opened, and a long live turn whose row is
+collapsed keeps only its newest steps (older ones leave as new ones stream
+in). In those cases `unloadedSteps` is true and `items` and `toolCalls` are
+part of the turn: a count over them is too low and can go down while the turn
+runs. Omit the count while `unloadedSteps` is true, as above, or show it as a
+lower bound ("at least 86"). Opening the row and loading earlier steps makes
+the snapshot complete again; the number of unloaded steps is not known.
 
 `turnSummary={{ rolling: true }}` selects the readable per-turn presentation:
 startup shows the preparation orb outside any disclosure, then hands over to
