@@ -5931,6 +5931,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "listModelPriceBasisModels",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/model-price-basis-models",
+    "request": [],
+    "response": [
+      "ModelPriceBasisModelsResponse"
+    ],
+    "permission": "connections:read"
+  },
+  {
     "id": "listNetworkRoutes",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/network-routes",
@@ -9392,6 +9402,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setOrganizationCompatibleEndpointModelListPrice",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
     "id": "setOrganizationCompatibleEndpointModelReasoning",
     "method": "PUT",
     "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/reasoning",
@@ -9400,6 +9421,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
+    "id": "setOrganizationProviderCustomModelListPrice",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": [
+      "OrganizationProviderCustomModel"
     ]
   },
   {
@@ -9532,6 +9564,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "WorkspaceInferenceControlResponse"
     ],
     "permission": "workspace:admin"
+  },
+  {
+    "id": "setWorkspaceModelKeyListPrice",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/list-price",
+    "request": [
+      "SetWorkspaceModelKeyListPriceRequest"
+    ],
+    "response": [
+      "ConnectionMetadata",
+      "ConnectionResponse"
+    ]
   },
   {
     "id": "setWorkspacePauseTimer",

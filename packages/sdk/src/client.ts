@@ -520,6 +520,9 @@ import type {
   OrganizationProviderCustomModelsResponse,
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
+  SetOrganizationCustomModelListPriceRequest,
+  SetWorkspaceModelKeyListPriceRequest,
+  ModelPriceBasisModelsResponse,
   OrganizationCompatibleEndpoint,
   OrganizationCompatibleEndpointsResponse,
   OrganizationAnthropicApiKey,
@@ -6688,6 +6691,24 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Set what an organization OpenAI model's or Azure OpenAI deployment's
+   * usage costs: the catalogue model it is priced like (an Azure
+   * deployment's base model), an explicit rate, or null for unknown.
+   */
+  async setOrganizationProviderCustomModelListPrice(
+    organizationId: string,
+    providerKind: "openai" | "azure_openai",
+    customModelId: string,
+    request: SetOrganizationCustomModelListPriceRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}/custom-models/${encodeURIComponent(customModelId)}/list-price`,
+      request,
+    );
+  }
+
   /** Read the workspace's hard provider/model allowlist. */
   async getWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
@@ -6824,6 +6845,20 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationCompatibleEndpointModel>(
       "PUT",
       `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}/reasoning`,
+      request,
+    );
+  }
+
+  /** Set what an OpenAI-compatible endpoint model's usage costs, or null for unknown. */
+  async setOrganizationCompatibleEndpointModelListPrice(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: SetOrganizationCustomModelListPriceRequest,
+  ): Promise<OrganizationCompatibleEndpointModel> {
+    return await this.requestJson<OrganizationCompatibleEndpointModel>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}/list-price`,
       request,
     );
   }
@@ -11716,6 +11751,32 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/connections/${connectionId}`,
     );
     return response.connection;
+  }
+
+  /**
+   * Set what a workspace's own OpenAI, Azure OpenAI or OpenAI-compatible
+   * model key's model costs: the catalogue model it is priced like (an Azure
+   * deployment's base model), an explicit rate, or null for unknown.
+   */
+  async setWorkspaceModelKeyListPrice(
+    workspaceId: string,
+    connectionId: string,
+    request: SetWorkspaceModelKeyListPriceRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/list-price`,
+      request,
+    );
+    return response.connection;
+  }
+
+  /** Catalogue models with a known list rate that a workspace model key can be priced like. */
+  async listModelPriceBasisModels(workspaceId: string): Promise<ModelPriceBasisModelsResponse> {
+    return await this.requestJson<ModelPriceBasisModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-price-basis-models`,
+    );
   }
 
   /**

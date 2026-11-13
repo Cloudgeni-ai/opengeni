@@ -644,11 +644,21 @@ function KpiTiles(props: { usage: UsageResponse }) {
   const priorTokens = prior ? (prior.tokensTotal ?? tokenTotal(prior.tokens)) : null;
   const hit = cacheHitRate(totals);
   const priorHit = prior ? cacheHitRate(prior) : null;
+  // Calls without a list price (a connected model with no price yet, now or
+  // in the past) are left out of the estimate; say how many, never read $0.
+  const unpricedCalls =
+    costIsEstimate(totals) && totals.pricedCalls < totals.calls
+      ? totals.calls - totals.pricedCalls
+      : 0;
+  const unpricedNote =
+    unpricedCalls > 0
+      ? ` · ${formatCount(unpricedCalls)} ${unpricedCalls === 1 ? "call" : "calls"} not priced`
+      : "";
   const spendCaption = costUnknown(totals)
     ? "No list price recorded for these models"
     : estimated > 0
-      ? `${formatMoney(credits)} charged · ~${formatMoney(estimated)} estimated`
-      : "Charged to Opengeni credits";
+      ? `${formatMoney(credits)} charged · ~${formatMoney(estimated)} estimated${unpricedNote}`
+      : `Charged to Opengeni credits${unpricedNote}`;
   const withDelta = (delta: StatDelta | undefined) => (delta ? { delta } : {});
   const cacheDelta: StatDelta | undefined =
     hit !== null && priorHit !== null && prior && prior.cacheKnownCalls > 0

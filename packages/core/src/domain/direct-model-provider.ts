@@ -91,12 +91,16 @@ export async function discoverCompatibleModelReasoning(
   );
 }
 
-/** Verify the customer's exact route without persisting their key or test response. */
+/**
+ * Verify the customer's exact route without persisting their key or test
+ * response. Returns only the model id the provider reported serving (Azure
+ * OpenAI reports a deployment's base model), never the rest of its answer.
+ */
 export async function verifyDirectModelAccess(
   input: DirectModelProviderMetadata,
   credential: DirectModelAccessCredential,
   fetchImpl: typeof fetch = fetch,
-): Promise<void> {
+): Promise<{ reportedModel: string | null }> {
   const config = DirectModelProviderMetadata.parse(input);
   const baseUrl = directModelBaseUrl(config);
   const bearer = typeof credential === "string" ? null : credential.bearerToken;
@@ -175,6 +179,13 @@ export async function verifyDirectModelAccess(
       message: "Your provider couldn’t complete the connection check. Try again shortly.",
     });
   }
+  const reported = body?.model;
+  return {
+    reportedModel:
+      typeof reported === "string" && reported.length <= 256 && /^[!-~]+$/u.test(reported)
+        ? reported
+        : null,
+  };
 }
 
 /**
@@ -189,7 +200,7 @@ export async function verifyOrganizationDirectModel(
     | { provider: "azure_openai"; model: string; endpoint: string },
   credential: DirectModelAccessCredential,
   fetchImpl: typeof fetch = fetch,
-): Promise<void> {
+): Promise<{ reportedModel: string | null }> {
   const config = DirectModelProviderMetadata.safeParse(input);
   if (!config.success) {
     throw new HTTPException(422, {
@@ -199,7 +210,7 @@ export async function verifyOrganizationDirectModel(
           : "Enter the exact Azure OpenAI deployment name.",
     });
   }
-  await verifyDirectModelAccess(config.data, credential, fetchImpl);
+  return await verifyDirectModelAccess(config.data, credential, fetchImpl);
 }
 
 /** The organization Azure OpenAI form of {@link verifyOrganizationDirectModel}. */

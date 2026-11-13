@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import {
+  defaultModelPricing,
   resolveTurnExecutionPolicyV1,
   withOrganizationAzureOpenAICredential,
 } from "@opengeni/config";
@@ -18,15 +19,39 @@ useNoSessionUsageLimitForFakeDatabases();
 const db = {} as Database;
 const MODEL_ID = "organization-azure-openai/gpt-6.1-sol";
 
-function settings() {
+function settings(price: Record<string, unknown> = {}) {
   return withOrganizationAzureOpenAICredential(
     testSettings({ billingMode: "stripe", usageLimitsMode: "managed" }),
     "azure-org-key",
     {
       endpoint: "https://contoso.openai.azure.com/openai/v1",
-      models: [{ upstreamModelId: "gpt-6.1-sol" }],
+      models: [{ upstreamModelId: "gpt-6.1-sol", ...price }],
     },
   );
+}
+
+/** Settle one call of the deployment and return its billing record. */
+async function settle(price: Record<string, unknown>, sourceKey: string) {
+  const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(async () => {});
+  const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse");
+  try {
+    const billing = await recordModelUsageAndDebitCredits(settings(price), db, {
+      accountId: "acct",
+      workspaceId: "ws",
+      sessionId: "sess",
+      turnId: `turn-${sourceKey}`,
+      turnAttemptId: "attempt",
+      model: MODEL_ID,
+      externallyBilled: true,
+      usage: { inputTokens: 100_000, outputTokens: 10_000, totalTokens: 110_000 },
+      sourceKey,
+    });
+    expect(debitSpy).not.toHaveBeenCalled();
+    return billing;
+  } finally {
+    recordSpy.mockRestore();
+    debitSpy.mockRestore();
+  }
 }
 
 describe("organization Azure OpenAI usage", () => {
@@ -81,5 +106,43 @@ describe("organization Azure OpenAI usage", () => {
       recordSpy.mockRestore();
       debitSpy.mockRestore();
     }
+  });
+
+  test("without a declared price, the call's cost is unknown, never zero", async () => {
+    const billing = await settle({}, "response-unpriced");
+    expect(billing).toMatchObject({
+      billingPath: "external",
+      estimatedProviderCostMicros: null,
+      pricingSource: null,
+    });
+  });
+
+  test("a deployment's base model prices its usage at that model's list rate", async () => {
+    const billing = await settle({ listPricingModelId: "gpt-6-astra" }, "response-base");
+    const rate = defaultModelPricing["gpt-6-astra"]!.default;
+    expect(billing).toMatchObject({
+      billingPath: "external",
+      pricedCostMicros: 0,
+      pricingSource: "configured_list_price",
+      estimatedProviderCostMicros:
+        rate.inputMicrosPerMillionTokens / 10 + rate.outputMicrosPerMillionTokens / 100,
+    });
+  });
+
+  test("an administrator's own price overrides the base model", async () => {
+    const billing = await settle(
+      {
+        listPricingModelId: "gpt-6-astra",
+        listPricing: {
+          inputMicrosPerMillionTokens: 2_000_000,
+          outputMicrosPerMillionTokens: 8_000_000,
+        },
+      },
+      "response-custom",
+    );
+    expect(billing).toMatchObject({
+      pricingSource: "configured_list_price",
+      estimatedProviderCostMicros: 200_000 + 80_000,
+    });
   });
 });

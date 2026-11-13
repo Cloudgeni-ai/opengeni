@@ -1,8 +1,12 @@
 import {
   azureOpenAIDeploymentIdentityAvailable,
   claudeProviderId,
+  connectedModelPriceBasisFromReportedModel,
+  connectedModelPriceBasisModelIds,
   opperCredentialProblem,
+  organizationConnectedModelListPrice,
   type AzureEntraProviderCredential,
+  type Settings,
 } from "@opengeni/config";
 import {
   CreateOrganizationProviderCustomModelRequest,
@@ -14,7 +18,9 @@ import {
   OrganizationProviderCustomModel,
   OrganizationProviderCustomModelsResponse,
   RevokeOrganizationModelProviderConnectionRequest,
+  SetOrganizationCustomModelListPriceRequest,
   UpsertOrganizationModelProviderConnectionRequest,
+  type ConnectedModelListPrice,
 } from "@opengeni/contracts";
 import {
   organizationAzureEntraSetupToken,
@@ -34,7 +40,9 @@ import {
   OrganizationModelProviderLimitError,
   retireOrganizationModelProviderCustomModel,
   revokeOrganizationModelProviderConnection,
+  setOrganizationModelProviderCustomModelListPrice,
   upsertOrganizationModelProviderConnection,
+  type ConnectedModelListPricing,
   type OrganizationModelProviderConnection,
   type OrganizationModelProviderCredential,
 } from "@opengeni/db";
@@ -104,16 +112,61 @@ function azureEntraCredential(
     : { source: "deployment_identity" };
 }
 
-function modelJson(model: {
-  id: string;
-  upstreamModelId: string;
-  label: string | null;
-  version: number;
-  createdAt: Date;
-  updatedAt: Date;
-}) {
+/** Organization models whose provider reports no cost, so their price is declared. */
+export type ListPricedModelKind = "openai" | "azure_openai" | "openai_compatible";
+
+export function isListPricedModelKind(kind: string): kind is ListPricedModelKind {
+  return kind === "openai" || kind === "azure_openai" || kind === "openai_compatible";
+}
+
+/**
+ * The price an administrator asked for, checked: a base model must have a
+ * known list rate, or the model would silently stay unpriced.
+ */
+export function acceptedListPrice(
+  settings: Settings,
+  price: ConnectedModelListPrice | null,
+):
+  | { basis: "model"; modelId: string }
+  | { basis: "custom"; pricing: ConnectedModelListPricing }
+  | null {
+  if (
+    price?.basis === "model" &&
+    !connectedModelPriceBasisModelIds(settings).includes(price.modelId)
+  )
+    throw new HTTPException(422, {
+      message: "Choose a base model with a known price, or enter the price yourself.",
+    });
+  return price;
+}
+
+/** The base model Azure reported serving, as a price for a new deployment. */
+export function detectedListPrice(
+  settings: Settings,
+  reportedModel: string | null,
+): { basis: "model"; modelId: string } | undefined {
+  const modelId = connectedModelPriceBasisFromReportedModel(settings, reportedModel);
+  return modelId ? { basis: "model", modelId } : undefined;
+}
+
+export function modelJson(
+  model: {
+    id: string;
+    upstreamModelId: string;
+    label: string | null;
+    listPricingModelId?: string | null;
+    listPricing?: ConnectedModelListPricing | null;
+    version: number;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  pricing?: { settings: Settings; kind: string },
+) {
   return OrganizationProviderCustomModel.parse({
     ...model,
+    ...(pricing && isListPricedModelKind(pricing.kind)
+      ? organizationConnectedModelListPrice(pricing.settings, pricing.kind, model)
+      : {}),
     createdAt: model.createdAt.toISOString(),
     updatedAt: model.updatedAt.toISOString(),
   });
@@ -241,14 +294,18 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       : null;
     // Models saved with the key are checked with it first, with the same
     // short request as adding one later, so nothing is saved if one fails.
+    // Azure answers with each deployment's base model, which prices its usage.
+    const modelListPrices: Record<string, { basis: "model"; modelId: string }> = {};
     for (const model of new Set(payload.models ?? [])) {
-      await verifyOrganizationDirectModel(
+      const { reportedModel } = await verifyOrganizationDirectModel(
         kind === "openai"
           ? { provider: "openai", model }
           : { provider: "azure_openai", model, endpoint: payload.endpoint! },
         entraToken ?? apiKey,
         deps.directModelFetch,
       );
+      const detected = detectedListPrice(deps.settings, reportedModel);
+      if (detected) modelListPrices[model] = detected;
     }
     const stored: OrganizationModelProviderCredential =
       authentication?.method === "entra_client_secret"
@@ -275,7 +332,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         credentialDigest: organizationModelProviderCredentialDigest(credential),
         ...(kind === "azure_openai" ? { endpoint: payload.endpoint ?? null } : {}),
         ...(authMethod === "api_key" ? {} : { authMethod }),
-        ...(payload.models ? { models: payload.models } : {}),
+        ...(payload.models ? { models: payload.models, modelListPrices } : {}),
         operationId: payload.operationId,
         ...(payload.expectedVersion === undefined
           ? {}
@@ -324,13 +381,19 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       c.header("cache-control", "private, no-store");
       const organizationId = parseOrganizationId(c.req.param("organizationId"));
       const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      const kind = modelProviderKind(c.req.param("providerKind"));
       const models = await listOrganizationModelProviderCustomModels(deps.db, {
         organizationId,
         actorSubjectId: human.subjectId,
-        providerKind: modelProviderKind(c.req.param("providerKind")),
+        providerKind: kind,
       });
       return c.json(
-        OrganizationProviderCustomModelsResponse.parse({ models: models.map(modelJson) }),
+        OrganizationProviderCustomModelsResponse.parse({
+          models: models.map((model) => modelJson(model, { settings: deps.settings, kind })),
+          ...(kind === "openai" || kind === "azure_openai"
+            ? { priceBasisModelIds: connectedModelPriceBasisModelIds(deps.settings) }
+            : {}),
+        }),
       );
     },
   );
@@ -348,6 +411,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         "invalid organization custom model",
       );
       const kind = modelProviderKind(c.req.param("providerKind"));
+      let listPrice: ReturnType<typeof detectedListPrice>;
       if (
         (kind === "anthropic" || kind === "claude_subscription") &&
         `${claudeProviderId(kind)}/${payload.upstreamModelId}`.length > 256
@@ -375,7 +439,8 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
           throw new HTTPException(409, {
             message: `Connect ${title} for the organization before adding ${kind === "openai" ? "models" : "deployments"}.`,
           });
-        await verifyOrganizationDirectModel(
+        // Azure answers with the deployment's base model, which prices its usage.
+        const { reportedModel } = await verifyOrganizationDirectModel(
           kind === "openai"
             ? { provider: "openai", model: payload.upstreamModelId }
             : {
@@ -392,17 +457,19 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
             : credential.apiKey,
           deps.directModelFetch,
         );
+        listPrice = detectedListPrice(deps.settings, reportedModel);
       }
       try {
         const model = await createOrganizationModelProviderCustomModel(deps.db, {
           organizationId,
           actorSubjectId: human.subjectId,
-          providerKind: modelProviderKind(c.req.param("providerKind")),
+          providerKind: kind,
           operationId: payload.operationId,
           upstreamModelId: payload.upstreamModelId,
           ...(payload.label === undefined ? {} : { label: payload.label }),
+          ...(listPrice ? { listPrice } : {}),
         });
-        return c.json(modelJson(model), 201);
+        return c.json(modelJson(model, { settings: deps.settings, kind }), 201);
       } catch (error) {
         conflict(error);
       }
@@ -426,14 +493,55 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         throw new HTTPException(422, { message: "invalid organization custom model id" });
       }
       try {
+        const kind = modelProviderKind(c.req.param("providerKind"));
         const model = await retireOrganizationModelProviderCustomModel(deps.db, {
           organizationId,
           actorSubjectId: human.subjectId,
-          providerKind: modelProviderKind(c.req.param("providerKind")),
+          providerKind: kind,
           customModelId: customModelId.data,
           ...payload,
         });
-        return c.json(modelJson(model));
+        return c.json(modelJson(model, { settings: deps.settings, kind }));
+      } catch (error) {
+        conflict(error);
+      }
+    },
+  );
+
+  // Set what an OpenAI model's or Azure deployment's usage costs: a base
+  // model's list rate, the administrator's own rate, or null for unknown.
+  app.put(
+    "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
+    async (c) => {
+      c.header("cache-control", "private, no-store");
+      requireSameOriginBrowserMutation(c, deps);
+      const organizationId = parseOrganizationId(c.req.param("organizationId"));
+      const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      const kind = modelProviderKind(c.req.param("providerKind"));
+      if (kind !== "openai" && kind !== "azure_openai")
+        throw new HTTPException(404, {
+          message: "This provider reports its own cost, so its models have no price to set.",
+        });
+      const payload = await jsonBody(
+        c,
+        SetOrganizationCustomModelListPriceRequest,
+        "Choose a base model or enter a price",
+      );
+      const customModelId = z.string().uuid().safeParse(c.req.param("customModelId"));
+      if (!customModelId.success) {
+        throw new HTTPException(422, { message: "invalid organization custom model id" });
+      }
+      const price = acceptedListPrice(deps.settings, payload.listPrice);
+      try {
+        const model = await setOrganizationModelProviderCustomModelListPrice(deps.db, {
+          organizationId,
+          actorSubjectId: human.subjectId,
+          providerKind: kind,
+          customModelId: customModelId.data,
+          expectedVersion: payload.expectedVersion,
+          price,
+        });
+        return c.json(modelJson(model, { settings: deps.settings, kind }));
       } catch (error) {
         conflict(error);
       }

@@ -8,7 +8,10 @@ import { decryptEnvironmentValue } from "./environment-crypto";
 import {
   OrganizationModelProviderConflictError,
   OrganizationModelProviderLimitError,
+  setOrganizationCustomModelListPriceInScope,
   withOrganizationProviderAdministrator,
+  type ConnectedModelListPrice,
+  type ConnectedModelListPricing,
 } from "./organization-model-providers";
 import * as schema from "./schema";
 
@@ -46,6 +49,10 @@ export type OrganizationCompatibleEndpointModel = {
   label: string | null;
   /** The reasoning levels the model accepts; null when it declares none. */
   reasoning: CompatibleModelReasoning | null;
+  /** The catalogue model whose list rate prices it; null when unknown or custom. */
+  listPricingModelId: string | null;
+  /** The administrator's own list rate; null when unknown or priced from a model. */
+  listPricing: ConnectedModelListPricing | null;
   version: number;
   retiredAt: Date | null;
   createdAt: Date;
@@ -105,6 +112,8 @@ function mapModel(row: ModelRow): OrganizationCompatibleEndpointModel {
       row.reasoningEfforts && row.defaultReasoningEffort
         ? { efforts: [...row.reasoningEfforts], defaultEffort: row.defaultReasoningEffort }
         : null,
+    listPricingModelId: row.priceBasisModelId,
+    listPricing: row.listPricing,
     version: row.version,
     retiredAt: row.retiredAt,
     createdAt: row.createdAt,
@@ -532,6 +541,28 @@ export async function createOrganizationCompatibleEndpointModel(
       .returning();
     if (!row) throw new Error("organization compatible endpoint model create returned no row");
     return mapModel(row);
+  });
+}
+
+/** Set what one active endpoint model's usage costs (see the shared setter). */
+export async function setOrganizationCompatibleEndpointModelListPrice(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    connectionId: string;
+    customModelId: string;
+    expectedVersion: number;
+    price: ConnectedModelListPrice;
+  },
+): Promise<OrganizationCompatibleEndpointModel> {
+  return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
+    const endpoint = await endpointRow(scopedDb, input.organizationId, input.connectionId);
+    if (!endpoint || endpoint.status !== "active")
+      throw new OrganizationModelProviderConflictError();
+    return mapModel(
+      await setOrganizationCustomModelListPriceInScope(scopedDb, { ...input, providerKind: KIND }),
+    );
   });
 }
 
