@@ -3,9 +3,11 @@ import { mcpToolRecommendsApproval, type McpServerConnectionRef } from "@opengen
 import { DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER } from "../src/dataverse-web-api-mcp";
 import {
   FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_TOOLS,
   FinanceOperationsODataMcpServer,
   isFinanceOperationsMcpConfig,
 } from "../src/finance-operations-odata-mcp";
+import { fixedBridgeConnectorTools } from "../src/index";
 
 const HOST = "contoso.operations.ch.dynamics.com";
 const MCP_URL = `https://${HOST}/mcp`;
@@ -56,6 +58,11 @@ const text = (result: any) => result.content[0].text as string;
 const header = (call: Call, name: string) => (call.init.headers as Record<string, string>)[name];
 
 describe("Finance and Operations OData bridge", () => {
+  test("its tools are the connector's tools outside a run, without asking the hosted MCP server", () => {
+    expect(fixedBridgeConnectorTools(MCP_URL, REF)).toBe(FINANCE_OPERATIONS_ODATA_TOOLS);
+    expect(fixedBridgeConnectorTools(MCP_URL, undefined)).toBeNull();
+  });
+
   test("matches only Finance and Operations endpoints connected through their own host", () => {
     expect(isFinanceOperationsMcpConfig(MCP_URL, REF)).toBe(true);
     expect(

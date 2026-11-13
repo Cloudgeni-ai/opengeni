@@ -346,6 +346,8 @@ import {
 } from "./business-central-api-mcp";
 import {
   FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_TOOLS,
+  isFinanceOperationsMcpConfig,
   type FinanceOperationsODataMcpBridgeContext,
 } from "./finance-operations-odata-mcp";
 
@@ -367,6 +369,7 @@ export function fixedBridgeConnectorTools(
 }> | null {
   if (isDataverseMcpConfig(url, connectionRef)) return DATAVERSE_WEB_API_TOOLS;
   if (isBusinessCentralApiConfig(url, connectionRef)) return BUSINESS_CENTRAL_API_TOOLS;
+  if (isFinanceOperationsMcpConfig(url, connectionRef)) return FINANCE_OPERATIONS_ODATA_TOOLS;
   return null;
 }
 
