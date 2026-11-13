@@ -663,12 +663,9 @@ export async function completeNangoConnect(
     });
   const client = nangoClient(deps);
   const tags = attemptTags(state);
-  const match = (
-    await client.listConnections({
-      tags: nangoAttemptTags(tags),
-      integrationId: state.providerConfigKey,
-    })
-  ).find(
+  // Attempt tags are unique to this connect attempt; the integration is
+  // matched here rather than by a Nango query filter.
+  const match = (await client.listConnections({ tags: nangoAttemptTags(tags) })).find(
     (connection) =>
       connection.providerConfigKey === state.providerConfigKey &&
       nangoTagsMatchAttempt(connection.tags, tags),

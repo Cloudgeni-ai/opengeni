@@ -210,13 +210,11 @@ export class NangoClient {
     input: {
       connectionId?: string;
       tags?: Record<string, string>;
-      integrationId?: string;
       page?: number;
     } = {},
   ): Promise<NangoConnectionSummary[]> {
     const query = new URLSearchParams();
     if (input.connectionId) query.set("connectionId", input.connectionId);
-    if (input.integrationId) query.set("integrationId", input.integrationId);
     for (const [key, value] of Object.entries(input.tags ?? {})) query.set(`tags[${key}]`, value);
     query.set("limit", "100");
     if (input.page !== undefined) query.set("page", String(input.page));
@@ -334,11 +332,11 @@ export class NangoClient {
    * by page until a page adds nothing new. For operator reconciliation.
    */
   async listAllConnections(
-    input: { integrationId?: string } = {},
+    input: { providerConfigKey?: string } = {},
   ): Promise<NangoConnectionSummary[]> {
     const seen = new Map<string, NangoConnectionSummary>();
     for (let page = 0; page < 1000; page += 1) {
-      const batch = await this.listConnections({ ...input, page });
+      const batch = await this.listConnections({ page });
       let added = 0;
       for (const connection of batch) {
         const key = `${connection.providerConfigKey}\u0000${connection.connectionId}`;
@@ -348,7 +346,10 @@ export class NangoClient {
       }
       if (batch.length < 100 || added === 0) break;
     }
-    return [...seen.values()];
+    const all = [...seen.values()];
+    return input.providerConfigKey === undefined
+      ? all
+      : all.filter((connection) => connection.providerConfigKey === input.providerConfigKey);
   }
 
   /** Deleting a connection stops Nango's connection billing for it. 404 is success. */

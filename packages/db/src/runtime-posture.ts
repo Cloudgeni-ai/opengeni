@@ -3412,6 +3412,12 @@ export type RuntimeDatabasePostureOptions = {
    * one is present it is checked like every other definer.
    */
   routinesCreatedByLaterMigrations?: readonly string[];
+  /**
+   * The same, for owner-internal target-schema helpers (named without their argument list):
+   * a helper a later migration creates may be absent. When one is present it is checked like
+   * every other helper.
+   */
+  targetRoutinesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -4729,6 +4735,7 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  const notYetCreatedTargetRoutines = new Set(options.targetRoutinesCreatedByLaterMigrations ?? []);
   for (const routine of posture.targetRoutines) {
     if (!knownTargetRoutines.has(routine.name)) {
       violations.push(...unknownRoutineViolations(routine, targetSchema, expectedRole));
@@ -4737,6 +4744,11 @@ export function evaluateRuntimeDatabasePosture(
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
     if (matches.length === 0 && AGENTS_LEGACY_TRIGGER_ROUTINE_SET.has(forbiddenRoutine)) continue;
+    if (
+      matches.length === 0 &&
+      notYetCreatedTargetRoutines.has(forbiddenRoutine.slice(0, forbiddenRoutine.indexOf("(")))
+    )
+      continue;
     if (matches.length !== 1) {
       violations.push(
         `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,
