@@ -37,6 +37,8 @@ import {
   subjectFor,
   replayConnectedCommandOutput,
   connectedCommandExitProof,
+  ConnectedCommandCollectionError,
+  connectedCommandReplayDeadline,
   withoutWaking,
 } from "@opengeni/runtime/sandbox";
 import type { ConnectedCommandCompletionLocator } from "./completion-locator";
@@ -167,7 +169,10 @@ function connectedCommandOutputReader(
   if (deps.reader) return deps.reader;
   const bus = deps.bus;
   if (!bus?.getOpStreamConnection)
-    throw new Error("Connected command output transport unavailable");
+    throw new ConnectedCommandCollectionError(
+      "output_transport_unavailable",
+      "Connected command output transport unavailable",
+    );
   return new OpStreamExecClient({
     workspaceId: identity.controlWorkspaceId,
     agentId: identity.enrollmentId,
@@ -258,12 +263,15 @@ export async function collectConnectedCommandCompletion(
     return;
   }
   if (!reader && !bus?.getOpStreamConnection)
-    throw new Error("Connected command output transport unavailable");
+    throw new ConnectedCommandCollectionError(
+      "output_transport_unavailable",
+      "Connected command output transport unavailable",
+    );
   const claimTtlMs = 5 * 60_000;
   const controlTimeoutMs = CONNECTED_COMMAND_COLLECTION_TIMEOUT_MS;
   // Finish or relinquish collection before the existing claim can be stolen.
-  // Reserve the bounded replay window plus control timeout for the last read.
-  const replayDeadlineAt = Date.now() + claimTtlMs - controlTimeoutMs - 5_000;
+  // The replay follows its one attachment until this deadline.
+  const replayDeadlineAt = connectedCommandReplayDeadline(Date.now(), claimTtlMs, controlTimeoutMs);
   const claim = await claimPushedConnectedCommandCompletion(db, {
     ...command,
     ...identity,
@@ -296,7 +304,10 @@ export async function collectConnectedCommandCompletion(
       replay.outputReceipt ??
       (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
     if (!terminal || !receipt || !terminal.outcome.terminalExit)
-      throw new Error("Connected command completion does not match its captured exit frontier");
+      throw new ConnectedCommandCollectionError(
+        "exit_frontier_mismatch",
+        "Connected command completion does not match its captured exit frontier",
+      );
     // The event is a wake hint. Only verified retained truth supplies proof,
     // including cancellation, timeout and failure details, not just exit code.
     const exit = terminal.outcome.terminalExit;
@@ -374,7 +385,10 @@ export async function collectExitedConnectedCommandOutput(
       replay.outputReceipt ??
       (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
     if (!terminal || !receipt)
-      throw new Error("Connected command output replay has no complete custody receipt");
+      throw new ConnectedCommandCollectionError(
+        "exit_frontier_mismatch",
+        "Connected command output replay has no complete custody receipt",
+      );
     await recordConnectedCommandOutputConsumption(db, {
       ...row,
       receipt,

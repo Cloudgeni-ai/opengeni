@@ -1234,10 +1234,12 @@ authenticated control-workspace/enrollment/connection subject and operation ID
 to claim the original adopted command, even after its session changes routes.
 The collector durably captures retained output through the verified exit frontier
 before settlement, so a terminal read cannot race ahead of the final output.
-Duplicate events cannot steal an active collector's claim. The runner republishes
-unacknowledged terminal records on connection establishment and at its existing
-heartbeat cadence over the independent bulk connection, healing a full send queue
-or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
+Duplicate events cannot steal an active collector's claim. The event and the
+runner's operation inventory go on the control connection, never the bulk
+connection that carries output frames: behind a slow uplink's queued output a
+few-byte notice would otherwise wait minutes. The runner republishes
+unacknowledged terminal records on connection establishment and with every
+heartbeat, healing a lost notice or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
 stops these notifications after the server durably owns reconciliation; it never
 releases retained output. Only the first notification bypasses polling backoff.
 Failed collections reuse reconciliation's exponential backoff, and pending
@@ -1245,8 +1247,13 @@ duplicates coalesce per operation. Older agents and lost connections remain cove
 reconciliation. Terminal publication
 does not discard retained output; release remains separately retryable after custody.
 Completion collectors have independent ingestion capacity, so even a saturated
-collection queue cannot delay machine heartbeats. A collector yields to reconciliation
-before its existing claim lease expires; this never cancels or time-limits the command.
+collection queue cannot delay machine heartbeats. A collector follows one output attachment
+until the exit frame arrives, however slowly the link delivers it, and yields to
+reconciliation before its existing claim lease expires; attaching again would
+only queue the same frames once more behind those in flight. This never cancels
+or time-limits the command. A failed collection logs a closed `reason` code
+(`claim_deadline`, `exit_frontier_not_reached`, `control_<code>`,
+`database_<sqlstate>`, …), since telemetry does not export error text.
 
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
