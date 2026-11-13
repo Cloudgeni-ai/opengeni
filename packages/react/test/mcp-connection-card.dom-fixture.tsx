@@ -1510,6 +1510,7 @@ test("a reviewed service's card speaks its catalog copy and keeps the technical 
       {
         listCapabilities: async () => ({ items: [shown] }),
         listConnections: async () => [],
+        listOwnConnectionAccounts: async () => [],
         connectTransport: () => ({}),
       },
       { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
@@ -1658,6 +1659,7 @@ test("the card asks who can use a connection only when someone else could", asyn
         listCapabilities: async () => ({ items: [shown] }),
         listWorkspaceMembers: async () => input.people.map((subjectId) => ({ subjectId })),
         getAccessContext: async () => ({ subjectId: "user:me" }),
+        listOwnConnectionAccounts: async () => [],
         connectTransport: () => ({}),
       },
       { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
@@ -1695,4 +1697,247 @@ test("the card asks who can use a connection only when someone else could", asyn
     expect(await render({ people: ["user:me", "user:anna"], mcpUrl })).toMatchObject({
       asked: false,
     });
+});
+
+/**
+ * A capability not yet set up in this shared workspace, and the person's own
+ * login for it that lives in another workspace. Signing in again reuses that
+ * login (D-54), so it is only ever listed with their accounts.
+ */
+function ownLoginElsewhereClient(options: {
+  /** Already listed before signing in (the card can offer "Use it here"). */
+  listedBeforeSignIn: boolean;
+  /** Whether the server turned the reused login on here. */
+  turnedOnBySignIn: boolean;
+  /** Turning the capability on here is an admin's step. */
+  enableRefused?: boolean;
+}) {
+  let committed = false;
+  let enabled = false;
+  let turnedOn = false;
+  const calls: string[] = [];
+  const enables: unknown[] = [];
+  const grants: unknown[] = [];
+  const begins: unknown[] = [];
+  const capability = () =>
+    ({
+      ...item,
+      id: "reused-service",
+      enabled,
+      connectionRef: enabled
+        ? { providerDomain: "service.example", kind: "oauth2", subjectScope: "subject" }
+        : null,
+    }) as unknown as CapabilityCatalogItem;
+  const login = () =>
+    ({
+      ...connection,
+      id: "own-login-elsewhere",
+      workspaceId: "other-workspace",
+      subjectId: "user:own",
+      authorityId: "authority-own",
+      turnedOnHere: turnedOn || (committed && options.turnedOnBySignIn),
+    }) as ConnectionMetadata;
+  const attempt = {
+    id: "reuse-attempt",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "personal",
+    revision: 1,
+    state: "credential_input",
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "credentials", fields: [] },
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [capability()] }),
+    listWorkspaceMembers: async () => [{ subjectId: "user:own" }, { subjectId: "user:anna" }],
+    getAccessContext: async () => ({ subjectId: "user:own" }),
+    // This workspace stores no connection of its own for it.
+    listConnections: async () => [],
+    listOwnConnectionAccounts: async () =>
+      committed || options.listedBeforeSignIn ? [login()] : [],
+    issueUserResourceGrant: async (...input: unknown[]) => {
+      calls.push("issueUserResourceGrant");
+      grants.push(input);
+      turnedOn = true;
+      return { grant: { grantId: "grant" } };
+    },
+    enableCapability: async (...input: unknown[]) => {
+      calls.push("enableCapability");
+      enables.push(input);
+      if (options.enableRefused)
+        throw new OpenGeniApiError(
+          403,
+          JSON.stringify({ error: { message: "Only an admin can turn on this integration" } }),
+          { mutation: true },
+        );
+      enabled = true;
+    },
+    connectTransport: () => ({
+      begin: async (_workspaceId: string, input: unknown) => {
+        begins.push(input);
+        return attempt;
+      },
+      advance: async () => {
+        committed = true;
+        return {
+          ...attempt,
+          revision: 2,
+          state: "complete",
+          credentialsCommitted: true,
+          nextAction: { type: "none" },
+          account: {
+            id: "own-login-elsewhere",
+            providerId: "mcp-oauth",
+            ownership: "personal",
+            status: "connected",
+            label: "Example service",
+            version: 1,
+          },
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  return { client, calls, enables, grants, begins };
+}
+
+const personalEnable = [
+  "workspace",
+  "reused-service",
+  {
+    connectionRef: { providerDomain: "service.example", kind: "oauth2", subjectScope: "subject" },
+  },
+];
+
+async function renderOwnLoginElsewhereCard(
+  client: OpenGeniClient,
+  onConfigured: () => void,
+  personalOnly = true,
+) {
+  return await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="reused-service"
+      name="Example service"
+      returnUrl="https://host.example/"
+      onConfigured={onConfigured}
+      dialogOnly
+      personalOnly={personalOnly}
+    />,
+  );
+}
+
+for (const turnedOnBySignIn of [true, false])
+  test(`signing in with your own login from another workspace turns the capability on here (${turnedOnBySignIn ? "turned on by the server" : "turned on by the card"})`, async () => {
+    sessionStorage.clear();
+    const h = ownLoginElsewhereClient({ listedBeforeSignIn: false, turnedOnBySignIn });
+    let configured = 0;
+    const previousOpen = window.open;
+    window.open = (() => ({
+      opener: null,
+      closed: false,
+      location: { replace() {} },
+      close() {},
+    })) as unknown as typeof window.open;
+    const view = await renderOwnLoginElsewhereCard(h.client, () => {
+      configured += 1;
+    });
+    try {
+      await flush();
+      const button = [...document.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === "Continue to Example service",
+      );
+      expect(button).toBeDefined();
+      await actRun(() => button!.click());
+      await flush();
+      expect(h.begins).toEqual([expect.objectContaining({ ownership: "personal" })]);
+      expect(document.body.textContent).not.toContain(
+        "The authorized account does not match this integration",
+      );
+      expect(document.querySelector('[role="alert"]')?.textContent ?? null).toBeNull();
+      expect(h.calls).toEqual(
+        turnedOnBySignIn ? ["enableCapability"] : ["issueUserResourceGrant", "enableCapability"],
+      );
+      if (!turnedOnBySignIn)
+        expect(h.grants).toEqual([
+          ["workspace", "authority-own", expect.objectContaining({ resourceKind: "connection" })],
+        ]);
+      expect(h.enables).toEqual([personalEnable]);
+      expect(configured).toBe(1);
+    } finally {
+      await view.unmount();
+      window.open = previousOpen;
+    }
+  });
+
+test("a capability not set up here offers your own login from another workspace instead of a new sign-in", async () => {
+  sessionStorage.clear();
+  const h = ownLoginElsewhereClient({ listedBeforeSignIn: true, turnedOnBySignIn: false });
+  let configured = 0;
+  const view = await renderOwnLoginElsewhereCard(h.client, () => {
+    configured += 1;
+  });
+  try {
+    await flush();
+    const use = [...document.querySelectorAll("button.og-session-capability-primary")].find(
+      (node) => node.textContent === "Use it here",
+    ) as HTMLButtonElement | undefined;
+    expect(use).toBeDefined();
+    await actRun(() => use!.click());
+    await flush();
+    expect(h.begins).toEqual([]);
+    expect(h.calls).toEqual(["enableCapability", "issueUserResourceGrant"]);
+    expect(h.enables).toEqual([personalEnable]);
+    expect(document.querySelector('[role="alert"]')?.textContent ?? null).toBeNull();
+    expect(configured).toBe(1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a shareable capability with others in the workspace asks who can use it before offering your own login", async () => {
+  sessionStorage.clear();
+  const h = ownLoginElsewhereClient({ listedBeforeSignIn: true, turnedOnBySignIn: false });
+  const view = await renderOwnLoginElsewhereCard(h.client, () => {}, false);
+  try {
+    await flush();
+    expect(document.body.textContent).toContain("Who can use this connection?");
+    expect(
+      [...document.querySelectorAll("button")].some((node) => node.textContent === "Use it here"),
+    ).toBe(false);
+    expect(h.calls).toEqual([]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("using your own login here when only an admin can turn the capability on leaves the login as it was", async () => {
+  sessionStorage.clear();
+  const h = ownLoginElsewhereClient({
+    listedBeforeSignIn: true,
+    turnedOnBySignIn: false,
+    enableRefused: true,
+  });
+  let configured = 0;
+  const view = await renderOwnLoginElsewhereCard(h.client, () => {
+    configured += 1;
+  });
+  try {
+    await flush();
+    const use = [...document.querySelectorAll("button.og-session-capability-primary")].find(
+      (node) => node.textContent === "Use it here",
+    ) as HTMLButtonElement | undefined;
+    expect(use).toBeDefined();
+    await actRun(() => use!.click());
+    await flush();
+    expect(h.calls).toEqual(["enableCapability"]);
+    expect(h.grants).toEqual([]);
+    expect(document.body.textContent).toContain("Only an admin can turn on Example service.");
+    expect(configured).toBe(0);
+  } finally {
+    await view.unmount();
+  }
 });

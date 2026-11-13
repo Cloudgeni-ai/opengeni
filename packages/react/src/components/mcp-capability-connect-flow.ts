@@ -70,6 +70,27 @@ export function personalReconnectTarget(
     : { ambiguous: false, connectionId: logins[0]?.id };
 }
 
+/**
+ * The person's one own login for this endpoint, added in another workspace
+ * and not turned on in this one, for a capability not yet set up here: the
+ * card offers to use it here instead of signing in again. None when they have
+ * no such login, or more than one (a sign-in then says which account).
+ */
+export function ownLoginToUseHere(
+  accounts: readonly ConnectionMetadata[],
+  mcpUrl: string | null | undefined,
+): ConnectionMetadata | null {
+  if (!mcpUrl) return null;
+  const logins = accounts.filter(
+    (entry) =>
+      entry.subjectId !== null &&
+      entry.kind === "oauth2" &&
+      entry.status === "active" &&
+      entry.metadata.mcpUrl === mcpUrl,
+  );
+  return logins.length === 1 && ownLoginOffHere(logins[0]!) ? logins[0]! : null;
+}
+
 function personalOnlyService(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl"> | null) {
   const url = item?.mcpUrl ?? item?.endpointUrl;
   // A Dynamics connection acts as the person, with their own Dynamics
@@ -270,6 +291,26 @@ export function useMcpCapabilityConnect({
         ? usableHere.some((entry) => entry.id === reconnectConnectionId)
         : usableHere.length === 1;
       if (usableHere.length === 0) ownLoginElsewhere = matches.find(ownLoginOffHere) ?? null;
+    } else if (
+      !resolved.enabled &&
+      !reconnectConnectionId &&
+      (resolved.connectionRef
+        ? resolved.connectionRef.subjectScope === "subject"
+        : // Only where the card would connect the person's own account anyway;
+          // otherwise they first choose who can use the connection.
+          personalOnly ||
+          nobodyToShareWith ||
+          personalOnlyService(resolved) ||
+          resolved.metadata?.defaultConnectionOwnership === "personal")
+    ) {
+      // Not set up here yet, but the person may already have their own login
+      // for it from another workspace. Only an offer: if this read fails the
+      // card still signs in as usual.
+      const accounts = await Promise.resolve()
+        .then(() => client.listOwnConnectionAccounts(workspaceId))
+        .catch((): ConnectionMetadata[] => []);
+      if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
+      ownLoginElsewhere = ownLoginToUseHere(accounts, resolved.mcpUrl ?? resolved.endpointUrl);
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     const selected =
@@ -361,10 +402,19 @@ export function useMcpCapabilityConnect({
     if (attempt.state !== "complete" || !attempt.account || !attempt.credentialsCommitted) return;
     const resolved = await load(active);
     if (!resolved || !active()) return;
-    const connection = (await client.listConnections(workspaceId)).find(
+    let connection = (await client.listConnections(workspaceId)).find(
       (entry) => entry.id === attempt.account!.id,
     );
     if (!active()) return;
+    // Signing in with your own login already added in another workspace
+    // reuses that login (D-54): it is listed with your accounts, not with
+    // this workspace's connections.
+    if (!connection && attempt.ownership === "personal") {
+      connection = (await client.listOwnConnectionAccounts(workspaceId)).find(
+        (entry) => entry.id === attempt.account!.id,
+      );
+      if (!active()) return;
+    }
     if (
       !connection ||
       connection.status !== "active" ||
@@ -381,6 +431,12 @@ export function useMcpCapabilityConnect({
       previous.connectionId !== connection.id
     )
       throw new ConnectCardMessage(t("sessionMcpCapabilityCard.thisIntegrationSSelectedAccount"));
+    // The server turns a reused login on where it was connected, best
+    // effort; signing in here is the person's choice to use it here.
+    if (ownLoginOffHere(connection)) {
+      await turnOnOwnLoginHere(client, workspaceId, connection);
+      if (!active()) return;
+    }
     // Enabling is a workspace installation change. When the capability is
     // already enabled with exactly this binding (each person's own account,
     // or this shared account), connecting an account needs no installation
@@ -392,46 +448,7 @@ export function useMcpCapabilityConnect({
         ? previous.subjectScope === "subject"
         : previous.subjectScope !== "subject" && previous.connectionId === connection.id);
     if (!alreadyBound) {
-      try {
-        await client.enableCapability(workspaceId, capabilityId, {
-          connectionRef:
-            attempt.ownership === "personal"
-              ? {
-                  providerDomain: connection.providerDomain,
-                  kind: "oauth2",
-                  subjectScope: "subject",
-                }
-              : {
-                  providerDomain: connection.providerDomain,
-                  kind: "oauth2",
-                  subjectScope: "workspace",
-                  connectionId: connection.id,
-                },
-        });
-      } catch (failure) {
-        // An admin who hasn't confirmed it's them with a passkey is asked to;
-        // the account is connected and turning it on works once they do.
-        if (
-          failure instanceof OpenGeniApiError &&
-          failure.status === 403 &&
-          failure.details?.code === ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE
-        )
-          throw new ConnectCardMessage(
-            t(
-              failure.details.passkeyRegistered === false
-                ? "sessionMcpCapabilityCard.addAPasskeyToTurnOn"
-                : "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn",
-              { name: resolved.name },
-            ),
-          );
-        // The account is connected, but turning the integration on here is an
-        // admin's step. Say so: the account is used once an admin turns it on.
-        if (failure instanceof OpenGeniApiError && failure.status === 403)
-          throw new ConnectCardMessage(
-            t("sessionMcpCapabilityCard.onlyAnAdminCanTurnOn", { name: resolved.name }),
-          );
-        throw failure;
-      }
+      await enableWith(resolved, connection, attempt.ownership);
       if (!active()) return;
     }
     const enabled = await load(active);
@@ -440,6 +457,54 @@ export function useMcpCapabilityConnect({
     }
     if (!active()) return;
     hints.forget(storageKey);
+  }
+
+  /** Turn the capability on here with this account: each person's own, or this shared one. */
+  async function enableWith(
+    resolved: CapabilityCatalogItem,
+    connection: ConnectionMetadata,
+    accountOwnership: ConnectOwnership,
+  ) {
+    try {
+      await client.enableCapability(workspaceId, capabilityId, {
+        connectionRef:
+          accountOwnership === "personal"
+            ? {
+                providerDomain: connection.providerDomain,
+                kind: "oauth2",
+                subjectScope: "subject",
+              }
+            : {
+                providerDomain: connection.providerDomain,
+                kind: "oauth2",
+                subjectScope: "workspace",
+                connectionId: connection.id,
+              },
+      });
+    } catch (failure) {
+      // An admin who hasn't confirmed it's them with a passkey is asked to;
+      // the account is connected and turning it on works once they do.
+      if (
+        failure instanceof OpenGeniApiError &&
+        failure.status === 403 &&
+        failure.details?.code === ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE
+      )
+        throw new ConnectCardMessage(
+          t(
+            failure.details.passkeyRegistered === false
+              ? "sessionMcpCapabilityCard.addAPasskeyToTurnOn"
+              : "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn",
+            { name: resolved.name },
+          ),
+        );
+      // The account is connected, but turning the integration on here is an
+      // admin's step. Say so: the account is used once an admin turns it on.
+      if (failure instanceof OpenGeniApiError && failure.status === 403)
+        throw new ConnectCardMessage(
+          t("sessionMcpCapabilityCard.onlyAnAdminCanTurnOn", { name: resolved.name }),
+        );
+      throw failure;
+    }
   }
 
   async function open() {
@@ -680,11 +745,24 @@ export function useMcpCapabilityConnect({
     await run(async (active) => {
       const login = offHere;
       if (!item || !login) return;
+      // Not set up here yet: turn it on for each person's own account first,
+      // so a refusal (only an admin can) leaves the login as it was.
+      const enabling = !item.enabled || !item.connectionRef;
+      if (enabling) {
+        await enableWith(item, login, "personal");
+        if (!active()) return;
+      }
       await turnOnOwnLoginHere(client, workspaceId, login);
       if (!active()) return;
       setOffHere(null);
+      let capability = item;
+      if (enabling) {
+        const enabled = await load(active);
+        if (!enabled || !active()) return;
+        capability = enabled;
+      }
       setConnected(true);
-      await finishConnection(item, active);
+      await finishConnection(capability, active);
       finished = true;
     });
     // Started from the closed card: open it so a failure is shown, not lost.

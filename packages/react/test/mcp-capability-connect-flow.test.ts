@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { ConnectionMetadata } from "@opengeni/sdk";
-import { personalReconnectTarget } from "../src/components/mcp-capability-connect-flow";
+import {
+  ownLoginToUseHere,
+  personalReconnectTarget,
+} from "../src/components/mcp-capability-connect-flow";
 
 const GMAIL = "https://gmailmcp.googleapis.com/mcp/v1";
 
@@ -75,5 +78,25 @@ describe("which own login a connector card reconnects", () => {
         GMAIL,
       ),
     ).toEqual({ ambiguous: false, connectionId: "mine" });
+  });
+});
+
+describe("which own login from another workspace a card offers to use here", () => {
+  const elsewhere = (id: string, overrides: Partial<ConnectionMetadata> = {}) =>
+    login(id, "active", { workspaceId: "elsewhere", turnedOnHere: false, ...overrides });
+
+  test("your one working login for this endpoint, off here", () => {
+    expect(ownLoginToUseHere([elsewhere("mine")], GMAIL)?.id).toBe("mine");
+  });
+
+  test("nothing when it is already on here, ambiguous, lapsed, shared or another endpoint", () => {
+    expect(ownLoginToUseHere([elsewhere("on", { turnedOnHere: true })], GMAIL)).toBeNull();
+    expect(ownLoginToUseHere([elsewhere("one"), elsewhere("two")], GMAIL)).toBeNull();
+    expect(ownLoginToUseHere([elsewhere("lapsed", { status: "needs_reauth" })], GMAIL)).toBeNull();
+    expect(ownLoginToUseHere([elsewhere("shared", { subjectId: null })], GMAIL)).toBeNull();
+    expect(
+      ownLoginToUseHere([elsewhere("drive", { metadata: { mcpUrl: "https://other/mcp" } })], GMAIL),
+    ).toBeNull();
+    expect(ownLoginToUseHere([elsewhere("mine")], undefined)).toBeNull();
   });
 });
