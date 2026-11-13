@@ -147,6 +147,12 @@ unless the component turns it on
 Server-side code gets the same workspace with
 `og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
 
+Workspaces the product's organization key creates are managed by the product.
+Organization owners and admins read those users' sessions, cost and an audit
+log in Opengeni Console (`/console` in the app); the organization chooses full
+transcripts, metadata only or off. See
+[opengeni-console.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/opengeni-console.md).
+
 ### The agent
 
 The browser sends only the first message and its attached files (the proxy adds

@@ -6224,6 +6224,12 @@ export async function deleteGitHubInstallationBinding(
     eventRouteSecret: Uint8Array | null;
     /** Who removed the installation from the workspace: audited in the same transaction. */
     audit?: DisconnectAuditActor | null;
+    /**
+     * The installation that replaces this one (a reinstall on the same GitHub
+     * account). Its approval choices move to the replacement in the same
+     * transaction; a choice already made there wins.
+     */
+    replacedByInstallationId?: number | undefined;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -6240,6 +6246,17 @@ export async function deleteGitHubInstallationBinding(
         )
         .returning({ id: schema.githubInstallations.id });
       await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
+      const replacedBy = input.replacedByInstallationId;
+      const moved =
+        rows.length > 0 && replacedBy !== undefined && replacedBy !== input.installationId
+          ? await moveConnectorActionPoliciesInScope(scopedDb, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              fromConnectionId: `github-app:${input.installationId}`,
+              toConnectionId: `github-app:${replacedBy}`,
+              auditSubjectId: input.audit?.subjectId ?? null,
+            })
+          : null;
       if (input.audit && rows.length > 0) {
         await insertDisconnectAuditEventInScope(scopedDb, {
           accountId: input.accountId,
@@ -6252,11 +6269,123 @@ export async function deleteGitHubInstallationBinding(
             provider: "github",
             providerDomain: "github.com",
           },
+          ...(moved
+            ? {
+                details: {
+                  replacedByInstallationId: String(replacedBy),
+                  approvalPoliciesMoved: moved.movedPolicyIds.length,
+                  approvalPoliciesRemoved: moved.removedPolicyIds,
+                },
+              }
+            : {}),
         });
       }
       return rows.length > 0;
     },
   );
+}
+
+/**
+ * Moves one connection's approval choices to the connection that replaced it,
+ * in the caller's scoped transaction, and removes them from the old one. A
+ * choice already made on the new connection wins. Moved rows keep who created
+ * and last changed them, and when; the actor doing the move is audited.
+ */
+async function moveConnectorActionPoliciesInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    fromConnectionId: string;
+    toConnectionId: string;
+    auditSubjectId: string | null;
+  },
+): Promise<{ movedPolicyIds: string[]; removedPolicyIds: string[] }> {
+  const fromConnection = and(
+    eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+    eq(schema.connectorActionPolicies.connectionId, input.fromConnectionId),
+  );
+  const previous = await scopedDb
+    .select()
+    .from(schema.connectorActionPolicies)
+    .where(fromConnection)
+    .orderBy(asc(schema.connectorActionPolicies.id))
+    .for("update");
+  if (previous.length === 0) return { movedPolicyIds: [], removedPolicyIds: [] };
+  const moved: Array<typeof schema.connectorActionPolicies.$inferSelect & { from: string }> = [];
+  for (let offset = 0; offset < previous.length; offset += 128) {
+    const batch = previous.slice(offset, offset + 128);
+    const inserted = await scopedDb
+      .insert(schema.connectorActionPolicies)
+      .values(
+        batch.map((policy) => ({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionId: input.toConnectionId,
+          serverId: policy.serverId,
+          toolName: policy.toolName,
+          actionName: policy.actionName,
+          policy: policy.policy,
+          createdBySubjectId: policy.createdBySubjectId,
+          updatedBySubjectId: policy.updatedBySubjectId,
+          createdAt: policy.createdAt,
+          updatedAt: policy.updatedAt,
+        })),
+      )
+      .onConflictDoNothing({
+        target: [
+          schema.connectorActionPolicies.workspaceId,
+          schema.connectorActionPolicies.connectionId,
+          schema.connectorActionPolicies.serverId,
+          schema.connectorActionPolicies.toolName,
+          schema.connectorActionPolicies.actionName,
+        ],
+      })
+      .returning();
+    const scope = (policy: { serverId: string; toolName: string; actionName: string }) =>
+      JSON.stringify([policy.serverId, policy.toolName, policy.actionName]);
+    const sources = new Map(batch.map((policy) => [scope(policy), policy.id]));
+    for (const row of inserted) moved.push({ ...row, from: sources.get(scope(row))! });
+  }
+  const removed = await scopedDb
+    .delete(schema.connectorActionPolicies)
+    .where(fromConnection)
+    .returning({ id: schema.connectorActionPolicies.id });
+  if (input.auditSubjectId && moved.length > 0) {
+    for (let offset = 0; offset < moved.length; offset += 128)
+      await scopedDb.insert(schema.auditEvents).values(
+        moved.slice(offset, offset + 128).map((row) =>
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.auditSubjectId!,
+              action: "connector.action.policy_changed",
+              targetType: "connector_action_policy",
+              targetId: row.id,
+              metadata: {
+                connectionId: row.connectionId,
+                serverId: row.serverId,
+                toolName: row.toolName,
+                actionName: row.actionName,
+                policy: row.policy,
+                version: row.version,
+                previousPolicy: null,
+                previousVersion: null,
+                movedFromConnectionId: input.fromConnectionId,
+                movedFromPolicyId: row.from,
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        ),
+      );
+  }
+  return {
+    movedPolicyIds: moved.map((row) => row.id),
+    removedPolicyIds: removed.map((row) => row.id),
+  };
 }
 
 /**
@@ -41396,6 +41525,15 @@ export async function listSessionEventPage(
           // Indexing the ordered ID array avoids rescanning an ordered CTE at
           // every recursion step. Keep the subsequent payload SELECT separate:
           // this is still metadata planning, not a new page-wide snapshot.
+          // The recursive step reads its next ID through a scalar subquery so
+          // the lookup compares the ID with a plain parameter (the subquery runs
+          // as an InitPlan). Under row-level security PostgreSQL uses a lookup
+          // as an index condition only when it is leakproof, and since the
+          // November 2026 minor releases (16.16, 17.12, 18.7; CVE-2026-116327)
+          // any non-leakproof function over a value from elsewhere in the query
+          // makes it leaky. `id = ordered.ids[bounded.row_number + 1]` written
+          // in the lookup itself is leaky because of `+`, and turns every step
+          // into a filtered scan of the whole session.
           const metadataRows = await rawRows<
             SessionEventProjectionMetadataRow & { sourceRowCount: number }
           >(
@@ -41427,12 +41565,13 @@ export async function listSessionEventPage(
                 select sized.id, sized.sequence,
                   bounded.row_number + 1, sized.bytes,
                   bounded.cumulative_bytes + 1 + sized.bytes
-                from bounded cross join ordered
-                cross join lateral (
+                from bounded cross join lateral (
                   select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
                     (${transferBytesSql})::int as bytes
                   from ${schema.sessionEvents}
-                  where ${schema.sessionEvents.id} = ordered.ids[bounded.row_number + 1]
+                  where ${schema.sessionEvents.id} = (
+                      select ordered.ids[bounded.row_number + 1] from ordered
+                    )
                     and ${schema.sessionEvents.workspaceId} = ${workspaceId}
                     and ${schema.sessionEvents.sessionId} = ${sessionId}
                   offset 0
@@ -70006,6 +70145,11 @@ export async function beginEnrollmentAgentUpdate(
      * (null: none), so a decision made from an older read of the machine
      * never replaces a newer record. */
     expectedOperationId?: string | null;
+    /** Also replace an unfinished operation whose last progress is at or
+     * before this time: its runner was asked and has not been heard from
+     * since, so it is treated as lost. A fresh progress event moves the
+     * operation past this time and keeps it. */
+    replaceUnfinishedBefore?: Date;
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(
@@ -70080,6 +70224,9 @@ export async function beginEnrollmentAgentUpdate(
               sql`${schema.enrollments.agentUpdateStatus} is null`,
               eq(schema.enrollments.agentUpdateStatus, "succeeded"),
               eq(schema.enrollments.agentUpdateStatus, "failed"),
+              input.replaceUnfinishedBefore === undefined
+                ? undefined
+                : sql`${schema.enrollments.agentUpdateUpdatedAt} <= ${input.replaceUnfinishedBefore.toISOString()}::timestamptz`,
             ),
             input.expectedOperationId === undefined
               ? undefined
@@ -98366,6 +98513,7 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
 }
 
 export * from "./feedback";
+export * from "./console";
 export * from "./session-final-reply";
 export * from "./knowledge-entries";
 

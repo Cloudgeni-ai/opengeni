@@ -99,7 +99,8 @@ describe("rail footer account menu", () => {
       expectNoAdjacentSeparators(sequence);
       expect(sequence[2]).toBe("My things");
       expect(sequence[3]).toBe("Billing and receipts");
-      expect(sequence[4]).toBe("|");
+      expect(sequence[4]).toBe("Opengeni Console");
+      expect(sequence[5]).toBe("|");
     } finally {
       await ownerUnmount();
     }

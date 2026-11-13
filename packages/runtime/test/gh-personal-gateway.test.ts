@@ -385,10 +385,22 @@ describe.skipIf(!available)("gh as the person through the Opengeni gateway (real
 
   test("the sandbox keeps no GitHub token, only the pass file", () => {
     const credentials = join(home, ".opengeni", "git-credentials");
-    const files = readdirSync(credentials);
-    for (const name of files) {
-      expect(readFileSync(join(credentials, name), "utf8")).not.toContain("ambient-token");
+    const files = readdirSync(credentials, { recursive: true, withFileTypes: true }).filter(
+      (entry) => entry.isFile(),
+    );
+    for (const entry of files) {
+      expect(readFileSync(join(entry.parentPath, entry.name), "utf8")).not.toContain(
+        "ambient-token",
+      );
     }
+    // The pass lives in this chat's own credential directory.
+    const passFile = join(
+      credentials,
+      "sessions",
+      "default",
+      `${gitCredentialBindingHash("github-personal/binding-1")}-token`,
+    );
+    expect(readFileSync(passFile, "utf8").trim()).toBe(PASS);
     expect(readFileSync(join(home, ".opengeni", "bin", GH_GATEWAY_KIT_FILE_NAME), "utf8")).toBe(
       GH_GATEWAY_KIT_SCRIPT,
     );

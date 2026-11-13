@@ -153,14 +153,15 @@ export function AdminStepUpDialog({
     return (
       <FormDialog
         open
+        aboveOtherDialogs
         onOpenChange={(open) => !open && close(false)}
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
         title="Add a passkey"
         description={
           inBrowser
-            ? "Admin settings need a passkey to confirm it's you. Add one in your browser, then try again here."
-            : "Admin settings need a passkey to confirm it's you. Add one to your account, then try again."
+            ? "Changing who has access needs a passkey. Add one in your browser, then try again here."
+            : "Changing who has access needs a passkey. Add one to your account, then try again."
         }
         submitLabel={inBrowser ? "Add in browser" : "Add passkey"}
         onSubmit={() => {
@@ -179,6 +180,7 @@ export function AdminStepUpDialog({
     return (
       <FormDialog
         open
+        aboveOtherDialogs
         onOpenChange={(open) => !open && close(confirmed.current)}
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
@@ -231,11 +233,12 @@ export function AdminStepUpDialog({
     return (
       <FormDialog
         open
+        aboveOtherDialogs
         onOpenChange={(open) => !open && close(false)}
         size="sm"
         leading={<KeyRoundIcon aria-hidden />}
         title="Confirm it's you"
-        description="Use your passkey to change admin settings. Passkeys open in your browser, which then shows a code to enter here."
+        description="Use your passkey to change who has access. Passkeys open in your browser, which then shows a code to enter here."
         submitLabel="Continue in browser"
         pendingLabel="Opening your browser…"
         error={error}
@@ -257,11 +260,12 @@ export function AdminStepUpDialog({
   return (
     <FormDialog
       open
+      aboveOtherDialogs
       onOpenChange={(open) => !open && close(confirmed.current)}
       size="sm"
       leading={<KeyRoundIcon aria-hidden />}
       title="Confirm it's you"
-      description="Use your passkey to change admin settings. You won't be asked again until you sign out."
+      description="Use your passkey to change who has access. You won't be asked again until you sign out."
       submitLabel="Use passkey"
       pendingLabel="Waiting for your passkey…"
       error={error}

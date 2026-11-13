@@ -16,11 +16,16 @@ import { managedPasskeySignInOffered } from "../routes/managed-passkeys";
 
 /* ----------------------------------------------------------------------------
    Admin step-up (CASA 3.3.1). An organization owner or admin, or a workspace
-   admin, changing admin settings in a browser must be in a session confirmed
-   with a passkey: signed in with one, or confirmed with one once in it. The
-   mark is on the session row (auth_sessions.mfa_verified_at), so it lasts as
-   long as the session and goes with it on sign-out or revocation. Creating a
-   personal API key is gated the same way for such an admin.
+   admin, changing who can reach the organization and its data in a browser
+   must be in a session confirmed with a passkey: signed in with one, or
+   confirmed with one once in it. That is access management (members, roles,
+   invitations, service accounts, ownership recovery), creating credentials
+   (organization and workspace API keys, and a personal key as an admin) and
+   shared connections (creating, changing or removing them). Everything else,
+   such as settings, billing, policies and revoking keys, is never asked.
+
+   The mark is on the session row (auth_sessions.mfa_verified_at), so it lasts
+   as long as the session and goes with it on sign-out or revocation.
 
    Only browser sessions are asked. An approved native app, and an agent or
    personal API key acting as the person, act under the person's existing
@@ -31,7 +36,7 @@ import { managedPasskeySignInOffered } from "../routes/managed-passkeys";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-type Scope = "organization" | "workspace" | "billing" | "personal_api_key";
+type Scope = "organization" | "workspace" | "personal_api_key";
 type AdminRoute = {
   scope: Scope;
   /** Only these methods (default: every mutation). */
@@ -69,45 +74,42 @@ const route = (scope: Scope, source: string, options: Partial<AdminRoute> = {}):
 });
 
 /**
- * The admin functions, as mutations. Everything under an organization is an
- * admin setting except a person's own API keys and identity lookups; in a
- * workspace, its settings, members, keys, shared integrations and connections.
+ * The admin functions, as mutations: who can access the organization and its
+ * data. Nothing else (settings, billing, policies, revoking access) is here.
  */
 export const ADMIN_ROUTES: readonly AdminRoute[] = [
-  route(
-    "organization",
-    `${ORG}(?!/personal-api-keys(?:/|$)|/external-identities/lookup/?$)(?:/.*)?`,
-  ),
-  route("workspace", WS),
-  route("workspace", `${WS}/settings`),
+  // Access management.
+  route("organization", `${ORG}/(?:members|external-members)/[^/]+`),
+  route("organization", `${ORG}/invitations(?:/[^/]+/(?:revoke|delivery/retry))?`),
+  route("organization", `${ORG}/workspaces/[^/]+/(?:members|external-members)/[^/]+(?:/revoke)?`),
+  route("organization", `${ORG}/service-accounts(?:/[^/]+)?`, {
+    methods: ["POST", "PATCH"],
+  }),
+  route("organization", `${ORG}/recovery/.+`),
   route("workspace", `${WS}/(?:members|external-members)(?:/[^/]+)?`),
-  route("workspace", `${WS}/api-keys(?:/[^/]+)?`),
-  route("workspace", `${WS}/(?:credential-provider|webhooks)(?:/.*)?`),
-  route("workspace", `${WS}/(?:model-policy|default-rig|model-account-settings)(?:/.*)?`),
-  route("workspace", `${WS}/(?:gateway|openrouter|opper)-custom-models(?:/[^/]+)?`),
-  route("workspace", `${WS}/(?:vault-providers|vaults)(?:/.*)?`),
-  route("workspace", `${WS}/integrations/(?:install|[^/]+/organization)`),
-  route("workspace", `${WS}/integrations/[^/]+/instances/.+`),
-  route("workspace", `${WS}/capabilities/[^/]+/(?:enable|disable|installation|tool-permissions)`),
-  route("workspace", `${WS}/plugins/(?!preview/?$)[^/]+`),
-  route("workspace", `${WS}/github/(?:installations|app-manifest|action-policies)(?:/.*)?`),
-  route("workspace", `${WS}/(?:video-generation/policy|site-limit-profile|inference-control)`),
-  route("workspace", `${WS}/connections/[^/]+/slack-bot/organization-access`),
-  route("workspace", `${WS}/(?:slack-task-policy|agent-policy)(?:/.*)?`),
-  route("workspace", `${WS}/(?:.+/)?allowance(?:/.*)?`),
+  // Credentials: creating a key, or changing what one may do; revoking isn't asked.
+  route("organization", `${ORG}/api-keys`, { methods: ["POST"] }),
+  route("organization", `${ORG}/api-keys/[^/]+`, { methods: ["PATCH"] }),
+  route("workspace", `${WS}/api-keys`, { methods: ["POST"] }),
+  // Creating a key that acts as an admin; using or revoking one isn't asked.
+  route("personal_api_key", `${ORG}/personal-api-keys`, { methods: ["POST"] }),
+  // Shared connections, including Gmail.
+  route("organization", `${ORG}/(?:mcp-connections|connectors)/(?!api-integrations/)[^/]+`),
+  route("organization", `${ORG}/connectors`, { methods: ["POST"] }),
   route(
     "workspace",
-    `${WS}/(?:connections|connections/oauth/start|integrations/oauth/start|connect/attempts|connections/(?:slack-bot|1password|fiken)/install|connections/fiken/oauth/start)`,
+    `${WS}/(?:connections|connections/oauth/start|integrations/oauth/start|connect/attempts|connections/(?:slack-bot|fiken)/install|connections/fiken/oauth/start)`,
     { shared: "created" },
   ),
   // An existing connection, also under a provider's own routes
   // (connections/atlassian/<id>/source, connections/google-drive/<id>/lifecycle).
-  route("workspace", `${WS}/connections/(?:[^/]+/)?${CONNECTION}(?:/.*)?`, {
-    shared: "existing",
-  }),
-  route("billing", "/v1/billing/(?:checkout|portal|alerts|subscription/.+|auto-top-up(?:/.*)?)"),
-  // Creating a key that acts as an admin; using or revoking one isn't asked.
-  route("personal_api_key", `${ORG}/personal-api-keys`, { methods: ["POST"] }),
+  // Vault (1Password) and Slack organization-access settings, and the
+  // GitHub repository access check (a read sent as POST), aren't asked.
+  route(
+    "workspace",
+    `${WS}/connections/(?:[^/]+/)?${CONNECTION}(?!/(?:1password|managed-vaults|slack-bot/organization-access|github/repositories/verify)(?:/|$))(?:/.*)?`,
+    { shared: "existing" },
+  ),
 ];
 
 export function matchAdminRoute(
@@ -227,16 +229,6 @@ async function jsonBody(c: Context): Promise<Record<string, unknown> | null> {
   }
 }
 
-/** Every organization this billing request could name, as the routes read it. */
-async function billingAccountIds(c: Context, context: AccessContext): Promise<string[]> {
-  const body = await jsonBody(c);
-  return [c.req.query("accountId"), body?.accountId, context.defaultAccountId]
-    .filter(
-      (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
-    )
-    .map(canonicalId);
-}
-
 /**
  * Whether a new connection would be shared with the workspace. The routes
  * create a shared one unless ownership is the person's own ("personal", or
@@ -332,10 +324,6 @@ async function administers(
   if (matched.route.scope === "personal_api_key") {
     return administersInOrganization(deps, access, matched.organizationId);
   }
-  if (matched.route.scope === "billing") {
-    const accountIds = await billingAccountIds(c, context);
-    return accountIds.some((accountId) => organizationAdmin(access, accountId));
-  }
   if (matched.workspaceId) {
     const workspaceId = matched.workspaceId;
     const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
@@ -413,8 +401,8 @@ export function adminStepUpGuard(deps: ApiRouteDeps): MiddlewareHandler {
     throw new ApiHttpError(403, {
       code: "forbidden",
       message: passkeyRegistered
-        ? "Confirm it's you with your passkey to change admin settings."
-        : "Add a passkey to your account to change admin settings.",
+        ? "Confirm it's you with your passkey to change who has access."
+        : "Add a passkey to your account to change who has access.",
       details: {
         code: ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
         passkeyRegistered,

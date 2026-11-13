@@ -14,6 +14,11 @@ import {
 } from "./object-storage-fixture";
 import { errorMessage } from "@opengeni/contracts/values";
 
+// Pinned by digest so the test stack does not change under CI with each
+// PostgreSQL minor or pgvector release.
+const TEST_POSTGRES_IMAGE =
+  "pgvector/pgvector:0.8.6-pg18-bookworm@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a";
+
 export type TestServices = {
   projectName: string;
   cwd: string;
@@ -412,7 +417,7 @@ function testServiceImages(options: {
   objectStorage?: boolean;
 }): Record<string, string> {
   return {
-    postgres: "pgvector/pgvector:pg18-bookworm",
+    postgres: TEST_POSTGRES_IMAGE,
     nats: "nats:2-alpine",
     ...((options.temporal ?? true) ? { temporal: "temporalio/auto-setup:1.28" } : {}),
     ...((options.objectStorage ?? false) ? { garage: GARAGE_FIXTURE_IMAGE } : {}),
@@ -724,7 +729,7 @@ function composeYaml(
 ): string {
   return `services:
   postgres:
-    image: pgvector/pgvector:pg18-bookworm
+    image: ${TEST_POSTGRES_IMAGE}
     pull_policy: never
     environment:
       POSTGRES_DB: opengeni

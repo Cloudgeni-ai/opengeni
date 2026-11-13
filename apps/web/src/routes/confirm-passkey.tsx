@@ -108,7 +108,7 @@ export function ConfirmPasskeyRoute({
             </p>
             <p className="mt-3 text-sm text-fg-muted">
               Type it into the Opengeni app on this computer. Never share it: anyone with this code
-              can change admin settings as you.
+              can change who has access as you.
             </p>
           </>
         ) : (

@@ -40,6 +40,11 @@
 //   /workspaces/:id/settings                 → workspace settings (general, access, API keys; Models redirects to the organization)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
+//   /console                                 → Opengeni Console (?org): Overview, for organization owners and admins
+//   /console/sessions[/:wsId/:sessionId]     → end users' sessions in managed workspaces (?workspace), one transcript
+//   /console/workspaces, /api-keys[/new]     → workspaces by kind; organization API keys
+//   /console/agents, /members, /usage, /settings → placeholders, members, spend by kind, review level + audit log
+//   (a console.* host opens every path under /console; see lib/console-route.ts)
 //   /billing?checkout=success|cancelled      → Stripe return → default organization's billing
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
@@ -103,6 +108,7 @@ import {
   type KnowledgeSearch,
 } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
+import { parseConsoleSearch, parseConsoleSessionsSearch } from "@/lib/console-route";
 import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
 import { siteAuthSearch } from "@/lib/site-auth";
 import {
@@ -339,6 +345,50 @@ const LazyDevSessionTimelineRoute = lazyRouteComponent(
   () => import("@/routes/dev-session-timeline"),
   "DevSessionTimelineRoute",
 );
+const LazyConsoleShellRoute = lazyRouteComponent(
+  () => import("@/routes/console/shell"),
+  "ConsoleShellRoute",
+);
+const LazyConsoleOverviewRoute = lazyRouteComponent(
+  () => import("@/routes/console/overview"),
+  "ConsoleOverviewRoute",
+);
+const LazyConsoleSessionsRoute = lazyRouteComponent(
+  () => import("@/routes/console/sessions"),
+  "ConsoleSessionsRoute",
+);
+const LazyConsoleSessionRoute = lazyRouteComponent(
+  () => import("@/routes/console/session-detail"),
+  "ConsoleSessionRoute",
+);
+const LazyConsoleWorkspacesRoute = lazyRouteComponent(
+  () => import("@/routes/console/workspaces"),
+  "ConsoleWorkspacesRoute",
+);
+const LazyConsoleApiKeysRoute = lazyRouteComponent(
+  () => import("@/routes/console/api-keys"),
+  "ConsoleApiKeysRoute",
+);
+const LazyConsoleNewApiKeyRoute = lazyRouteComponent(
+  () => import("@/routes/console/api-keys"),
+  "ConsoleNewApiKeyRoute",
+);
+const LazyConsoleAgentsRoute = lazyRouteComponent(
+  () => import("@/routes/console/organization-pages"),
+  "ConsoleAgentsRoute",
+);
+const LazyConsoleMembersRoute = lazyRouteComponent(
+  () => import("@/routes/console/organization-pages"),
+  "ConsoleMembersRoute",
+);
+const LazyConsoleUsageRoute = lazyRouteComponent(
+  () => import("@/routes/console/organization-pages"),
+  "ConsoleUsageRoute",
+);
+const LazyConsoleSettingsRoute = lazyRouteComponent(
+  () => import("@/routes/console/settings"),
+  "ConsoleSettingsRoute",
+);
 
 const rootRoute = createRootRoute({
   component: RootRouteComponent,
@@ -553,6 +603,65 @@ const uiKitRoute = import.meta.env.DEV
       component: lazyRouteComponent(() => import("@/dev/ui-kit"), "UiKitRoute"),
     })
   : null;
+// Opengeni Console: the organization surface for products that embed
+// Opengeni. Its own frame (no chat rail); every page keeps `?org`.
+const consoleRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "console",
+  validateSearch: parseConsoleSearch,
+  component: LazyConsoleShellRoute,
+});
+const consoleIndexRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "/",
+  component: LazyConsoleOverviewRoute,
+});
+const consoleSessionsRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "sessions",
+  validateSearch: parseConsoleSessionsSearch,
+  component: LazyConsoleSessionsRoute,
+});
+const consoleSessionRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "sessions/$workspaceId/$sessionId",
+  component: LazyConsoleSessionRoute,
+});
+const consoleWorkspacesRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "workspaces",
+  component: LazyConsoleWorkspacesRoute,
+});
+const consoleApiKeysRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "api-keys",
+  component: LazyConsoleApiKeysRoute,
+});
+const consoleNewApiKeyRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "api-keys/new",
+  component: LazyConsoleNewApiKeyRoute,
+});
+const consoleAgentsRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "agents",
+  component: LazyConsoleAgentsRoute,
+});
+const consoleMembersRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "members",
+  component: LazyConsoleMembersRoute,
+});
+const consoleUsageRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "usage",
+  component: LazyConsoleUsageRoute,
+});
+const consoleSettingsRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "settings",
+  component: LazyConsoleSettingsRoute,
+});
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "workspaces/$workspaceId",
@@ -1125,6 +1234,18 @@ const routeTree = rootRoute.addChildren([
     : []),
   ...(import.meta.env.DEV && composerStackPreviewRoute ? [composerStackPreviewRoute] : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
+  consoleRoute.addChildren([
+    consoleIndexRoute,
+    consoleSessionsRoute,
+    consoleSessionRoute,
+    consoleWorkspacesRoute,
+    consoleApiKeysRoute,
+    consoleNewApiKeyRoute,
+    consoleAgentsRoute,
+    consoleMembersRoute,
+    consoleUsageRoute,
+    consoleSettingsRoute,
+  ]),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,

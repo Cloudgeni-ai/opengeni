@@ -479,6 +479,18 @@ export {
   withCodemodeTokenClient,
 } from "./codemode-token";
 
+// Per-chat Git credential directories on a shared box: every chat's commands
+// select their own broker pass, routes, helper and provider CLI selection.
+export {
+  GIT_SESSION_CONFIG_LINES,
+  gitSessionDirectoryExport,
+  gitSessionEnvironmentLines,
+  gitSessionKey,
+  withGitSessionClient,
+  withGitSessionEnvironment,
+  withGitSessionSession,
+} from "./git-session";
+
 // Exact-attempt Codemode authority. Shared by ordinary turn execution and
 // one-off Connected Machine execution so neither surface can drift into a
 // second token shape or lifetime.

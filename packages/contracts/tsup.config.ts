@@ -64,6 +64,7 @@ export default defineConfig({
     "src/session-list-entries.ts",
     "src/organization-model-usage.ts",
     "src/insights-usage.ts",
+    "src/console.ts",
     "src/session-final-reply.ts",
     "src/session-history.ts",
     "src/message-time-zone.ts",

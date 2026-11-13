@@ -38,7 +38,9 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     footerStart,
     onOpenChange,
     onSubmit,
+    aboveOtherDialogs,
   }: {
+    aboveOtherDialogs?: boolean;
     title: ReactNode;
     description?: ReactNode;
     submitLabel: ReactNode;
@@ -49,7 +51,7 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     onOpenChange: (open: boolean) => void;
     onSubmit: () => unknown;
   }) => (
-    <div role="dialog">
+    <div role="dialog" data-above-other-dialogs={aboveOtherDialogs ? "" : undefined}>
       <h2>{title}</h2>
       <p>{description}</p>
       {children}
@@ -76,6 +78,8 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
 const { AdminStepUpDialog } = await import("./admin-step-up-dialog");
 type StepUpHandoffApi = import("./admin-step-up-dialog").StepUpHandoffApi;
 const { withAdminStepUp } = await import("@/lib/admin-step-up");
+const { OpenGeniApiError } = await import("@opengeni/sdk");
+const { userErrorText } = await import("@opengeni/react/ui/api-error");
 const { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } =
   await import("@opengeni/contracts/managed-sign-in-methods");
 
@@ -145,6 +149,8 @@ describe("AdminStepUpDialog", () => {
     );
     await flush();
     expect(view.container.querySelector("h2")?.textContent).toBe("Confirm it's you");
+    // Any open surface can raise it, the chat's connect dialog included.
+    expect(view.container.querySelector("[data-above-other-dialogs]")).not.toBeNull();
     // Once per session, not every few minutes.
     expect(view.container.textContent).toContain("You won't be asked again until you sign out.");
     await view.click("Use passkey");
@@ -181,9 +187,26 @@ describe("AdminStepUpDialog", () => {
     });
     await flush();
     expect(view.container.querySelector("h2")?.textContent).toBe("Add a passkey");
+    expect(view.container.querySelector("[data-above-other-dialogs]")).not.toBeNull();
     await view.click("Add passkey");
     expect((await change).status).toBe(403);
     expect(navigations).toEqual([{ to: "/settings/security" }]);
+    await view.unmount();
+  });
+
+  test("cancelling the add-a-passkey prompt shows a passkey hint, not a missing permission", async () => {
+    const view = await mount(async () => {});
+    const change = withAdminStepUp(async () => refusal(false), {
+      input: "/v1/x",
+      init: { method: "POST", body: "{}" },
+    });
+    await flush();
+    await view.click("Cancel");
+    const response = await change;
+    expect(response.status).toBe(403);
+    // The page that sent the change shows the refusal the SDK raises for it.
+    const raised = new OpenGeniApiError(response.status, await response.text(), { mutation: true });
+    expect(userErrorText(raised)).toBe("Add a passkey to your account, then try again.");
     await view.unmount();
   });
 });

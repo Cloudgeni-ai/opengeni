@@ -48,6 +48,12 @@ export type NativeConnectRequest = {
    * With a description, the setup drops its generic connection summary.
    */
   title?: string | undefined;
+  /**
+   * For a repair: the title when the provider can't be reached to start it
+   * ("GitHub couldn't be reached"). The dialog then offers Check again, which
+   * retries the same repair.
+   */
+  unreachableTitle?: string | undefined;
   description?: string | undefined;
   logoUrl?: string | undefined;
   authorizeLabel?: string | undefined;
@@ -71,6 +77,25 @@ function sameScopes(left: readonly string[] | undefined, right: readonly string[
   const a = [...new Set(left ?? [])].sort();
   const b = [...new Set(right ?? [])].sort();
   return a.length === b.length && a.every((scope, index) => scope === b[index]);
+}
+
+/**
+ * The provider couldn't be asked to start this setup: the API answers a
+ * retryable `upstream_unavailable` with `details.code: "provider_unreachable"`.
+ */
+export function isConnectProviderUnreachable(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, details } = error as { code?: unknown; details?: unknown };
+  return (
+    code === "upstream_unavailable" &&
+    typeof details === "object" &&
+    details !== null &&
+    (details as { code?: unknown }).code === "provider_unreachable"
+  );
+}
+
+function setupFailure(error: unknown): "error" | "unreachable" {
+  return isConnectProviderUnreachable(error) ? "unreachable" : "error";
 }
 
 /** How long setup closed mid-way may keep finishing without its dialog. */
@@ -100,7 +125,9 @@ export function NativeConnectSetup({
   const serviceName = own.name ?? request.displayName;
   const [controller, setController] = useState<ConnectController | null>(null);
   const [approvalPending, setApprovalPending] = useState(false);
-  const [failed, setFailed] = useState(false);
+  // Starting setup failed; "unreachable" when the provider couldn't be asked.
+  const [failed, setFailed] = useState<false | "error" | "unreachable">(false);
+  const fail = (error: unknown) => setFailed(setupFailure(error));
   const [preparing, setPreparing] = useState(true);
   const [retry, setRetry] = useState(0);
   const [pending, setPending] = useState<ConnectAttempt[]>([]);
@@ -171,8 +198,8 @@ export function NativeConnectSetup({
         } else if (matches.length > 1) setPending(matches);
         else await next.begin(nativeConnectApiInput(request));
       })
-      .catch(() => {
-        if (live) setFailed(true);
+      .catch((error: unknown) => {
+        if (live) setFailed(setupFailure(error));
       })
       .finally(() => {
         if (live) setPreparing(false);
@@ -206,6 +233,8 @@ export function NativeConnectSetup({
   }, [controller, onComplete]);
   if (request.scope.workspaceId !== workspaceId || request.scope.transport !== transport)
     return null;
+  // A repair the provider couldn't be asked to start: say so, and check again.
+  const unreachable = failed === "unreachable" && !!request.unreachableTitle;
   return (
     <Dialog
       open
@@ -263,11 +292,15 @@ export function NativeConnectSetup({
               tabIndex={-1}
               className="text-xl font-semibold tracking-tight outline-hidden"
             >
-              {request.title ??
-                `Connect ${serviceName ?? request.installationTarget?.displayName ?? request.providerId}`}
+              {unreachable
+                ? request.unreachableTitle
+                : (request.title ??
+                  `Connect ${serviceName ?? request.installationTarget?.displayName ?? request.providerId}`)}
             </DialogTitle>
             <DialogDescription
-              className={approvalPending ? "sr-only" : "text-sm leading-6 text-fg-muted"}
+              className={
+                approvalPending || unreachable ? "sr-only" : "text-sm leading-6 text-fg-muted"
+              }
             >
               {own.description ??
                 request.description ??
@@ -276,7 +309,12 @@ export function NativeConnectSetup({
           </div>
         </DialogHeader>
         <div className="space-y-4 px-6 py-5 text-sm">
-          {failed && (
+          {unreachable && (
+            <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>
+              Check again
+            </Button>
+          )}
+          {failed && !unreachable && (
             <div
               role="alert"
               className="flex flex-wrap items-center justify-between gap-3 text-danger"
@@ -306,7 +344,7 @@ export function NativeConnectSetup({
                       onClick={() => {
                         setPending([]);
                         setResumed(true);
-                        void controller.recover(attempt.id).catch(() => setFailed(true));
+                        void controller.recover(attempt.id).catch(fail);
                       }}
                     >
                       Resume{" "}
@@ -322,9 +360,7 @@ export function NativeConnectSetup({
                 variant="outline"
                 onClick={() => {
                   setPending([]);
-                  void controller
-                    .begin(nativeConnectApiInput(request))
-                    .catch(() => setFailed(true));
+                  void controller.begin(nativeConnectApiInput(request)).catch(fail);
                 }}
               >
                 {request.reconnectAccountId ? "Start over" : "Connect a different account"}
@@ -339,7 +375,7 @@ export function NativeConnectSetup({
                 setPreparing(true);
                 void controller
                   .begin(nativeConnectApiInput(request))
-                  .catch(() => setFailed(true))
+                  .catch(fail)
                   .finally(() => setPreparing(false));
               }}
             >

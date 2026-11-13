@@ -189,7 +189,11 @@ approvals, limits and other notices stay the app's. The manifest requests it,
 so new installs have it; an existing install gets it when a Slack admin
 reinstalls the app. Without the grant, every post is the app's as before. The avatar picture is served from a signed
 `/v1/public/session-avatars/` URL that Slack fetches without credentials; it
-draws only the avatar it was signed for.
+draws only the avatar it was signed for. Slack refuses a post whose picture URL
+is 256 characters or longer, so new URLs carry a 128-bit signature (older,
+full-length ones still work), a URL that is still too long is left off, and a
+post Slack refuses (`invalid_arguments`) with a name or picture is sent once
+more as the app's, so it still arrives.
 
 `files:write` is an optional bot grant, requested by the canonical manifest but
 not required for existing installations to remain eligible. Apply the generated

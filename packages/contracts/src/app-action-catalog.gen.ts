@@ -2984,15 +2984,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/catalog",
     "request": [],
     "response": [
-      "ToolGatewayApprovalResponse",
-      "ToolGatewayCallResponse",
-      "ToolGatewayCatalog",
-      "ToolGatewayDeclarationsResponse"
+      "ToolGatewayCatalog"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/tools/declarations",
@@ -3000,15 +2994,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/declarations",
     "request": [],
     "response": [
-      "ToolGatewayApprovalResponse",
-      "ToolGatewayCallResponse",
-      "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/vault-providers/connections",
@@ -3555,6 +3543,52 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectorToolPermissionsResponse"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "getConsoleApiKeyUsage",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/api-keys",
+    "request": [
+      "ConsoleRangeQuery"
+    ],
+    "query": [
+      "range"
+    ],
+    "response": [
+      "ConsoleApiKeyUsageResponse"
+    ]
+  },
+  {
+    "id": "getConsoleSession",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId/sessions/:sessionId",
+    "request": [],
+    "response": [
+      "ConsoleSessionDetail"
+    ]
+  },
+  {
+    "id": "getConsoleSettings",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/settings",
+    "request": [],
+    "response": [
+      "ConsoleSettings"
+    ]
+  },
+  {
+    "id": "getConsoleSummary",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/summary",
+    "request": [
+      "ConsoleRangeQuery"
+    ],
+    "query": [
+      "range"
+    ],
+    "response": [
+      "ConsoleSummary"
+    ]
   },
   {
     "id": "getDocumentBase",
@@ -5455,6 +5489,69 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectProvider"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "listConsoleAuditLog",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/audit-log",
+    "request": [
+      "ListConsoleAuditEventsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "sessionId"
+    ],
+    "response": [
+      "ConsoleAuditEventListResponse"
+    ]
+  },
+  {
+    "id": "listConsoleSessionEvents",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId/sessions/:sessionId/events",
+    "request": [
+      "ConsoleSessionEventsQuery"
+    ],
+    "query": [
+      "after",
+      "limit"
+    ],
+    "response": [
+      "SessionEvent"
+    ]
+  },
+  {
+    "id": "listConsoleSessions",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/sessions",
+    "request": [
+      "ListConsoleSessionsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "q",
+      "workspaceId"
+    ],
+    "response": [
+      "ConsoleSessionListResponse"
+    ]
+  },
+  {
+    "id": "listConsoleWorkspaces",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces",
+    "request": [
+      "ListConsoleWorkspacesQuery"
+    ],
+    "query": [
+      "kind",
+      "range"
+    ],
+    "response": [
+      "ConsoleWorkspaceListResponse"
+    ]
   },
   {
     "id": "listDocumentAuthorityReclassifications",
@@ -7424,16 +7521,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/manifest",
     "request": [],
     "response": [
-      "ToolGatewayInvokeResponse",
-      "ToolGatewayManifestResponse",
-      "ToolGatewayResolvedTool",
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewayManifestResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/resolve",
@@ -7441,16 +7531,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/resolve",
     "request": [],
     "response": [
-      "ToolGatewayInvokeResponse",
-      "ToolGatewayManifestResponse",
-      "ToolGatewayResolvedTool",
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewayResolvedTool"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/site-consent",
@@ -7460,13 +7543,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewaySiteConsentRequest"
     ],
     "response": [
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewaySiteConsentResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/target-approvals",
@@ -10001,6 +10080,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "capabilities:manage"
+  },
+  {
+    "id": "updateConsoleSettings",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/console/settings",
+    "request": [
+      "UpdateConsoleSettingsRequest"
+    ],
+    "response": [
+      "ConsoleSettings"
+    ]
+  },
+  {
+    "id": "updateConsoleWorkspace",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId",
+    "request": [
+      "UpdateConsoleWorkspaceRequest"
+    ],
+    "response": [
+      "ConsoleWorkspaceKind"
+    ]
   },
   {
     "id": "updateEditableArtifactVisibility",

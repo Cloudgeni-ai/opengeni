@@ -179,6 +179,24 @@ describe("api errors in product words", () => {
     );
   });
 
+  test("a closed passkey prompt says to use a passkey, not that permission is missing", () => {
+    const stepUp = (passkeyRegistered: boolean) =>
+      new OpenGeniApiError(
+        403,
+        JSON.stringify({
+          error: {
+            message: "Confirm it's you with your passkey to change who has access.",
+            requestId: REFERENCE,
+            code: "forbidden",
+            details: { code: "ADMIN_PASSKEY_STEP_UP_REQUIRED", passkeyRegistered },
+          },
+        }),
+        { mutation: true },
+      );
+    expect(userErrorText(stepUp(true))).toBe("Confirm it's you with your passkey, then try again.");
+    expect(userErrorText(stepUp(false))).toBe("Add a passkey to your account, then try again.");
+  });
+
   test("a refusal a route words for people keeps its own sentence when the page knows its code", () => {
     const sentence =
       "Only a Microsoft 365 Global Administrator or Teams Administrator can connect your organization. Ask your admin to message Opengeni in Teams and select Connect your organization. If your admin role must be activated first, activate it and try again.";
