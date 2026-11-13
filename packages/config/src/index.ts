@@ -9267,8 +9267,15 @@ function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
   return {
     ...(provider.anthropic
       ? {
-          anthropic: (({ identity: _identity, credentialBinding: _binding, ...options }) =>
-            options)(provider.anthropic),
+          // An organization's several API keys are credential material like
+          // its single key: which keys it holds, and which still have
+          // credits, change while its turns run.
+          anthropic: (({
+            identity: _identity,
+            credentialBinding: _binding,
+            apiKeys: _apiKeys,
+            ...options
+          }) => options)(provider.anthropic),
         }
       : {}),
     headers: Object.entries(provider.defaultHeaders ?? {})
