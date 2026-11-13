@@ -101,7 +101,7 @@ const APP_PASSWORD = "apppw";
 // pgvector release, and planner-sensitive tests must not change under CI.
 // Move it on purpose, together with any test that the new version affects.
 const IMAGE =
-  "pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b";
+  "pgvector/pgvector:0.8.7-pg16@sha256:484e838076e04939d27d3e176e91c86eea96236126023be8d3059761122e579f";
 const NATIVE_PG_URL = process.env.OPENGENI_TEST_PG_URL?.trim() || undefined;
 const ADMIN_URL = NATIVE_PG_URL ?? `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
 const adminConnection = new URL(ADMIN_URL);
