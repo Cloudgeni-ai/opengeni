@@ -11,8 +11,9 @@ test("a request naming the deleted session finds it gone", () => {
   for (const url of [
     `${base}/${workspaceId}/sessions/${sessionId}`,
     `${base}/${workspaceId}/machines?sessionId=${sessionId}`,
+    `${base}/${workspaceId}/sessions/${sessionId.toUpperCase()}`,
   ]) {
-    const mapped = sessionMissingHttpError(error, url);
+    const mapped = sessionMissingHttpError(error, url, "GET");
     expect(mapped?.status).toBe(404);
     expect(mapped?.code).toBe("not_found");
     expect(mapped?.message).toBe("session not found");
@@ -20,14 +21,17 @@ test("a request naming the deleted session finds it gone", () => {
   }
 });
 
-test("any other request read a changing workspace and may retry", () => {
-  const mapped = sessionMissingHttpError(
-    new SessionMissingFromWorkspaceError(sessionId),
-    `${base}/${workspaceId}/sessions?limit=50`,
-  );
-  expect(mapped?.status).toBe(409);
-  expect(mapped?.code).toBe("conflict");
-  expect(mapped?.retryable).toBe(true);
+test("any other request read a changing workspace; only a read retries blindly", () => {
+  const error = new SessionMissingFromWorkspaceError(sessionId);
+  const read = sessionMissingHttpError(error, `${base}/${workspaceId}/sessions?limit=50`, "GET");
+  expect(read?.status).toBe(409);
+  expect(read?.code).toBe("conflict");
+  expect(read?.retryable).toBe(true);
+  expect(read?.outcomeUnknown).toBe(false);
+  const write = sessionMissingHttpError(error, `${base}/${workspaceId}/sessions`, "POST");
+  expect(write?.status).toBe(409);
+  expect(write?.retryable).toBe(false);
+  expect(write?.outcomeUnknown).toBe(true);
 });
 
 test("other session control invariant failures stay server errors", () => {
@@ -35,6 +39,7 @@ test("other session control invariant failures stay server errors", () => {
     sessionMissingHttpError(
       new SessionControlInvariantError(`Session ${sessionId} has cyclic ancestry`),
       `${base}/${workspaceId}/sessions/${sessionId}`,
+      "GET",
     ),
   ).toBeNull();
 });

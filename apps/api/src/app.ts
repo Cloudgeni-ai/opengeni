@@ -2836,7 +2836,7 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
-            sessionMissingHttpError(rawError, c.req.url) ??
+            sessionMissingHttpError(rawError, c.req.url, c.req.method) ??
             authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??

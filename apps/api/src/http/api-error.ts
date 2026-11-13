@@ -63,21 +63,43 @@ export class ApiHttpError extends HTTPException {
 /**
  * A session deleted while the request read it. A request that names that
  * session finds it gone (404); any other request, such as a list whose page
- * included it, read a changing workspace and can simply retry (409).
+ * included it, read a changing workspace (409). Only a read retries blindly:
+ * a write may have committed before its later read found the session gone.
  */
-export function sessionMissingHttpError(error: unknown, requestUrl: string): ApiHttpError | null {
+export function sessionMissingHttpError(
+  error: unknown,
+  requestUrl: string,
+  method: string,
+): ApiHttpError | null {
   if (!(error instanceof SessionMissingFromWorkspaceError)) return null;
   const url = new URL(requestUrl);
-  const named =
-    url.pathname.split("/").includes(error.sessionId) ||
-    [...url.searchParams.values()].includes(error.sessionId);
-  return named
-    ? new ApiHttpError(404, { code: "not_found", message: "session not found", retryable: false })
-    : new ApiHttpError(409, {
-        code: "conflict",
-        message: "A session was deleted while the request read it. Retry the request.",
-        retryable: true,
-      });
+  const sessionId = error.sessionId.toLowerCase();
+  const named = [
+    ...url.pathname.split("/").map(decodeURIComponentSafe),
+    ...url.searchParams.values(),
+  ].some((value) => value.toLowerCase() === sessionId);
+  if (named) {
+    return new ApiHttpError(404, {
+      code: "not_found",
+      message: "session not found",
+      retryable: false,
+    });
+  }
+  const read = method === "GET" || method === "HEAD";
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message: "A session was deleted while the request read it. Retry the request.",
+    retryable: read,
+    outcomeUnknown: !read,
+  });
+}
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 /** A missing permission keeps its plain sentence and names the permission in `details`. */
