@@ -167,6 +167,9 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         eventId: shown[0]!.id,
       });
       expect(mcpJson(first)).not.toHaveProperty("alreadyShown");
+      expect((mcpJson(first) as { message: string }).message).toContain(
+        "you get an update and continue then",
+      );
       // A repeated search names the card already in the chat, keeping the
       // status and guidance of a posted card.
       const again = await request(true);
@@ -236,6 +239,10 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       });
       expect(result.isError, JSON.stringify(result)).not.toBe(true);
       expect(mcpJson(result)).toMatchObject({ status: "setup_requested" });
+      // The chat continues on its own once the person finishes the card.
+      expect((mcpJson(result) as { message: string }).message).toContain(
+        "don't ask them to tell you when they're done",
+      );
       const notices = (
         await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
       ).filter((event) => event.type === "tool.auth_needed");
