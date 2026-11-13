@@ -875,6 +875,13 @@ const SettingsSchema = z.object({
   // Operator OAuth apps for first-party social connectors, keyed by provider
   // id ("x", "reddit"): {"x":{"clientId":"...","clientSecret":"..."}}.
   socialOauthClientsJson: z.string().default("{}"),
+  // Nango-backed integrations (docs/nango.md). Nango stays completely off
+  // unless the environment secret key is configured; the per-integration
+  // backend switch in the database is the allowlist below this ceiling.
+  nangoSecretKey: z.string().trim().min(1).optional(),
+  nangoApiBaseUrl: z.string().url().default("https://api.nango.dev"),
+  // Environment Settings > Webhooks > Signing key; required to accept webhooks.
+  nangoWebhookSigningKey: z.string().trim().min(1).optional(),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by explicit completion/pause and budget
   // exhaustion, never by count. goalMaxAutoContinuations is therefore UNSET
@@ -6144,6 +6151,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
+    nangoSecretKey: optional("OPENGENI_NANGO_SECRET_KEY"),
+    nangoApiBaseUrl: optional("OPENGENI_NANGO_API_BASE_URL"),
+    nangoWebhookSigningKey: optional("OPENGENI_NANGO_WEBHOOK_SIGNING_KEY"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
     goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
@@ -13070,6 +13080,18 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   parseConnectResultPageTextJson(settings.connectResultPageTextJson);
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
+  if (settings.nangoSecretKey) {
+    const nangoBase = new URL(settings.nangoApiBaseUrl);
+    if (
+      nangoBase.protocol !== "https:" &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error("OPENGENI_NANGO_API_BASE_URL must use https outside local/test");
+    }
+    if (nangoBase.search || nangoBase.hash || nangoBase.username || nangoBase.password) {
+      throw new Error("OPENGENI_NANGO_API_BASE_URL must be a plain base URL");
+    }
+  }
   // Only the operator's own environment is strict here. Settings resolved
   // from a stored catalog document re-parse providers without this check;
   // a contradicted claim there is unknown (registryModelResidency).
