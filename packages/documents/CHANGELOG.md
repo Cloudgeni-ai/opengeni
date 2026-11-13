@@ -1,5 +1,15 @@
 # @opengeni/documents
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/config@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/db@6.20.1
+- @opengeni/network@6.20.1
+- @opengeni/storage@6.20.1
+
 ## 6.20.0
 
 ### Patch Changes

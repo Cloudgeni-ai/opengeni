@@ -1,5 +1,37 @@
 # @opengeni/worker-bundle
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/agent-proto@6.20.1
+- @opengeni/capabilities@6.20.1
+- @opengeni/codemode@6.20.1
+- @opengeni/codex@6.20.1
+- @opengeni/config@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/core@6.20.1
+- @opengeni/db@6.20.1
+- @opengeni/decisions@6.20.1
+- @opengeni/documents@6.20.1
+- @opengeni/events@6.20.1
+- @opengeni/github@6.20.1
+- @opengeni/interaction@6.20.1
+- @opengeni/jev@6.20.1
+- @opengeni/network@6.20.1
+- @opengeni/observability@6.20.1
+- @opengeni/runtime@6.20.1
+- @opengeni/sdk@6.20.1
+- @opengeni/storage@6.20.1
+- @opengeni/subscriptions@6.20.1
+- @opengeni/tool-gateway@6.20.1
+- @opengeni/vaults@6.20.1
+- @opengeni/vaults-bitwarden@6.20.1
+- @opengeni/vaults-keeper@6.20.1
+- @opengeni/vaults-onepassword@6.20.1
+- @opengeni/vaults-protonpass@6.20.1
+- @opengeni/xai-subscription@6.20.1
+
 ## 6.20.0
 
 ### Minor Changes
