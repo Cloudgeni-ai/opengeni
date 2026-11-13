@@ -225,6 +225,21 @@ export function dataverseWebApiBase(mcpUrl: string): string | null {
 
 export const DATAVERSE_WEB_API_PATH = "/api/data/v9.2/";
 
+/** Finance and Operations data entities (OData) and their JSON metadata service. */
+export const FINANCE_OPERATIONS_DATA_PATH = "/data/";
+export const FINANCE_OPERATIONS_METADATA_PATH = "/Metadata/";
+
+/**
+ * The environment origin of a Finance and Operations MCP endpoint, or null for
+ * any other URL. The Finance and Operations tools run against the
+ * environment's OData data entities (`/data/`) and metadata service
+ * (`/Metadata/`) with the connection's grant.
+ */
+export function financeOperationsOrigin(mcpUrl: string): string | null {
+  if (microsoftDynamicsProductForMcpUrl(mcpUrl) !== "finance_operations") return null;
+  return new URL(mcpUrl).origin;
+}
+
 /** The agent-facing catalog entry that leads to a Microsoft Dynamics Connect card. */
 export const MICROSOFT_DYNAMICS_CAPABILITY_ID = "api:microsoft-dynamics";
 

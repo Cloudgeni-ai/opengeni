@@ -904,26 +904,34 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         providerDomain: "contoso.crm4.dynamics.com",
         setupRequest: { endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp" },
       });
-      // An address that isn't a Dynamics environment, or Finance and
-      // Operations while it is off, posts nothing and says why.
-      for (const endpointUrl of [
-        "https://home.dynamics.com/",
-        "https://contoso.operations.dynamics.com/",
-      ]) {
-        const refused = await mcp.callTool({
-          name: "custom_mcp_setup_request",
-          arguments: {
-            name: "Microsoft Dynamics",
-            endpointUrl,
-            rationale: "Answer CRM questions.",
-          },
-        });
-        expect(mcpJson(refused)).toMatchObject({ status: "unavailable" });
-      }
+      // An address that isn't a Dynamics environment posts nothing and says why.
+      const refused = await mcp.callTool({
+        name: "custom_mcp_setup_request",
+        arguments: {
+          name: "Microsoft Dynamics",
+          endpointUrl: "https://home.dynamics.com/",
+          rationale: "Answer CRM questions.",
+        },
+      });
+      expect(mcpJson(refused)).toMatchObject({ status: "unavailable" });
+      // Finance and Operations posts its own card for its MCP endpoint.
+      const finance = await mcp.callTool({
+        name: "custom_mcp_setup_request",
+        arguments: {
+          name: "Microsoft Dynamics",
+          endpointUrl: "https://contoso.operations.dynamics.com/?cmp=usmf",
+          rationale: "Answer finance questions.",
+        },
+      });
+      expect(mcpJson(finance)).toMatchObject({ status: "setup_requested" });
       const after = (
         await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
       ).filter((event) => event.type === "tool.auth_needed");
-      expect(after).toHaveLength(1);
+      expect(after).toHaveLength(2);
+      expect(after[1]!.payload).toMatchObject({
+        providerDomain: "contoso.operations.dynamics.com",
+        setupRequest: { endpointUrl: "https://contoso.operations.dynamics.com/mcp" },
+      });
     } finally {
       await Promise.all([mcp.close(), server.close()]);
     }
