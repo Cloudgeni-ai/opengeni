@@ -965,8 +965,9 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       },
     });
-    const open = async (available: boolean) => {
-      const attempt = await seedAttempt(false);
+    // `bindingsKnown`: this turn's account selection is recorded (and has none for the environment).
+    const open = async (available: boolean, bindingsKnown = !available) => {
+      const attempt = await seedAttempt(bindingsKnown);
       await persistAttemptToolCatalog(
         client.db,
         createAttemptToolEnvironment({
@@ -1064,6 +1065,22 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         expect(cards[0]!.payload).toMatchObject({ capability: { id: capabilityId } });
       } finally {
         await missing.close();
+      }
+      // Here but not usable in this execution: still named, never an address question alone.
+      const unusable = await open(false, false);
+      try {
+        const setup = generic(
+          await unusable.call("capability_catalog_search", { query: "Microsoft Dynamics" }),
+        );
+        expect(setup.detail).toContain(capabilityId);
+        const requested = await unusable.call("capability_authorization_request", {
+          capabilityId: "api:microsoft-dynamics",
+          rationale: "Answer CRM questions.",
+        });
+        expect(requested).toMatchObject({ status: "input_required", cardShown: false });
+        expect(requested.message).toContain(capabilityId);
+      } finally {
+        await unusable.close();
       }
     } finally {
       await shared.admin`DELETE FROM capability_installations WHERE workspace_id=${workspace.workspaceId} AND capability_id=${capabilityId}`;

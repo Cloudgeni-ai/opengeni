@@ -360,6 +360,12 @@ function microsoftDynamicsSetupFromEnvironments(
       action: "connect",
       detail: `This workspace already has ${describe(connectable)}. Call capability_authorization_request with ${connectable.length === 1 ? "this capabilityId" : "the capabilityId of the one the person means"}; its card signs them in without asking for the address. Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
     };
+  if (environments.length > 0)
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: `This workspace already has ${describe(environments)}, but it is not usable in this chat: ${environments[0]!.setup.detail} Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
   return null;
 }
 
