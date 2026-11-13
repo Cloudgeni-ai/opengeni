@@ -41396,6 +41396,10 @@ export async function listSessionEventPage(
           // Indexing the ordered ID array avoids rescanning an ordered CTE at
           // every recursion step. Keep the subsequent payload SELECT separate:
           // this is still metadata planning, not a new page-wide snapshot.
+          // The recursive step reads its next ID through a scalar subquery so
+          // the lookup is always an index parameter. Joining `ordered` there
+          // lets the planner (PostgreSQL 16.16, 17.12, 18.7) put the payload
+          // scan below it and turn the ID match into a per-step session scan.
           const metadataRows = await rawRows<
             SessionEventProjectionMetadataRow & { sourceRowCount: number }
           >(
@@ -41427,12 +41431,13 @@ export async function listSessionEventPage(
                 select sized.id, sized.sequence,
                   bounded.row_number + 1, sized.bytes,
                   bounded.cumulative_bytes + 1 + sized.bytes
-                from bounded cross join ordered
-                cross join lateral (
+                from bounded cross join lateral (
                   select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
                     (${transferBytesSql})::int as bytes
                   from ${schema.sessionEvents}
-                  where ${schema.sessionEvents.id} = ordered.ids[bounded.row_number + 1]
+                  where ${schema.sessionEvents.id} = (
+                      select ordered.ids[bounded.row_number + 1] from ordered
+                    )
                     and ${schema.sessionEvents.workspaceId} = ${workspaceId}
                     and ${schema.sessionEvents.sessionId} = ${sessionId}
                   offset 0
