@@ -1071,7 +1071,10 @@ function isBusinessCentralApiDestination(
     !url.username &&
     !url.password &&
     !url.hash &&
-    url.pathname.startsWith(root.pathname)
+    url.pathname.startsWith(root.pathname) &&
+    // The URL parser resolves literal dot segments; refuse encoded separators and
+    // dots that a server could decode into a path outside the API root.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname)
   );
 }
 

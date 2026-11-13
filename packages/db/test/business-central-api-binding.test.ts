@@ -30,6 +30,12 @@ test("a Business Central grant reaches the Business Central API of any environme
     `https://api.businesscentral.dynamics.com:444/v2.0/${TENANT}/Production/api/v2.0/companies`,
     `https://user@api.businesscentral.dynamics.com/v2.0/${TENANT}/Production/api/v2.0/companies`,
     "https://attacker.test/v2.0/x/Production/api/v2.0/companies",
+    // Traversal out of the API root, literal or encoded.
+    `https://api.businesscentral.dynamics.com/v2.0/../other`,
+    `${ROOT}/..%2F..%2F..%2Fother`,
+    `${ROOT}/..%5C..%5Cother`,
+    `${ROOT}/%2E%2E/%2e%2e/%2E%2E/%2E%2E/%2E%2E/other`,
+    `${ROOT}/companies%2f..%2f..`,
   ])
     expect(connectionMetadataMatchesBinding(connection, ref, url)).toBe(false);
   // Only a Business Central connection's grant, and only for an OAuth reference.
