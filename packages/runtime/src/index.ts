@@ -355,7 +355,12 @@ import {
 export function fixedBridgeConnectorTools(
   url: string,
   connectionRef: McpServerConnectionRef | undefined,
-): readonly Awaited<ReturnType<MCPServer["listTools"]>>[number][] | null {
+): ReadonlyArray<{
+  name: string;
+  description?: string | undefined;
+  annotations?: Readonly<Record<string, boolean>>;
+  _meta?: Readonly<Record<string, unknown>>;
+}> | null {
   if (isDataverseMcpConfig(url, connectionRef)) return DATAVERSE_WEB_API_TOOLS;
   if (isBusinessCentralApiConfig(url, connectionRef)) return BUSINESS_CENTRAL_API_TOOLS;
   return null;

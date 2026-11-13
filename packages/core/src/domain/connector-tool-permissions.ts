@@ -354,7 +354,6 @@ export function reviewedConnectorToolCatalog(
                     annotations: {
                       readOnlyHint: tool.annotations.readOnlyHint,
                       destructiveHint: tool.annotations.destructiveHint,
-                      title: tool.annotations.title,
                     },
                   }
                 : {}),

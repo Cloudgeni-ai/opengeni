@@ -1464,10 +1464,6 @@ describe("workspace artifact API and PostgreSQL authority", () => {
   }, 60_000);
 
   test("an agent's Site on its own account route also declares that connector, and a retry replays", async () => {
-    const attempt = await seedAttempt(grant, {
-      permissions: ["artifacts:publish"],
-      tools: ["artifacts_create"],
-    });
     // An agent sees only its own account routes; the turn's frozen binding
     // names the connector behind the route.
     const connectionId = crypto.randomUUID();
@@ -1478,8 +1474,10 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       subjectScope: "subject" as const,
       connectionId,
     };
-    await shared.admin`
-      UPDATE session_turns SET mcp_account_bindings = ${shared.admin.json([
+    const attempt = await seedAttempt(grant, {
+      permissions: ["artifacts:publish"],
+      tools: ["artifacts_create"],
+      mcpAccountBindings: [
         {
           serverId: route,
           canonicalServerId: "crm",
@@ -1492,8 +1490,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           kind: "oauth2",
           connectionRef,
         },
-      ])}::jsonb
-      WHERE id = ${attempt.turnId}`;
+      ],
+    });
     await persistArtifactAttemptCatalog(grant, attempt, [{ serverId: route, toolName: "query" }]);
     const server = buildOpenGeniMcpServer(
       {
@@ -1884,6 +1882,8 @@ async function seedAttempt(
   options: {
     permissions?: Permission[] | null;
     tools?: FirstPartyMcpToolName[];
+    /** The turn's accepted MCP account bindings, frozen when it is accepted. */
+    mcpAccountBindings?: unknown[];
   } = {},
 ): Promise<Attempt> {
   const session = await createSession(client.db, {
@@ -1905,12 +1905,14 @@ async function seedAttempt(
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
-      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context,
+      mcp_account_bindings
     ) VALUES (
       ${targetGrant.accountId}, ${targetGrant.workspaceId}, ${session.id}, gen_random_uuid(),
       ${`artifact-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish artifact',
       'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
-      ${targetGrant.subjectId}, '{"accepted":true}'::jsonb
+      ${targetGrant.subjectId}, '{"accepted":true}'::jsonb,
+      ${options.mcpAccountBindings ? shared.admin.json(options.mcpAccountBindings as never) : null}::jsonb
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
   await shared.admin.begin(async (tx) => {
