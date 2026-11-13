@@ -60,7 +60,8 @@ let client: DbClient;
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-nango");
   if (!shared) {
-    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("Real PostgreSQL is required");
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
+      throw new Error("Real PostgreSQL is required");
     return;
   }
   client = createDb(shared.appUrl);
@@ -89,7 +90,11 @@ async function owner(name: string): Promise<Owner> {
       (account_id, subject_id, status, personal_workspace_id)
     values (${grant.accountId}, ${grant.subjectId}, 'active', ${grant.workspaceId!})
     on conflict do nothing`;
-  return { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    subjectId: grant.subjectId,
+  };
 }
 
 /** A fake Nango: connections by attempt, each with its account email and reported scopes. */
@@ -288,10 +293,16 @@ describe("Nango connections in PostgreSQL", () => {
     expect((await nangoRows(target))[0]!.status).toBe("needs_reauth");
     nango.remote[0]!.authErrors = 0;
     expect(
-      await handleNangoWebhook(deps, webhook(target, "nw-1", { operation: "refresh", success: true })),
+      await handleNangoWebhook(
+        deps,
+        webhook(target, "nw-1", { operation: "refresh", success: true }),
+      ),
     ).toBe("recovered");
     expect(
-      await handleNangoWebhook(deps, webhook(target, "nw-1", { operation: "deletion", success: true })),
+      await handleNangoWebhook(
+        deps,
+        webhook(target, "nw-1", { operation: "deletion", success: true }),
+      ),
     ).toBe("deleted");
     expect((await nangoRows(target))[0]!.status).toBe("revoked");
   });
@@ -309,7 +320,10 @@ describe("Nango connections in PostgreSQL", () => {
       target.subjectId,
     );
     expect(connection).not.toBeNull();
-    await deleteNangoConnectionFor({ db: client.db, settings, fetchImpl: nango.fetchImpl }, connection!);
+    await deleteNangoConnectionFor(
+      { db: client.db, settings, fetchImpl: nango.fetchImpl },
+      connection!,
+    );
     expect(
       nango.requests.some(
         (request) => request.method === "DELETE" && request.url.pathname === "/connections/nd-1",

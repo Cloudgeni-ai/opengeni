@@ -59,8 +59,9 @@ Nango connections are ordinary `connections` rows (kind `oauth2`) with
 provider domain `nango:<integration key>`, so native and Nango connections
 never satisfy each other's connection reference. The encrypted credential holds
 only `{ type: "nango", nangoConnectionId, providerConfigKey }`; the Nango
-secret key never leaves the deployment configuration. Gmail, Calendar and Drive
-stay personal-only. The account label comes from a read-only identity call
+secret key never leaves the deployment configuration. Every Nango connection
+is personal-only: the setter and the definition parser reject any other
+`ownership`. The account label comes from a read-only identity call
 through the proxy (Gmail profile, Calendar primary calendar, Drive `about`, or
 the definition's `accountIdentity`).
 
@@ -71,11 +72,18 @@ connect session for that one integration, tagged with the Opengeni attempt,
 and shows Nango Connect. On completion it calls
 `POST /v1/integrations/nango/connect/complete`, which finds the connection by
 attempt tags and integration through `GET /connections`, verifies the
-identity call, and stores it. The organization integration acquisition policy
+identity call, and stores it. Reconnecting the same verified account updates
+its row; a connection without a verified identity is always stored as a new
+account. The recorded grants are the scopes Nango reports for the connection
+(`credentials.raw.scope`), falling back to the managed app's fixed scopes when
+Nango reports none. The organization integration acquisition policy
 and setup permissions apply as for native connectors; in allowlist mode the
 policy key is the integration key (`gmail`, `linkedin`, `x`, …).
 
-Disconnect deletes the connection in Nango too, so its billing stops.
+Disconnect deletes the connection in Nango too, so its billing stops. Rows
+removed by SQL cascades (workspace or organization deletion, member removal)
+are not deleted in Nango at that moment; `integrations:nango orphans` finds and
+deletes them (below).
 
 ### Webhook
 
@@ -85,8 +93,10 @@ signature).
 
 - `auth` creation/override: backup finalizer for a connect attempt whose page
   was closed early (tags are re-verified).
-- `auth` refresh failure: marks the connection `needs_reauth`; a later
-  successful refresh marks it active again.
+- `auth` refresh failure: re-checks the connection in Nango and marks it
+  `needs_reauth` only if Nango still reports an auth error; a later successful
+  refresh (or a re-check without errors) marks it active again. Replays of an
+  old event are therefore harmless.
 - `auth` deletion: revokes the Opengeni connection.
 
 ### Tool execution
@@ -95,9 +105,9 @@ signature).
   returns Nango proxy headers (`Connection-Id`, `Provider-Config-Key`) and a
   URL rewrite instead of a token; each bridge validates the Google destination
   exactly as before, then sends the request to `<Nango base>/proxy/<path>`.
-  Mutations keep the no-replay rule. A Nango connection records the managed
-  app's fixed scopes (`https://mail.google.com/`, `…/auth/calendar`,
-  `…/auth/drive`, or the definition's `scopes`) as its grants, and requested
+  Mutations keep the no-replay rule. A Nango connection records the scopes
+  Nango reports (or the managed app's fixed scopes `https://mail.google.com/`,
+  `…/auth/calendar`, `…/auth/drive`, or the definition's `scopes`), and requested
   incremental scopes are dropped, so the incremental-consent path never runs;
   a tool needing a scope the app lacks returns the normal not-available error.
 - Drive under Nango: Google's hosted Drive MCP server is unreachable through
@@ -105,13 +115,19 @@ signature).
   `search_files`, `list_recent_files`, `get_file_metadata`,
   `get_file_permissions`, `read_file_content`, `download_file_content`. Text
   export covers Google Docs, Sheets (CSV) and Slides; other files return
-  their bytes. `create_file` and `copy_file` are not offered under Nango.
+  their bytes. `download_file_content` saves the file to the agent's files
+  when the chat has them; otherwise it returns base64 only up to 1 MiB.
+  `create_file` and `copy_file` are not offered under Nango.
 - Config-only integrations (LinkedIn, X, future ones): the in-process Nango
   tools bridge lists the integration's deployed Nango actions (name,
   description, input schema), filtered by `definition.tools.allow`, and runs
   them with `POST /connections/{id}/tools/{name}/calls`. Writes (a non-GET endpoint, or listed in
   `definition.tools.write`) default to Ask first; reads are allowed. Tool
-  descriptions are Nango's action metadata.
+  descriptions are Nango's action metadata. A write is reported as not
+  executed only for a clear refusal before it ran (401, 403, 404, 429, or an
+  input-validation 400/422); every other failure, including Nango function
+  runtime errors and 5xx, is reported as an unknown outcome and never retried.
+  Response bodies are read up to 4 MiB.
 
 ## Operator runbook
 
@@ -180,8 +196,21 @@ SELECT set_integration_backend('linkedin', 'native', NULL, false, NULL,
 
 Native connections work again exactly as before. Nango connections are shown
 as inactive but are not deleted automatically, and Nango bills them until
-deleted. To stop billing, export them (below) and delete them in the Nango
-dashboard, or have users disconnect them while the integration is on Nango.
+deleted. To stop billing, run the orphans command below, or have users
+disconnect them while the integration is on Nango.
+
+### Clean up orphaned Nango connections
+
+```sh
+bun run integrations:nango orphans [--key gmail] [--out orphans.csv]
+bun run integrations:nango orphans --key gmail --delete --operator <you> --reason "<why>"
+```
+
+It lists every Nango connection (paged `GET /connections`) whose id has no live
+Opengeni row (from `nango_affected_connections`), optionally per integration,
+and with `--delete` deletes each in Nango. Run it after a flip back, and
+periodically to catch rows removed by workspace/organization deletion or member
+removal.
 
 ### Export affected users
 
@@ -193,8 +222,8 @@ COMMIT;
 
 or `bun run integrations:nango affected --key gmail --out gmail-affected.csv`.
 Columns: organization id/name, workspace id/name, user id/email, connection
-id, backend (`native`/`nango`), provider domain, status, account label,
-created, last used. For `x` the export includes native X social accounts.
+id, Nango connection id (empty for native rows), backend (`native`/`nango`),
+provider domain, status, account label, created, last used. For `x` the export includes native X social accounts.
 
 ### Read usage and cost
 
@@ -224,10 +253,15 @@ Opengeni; use the export to find them.
 
 ## Limits
 
-- The connect page iframes Nango's hosted connect link and listens for its
-  completion message, polling the complete endpoint as a fallback.
+- The connect page embeds Nango Connect UI with its documented handshake: it
+  waits for `ready`, posts the session token (never in the URL), and handles
+  `connect` and `close`. On `connect` it calls the complete endpoint with a
+  short backoff; a slow-backoff poll (5 s up to 30 s) stops when the session
+  expires or the UI closes.
 - The webhook finalizer can store a connection whose page was closed, but it
   cannot resume a tool call waiting on that attempt; the user retries.
 - While Nango serves an integration, a native connection superseded by an
-  active Nango connection shows status `error` with
-  `integrationBackendProjection: "superseded"`.
+  active Nango connection shows status `needs_reauth` with
+  `integrationBackendProjection: "superseded"` and is not listed again as an
+  account to reconnect. `GET /connections/:id` uses the same projection as the
+  list.

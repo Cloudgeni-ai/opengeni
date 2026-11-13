@@ -88,6 +88,10 @@ test("the backend switch is owner-written, append-only and runtime-readable", as
     (async () =>
       await shared.admin`select set_integration_backend(${key}, 'nango', 'k', true, '{"unknown":1}'::jsonb, 'op', 'Unknown definition field')`)(),
   ).rejects.toThrow();
+  await expect(
+    (async () =>
+      await shared.admin`select set_integration_backend(${key}, 'nango', 'k', true, '{"ownership":"workspace"}'::jsonb, 'op', 'Workspace ownership')`)(),
+  ).rejects.toThrow();
 
   const cache = createIntegrationBackendSettingsCache({ ttlMs: 60_000 });
   const first = await cache.get(client.db);
