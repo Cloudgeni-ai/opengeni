@@ -879,7 +879,9 @@ impl Host {
     /// spare VMs, oldest first. A held wake that waits for processor time
     /// counts no memory until that is free: freeing memory would not let
     /// it through. Counts what floors already set and spare VMs already
-    /// ending will free. Returns whether any floor changed.
+    /// ending will free, and an overdrawn budget as memory to free too, so
+    /// a host booked beyond its budget frees what it is over as well as
+    /// its buffer. Returns whether any floor changed.
     pub(super) fn keep_buffer(&mut self, now: At) -> bool {
         let (Some(admission), Some(capacity)) = (self.policy.admission, self.capacity()) else {
             return false;
@@ -902,8 +904,9 @@ impl Host {
             .filter(|slot| cpu.is_none_or(|headroom| i128::from(slot.cpu_need()) <= headroom))
             .map(|slot| slot.wake_need(percent))
             .sum();
-        let needed = (admission.buffer + held)
-            .saturating_sub(capacity.free() + planned + self.spares.ending());
+        let freeing = i128::from(planned) + i128::from(self.spares.ending());
+        let short = i128::from(admission.buffer) + i128::from(held) - capacity.headroom() - freeing;
+        let needed = u64::try_from(short.max(0)).unwrap_or(u64::MAX);
         let needed = self.end_spares(needed);
         needed > 0 && self.push_idle(now, needed, Measure::Occupancy).0
     }

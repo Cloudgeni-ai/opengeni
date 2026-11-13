@@ -529,6 +529,33 @@ fn an_overdrawn_budget_admits_nothing_more() {
     assert_eq!(rig.capacity().reserved, GIB);
 }
 
+/// Booked beyond its budget, as when a create's first wake counted on an
+/// idle VM ending that then could not end at once, the host frees what it
+/// is over as well as its buffer, least recently used first: an overdrawn
+/// budget once counted as merely full, so nothing was freed for it.
+#[test]
+fn an_overdrawn_budget_is_freed_ahead_of_wakes() {
+    let mut rig = Rig::buffered(2 * GIB, 0);
+    rig.add(1, State::RUNNING, Size::whole(GIB));
+    rig.hold(1);
+    for id in 2..=3 {
+        rig.at(u64::try_from(id).unwrap());
+        rig.add(id, paused_saved(), Size::whole(GIB));
+        rig.resident(id, GIB);
+    }
+    assert_eq!(rig.capacity().free(), 0, "overdrawn by a GiB");
+    rig.at(10);
+    let actions = rig.send(Input::Tick);
+    let [(2, Step::Drop, op)] = started(&actions)[..] else {
+        panic!("the least recently used idle VM ends: {actions:?}");
+    };
+    assert_eq!(started(&rig.finish(2, op)), []);
+    assert_eq!(rig.level(3), Level::Paused, "only what is over is freed");
+    assert_eq!(rig.capacity().free(), 0);
+    rig.at(20);
+    assert_eq!(started(&rig.send(Input::Tick)), []);
+}
+
 #[test]
 fn a_remote_wake_is_admitted_before_it_downloads() {
     let remote = State::new(Level::Remote, Durability::Remote, true);

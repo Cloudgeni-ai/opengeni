@@ -19,6 +19,16 @@ fn recommended() -> SleepPolicy {
     SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap()
 }
 
+/// The recommended rules with compression asked for (ADR 37): pressure
+/// compresses a paused sandbox before it ends its process.
+fn compressing() -> SleepPolicy {
+    SleepPolicy::new(SleepRules {
+        compress_under_pressure: true,
+        ..SleepRules::RECOMMENDED.keeping_memory()
+    })
+    .unwrap()
+}
+
 /// The recommended rules as they are: memory stays in host RAM alone.
 fn unsaved() -> SleepPolicy {
     SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
@@ -805,7 +815,7 @@ fn memory_pressure_compresses_the_least_recently_used_idle_sandboxes_first() {
     let mut rig = pressured_rig();
     for id in 1..=4_u128 {
         rig.at(secs(u64::try_from(id).unwrap()));
-        rig.add(id, paused(Durability::Local), recommended());
+        rig.add(id, paused(Durability::Local), compressing());
         rig.send(Input::Resident {
             sandbox: SandboxId(id),
             bytes: GIB,
@@ -1290,7 +1300,7 @@ fn a_sleep_request_drains_a_sandbox_to_object_storage_and_it_still_wakes() {
 #[test]
 fn a_sandbox_that_cannot_be_saved_still_wakes_and_runs() {
     let mut rig = pressured_rig();
-    rig.add(1, paused(Durability::Volatile), recommended());
+    rig.add(1, paused(Durability::Volatile), compressing());
     rig.send(Input::Resident {
         sandbox: SandboxId(1),
         bytes: GIB,

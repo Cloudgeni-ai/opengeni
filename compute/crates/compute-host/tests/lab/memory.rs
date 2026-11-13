@@ -412,6 +412,7 @@ const COMPRESS_WHEN_NEEDED: SleepConfig = SleepConfig {
     evict_after_ms: None,
     forget_after_ms: None,
     compress: true,
+    earlier_compress: compute_host::protocol::Dropped,
     checkpoint_every_ms: None,
 };
 
