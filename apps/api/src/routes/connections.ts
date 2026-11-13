@@ -189,6 +189,7 @@ import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations
 import { withAccountIdentityState } from "../integrations/oauth-account-identity";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { revokeGoogleOAuthGrantForDisconnect } from "../integrations/google-oauth-revocation";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -1411,7 +1412,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               connectionId,
               grant.subjectId,
               existing.version,
-              { audit },
+              {
+                audit,
+                // Google OAuth: end the grant at Google and drop the stored tokens.
+                replacementCredentialEncrypted: await revokeGoogleOAuthGrantForDisconnect(
+                  deps,
+                  existing,
+                ),
+              },
             );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
