@@ -294,7 +294,14 @@ export function useMcpCapabilityConnect({
     } else if (
       !resolved.enabled &&
       !reconnectConnectionId &&
-      (!resolved.connectionRef || resolved.connectionRef.subjectScope === "subject")
+      (resolved.connectionRef
+        ? resolved.connectionRef.subjectScope === "subject"
+        : // Only where the card would connect the person's own account anyway;
+          // otherwise they first choose who can use the connection.
+          personalOnly ||
+          nobodyToShareWith ||
+          personalOnlyService(resolved) ||
+          resolved.metadata?.defaultConnectionOwnership === "personal")
     ) {
       // Not set up here yet, but the person may already have their own login
       // for it from another workspace. Only an offer: if this read fails the
@@ -416,12 +423,6 @@ export function useMcpCapabilityConnect({
       (connection.subjectId !== null) !== (attempt.ownership === "personal")
     )
       throw new ConnectCardMessage(t("sessionMcpCapabilityCard.theAuthorizedAccountDoesNot"));
-    // The server turns a reused login on where it was connected, best
-    // effort; signing in here is the person's choice to use it here.
-    if (ownLoginOffHere(connection)) {
-      await turnOnOwnLoginHere(client, workspaceId, connection);
-      if (!active()) return;
-    }
     const previous = resolved.connectionRef;
     if (
       resolved.enabled &&
@@ -430,6 +431,12 @@ export function useMcpCapabilityConnect({
       previous.connectionId !== connection.id
     )
       throw new ConnectCardMessage(t("sessionMcpCapabilityCard.thisIntegrationSSelectedAccount"));
+    // The server turns a reused login on where it was connected, best
+    // effort; signing in here is the person's choice to use it here.
+    if (ownLoginOffHere(connection)) {
+      await turnOnOwnLoginHere(client, workspaceId, connection);
+      if (!active()) return;
+    }
     // Enabling is a workspace installation change. When the capability is
     // already enabled with exactly this binding (each person's own account,
     // or this shared account), connecting an account needs no installation
@@ -738,14 +745,18 @@ export function useMcpCapabilityConnect({
     await run(async (active) => {
       const login = offHere;
       if (!item || !login) return;
+      // Not set up here yet: turn it on for each person's own account first,
+      // so a refusal (only an admin can) leaves the login as it was.
+      const enabling = !item.enabled || !item.connectionRef;
+      if (enabling) {
+        await enableWith(item, login, "personal");
+        if (!active()) return;
+      }
       await turnOnOwnLoginHere(client, workspaceId, login);
       if (!active()) return;
       setOffHere(null);
       let capability = item;
-      // Not set up here yet: turn it on for each person's own account.
-      if (!item.enabled || !item.connectionRef) {
-        await enableWith(item, login, "personal");
-        if (!active()) return;
+      if (enabling) {
         const enabled = await load(active);
         if (!enabled || !active()) return;
         capability = enabled;

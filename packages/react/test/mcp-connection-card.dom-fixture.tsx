@@ -1659,6 +1659,7 @@ test("the card asks who can use a connection only when someone else could", asyn
         listCapabilities: async () => ({ items: [shown] }),
         listWorkspaceMembers: async () => input.people.map((subjectId) => ({ subjectId })),
         getAccessContext: async () => ({ subjectId: "user:me" }),
+        listOwnConnectionAccounts: async () => [],
         connectTransport: () => ({}),
       },
       { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
@@ -1708,6 +1709,8 @@ function ownLoginElsewhereClient(options: {
   listedBeforeSignIn: boolean;
   /** Whether the server turned the reused login on here. */
   turnedOnBySignIn: boolean;
+  /** Turning the capability on here is an admin's step. */
+  enableRefused?: boolean;
 }) {
   let committed = false;
   let enabled = false;
@@ -1749,6 +1752,8 @@ function ownLoginElsewhereClient(options: {
   };
   const client = {
     listCapabilities: async () => ({ items: [capability()] }),
+    listWorkspaceMembers: async () => [{ subjectId: "user:own" }, { subjectId: "user:anna" }],
+    getAccessContext: async () => ({ subjectId: "user:own" }),
     // This workspace stores no connection of its own for it.
     listConnections: async () => [],
     listOwnConnectionAccounts: async () =>
@@ -1762,6 +1767,12 @@ function ownLoginElsewhereClient(options: {
     enableCapability: async (...input: unknown[]) => {
       calls.push("enableCapability");
       enables.push(input);
+      if (options.enableRefused)
+        throw new OpenGeniApiError(
+          403,
+          JSON.stringify({ error: { message: "Only an admin can turn on this integration" } }),
+          { mutation: true },
+        );
       enabled = true;
     },
     connectTransport: () => ({
@@ -1800,7 +1811,11 @@ const personalEnable = [
   },
 ];
 
-async function renderOwnLoginElsewhereCard(client: OpenGeniClient, onConfigured: () => void) {
+async function renderOwnLoginElsewhereCard(
+  client: OpenGeniClient,
+  onConfigured: () => void,
+  personalOnly = true,
+) {
   return await renderComponent(
     <McpConnectionCard
       client={client}
@@ -1810,7 +1825,7 @@ async function renderOwnLoginElsewhereCard(client: OpenGeniClient, onConfigured:
       returnUrl="https://host.example/"
       onConfigured={onConfigured}
       dialogOnly
-      personalOnly
+      personalOnly={personalOnly}
     />,
   );
 }
@@ -1874,10 +1889,54 @@ test("a capability not set up here offers your own login from another workspace 
     await actRun(() => use!.click());
     await flush();
     expect(h.begins).toEqual([]);
-    expect(h.calls).toEqual(["issueUserResourceGrant", "enableCapability"]);
+    expect(h.calls).toEqual(["enableCapability", "issueUserResourceGrant"]);
     expect(h.enables).toEqual([personalEnable]);
     expect(document.querySelector('[role="alert"]')?.textContent ?? null).toBeNull();
     expect(configured).toBe(1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a shareable capability with others in the workspace asks who can use it before offering your own login", async () => {
+  sessionStorage.clear();
+  const h = ownLoginElsewhereClient({ listedBeforeSignIn: true, turnedOnBySignIn: false });
+  const view = await renderOwnLoginElsewhereCard(h.client, () => {}, false);
+  try {
+    await flush();
+    expect(document.body.textContent).toContain("Who can use this connection?");
+    expect(
+      [...document.querySelectorAll("button")].some((node) => node.textContent === "Use it here"),
+    ).toBe(false);
+    expect(h.calls).toEqual([]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("using your own login here when only an admin can turn the capability on leaves the login as it was", async () => {
+  sessionStorage.clear();
+  const h = ownLoginElsewhereClient({
+    listedBeforeSignIn: true,
+    turnedOnBySignIn: false,
+    enableRefused: true,
+  });
+  let configured = 0;
+  const view = await renderOwnLoginElsewhereCard(h.client, () => {
+    configured += 1;
+  });
+  try {
+    await flush();
+    const use = [...document.querySelectorAll("button.og-session-capability-primary")].find(
+      (node) => node.textContent === "Use it here",
+    ) as HTMLButtonElement | undefined;
+    expect(use).toBeDefined();
+    await actRun(() => use!.click());
+    await flush();
+    expect(h.calls).toEqual(["enableCapability"]);
+    expect(h.grants).toEqual([]);
+    expect(document.body.textContent).toContain("Only an admin can turn on Example service.");
+    expect(configured).toBe(0);
   } finally {
     await view.unmount();
   }
