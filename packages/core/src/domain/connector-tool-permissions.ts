@@ -345,7 +345,22 @@ export function reviewedConnectorToolCatalog(
       : isOfficialSlackMcpConfig(server.url, server.connectionRef)
         ? slackRestMcpToolsForScopes(grantedScopes)
         : // A bridge's fixed tools: its hosted server is never what agents call.
-          (fixedBridgeConnectorTools(server.url, server.connectionRef) as ListedTool[] | null);
+          (fixedBridgeConnectorTools(server.url, server.connectionRef)?.map(
+            (tool): ListedTool => ({
+              name: tool.name,
+              ...(tool.description ? { description: tool.description } : {}),
+              ...(tool.annotations
+                ? {
+                    annotations: {
+                      readOnlyHint: tool.annotations.readOnlyHint,
+                      destructiveHint: tool.annotations.destructiveHint,
+                      title: tool.annotations.title,
+                    },
+                  }
+                : {}),
+              ...(tool._meta ? { _meta: tool._meta } : {}),
+            }),
+          ) ?? null);
   return (
     tools?.filter((tool) => !server.allowedTools || server.allowedTools.includes(tool.name)) ?? null
   );

@@ -1463,6 +1463,102 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     }
   }, 60_000);
 
+  test("an agent's Site on its own account route also declares that connector, and a retry replays", async () => {
+    const attempt = await seedAttempt(grant, {
+      permissions: ["artifacts:publish"],
+      tools: ["artifacts_create"],
+    });
+    // An agent sees only its own account routes; the turn's frozen binding
+    // names the connector behind the route.
+    const connectionId = crypto.randomUUID();
+    const route = `account-${crypto.randomUUID().replaceAll("-", "")}`;
+    const connectionRef = {
+      providerDomain: "crm.example",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+      connectionId,
+    };
+    await shared.admin`
+      UPDATE session_turns SET mcp_account_bindings = ${shared.admin.json([
+        {
+          serverId: route,
+          canonicalServerId: "crm",
+          connectionId,
+          originWorkspaceId: grant.workspaceId,
+          subjectScope: "subject",
+          ownerSubjectId: grant.subjectId,
+          accountLabel: "ada@example.com",
+          providerDomain: "crm.example",
+          kind: "oauth2",
+          connectionRef,
+        },
+      ])}::jsonb
+      WHERE id = ${attempt.turnId}`;
+    await persistArtifactAttemptCatalog(grant, attempt, [{ serverId: route, toolName: "query" }]);
+    const server = buildOpenGeniMcpServer(
+      {
+        settings: testSettings(),
+        db: client.db,
+        objectStorage,
+        bus: new MemoryEventBus(),
+      } as ApiRouteDeps,
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["artifacts:publish"],
+        principalKind: "agent_attempt",
+        metadata: {
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          executionGeneration: attempt.executionGeneration,
+          firstPartyMcpTools: ["artifacts_create"],
+        },
+      },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "workspace-artifact-paired-tools-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    const suffix = crypto.randomUUID();
+    const create = async (requestedTools: Array<{ serverId: string; toolName: string }>) => {
+      const result = await mcp.callTool({
+        name: "artifacts_create",
+        arguments: {
+          title: "Paired Site tools",
+          html: "<!doctype html><main>CRM</main>",
+          requestedTools,
+          idempotencyKey: `paired-${suffix}-${requestedTools.map((tool) => tool.serverId).join("-")}`,
+        },
+      });
+      const text = result.content.find((item) => item.type === "text");
+      if (!text || text.type !== "text") throw new Error("missing create result");
+      return { isError: result.isError === true, text: text.text };
+    };
+    try {
+      const declared = [{ serverId: route, toolName: "query" }];
+      const first = await create(declared);
+      if (first.isError) throw new Error(first.text);
+      const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(first.text));
+      expect(created.version.requestedTools).toEqual([
+        { serverId: route, toolName: "query" },
+        { serverId: "crm", toolName: "query" },
+      ]);
+      // A retry with the list as declared is the same publication.
+      const retry = await create(declared);
+      if (retry.isError) throw new Error(retry.text);
+      const replayed = WorkspaceArtifactMutationResponse.parse(JSON.parse(retry.text));
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.version.id).toBe(created.version.id);
+      // A connector none of the attempt's routes belongs to is still refused.
+      const foreign = await create([{ serverId: "billing", toolName: "query" }]);
+      expect(foreign.isError).toBe(true);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+
   test("prevents attempts from retaining Site tools outside their immutable catalog", async () => {
     const attempt = await seedAttempt(grant, {
       permissions: ["artifacts:publish"],

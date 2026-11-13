@@ -9,9 +9,14 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import type { EnabledMcpCapabilityServer } from "@opengeni/db";
+import {
+  getSessionTurnMcpAccountBindings,
+  WorkspaceArtifactOperationError,
+  type EnabledMcpCapabilityServer,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./http/api-error";
+import { exactAgentAttemptClaims } from "./sandbox/agent-fleet-context";
 import { allGatewayToolRefs } from "./workspace-tool-gateway";
 
 /**
@@ -264,11 +269,12 @@ export function routeSiteTool(
  * declares the publisher's routes. Each one the publisher owns is paired with
  * its connector's canonical identity, which `routeSiteTool` resolves per
  * viewer to their own account, or to the connect card when they have none.
- * Uses only the publisher's own bindings; nothing else is added, and the list
- * never grows past the declaration limit.
+ * Uses only the publisher's own bindings; nothing else is added. A list that
+ * would pass the declaration limit is refused rather than silently left
+ * working only for the publisher.
  */
 export function siteToolDeclarationsForEveryViewer(
-  inventory: Pick<SiteToolAccountInventory, "accounts">,
+  inventory: { accounts: ReadonlyArray<{ serverId: string; canonicalServerId: string }> },
   declared: readonly ToolGatewayIdentity[],
 ): ToolGatewayIdentity[] {
   const result = [...declared];
@@ -279,14 +285,22 @@ export function siteToolDeclarationsForEveryViewer(
     const canonical = { serverId: own.canonicalServerId, toolName: item.toolName };
     const key = JSON.stringify([canonical.serverId, canonical.toolName]);
     if (seen.has(key)) continue;
-    if (result.length >= WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX) break;
     seen.add(key);
     result.push(canonical);
   }
+  if (result.length > WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+    throw new WorkspaceArtifactOperationError(
+      `These ${declared.length} tools use your own connected accounts, so each is also declared for its connector so that other viewers can use their own account. That makes ${result.length} declarations, more than the limit of ${WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX}. Declare fewer tools.`,
+    );
   return result;
 }
 
-/** `siteToolDeclarationsForEveryViewer` over the publisher's own inventory. */
+/**
+ * `siteToolDeclarationsForEveryViewer` over the publisher's own accounts. An
+ * agent publishes as its attempt, not as the person, so its accounts are the
+ * turn's frozen account bindings: exactly the routes in its tool catalog, the
+ * same ones the publication's catalog check accepts.
+ */
 export async function declareSiteToolsForEveryViewer(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -294,6 +308,17 @@ export async function declareSiteToolsForEveryViewer(
   readAccounts: typeof readSiteToolAccountInventory = readSiteToolAccountInventory,
 ): Promise<ToolGatewayIdentity[]> {
   if (declared.length === 0) return [...declared];
+  const claims = exactAgentAttemptClaims(grant);
+  if (claims) {
+    // A turn this cannot read is refused by the publication itself; pair nothing.
+    const bindings = await getSessionTurnMcpAccountBindings(
+      deps.db,
+      grant.workspaceId,
+      claims.sessionId,
+      claims.turnId,
+    ).catch(() => null);
+    return siteToolDeclarationsForEveryViewer({ accounts: bindings ?? [] }, declared);
+  }
   return siteToolDeclarationsForEveryViewer(await readAccounts(deps, grant), declared);
 }
 

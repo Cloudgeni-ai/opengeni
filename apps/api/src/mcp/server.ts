@@ -7914,12 +7914,16 @@ function registerCapabilityDiscoveryTools(
   };
   // The generic Dynamics entry reflects environments already here, so an agent
   // is not told to ask for an address of an environment that is connected.
-  const setupProjections = async (items: CapabilityCatalogItem[]) => {
+  // `catalogItems`: the workspace catalog when the caller already read it.
+  const setupProjections = async (
+    items: CapabilityCatalogItem[],
+    catalogItems?: readonly CapabilityCatalogItem[],
+  ) => {
     const setups = await projectSetups(items);
     const index = items.findIndex((item) => item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID);
     if (index === -1 || setups[index]!.status === "unavailable") return setups;
     const fromEnvironments = microsoftDynamicsSetupFromEnvironments(
-      await dynamicsEnvironmentSetups(),
+      await dynamicsEnvironmentSetups(catalogItems),
     );
     if (fromEnvironments) setups[index] = fromEnvironments;
     return setups;
@@ -7965,7 +7969,7 @@ function registerCapabilityDiscoveryTools(
               ).values(),
             ];
       const [projected, inventory] = await Promise.all([
-        setupProjections([...ranked.map(({ item }) => item), ...connections]),
+        setupProjections([...ranked.map(({ item }) => item), ...connections], current.items),
         reconnectInventory(ranked.map(({ item }) => item)),
       ]);
       const setups = projected.slice(0, ranked.length);
@@ -8086,6 +8090,14 @@ function registerCapabilityDiscoveryTools(
       // one. Otherwise the card needs the environment's address, which only
       // the person knows.
       if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
+        const [own] = await projectSetups([item]);
+        if (own?.status === "unavailable")
+          return json({
+            capabilityId: item.id,
+            status: "unavailable",
+            cardShown: false,
+            message: own.detail,
+          });
         const environments = await dynamicsEnvironmentSetups(current.items);
         const connectable = environments.filter(
           ({ setup }) => setup.status === "authorization_required",

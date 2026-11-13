@@ -1704,6 +1704,13 @@ test("the card asks who can use a connection only when someone else could", asyn
     expect(await render({ people: ["user:me", "user:anna"], mcpUrl })).toMatchObject({
       asked: false,
     });
+  // Microsoft Dynamics is personal by default but can be shared, so the card asks.
+  expect(
+    await render({
+      people: ["user:me", "user:anna"],
+      mcpUrl: "https://contoso.crm4.dynamics.com/api/mcp",
+    }),
+  ).toMatchObject({ asked: true });
 });
 
 /**

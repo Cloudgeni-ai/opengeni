@@ -31,17 +31,22 @@ describe("Site tool declarations for every viewer", () => {
     expect(siteToolDeclarationsForEveryViewer({ accounts: [] }, declared)).toEqual(declared);
   });
 
-  test("never grows past the declaration limit", () => {
+  test("refuses a list that pairing would push past the declaration limit", () => {
     const inventory = { accounts: [account("account-a", "dynamics")] };
     const declared = Array.from({ length: WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX }, (_, index) => ({
       serverId: "account-a",
       toolName: `tool_${index}`,
     }));
-    expect(siteToolDeclarationsForEveryViewer(inventory, declared)).toEqual(declared);
-    const roomForOne = declared.slice(1);
-    const paired = siteToolDeclarationsForEveryViewer(inventory, roomForOne);
-    expect(paired).toHaveLength(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX);
-    expect(paired.at(-1)).toEqual({ serverId: "dynamics", toolName: "tool_1" });
+    expect(() => siteToolDeclarationsForEveryViewer(inventory, declared)).toThrow(
+      `more than the limit of ${WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX}`,
+    );
+    // Exactly at the limit is fine.
+    const half = declared.slice(0, WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX / 2);
+    expect(siteToolDeclarationsForEveryViewer(inventory, half)).toHaveLength(
+      WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+    );
+    // Tools of a connector without the publisher's accounts need no pairing.
+    expect(siteToolDeclarationsForEveryViewer({ accounts: [] }, declared)).toEqual(declared);
   });
 
   test("a paired declaration routes another viewer to connect; an unpaired one is marked unresolved", () => {
