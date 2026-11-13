@@ -833,15 +833,15 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, pg_temp"],
           },
-          // Migration 1359: the session content collector and its inventory,
-          // created without runtime EXECUTE until a later migration grants them.
+          // Migration 1361 activates the session content collector and its
+          // inventory introduced by 1359.
           ...[
             "session_content_garbage_candidates_v1(integer)",
             "collect_session_content_garbage_v1(uuid, uuid, integer)",
           ].map((name) => ({
             name,
             owner: "opengeni_migrator",
-            can_execute: false,
+            can_execute: true,
             public_execute: false,
             security_definer: true,
             trigger_callable: false,

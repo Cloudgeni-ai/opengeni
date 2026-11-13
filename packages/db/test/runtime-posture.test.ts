@@ -4259,8 +4259,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "end_agent_call_rings_v1(uuid)",
-      "session_content_garbage_candidates_v1(integer)",
-      "collect_session_content_garbage_v1(uuid, uuid, integer)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

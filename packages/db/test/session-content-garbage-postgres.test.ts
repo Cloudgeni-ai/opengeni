@@ -208,7 +208,7 @@ async function forgetCollection(scope: Scope) {
 const farDeadline = () => Date.now() + 60_000;
 
 describe("session content garbage collection", () => {
-  test("collects nothing while the routines are withheld from the runtime", async () => {
+  test("the migrated runtime role runs the collection pass without extra grants", async () => {
     if (!shared) return;
     const scope = await fixture();
     await persistModelContextSnapshot(client.db, {
@@ -220,15 +220,13 @@ describe("session content garbage collection", () => {
       snapshot: snapshotFixture(2, conversation(3_000, 100, "b")),
     });
     await age(scope, "1 hour");
-    const before = await blobDigests(scope);
-    expect(await collectSessionContentGarbagePass(client.db, { deadline: farDeadline() })).toEqual({
-      available: false,
-      sessions: 0,
-      deleted: 0,
-      failed: 0,
-    });
-    expect(await blobDigests(scope)).toEqual(before);
-    await grantDeferredRuntimeAccess(shared.admin);
+    expect((await blobDigests(scope)).length).toBeGreaterThan(
+      (await referencedDigests(scope)).length,
+    );
+    const pass = await collectSessionContentGarbagePass(client.db, { deadline: farDeadline() });
+    expect(pass.available).toBe(true);
+    expect(pass.failed).toBe(0);
+    expect(await blobDigests(scope)).toEqual(await referencedDigests(scope));
   });
 
   test("deletes exactly the blobs no row names, and every stored value still reads back", async () => {

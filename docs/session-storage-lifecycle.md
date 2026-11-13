@@ -88,11 +88,12 @@ commits its reference before the blob can be judged unreferenced, and a reader
 never sees a snapshot whose blobs were deleted between two statements. Archived
 and archiving sessions are skipped; their blobs leave with the archive purge.
 
-Migration 1359 creates both routines without runtime `EXECUTE`, because the
-previous release rejects a grant on a definer it does not know. Until a later
-migration grants them, the maintenance pass reports the collector unavailable
-and collects nothing. An operator can run the same routines as the table owner,
-one transaction per call, for example:
+Migration 1359 created both routines without runtime `EXECUTE`, because the
+previous release rejects a grant on a definer it does not know; 1361 grants
+them. On a database between the two, the maintenance pass reports the
+collector unavailable and collects nothing. An operator can drain a backlog,
+or collect before 1361, by running the same routines as the table owner, one
+transaction per call, for example:
 
 ```sql
 DO $$
