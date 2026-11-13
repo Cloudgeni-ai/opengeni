@@ -149,8 +149,9 @@ Server-side code gets the same workspace with
 
 Workspaces the product's organization key creates are managed by the product.
 Organization owners and admins read those users' sessions, cost and an audit
-log in Opengeni Console (`/console` in the app); the organization chooses full
-transcripts, metadata only or off. See
+log in Opengeni Console (console.opengeni.ai, or `/console` in the app), where
+they also manage members, billing and API keys without opening the app; the
+organization chooses full transcripts, metadata only or off. See
 [opengeni-console.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/opengeni-console.md).
 
 ### The agent

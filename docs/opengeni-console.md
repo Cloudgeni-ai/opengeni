@@ -5,8 +5,52 @@ Opengeni in their own product. Organization owners and admins use it to read
 what their product's end users asked and what the agent answered, see the
 metered cost, create organization API keys and choose how much of their end
 users' sessions they review. It is served by the web app under `/console`
-(`console.<app host>` redirects there) with the app's sign-in and
-organization switcher, and has no chat sidebar.
+with the app's account, sign-in and organization switcher, and has no chat
+sidebar.
+
+## Its own host
+
+Console is also a separate platform on its own host: `console.opengeni.ai` in
+production and `staging.console.opengeni.ai` on staging. The web app treats a
+host whose first or second label is `console` as a Console host
+(`apps/web/src/lib/console-route.ts`); `consolex.*` and `app.*` are not. On a
+Console host:
+
+- every app path opens a Console page: `/` opens Overview, organization
+  settings sections open their Console page (People → Members, Billing and
+  Insights → Usage and billing, Developer → API keys, General → Settings), and
+  workspaces or chats open Overview. Sign-in returns, password reset, account
+  setup, shared chats and other fixed public pages keep their path.
+- sign-in, sign-up, password reset and email verification use Console's own
+  sign-in page, and post-sign-in, Google or GitHub sign-in and invitation
+  links return to the Console host.
+- Members (invite, roles, remove), Usage and billing (top-ups, plans, budgets,
+  Stripe returns), API keys and the organization name work inside Console with
+  the app's organization settings pages. End users (`external_user:`) are
+  never listed as members.
+- the account menu has Sign out, and nothing links into the app.
+
+The API takes the host a link should open on from the request: an allowed
+`x-forwarded-host` (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`), else
+`OPENGENI_PUBLIC_BASE_URL`. That chooses the host of verification emails,
+invitation account-setup links (a resent invitation keeps the host it was
+first sent from), Google and GitHub sign-in returns and the Stripe return
+pages Console asks for.
+
+A deployment serving Console on its own host sets:
+
+| Setting | Value |
+| --- | --- |
+| `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` | the app and Console hosts, e.g. `app.opengeni.ai,console.opengeni.ai` |
+| `OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS` | both origins, e.g. `https://app.opengeni.ai,https://console.opengeni.ai` (browser mutations, passkeys) |
+| `OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` | the shared parent, e.g. `.opengeni.ai`, so one sign-in covers both hosts |
+| `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` | optional; a distinct prefix (e.g. `opengeni-staging`) keeps staging's cookies apart from production's on a shared parent domain. Unset keeps Better Auth's default name, so existing sessions stay signed in |
+| Google and GitHub OAuth apps | add `https://<console host>/v1/auth/callback/google` and `/github` as redirect URIs |
+
+The web server proxies `/v1` with the incoming host as `x-forwarded-host`, and
+its Content-Security-Policy uses `'self'`, so no other change is needed there.
+Passkeys are bound to the hostname they were made on: a passkey made on the
+app host does not sign in on the Console host.
 
 ## Managed workspaces
 
@@ -114,6 +158,9 @@ workspaces and sets `truncated: true` when there are more.
 
 ## Not yet
 
+Passkeys shared between the app and Console hosts, a Console-specific
+onboarding for someone who has no organization yet (they get the app's
+organization setup, then land in Console), and Insights inside Console.
 Organization-level agents shared across managed workspaces, end-user opt-out,
 content masking, hiding managed workspaces in the app, time-boxed support
 access and compliance access are planned. A future compliance mode must cover

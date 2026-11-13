@@ -773,8 +773,10 @@ review of sessions in workspaces the product manages
 `external_user:` owners, never an Opengeni account's private chat. The review
 level (full, metadata, off) and the reviewable-session predicate are applied in
 SQL on every read (`packages/db/src/console.ts`), each open is audit-logged
-before it is returned, and team workspaces expose cost and counts only. See
-[`opengeni-console.md`](opengeni-console.md).
+before it is returned, and team workspaces expose cost and counts only. On its
+own host (`console.*`, `*.console.*`) the web app keeps every page in Console,
+and the API builds auth, invitation and Stripe return links on the request's
+allowed host. See [`opengeni-console.md`](opengeni-console.md).
 
 Canonical: `packages/core/src/access/index.ts`,
 `packages/core/src/session-authorization.ts`, `packages/db/src/runtime-posture.ts`,
