@@ -763,7 +763,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       message: kind.message ?? siteToolFailureMessage(kind.code, system),
     };
   };
-  const recovering = async <T extends { result?: ToolGatewayCallResponse["result"] }>(
+  const recovering = async <T,>(
     identity: ToolGatewayIdentity | null,
     signal: AbortSignal,
     run: () => Promise<T>,
@@ -774,7 +774,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       let thrown: unknown;
       try {
         value = await run();
-        kind = siteToolResultFailureKind(value.result);
+        kind = siteToolResultFailureKind(resultOf(value));
         if (!kind) return value;
       } catch (error) {
         kind = siteToolFailureKind(error);
@@ -791,9 +791,13 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       if (again && (failure.retryable || failure.reconnect)) continue;
       if (value === undefined)
         throw Object.assign(new SiteToolCallFailedError(failure), { cause: thrown });
-      return { ...value, result: siteToolFailureResult(value.result!, failure) };
+      return { ...value, result: siteToolFailureResult(resultOf(value)!, failure) } as T;
     }
   };
+  const resultOf = (value: unknown): ToolGatewayCallResponse["result"] | undefined =>
+    typeof value === "object" && value !== null && "result" in value
+      ? (value as { result?: ToolGatewayCallResponse["result"] }).result
+      : undefined;
   const declaredIdentity = (target: ToolGatewayInvokeRequest["target"]) =>
     "identity" in target ? target.identity : null;
   const { resolve: bridgeResolve, invoke: bridgeInvoke, call: bridgeCall } = bridge;
