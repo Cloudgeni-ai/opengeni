@@ -91,7 +91,8 @@ export function ConsoleUsageRoute() {
     if (!checkout) return;
     if (!reportedCheckoutReturns.has(checkout)) {
       reportedCheckoutReturns.add(checkout);
-      if (checkout === "cancelled") toast("Checkout cancelled", { description: "No charge was made." });
+      if (checkout === "cancelled")
+        toast("Checkout cancelled", { description: "No charge was made." });
       else if (!checkoutSession) {
         toast.success("Payment received", { description: "Your credits will appear shortly." });
       }

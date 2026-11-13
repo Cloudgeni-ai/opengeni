@@ -12,6 +12,7 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 // setup. Everything below the workspace shell consumes the state through
 // `useAppContext`.
 import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { onConsoleHost } from "@/lib/console-route";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -205,7 +206,9 @@ export function RootRouteComponent() {
       /^\/native-sign-in\/?$/.test(state.location.pathname) &&
       new URLSearchParams(state.location.searchStr).get("platform") === "office"
         ? "excel"
-        : "general",
+        : onConsoleHost()
+          ? "console"
+          : "general",
   });
   // Public surfaces render ahead of auth/config gates. `/reset-password` and
   // shared chats (`/share/<id>`) are always public; DEV visual harnesses are public and need no session.

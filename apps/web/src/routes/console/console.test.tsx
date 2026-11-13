@@ -16,6 +16,38 @@ mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children?: ReactNode }) => createElement("a", { href: "#" }, children),
 }));
 
+// Console runs inside the app's own context: the signed-in owner of the organization.
+const appContext = {
+  accessKeyVersion: 1,
+  accessContext: {
+    subjectId: "user:mira",
+    subjectLabel: "Mira Holt",
+    accountGrants: [
+      {
+        accountId: organizationId,
+        subjectId: "user:mira",
+        role: "owner",
+        permissions: ["billing:read", "billing:manage", "api_keys:manage", "account:admin"],
+      },
+    ],
+    workspaceGrants: [],
+  },
+  clientConfig: {
+    auth: { mode: "managedSession" },
+    productAccessMode: "managed",
+    managedAuthSessionSetMode: "legacy",
+  },
+  workspaces: [{ id: workspaceId, accountId: organizationId, name: "Analysts" }],
+  authSession: { user: { name: "Mira Holt", email: "mira@kontali.test" } },
+  revalidatePrincipalAccess: mock(async () => undefined),
+  handleManagedSignOut: mock(async () => undefined),
+};
+const AppContextModule = await import("@opengeni/react/app/app-context");
+mock.module("@opengeni/react/app/app-context", () => ({
+  ...AppContextModule,
+  useAppContext: () => ({ ...appContext, client }),
+}));
+
 const { ConsoleContext } = await import("./console-shared");
 const { ConsoleSessionsRoute } = await import("./sessions");
 const { ConsoleSettingsRoute } = await import("./settings");
@@ -68,6 +100,21 @@ const client = {
       member("m3", "external_user:kontali:lars", "lars", "member"),
     ],
   })),
+  getOrganizationAdministrationOverview: mock(async () => ({
+    organization: {
+      id: organizationId,
+      name: "Tech",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+    roles: [],
+    workspaces: [],
+  })),
+  listOrganizationInvitationsForOrganization: mock(async () => ({
+    invitations: [],
+    nextCursor: null,
+  })),
+  listOrganizationMemberNames: mock(async () => ({ available: false, members: [] })),
   getConsoleSettings: mock(async () => ({
     organizationId,
     reviewLevel: "full",
@@ -112,7 +159,20 @@ function apiKey(
 }
 
 function member(id: string, subjectId: string, name: string, role: string) {
-  return { id, subjectId, name, email: null, role, status: "active" };
+  return {
+    id,
+    organizationId,
+    subjectId,
+    name,
+    email: null,
+    role,
+    status: "active",
+    authorizationRevision: 1,
+    sharedWorkspaceAccess: [],
+    revokedAt: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
 }
 
 let container: HTMLDivElement;
@@ -198,7 +258,9 @@ describe("Console members", () => {
     await render(createElement(ConsoleMembersRoute));
     expect(container.textContent).toContain("Mira Holt");
     expect(container.textContent).not.toContain("anna");
-    expect(container.textContent).toContain("End users of your product aren't listed (2)");
+    expect(container.textContent).not.toContain("lars");
+    // Invite people is right here, not in the app.
+    expect(container.textContent).toContain("Invite people");
   });
 });
 

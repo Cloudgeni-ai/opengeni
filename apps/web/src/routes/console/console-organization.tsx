@@ -126,7 +126,9 @@ export function ConsoleOrganizationProvider({ children }: { children: ReactNode 
       onCreateWorkspace={createWorkspace}
       onDeleteWorkspace={deleteWorkspace}
     >
-      <OrganizationRoutesContext.Provider value={routes}>{children}</OrganizationRoutesContext.Provider>
+      <OrganizationRoutesContext.Provider value={routes}>
+        {children}
+      </OrganizationRoutesContext.Provider>
     </OrganizationDirectoryProvider>
   );
 }

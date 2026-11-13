@@ -118,7 +118,14 @@ describe("managed auth on Opengeni Console's host", () => {
     expect(origins).toContain("https://console.opengeni.test");
     const consoleUrl = "https://console.opengeni.test/console/usage?checkout=success";
     expect(
-      checkoutReturnUrl(hosts.publicBaseUrl, undefined, consoleUrl, "/billing", "successUrl", origins),
+      checkoutReturnUrl(
+        hosts.publicBaseUrl,
+        undefined,
+        consoleUrl,
+        "/billing",
+        "successUrl",
+        origins,
+      ),
     ).toBe(consoleUrl);
     expect(() =>
       checkoutReturnUrl(

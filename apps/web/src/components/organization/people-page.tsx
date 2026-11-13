@@ -471,7 +471,8 @@ function PeopleList({
   const [filter, setFilter] = useState<PeopleFilter>("all");
   const members = directory.members.value.filter(
     (member) =>
-      member.status !== "revoked" && !(hideEndUsers && member.subjectId.startsWith("external_user:")),
+      member.status !== "revoked" &&
+      !(hideEndUsers && member.subjectId.startsWith("external_user:")),
   );
   const invitations = directory.invitations.value.invitations.filter(
     (invitation) => invitation.status === "pending",

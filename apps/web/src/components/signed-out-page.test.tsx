@@ -128,3 +128,17 @@ test("provider configuration and invitation precedence remain owned by the form"
   expect(invited).not.toContain("Continue with Google");
   expect(invited).not.toContain("Continue with GitHub");
 });
+
+test("on Opengeni Console's host, sign-in is Console's own", () => {
+  const html = renderToStaticMarkup(
+    <SignedOutPage pitch="console">
+      <ManagedAuthPanel presentation="embedded" onSubmit={async () => undefined} />
+    </SignedOutPage>,
+  );
+  expect(html).toContain(">Console</span>");
+  expect(html).toContain("Your product&#x27;s agents,");
+  expect(html).toContain("Your users&#x27; questions and answers");
+  expect(html).not.toContain("Hand off real work.");
+  expect(html).not.toContain("One workspace.");
+  expect(html).toContain("Forgot password?");
+});

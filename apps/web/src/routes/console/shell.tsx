@@ -124,7 +124,9 @@ function ConsoleAccountMenu({ label, role }: { label: string; role: string | nul
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-56">
         {context.authSession?.user.email ? (
-          <DropdownMenuLabel className="truncate">{context.authSession.user.email}</DropdownMenuLabel>
+          <DropdownMenuLabel className="truncate">
+            {context.authSession.user.email}
+          </DropdownMenuLabel>
         ) : null}
         {signOut ? (
           <DropdownMenuItem variant="destructive" onSelect={signOut}>
@@ -315,22 +317,22 @@ export function ConsoleShellRoute() {
               </Button>
             ) : null}
             {consoleHost ? null : (
-            <Button variant="ghost" size="sm" asChild>
-              {value?.appWorkspaceId ? (
-                <Link
-                  to="/workspaces/$workspaceId/sessions"
-                  params={{ workspaceId: value.appWorkspaceId }}
-                >
-                  <ArrowUpRightIcon aria-hidden="true" />
-                  Open Opengeni
-                </Link>
-              ) : (
-                <Link to="/">
-                  <ArrowUpRightIcon aria-hidden="true" />
-                  Open Opengeni
-                </Link>
-              )}
-            </Button>
+              <Button variant="ghost" size="sm" asChild>
+                {value?.appWorkspaceId ? (
+                  <Link
+                    to="/workspaces/$workspaceId/sessions"
+                    params={{ workspaceId: value.appWorkspaceId }}
+                  >
+                    <ArrowUpRightIcon aria-hidden="true" />
+                    Open Opengeni
+                  </Link>
+                ) : (
+                  <Link to="/">
+                    <ArrowUpRightIcon aria-hidden="true" />
+                    Open Opengeni
+                  </Link>
+                )}
+              </Button>
             )}
           </div>
         </header>

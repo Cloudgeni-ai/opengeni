@@ -202,10 +202,12 @@ export async function resolveOrganizationUserSetupDeliveryEmail(
     : input.frozenPayloadDigest
       ? ["fragment", "query"]
       : [settings.organizationUserSetupEmailTokenTransport];
-  const bases = input.setupBaseUrls?.length ? input.setupBaseUrls : [requiredPublicBaseUrl(settings)];
+  const bases = input.setupBaseUrls?.length
+    ? input.setupBaseUrls
+    : [requiredPublicBaseUrl(settings)];
   const baseCandidates = input.frozenPayloadDigest ? bases : bases.slice(0, 1);
-  for (const [transport, baseUrl] of candidates.flatMap((transport) =>
-    baseCandidates.map((base) => [transport, base] as const),
+  for (const [transport, baseUrl] of candidates.flatMap((candidate) =>
+    baseCandidates.map((base) => [candidate, base] as const),
   )) {
     const setup = await deriveOrganizationUserSetupToken(settings, {
       invitationId: input.invitationId,

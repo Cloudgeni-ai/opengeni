@@ -84,11 +84,13 @@ export function OrganizationBillingPage({
   const anchorWorkspaceId = props.identity.workspaceId;
   const openBudget = useCallback(
     (workspace: string | undefined) =>
-      routes ? routes.openBudget(workspace) : void navigate({
-        to: "/workspaces/$workspaceId/organization",
-        params: { workspaceId: anchorWorkspaceId },
-        search: workspace ? { section: "billing", workspace } : { section: "billing" },
-      }),
+      routes
+        ? routes.openBudget(workspace)
+        : void navigate({
+            to: "/workspaces/$workspaceId/organization",
+            params: { workspaceId: anchorWorkspaceId },
+            search: workspace ? { section: "billing", workspace } : { section: "billing" },
+          }),
     [anchorWorkspaceId, navigate, routes],
   );
   if (budgetWorkspaceId) {
@@ -463,10 +465,10 @@ function BillingOverview({
                     routes?.openInsights
                       ? routes.openInsights()
                       : void navigate({
-                      to: "/workspaces/$workspaceId/organization",
-                      params: { workspaceId },
-                      search: { section: "insights" },
-                    })
+                          to: "/workspaces/$workspaceId/organization",
+                          params: { workspaceId },
+                          search: { section: "insights" },
+                        })
                   }
                 >
                   Open Insights

@@ -1091,7 +1091,8 @@ export async function resolveManagedAuthOAuthAttempt(
   const callbackURL = typeof stateData.callbackURL === "string" ? stateData.callbackURL : null;
   const errorURL = typeof stateData.errorURL === "string" ? stateData.errorURL : null;
   // Both returns go back to the one origin the sign-in started from.
-  const expectedOrigin = callbackURL && URL.canParse(callbackURL) ? new URL(callbackURL).origin : "";
+  const expectedOrigin =
+    callbackURL && URL.canParse(callbackURL) ? new URL(callbackURL).origin : "";
   if (
     !callbackURL ||
     !errorURL ||
