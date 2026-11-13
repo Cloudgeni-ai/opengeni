@@ -11875,6 +11875,14 @@ export async function runAgentStream(
 ) {
   const gate = agentInputWaitYields.get(agent);
   const scope = gate?.beginStream(overrides.signal);
+  // Discovery cards a search or listing skipped, or failed to show, become
+  // session events of this run.
+  const onRuntimeEvent = overrides.onRuntimeEvent;
+  lazyToolRuntimeForAgent(agent)?.setDiscoveryCardSink(
+    onRuntimeEvent
+      ? (event) => onRuntimeEvent({ type: "tool.discovery_card", payload: event })
+      : undefined,
+  );
   const contentless = contentlessModelResponseGuard(overrides.onContentlessModelResponse);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;

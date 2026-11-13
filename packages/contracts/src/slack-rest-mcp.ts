@@ -69,7 +69,10 @@ export type SlackRestMcpTool = {
 
 const conversationScopes = ["channels:read", "groups:read", "im:read", "mpim:read"];
 const historyScopes = ["channels:history", "groups:history", "im:history", "mpim:history"];
-const channel = { type: "string", description: "Slack conversation ID, such as C123 or D123." };
+const channel = {
+  type: "string",
+  description: "Slack conversation ID, such as C123 or D123, or a channel name such as #general.",
+};
 const cursor = { type: "string", maxLength: 4096, description: "Cursor from the previous page." };
 const directoryPage = { type: "integer", minimum: 1, maximum: 100, default: 100 };
 const historyPage = { type: "integer", minimum: 1, maximum: 15, default: 15 };

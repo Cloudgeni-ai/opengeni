@@ -608,6 +608,24 @@ alreadyShown? }`, and every `capability_authorization_request` result carries
 `cardShown`, so neither the agent nor a client has to infer whether a card was
 shown.
 
+A request that opens with a one-word integration name, capitalised, as the
+label of what follows ("Airtable list records…", "Linear: create an issue")
+names it distinctively; a sentence-opening capital before an ordinary word
+("Linear regression") still does not. `tool_list` browsing gets the same card:
+a first page that a `namePrefix` or `group` filter left empty, whose filter
+words (digests, `mcp_` and `connection/` keys and separators removed, at most
+six words) name exactly one connectable integration nobody installed, adds the
+same `notConnected` notice and `connectCard` field through the same lookup
+(bounded at 1.5 s), card tool, dedupe and policy. Browsing without such a
+filter, a listing with tools and later pages are unchanged. Whenever discovery
+shows no new card for an integration a request may name, the run records a
+`tool.discovery_card` session event with the `source` (`tool_search` or
+`tool_list`), the `outcome` (`skipped`, `already_shown`, `not_shown` or
+`failed`), a `reason` (`several_named`, `not_distinctive`, `lookup_timed_out`,
+`lookup_failed`, `no_card_tool`, `timeout` or `error`), the query bounded to
+500 characters, and the capability ids and names concerned. Recording is best
+effort and never delays or fails discovery.
+
 ### Recovery from tool-search misses
 
 Progressive discovery uses the same authorized deferred pool on every transport.
@@ -640,6 +658,10 @@ part after the server separator (`projects.` or `projects_`). Digest aliases sor
 that readable part. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
 keys, never authorization identities.
+Each digest-aliased tool has its own digest, so one tool's `mcp_<digest>` is no
+connection prefix; a `namePrefix` that is such a digest (or a start of one of
+at least four hex digits) and matches only MCP tools lists every tool of those
+tools' connections, within any `group`, and says so in `message`.
 
 Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
 listed tool's full schema without keyword ranking. Exact lookup cannot admit

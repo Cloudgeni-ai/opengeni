@@ -2848,6 +2848,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
+  "tool.discovery_card",
   "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",

@@ -76,7 +76,15 @@ type Plan = {
   method: string;
   params: Record<string, string | number | boolean>;
   mutation: boolean;
+  /** A channel given by name, resolved to its conversation ID before the request. */
+  channelName?: string;
 };
+
+const SLACK_CONVERSATION_ID = /^[CDG][A-Z0-9]+$/u;
+/** A Slack channel name, with or without its leading "#". */
+const SLACK_CHANNEL_NAME = /^#?([\p{L}\p{N}_-][\p{L}\p{N}._-]{0,79})$/u;
+/** Channel name lookups read at most this many pages of conversations.list. */
+const CHANNEL_NAME_LOOKUP_PAGES = 10;
 
 /** Reserve one request, or extend a shared provider cooldown after a 429. */
 export type SlackApiRateLimiter = (
@@ -203,6 +211,10 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
           `Slack has not granted access to ${toolName}. Reconnect to grant the required permissions.`,
         );
       }
+      if (plan.channelName !== undefined) {
+        const channel = await this.channelIdForName(plan.channelName, toolName);
+        plan.params.channel = channel;
+      }
       if (toolName === "slack_list_channels") {
         const granted = new Set(normalizeSlackScopes(credential.grantedScopes));
         const requested = String(plan.params.types).split(",");
@@ -258,6 +270,67 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
           : {}),
       };
     }
+  }
+
+  /**
+   * The conversation ID of the one channel this account can see by that name
+   * (public or private, not archived). Clear errors when there is none, or
+   * more than one, so the caller can pass an ID instead.
+   */
+  private async channelIdForName(name: string, toolName: string): Promise<string> {
+    const credential = await this.resolve("conversations.list", toolName, false);
+    const granted = new Set(normalizeSlackScopes(credential.grantedScopes));
+    const types = (["public_channel", "private_channel"] as const).filter((type) =>
+      granted.has(SLACK_CONVERSATION_READ_SCOPE_BY_TYPE[type]),
+    );
+    if (!types.length)
+      throw new SlackInputError(
+        `Slack has not granted access to look up #${name} by name. Pass the channel's conversation ID instead.`,
+      );
+    const matches: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < CHANNEL_NAME_LOOKUP_PAGES; page += 1) {
+      const payload = await this.request(
+        {
+          method: "conversations.list",
+          params: {
+            types: types.join(","),
+            exclude_archived: true,
+            limit: 1000,
+            ...(cursor ? { cursor } : {}),
+          },
+          mutation: false,
+        },
+        credential,
+        toolName,
+        false,
+      );
+      for (const entry of Array.isArray(payload.channels) ? payload.channels : []) {
+        const channel = entry as { id?: unknown; name?: unknown; name_normalized?: unknown };
+        if (
+          typeof channel.id === "string" &&
+          [channel.name, channel.name_normalized].some(
+            (value) => typeof value === "string" && value.toLowerCase() === name,
+          ) &&
+          !matches.includes(channel.id)
+        )
+          matches.push(channel.id);
+      }
+      const next = (payload.response_metadata as { next_cursor?: unknown } | undefined)
+        ?.next_cursor;
+      cursor = typeof next === "string" && next ? next : undefined;
+      if (!cursor) break;
+    }
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length > 1)
+      throw new SlackInputError(
+        `Several channels are named #${name} (${matches.join(", ")}). Pass the conversation ID of the one you mean.`,
+      );
+    throw new SlackInputError(
+      cursor
+        ? `#${name} is not among the first channels this Slack account can see. Pass its conversation ID instead; slack_list_channels lists channels with their IDs.`
+        : `No channel named #${name} is visible to this Slack account. Check the name, or find the channel and its ID with slack_list_channels.`,
+    );
   }
 
   private async resolve(
@@ -679,10 +752,19 @@ function requestPlan(toolName: string, input: Record<string, unknown>): Plan {
       throw new SlackInputError(`${name} must be a boolean`);
     params[name] = input[name] === undefined ? defaultValue : (input[name] as boolean);
   };
+  let channelName: string | undefined;
   if ("channel" in schema.inputSchema.properties) {
-    copyString("channel", true, 80);
-    if (!/^[CDG][A-Z0-9]+$/u.test(String(params.channel)))
-      throw new SlackInputError("channel must be a Slack conversation ID");
+    copyString("channel", true, 81);
+    const channel = String(params.channel).trim();
+    params.channel = channel;
+    if (!SLACK_CONVERSATION_ID.test(channel)) {
+      const name = SLACK_CHANNEL_NAME.exec(channel)?.[1];
+      if (name === undefined)
+        throw new SlackInputError(
+          "channel must be a Slack conversation ID or a channel name such as #general",
+        );
+      channelName = name.toLowerCase();
+    }
   }
   if ("user" in schema.inputSchema.properties) {
     copyString("user", true, 80);
@@ -702,57 +784,61 @@ function requestPlan(toolName: string, input: Record<string, unknown>): Plan {
       throw new SlackInputError(`limit must be an integer between 1 and ${maximum}`);
     params.limit = input.limit === undefined ? maximum : (input.limit as number);
   }
-  switch (toolName) {
-    case "slack_list_channels": {
-      const types = input.types ?? Object.keys(SLACK_CONVERSATION_READ_SCOPE_BY_TYPE);
-      if (
-        !Array.isArray(types) ||
-        types.length < 1 ||
-        types.length > 4 ||
-        types.some(
-          (type) =>
-            typeof type !== "string" || !Object.hasOwn(SLACK_CONVERSATION_READ_SCOPE_BY_TYPE, type),
+  const plan = ((): Plan => {
+    switch (toolName) {
+      case "slack_list_channels": {
+        const types = input.types ?? Object.keys(SLACK_CONVERSATION_READ_SCOPE_BY_TYPE);
+        if (
+          !Array.isArray(types) ||
+          types.length < 1 ||
+          types.length > 4 ||
+          types.some(
+            (type) =>
+              typeof type !== "string" ||
+              !Object.hasOwn(SLACK_CONVERSATION_READ_SCOPE_BY_TYPE, type),
+          )
         )
-      )
-        throw new SlackInputError("types must contain 1-4 valid Slack conversation types");
-      params.types = [...new Set(types)].join(",");
-      copyBoolean("exclude_archived", true);
-      return { method: "conversations.list", params, mutation: false };
+          throw new SlackInputError("types must contain 1-4 valid Slack conversation types");
+        params.types = [...new Set(types)].join(",");
+        copyBoolean("exclude_archived", true);
+        return { method: "conversations.list", params, mutation: false };
+      }
+      case "slack_get_channel_info":
+        return { method: "conversations.info", params, mutation: false };
+      case "slack_list_channel_members":
+        return { method: "conversations.members", params, mutation: false };
+      case "slack_list_users":
+        return { method: "users.list", params, mutation: false };
+      case "slack_get_user_info":
+        return { method: "users.info", params, mutation: false };
+      case "slack_read_channel":
+        copyTimestamp("oldest");
+        copyTimestamp("latest");
+        copyBoolean("inclusive", false);
+        return { method: "conversations.history", params, mutation: false };
+      case "slack_read_thread":
+        copyTimestamp("ts", true);
+        return { method: "conversations.replies", params, mutation: false };
+      case "slack_download_file":
+        copyString("file", true, 80);
+        if (!/^F[A-Z0-9]+$/u.test(String(params.file)))
+          throw new SlackInputError("file must be a Slack file ID");
+        return { method: "files.info", params, mutation: false };
+      case "slack_open_dm":
+        params.users = params.user!;
+        delete params.user;
+        return { method: "conversations.open", params, mutation: true };
+      case "slack_send_message":
+        copyString("text", true, 40_000);
+        copyTimestamp("thread_ts");
+        copyBoolean("unfurl_links", false);
+        copyBoolean("unfurl_media", false);
+        return { method: "chat.postMessage", params, mutation: true };
+      default:
+        throw new SlackInputError(`Unsupported Slack tool: ${toolName}`);
     }
-    case "slack_get_channel_info":
-      return { method: "conversations.info", params, mutation: false };
-    case "slack_list_channel_members":
-      return { method: "conversations.members", params, mutation: false };
-    case "slack_list_users":
-      return { method: "users.list", params, mutation: false };
-    case "slack_get_user_info":
-      return { method: "users.info", params, mutation: false };
-    case "slack_read_channel":
-      copyTimestamp("oldest");
-      copyTimestamp("latest");
-      copyBoolean("inclusive", false);
-      return { method: "conversations.history", params, mutation: false };
-    case "slack_read_thread":
-      copyTimestamp("ts", true);
-      return { method: "conversations.replies", params, mutation: false };
-    case "slack_download_file":
-      copyString("file", true, 80);
-      if (!/^F[A-Z0-9]+$/u.test(String(params.file)))
-        throw new SlackInputError("file must be a Slack file ID");
-      return { method: "files.info", params, mutation: false };
-    case "slack_open_dm":
-      params.users = params.user!;
-      delete params.user;
-      return { method: "conversations.open", params, mutation: true };
-    case "slack_send_message":
-      copyString("text", true, 40_000);
-      copyTimestamp("thread_ts");
-      copyBoolean("unfurl_links", false);
-      copyBoolean("unfurl_media", false);
-      return { method: "chat.postMessage", params, mutation: true };
-    default:
-      throw new SlackInputError(`Unsupported Slack tool: ${toolName}`);
-  }
+  })();
+  return channelName === undefined ? plan : { ...plan, channelName };
 }
 
 function boundedString(value: unknown, name: string, max: number): string {
