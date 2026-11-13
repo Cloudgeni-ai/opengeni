@@ -259,6 +259,7 @@ import {
   managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
+  managedAuthPublicOrigins,
   findManagedAuthOAuthState,
 } from "./auth/managed-auth";
 import {
@@ -1494,7 +1495,7 @@ export function createAppComposition(
           managedAuth,
           c.req.raw,
           oauthCallbackProvider,
-          deps.settings.publicBaseUrl!,
+          managedAuthPublicOrigins(deps.settings),
         );
         if (!attempt || !authority || attempt.authorityHash !== managedAuthSha256(authority)) {
           throw new HTTPException(409, { message: "provider_route_blocked" });
@@ -1519,12 +1520,12 @@ export function createAppComposition(
           !handled.authSessionId &&
           managedAuthOAuthReturnMatches(
             providerResponse.headers.get("location") ?? "",
-            new URL(deps.settings.publicBaseUrl!).origin,
+            attempt.returnOrigin,
             attempt.transactionId,
             "complete",
           )
         ) {
-          const location = new URL("/account-auth", deps.settings.publicBaseUrl!);
+          const location = new URL("/account-auth", attempt.returnOrigin);
           location.searchParams.set("transaction", attempt.transactionId);
           location.searchParams.set("social", "error");
           providerResponse = Response.redirect(location, 302);
@@ -1559,7 +1560,7 @@ export function createAppComposition(
             // proves that completion did not commit. An uncertain outcome may
             // already point the selected slot at this session, so the callback
             // must not independently revoke it.
-            const location = new URL("/account-auth", deps.settings.publicBaseUrl!);
+            const location = new URL("/account-auth", attempt.returnOrigin);
             location.searchParams.set("transaction", attempt.transactionId);
             location.searchParams.set("social", "error");
             providerResponse = Response.redirect(location, 302);

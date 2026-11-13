@@ -2,12 +2,12 @@
 import { consoleHostRedirectPath } from "./console-route";
 
 if (typeof window !== "undefined") {
-  const target = consoleHostRedirectPath(window.location.hostname, window.location.pathname);
+  const target = consoleHostRedirectPath(
+    window.location.hostname,
+    window.location.pathname,
+    window.location.search,
+  );
   if (target) {
-    window.history.replaceState(
-      window.history.state,
-      "",
-      `${target}${window.location.search}${window.location.hash}`,
-    );
+    window.history.replaceState(window.history.state, "", `${target}${window.location.hash}`);
   }
 }

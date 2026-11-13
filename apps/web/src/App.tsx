@@ -44,7 +44,7 @@
 //   /console/sessions[/:wsId/:sessionId]     → end users' sessions in managed workspaces (?workspace), one transcript
 //   /console/workspaces, /api-keys[/new]     → workspaces by kind; organization API keys
 //   /console/agents, /members, /usage, /settings → placeholders, members, spend by kind, review level + audit log
-//   (a console.* host opens every path under /console; see lib/console-route.ts)
+//   (on a Console host, console.* or *.console.*, every app path opens a Console page; see lib/console-route.ts)
 //   /billing?checkout=success|cancelled      → Stripe return → default organization's billing
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
@@ -62,6 +62,7 @@ import {
   createRoute,
   createRouter,
   lazyRouteComponent,
+  redirect,
   useParams,
   useSearch,
 } from "@tanstack/react-router";
@@ -108,7 +109,11 @@ import {
   type KnowledgeSearch,
 } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
-import { parseConsoleSearch, parseConsoleSessionsSearch } from "@/lib/console-route";
+import {
+  consoleHostRedirectPath,
+  parseConsoleSearch,
+  parseConsoleSessionsSearch,
+} from "@/lib/console-route";
 import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
 import { siteAuthSearch } from "@/lib/site-auth";
 import {
@@ -391,6 +396,17 @@ const LazyConsoleSettingsRoute = lazyRouteComponent(
 );
 
 const rootRoute = createRootRoute({
+  // On a Console host, an in-app link into the app (a workspace, a chat, the
+  // organization settings) opens the matching Console page instead.
+  beforeLoad: ({ location }) => {
+    if (typeof window === "undefined") return;
+    const target = consoleHostRedirectPath(
+      window.location.hostname,
+      location.pathname,
+      location.searchStr,
+    );
+    if (target) throw redirect({ href: target, replace: true });
+  },
   component: RootRouteComponent,
   errorComponent: RootRouteErrorPanel,
   notFoundComponent: NotFoundPanel,

@@ -2363,6 +2363,12 @@ const SettingsSchema = z.object({
   betterAuthSecret: z.string().optional(),
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
+  /** Better Auth cookie name prefix; unset keeps Better Auth's default ("better-auth"). */
+  betterAuthCookiePrefix: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u, "letters, digits, - and _ only")
+    .optional(),
   betterAuthTrustedOrigins: z.string().default(""),
   managedAuthGoogleClientId: z.string().optional(),
   managedAuthGoogleClientSecret: z.string().optional(),
@@ -6643,6 +6649,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
+    betterAuthCookiePrefix: optional("OPENGENI_BETTER_AUTH_COOKIE_PREFIX"),
     betterAuthTrustedOrigins: optional("OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS"),
     managedAuthGoogleClientId: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID"),
     managedAuthGoogleClientSecret: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET"),
