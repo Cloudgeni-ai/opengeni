@@ -9,6 +9,7 @@ import {
   managedAuthRequestBaseUrl,
 } from "../src/auth/managed-auth";
 import { resolveOrganizationUserSetupDeliveryEmail } from "../src/auth/organization-user-setup";
+import { billingReturnOrigins, checkoutReturnUrl } from "../src/routes/billing";
 
 // Opengeni Console is served on its own hosts (console.opengeni.ai,
 // staging.console.opengeni.ai) by the same API. Links sent for a request open
@@ -110,5 +111,24 @@ describe("managed auth on Opengeni Console's host", () => {
     };
     expect(await cookieName(undefined)).toBe("__Secure-better-auth.session_token");
     expect(await cookieName("opengeni-staging")).toBe("__Secure-opengeni-staging.session_token");
+  });
+
+  test("Stripe may return to Console's host, and never to a host that isn't allowed", () => {
+    const origins = billingReturnOrigins(hosts);
+    expect(origins).toContain("https://console.opengeni.test");
+    const consoleUrl = "https://console.opengeni.test/console/usage?checkout=success";
+    expect(
+      checkoutReturnUrl(hosts.publicBaseUrl, undefined, consoleUrl, "/billing", "successUrl", origins),
+    ).toBe(consoleUrl);
+    expect(() =>
+      checkoutReturnUrl(
+        hosts.publicBaseUrl,
+        undefined,
+        "https://attacker.test/",
+        "/billing",
+        "successUrl",
+        origins,
+      ),
+    ).toThrow();
   });
 });

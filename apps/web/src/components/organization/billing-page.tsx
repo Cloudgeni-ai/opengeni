@@ -30,6 +30,7 @@ import {
 import type { BillingEntitlementsResponse, BillingSummary } from "@opengeni/react/app/types";
 import type { BillingCheckoutStatus } from "@opengeni/sdk";
 import { BillingLoadFailure } from "./billing-load-failure";
+import { useOrganizationRoutes } from "./organization-nav";
 import { BillingReceiptsSection } from "./billing-receipts";
 import { SubscriptionPlans } from "./subscription-plans";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
@@ -79,15 +80,16 @@ export function OrganizationBillingPage({
   budgetWorkspaceId?: string | undefined;
 }) {
   const navigate = useNavigate();
+  const routes = useOrganizationRoutes();
   const anchorWorkspaceId = props.identity.workspaceId;
   const openBudget = useCallback(
     (workspace: string | undefined) =>
-      void navigate({
+      routes ? routes.openBudget(workspace) : void navigate({
         to: "/workspaces/$workspaceId/organization",
         params: { workspaceId: anchorWorkspaceId },
         search: workspace ? { section: "billing", workspace } : { section: "billing" },
       }),
-    [anchorWorkspaceId, navigate],
+    [anchorWorkspaceId, navigate, routes],
   );
   if (budgetWorkspaceId) {
     return (
@@ -118,8 +120,12 @@ function BillingOverview({
 }) {
   const { client, clientConfig } = useAppContext();
   const navigate = useNavigate();
+  const routes = useOrganizationRoutes();
   const accountId = identity.organizationId;
   const workspaceId = identity.workspaceId;
+  const returnUrl = routes
+    ? routes.billingPortalReturnUrl
+    : `${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`;
   const identityKey = organizationAdminIdentityKey(identity);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [billingOwnerKey, setBillingOwnerKey] = useState("");
@@ -248,8 +254,12 @@ function BillingOverview({
       const session = await client.createBillingCheckout({
         amountUsd,
         ...(accountId ? { accountId } : {}),
-        successUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
-        cancelUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
+        successUrl: routes
+          ? routes.billingReturnUrl("success")
+          : billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
+        cancelUrl: routes
+          ? routes.billingReturnUrl("cancelled")
+          : billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
       });
       if (!ownsBillingOperation(operation)) return;
       window.location.assign(session.url);
@@ -313,7 +323,7 @@ function BillingOverview({
           key={identityKey}
           client={client}
           accountId={accountId}
-          returnUrl={`${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`}
+          returnUrl={returnUrl}
           catalog={subscriptions.catalog}
           plan={visibleBilling.balance.plan}
           canManage={canManageBilling}
@@ -414,7 +424,7 @@ function BillingOverview({
             accountId={accountId}
             canManageAlerts={canManageBilling}
             canManageAutoTopUp={canManageAutomaticTopUp}
-            returnUrl={`${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`}
+            returnUrl={returnUrl}
           />
         </Suspense>
       ) : null}
@@ -440,7 +450,7 @@ function BillingOverview({
         </Suspense>
       ) : null}
 
-      {canReadBilling && accountId ? (
+      {canReadBilling && accountId && (!routes || routes.openInsights) ? (
         <Section title="Usage">
           <SettingRowGroup>
             <SettingRow
@@ -450,7 +460,9 @@ function BillingOverview({
               control={
                 <RowButton
                   onClick={() =>
-                    void navigate({
+                    routes?.openInsights
+                      ? routes.openInsights()
+                      : void navigate({
                       to: "/workspaces/$workspaceId/organization",
                       params: { workspaceId },
                       search: { section: "insights" },
