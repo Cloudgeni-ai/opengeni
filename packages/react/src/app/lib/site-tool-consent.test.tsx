@@ -286,6 +286,7 @@ describe("Site tool failures in the Opengeni frame", () => {
     reconnect: null,
     retryable: true,
     detail: "API 404: tool_unavailable Reference: req_1.",
+    sourceCode: "not_found",
     ...overrides,
   });
   const recover = (host: SiteToolConsentHost, value: SiteToolFailure, signal?: AbortSignal) =>
@@ -339,12 +340,40 @@ describe("Site tool failures in the Opengeni frame", () => {
       expect(dialog()?.textContent).toContain(
         "Microsoft Dynamics didn't allow this for your account.",
       );
+      expect(dialog()?.textContent).toContain(
+        "Ask whoever manages your Microsoft Dynamics access.",
+      );
       expect([...dialog()!.querySelectorAll("button")].map((item) => item.textContent)).toEqual([
         "Close",
       ]);
       await actRun(() => button("Close").click());
       await closed();
       expect(answer).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a tool the Site can't offer this viewer asks for a republish, with one Close", async () => {
+    const { view, host } = await mount();
+    try {
+      await actRun(() => {
+        void recover(
+          host(),
+          failure({
+            code: "site_tool_not_available_for_viewer",
+            message: "This isn't available to you on this Site.",
+            retryable: false,
+          }),
+        );
+      });
+      await opened();
+      expect(dialog()?.textContent).toContain("Ask the Site owner to publish it again.");
+      expect([...dialog()!.querySelectorAll("button")].map((item) => item.textContent)).toEqual([
+        "Close",
+      ]);
+      await actRun(() => button("Close").click());
+      await closed();
     } finally {
       await view.unmount();
     }

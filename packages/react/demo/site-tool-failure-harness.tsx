@@ -92,23 +92,24 @@ const failure = (code: SiteToolFailure["code"], retryable: boolean): SiteToolFai
   system,
   message:
     code === "site_tool_not_available_for_viewer"
-      ? "This Site uses an account that isn't yours, so it can't run this for you. Ask the Site's owner to publish it again so it can use your own account."
+      ? "This Site uses an account that isn't yours, so it can't run this for you."
       : siteToolFailureMessage(code, system),
   reconnect:
     code === "site_tool_reconnect_required"
-      ? { connectionId: CONNECTION_ID, capabilityId: DYNAMICS.id, name: system }
+      ? { connectionId: CONNECTION_ID, capabilityId: DYNAMICS.id, name: system, shared: false }
       : null,
   retryable,
   detail:
     code === "site_tool_permission_denied"
       ? "Dataverse returned 403: Principal user is missing prvReadAccount privilege."
       : "API 404: tool_unavailable Reference: req_sample.",
+  sourceCode: code === "site_tool_permission_denied" ? "provider_permission_denied" : "not_found",
 });
 const FAILURES: Record<string, SiteToolFailure> = {
   reconnect: failure("site_tool_reconnect_required", false),
   denied: failure("site_tool_permission_denied", false),
   retry: failure("site_tool_unavailable", true),
-  not_available: failure("site_tool_not_available_for_viewer", true),
+  not_available: failure("site_tool_not_available_for_viewer", false),
   unknown: failure("site_tool_outcome_unknown", false),
 };
 

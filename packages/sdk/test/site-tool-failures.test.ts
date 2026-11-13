@@ -22,7 +22,10 @@ const apiError = (status: number, error: Record<string, unknown>) =>
   new OpenGeniApiError(status, JSON.stringify({ error, requestId: "req_1" }));
 const ok = { content: [{ type: "text", text: "rows" }] };
 
-function harness(script: Array<unknown>, options: { host?: boolean; again?: boolean } = {}) {
+function harness(
+  script: Array<unknown>,
+  options: { host?: boolean; again?: boolean; shared?: boolean } = {},
+) {
   const invokes: ToolGatewayInvokeRequest[] = [];
   const prompts: SiteToolFailurePrompt[] = [];
   const bridge = createSiteToolBridge({
@@ -57,6 +60,7 @@ function harness(script: Array<unknown>, options: { host?: boolean; again?: bool
             account: "ada@example.com",
             connectionId,
             capabilityId: "cap-dynamics",
+            ...(options.shared ? { shared: true } : {}),
           },
         ],
         selected: route,
@@ -100,11 +104,37 @@ describe("Site tool failures reach the viewer as clear states", () => {
         code: "site_tool_reconnect_required",
         system: "Microsoft Dynamics",
         message: "Sign in to Microsoft Dynamics again to continue.",
-        reconnect: { connectionId, capabilityId: "cap-dynamics", name: "Microsoft Dynamics" },
+        reconnect: {
+          connectionId,
+          capabilityId: "cap-dynamics",
+          name: "Microsoft Dynamics",
+          shared: false,
+        },
+        sourceCode: "tool_connection_needs_attention",
       }),
     ]);
-    // The same operation, after the viewer signed in again.
-    expect(h.invokes.map((request) => request.operationId)).toEqual(["op-1", "op-1"]);
+    // The provider never received the first call, and its approval is spent:
+    // after signing in again it runs as a new operation.
+    const [first, second] = h.invokes.map((request) => request.operationId);
+    expect(first).toBe("op-1");
+    expect(second).not.toBe("op-1");
+    expect(second).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+
+  test("a workspace-shared connection reconnects that shared account", async () => {
+    const h = harness(
+      [
+        apiError(409, {
+          code: "conflict",
+          message: "Reconnect this account in Opengeni, then try again.",
+          details: { code: "tool_connection_needs_attention", reason: "expired" },
+        }),
+        ok,
+      ],
+      { shared: true },
+    );
+    await h.invoke();
+    expect(h.prompts[0]?.failure.reconnect).toMatchObject({ connectionId, shared: true });
   });
 
   test("a provider's sign-in refusal is the same Reconnect; closing it leaves a typed result", async () => {
@@ -122,11 +152,16 @@ describe("Site tool failures reach the viewer as clear states", () => {
     );
     const { result } = await h.invoke();
     expect(h.prompts[0]?.failure.code).toBe("site_tool_reconnect_required");
+    // Site code still reads the provider's own result; the typed state is added.
     expect(result).toMatchObject({
       isError: true,
-      content: [{ type: "text", text: "Sign in to Microsoft Dynamics again to continue." }],
+      content: [{ type: "text", text: "Microsoft Dynamics rejected the sign-in." }],
       structuredContent: {
-        error: { code: "site_tool_reconnect_required", detail: "rejected the sign-in" },
+        error: { code: "connection_auth_needed", message: "rejected the sign-in" },
+        siteToolFailure: {
+          code: "site_tool_reconnect_required",
+          message: "Sign in to Microsoft Dynamics again to continue.",
+        },
       },
     });
     expect(h.invokes).toHaveLength(1);
@@ -156,14 +191,15 @@ describe("Site tool failures reach the viewer as clear states", () => {
     expect(h.invokes).toHaveLength(1);
     expect(result).toMatchObject({
       isError: true,
-      content: [{ type: "text", text: "Microsoft Dynamics didn't allow this for your account." }],
+      content: [{ type: "text", text: providerText }],
       structuredContent: {
-        error: { code: "site_tool_permission_denied", system: "Microsoft Dynamics" },
+        error: { code: "provider_permission_denied" },
+        siteToolFailure: { code: "site_tool_permission_denied", system: "Microsoft Dynamics" },
       },
     });
   });
 
-  test("any other failure is a plain message with Try again, never the raw status", async () => {
+  test("a refusal that ran nothing is a plain message with Try again, never the raw status", async () => {
     const h = harness([apiError(404, { code: "not_found", message: "tool_unavailable" }), ok]);
     expect((await h.invoke()).result).toEqual(ok);
     const failure = h.prompts[0]!.failure;
@@ -187,6 +223,8 @@ describe("Site tool failures reach the viewer as clear states", () => {
       message: "Couldn't get this from Microsoft Dynamics.",
       retryable: true,
       outcomeUnknown: false,
+      // Site code that checked the original code still finds it.
+      details: { code: "not_found" },
     });
     expect((error as Error).message).not.toMatch(/API|404|tool_unavailable/u);
   });
@@ -211,11 +249,91 @@ describe("Site tool failures reach the viewer as clear states", () => {
     expect(h.invokes).toHaveLength(1);
   });
 
+  test("a dropped connection on a write is never run again", async () => {
+    const h = harness([new TypeError("Failed to fetch"), ok]);
+    const error = await h.invoke().catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "site_tool_outcome_unknown", retryable: false });
+    expect(h.prompts[0]?.failure).toMatchObject({
+      code: "site_tool_outcome_unknown",
+      retryable: false,
+      message: "Couldn't confirm this finished. Check Microsoft Dynamics before trying again.",
+    });
+    expect(h.invokes).toHaveLength(1);
+  });
+
+  test("a 502 with an HTML body is an unknown outcome, never run again", async () => {
+    const h = harness([new OpenGeniApiError(502, "<html><body>Bad Gateway</body></html>"), ok]);
+    const error = await h.invoke().catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "site_tool_outcome_unknown", retryable: false });
+    expect((error as Error).message).not.toMatch(/502|html/iu);
+    expect(h.invokes).toHaveLength(1);
+  });
+
+  test("a definitive refusal keeps retryable false", async () => {
+    const h = harness([apiError(403, { code: "forbidden", message: "site_tool_not_authorized" })]);
+    const error = await h.invoke().catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "site_tool_unavailable", retryable: false });
+    expect(h.invokes).toHaveLength(1);
+  });
+
+  test("a tool the Site can't offer this viewer says to ask the owner, without Try again", async () => {
+    const h = harness([
+      apiError(404, {
+        code: "not_found",
+        message: "This Site was published with another member's account.",
+        details: { code: "site_tool_not_available_for_viewer" },
+      }),
+    ]);
+    const error = await h.invoke().catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      code: "site_tool_not_available_for_viewer",
+      retryable: false,
+      message: "This Site was published with another member's account.",
+    });
+    expect(h.invokes).toHaveLength(1);
+  });
+
   test("Try again is bounded", async () => {
-    const h = harness([apiError(500, { code: "internal", message: "boom" })]);
+    const h = harness([
+      apiError(429, { code: "rate_limited", message: "slow down", retryable: true }),
+    ]);
     const error = await h.invoke().catch((reason: unknown) => reason);
     expect(error).toMatchObject({ code: "site_tool_unavailable" });
     expect(h.invokes).toHaveLength(3);
     expect(h.prompts).toHaveLength(2);
+    // Every attempt is the same operation.
+    expect(new Set(h.invokes.map((request) => request.operationId))).toEqual(new Set(["op-1"]));
+  });
+
+  test("calls pin one operation id for every attempt", async () => {
+    const requests: Array<{ operationId?: string | undefined }> = [];
+    const bridge = createSiteToolBridge({
+      workspaceId: "workspace",
+      workspaceTools: {
+        $catalog: async () =>
+          ({
+            version: 1,
+            generation: 1,
+            workspaceId: "workspace",
+            digest: "digest",
+            createdAt: new Date(0).toISOString(),
+            entries: [{ identity: declared }],
+          }) as never,
+      },
+      recoverToolCall: async () => true,
+      callTool: async ({ request }) => {
+        requests.push(request);
+        if (requests.length === 1)
+          throw apiError(429, { code: "rate_limited", message: "slow down", retryable: true });
+        return { operationId: request.operationId!, catalogDigest: "digest", result: ok } as never;
+      },
+    });
+    await bridge.call(
+      { catalogDigest: "digest", identity: declared, arguments: {} },
+      { signal: new AbortController().signal },
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.operationId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(requests[1]?.operationId).toBe(requests[0]?.operationId);
   });
 });

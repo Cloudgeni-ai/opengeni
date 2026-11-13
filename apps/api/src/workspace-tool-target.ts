@@ -889,12 +889,13 @@ export async function describeWorkspaceSiteToolConsent(
     // The viewer's own connection and its capability, so the frame can offer
     // Reconnect for that same account when it stops working.
     accounts: choices.accounts.map(
-      ({ identity, connector, account, connectionId, canonicalServerId }) => ({
+      ({ identity, connector, account, connectionId, canonicalServerId, shared }) => ({
         identity,
         connector,
         account,
         connectionId,
         capabilityId: inventory.canonical.get(canonicalServerId)?.capabilityId ?? null,
+        shared: shared === true,
       }),
     ),
     selected: choices.selected,

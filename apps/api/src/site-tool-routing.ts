@@ -41,6 +41,8 @@ export type SiteToolAccount = {
   /** The canonical connector the route belongs to. */
   canonicalServerId: string;
   connectionId: string;
+  /** The connection is shared with the workspace rather than the viewer's own. */
+  shared?: boolean;
 };
 
 export type SiteToolConnect = {
@@ -175,6 +177,7 @@ export async function readSiteToolAccountInventory(
         account,
         canonicalServerId: binding.canonicalServerId,
         connectionId: binding.connectionId,
+        shared: binding.subjectScope === "workspace",
       },
     ];
   });
@@ -232,6 +235,7 @@ export function routeSiteTool(
         account: own.account,
         canonicalServerId: own.canonicalServerId,
         connectionId: own.connectionId,
+        ...(own.shared === undefined ? {} : { shared: own.shared }),
       },
     };
   }

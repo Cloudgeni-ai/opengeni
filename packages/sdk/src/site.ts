@@ -311,6 +311,7 @@ export type OpenGeniSiteBridgeResponseMessage = {
         message: string;
         retryable: boolean;
         outcomeUnknown?: boolean;
+        details?: { code: string };
       };
     }
 );
@@ -419,6 +420,8 @@ export class OpenGeniSiteBridgeError extends Error {
     message: string,
     readonly retryable = false,
     readonly outcomeUnknown = false,
+    /** The original error's code behind a typed `site_tool_*` failure, for example `not_found`. */
+    readonly details: { code?: string } = {},
   ) {
     super(message);
     this.name = "OpenGeniSiteBridgeError";
@@ -1057,6 +1060,9 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
             typeof error.message === "string" ? error.message : "Site tool request failed",
             error.retryable === true,
             error.outcomeUnknown === true,
+            isRecord(error.details) && typeof error.details.code === "string"
+              ? { code: error.details.code }
+              : {},
           ),
         );
       };

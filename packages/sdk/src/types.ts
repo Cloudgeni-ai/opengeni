@@ -327,6 +327,8 @@ export type ToolGatewaySiteConsentAccount = {
   connectionId?: string;
   /** The catalog capability that reconnects it, when there is one. */
   capabilityId?: string | null;
+  /** The connection is shared with the workspace rather than the viewer's own. */
+  shared?: boolean;
 };
 /** The provider's own reading of the call (for Gmail, the message as it would be sent). */
 export type ToolGatewaySiteConsentReview = {

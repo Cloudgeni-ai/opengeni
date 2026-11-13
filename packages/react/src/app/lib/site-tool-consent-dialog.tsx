@@ -8,6 +8,7 @@ import type {
 import { useEffect, useRef, useState } from "react";
 import { toolReviewAction } from "@opengeni/contracts";
 import { McpConnectionCard } from "../../components/session-mcp-capability-card";
+import { useOpenGeniText } from "../../messages/runtime";
 import { Button } from "../../ui/button";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import {
@@ -257,6 +258,7 @@ export function SiteToolRecover({
   onDone: (again: boolean) => void;
 }) {
   const { failure } = request;
+  const t = useOpenGeniText();
   const answered = useRef(false);
   const answer = (again: boolean) => {
     if (answered.current) return;
@@ -272,18 +274,22 @@ export function SiteToolRecover({
       />
     );
   const retry = failure.retryable;
+  const hint =
+    failure.code === "site_tool_permission_denied" && failure.system
+      ? t("siteToolRecover.askWhoeverManages", { system: failure.system })
+      : failure.code === "site_tool_not_available_for_viewer"
+        ? t("siteToolRecover.askSiteOwner")
+        : null;
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : answer(false))}>
       <DialogContent showCloseButton={false} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="text-base">{failure.message}</DialogTitle>
-          {failure.code === "site_tool_permission_denied" && failure.system ? (
-            <DialogDescription>Ask whoever manages your {failure.system} access.</DialogDescription>
-          ) : null}
+          {hint ? <DialogDescription>{hint}</DialogDescription> : null}
         </DialogHeader>
         {failure.detail ? (
           <details className="text-sm text-fg-muted">
-            <summary className="cursor-pointer select-none">Details</summary>
+            <summary className="cursor-pointer select-none">{t("siteToolRecover.details")}</summary>
             <p className="mt-2 break-words">{failure.detail}</p>
           </details>
         ) : null}
@@ -295,7 +301,7 @@ export function SiteToolRecover({
             autoFocus
             onClick={() => answer(retry)}
           >
-            {retry ? "Try again" : "Close"}
+            {retry ? t("siteToolRecover.tryAgain") : t("siteToolRecover.close")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -303,7 +309,10 @@ export function SiteToolRecover({
   );
 }
 
-/** The existing connect card, signing in to the viewer's same connection again. */
+/**
+ * The existing connect card, signing in to the same connection again: the
+ * viewer's own, or the workspace's shared one.
+ */
 function SiteToolReconnect({
   workspaceId,
   reconnect,
@@ -323,7 +332,7 @@ function SiteToolReconnect({
       name={reconnect.name}
       returnUrl={window.location.href}
       reconnectConnectionId={reconnect.connectionId}
-      personalOnly
+      personalOnly={!reconnect.shared}
       dialogOnly
       onConfigured={() => {
         connected.current = true;

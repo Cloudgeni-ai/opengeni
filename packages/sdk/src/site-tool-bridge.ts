@@ -110,6 +110,14 @@ function siteToolNotAvailableForViewer(error: unknown): unknown {
   });
 }
 
+/** A refusal the bridge makes itself, before anything is sent: nothing ran. */
+function siteToolRefusal(message: string, code: string, retryable: boolean): Error {
+  return Object.assign(new Error(message), { code, retryable, outcomeUnknown: false });
+}
+/** The Site calls a tool its pinned version doesn't declare. */
+const undeclaredTool = () =>
+  siteToolRefusal("This tool is not available to the Site", "site_tool_not_declared", false);
+
 /**
  * Why a Site's tool call didn't complete, as the viewer and Site code see it.
  * Site code reads the same `code` on the error (or on the result's
@@ -133,21 +141,36 @@ export type SiteToolFailure = {
   /** One plain sentence for the viewer; never an HTTP status or internal code. */
   message: string;
   /** The viewer's own connection to sign in again, for `site_tool_reconnect_required`. */
-  reconnect: { connectionId: string; capabilityId: string; name: string } | null;
-  /** Running it again may help: false after a refusal or an unknown outcome. */
+  reconnect: {
+    connectionId: string;
+    capabilityId: string;
+    name: string;
+    /** Shared with the workspace rather than the viewer's own. */
+    shared: boolean;
+  } | null;
+  /**
+   * Running it again is safe and may help: only after a refusal Opengeni
+   * confirms ran nothing. False for definitive refusals and unknown outcomes.
+   */
   retryable: boolean;
   /** The original error, for logs or a details toggle; not for the viewer's main text. */
   detail: string;
+  /** The original error's code (`not_found`, `tool_connection_needs_attention`, ...), when it had one. */
+  sourceCode: string | null;
 };
 export type SiteToolFailurePrompt = { failure: SiteToolFailure; signal: AbortSignal };
 
-/** A Site tool call that stopped; `code` says why (see `SiteToolFailureCode`). */
+/**
+ * A Site tool call that stopped; `code` says why (see `SiteToolFailureCode`).
+ * `details.code` keeps the original error's code for Site code that checks it.
+ */
 export class SiteToolCallFailedError extends Error {
   readonly code: SiteToolFailureCode;
   readonly retryable: boolean;
   readonly outcomeUnknown: boolean;
   readonly system: string | null;
   readonly detail: string;
+  readonly details: { code?: string };
   constructor(failure: SiteToolFailure) {
     super(failure.message);
     this.name = "SiteToolCallFailedError";
@@ -156,6 +179,7 @@ export class SiteToolCallFailedError extends Error {
     this.outcomeUnknown = failure.code === "site_tool_outcome_unknown";
     this.system = failure.system;
     this.detail = failure.detail;
+    this.details = failure.sourceCode ? { code: failure.sourceCode } : {};
   }
 }
 
@@ -174,6 +198,7 @@ const SITE_TOOL_PASSTHROUGH_CODES = new Set([
 type SiteToolFailureKind = Pick<SiteToolFailure, "code" | "retryable" | "detail"> & {
   /** Opengeni's own explanation for the viewer, when the server gave one. */
   message?: string;
+  sourceCode?: string | null;
 };
 
 function errorCodes(error: unknown): { code: unknown; nested: unknown } {
@@ -182,8 +207,17 @@ function errorCodes(error: unknown): { code: unknown; nested: unknown } {
   return { code: candidate.code, nested: candidate.details?.code };
 }
 
-/** How a thrown Site tool error reaches the viewer, or null to pass it through. */
-export function siteToolFailureKind(error: unknown): SiteToolFailureKind | null {
+/**
+ * How a thrown Site tool error reaches the viewer, or null to pass it through.
+ * Try again is offered only for a refusal Opengeni confirms ran nothing (a 4xx
+ * answer, or the bridge's own refusal) that isn't definitive. A dropped
+ * connection, a 5xx or an untyped error on a call that `executes` may have
+ * run, so it is `site_tool_outcome_unknown` and is never run again.
+ */
+export function siteToolFailureKind(
+  error: unknown,
+  options: { executes?: boolean } = {},
+): SiteToolFailureKind | null {
   if (error instanceof SiteToolCallFailedError) return null;
   if (error instanceof Error && error.name === "AbortError") return null;
   const { code, nested } = errorCodes(error);
@@ -193,19 +227,39 @@ export function siteToolFailureKind(error: unknown): SiteToolFailureKind | null 
   )
     return null;
   const detail = error instanceof Error ? error.message : String(error);
-  const outcomeUnknown =
-    typeof error === "object" &&
-    error !== null &&
-    (error as { outcomeUnknown?: unknown }).outcomeUnknown === true;
-  if (outcomeUnknown) return { code: "site_tool_outcome_unknown", retryable: false, detail };
+  const sourceCode = typeof nested === "string" ? nested : typeof code === "string" ? code : null;
+  const source = (typeof error === "object" && error !== null ? error : {}) as {
+    status?: unknown;
+    retryable?: unknown;
+    outcomeUnknown?: unknown;
+  };
+  const kind = (
+    failure: SiteToolFailureCode,
+    retryable: boolean,
+    message?: string,
+  ): SiteToolFailureKind => ({
+    code: failure,
+    retryable,
+    detail,
+    sourceCode,
+    ...(message === undefined ? {} : { message }),
+  });
+  if (source.outcomeUnknown === true) return kind("site_tool_outcome_unknown", false);
   if (nested === "tool_connection_needs_attention" || code === "connection_auth_needed")
-    return { code: "site_tool_reconnect_required", retryable: false, detail };
+    return kind("site_tool_reconnect_required", false);
+  // These change only when the Site is published again.
   if (code === "site_tool_not_available_for_viewer")
     // Already the server's own explanation (see siteToolNotAvailableForViewer).
-    return { code: "site_tool_not_available_for_viewer", retryable: true, detail, message: detail };
-  if (nested === "site_tool_not_available_for_viewer")
-    return { code: "site_tool_not_available_for_viewer", retryable: true, detail };
-  return { code: "site_tool_unavailable", retryable: true, detail };
+    return kind("site_tool_not_available_for_viewer", false, detail);
+  if (nested === "site_tool_not_available_for_viewer" || code === "site_tool_not_declared")
+    return kind("site_tool_not_available_for_viewer", false);
+  const status = typeof source.status === "number" ? source.status : null;
+  const refused = status === null ? source.outcomeUnknown === false : status >= 400 && status < 500;
+  // A missing route can appear (the viewer connects elsewhere); other refusals
+  // keep their own retryable (false for site_tool_not_authorized or a 400).
+  if (refused) return kind("site_tool_unavailable", source.retryable === true || status === 404);
+  if (options.executes !== false) return kind("site_tool_outcome_unknown", false);
+  return kind("site_tool_unavailable", true);
 }
 
 /** A tool result the provider refused in a way the viewer can act on, or null. */
@@ -216,10 +270,11 @@ function siteToolResultFailureKind(
   const error = (result.structuredContent as { error?: { code?: unknown; message?: unknown } })
     ?.error;
   const detail = typeof error?.message === "string" ? error.message : "";
+  const sourceCode = typeof error?.code === "string" ? error.code : null;
   if (error?.code === "connection_auth_needed")
-    return { code: "site_tool_reconnect_required", retryable: false, detail };
+    return { code: "site_tool_reconnect_required", retryable: false, detail, sourceCode };
   if (error?.code === "provider_permission_denied")
-    return { code: "site_tool_permission_denied", retryable: false, detail };
+    return { code: "site_tool_permission_denied", retryable: false, detail, sourceCode };
   return null;
 }
 
@@ -243,23 +298,23 @@ export function siteToolFailureMessage(code: SiteToolFailureCode, system: string
   }
 }
 
-/** The same error result, with the viewer's typed code and sentence; the provider's text stays in `detail`. */
+/**
+ * The same error result, unchanged for Site code that reads the provider's
+ * error, plus the viewer's typed code and sentence in `siteToolFailure`.
+ */
 function siteToolFailureResult(
   result: NonNullable<ToolGatewayCallResponse["result"]>,
   failure: SiteToolFailure,
 ): ToolGatewayCallResponse["result"] {
   return {
     ...result,
-    content: [{ type: "text", text: failure.message }],
     structuredContent: {
       ...(result.structuredContent ?? {}),
-      error: {
+      siteToolFailure: {
         code: failure.code,
         message: failure.message,
         system: failure.system,
         retryable: false,
-        outcomeUnknown: false,
-        detail: failure.detail,
       },
     },
   };
@@ -367,7 +422,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       "identity" in request.target &&
       !allowed.has(identityKey(request.target.identity))
     )
-      throw new Error("This tool is not available to the Site");
+      throw undeclaredTool();
     let tool: ToolGatewayResolvedTool;
     try {
       tool = await input.workspaceTools.$resolve!(request.target, { signal, ...context });
@@ -383,7 +438,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         ? tool.entry.identity.toolName !== request.target.identity.toolName
         : !allowedTools.has(tool.entry.identity.toolName))
     )
-      throw new Error("This tool is not available to the Site");
+      throw undeclaredTool();
     return tool;
   };
   const invokeOnce = async (
@@ -527,7 +582,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       "identity" in request.target &&
       !allowed.has(identityKey(request.target.identity))
     )
-      throw new Error("This tool is not available to the Site");
+      throw undeclaredTool();
     try {
       return await invokeOnce(request, signal);
     } catch (error) {
@@ -627,8 +682,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       : {}),
     catalog: async ({ signal }) => await loadCatalog({ signal }),
     call: async (request, { signal }) => {
-      if (allowed && !allowed.has(identityKey(request.identity)))
-        throw new Error("This tool is not available to the Site");
+      if (allowed && !allowed.has(identityKey(request.identity))) throw undeclaredTool();
       if (targeted && input.requestedTools) {
         const tool = manifests
           .get(request.catalogDigest)
@@ -692,7 +746,11 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
             (entry) => identityKey(entry.identity) === identityKey(request.identity),
           )
         )
-          throw new Error("This requested tool is not enabled in the workspace");
+          throw siteToolRefusal(
+            "This requested tool is not enabled in the workspace",
+            "tool_unavailable",
+            true,
+          );
         const response = await input.callTool({
           workspaceId: input.workspaceId,
           signal,
@@ -755,6 +813,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
             connectionId: account.connectionId,
             capabilityId: account.capabilityId,
             name: account.connector,
+            shared: account.shared === true,
           };
       } catch {
         // Naming the system is best effort; the failure itself still reaches the viewer.
@@ -762,26 +821,35 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     }
     return {
       ...kind,
+      sourceCode: kind.sourceCode ?? null,
       system,
       reconnect,
       message: kind.message ?? siteToolFailureMessage(kind.code, system),
     };
   };
+  /**
+   * Runs `run` and, when it stops, asks the host what to do. `run(true)` after
+   * a reconnect: the connection had to sign in again, so the provider never
+   * received the call, and it runs as a new operation (the first one's
+   * approval is spent). Try again reuses the same operation.
+   */
   const recovering = async <T>(
     identity: ToolGatewayIdentity | null,
     signal: AbortSignal,
-    run: () => Promise<T>,
+    executes: boolean,
+    run: (reconnected: boolean) => Promise<T>,
   ): Promise<T> => {
+    let reconnected = false;
     for (let attempt = 1; ; attempt += 1) {
       let kind: SiteToolFailureKind | null;
       let value: T | undefined;
       let thrown: unknown;
       try {
-        value = await run();
+        value = await run(reconnected);
         kind = siteToolResultFailureKind(resultOf(value));
         if (!kind) return value;
       } catch (error) {
-        kind = siteToolFailureKind(error);
+        kind = siteToolFailureKind(error, { executes });
         if (!kind || signal.aborted) throw error;
         thrown = error;
       }
@@ -792,7 +860,11 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           ? await input.recoverToolCall({ failure, signal }).catch(() => false)
           : false;
       signal.throwIfAborted();
-      if (again && (failure.retryable || failure.reconnect)) continue;
+      if (again && failure.reconnect) {
+        reconnected = true;
+        continue;
+      }
+      if (again && failure.retryable) continue;
       if (value === undefined)
         throw Object.assign(new SiteToolCallFailedError(failure), { cause: thrown });
       return { ...value, result: siteToolFailureResult(resultOf(value)!, failure) } as T;
@@ -810,21 +882,35 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     ...(bridgeResolve
       ? {
           resolve: async (request: ToolGatewayResolveRequest, options: { signal: AbortSignal }) =>
-            await recovering(declaredIdentity(request.target), options.signal, () =>
+            await recovering(declaredIdentity(request.target), options.signal, false, () =>
               bridgeResolve(request, options),
             ),
         }
       : {}),
     ...(bridgeInvoke
       ? {
-          invoke: async (request: ToolGatewayInvokeRequest, options: { signal: AbortSignal }) =>
-            await recovering(declaredIdentity(request.target), options.signal, () =>
-              bridgeInvoke(request, options),
-            ),
+          invoke: async (request: ToolGatewayInvokeRequest, options: { signal: AbortSignal }) => {
+            let operationId = request.operationId;
+            return await recovering(
+              declaredIdentity(request.target),
+              options.signal,
+              true,
+              (reconnected) => {
+                if (reconnected) operationId = crypto.randomUUID();
+                return bridgeInvoke({ ...request, operationId }, options);
+              },
+            );
+          },
         }
       : {}),
-    call: async (request, options) =>
-      await recovering(request.identity, options.signal, () => bridgeCall(request, options)),
+    call: async (request, options) => {
+      // One operation for every attempt, so a rerun is never a second call.
+      let operationId = request.operationId ?? crypto.randomUUID();
+      return await recovering(request.identity, options.signal, true, (reconnected) => {
+        if (reconnected) operationId = crypto.randomUUID();
+        return bridgeCall({ ...request, operationId }, options);
+      });
+    },
   };
 }
 
