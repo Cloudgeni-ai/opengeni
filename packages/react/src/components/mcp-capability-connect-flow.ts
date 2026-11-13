@@ -547,6 +547,11 @@ export function useMcpCapabilityConnect({
 
   /** Turn it on again with the connected account: after a step-up, or Try again. */
   function retryTurnOn() {
+    // Using your own login here retries that, not a sign-in.
+    if (offHere) {
+      void useHere();
+      return;
+    }
     void run(async (active) => {
       const attempt = controller.getSnapshot().attempt;
       if (attempt?.state === "complete") await reconcile(attempt, active);

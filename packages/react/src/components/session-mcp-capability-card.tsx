@@ -299,6 +299,19 @@ function ScopedCard({
                   </button>
                 ) : null}
               </div>
+            ) : flow.stepUp ? (
+              // Connected, but turning it on waits for a passkey: that is the step.
+              <button
+                className="og-session-capability-primary"
+                disabled={busy}
+                onClick={flow.confirmStepUp}
+              >
+                {flow.stepUp.opened || !flow.stepUp.hostAction || !adminStepUp
+                  ? t("sessionMcpCapabilityCard.tryAgain")
+                  : flow.stepUp.passkeyRegistered
+                    ? t("sessionMcpCapabilityCard.confirmItSYou")
+                    : t("sessionMcpCapabilityCard.addAPasskey")}
+              </button>
             ) : ownLoginQuestion ? (
               <>
                 <p className="og-session-capability-scope">{ownLoginQuestion}</p>
@@ -313,19 +326,6 @@ function ScopedCard({
                   {t("sessionMcpCapabilityCard.connectADifferentAccount")}
                 </button>
               </>
-            ) : flow.stepUp ? (
-              // Connected, but turning it on waits for a passkey: that is the step.
-              <button
-                className="og-session-capability-primary"
-                disabled={busy}
-                onClick={flow.confirmStepUp}
-              >
-                {flow.stepUp.opened || !flow.stepUp.hostAction || !adminStepUp
-                  ? t("sessionMcpCapabilityCard.tryAgain")
-                  : flow.stepUp.passkeyRegistered
-                    ? t("sessionMcpCapabilityCard.confirmItSYou")
-                    : t("sessionMcpCapabilityCard.addAPasskey")}
-              </button>
             ) : !connected && adminApproval ? (
               // The organization has to approve first: that help is the step,
               // with signing in again as its last action.
