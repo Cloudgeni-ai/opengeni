@@ -1,5 +1,7 @@
 //! Waking and connecting: at the owner, or, for a sandbox nobody owns, at a
-//! host that first adopts its latest archive.
+//! host that first adopts its latest archive. An owner with no room for a
+//! wake hands the sandbox off when another host has room, and the wake
+//! places it there ([ADR 38](../../../../docs/adr/0038-a-full-owner-hands-a-wake-on.md)).
 //!
 //! A wake that finds no room waits for it cheaply. A host that refuses a
 //! sandbox as full is not asked about it again until what it reports
@@ -70,6 +72,17 @@ impl Want {
     }
 }
 
+/// What one wake learned of owners that had no room for it.
+#[derive(Debug, Default)]
+struct Passed {
+    /// Hosts that handed it off for want of room: not where it goes next
+    /// while another host has room.
+    avoid: HashSet<HostId>,
+    /// Owners asked to hand it off, under the epoch they owned it by: each
+    /// is asked once per wake, however long it waits.
+    asked: HashSet<(HostId, OwnerEpoch)>,
+}
+
 /// An adopt's answer, what follows it, and the row as it was written.
 #[derive(Debug)]
 pub(super) struct Adopted {
@@ -113,26 +126,24 @@ impl<S: Store> Service<S> {
         let mut waited_on = String::new();
         // This caller's turn to place it while nobody owns it.
         let mut turn: Option<OwnedMutexGuard<()>> = None;
+        let mut passed = Passed::default();
         while Instant::now() < deadline {
             let row = self.get(team, id).await?;
-            let Some(host) = row.ownership.owner else {
-                self.place_unowned(row, &mut turn, deadline, &mut waited_on)
+            let epoch = row.ownership.epoch;
+            // An owner that refused to adopt it under this epoch holds
+            // nothing of it: placed as a sandbox nobody owns is, without
+            // asking it.
+            let owner = (row.ownership.owner).filter(|host| !self.held_nothing(id, *host, epoch));
+            let Some(host) = owner else {
+                self.place_unowned(row, &mut turn, &passed.avoid, deadline, &mut waited_on)
                     .await?;
                 continue;
             };
-            let epoch = row.ownership.epoch;
             let Some(target) = self.view.target(host) else {
                 waited_on = self.unreachable(host);
                 tokio::time::sleep(AGAIN_AFTER).await;
                 continue;
             };
-            // It refused to adopt it under this epoch, so holds nothing of
-            // it: placed as a sandbox nobody owns is, without asking it.
-            if self.held_nothing(id, host, epoch) {
-                self.place_unowned(row, &mut turn, deadline, &mut waited_on)
-                    .await?;
-                continue;
-            }
             // Another caller here is giving it to `host` now, which may not
             // hold it yet: asked once that settles, not meanwhile.
             if turn.is_none() && self.placing_now(id) {
@@ -145,7 +156,7 @@ impl<S: Store> Service<S> {
                 if waited_on.is_empty() {
                     waited_on = Failure::NoCapacity.to_string();
                 }
-                self.wait_while(deadline, || self.view.refuses(host, &full))
+                self.full_owner(&row, host, &mut passed, &mut waited_on, deadline)
                     .await;
                 continue;
             }
@@ -198,7 +209,7 @@ impl<S: Store> Service<S> {
                 Some(ErrorCode::HostFull) => {
                     self.view.refused(host, full);
                     waited_on = host_failure(&answered).to_string();
-                    self.wait_while(deadline, || self.view.refuses(host, &full))
+                    self.full_owner(&row, host, &mut passed, &mut waited_on, deadline)
                         .await;
                 }
                 Some(
@@ -219,13 +230,79 @@ impl<S: Store> Service<S> {
         )))
     }
 
-    /// Places `row`'s sandbox, which nobody owns, for a wake, once it is
-    /// this caller's `turn`, or waits for room or for the turn, until
-    /// `deadline` at most. The caller reads the row again after.
+    /// Deals with `host`, the owner of `row`'s sandbox, refusing a wake of
+    /// it as full: has it hand the sandbox off for the wake to place
+    /// elsewhere ([`Self::hand_on`]), once per owner and wake, or else
+    /// waits until it could have room. The caller reads the row again
+    /// after.
+    async fn full_owner(
+        &self,
+        row: &SandboxRow,
+        host: HostId,
+        passed: &mut Passed,
+        waited_on: &mut String,
+        deadline: Instant,
+    ) {
+        if passed.asked.insert((host, row.ownership.epoch))
+            && self.hand_on(row, host, &mut passed.avoid, waited_on).await
+        {
+            return;
+        }
+        let full = Refused::Wake(row.id);
+        self.wait_while(deadline, || self.view.refuses(host, &full))
+            .await;
+    }
+
+    /// Has `host`, the owner of `row`'s sandbox, which refused a wake of it
+    /// as full, hand it off, if another host has room for it: the wake
+    /// then places it like a sandbox nobody owns, rather than waiting for
+    /// room on the host that last ran it (ADR 38). Its files go with it;
+    /// the owner stores what it has not stored yet before it lets go. True
+    /// once it was handed off, after adding `host` to `avoid`. False when
+    /// no other host has room, so moving it would not wake it sooner, or
+    /// when the owner did not hand it off, after noting why in
+    /// `waited_on`: the wake waits for room where it is, as before.
+    async fn hand_on(
+        &self,
+        row: &SandboxRow,
+        host: HostId,
+        avoid: &mut HashSet<HostId>,
+        waited_on: &mut String,
+    ) -> bool {
+        let mut elsewhere = avoid.clone();
+        elsewhere.insert(host);
+        if !self
+            .view
+            .has_room_now(&self.placing(row), &row.spec.config.reach, &elsewhere)
+        {
+            return false;
+        }
+        match self.hand_off(row, host, false).await {
+            Ok(()) => {
+                tracing::info!(
+                    sandbox = %row.id,
+                    host = host.0,
+                    "a full owner handed a sandbox off, to wake it where there is room"
+                );
+                avoid.insert(host);
+                true
+            }
+            Err(error) => {
+                *waited_on = error.to_string();
+                false
+            }
+        }
+    }
+
+    /// Places `row`'s sandbox, which nobody owns, for a wake, outside
+    /// `avoid` while there is room elsewhere, once it is this caller's
+    /// `turn`, or waits for room or for the turn, until `deadline` at most.
+    /// The caller reads the row again after.
     async fn place_unowned(
         &self,
         row: SandboxRow,
         turn: &mut Option<OwnedMutexGuard<()>>,
+        avoid: &HashSet<HostId>,
         deadline: Instant,
         waited_on: &mut String,
     ) -> Result<(), Failure> {
@@ -240,7 +317,13 @@ impl<S: Store> Service<S> {
             }
         }
         let (demand, reach) = (self.placing(&row), row.spec.config.reach.clone());
-        if !self.adopt_or_wait(row, HashSet::new(), waited_on).await? {
+        // A host it was handed off from for want of room is a last resort.
+        let exclude = if self.view.has_room_now(&demand, &reach, avoid) {
+            avoid.clone()
+        } else {
+            HashSet::new()
+        };
+        if !self.adopt_or_wait(row, exclude, waited_on).await? {
             self.wait_for_room(&demand, &reach, &HashSet::new(), deadline)
                 .await;
         }
