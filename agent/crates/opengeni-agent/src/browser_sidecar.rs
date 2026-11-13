@@ -170,6 +170,8 @@ impl BrowserSidecarManager {
                 "browser controller sidecar is not a regular file".to_string(),
             ));
         }
+        #[cfg(target_os = "linux")]
+        ensure_program_loader_present(&binary)?;
         Ok(Self {
             config_dir,
             binary,
@@ -1294,6 +1296,67 @@ fn select_packaged_browserd(
     }
 }
 
+/// Refuses a controller this Linux cannot start. The Linux controller is
+/// linked against glibc; on a musl system (for example Alpine) its program
+/// loader does not exist, and starting it fails with a bare "No such file or
+/// directory". Finding that out at startup turns it into a plain reason.
+#[cfg(target_os = "linux")]
+fn ensure_program_loader_present(binary: &Path) -> PlatformResult<()> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(ELF_HEAD_BYTES);
+    std::fs::File::open(binary)
+        .and_then(|file| file.take(ELF_HEAD_BYTES as u64).read_to_end(&mut head))
+        .map_err(|error| PlatformError::from_io("inspect browserd binary", &error))?;
+    match elf_program_interpreter(&head) {
+        Some(loader) if !Path::new(&loader).exists() => {
+            Err(PlatformError::Unsupported(missing_loader_reason(&loader)))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// How much of the controller is read to find its program loader. The ELF
+/// header and program headers sit at the start of the file.
+#[cfg(any(target_os = "linux", test))]
+const ELF_HEAD_BYTES: usize = 64 * 1024;
+
+#[cfg(any(target_os = "linux", test))]
+fn missing_loader_reason(loader: &str) -> String {
+    format!(
+        "Managed browsers can't run on this computer: its Linux has no {loader}, the \
+         system loader the browser controller needs (musl systems such as Alpine lack it). \
+         Open the browser on another machine or in the person's own Chrome."
+    )
+}
+
+/// The program loader (`PT_INTERP`) a 64-bit little-endian ELF file asks for,
+/// or `None` for anything else (a static binary, a script, another format).
+#[cfg(any(target_os = "linux", test))]
+fn elf_program_interpreter(head: &[u8]) -> Option<String> {
+    const PT_INTERP: u32 = 3;
+    let u16_at = |at: usize| Some(u16::from_le_bytes(head.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(head.get(at..at + 4)?.try_into().ok()?));
+    let u64_at = |at: usize| Some(u64::from_le_bytes(head.get(at..at + 8)?.try_into().ok()?));
+    // Magic, 64-bit class, little-endian data.
+    if head.get(..6)? != b"\x7fELF\x02\x01" {
+        return None;
+    }
+    let table = usize::try_from(u64_at(0x20)?).ok()?;
+    let entry_size = usize::from(u16_at(0x36)?);
+    let entries = usize::from(u16_at(0x38)?);
+    (0..entries).find_map(|index| {
+        let header = table.checked_add(index.checked_mul(entry_size)?)?;
+        if u32_at(header)? != PT_INTERP {
+            return None;
+        }
+        let offset = usize::try_from(u64_at(header + 8)?).ok()?;
+        let size = usize::try_from(u64_at(header + 32)?).ok()?;
+        let raw = head.get(offset..offset.checked_add(size)?)?;
+        let path = raw.split(|byte| *byte == 0).next()?;
+        Some(String::from_utf8_lossy(path).into_owned()).filter(|path| !path.is_empty())
+    })
+}
+
 fn discover_browserd_binary() -> PlatformResult<PathBuf> {
     let candidates = if let Some(explicit) = std::env::var_os(BROWSERD_BINARY_ENV) {
         vec![PathBuf::from(explicit)]
@@ -1540,6 +1603,56 @@ static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal 64-bit little-endian ELF image with one program header,
+    /// `PT_INTERP` when `loader` is given and `PT_LOAD` otherwise.
+    fn elf_image(loader: Option<&str>) -> Vec<u8> {
+        let mut image = vec![0_u8; 0x78];
+        image[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        image[0x20..0x28].copy_from_slice(&0x40_u64.to_le_bytes());
+        image[0x36..0x38].copy_from_slice(&56_u16.to_le_bytes());
+        image[0x38..0x3a].copy_from_slice(&1_u16.to_le_bytes());
+        let path = loader.map(|path| format!("{path}\0")).unwrap_or_default();
+        let kind: u32 = if loader.is_some() { 3 } else { 1 };
+        image[0x40..0x44].copy_from_slice(&kind.to_le_bytes());
+        image[0x48..0x50].copy_from_slice(&0x78_u64.to_le_bytes());
+        image[0x60..0x68].copy_from_slice(&(path.len() as u64).to_le_bytes());
+        image.extend_from_slice(path.as_bytes());
+        image
+    }
+
+    #[test]
+    fn reads_the_program_loader_a_dynamic_controller_asks_for() {
+        assert_eq!(
+            elf_program_interpreter(&elf_image(Some("/lib/ld-linux-aarch64.so.1"))).as_deref(),
+            Some("/lib/ld-linux-aarch64.so.1")
+        );
+        // Static binaries, scripts and truncated files ask for nothing.
+        assert_eq!(elf_program_interpreter(&elf_image(None)), None);
+        assert_eq!(elf_program_interpreter(b"#!/bin/sh\nexit 0\n"), None);
+        let truncated = elf_image(Some("/lib/ld-linux-aarch64.so.1"));
+        assert_eq!(elf_program_interpreter(&truncated[..0x60]), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_controller_whose_loader_is_missing_is_refused_with_a_plain_reason() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = directory.path().join("opengeni-browserd");
+        let loader = directory.path().join("missing").join("ld-linux.so.1");
+        let loader = loader.to_str().expect("utf-8 path");
+        std::fs::write(&binary, elf_image(Some(loader))).expect("write controller");
+        match BrowserSidecarManager::with_binary(directory.path(), &binary) {
+            Err(PlatformError::Unsupported(reason)) => {
+                assert!(reason.starts_with("Managed browsers can't run on this computer"));
+                assert!(reason.contains(loader));
+            }
+            other => panic!("expected an unsupported refusal, got {other:?}"),
+        }
+        // A loader that exists is accepted.
+        std::fs::write(&binary, elf_image(Some("/bin/sh"))).expect("write controller");
+        assert!(BrowserSidecarManager::with_binary(directory.path(), &binary).is_ok());
+    }
 
     #[test]
     fn screen_control_turned_off_starts_controllers_without_a_computer_backend() {

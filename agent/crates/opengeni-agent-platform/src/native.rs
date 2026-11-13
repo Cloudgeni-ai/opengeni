@@ -43,6 +43,9 @@ pub struct NativePlatform {
     stream_registry: Option<Arc<dyn StreamRegistry>>,
     /// Agent-owned browserd lifecycle shared by every workspace link on this host.
     browser_control: Option<Arc<dyn BrowserControlBackend>>,
+    /// Why managed browsers cannot run on this computer, when the agent found
+    /// out at startup; reported instead of a generic "unavailable".
+    browser_control_unavailable: Option<String>,
     /// The per-op OOM cgroup manager, wired by the supervisor at startup on a
     /// delegated Linux cgroup v2 host (issue #345). `None` until then (and on every
     /// non-Linux / non-delegated host), in which case exec runs with no per-op
@@ -93,6 +96,7 @@ impl NativePlatform {
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
             browser_control: None,
+            browser_control_unavailable: None,
             cgroups: None,
         }
     }
@@ -109,6 +113,7 @@ impl NativePlatform {
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
             browser_control: None,
+            browser_control_unavailable: None,
             cgroups: None,
         }
     }
@@ -126,6 +131,14 @@ impl NativePlatform {
     #[must_use]
     pub fn with_browser_control(mut self, backend: Arc<dyn BrowserControlBackend>) -> Self {
         self.browser_control = Some(backend);
+        self
+    }
+
+    /// Records why managed browsers cannot run on this computer, so a browser
+    /// request gets that reason instead of a generic failure.
+    #[must_use]
+    pub fn with_browser_control_unavailable(mut self, reason: impl Into<String>) -> Self {
+        self.browser_control_unavailable = Some(reason.into());
         self
     }
 
@@ -1444,6 +1457,10 @@ impl Platform for NativePlatform {
         self.browser_control.clone()
     }
 
+    fn browser_control_unavailable_reason(&self) -> Option<String> {
+        self.browser_control_unavailable.clone()
+    }
+
     async fn pty_open(&self, req: &v1::PtyOpenRequest) -> PlatformResult<v1::PtyOpenResponse> {
         let registry = self.stream_registry.as_ref().ok_or_else(|| {
             PlatformError::Unsupported("pty_open: no relay stream registrar is wired".to_string())
@@ -1986,6 +2003,20 @@ mod tests {
         let mut platform = NativePlatform::with_root(root.path());
         platform.home_dir = Some(home.path().to_path_buf());
         (platform, root, home)
+    }
+
+    #[tokio::test]
+    async fn a_browser_request_reports_why_browsers_cannot_run_here() {
+        let request = v1::BrowserControlEnsureRequest::default();
+        let (platform, _dir) = rooted();
+        let unknown = platform.browser_control_ensure(&request).await.unwrap_err();
+        assert!(matches!(unknown, PlatformError::Unsupported(ref message)
+            if message.contains("browser controller sidecar is unavailable")));
+        let platform = platform.with_browser_control_unavailable("no loader here");
+        let known = platform.browser_control_ensure(&request).await.unwrap_err();
+        assert!(
+            matches!(known, PlatformError::Unsupported(ref message) if message == "no loader here")
+        );
     }
 
     #[test]

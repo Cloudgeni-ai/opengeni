@@ -416,15 +416,20 @@ pub trait Platform: Send + Sync {
         None
     }
 
+    /// Why managed browsers cannot run on this computer, when that is known.
+    fn browser_control_unavailable_reason(&self) -> Option<String> {
+        None
+    }
+
     /// Ensures one placement-scoped browser controller sidecar.
     async fn browser_control_ensure(
         &self,
         req: &v1::BrowserControlEnsureRequest,
     ) -> PlatformResult<v1::BrowserControlEnsureResponse> {
         let backend = self.browser_control_backend().ok_or_else(|| {
-            PlatformError::Unsupported(
-                "browser_control_ensure: browser controller sidecar is unavailable".to_string(),
-            )
+            PlatformError::Unsupported(self.browser_control_unavailable_reason().unwrap_or_else(
+                || "browser_control_ensure: browser controller sidecar is unavailable".to_string(),
+            ))
         })?;
         let endpoint = backend.ensure(req).await?;
         Ok(v1::BrowserControlEnsureResponse {
