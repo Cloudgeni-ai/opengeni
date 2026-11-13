@@ -1465,13 +1465,14 @@ describe("workspace artifact API and PostgreSQL authority", () => {
 
   test("an agent's Site on its own account route also declares that connector, and a retry replays", async () => {
     // An agent sees only its own account routes; the turn's frozen binding
-    // names the connector behind the route.
+    // names the connector behind the route (a workspace account here; a
+    // personal one pairs the same way once its sender delegation is frozen).
     const connectionId = crypto.randomUUID();
     const route = `account-${crypto.randomUUID().replaceAll("-", "")}`;
     const connectionRef = {
       providerDomain: "crm.example",
       kind: "oauth2" as const,
-      subjectScope: "subject" as const,
+      subjectScope: "workspace" as const,
       connectionId,
     };
     const attempt = await seedAttempt(grant, {
@@ -1483,8 +1484,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           canonicalServerId: "crm",
           connectionId,
           originWorkspaceId: grant.workspaceId,
-          subjectScope: "subject",
-          ownerSubjectId: grant.subjectId,
+          subjectScope: "workspace",
+          ownerSubjectId: null,
           accountLabel: "ada@example.com",
           providerDomain: "crm.example",
           kind: "oauth2",
