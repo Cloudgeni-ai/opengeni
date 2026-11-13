@@ -946,6 +946,20 @@ test("a shutdown that could not save the files tells the person since when", () 
   ]);
 });
 
+test("a sandbox deleted while its chat was archived tells the person its files are gone", () => {
+  expect(
+    buildTimeline(englishText, [
+      event(1, "sandbox.box.terminated", { persisted: false, drainReason: "group_end" }),
+    ]),
+  ).toEqual([
+    expect.objectContaining({
+      kind: "notice",
+      tone: "input",
+      text: "This chat's workspace machine was deleted while the chat was archived. The chat continues on a new one, without the old one's files.",
+    }),
+  ]);
+});
+
 test("a reduced save names the left-out folders; an ordinary shutdown says nothing", () => {
   expect(
     buildTimeline(englishText, [
