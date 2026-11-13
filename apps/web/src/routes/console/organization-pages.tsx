@@ -2,10 +2,12 @@
 // own organization settings pages, kept inside Console.
 import type { ConsoleRange } from "@opengeni/sdk";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { BotIcon, CreditCardIcon, UsersIcon } from "lucide-react";
+import { BotIcon, CreditCardIcon, UserPlusIcon, UsersIcon } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
 
+import { canInviteOrganizationRole } from "@opengeni/react/app/lib/organization-admin";
+import { Button } from "@opengeni/react/ui/button";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
 import { PageHeader } from "@opengeni/react/ui/page-header";
@@ -51,13 +53,32 @@ export function ConsoleAgentsRoute() {
 }
 
 export function ConsoleMembersRoute() {
-  const { appWorkspaceId } = useConsole();
+  const navigate = useNavigate();
+  const { appWorkspaceId, search } = useConsole();
   const { person, invitation, view } = useSearch({ strict: false }) as ConsoleMembersSearch;
   const access = useConsoleOrganizationAccess();
   const subPage = Boolean(person || invitation || view);
   return (
     <ConsolePage>
-      {subPage ? null : <PageHeader title="Members" icon={<UsersIcon />} />}
+      {subPage ? null : (
+        <PageHeader
+          title="Members"
+          icon={<UsersIcon />}
+          actions={
+            canInviteOrganizationRole(access.actorRole, "member") ? (
+              <Button
+                type="button"
+                onClick={() =>
+                  void navigate({ to: "/console/members", search: { ...search, view: "invite" } })
+                }
+              >
+                <UserPlusIcon aria-hidden="true" />
+                Invite people
+              </Button>
+            ) : undefined
+          }
+        />
+      )}
       <ConsoleOrganizationProvider>
         <OrganizationPeoplePage
           workspaceId={appWorkspaceId ?? ""}
@@ -201,7 +222,7 @@ export function ConsoleUsageRoute() {
           </p>
         </>
       )}
-      <Section title="Billing">{billing}</Section>
+      {billing}
     </ConsolePage>
   );
 }
