@@ -23,6 +23,7 @@ import {
 import {
   bootstrapWorkspace,
   createChannel,
+  createConnection,
   createDb,
   createSession,
   createWorkspaceArtifact,
@@ -1467,7 +1468,16 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     // An agent sees only its own account routes; the turn's frozen binding
     // names the connector behind the route (a workspace account here; a
     // personal one pairs the same way once its sender delegation is frozen).
-    const connectionId = crypto.randomUUID();
+    const connectionId = (
+      await createConnection(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        providerDomain: "crm.example",
+        kind: "oauth2",
+        credentialEncrypted: "unused-test-credential",
+        metadata: {},
+      })
+    ).id;
     const route = `account-${crypto.randomUUID().replaceAll("-", "")}`;
     const connectionRef = {
       providerDomain: "crm.example",
