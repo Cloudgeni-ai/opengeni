@@ -2882,14 +2882,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "GET /v1/workspaces/:workspaceId/model-price-basis-models",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/model-price-basis-models",
-    "request": [],
-    "response": [],
-    "permission": "connections:read"
-  },
-  {
     "id": "GET /v1/workspaces/:workspaceId/models",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/models",
@@ -5939,6 +5931,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "listModelPriceBasisModels",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/model-price-basis-models",
+    "request": [],
+    "response": [
+      "ModelPriceBasisModelsResponse"
+    ],
+    "permission": "connections:read"
+  },
+  {
     "id": "listNetworkRoutes",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/network-routes",
@@ -8054,15 +8056,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "PUT /v1/workspaces/:workspaceId/connections/:connectionId/list-price",
-    "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/list-price",
-    "request": [
-      "SetWorkspaceModelKeyListPriceRequest"
-    ],
-    "response": []
-  },
-  {
     "id": "PUT /v1/workspaces/:workspaceId/credential-profile",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/credential-profile",
@@ -9571,6 +9564,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "WorkspaceInferenceControlResponse"
     ],
     "permission": "workspace:admin"
+  },
+  {
+    "id": "setWorkspaceModelKeyListPrice",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/list-price",
+    "request": [
+      "SetWorkspaceModelKeyListPriceRequest"
+    ],
+    "response": [
+      "ConnectionMetadata",
+      "ConnectionResponse"
+    ]
   },
   {
     "id": "setWorkspacePauseTimer",

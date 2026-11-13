@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key can
--- say what its model's usage costs, like an organization's (1400): the
+-- say what its model's usage costs, like an organization's (1401): the
 -- catalogue model whose list rate it shares (an Azure deployment's base
 -- model, read from Azure's answer when the key is connected or set by an
 -- administrator), or the administrator's own rate. Both columns are null for
@@ -9,7 +9,7 @@
 -- id and every accepted turn on it stay as they are.
 --
 -- Rolling: two nullable columns and a check added NOT VALID in a short
--- transaction; 1402 validates it. The previous release never reads or writes
+-- transaction; 1403 validates it. The previous release never reads or writes
 -- them.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
