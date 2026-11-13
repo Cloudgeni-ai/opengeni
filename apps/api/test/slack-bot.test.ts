@@ -605,6 +605,8 @@ function fakeSlack(
     postReadPageSize?: number;
     postVisibilityDelayReads?: number;
     rejectFirstPostCode?: string;
+    /** Refuse every post with this Slack error code. */
+    rejectAllPostsCode?: string;
     /** Refuse posts that carry a custom name or picture, as Slack does with a bad one. */
     rejectIdentityPosts?: boolean;
     loseFirstDeleteResponse?: boolean;
@@ -1056,6 +1058,9 @@ function fakeSlack(
       postAttempts += 1;
       if (options.rejectFirstPostCode && postAttempts === 1) {
         return Response.json({ ok: false, error: options.rejectFirstPostCode });
+      }
+      if (options.rejectAllPostsCode) {
+        return Response.json({ ok: false, error: options.rejectAllPostsCode });
       }
       // Slack refuses an icon_url of 256 characters or more.
       const iconUrl = params.get("icon_url");
@@ -3897,6 +3902,45 @@ describe("Opengeni Slack bot connection", () => {
       }),
     ).rejects.toThrow(/msg_too_long/);
     expect(other.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+  });
+
+  test("a post Slack refuses with and without its name fails after one retry", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({
+      scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, OPENGENI_SLACK_BOT_IDENTITY_SCOPE],
+      teamId: `T_REFUSED_ALL_${crypto.randomUUID().slice(0, 8)}`,
+      rejectAllPostsCode: "invalid_arguments",
+    });
+    const { bot, connection } = await connectedTestBot(workspace, slack.fetch);
+    const posts = () => slack.calls.filter((call) => call.method === "chat.postMessage");
+    const operationId = crypto.randomUUID();
+    await expect(
+      bot.postMessage({
+        operationId,
+        channelId: "C_MEMBER",
+        text: "on it",
+        identity: { username: "Release owner" },
+      }),
+    ).rejects.toThrow(/invalid_arguments/);
+    // One try with the name, one retry as the app, and nothing posted.
+    expect(posts()).toHaveLength(2);
+    expect(posts()[0]).toMatchObject({ username: "Release owner", iconUrl: null });
+    expect(posts()[1]).toMatchObject({
+      clientMessageId: operationId,
+      username: null,
+      iconUrl: null,
+    });
+    expect(slack.committedPosts).toHaveLength(0);
+    // Slack refused it outright, so the operation is released (not left
+    // ambiguous) with the refusal recorded, and may be tried again.
+    expect(
+      await getSlackBotPostOperation(client.db, workspace.workspaceId, connection.id, operationId),
+    ).toMatchObject({
+      status: "pending",
+      claimHolderId: null,
+      lastFailureCode: "invalid_arguments",
+    });
   });
 
   test("reconciles an accepted post after response loss without a second mutation", async () => {

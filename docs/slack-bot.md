@@ -195,6 +195,13 @@ full-length ones still work), a URL that is still too long is left off, and a
 post Slack refuses (`invalid_arguments`) with a name or picture is sent once
 more as the app's, so it still arrives.
 
+Two cases still post without the picture; the message itself always arrives.
+While older and newer servers run side by side during a rollout, or after a
+rollback, an older server cannot verify the shorter avatar links, so a picture
+it is asked for doesn't load. And on a deployment whose public hostname is
+longer than about 39 characters, an image avatar's URL is still over Slack's
+255-character limit, so its posts show the name with no picture.
+
 `files:write` is an optional bot grant, requested by the canonical manifest but
 not required for existing installations to remain eligible. Apply the generated
 manifest to the Slack app before reinstalling the Opengeni workspace bot. Older
