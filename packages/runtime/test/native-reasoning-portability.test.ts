@@ -132,7 +132,7 @@ function modelFor(
 
 for (const sourceApi of ["responses", "anthropic-messages"] as const) {
   for (const targetApi of ["responses", "chat", "anthropic-messages"] as const) {
-    test(`${sourceApi} -> ${targetApi}: readable context, native artifacts and paired tools survive persistence`, async () => {
+    test(`${sourceApi} -> ${targetApi}: native artifacts and paired tools survive persistence; foreign reasoning is left out`, async () => {
       const source = modelFor(sourceApi, true, []);
       const reply = await getOrCreateTrace(() => source.getResponse({ ...base, input: "Start" }));
       const history = sanitizeHistoryItemsForModel(
@@ -163,9 +163,9 @@ for (const sourceApi of ["responses", "anthropic-messages"] as const) {
       expect(result.finalOutput).toBe("Done.");
       expect(requests).toHaveLength(1);
       const wire = JSON.stringify(requests[0]);
-      expect(wire.split(summary)).toHaveLength(2);
       expect(wire).toContain("Found");
       if (targetApi === sourceApi) {
+        expect(wire.split(summary)).toHaveLength(2);
         expect(wire).toContain("opaque-fixture");
         expect(wire).toContain(
           sourceApi === "responses" ? "ciphertext-fixture" : "signature-fixture",
@@ -180,8 +180,9 @@ for (const sourceApi of ["responses", "anthropic-messages"] as const) {
           '"encrypted_content"',
         ])
           expect(wire).not.toContain(field);
-        expect(wire).toContain("[Historical reasoning from another model]");
-        expect(wire).toContain("[Historical reasoning from another model is unavailable.]");
+        // Prior reasoning never appears as visible text after a switch.
+        expect(wire).not.toContain(summary);
+        expect(wire).not.toContain("Historical reasoning");
       }
       const body = requests[0]!;
       if (targetApi === "responses") {

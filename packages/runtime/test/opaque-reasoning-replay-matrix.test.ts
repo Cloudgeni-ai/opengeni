@@ -824,7 +824,7 @@ describe("across Claude and Responses providers", () => {
     return new OpenGeniResponsesModel(client, "gpt-fixture", provider);
   }
 
-  test("Claude thinking reaches a Responses provider only as readable text", async () => {
+  test("Claude thinking never reaches a Responses provider, not even as text", async () => {
     const platform = claudePlatform({ streamed: false });
     const claude = new AnthropicMessagesModel(
       claudeProvider(API),
@@ -841,10 +841,12 @@ describe("across Claude and Responses providers", () => {
     );
     expect(sent).toHaveLength(1);
     expect(JSON.stringify(sent[0])).not.toContain(reasoningBlock(earlier).signature);
-    expect(JSON.stringify(sent[0])).toContain("Reasoning 1.");
+    expect(JSON.stringify(sent[0])).not.toContain("Reasoning 1.");
+    expect(JSON.stringify(sent[0])).not.toContain("Historical reasoning");
+    expect(JSON.stringify(sent[0])).toContain("Answer 1.");
   });
 
-  test("OpenAI encrypted reasoning reaches Claude, or another Responses provider, only as readable text", async () => {
+  test("OpenAI encrypted reasoning never reaches Claude or another Responses provider, not even as text", async () => {
     const sent: Item[] = [];
     const earlier = await run(
       responsesProvider("openai", sent),
@@ -862,11 +864,14 @@ describe("across Claude and Responses providers", () => {
     await run(claude, request(history, BASE_SYSTEM), false);
     expect(platform.sent.map(({ refused }) => refused)).toEqual([false]);
     expect(JSON.stringify(platform.sent[0]!.body)).not.toContain(ciphertext);
-    expect(JSON.stringify(platform.sent[0]!.body)).toContain("OpenAI reasoning.");
+    expect(JSON.stringify(platform.sent[0]!.body)).not.toContain("OpenAI reasoning.");
+    expect(JSON.stringify(platform.sent[0]!.body)).toContain("OpenAI answer.");
 
     const other: Item[] = [];
     await run(responsesProvider("azure", other), request(history, BASE_SYSTEM), false);
     expect(other).toHaveLength(1);
     expect(JSON.stringify(other[0])).not.toContain(ciphertext);
+    expect(JSON.stringify(other[0])).not.toContain("OpenAI reasoning.");
+    expect(JSON.stringify(other[0])).not.toContain("Historical reasoning");
   });
 });

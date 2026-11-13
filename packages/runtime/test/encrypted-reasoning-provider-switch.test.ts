@@ -126,10 +126,11 @@ for (const stream of [true, false]) {
     expect(output).toBe("Done.");
     expect(requests).toHaveLength(2);
     expect(requests[0]).toContain(CODEX_CIPHERTEXT);
-    // The resent request keeps the reasoning as readable text, never ciphertext.
+    // The resent request leaves the reasoning out: no ciphertext, and no
+    // readable text in its place.
     expect(requests[1]).not.toContain("encrypted_content");
-    expect(requests[1]).toContain(
-      JSON.stringify(`[Historical reasoning from another model]\n${summary}`),
-    );
+    expect(requests[1]).not.toContain(summary);
+    expect(requests[1]).not.toContain("Historical reasoning");
+    expect(requests[1]).toContain("It uses server actions.");
   });
 }

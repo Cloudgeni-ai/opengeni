@@ -185,15 +185,15 @@ for (const stream of [false, true]) {
     expect(native).not.toContain("artifact_origin");
     expect(native).not.toContain("Historical reasoning");
 
-    // Any other Responses provider gets the readable summary, never ciphertext.
+    // Any other Responses provider gets neither the ciphertext nor its summary
+    // as text: the reasoning is left out.
     const foreign = await wireFor("origin-other", history, stream);
     expect(foreign).not.toContain(ciphertext);
     expect(foreign).not.toContain("encrypted_content");
     expect(foreign).not.toContain("artifact_origin");
-    expect(foreign).toContain(
-      JSON.stringify(`[Historical reasoning from another model]\n${summary}`),
-    );
-    expect(foreign).toContain("[Historical reasoning from another model is unavailable.]");
+    expect(foreign).not.toContain(summary);
+    expect(foreign).not.toContain("Historical reasoning");
+    expect(foreign).not.toContain('"type":"reasoning"');
   });
 }
 
@@ -215,7 +215,7 @@ const legacyHistory = () =>
   );
 
 for (const stream of [false, true]) {
-  test(`a provider that cannot decrypt untagged reasoning gets its summary on the retry and afterwards (${stream ? "streamed" : "single"})`, async () => {
+  test(`a provider that cannot decrypt untagged reasoning gets it left out on the retry and afterwards (${stream ? "streamed" : "single"})`, async () => {
     const providerId = `origin-refusing-${stream ? "stream" : "single"}`;
     const history = legacyHistory();
     expect(JSON.stringify(history)).toContain(ciphertext);
@@ -239,11 +239,10 @@ for (const stream of [false, true]) {
     expect(JSON.stringify(first[0])).toContain(ciphertext);
     const retried = JSON.stringify(first[1]);
     expect(retried).not.toContain("encrypted_content");
-    expect(retried).toContain(
-      JSON.stringify(`[Historical reasoning from another model]\n${summary}`),
-    );
+    expect(retried).not.toContain(summary);
+    expect(retried).not.toContain("Historical reasoning");
 
-    // A later run in this process sends the readable form directly.
+    // A later run in this process leaves it out directly.
     const later: Record<string, any>[] = [];
     expect(await run(later)).toBe("Done.");
     expect(later).toHaveLength(1);
@@ -334,13 +333,12 @@ for (const stream of [false, true]) {
     const foreign = await wireFor("raw-other", history, stream);
     expect(foreign).not.toContain("reasoning_text");
     expect(foreign).not.toContain('"type":"reasoning"');
-    expect(foreign).toContain(
-      JSON.stringify(`[Historical reasoning from another model]\n${rawThought}`),
-    );
+    expect(foreign).not.toContain(rawThought);
+    expect(foreign).not.toContain("Historical reasoning");
   });
 }
 
-test("untagged raw reasoning from another provider is sent as readable text, never its content", async () => {
+test("untagged raw reasoning from another provider is left out, never sent as content or text", async () => {
   // The stored shape of reasoning from a Responses-compatible custom provider
   // before origins covered raw reasoning: the raw text sits in providerData.
   const history = persisted([
@@ -371,12 +369,11 @@ test("untagged raw reasoning from another provider is sent as readable text, nev
   expect(requests).toHaveLength(1);
   const wire = JSON.stringify(requests[0]);
   expect(wire).not.toContain("reasoning_text");
-  expect(wire).toContain(
-    JSON.stringify(`[Historical reasoning from another model]\n${rawThought}`),
-  );
+  expect(wire).not.toContain(rawThought);
+  expect(wire).toContain("Hello.");
 });
 
-test("untagged raw reasoning becomes bounded readable text on every other route", () => {
+test("untagged raw reasoning is left out on every other route", () => {
   const longThought = "x".repeat(40_000);
   const untagged = (text: string, withCiphertext: boolean) => ({
     type: "reasoning",
@@ -398,14 +395,10 @@ test("untagged raw reasoning becomes bounded readable text on every other route"
   const mixedWire = JSON.stringify(mixed);
   expect(mixedWire).not.toContain("reasoning_text");
   expect(mixedWire).not.toContain(ciphertext);
-  expect(mixedWire).toContain(rawThought);
+  expect(mixed).toEqual([user]);
 
   for (const api of ["chat", "anthropic-messages"] as const) {
-    const wire = JSON.stringify(
-      projectHistoryForProvider([user, untagged(rawThought, false)], api),
-    );
-    expect(wire).not.toContain("reasoning_text");
-    expect(wire).toContain(rawThought);
+    expect(projectHistoryForProvider([user, untagged(rawThought, false)], api)).toEqual([user]);
   }
 
   for (const api of ["responses", "chat", "anthropic-messages"] as const) {
@@ -414,8 +407,7 @@ test("untagged raw reasoning becomes bounded readable text on every other route"
         artifactScope: "raw-receiver",
       }),
     );
-    expect(wire).toContain("x".repeat(32_000));
-    expect(wire).not.toContain("x".repeat(32_001));
+    expect(wire).not.toContain("xxxx");
   }
 });
 
@@ -463,7 +455,8 @@ test("the origin record is kept until a request names the receiving provider", (
     artifactScope: "origin-a",
     isRejectedArtifact: () => true,
   });
-  expect(JSON.stringify(refused[1])).not.toContain(ciphertext);
+  expect(refused).toEqual([history[0]]);
+  expect(JSON.stringify(refused)).not.toContain(summary);
 
   for (const api of ["chat", "anthropic-messages"] as const)
     expect(JSON.stringify(projectHistoryForProvider(history, api))).not.toContain(ciphertext);
