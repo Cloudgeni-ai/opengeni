@@ -51,9 +51,9 @@ describe("Nango identities", () => {
     expect(nativeNangoIntegrationForProviderDomain("gmailmcp.googleapis.com")?.integrationKey).toBe(
       "gmail",
     );
-    expect(nativeNangoIntegrationForMcpUrl("https://drivemcp.googleapis.com/mcp/v1/")?.integrationKey).toBe(
-      "google-drive",
-    );
+    expect(
+      nativeNangoIntegrationForMcpUrl("https://drivemcp.googleapis.com/mcp/v1/")?.integrationKey,
+    ).toBe("google-drive");
     expect(nangoToolsIntegrationKeyFromMcpUrl(nangoToolsMcpUrl("linkedin"))).toBe("linkedin");
     expect(nangoToolsIntegrationKeyFromMcpUrl("https://example.com/tools/linkedin")).toBeNull();
   });
@@ -61,21 +61,32 @@ describe("Nango identities", () => {
   test("destinations bind exact origin and path prefix", () => {
     const gmail = nativeNangoIntegrationByKey("gmail")!;
     expect(
-      nangoDestinationAllowed(gmail.destinations, "https://gmail.googleapis.com/gmail/v1/users/me/messages"),
+      nangoDestinationAllowed(
+        gmail.destinations,
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+      ),
     ).toBe(true);
     expect(
-      nangoDestinationAllowed(gmail.destinations, "https://gmail.googleapis.com/gmail/v1/users/other/messages"),
+      nangoDestinationAllowed(
+        gmail.destinations,
+        "https://gmail.googleapis.com/gmail/v1/users/other/messages",
+      ),
     ).toBe(false);
-    expect(nangoDestinationAllowed(gmail.destinations, "https://evil.example/gmail/v1/users/me/")).toBe(false);
-    expect(nangoDestinationAllowed(gmail.destinations, "http://gmail.googleapis.com/gmail/v1/users/me/")).toBe(
-      false,
-    );
+    expect(
+      nangoDestinationAllowed(gmail.destinations, "https://evil.example/gmail/v1/users/me/"),
+    ).toBe(false);
+    expect(
+      nangoDestinationAllowed(gmail.destinations, "http://gmail.googleapis.com/gmail/v1/users/me/"),
+    ).toBe(false);
   });
 
   test("proxy rewrite keeps path and query and pins the provider origin", () => {
-    const proxied = nangoProxyRequest("https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=5", {
-      baseUrl: "https://api.nango.dev/",
-    });
+    const proxied = nangoProxyRequest(
+      "https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=5",
+      {
+        baseUrl: "https://api.nango.dev/",
+      },
+    );
     expect(proxied.url.toString()).toBe(
       "https://api.nango.dev/proxy/calendar/v3/calendars/primary/events?maxResults=5",
     );
@@ -85,7 +96,11 @@ describe("Nango identities", () => {
     });
     expect(direct.url.toString()).toBe("https://www.googleapis.com/drive/v3/files");
     const viaNango = credentialRequestTarget("https://www.googleapis.com/drive/v3/files", {
-      headers: { authorization: "Bearer env", "connection-id": "c1", "provider-config-key": "google-drive" },
+      headers: {
+        authorization: "Bearer env",
+        "connection-id": "c1",
+        "provider-config-key": "google-drive",
+      },
       proxy: {
         kind: "nango_proxy",
         baseUrl: "https://api.nango.dev",
@@ -123,7 +138,10 @@ describe("backend setting", () => {
       setting({
         integrationKey: "x",
         providerConfigKey: "twitter-v2",
-        definition: parseNangoIntegrationDefinition({ displayName: "X", tools: { source: "nango" } }),
+        definition: parseNangoIntegrationDefinition({
+          displayName: "X",
+          tools: { source: "nango" },
+        }),
       }),
     ];
     expect(effectiveNangoIntegrations(settings, false).size).toBe(0);
@@ -230,16 +248,17 @@ describe("tools and pricing", () => {
   });
 
   test("identity field reads a dot path", () => {
-    expect(readIdentityField({ user: { emailAddress: "a@example.com" } }, "user.emailAddress")).toBe(
-      "a@example.com",
-    );
+    expect(
+      readIdentityField({ user: { emailAddress: "a@example.com" } }, "user.emailAddress"),
+    ).toBe("a@example.com");
     expect(readIdentityField({}, "user.emailAddress")).toBeNull();
   });
 });
 
 describe("NangoClient", () => {
   test("calls the documented endpoints with the secret key", async () => {
-    const calls: { url: string; method: string; headers: Record<string, string>; body?: string }[] = [];
+    const calls: { url: string; method: string; headers: Record<string, string>; body?: string }[] =
+      [];
     const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       calls.push({
@@ -249,7 +268,9 @@ describe("NangoClient", () => {
         ...(typeof init?.body === "string" ? { body: init.body } : {}),
       });
       if (url.endsWith("/connect/sessions"))
-        return Response.json({ data: { token: "tok", connect_link: "https://connect.nango.dev/x", expires_at: "z" } });
+        return Response.json({
+          data: { token: "tok", connect_link: "https://connect.nango.dev/x", expires_at: "z" },
+        });
       if (url.includes("/connections?"))
         return Response.json({
           connections: [
@@ -266,7 +287,12 @@ describe("NangoClient", () => {
       if (url.includes("/functions"))
         return Response.json({
           data: [
-            { type: "tool", name: "create-post", description: "Create a post", input_json_schema: { type: "object" } },
+            {
+              type: "tool",
+              name: "create-post",
+              description: "Create a post",
+              input_json_schema: { type: "object" },
+            },
             { type: "sync", name: "contacts" },
           ],
           pagination: { total: 2 },
@@ -274,11 +300,29 @@ describe("NangoClient", () => {
       if (url.includes("/tools/")) return Response.json({ id: "p1" });
       return new Response(null, { status: 404 });
     };
-    const client = new NangoClient({ secretKey: "sk-test", baseUrl: "https://nango.test", fetchImpl });
-    const session = await client.createConnectSession({ tags: { a: "b" }, allowedIntegrations: ["google-mail"] });
-    expect(session).toEqual({ token: "tok", connectLink: "https://connect.nango.dev/x", expiresAt: "z" });
-    const connections = await client.listConnections({ connectionId: "c1", tags: { end_user_id: "user:1" } });
-    expect(connections[0]).toMatchObject({ connectionId: "c1", authErrors: 1, tags: { end_user_id: "user:1" } });
+    const client = new NangoClient({
+      secretKey: "sk-test",
+      baseUrl: "https://nango.test",
+      fetchImpl,
+    });
+    const session = await client.createConnectSession({
+      tags: { a: "b" },
+      allowedIntegrations: ["google-mail"],
+    });
+    expect(session).toEqual({
+      token: "tok",
+      connectLink: "https://connect.nango.dev/x",
+      expiresAt: "z",
+    });
+    const connections = await client.listConnections({
+      connectionId: "c1",
+      tags: { end_user_id: "user:1" },
+    });
+    expect(connections[0]).toMatchObject({
+      connectionId: "c1",
+      authErrors: 1,
+      tags: { end_user_id: "user:1" },
+    });
     const tools = await client.listTools("linkedin");
     expect(tools.map((tool) => tool.name)).toEqual(["create-post"]);
     const result = await client.callTool({

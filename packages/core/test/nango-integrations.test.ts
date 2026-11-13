@@ -120,13 +120,18 @@ describe("integration backend switch", () => {
       const items = [
         ...configuredMcpCatalogItems(settings, backends),
         ...withoutNangoReplacedSocialItems(
-          builtInConnectorCatalogItems({ settings, socialConnections: [], workspaceConnections: [] }),
+          builtInConnectorCatalogItems({
+            settings,
+            socialConnections: [],
+            workspaceConnections: [],
+          }),
           backends,
         ),
       ];
-      const services = items.map((item) =>
-        item.metadata.nangoIntegrationKey ??
-        (item.metadata.providerAdapter === "social" ? item.metadata.provider : item.id),
+      const services = items.map(
+        (item) =>
+          item.metadata.nangoIntegrationKey ??
+          (item.metadata.providerAdapter === "social" ? item.metadata.provider : item.id),
       );
       expect(new Set(services).size).toBe(services.length);
       const x = items.filter(

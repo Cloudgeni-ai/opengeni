@@ -10,7 +10,11 @@ import type { MCPServer } from "@openai/agents";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
 import { nangoProviderDomain, type NangoProxyTransport } from "@opengeni/contracts/nango";
-import { NANGO_PROXY_TRANSPORTS, sendWithCredential, type NangoUsageRecorder } from "./nango-transport";
+import {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+} from "./nango-transport";
 
 /**
  * Connection identity of Google's hosted Calendar MCP. As with Gmail, this URL
@@ -367,7 +371,8 @@ export function isOfficialGoogleCalendarMcpConfig(
     canonicalUrl(url) === canonicalUrl(OFFICIAL_GOOGLE_CALENDAR_MCP_URL) &&
     // The same reviewed bridge serves the native grant and, when the operator
     // routes Calendar through Nango, the Nango connection (docs/nango.md).
-    (domain === "calendarmcp.googleapis.com" || domain === nangoProviderDomain("google-calendar")) &&
+    (domain === "calendarmcp.googleapis.com" ||
+      domain === nangoProviderDomain("google-calendar")) &&
     connectionRef?.kind === "oauth2"
   );
 }

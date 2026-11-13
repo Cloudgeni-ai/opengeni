@@ -69,7 +69,10 @@ function fakeNango(connections: unknown[], identityStatus = 200) {
     });
     if (url.pathname === "/connect/sessions")
       return Response.json({
-        data: { token: "session-token", connect_link: "https://connect.nango.test/?session_token=s" },
+        data: {
+          token: "session-token",
+          connect_link: "https://connect.nango.test/?session_token=s",
+        },
       });
     if (url.pathname === "/connections") return Response.json({ connections });
     if (url.pathname.startsWith("/proxy/"))
@@ -136,7 +139,12 @@ describe("Nango Connect", () => {
     const token = await startedState();
     const nango = fakeNango([]);
     const response = await nangoConnectPage(
-      { db: unreachableDb, settings, fetchImpl: nango.fetchImpl, nangoBackends: async () => backends },
+      {
+        db: unreachableDb,
+        settings,
+        fetchImpl: nango.fetchImpl,
+        nangoBackends: async () => backends,
+      },
       {
         state: token,
         browser: { bindingDigests: [], signedInSubjectId: null },
@@ -194,7 +202,12 @@ describe("Nango Connect", () => {
     ]);
     expect(
       await completeNangoConnect(
-        { db: unreachableDb, settings, fetchImpl: nango.fetchImpl, nangoBackends: async () => backends },
+        {
+          db: unreachableDb,
+          settings,
+          fetchImpl: nango.fetchImpl,
+          nangoBackends: async () => backends,
+        },
         { state: token, browser: { bindingDigests: [], signedInSubjectId: null } },
       ),
     ).toEqual({ status: "pending" });
@@ -221,7 +234,12 @@ describe("Nango Connect", () => {
     );
     await expect(
       completeNangoConnect(
-        { db: unreachableDb, settings, fetchImpl: nango.fetchImpl, nangoBackends: async () => backends },
+        {
+          db: unreachableDb,
+          settings,
+          fetchImpl: nango.fetchImpl,
+          nangoBackends: async () => backends,
+        },
         { state: token, browser: { bindingDigests: [], signedInSubjectId: null } },
       ),
     ).rejects.toThrow("could not be verified");
@@ -232,7 +250,8 @@ describe("Nango Connect", () => {
     expect(identity.headers.get("provider-config-key")).toBe("google-mail");
     expect(
       nango.requests.some(
-        (request) => request.method === "DELETE" && request.url.includes("/connections/nango-conn-1"),
+        (request) =>
+          request.method === "DELETE" && request.url.includes("/connections/nango-conn-1"),
       ),
     ).toBe(true);
   });
@@ -253,7 +272,14 @@ describe("Nango Connect", () => {
 });
 
 describe("Nango webhook", () => {
-  const body = JSON.stringify({ type: "auth", operation: "refresh", connectionId: "c", providerConfigKey: "p", success: false, tags: {} });
+  const body = JSON.stringify({
+    type: "auth",
+    operation: "refresh",
+    connectionId: "c",
+    providerConfigKey: "p",
+    success: false,
+    tags: {},
+  });
   const sign = (raw: string) => createHmac("sha256", SIGNING_KEY).update(raw).digest("hex");
 
   test("rejects a missing or wrong signature", async () => {
@@ -266,7 +292,10 @@ describe("Nango webhook", () => {
   test("is not served unless Nango and its signing key are configured", async () => {
     await expect(
       handleNangoWebhook(
-        { db: unreachableDb, settings: { ...settings, nangoWebhookSigningKey: undefined } as Settings },
+        {
+          db: unreachableDb,
+          settings: { ...settings, nangoWebhookSigningKey: undefined } as Settings,
+        },
         { rawBody: body, signature: sign(body) },
       ),
     ).rejects.toMatchObject({ status: 404 });

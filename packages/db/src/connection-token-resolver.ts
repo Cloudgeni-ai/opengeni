@@ -1373,10 +1373,14 @@ function nangoConnectionBindingMatches(
     if (!nangoDestinationAllowed(native.destinations, destination)) return false;
     // The same exact routes the native grant may reach, nothing broader.
     const nativeRef = { ...ref, providerDomain: native.nativeProviderDomain };
-    if (native.integrationKey === "gmail") return isOfficialGmailRestDestination(destination, nativeRef);
+    if (native.integrationKey === "gmail")
+      return isOfficialGmailRestDestination(destination, nativeRef);
     if (native.integrationKey === "google-calendar")
       return isOfficialGoogleCalendarRestDestination(destination, nativeRef);
-    return isOfficialDriveRestDestination(destination, nativeRef) || isNangoDriveReadDestination(destination);
+    return (
+      isOfficialDriveRestDestination(destination, nativeRef) ||
+      isNangoDriveReadDestination(destination)
+    );
   }
   return destination === canonicalHttpUrl(nangoToolsMcpUrl(key));
 }
@@ -1392,7 +1396,9 @@ function isNangoDriveReadDestination(destinationUrl: string): boolean {
     !url.username &&
     !url.password &&
     !url.hash &&
-    /^\/drive\/v3\/(?:files(?:\/[a-zA-Z0-9_-]+(?:\/export|\/permissions)?)?|about)$/u.test(url.pathname)
+    /^\/drive\/v3\/(?:files(?:\/[a-zA-Z0-9_-]+(?:\/export|\/permissions)?)?|about)$/u.test(
+      url.pathname,
+    )
   );
 }
 

@@ -60,7 +60,10 @@ export async function readIntegrationBackendSettings(
       enabled: row.enabled === true,
       definition: row.definition ? parseNangoIntegrationDefinition(row.definition) : null,
       revision: Number(row.revision),
-      changedAt: (row.changed_at instanceof Date ? row.changed_at : new Date(row.changed_at)).toISOString(),
+      changedAt: (row.changed_at instanceof Date
+        ? row.changed_at
+        : new Date(row.changed_at)
+      ).toISOString(),
     }));
   } catch (error) {
     if (pgCode(error) === "42P01") return [];
@@ -75,7 +78,10 @@ export async function readIntegrationBackendSettings(
 export function createIntegrationBackendSettingsCache(
   options: { ttlMs?: number; now?: () => number } = {},
 ) {
-  const ttlMs = Math.min(options.ttlMs ?? INTEGRATION_BACKEND_CACHE_TTL_MS, INTEGRATION_BACKEND_CACHE_TTL_MS);
+  const ttlMs = Math.min(
+    options.ttlMs ?? INTEGRATION_BACKEND_CACHE_TTL_MS,
+    INTEGRATION_BACKEND_CACHE_TTL_MS,
+  );
   const now = options.now ?? Date.now;
   let value: IntegrationBackendSetting[] = [];
   let loadedAt = Number.NEGATIVE_INFINITY;
@@ -105,7 +111,9 @@ export function createIntegrationBackendSettingsCache(
   };
 }
 
-export type IntegrationBackendSettingsCache = ReturnType<typeof createIntegrationBackendSettingsCache>;
+export type IntegrationBackendSettingsCache = ReturnType<
+  typeof createIntegrationBackendSettingsCache
+>;
 
 /** The deployment's shared cache; API and worker processes each hold one. */
 export const integrationBackendSettingsCache = createIntegrationBackendSettingsCache();
@@ -267,7 +275,8 @@ type ActivityRow = {
   compute_seconds: number | string;
 };
 
-const toTime = (value: Date | string) => (value instanceof Date ? value : new Date(value)).getTime();
+const toTime = (value: Date | string) =>
+  (value instanceof Date ? value : new Date(value)).getTime();
 
 /**
  * Connection time from lifecycle events: a connection exists from its first
@@ -327,10 +336,19 @@ export function buildNangoUsageSummary(input: {
 }): NangoUsageSummary {
   const sinceMs = input.since.getTime();
   const untilMs = input.until.getTime();
-  const key = (row: { account_id: string; workspace_id: string; integration_key: string; subject_id: string | null }) =>
-    JSON.stringify([row.account_id, row.workspace_id, row.integration_key, row.subject_id]);
+  const key = (row: {
+    account_id: string;
+    workspace_id: string;
+    integration_key: string;
+    subject_id: string | null;
+  }) => JSON.stringify([row.account_id, row.workspace_id, row.integration_key, row.subject_id]);
   const rows = new Map<string, NangoUsageSummaryRow>();
-  const rowFor = (row: { account_id: string; workspace_id: string; integration_key: string; subject_id: string | null }) => {
+  const rowFor = (row: {
+    account_id: string;
+    workspace_id: string;
+    integration_key: string;
+    subject_id: string | null;
+  }) => {
     const id = key(row);
     let entry = rows.get(id);
     if (!entry) {
@@ -363,7 +381,9 @@ export function buildNangoUsageSummary(input: {
     const end = Math.min(endedAt, untilMs);
     if (end > start) rowFor(current.row).connectionSeconds += (end - start) / 1000;
   };
-  for (const event of [...input.lifecycle].sort((a, b) => toTime(a.occurred_at) - toTime(b.occurred_at))) {
+  for (const event of [...input.lifecycle].sort(
+    (a, b) => toTime(a.occurred_at) - toTime(b.occurred_at),
+  )) {
     const connectionKey = `${event.account_id}:${event.nango_connection_id}`;
     const at = toTime(event.occurred_at);
     if (event.kind === "connection_deleted") close(connectionKey, at);
@@ -413,9 +433,16 @@ export function buildNangoUsageSummary(input: {
   result.sort((a, b) =>
     [a.accountId, a.workspaceId, a.integrationKey, a.subjectId ?? ""]
       .join("\u0000")
-      .localeCompare([b.accountId, b.workspaceId, b.integrationKey, b.subjectId ?? ""].join("\u0000")),
+      .localeCompare(
+        [b.accountId, b.workspaceId, b.integrationKey, b.subjectId ?? ""].join("\u0000"),
+      ),
   );
-  return { since: input.since.toISOString(), until: input.until.toISOString(), rows: result, totals };
+  return {
+    since: input.since.toISOString(),
+    until: input.until.toISOString(),
+    rows: result,
+    totals,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -60,7 +60,11 @@ function deps(credential: ConnectionCredentialForBroker) {
   return { deps: value, counts };
 }
 
-const gmailRef = { providerDomain: "nango:gmail", kind: "oauth2" as const, subjectScope: "subject" as const };
+const gmailRef = {
+  providerDomain: "nango:gmail",
+  kind: "oauth2" as const,
+  subjectScope: "subject" as const,
+};
 
 describe("Nango connection credentials", () => {
   test("resolve to Nango proxy headers and transport for a caller that declared it", async () => {
@@ -105,21 +109,34 @@ describe("Nango connection credentials", () => {
       destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
       connectionRef: gmailRef,
     };
-    const configured = buildConnectionTokenResolver({} as Database, nangoSettings, deps(nangoCredential()).deps);
-    await expect(configured(input)).resolves.toMatchObject({ status: "auth_needed", reason: "unsupported_auth" });
+    const configured = buildConnectionTokenResolver(
+      {} as Database,
+      nangoSettings,
+      deps(nangoCredential()).deps,
+    );
+    await expect(configured(input)).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "unsupported_auth",
+    });
     const unconfigured = buildConnectionTokenResolver(
       {} as Database,
       testSettings() as Settings,
       deps(nangoCredential()).deps,
     );
-    await expect(unconfigured({ ...input, acceptedTransports: ["nango_proxy"] })).resolves.toMatchObject({
+    await expect(
+      unconfigured({ ...input, acceptedTransports: ["nango_proxy"] }),
+    ).resolves.toMatchObject({
       status: "auth_needed",
       reason: "unsupported_auth",
     });
   });
 
   test("bind only the integration's exact provider routes", async () => {
-    const resolver = buildConnectionTokenResolver({} as Database, nangoSettings, deps(nangoCredential()).deps);
+    const resolver = buildConnectionTokenResolver(
+      {} as Database,
+      nangoSettings,
+      deps(nangoCredential()).deps,
+    );
     for (const destinationUrl of [
       "https://gmail.googleapis.com/gmail/v1/users/another/labels",
       "https://www.googleapis.com/drive/v3/files",
@@ -143,7 +160,11 @@ describe("Nango connection credentials", () => {
       providerDomain: "gmailmcp.googleapis.com",
       credential: { access_token: "native-token", token_type: "Bearer" },
     });
-    const nativeResolver = buildConnectionTokenResolver({} as Database, nangoSettings, deps(nativeRow).deps);
+    const nativeResolver = buildConnectionTokenResolver(
+      {} as Database,
+      nangoSettings,
+      deps(nativeRow).deps,
+    );
     await expect(
       nativeResolver({
         workspaceId: "ws_1",
@@ -154,7 +175,11 @@ describe("Nango connection credentials", () => {
         acceptedTransports: ["nango_proxy"],
       }),
     ).resolves.toMatchObject({ status: "auth_needed", reason: "missing_connection" });
-    const nangoResolver = buildConnectionTokenResolver({} as Database, nangoSettings, deps(nangoCredential()).deps);
+    const nangoResolver = buildConnectionTokenResolver(
+      {} as Database,
+      nangoSettings,
+      deps(nangoCredential()).deps,
+    );
     await expect(
       nangoResolver({
         workspaceId: "ws_1",
@@ -170,11 +195,24 @@ describe("Nango connection credentials", () => {
   test("config-only integrations bind to their tool bridge identity", async () => {
     const linkedin = nangoCredential({
       providerDomain: "nango:linkedin",
-      credential: { type: "nango", nangoConnectionId: "nc-2", providerConfigKey: "linkedin", integrationKey: "linkedin" },
+      credential: {
+        type: "nango",
+        nangoConnectionId: "nc-2",
+        providerConfigKey: "linkedin",
+        integrationKey: "linkedin",
+      },
       metadata: { mcpUrl: "https://nango.opengeni.invalid/tools/linkedin" },
     });
-    const resolver = buildConnectionTokenResolver({} as Database, nangoSettings, deps(linkedin).deps);
-    const ref = { providerDomain: "nango:linkedin", kind: "oauth2" as const, subjectScope: "subject" as const };
+    const resolver = buildConnectionTokenResolver(
+      {} as Database,
+      nangoSettings,
+      deps(linkedin).deps,
+    );
+    const ref = {
+      providerDomain: "nango:linkedin",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
     await expect(
       resolver({
         workspaceId: "ws_1",

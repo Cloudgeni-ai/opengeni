@@ -18,7 +18,11 @@ import PostalMime, { addressParser, decodeWords } from "postal-mime";
 import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
 import { connectorAttachmentFileName } from "./connector-attachments";
 import { nangoProviderDomain, type NangoProxyTransport } from "@opengeni/contracts/nango";
-import { NANGO_PROXY_TRANSPORTS, sendWithCredential, type NangoUsageRecorder } from "./nango-transport";
+import {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+} from "./nango-transport";
 import { projectGmailToolResultForModel } from "./gmail-model-projection";
 import {
   GMAIL_EXTRA_TOOLS,

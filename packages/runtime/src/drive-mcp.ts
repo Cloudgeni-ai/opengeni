@@ -10,7 +10,11 @@ import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import type { McpServerConnectionRef, ToolAuthNeededPayload } from "@opengeni/contracts";
 import type { ResolveConnectionCredentialInput, ResolveConnectionCredentialResult } from "./index";
 import { nangoProviderDomain } from "@opengeni/contracts/nango";
-import { NANGO_PROXY_TRANSPORTS, sendWithCredential, type NangoUsageRecorder } from "./nango-transport";
+import {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+} from "./nango-transport";
 import {
   NANGO_DRIVE_MAX_DOWNLOAD_BYTES,
   NANGO_DRIVE_READ_TOOLS,
@@ -181,7 +185,9 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
     private readonly context: DriveMcpBridgeContext,
   ) {
     this.remote = isNangoDriveConfig(config) ? null : context.createRemoteServer();
-    this.name = this.remote?.name ?? `opengeni-drive-rest-${context.serverId.replace(/[^A-Za-z0-9_-]/gu, "_")}`;
+    this.name =
+      this.remote?.name ??
+      `opengeni-drive-rest-${context.serverId.replace(/[^A-Za-z0-9_-]/gu, "_")}`;
   }
   async connect() {
     await this.remote?.connect();
@@ -193,7 +199,8 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
     await this.remote?.invalidateToolsCache();
   }
   async listTools() {
-    if (!this.remote) return [...structuredClone(NANGO_DRIVE_READ_TOOLS), ...structuredClone(DRIVE_EXTRA_TOOLS)];
+    if (!this.remote)
+      return [...structuredClone(NANGO_DRIVE_READ_TOOLS), ...structuredClone(DRIVE_EXTRA_TOOLS)];
     return mergeDriveMcpTools(await this.remote.listTools());
   }
   async callTool(
@@ -211,7 +218,8 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
     options?: { signal?: AbortSignal },
   ): Promise<DriveToolResult> {
     options?.signal?.throwIfAborted();
-    if (!this.remote && isNangoDriveReadTool(name)) return await this.callRestRead(name, args, options);
+    if (!this.remote && isNangoDriveReadTool(name))
+      return await this.callRestRead(name, args, options);
     if (!Object.hasOwn(definitions, name)) {
       const remote = this.remote;
       if (!remote) return inputError(`Unknown Google Drive tool: ${name}`);
@@ -359,10 +367,7 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
       structuredContent: payload,
     };
   }
-  private async resolve(
-    toolName: string,
-    url: URL,
-  ) {
+  private async resolve(toolName: string, url: URL) {
     const credential = await this.context.resolveCredential({
       workspaceId: this.context.workspaceId,
       serverId: this.context.serverId,
@@ -417,7 +422,9 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
     const parsed = parseNangoDriveRead(name, args);
     if (!parsed.ok) return inputError(parsed.error);
     const input = parsed.input;
-    const getJson = async (url: URL): Promise<{ ok: boolean; payload: Record<string, unknown> } | null> => {
+    const getJson = async (
+      url: URL,
+    ): Promise<{ ok: boolean; payload: Record<string, unknown> } | null> => {
       const credential = await this.resolve(name, url);
       if (credential.status === "auth_needed") return null;
       options?.signal?.throwIfAborted();
@@ -445,7 +452,8 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
     }
     const metadata = await getJson(nangoDriveMetadataUrl(fileId));
     if (!metadata) return reconnectResult();
-    if (name === "get_file_metadata" || !metadata.ok) return jsonResult(metadata.payload, metadata.ok);
+    if (name === "get_file_metadata" || !metadata.ok)
+      return jsonResult(metadata.payload, metadata.ok);
     const mimeType = typeof metadata.payload.mimeType === "string" ? metadata.payload.mimeType : "";
     const purpose = name === "read_file_content" ? "text" : "bytes";
     const target = nangoDriveContentUrl(
@@ -469,13 +477,13 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
     }
     const bytes = await readBoundedBytes(response, NANGO_DRIVE_MAX_DOWNLOAD_BYTES);
     if (!bytes) return inputError("The file is larger than 10 MiB.");
-    const file = { id: fileId, name: metadata.payload.name, mimeType };
+    const fileSummary = { id: fileId, name: metadata.payload.name, mimeType };
     if (purpose === "text") {
       const { text, truncated } = projectNangoDriveText(bytes);
-      return jsonResult({ file, content: text, truncated });
+      return jsonResult({ file: fileSummary, content: text, truncated });
     }
     return jsonResult({
-      file,
+      file: fileSummary,
       contentMimeType: response.headers.get("content-type") ?? mimeType,
       sizeBytes: bytes.byteLength,
       base64Content: Buffer.from(bytes).toString("base64"),
@@ -527,7 +535,8 @@ class DriveMutationOutcomeUnknown extends Error {
 export function isOfficialDriveMcpConfig(config: DriveMcpBridgeConfig): boolean {
   return (
     config.url === OFFICIAL_DRIVE_MCP_URL &&
-    (config.connectionRef?.providerDomain === "drivemcp.googleapis.com" || isNangoDriveConfig(config)) &&
+    (config.connectionRef?.providerDomain === "drivemcp.googleapis.com" ||
+      isNangoDriveConfig(config)) &&
     config.connectionRef?.kind === "oauth2" &&
     config.connectionRef.subjectScope === "subject"
   );

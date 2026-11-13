@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { GMAIL_REST_MCP_BRIDGE_ADAPTER, GmailRestMcpServer, OFFICIAL_GMAIL_MCP_URL } from "../src/gmail-rest-mcp";
+import {
+  GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  GmailRestMcpServer,
+  OFFICIAL_GMAIL_MCP_URL,
+} from "../src/gmail-rest-mcp";
 import {
   GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
   GoogleCalendarRestMcpServer,
@@ -45,10 +49,15 @@ function recordingFetch(respond: (call: Call) => Response) {
 describe("Nango proxy transport", () => {
   test("sends direct credentials unchanged and Nango credentials to the proxy with usage", async () => {
     const { calls, fetchImpl } = recordingFetch(() => Response.json({ ok: true }));
-    await sendWithCredential(fetchImpl, "https://www.googleapis.com/drive/v3/about", {}, {
-      headers: { authorization: "Bearer direct" },
-      connectionId: "c0",
-    });
+    await sendWithCredential(
+      fetchImpl,
+      "https://www.googleapis.com/drive/v3/about",
+      {},
+      {
+        headers: { authorization: "Bearer direct" },
+        connectionId: "c0",
+      },
+    );
     expect(calls[0]).toMatchObject({
       url: "https://www.googleapis.com/drive/v3/about",
       headers: { authorization: "Bearer direct" },
@@ -58,7 +67,11 @@ describe("Nango proxy transport", () => {
       fetchImpl,
       "https://www.googleapis.com/drive/v3/files?pageSize=1",
       { method: "POST", body: "abcd" },
-      { headers: nangoHeaders("google-drive"), connectionId: "c1", proxy: proxy("google-drive", "google-drive") },
+      {
+        headers: nangoHeaders("google-drive"),
+        connectionId: "c1",
+        proxy: proxy("google-drive", "google-drive"),
+      },
       { recorder: (report) => reports.push(report), toolName: "search_files" },
     );
     expect(await response.json()).toEqual({ ok: true });
@@ -88,7 +101,10 @@ describe("Nango proxy transport", () => {
 describe("Google bridges under Nango", () => {
   test("adapters match the Nango provider domains of the same catalog identities", () => {
     expect(
-      GMAIL_REST_MCP_BRIDGE_ADAPTER.matches({ url: OFFICIAL_GMAIL_MCP_URL, connectionRef: subjectRef("nango:gmail") }),
+      GMAIL_REST_MCP_BRIDGE_ADAPTER.matches({
+        url: OFFICIAL_GMAIL_MCP_URL,
+        connectionRef: subjectRef("nango:gmail"),
+      }),
     ).toBe(true);
     expect(
       GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER.matches({
@@ -97,10 +113,16 @@ describe("Google bridges under Nango", () => {
       }),
     ).toBe(true);
     expect(
-      DRIVE_MCP_BRIDGE_ADAPTER.matches({ url: OFFICIAL_DRIVE_MCP_URL, connectionRef: subjectRef("nango:google-drive") }),
+      DRIVE_MCP_BRIDGE_ADAPTER.matches({
+        url: OFFICIAL_DRIVE_MCP_URL,
+        connectionRef: subjectRef("nango:google-drive"),
+      }),
     ).toBe(true);
     expect(
-      GMAIL_REST_MCP_BRIDGE_ADAPTER.matches({ url: OFFICIAL_GMAIL_MCP_URL, connectionRef: subjectRef("nango:other") }),
+      GMAIL_REST_MCP_BRIDGE_ADAPTER.matches({
+        url: OFFICIAL_GMAIL_MCP_URL,
+        connectionRef: subjectRef("nango:other"),
+      }),
     ).toBe(false);
   });
 
@@ -177,7 +199,9 @@ describe("Google bridges under Nango", () => {
       fetchImpl,
     });
     await calendar.callToolResult("list_calendars", {});
-    expect(calls[0]!.url.startsWith("https://api.nango.test/proxy/calendar/v3/users/me/calendarList")).toBe(true);
+    expect(
+      calls[0]!.url.startsWith("https://api.nango.test/proxy/calendar/v3/users/me/calendarList"),
+    ).toBe(true);
     expect(calls[0]!.headers["base-url-override"]).toBe("https://www.googleapis.com");
   });
 
@@ -186,7 +210,11 @@ describe("Google bridges under Nango", () => {
       if (call.url.includes("/export"))
         return new Response("Document text", { headers: { "content-type": "text/plain" } });
       if (call.url.includes("/files/doc1"))
-        return Response.json({ id: "doc1", name: "Plan", mimeType: "application/vnd.google-apps.document" });
+        return Response.json({
+          id: "doc1",
+          name: "Plan",
+          mimeType: "application/vnd.google-apps.document",
+        });
       return Response.json({ files: [{ id: "doc1", name: "Plan" }] });
     });
     let remoteCreated = false;
@@ -211,7 +239,9 @@ describe("Google bridges under Nango", () => {
     );
     expect(remoteCreated).toBe(false);
     const names = (await drive.listTools()).map((tool) => tool.name);
-    expect(names).toEqual(expect.arrayContaining(["search_files", "read_file_content", "update_file", "list_changes"]));
+    expect(names).toEqual(
+      expect.arrayContaining(["search_files", "read_file_content", "update_file", "list_changes"]),
+    );
     expect(names).not.toContain("create_file");
     const search = await drive.callToolResult("search_files", { query: "plan's" });
     expect(search.structuredContent).toEqual({ files: [{ id: "doc1", name: "Plan" }] });
@@ -231,9 +261,24 @@ describe("generic Nango tools bridge", () => {
   const url = "https://nango.opengeni.invalid/tools/linkedin";
   const functions = {
     data: [
-      { type: "tool", name: "create-post", description: "Create a LinkedIn post", input_json_schema: { type: "object", properties: { text: { type: "string" } } } },
-      { type: "tool", name: "get-profile", description: "Read the profile", input_json_schema: { type: "object" } },
-      { type: "action", name: "delete-post", description: "Delete a post", json_schema: { type: "object" } },
+      {
+        type: "tool",
+        name: "create-post",
+        description: "Create a LinkedIn post",
+        input_json_schema: { type: "object", properties: { text: { type: "string" } } },
+      },
+      {
+        type: "tool",
+        name: "get-profile",
+        description: "Read the profile",
+        input_json_schema: { type: "object" },
+      },
+      {
+        type: "action",
+        name: "delete-post",
+        description: "Delete a post",
+        json_schema: { type: "object" },
+      },
       { type: "sync", name: "posts" },
     ],
     pagination: { total: 4 },
@@ -264,17 +309,41 @@ describe("generic Nango tools bridge", () => {
 
   test("matches only its own synthetic identity and Nango domain", () => {
     expect(NANGO_TOOLS_MCP_BRIDGE_ADAPTER.matches({ url, connectionRef: ref })).toBe(true);
-    expect(NANGO_TOOLS_MCP_BRIDGE_ADAPTER.matches({ url, connectionRef: subjectRef("nango:x") })).toBe(false);
-    expect(NANGO_TOOLS_MCP_BRIDGE_ADAPTER.matches({ url: "https://example.com/mcp", connectionRef: ref })).toBe(false);
+    expect(
+      NANGO_TOOLS_MCP_BRIDGE_ADAPTER.matches({ url, connectionRef: subjectRef("nango:x") }),
+    ).toBe(false);
+    expect(
+      NANGO_TOOLS_MCP_BRIDGE_ADAPTER.matches({
+        url: "https://example.com/mcp",
+        connectionRef: ref,
+      }),
+    ).toBe(false);
   });
 
   test("lists Nango tools filtered by the allowlist and classified for approvals", async () => {
     const { server } = bridge(
       () => Response.json(functions),
-      new Map([["linkedin", { tools: { source: "nango" as const, allow: ["create-post", "get-profile"], read: ["get-profile"] } }]]),
+      new Map([
+        [
+          "linkedin",
+          {
+            tools: {
+              source: "nango" as const,
+              allow: ["create-post", "get-profile"],
+              read: ["get-profile"],
+            },
+          },
+        ],
+      ]),
     );
     const tools = await server.listTools();
-    expect(tools.map((tool) => [tool.name, tool.annotations?.readOnlyHint, tool.annotations?.destructiveHint])).toEqual([
+    expect(
+      tools.map((tool) => [
+        tool.name,
+        tool.annotations?.readOnlyHint,
+        tool.annotations?.destructiveHint,
+      ]),
+    ).toEqual([
       ["create-post", false, true],
       ["get-profile", true, false],
     ]);
@@ -284,7 +353,9 @@ describe("generic Nango tools bridge", () => {
 
   test("executes through the tool call endpoint and records usage", async () => {
     const { server, calls, reports } = bridge((call) =>
-      call.url.includes("/functions") ? Response.json(functions) : Response.json({ id: "urn:li:share:1" }),
+      call.url.includes("/functions")
+        ? Response.json(functions)
+        : Response.json({ id: "urn:li:share:1" }),
     );
     const result = await server.callToolResult("create-post", { text: "Hello" });
     expect(result.structuredContent).toEqual({ id: "urn:li:share:1" });
@@ -294,7 +365,11 @@ describe("generic Nango tools bridge", () => {
     expect(call.headers["provider-config-key"]).toBe("linkedin");
     expect(call.body).toBe(JSON.stringify({ input: { text: "Hello" } }));
     expect(reports).toHaveLength(1);
-    expect(reports[0]).toMatchObject({ kind: "tool_call", toolName: "create-post", httpStatus: 200 });
+    expect(reports[0]).toMatchObject({
+      kind: "tool_call",
+      toolName: "create-post",
+      httpStatus: 200,
+    });
   });
 
   test("a write that may have reached Nango is never reported as not executed", async () => {

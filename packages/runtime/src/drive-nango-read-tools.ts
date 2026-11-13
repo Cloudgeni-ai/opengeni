@@ -41,7 +41,8 @@ export const NANGO_DRIVE_READ_DEFINITIONS = {
       .strict(),
   },
   get_file_metadata: {
-    description: "Get a Google Drive file's metadata: name, type, owners, size, parents, times and links.",
+    description:
+      "Get a Google Drive file's metadata: name, type, owners, size, parents, times and links.",
     schema: z.object({ fileId: id }).strict(),
   },
   get_file_permissions: {
@@ -121,16 +122,17 @@ export type NangoDriveReadPlan = {
 export function parseNangoDriveRead(
   name: NangoDriveReadName,
   args: Record<string, unknown> | null,
-):
-  | { ok: true; input: Record<string, unknown> }
-  | { ok: false; error: string } {
+): { ok: true; input: Record<string, unknown> } | { ok: false; error: string } {
   const parsed = NANGO_DRIVE_READ_DEFINITIONS[name].schema.safeParse(args ?? {});
   return parsed.success
     ? { ok: true, input: parsed.data as Record<string, unknown> }
     : { ok: false, error: parsed.error.message };
 }
 
-export function nangoDriveListUrl(name: "search_files" | "list_recent_files", input: Record<string, unknown>): URL {
+export function nangoDriveListUrl(
+  name: "search_files" | "list_recent_files",
+  input: Record<string, unknown>,
+): URL {
   const url = new URL(`${API}files`);
   url.searchParams.set("pageSize", String(input.pageSize ?? 25));
   if (typeof input.pageToken === "string") url.searchParams.set("pageToken", input.pageToken);
@@ -139,7 +141,10 @@ export function nangoDriveListUrl(name: "search_files" | "list_recent_files", in
   url.searchParams.set("fields", LIST_FIELDS);
   if (name === "search_files") {
     const text = escapeQuery(String(input.query));
-    url.searchParams.set("q", `(name contains '${text}' or fullText contains '${text}') and trashed = false`);
+    url.searchParams.set(
+      "q",
+      `(name contains '${text}' or fullText contains '${text}') and trashed = false`,
+    );
   } else {
     url.searchParams.set("q", "trashed = false");
     url.searchParams.set("orderBy", "modifiedTime desc");
@@ -179,7 +184,10 @@ export function nangoDriveContentUrl(
     url.searchParams.set("mimeType", target);
     return url;
   }
-  if (purpose === "text" && !/^(?:text\/|application\/(?:json|xml|x-yaml|yaml|csv|javascript|x-sh))/u.test(mimeType))
+  if (
+    purpose === "text" &&
+    !/^(?:text\/|application\/(?:json|xml|x-yaml|yaml|csv|javascript|x-sh))/u.test(mimeType)
+  )
     return { error: `This file (${mimeType}) is not text. Use download_file_content.` };
   const url = new URL(`${API}files/${fileId}`);
   url.searchParams.set("alt", "media");

@@ -13082,10 +13082,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
   if (settings.nangoSecretKey) {
     const nangoBase = new URL(settings.nangoApiBaseUrl);
-    if (
-      nangoBase.protocol !== "https:" &&
-      !["local", "test"].includes(settings.environment)
-    ) {
+    if (nangoBase.protocol !== "https:" && !["local", "test"].includes(settings.environment)) {
       throw new Error("OPENGENI_NANGO_API_BASE_URL must use https outside local/test");
     }
     if (nangoBase.search || nangoBase.hash || nangoBase.username || nangoBase.password) {

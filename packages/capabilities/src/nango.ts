@@ -47,7 +47,8 @@ export function parseNangoAuthWebhook(payload: unknown): NangoAuthWebhook | null
   if (!payload || typeof payload !== "object") return null;
   const raw = payload as Record<string, unknown>;
   if (raw.type !== "auth" || typeof raw.operation !== "string") return null;
-  if (typeof raw.connectionId !== "string" || typeof raw.providerConfigKey !== "string") return null;
+  if (typeof raw.connectionId !== "string" || typeof raw.providerConfigKey !== "string")
+    return null;
   const tags: Record<string, string> = {};
   if (raw.tags && typeof raw.tags === "object" && !Array.isArray(raw.tags))
     for (const [key, value] of Object.entries(raw.tags as Record<string, unknown>))
@@ -90,7 +91,10 @@ export type NangoConnectionSummary = {
 
 const MAX_NANGO_RESPONSE_BYTES = 4 * 1024 * 1024;
 
-async function readBoundedText(response: Response, maxBytes = MAX_NANGO_RESPONSE_BYTES): Promise<string> {
+async function readBoundedText(
+  response: Response,
+  maxBytes = MAX_NANGO_RESPONSE_BYTES,
+): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) return "";
   const chunks: Uint8Array[] = [];

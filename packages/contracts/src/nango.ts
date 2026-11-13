@@ -71,7 +71,10 @@ export const NATIVE_NANGO_INTEGRATIONS: readonly NativeNangoIntegration[] = Obje
     mcpUrl: "https://drivemcp.googleapis.com/mcp/v1",
     destinations: Object.freeze([
       Object.freeze({ origin: "https://www.googleapis.com", pathPrefix: "/drive/v3/" }),
-      Object.freeze({ origin: "https://www.googleapis.com", pathPrefix: "/upload/drive/v3/files/" }),
+      Object.freeze({
+        origin: "https://www.googleapis.com",
+        pathPrefix: "/upload/drive/v3/files/",
+      }),
     ]),
     accountIdentity: Object.freeze({
       url: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
@@ -97,7 +100,9 @@ export function nangoProviderDomain(integrationKey: string): string {
   return `${NANGO_PROVIDER_DOMAIN_PREFIX}${integrationKey}`;
 }
 
-export function nangoIntegrationKeyFromProviderDomain(domain: string | null | undefined): string | null {
+export function nangoIntegrationKeyFromProviderDomain(
+  domain: string | null | undefined,
+): string | null {
   if (typeof domain !== "string") return null;
   const lower = domain.toLowerCase();
   if (!lower.startsWith(NANGO_PROVIDER_DOMAIN_PREFIX)) return null;
@@ -219,7 +224,11 @@ function boundedText(value: unknown, max: number): string | undefined {
 
 function toolNames(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  return [...new Set(value.filter((name): name is string => typeof name === "string" && TOOL_NAME.test(name)))];
+  return [
+    ...new Set(
+      value.filter((name): name is string => typeof name === "string" && TOOL_NAME.test(name)),
+    ),
+  ];
 }
 
 /**
@@ -257,7 +266,11 @@ export function parseNangoIntegrationDefinition(value: unknown): NangoIntegratio
   }
   if (Array.isArray(raw.scopes))
     definition.scopes = [
-      ...new Set(raw.scopes.filter((scope): scope is string => typeof scope === "string" && scope.length <= 512)),
+      ...new Set(
+        raw.scopes.filter(
+          (scope): scope is string => typeof scope === "string" && scope.length <= 512,
+        ),
+      ),
     ];
   return definition;
 }
@@ -504,7 +517,8 @@ export function estimateNangoCostUsd(input: {
   computeSeconds: number;
 }): { connections: number; transfer: number; compute: number; total: number } {
   const round = (value: number) => Math.round(value * 1_000_000) / 1_000_000;
-  const connections = (input.connectionSeconds / SECONDS_PER_MONTH) * NANGO_PRICING.connectionMonthUsd;
+  const connections =
+    (input.connectionSeconds / SECONDS_PER_MONTH) * NANGO_PRICING.connectionMonthUsd;
   const transfer = (input.transferBytes / 1_000_000_000) * NANGO_PRICING.egressGbUsd;
   const compute = (input.computeSeconds / 3600) * NANGO_PRICING.computeHourUsd;
   return {

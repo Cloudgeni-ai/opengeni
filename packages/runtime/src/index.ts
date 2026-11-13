@@ -12,10 +12,7 @@ export {
 } from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
 import type { NangoIntegrationDefinition, NangoProxyTransport } from "@opengeni/contracts/nango";
-import {
-  NANGO_TOOLS_MCP_BRIDGE_ADAPTER,
-  type NangoToolsMcpBridgeContext,
-} from "./nango-tools-mcp";
+import { NANGO_TOOLS_MCP_BRIDGE_ADAPTER, type NangoToolsMcpBridgeContext } from "./nango-tools-mcp";
 import type { NangoUsageRecorder } from "./nango-transport";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,

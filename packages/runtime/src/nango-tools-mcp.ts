@@ -74,7 +74,9 @@ class NangoToolOutcomeUnknownError extends Error {
   readonly connectorActionOutcome = "uncertain";
   readonly retryable = false;
   constructor(toolName: string) {
-    super(`${toolName} was submitted but its outcome is uncertain. Check the result before trying again.`);
+    super(
+      `${toolName} was submitted but its outcome is uncertain. Check the result before trying again.`,
+    );
   }
 }
 
@@ -83,7 +85,12 @@ function errorResult(text: string, code: string): ToolResult {
     isError: true,
     content: [{ type: "text", text }],
     structuredContent: {
-      error: { connectorActionOutcome: "not_executed", outcomeUnknown: false, code, retryable: false },
+      error: {
+        connectorActionOutcome: "not_executed",
+        outcomeUnknown: false,
+        code,
+        retryable: false,
+      },
     },
   };
 }
@@ -151,7 +158,9 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
     this.tools = null;
   }
 
-  private async loadTools(): Promise<Map<string, NangoToolDescriptor & { group: "read" | "write" }>> {
+  private async loadTools(): Promise<
+    Map<string, NangoToolDescriptor & { group: "read" | "write" }>
+  > {
     if (this.tools) return this.tools;
     const credential = await this.resolve();
     if (!credential?.proxy) throw new Error("Authentication required for this connection");
@@ -163,7 +172,10 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
       );
       const response = await this.fetchImpl(url, {
         method: "GET",
-        headers: { authorization: credential.headers.authorization ?? "", accept: "application/json" },
+        headers: {
+          authorization: credential.headers.authorization ?? "",
+          accept: "application/json",
+        },
         redirect: "error",
         signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
       });
@@ -176,12 +188,23 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
         const raw = entry as Record<string, unknown>;
         if ((raw.type !== "tool" && raw.type !== "action") || raw.enabled === false) continue;
         if (typeof raw.name !== "string") continue;
-        const schema = (raw.input_json_schema ?? raw.json_schema) as Record<string, unknown> | null | undefined;
+        const schema = (raw.input_json_schema ?? raw.json_schema) as
+          | Record<string, unknown>
+          | null
+          | undefined;
         const endpoint = raw.endpoint as { method?: unknown } | undefined;
-        const method = typeof raw.method === "string" ? raw.method : typeof endpoint?.method === "string" ? endpoint.method : undefined;
+        const method =
+          typeof raw.method === "string"
+            ? raw.method
+            : typeof endpoint?.method === "string"
+              ? endpoint.method
+              : undefined;
         listed.push({
           name: raw.name,
-          description: typeof raw.description === "string" && raw.description.trim() ? raw.description.slice(0, 4000) : raw.name,
+          description:
+            typeof raw.description === "string" && raw.description.trim()
+              ? raw.description.slice(0, 4000)
+              : raw.name,
           inputSchema:
             schema && typeof schema === "object" && !Array.isArray(schema)
               ? schema
@@ -207,7 +230,11 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
     return [...tools.values()].map((tool) => ({
       name: tool.name,
       description: tool.description,
-      inputSchema: { type: "object", properties: {}, ...tool.inputSchema } as ListedTool["inputSchema"],
+      inputSchema: {
+        type: "object",
+        properties: {},
+        ...tool.inputSchema,
+      } as ListedTool["inputSchema"],
       annotations: {
         readOnlyHint: tool.group === "read",
         destructiveHint: tool.group === "write",
@@ -231,7 +258,8 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
     const tool = (await this.loadTools()).get(name);
     if (!tool) return errorResult(`Unknown tool: ${name}`, "invalid_input");
     const credential = await this.resolve(name);
-    if (!credential?.proxy) return errorResult("Authentication required for this connection", "authentication_required");
+    if (!credential?.proxy)
+      return errorResult("Authentication required for this connection", "authentication_required");
     if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest()))
       return errorResult("Authentication required for this connection", "authentication_required");
     const proxy = credential.proxy;
@@ -290,11 +318,16 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
       text = await response.text();
     } catch {
       report(response.status, 0);
-      if (write && (response.ok || response.status >= 500)) throw new NangoToolOutcomeUnknownError(name);
-      return errorResult(`${name} returned an unreadable response (${response.status}).`, "tool_failed");
+      if (write && (response.ok || response.status >= 500))
+        throw new NangoToolOutcomeUnknownError(name);
+      return errorResult(
+        `${name} returned an unreadable response (${response.status}).`,
+        "tool_failed",
+      );
     }
     report(response.status, new TextEncoder().encode(text).byteLength);
-    if (text.length > MAX_TOOL_RESPONSE_BYTES) return errorResult(`${name} returned too much data.`, "tool_failed");
+    if (text.length > MAX_TOOL_RESPONSE_BYTES)
+      return errorResult(`${name} returned too much data.`, "tool_failed");
     let output: unknown = text;
     try {
       output = text ? JSON.parse(text) : {};
@@ -306,14 +339,21 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
       const message =
         (output as { error?: { message?: unknown } } | null)?.error?.message ??
         `${name} failed (${response.status}).`;
-      return errorResult(String(message).slice(0, 2000), response.status === 401 || response.status === 403 ? "authentication_required" : "tool_failed");
+      return errorResult(
+        String(message).slice(0, 2000),
+        response.status === 401 || response.status === 403
+          ? "authentication_required"
+          : "tool_failed",
+      );
     }
     const structured =
       output && typeof output === "object" && !Array.isArray(output)
         ? (output as Record<string, unknown>)
         : { result: output };
     return {
-      content: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output) }],
+      content: [
+        { type: "text", text: typeof output === "string" ? output : JSON.stringify(output) },
+      ],
       structuredContent: structured,
     };
   }

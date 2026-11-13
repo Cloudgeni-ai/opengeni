@@ -50,7 +50,11 @@ async function organization(name: string) {
     subjectId: `user:${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
-  return { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    subjectId: grant.subjectId,
+  };
 }
 
 test("the backend switch is owner-written, append-only and runtime-readable", async () => {
@@ -91,7 +95,9 @@ test("the backend switch is owner-written, append-only and runtime-readable", as
     'test operator', 'Route through Nango again')`;
   expect(await cache.get(client.db)).toBe(first);
   cache.invalidate();
-  expect((await cache.get(client.db)).find((setting) => setting.integrationKey === key)?.backend).toBe("nango");
+  expect(
+    (await cache.get(client.db)).find((setting) => setting.integrationKey === key)?.backend,
+  ).toBe("nango");
 });
 
 test("usage events stay inside their organization and summarize into estimates", async () => {
@@ -106,8 +112,16 @@ test("usage events stay inside their organization and summarize into estimates",
     providerConfigKey: "google-mail",
     nangoConnectionId: "nango-a",
   };
-  await insertNangoUsageEvent(client.db, { ...base, kind: "connection_created", occurredAt: new Date("2026-09-20T00:00:00Z") });
-  await insertNangoUsageEvent(client.db, { ...base, kind: "connection_deleted", occurredAt: new Date("2026-10-16T00:00:00Z") });
+  await insertNangoUsageEvent(client.db, {
+    ...base,
+    kind: "connection_created",
+    occurredAt: new Date("2026-09-20T00:00:00Z"),
+  });
+  await insertNangoUsageEvent(client.db, {
+    ...base,
+    kind: "connection_deleted",
+    occurredAt: new Date("2026-10-16T00:00:00Z"),
+  });
   await insertNangoUsageEvent(client.db, {
     ...base,
     kind: "proxy_request",
@@ -137,7 +151,11 @@ test("usage events stay inside their organization and summarize into estimates",
   });
   // A usage event may not claim another organization's workspace.
   await expect(
-    insertNangoUsageEvent(client.db, { ...base, workspaceId: b.workspaceId, kind: "proxy_request" }),
+    insertNangoUsageEvent(client.db, {
+      ...base,
+      workspaceId: b.workspaceId,
+      kind: "proxy_request",
+    }),
   ).rejects.toThrow();
 
   const summary = await withAccountRls(client.db, a.accountId, (scoped) =>
@@ -186,7 +204,10 @@ test("the operator export lists native and Nango connections of an integration",
       [nangoId, "nango"],
     ].sort(),
   );
-  expect(rows[0]).toMatchObject({ organizationName: "Export org", accountLabel: "person@example.com" });
+  expect(rows[0]).toMatchObject({
+    organizationName: "Export org",
+    accountLabel: "person@example.com",
+  });
   await expect(listNangoAffectedConnections(client.db, "gmail")).rejects.toThrow();
 });
 
@@ -201,9 +222,9 @@ test("the operator export lists native X social accounts for x", async () => {
   const rows = (await listNangoAffectedConnections(adminClient.db, "x")).filter(
     (row) => row.organizationId === org.accountId,
   );
-  expect(rows.map((row) => [row.connectionId, row.backend, row.providerDomain, row.accountLabel])).toEqual([
-    [socialId, "native", "x.com", "opengeni"],
-  ]);
+  expect(
+    rows.map((row) => [row.connectionId, row.backend, row.providerDomain, row.accountLabel]),
+  ).toEqual([[socialId, "native", "x.com", "opengeni"]]);
   expect(
     (await listNangoAffectedConnections(adminClient.db, "gmail")).some(
       (row) => row.connectionId === socialId,

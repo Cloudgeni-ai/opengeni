@@ -2410,37 +2410,37 @@ export function configuredMcpCatalogItems(
       .map((server) =>
         nangoConfiguredCatalogItem(
           CapabilityCatalogItem.parse({
-          id: `mcp:${server.id}`,
-          kind: "mcp",
-          source: "configured",
-          name: server.name ?? server.id,
-          description: null,
-          category: "configured",
-          tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
-          endpointUrl: server.url,
-          authKind:
-            server.connectionRef?.authoritySource !== "host" &&
-            server.connectionRef?.kind === "oauth2"
-              ? "oauth2"
-              : null,
-          // Deployment-managed personal selectors need the same account picker
-          // as installed connectors. Fixed bindings remain server-resolved.
-          connectionRef:
-            server.connectionRef?.subjectScope === "subject" && !server.connectionRef.connectionId
-              ? installationConnectionRef({ connectionRef: server.connectionRef })
-              : null,
-          tools: [{ kind: "mcp", id: server.id }],
-          runtime: {
-            available: true,
-            mcpServerId: server.id,
-            transport: "streamable-http",
-            notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
-          },
-          metadata: {
-            mcpServerId: server.id,
-            allowedTools: server.allowedTools ?? [],
-            cacheToolsList: server.cacheToolsList,
-          },
+            id: `mcp:${server.id}`,
+            kind: "mcp",
+            source: "configured",
+            name: server.name ?? server.id,
+            description: null,
+            category: "configured",
+            tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
+            endpointUrl: server.url,
+            authKind:
+              server.connectionRef?.authoritySource !== "host" &&
+              server.connectionRef?.kind === "oauth2"
+                ? "oauth2"
+                : null,
+            // Deployment-managed personal selectors need the same account picker
+            // as installed connectors. Fixed bindings remain server-resolved.
+            connectionRef:
+              server.connectionRef?.subjectScope === "subject" && !server.connectionRef.connectionId
+                ? installationConnectionRef({ connectionRef: server.connectionRef })
+                : null,
+            tools: [{ kind: "mcp", id: server.id }],
+            runtime: {
+              available: true,
+              mcpServerId: server.id,
+              transport: "streamable-http",
+              notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
+            },
+            metadata: {
+              mcpServerId: server.id,
+              allowedTools: server.allowedTools ?? [],
+              cacheToolsList: server.cacheToolsList,
+            },
           }),
           nangoByServerUrl.get(server.url),
         ),

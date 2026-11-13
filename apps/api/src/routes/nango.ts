@@ -17,14 +17,19 @@ export const NANGO_USAGE_PATH = "/v1/billing/integration-usage";
 
 const MAX_USAGE_PERIOD_MS = 366 * 24 * 60 * 60 * 1000;
 
-function usagePeriod(query: { since?: string | undefined; until?: string | undefined }): { since: Date; until: Date } {
+function usagePeriod(query: { since?: string | undefined; until?: string | undefined }): {
+  since: Date;
+  until: Date;
+} {
   const now = new Date();
   const until = query.until ? new Date(query.until) : now;
   const since = query.since
     ? new Date(query.since)
     : new Date(Date.UTC(until.getUTCFullYear(), until.getUTCMonth(), 1));
   if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime()) || since >= until)
-    throw new HTTPException(400, { message: "since and until must be ISO times with since before until" });
+    throw new HTTPException(400, {
+      message: "since and until must be ISO times with since before until",
+    });
   if (until.getTime() - since.getTime() > MAX_USAGE_PERIOD_MS)
     throw new HTTPException(400, { message: "usage periods are at most one year" });
   return { since, until };

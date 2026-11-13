@@ -88,7 +88,9 @@ type NangoDeps = {
 };
 
 async function backendsFor(deps: NangoDeps) {
-  return deps.nangoBackends ? await deps.nangoBackends() : await nangoBackendsFor(deps.db, deps.settings);
+  return deps.nangoBackends
+    ? await deps.nangoBackends()
+    : await nangoBackendsFor(deps.db, deps.settings);
 }
 
 export const NANGO_CONNECT_PATH = "/v1/integrations/nango/connect";
@@ -131,7 +133,10 @@ function integrationOwnership(integration: EffectiveNangoIntegration): Connectio
 }
 
 function connectMcpUrl(integration: EffectiveNangoIntegration): string {
-  return integration.native?.mcpUrl ?? `https://nango.opengeni.invalid/tools/${integration.integrationKey}`;
+  return (
+    integration.native?.mcpUrl ??
+    `https://nango.opengeni.invalid/tools/${integration.integrationKey}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +193,9 @@ export function readNangoConnectState(settings: Settings, token: string): NangoC
     mcpUrl: required("mcpUrl"),
     returnPath: safeReturnPath(text(payload.returnPath) ?? INTEGRATIONS_FALLBACK_PATH),
     ...(text(payload.returnUrl) ? { returnUrl: text(payload.returnUrl)! } : {}),
-    ...(text(payload.connectAttemptId) ? { connectAttemptId: text(payload.connectAttemptId)! } : {}),
+    ...(text(payload.connectAttemptId)
+      ? { connectAttemptId: text(payload.connectAttemptId)! }
+      : {}),
     ...(text(payload.encryptedExternalContinuation, 16384)
       ? { encryptedExternalContinuation: text(payload.encryptedExternalContinuation, 16384)! }
       : {}),
@@ -329,7 +336,9 @@ export async function nangoConnectPage(
     throw new HTTPException(422, { message: "This account cannot own a personal connection" });
   const integration = (await backendsFor(deps)).get(state.integrationKey);
   if (!integration || integration.providerConfigKey !== state.providerConfigKey)
-    throw new HTTPException(409, { message: "This integration is no longer connected through Nango" });
+    throw new HTTPException(409, {
+      message: "This integration is no longer connected through Nango",
+    });
   const session = await nangoClient(deps).createConnectSession({
     tags: nangoAttemptTags(attemptTags(state)),
     allowedIntegrations: [state.providerConfigKey],
@@ -386,7 +395,8 @@ async function readConnectionIdentity(
   if (response.status < 200 || response.status >= 300)
     throw new HTTPException(502, { message: "The connected account could not be verified" });
   const label = readIdentityField(response.body, identity.field);
-  if (!label) throw new HTTPException(502, { message: "The connected account could not be verified" });
+  if (!label)
+    throw new HTTPException(502, { message: "The connected account could not be verified" });
   const key = ACCOUNT_IDENTITY_KEYS[integration.integrationKey];
   return { label, metadata: key ? { [key]: label, accountEmail: label } : { accountLabel: label } };
 }
@@ -419,7 +429,10 @@ function encryptedNangoCredential(
     providerConfigKey: integration.providerConfigKey,
     integrationKey: integration.integrationKey,
   };
-  return encryptEnvironmentValue(requireEnvironmentEncryption(settings), JSON.stringify(credential));
+  return encryptEnvironmentValue(
+    requireEnvironmentEncryption(settings),
+    JSON.stringify(credential),
+  );
 }
 
 async function ownerConnections(
@@ -461,7 +474,11 @@ async function persistNangoConnection(
     nangoConnectionId: string;
     identity: ConnectionIdentity;
   },
-): Promise<{ connection: ConnectionMetadata; created: boolean; replacedNangoConnectionId: string | null }> {
+): Promise<{
+  connection: ConnectionMetadata;
+  created: boolean;
+  replacedNangoConnectionId: string | null;
+}> {
   const ownerSubjectId = input.ownership === "personal" ? input.subjectId : null;
   const existing = await ownerConnections(
     db,
@@ -472,7 +489,12 @@ async function persistNangoConnection(
     (connection) => connection.metadata.nangoConnectionId === input.nangoConnectionId,
   );
   if (same) return { connection: same, created: false, replacedNangoConnectionId: null };
-  const metadata = nangoMetadata(input.integration, input.mcpUrl, input.nangoConnectionId, input.identity);
+  const metadata = nangoMetadata(
+    input.integration,
+    input.mcpUrl,
+    input.nangoConnectionId,
+    input.identity,
+  );
   const credentialEncrypted = encryptedNangoCredential(
     settings,
     input.integration,
@@ -484,7 +506,8 @@ async function persistNangoConnection(
     ? existing.find((connection) =>
         Object.values(input.identity.metadata).some(
           (value) =>
-            value === connection.metadata.accountEmail || value === connection.metadata.accountLabel,
+            value === connection.metadata.accountEmail ||
+            value === connection.metadata.accountLabel,
         ),
       )
     : existing.length === 1
@@ -546,11 +569,16 @@ export async function completeNangoConnect(
     throw new HTTPException(422, { message: "This account cannot own a personal connection" });
   const integration = (await backendsFor(deps)).get(state.integrationKey);
   if (!integration || integration.providerConfigKey !== state.providerConfigKey)
-    throw new HTTPException(409, { message: "This integration is no longer connected through Nango" });
+    throw new HTTPException(409, {
+      message: "This integration is no longer connected through Nango",
+    });
   const client = nangoClient(deps);
   const tags = attemptTags(state);
   const match = (
-    await client.listConnections({ tags: nangoAttemptTags(tags), integrationId: state.providerConfigKey })
+    await client.listConnections({
+      tags: nangoAttemptTags(tags),
+      integrationId: state.providerConfigKey,
+    })
   ).find(
     (connection) =>
       connection.providerConfigKey === state.providerConfigKey &&
@@ -562,7 +590,9 @@ export async function completeNangoConnect(
     identity = await readConnectionIdentity(client, integration, match.connectionId);
   } catch (error) {
     // An account we cannot name is never stored; stop its Nango billing too.
-    await client.deleteConnection(match.connectionId, state.providerConfigKey).catch(() => undefined);
+    await client
+      .deleteConnection(match.connectionId, state.providerConfigKey)
+      .catch(() => undefined);
     throw error;
   }
   const success = (connection: ConnectionMetadata): NangoConnectCompletion => {
@@ -614,7 +644,8 @@ export async function completeNangoConnect(
       { ...operation, expectedRevision: stored.attempt.revision, authorize },
       integration.integrationKey,
     );
-    if (claim.status === "replayed") return { status: "complete", redirectTo: stored.returnUrl!, exactReturn: true };
+    if (claim.status === "replayed")
+      return { status: "complete", redirectTo: stored.returnUrl!, exactReturn: true };
     await finishOAuthAcquisition(
       deps.db,
       state,
@@ -677,7 +708,12 @@ export async function completeNangoConnect(
 
 async function afterNangoConnectionStored(
   deps: NangoDeps,
-  owner: { accountId: string; workspaceId: string; subjectId: string; ownership: ConnectionOwnership },
+  owner: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    ownership: ConnectionOwnership;
+  },
   integration: EffectiveNangoIntegration,
   result: Awaited<ReturnType<typeof persistNangoConnection>>,
   nangoConnectionId: string,
@@ -810,7 +846,9 @@ export async function handleNangoWebhook(
   const stored = connections.find(
     (connection) => connection.metadata.nangoConnectionId === event.connectionId,
   );
-  const usage = (kind: "connection_needs_reauth" | "connection_deleted" | "connection_reconnected") =>
+  const usage = (
+    kind: "connection_needs_reauth" | "connection_deleted" | "connection_reconnected",
+  ) =>
     stored &&
     recordNangoUsageEvent(deps.db, {
       accountId,
@@ -825,7 +863,8 @@ export async function handleNangoWebhook(
   switch (event.operation) {
     case "creation":
     case "override": {
-      if (stored || !event.success || !integration) return stored ? "ignored" : "unknown_connection";
+      if (stored || !event.success || !integration)
+        return stored ? "ignored" : "unknown_connection";
       if (integration.providerConfigKey !== event.providerConfigKey) return "ignored";
       // Backup finalizer: the page did not finish (closed early). The tags
       // were set by this server for one signed, verified attempt.
@@ -868,11 +907,17 @@ export async function handleNangoWebhook(
     case "refresh": {
       if (!stored) return "unknown_connection";
       if (!event.success && stored.status === "active") {
-        await setConnectionStatus(deps.db, stored.workspaceId, "needs_reauth", "nango_refresh_failed", {
-          id: stored.id,
-          version: stored.version,
-          subjectId: stored.subjectId,
-        });
+        await setConnectionStatus(
+          deps.db,
+          stored.workspaceId,
+          "needs_reauth",
+          "nango_refresh_failed",
+          {
+            id: stored.id,
+            version: stored.version,
+            subjectId: stored.subjectId,
+          },
+        );
         usage("connection_needs_reauth");
         return "needs_reauth";
       }
