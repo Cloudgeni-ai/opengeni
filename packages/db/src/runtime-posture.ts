@@ -1952,7 +1952,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
   "set_credit_promotion_policy(jsonb, text, text)",
-  // 1405_nango_integrations: owner-only operator setter and export.
+  // 1406_nango_integrations: owner-only operator setter and export.
   "set_integration_backend(text, text, text, boolean, jsonb, text, text)",
   "nango_affected_connections(text)",
   "set_subscription_plan_catalog(jsonb, text, text)",
@@ -2944,7 +2944,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "company_profile_snapshots",
   "deployment_model_catalog",
   "document_authority_reclassifications",
-  // 1405_nango_integrations: the operator integration backend switch.
+  // 1406_nango_integrations: the operator integration backend switch.
   "integration_backend_revisions",
   "knowledge_lifecycle_events",
   "knowledge_memories",
@@ -3026,7 +3026,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
-  // 1405_nango_integrations: append-only Nango usage events.
+  // 1406_nango_integrations: append-only Nango usage events.
   "nango_usage_events",
   // 1377_opengeni_console: append-only Console audit log and end-user labels.
   "organization_console_audit_events",

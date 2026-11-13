@@ -16,7 +16,7 @@ never exposes Nango's whole catalog or Nango's own MCP server.
 | --------------------------- | --------------------------------------------------------------------------------------------------- |
 | Shared types, pricing       | `packages/contracts/src/nango.ts`                                                                   |
 | Nango HTTP client, webhooks | `packages/capabilities/src/nango.ts`                                                                |
-| Switch, usage, export (DB)  | `packages/db/drizzle/1405_nango_integrations.sql`, `packages/db/src/nango-integrations.ts`          |
+| Switch, usage, export (DB)  | `packages/db/drizzle/1406_nango_integrations.sql`, `packages/db/src/nango-integrations.ts`          |
 | Credential resolution       | `packages/db/src/connection-token-resolver.ts`                                                      |
 | Catalog and projection      | `packages/core/src/domain/nango-integrations.ts`, `packages/core/src/domain/capabilities.ts`        |
 | Proxy transport             | `packages/runtime/src/nango-transport.ts`                                                           |
