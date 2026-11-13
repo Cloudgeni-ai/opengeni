@@ -14,6 +14,11 @@ import {
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { listOwnConnectionMetadata } from "./personal-connection-delegations";
+import {
+  catalogProviderDomain,
+  projectConnectionsForBackends,
+  type NangoBackends,
+} from "./nango-integrations";
 
 /**
  * A connection that exists but stopped working: its provider rejected the
@@ -63,9 +68,19 @@ function needingReconnect(
  */
 export async function listConnectionsNeedingReconnect(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string | null },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    /** The integration backend switch; native accounts of a Nango-backed service need reconnecting. */
+    integrationBackends?: NangoBackends;
+  },
 ): Promise<ConnectionNeedingReconnect[]> {
-  const shared = (await listConnectionsMetadata(db, input.workspaceId, null)).filter(
+  const backends = input.integrationBackends ?? new Map();
+  const shared = projectConnectionsForBackends(
+    await listConnectionsMetadata(db, input.workspaceId, null),
+    backends,
+  ).filter(
     (connection) =>
       connection.subjectId === null &&
       connection.accountId === input.accountId &&
@@ -73,14 +88,15 @@ export async function listConnectionsNeedingReconnect(
   );
   // `db` may be one bounded transaction: these reads must not overlap.
   const own = input.subjectId
-    ? (
+    ? projectConnectionsForBackends(
         await listOwnConnectionMetadata(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: input.subjectId,
           reach: "anywhere",
           includeInactive: true,
-        })
+        }),
+        backends,
       ).filter((connection) => connection.status === "needs_reauth")
     : [];
   return [...shared, ...own]
@@ -108,9 +124,11 @@ export function connectionsNeedingReconnectFor(
 ): ConnectionNeedingReconnect[] {
   const domain = target.providerDomain?.trim().toLowerCase();
   if (!domain) return [];
+  // A connector served through Nango still names its catalog service.
+  const service = catalogProviderDomain(domain);
   return connections.filter(
     (connection) =>
-      connection.providerDomain.toLowerCase() === domain &&
+      catalogProviderDomain(connection.providerDomain.toLowerCase()) === service &&
       (!connection.mcpUrl || !target.mcpUrl || sameEndpoint(connection.mcpUrl, target.mcpUrl)),
   );
 }

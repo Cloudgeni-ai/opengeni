@@ -31,6 +31,8 @@ import { storeMcpServerLogo, type McpServerLogoStorage } from "./mcp-server-logo
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
+  nangoToolsMcpUrl,
+  type EffectiveNangoIntegration,
   FIKEN_PROVIDER_DOMAIN,
   FIRST_PARTY_MCP_TOOL_NAMES,
   OPENGENI_BROWSER_EXTENSION_URL,
@@ -118,6 +120,13 @@ import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 import { errorMessage } from "@opengeni/contracts/values";
+import {
+  applyNangoBackendsToSettings,
+  catalogProviderDomain,
+  nangoBackendsFor,
+  nangoReplacedSocialProviders,
+  type NangoBackends,
+} from "./nango-integrations";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -137,6 +146,11 @@ export async function buildCapabilityCatalog(input: {
   /** The workspace's organization, when the caller knows it (skips a lookup). */
   accountId?: string;
 }): Promise<CapabilityCatalogResponse> {
+  // The integration backend switch: config-only Nango integrations become
+  // deployment connectors, and a Nango-served social provider's native card
+  // is hidden, so one service is never listed twice.
+  const nangoBackends = await nangoBackendsFor(input.db, input.settings);
+  input = { ...input, settings: applyNangoBackendsToSettings(input.settings, nangoBackends) };
   // Scoped readers use savepoints and transaction-local actor settings. They
   // must not overlap on a caller's transaction: one reader can otherwise
   // restore another reader's subject instead of the enclosing caller's.
@@ -207,12 +221,15 @@ export async function buildCapabilityCatalog(input: {
       .map((skill) => [skill.capabilityId, skill]),
   );
   const builtIns = [
-    ...configuredMcpCatalogItems(input.settings),
-    ...builtInConnectorCatalogItems({
-      settings: input.settings,
-      socialConnections,
-      workspaceConnections,
-    }),
+    ...configuredMcpCatalogItems(input.settings, nangoBackends),
+    ...withoutNangoReplacedSocialItems(
+      builtInConnectorCatalogItems({
+        settings: input.settings,
+        socialConnections,
+        workspaceConnections,
+      }),
+      nangoBackends,
+    ),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -1333,7 +1350,7 @@ async function validateMcpCapabilityConnectionRef(
       return {
         ...normalized,
         kind: "oauth2",
-        providerDomain: canonicalDomain(normalized.providerDomain),
+        providerDomain: catalogProviderDomain(canonicalDomain(normalized.providerDomain)),
       };
     throw new HTTPException(422, {
       message: "connectionRef does not reference a visible active connection",
@@ -1363,7 +1380,13 @@ async function validateMcpCapabilityConnectionRef(
     });
   }
   if (subjectScope === "subject") {
-    const genericSubjectRef = { ...normalized, kind: connection.kind };
+    // A Nango connection of a native Google connector enables the same
+    // catalog identity; the runtime picks the backend (docs/nango.md).
+    const genericSubjectRef = {
+      ...normalized,
+      providerDomain: catalogProviderDomain(normalized.providerDomain),
+      kind: connection.kind,
+    };
     delete genericSubjectRef.connectionId;
     return genericSubjectRef;
   }
@@ -1775,6 +1798,8 @@ export async function settingsWithEnabledCapabilityMcpServers(
     connectionAccountReads?: ConnectionAccountReads;
   },
 ): Promise<Settings> {
+  const nangoBackends = await nangoBackendsFor(db, settings);
+  settings = applyNangoBackendsToSettings(settings, nangoBackends);
   const readApiIntegrations = () =>
     options?.subjectId
       ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
@@ -1864,13 +1889,16 @@ export async function settingsWithEnabledCapabilityMcpServers(
   );
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   options?.onResolvedCapabilityServers?.(enabled);
-  return settingsWithCodexAppsMcpServer(
-    settingsWithApiIntegrationServers(
-      settingsWithMcpCapabilityServers(settings, enabled),
-      apiIntegrations,
-      workspaceId,
+  return applyNangoBackendsToSettings(
+    settingsWithCodexAppsMcpServer(
+      settingsWithApiIntegrationServers(
+        settingsWithMcpCapabilityServers(settings, enabled),
+        apiIntegrations,
+        workspaceId,
+      ),
+      codexAppsDesignation !== null,
     ),
-    codexAppsDesignation !== null,
+    nangoBackends,
   );
 }
 
@@ -1914,6 +1942,8 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     signal?: AbortSignal;
   },
 ): Promise<Settings> {
+  const nangoBackends = await nangoBackendsFor(db, settings);
+  settings = applyNangoBackendsToSettings(settings, nangoBackends);
   const serverIds = new Set(options.serverIds);
   // One RLS scope at a time: `db` may be a single bounded transaction.
   const enabled = (
@@ -1988,13 +2018,16 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
       ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })
       : null;
   options.onResolvedApiIntegrations?.(apiIntegrations);
-  return settingsWithCodexAppsMcpServer(
-    settingsWithApiIntegrationServers(
-      settingsWithMcpCapabilityServers(settings, enabled),
-      apiIntegrations,
-      workspaceId,
+  return applyNangoBackendsToSettings(
+    settingsWithCodexAppsMcpServer(
+      settingsWithApiIntegrationServers(
+        settingsWithMcpCapabilityServers(settings, enabled),
+        apiIntegrations,
+        workspaceId,
+      ),
+      codexAppsDesignation !== null,
     ),
-    codexAppsDesignation !== null,
+    nangoBackends,
   );
 }
 
@@ -2356,7 +2389,15 @@ async function requireCatalogItem(
   return item;
 }
 
-function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
+function configuredMcpCatalogItems(
+  settings: Settings,
+  nangoBackends: NangoBackends = new Map(),
+): CapabilityCatalogItem[] {
+  const nangoByServerUrl = new Map(
+    [...nangoBackends.values()]
+      .filter((integration) => !integration.native)
+      .map((integration) => [nangoToolsMcpUrl(integration.integrationKey), integration] as const),
+  );
   return (
     settings.mcpServers
       // Opengeni, Files, and Document Search are native runtime surfaces. They
@@ -2367,7 +2408,8 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
           server.id !== CODEX_APPS_MCP_SERVER_ID && !firstPartyMcpServerIds.has(server.id),
       )
       .map((server) =>
-        CapabilityCatalogItem.parse({
+        nangoConfiguredCatalogItem(
+          CapabilityCatalogItem.parse({
           id: `mcp:${server.id}`,
           kind: "mcp",
           source: "configured",
@@ -2399,8 +2441,59 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
             allowedTools: server.allowedTools ?? [],
             cacheToolsList: server.cacheToolsList,
           },
-        }),
+          }),
+          nangoByServerUrl.get(server.url),
+        ),
       )
+  );
+}
+
+/**
+ * A config-only Nango integration's catalog entry: its operator definition
+ * names it, and its sign-in is the Nango Connect card of the ordinary flow.
+ */
+function nangoConfiguredCatalogItem(
+  item: CapabilityCatalogItem,
+  integration: EffectiveNangoIntegration | undefined,
+): CapabilityCatalogItem {
+  if (!integration) return item;
+  const definition = integration.definition;
+  return CapabilityCatalogItem.parse({
+    ...item,
+    name: definition.displayName ?? item.name,
+    description: definition.description ?? null,
+    category: "integrations",
+    tags: uniqueTags(["mcp", "nango", integration.integrationKey]),
+    mcpUrl: item.endpointUrl,
+    providerDomain: integration.providerDomain,
+    authKind: "oauth2",
+    runtime: {
+      ...item.runtime,
+      notes: "Signs in through Nango; tools run through this deployment's Nango integration.",
+    },
+    metadata: {
+      ...item.metadata,
+      integrationBackend: "nango",
+      nangoIntegrationKey: integration.integrationKey,
+      personalOnly: definition.ownership !== "workspace",
+      ...(definition.logoUrl ? { logoUrl: definition.logoUrl } : {}),
+    },
+  });
+}
+
+function withoutNangoReplacedSocialItems(
+  items: CapabilityCatalogItem[],
+  nangoBackends: NangoBackends,
+): CapabilityCatalogItem[] {
+  const hidden = nangoReplacedSocialProviders(nangoBackends);
+  if (hidden.size === 0) return items;
+  return items.filter(
+    (item) =>
+      !(
+        item.metadata.providerAdapter === "social" &&
+        typeof item.metadata.provider === "string" &&
+        hidden.has(item.metadata.provider)
+      ),
   );
 }
 

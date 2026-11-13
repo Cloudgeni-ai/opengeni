@@ -1,8 +1,10 @@
 import { sql } from "drizzle-orm";
 import {
   INTEGRATION_BACKEND_CACHE_TTL_MS,
+  effectiveNangoIntegrations,
   estimateNangoCostUsd,
   parseNangoIntegrationDefinition,
+  type EffectiveNangoIntegration,
   type IntegrationBackendSetting,
 } from "@opengeni/contracts";
 
@@ -107,6 +109,19 @@ export type IntegrationBackendSettingsCache = ReturnType<typeof createIntegratio
 
 /** The deployment's shared cache; API and worker processes each hold one. */
 export const integrationBackendSettingsCache = createIntegrationBackendSettingsCache();
+
+/**
+ * The Nango-backed integrations in effect for this deployment right now.
+ * Empty (every integration native) unless a Nango secret key is configured.
+ */
+export async function readEffectiveNangoIntegrations(
+  db: Database,
+  settings: { nangoSecretKey?: string | null | undefined },
+  cache: IntegrationBackendSettingsCache = integrationBackendSettingsCache,
+): Promise<Map<string, EffectiveNangoIntegration>> {
+  if (!settings.nangoSecretKey) return new Map();
+  return effectiveNangoIntegrations(await cache.get(db), true);
+}
 
 // ---------------------------------------------------------------------------
 // Usage events

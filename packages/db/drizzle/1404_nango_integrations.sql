@@ -115,6 +115,12 @@ BEGIN
   EXECUTE format('CREATE POLICY owner_append ON integration_backend_revisions FOR INSERT TO %I WITH CHECK (true)', owner_name);
   -- Operators reconcile every organization's usage as the owner.
   EXECUTE format('CREATE POLICY owner_read ON nango_usage_events FOR SELECT TO %I USING (true)', owner_name);
+  -- Native X accounts live in social_connections; the affected-users export
+  -- reads them inside the same owner inventory window as connections.
+  EXECUTE format(
+    'CREATE POLICY nango_affected_inventory_read ON social_connections FOR SELECT TO %I USING (opengeni_private.organization_tenancy_inventory_capability_active())',
+    owner_name
+  );
 
   EXECUTE format($definition$
     CREATE FUNCTION set_integration_backend(
@@ -193,6 +199,7 @@ BEGIN
       ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id())
       ON CONFLICT DO NOTHING;
       RETURN QUERY
+        SELECT * FROM (
         SELECT c.account_id, a.name, c.workspace_id, w.name,
           CASE WHEN c.subject_id LIKE 'user:%%' THEN substr(c.subject_id, 6) ELSE c.subject_id END,
           u.email, c.id,
@@ -206,7 +213,19 @@ BEGIN
         LEFT JOIN auth_users u ON c.subject_id = 'user:' || u.id
         WHERE c.provider_domain = 'nango:' || p_integration_key
           OR (native_domain IS NOT NULL AND c.provider_domain = native_domain)
-        ORDER BY a.name, w.name, u.email, c.created_at;
+        UNION ALL
+        -- Native X accounts are social provider connections.
+        SELECT s.account_id, a.name, s.workspace_id, w.name,
+          CASE WHEN s.subject_id LIKE 'user:%%' THEN substr(s.subject_id, 6) ELSE s.subject_id END,
+          u.email, s.id, 'native', 'x.com', s.status, s.account_handle,
+          s.created_at, NULL::timestamptz
+        FROM social_connections s
+        JOIN workspaces w ON w.id = s.workspace_id AND w.account_id = s.account_id
+        JOIN managed_accounts a ON a.id = s.account_id
+        LEFT JOIN auth_users u ON s.subject_id = 'user:' || u.id
+        WHERE p_integration_key = 'x' AND s.provider = 'x'
+        ) affected
+        ORDER BY 2, 4, 6, 12;
       DELETE FROM opengeni_private.organization_tenancy_inventory_capabilities
       WHERE backend_pid = pg_catalog.pg_backend_pid()
         AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned();

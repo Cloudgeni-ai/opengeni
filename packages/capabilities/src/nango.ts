@@ -255,6 +255,28 @@ export class NangoClient {
       );
   }
 
+  /**
+   * One read-only provider request through the Nango proxy (for example the
+   * account identity call). The provider origin travels as Base-Url-Override.
+   */
+  async proxyGet(input: {
+    url: string;
+    nangoConnectionId: string;
+    providerConfigKey: string;
+    signal?: AbortSignal;
+  }): Promise<{ status: number; body: unknown; bytes: number }> {
+    const target = new URL(input.url);
+    if (target.protocol !== "https:") throw new Error("Nango proxy destinations must use https");
+    return await this.json("GET", `/proxy${target.pathname}${target.search}`, {
+      headers: {
+        "base-url-override": target.origin,
+        "connection-id": input.nangoConnectionId,
+        "provider-config-key": input.providerConfigKey,
+      },
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+  }
+
   /** Tools (and deprecated actions) available to an integration, with input schemas. */
   async listTools(providerConfigKey: string): Promise<NangoToolDescriptor[]> {
     const tools: NangoToolDescriptor[] = [];

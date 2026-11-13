@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { withSiteSessionOrigin } from "@opengeni/core";
+import { nangoBackendsFor, nangoReplacedSocialProviders } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -944,10 +945,16 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     ...(gatewayServerIds.has("opengeni")
       ? [
           // Read alongside the other first-party servers, not before them.
-          resolveSlackBotToolAvailability(routeDeps.db, grant).then((slackBotAvailable) =>
+          Promise.all([
+            resolveSlackBotToolAvailability(routeDeps.db, grant),
+            nangoBackendsFor(routeDeps.db, routeDeps.settings),
+          ]).then(([slackBotAvailable, nangoBackends]) =>
             inMemoryMcpRegistration(
               "opengeni",
-              buildOpenGeniMcpServer(deps, grant, { slackBotAvailable }),
+              buildOpenGeniMcpServer(deps, grant, {
+                slackBotAvailable,
+                nangoReplacedSocialProviders: nangoReplacedSocialProviders(nangoBackends),
+              }),
             ),
           ),
         ]

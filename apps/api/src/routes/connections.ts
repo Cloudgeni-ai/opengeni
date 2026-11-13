@@ -13,6 +13,8 @@ import {
 } from "@opengeni/core";
 import { storedConnectionIntegrationKey } from "../integrations/stored-connection-integration-key";
 import { withDesktopAppReturnPath } from "../desktop-app-return";
+import { nangoBackendsFor, projectConnectionsForBackends } from "@opengeni/core";
+import { deleteNangoConnectionFor } from "../integrations/nango-connect";
 import {
   assertClaudeWorkspaceCredential,
   prepareClaudeWorkspaceCredential,
@@ -215,7 +217,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId);
     const reach = connectionReadReach(grant);
-    const connections = await listConnectionsMetadata(db, workspaceId, grant.subjectId);
+    // While a backend is switched, accounts read as the switch projects them.
+    const connections = projectConnectionsForBackends(
+      await listConnectionsMetadata(db, workspaceId, grant.subjectId),
+      await nangoBackendsFor(db, settings),
+    );
     return c.json(
       ListConnectionsResponse.parse({
         // The personal setup permission sees only the caller's own accounts.
@@ -249,10 +255,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListConnectionsResponse.parse({
         connections: withAccountIdentityState(
-          (
+          projectConnectionsForBackends(
             await listOwnConnectionAccountsForGrant(db, grant, {
               includeInactive: includeInactive === "true",
-            })
+            }),
+            await nangoBackendsFor(db, settings),
           ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
         ),
       }),
@@ -1393,6 +1400,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
+    // A Nango connection is deleted in Nango too, so its billing stops.
+    await deleteNangoConnectionFor({ db, settings }, existing);
     return c.json(ConnectionResponse.parse({ connection }));
   });
 

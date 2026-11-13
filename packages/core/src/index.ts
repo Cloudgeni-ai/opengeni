@@ -149,6 +149,7 @@ export * from "./domain/event-triggers";
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/personal-github-repository-access";
 export * from "./domain/connections-needing-reconnect";
+export * from "./domain/nango-integrations";
 export {
   listApiIntegrationsWithPersonalExtension,
   type PersonalWorkspaceExtensionApiIntegration,

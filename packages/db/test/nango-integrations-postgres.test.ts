@@ -189,3 +189,24 @@ test("the operator export lists native and Nango connections of an integration",
   expect(rows[0]).toMatchObject({ organizationName: "Export org", accountLabel: "person@example.com" });
   await expect(listNangoAffectedConnections(client.db, "gmail")).rejects.toThrow();
 });
+
+test("the operator export lists native X social accounts for x", async () => {
+  const org = await organization("Export X org");
+  const socialId = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`insert into social_connections (id, account_id, workspace_id, provider, account_handle)
+      values (${socialId}, ${org.accountId}, ${org.workspaceId}, 'x', 'opengeni')`;
+  });
+  const rows = (await listNangoAffectedConnections(adminClient.db, "x")).filter(
+    (row) => row.organizationId === org.accountId,
+  );
+  expect(rows.map((row) => [row.connectionId, row.backend, row.providerDomain, row.accountLabel])).toEqual([
+    [socialId, "native", "x.com", "opengeni"],
+  ]);
+  expect(
+    (await listNangoAffectedConnections(adminClient.db, "gmail")).some(
+      (row) => row.connectionId === socialId,
+    ),
+  ).toBe(false);
+});

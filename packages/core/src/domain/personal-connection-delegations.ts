@@ -16,6 +16,7 @@ import {
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
   GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
 } from "@opengeni/contracts/google-drive";
+import { isNangoProviderDomain } from "@opengeni/contracts/nango";
 import {
   isPersonalGitHubConnection,
   PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
@@ -998,6 +999,14 @@ export function withFrozenPersonalConnectionDelegations(input: {
             ? personalGitHubDelegations[0]!
             : null;
       if (!delegation || !(await input.ownerHasWorkspaceMembership(delegation.ownerSubjectId))) {
+        return personalAuthorityUnavailable(request);
+      }
+      // A delegation frozen under the other integration backend never
+      // satisfies this one: native and Nango connections stay apart.
+      if (
+        isNangoProviderDomain(delegation.providerDomain) !==
+        isNangoProviderDomain(request.connectionRef.providerDomain)
+      ) {
         return personalAuthorityUnavailable(request);
       }
       effectiveRequest = {
