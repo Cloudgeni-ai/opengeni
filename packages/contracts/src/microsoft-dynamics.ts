@@ -36,6 +36,8 @@ const BUSINESS_CENTRAL_DEFAULT_ENVIRONMENT = "Production";
 const BUSINESS_CENTRAL_TENANT =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})$/iu;
 const BUSINESS_CENTRAL_ENVIRONMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+// Web client pages that are not an environment name (sign-in and link landing pages).
+const BUSINESS_CENTRAL_WEB_PAGES = new Set(["signin", "signout", "deeplink", "oauthlanding"]);
 export const BUSINESS_CENTRAL_API_SCOPE = `https://${BUSINESS_CENTRAL_API_HOST}/Financials.ReadWrite.All`;
 /** Every Business Central environment's API is below this root. */
 export const BUSINESS_CENTRAL_API_ROOT = `https://${BUSINESS_CENTRAL_API_HOST}/v2.0/`;
@@ -147,7 +149,11 @@ function businessCentralEndpoint(url: URL): string | null {
         ? queryTenant
         : null;
   const environment = segments[0] ?? BUSINESS_CENTRAL_DEFAULT_ENVIRONMENT;
-  if (!BUSINESS_CENTRAL_ENVIRONMENT.test(environment)) return null;
+  if (
+    !BUSINESS_CENTRAL_ENVIRONMENT.test(environment) ||
+    BUSINESS_CENTRAL_WEB_PAGES.has(environment.toLowerCase())
+  )
+    return null;
   return businessCentralApiRoot({ tenant, environment });
 }
 

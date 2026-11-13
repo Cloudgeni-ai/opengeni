@@ -520,7 +520,9 @@ export class BusinessCentralApiMcpServer implements LocalMcpBridgeServer {
       ...(typeof count === "number" && count >= 0 ? { count } : {}),
       ...(nextLink
         ? {
-            nextLink: nextLink.startsWith(this.base) ? nextLink.slice(this.base.length) : nextLink,
+            nextLink: nextLink.toLowerCase().startsWith(this.base.toLowerCase())
+              ? nextLink.slice(this.base.length)
+              : nextLink,
           }
         : {}),
     };
@@ -932,7 +934,7 @@ function optionalString(value: unknown, field: string, max: number): string | un
 function identifier(value: unknown, pattern: RegExp, field: string): string {
   const text = typeof value === "string" ? value.trim() : "";
   if (!pattern.test(text))
-    throw new BusinessCentralError(`${field} is not valid: ${String(value)}`);
+    throw new BusinessCentralError(`${field} is not valid: ${String(value).slice(0, 80)}`);
   return text;
 }
 

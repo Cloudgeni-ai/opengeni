@@ -132,6 +132,8 @@ describe("Microsoft Dynamics MCP endpoints", () => {
     });
     for (const value of [
       "https://businesscentral.dynamics.com/not an environment",
+      "https://businesscentral.dynamics.com/SignIn?ReturnUrl=%2F",
+      `https://businesscentral.dynamics.com/${BC_TENANT}/deeplink?company=X`,
       "https://api.businesscentral.dynamics.com/v2.0/Production/api/microsoft/automation/v2.0",
       "https://api.businesscentral.dynamics.com/v1.0/Production/api/v2.0",
       "https://mcp.businesscentral.dynamics.com",
