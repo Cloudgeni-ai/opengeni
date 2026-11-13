@@ -3823,6 +3823,17 @@ const AnthropicProviderOptions = z.object({
   cacheTtl: z.enum(["5m", "1h", "off"]).default("5m"),
   maxOutputTokens: z.number().int().positive().default(32000),
   streamIdleTimeoutMs: z.number().int().positive().default(600000),
+  /**
+   * An organization's several Anthropic API keys, for its Anthropic API
+   * connection only: the keys that still have credits, the connection's own
+   * key first. Each session keeps one of them (`anthropicApiKeyOrder`).
+   * Absent when the organization has one key, which is then `apiKey` alone.
+   * The ids are non-secret member ids.
+   */
+  apiKeys: z
+    .array(z.object({ id: z.string().min(1).max(64), apiKey: z.string().min(1) }).strict())
+    .max(64)
+    .optional(),
 });
 
 /**
@@ -14089,5 +14100,34 @@ export function withClaudeConnectionCredential(
 }
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
+/**
+ * Give the organization's Anthropic API provider (`organization-anthropic`)
+ * its several API keys: the keys that still have credits, its own key
+ * first. Only that provider ever gets them, never a Claude subscription
+ * provider. An empty list means every key is out of credits, and its
+ * requests then fail without sending.
+ */
+export function withOrganizationAnthropicApiKeys(
+  settings: Settings,
+  keys: readonly { id: string; apiKey: string }[],
+): Settings {
+  const providerId = claudeProviderId("anthropic", "organization");
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify(
+      parseModelProvidersJson(settings.modelProvidersJson).map((provider) =>
+        provider.id === providerId && provider.anthropic
+          ? {
+              ...provider,
+              anthropic: {
+                ...provider.anthropic,
+                apiKeys: keys.map((key) => ({ id: key.id, apiKey: key.apiKey })),
+              },
+            }
+          : provider,
+      ),
+    ),
+  };
+}
 export * from "./subscription-account-selection";
 export * from "./claude-subscription-capacity";

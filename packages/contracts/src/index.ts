@@ -4043,6 +4043,72 @@ export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
 >;
 
 /**
+ * One API key of an organization's Anthropic API connection, which can hold
+ * several. The connection's own key is the first; each session keeps one key
+ * while it serves. Never includes the key itself.
+ */
+export const OrganizationAnthropicApiKey = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.string.min(1).max(64),
+    /** Null for the connection's own key. */
+    label: primitives.string.max(128).nullable(),
+    /** Whether this is the connection's own key (replaced or disconnected with the connection). */
+    connectionKey: z.boolean(),
+    /** The Anthropic organization the key belongs to, when known. */
+    anthropicOrganizationId: primitives.string.max(128).nullable(),
+    /**
+     * When Anthropic refused the key because its organization is out of
+     * credits. Null while it serves. A refused key stays out until it is let
+     * serve again.
+     */
+    creditRefusedAt: primitives.dateTime.nullable(),
+    createdAt: primitives.dateTime,
+  }),
+);
+export type OrganizationAnthropicApiKey = z.infer<typeof OrganizationAnthropicApiKey>;
+export const OrganizationAnthropicApiKeysResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The connection's version; its own key's id changes when the key is replaced. */
+    connectionVersion: primitives.positiveInteger,
+    keys: z.array(OrganizationAnthropicApiKey).max(64),
+  }),
+);
+export type OrganizationAnthropicApiKeysResponse = z.infer<
+  typeof OrganizationAnthropicApiKeysResponse
+>;
+export const AddOrganizationAnthropicApiKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** An Anthropic API key (`sk-ant-api…`), checked with Anthropic before it is saved. */
+      apiKey: primitives.string.trim().min(1).max(8192),
+      /** A name to tell the key apart, such as the Anthropic account it belongs to. */
+      label: primitives.string
+        .trim()
+        .min(1)
+        .max(128)
+        .regex(/^[^\r\n|]+$/),
+    })
+    .strict(),
+);
+export type AddOrganizationAnthropicApiKeyRequest = z.infer<
+  typeof AddOrganizationAnthropicApiKeyRequest
+>;
+export const UpdateOrganizationAnthropicApiKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      label: primitives.string
+        .trim()
+        .min(1)
+        .max(128)
+        .regex(/^[^\r\n|]+$/),
+    })
+    .strict(),
+);
+export type UpdateOrganizationAnthropicApiKeyRequest = z.infer<
+  typeof UpdateOrganizationAnthropicApiKeyRequest
+>;
+
+/**
  * One model of an organization's OpenAI-compatible endpoint, with the
  * reasoning levels it accepts (null when it declares none, so chats get no
  * reasoning choice for it).

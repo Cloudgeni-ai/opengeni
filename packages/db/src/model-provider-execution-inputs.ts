@@ -20,6 +20,7 @@ import {
   type OrganizationCompatibleEndpointForWorkspace,
 } from "./organization-compatible-model-endpoints";
 import { isWorkspaceEuOnlyInScope } from "./organization-inference-residency";
+import { organizationAnthropicApiKeyPool } from "./organization-anthropic-api-keys";
 import * as schema from "./schema";
 
 /** Attempt-local read results, never a cross-turn credential or authority cache. */
@@ -42,6 +43,12 @@ export type ModelProviderExecutionInputs = {
    * with their models; each carries its encrypted key when credentials load.
    */
   organizationCompatibleEndpoints: OrganizationCompatibleEndpointForWorkspace[];
+  /**
+   * The organization's Anthropic API keys when its connection holds several
+   * (encrypted, its own key first, without keys refused for lack of
+   * credits); null for a single key, or when credentials don't load.
+   */
+  organizationAnthropicApiKeys: { id: string; credentialEncrypted: string }[] | null;
   /** Whether the workspace is EU-only (`isWorkspaceEuOnly`), read in the same transaction. */
   euOnly: boolean;
 };
@@ -105,6 +112,8 @@ export async function loadModelProviderExecutionInputs(
     const encryptedCredentials: ModelProviderExecutionInputs["encryptedCredentials"] = {};
     const organizationEndpoints: ModelProviderExecutionInputs["organizationEndpoints"] = {};
     const organizationAuthMethods: ModelProviderExecutionInputs["organizationAuthMethods"] = {};
+    let organizationAnthropicApiKeys: ModelProviderExecutionInputs["organizationAnthropicApiKeys"] =
+      null;
     if (input.loadOrganizationCredentials) {
       const rows = await scopedDb
         .select({
@@ -112,6 +121,9 @@ export async function loadModelProviderExecutionInputs(
           credentialEncrypted: schema.organizationModelProviderConnections.credentialEncrypted,
           endpoint: schema.organizationModelProviderConnections.endpoint,
           authMethod: schema.organizationModelProviderConnections.authMethod,
+          version: schema.organizationModelProviderConnections.version,
+          apiKeyMembers: schema.organizationModelProviderConnections.apiKeyMembers,
+          apiKeyCreditRefusals: schema.organizationModelProviderConnections.apiKeyCreditRefusals,
         })
         .from(schema.organizationModelProviderConnections)
         .where(
@@ -138,6 +150,9 @@ export async function loadModelProviderExecutionInputs(
         if (row.providerKind === "azure_openai" && row.authMethod !== "api_key") {
           organizationAuthMethods.azure_openai = row.authMethod;
         }
+        if (row.providerKind === "anthropic") {
+          organizationAnthropicApiKeys = organizationAnthropicApiKeyPool(row);
+        }
       }
     }
     const organizationCompatibleEndpoints = await listOrganizationCompatibleEndpointsInScope(
@@ -154,6 +169,7 @@ export async function loadModelProviderExecutionInputs(
       organizationEndpoints,
       organizationAuthMethods,
       organizationCompatibleEndpoints,
+      organizationAnthropicApiKeys,
       euOnly,
     };
   });

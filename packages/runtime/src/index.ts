@@ -68,7 +68,14 @@ export {
   fitCompactionPrefix,
   compactionPrefixCuts,
 } from "./anthropic-compaction";
-export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
+export {
+  AnthropicProviderRejection,
+  AnthropicStreamInterruptedError,
+  ANTHROPIC_API_KEYS_OUT_OF_CREDITS,
+  anthropicApiKeyOrder,
+  isAnthropicApiKeyCreditRefusal,
+  withAnthropicApiKeyRefusals,
+} from "./anthropic-messages";
 export {
   createModelImageSizer,
   sniffModelImageType,

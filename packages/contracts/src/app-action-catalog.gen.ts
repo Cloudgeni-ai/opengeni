@@ -189,6 +189,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "addOrganizationAnthropicApiKey",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys",
+    "request": [
+      "AddOrganizationAnthropicApiKeyRequest"
+    ],
+    "response": [
+      "OrganizationAnthropicApiKey"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
     "id": "addWorkspaceMember",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/members",
@@ -5994,6 +6008,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listOrganizationAnthropicApiKeys",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys",
+    "request": [],
+    "response": [
+      "OrganizationAnthropicApiKeysResponse"
+    ]
+  },
+  {
     "id": "listOrganizationApiKeys",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/api-keys",
@@ -8516,6 +8539,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "removeOrganizationAnthropicApiKey",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "removeSessionResources",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",
@@ -9208,6 +9238,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SendTestEventResponse"
+    ]
+  },
+  {
+    "id": "serveOrganizationAnthropicApiKeyAgain",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId/serve-again",
+    "request": [],
+    "response": [
+      "OrganizationAnthropicApiKey"
     ]
   },
   {
@@ -10349,6 +10388,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationAgentAdminAccess"
+    ]
+  },
+  {
+    "id": "updateOrganizationAnthropicApiKey",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
+    "request": [
+      "UpdateOrganizationAnthropicApiKeyRequest"
+    ],
+    "response": [
+      "OrganizationAnthropicApiKey"
     ]
   },
   {

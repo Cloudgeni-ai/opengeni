@@ -9,6 +9,7 @@ import {
   getWorkspaceCredentialProvider,
   markSessionTurnModelTransportHttpOnly,
   readSessionAgentPrompt,
+  markOrganizationAnthropicApiKeyCreditRefused,
 } from "@opengeni/db";
 import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
 import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
@@ -53,7 +54,11 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
+import {
+  withAnthropicApiKeyRefusals,
+  withClaudeUsageObserver,
+  withInferenceResidency,
+} from "@opengeni/runtime";
 import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
 import { sessionTitlePromptFor } from "./session-title";
 import { createCodexCreditGuard } from "./codex-credit-policy";
@@ -1335,10 +1340,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }),
               );
             };
+          // The organization's pooled Anthropic API keys: one Anthropic
+          // refuses for lack of credits is recorded, so later turns skip it.
+          // Recording never holds up or fails the turn.
+          const recordAnthropicApiKeyRefusal = (providerId: string, keyId: string) => {
+            if (providerId !== "organization-anthropic") return;
+            void markOrganizationAnthropicApiKeyCreditRefused(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              keyId,
+            }).catch((error: unknown) =>
+              observability.warn("Could not record an Anthropic API key out of credits", {
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            );
+          };
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            claudeCore ? withClaudeCoreLane("requests")(fn) : fn();
+            withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
+              claudeCore ? withClaudeCoreLane("requests")(fn) : fn(),
+            );
           const withClaudeTitleUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn();
+            withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
+              claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn(),
+            );
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           // The turn's model requests belong to this session's conversation,

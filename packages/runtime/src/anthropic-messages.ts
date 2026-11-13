@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import { AnthropicRequestError } from "./anthropic-request-error";
@@ -110,6 +111,57 @@ export function anthropicThinkingIsProgressUpdate(signature: string): boolean {
  */
 export class AnthropicStreamInterruptedError extends Error {
   readonly code = "anthropic_stream_interrupted";
+}
+
+/**
+ * The order in which a session tries an organization's Anthropic API keys
+ * (rendezvous hashing of the session over the key ids). A session keeps its
+ * first key while that key serves: Anthropic's prompt cache, signed thinking
+ * and search results belong to the key's Anthropic organization, so moving
+ * would throw them away. Removing or refusing one key moves only the sessions
+ * that were on it, and adding one moves only the sessions it now ranks first.
+ */
+export function anthropicApiKeyOrder<T extends { id: string }>(
+  keys: readonly T[],
+  session: string,
+): T[] {
+  const score = (id: string) =>
+    createHash("sha256").update(`${session}\0${id}`).digest().readBigUInt64BE(0);
+  return keys
+    .map((key) => ({ key, score: score(key.id) }))
+    .sort((a, b) => (a.score === b.score ? 0 : a.score > b.score ? -1 : 1))
+    .map(({ key }) => key);
+}
+
+/**
+ * Anthropic refused an API key because its organization can't pay: the
+ * credit balance is too low (HTTP 400), a billing error (402), or the
+ * organization's own spend limit. Credits don't come back by themselves, so
+ * the key stays out until an administrator checks it again.
+ */
+export function isAnthropicApiKeyCreditRefusal(error: unknown): boolean {
+  if (!(error instanceof AnthropicRequestError)) return false;
+  if (error.status === 402 || error.errorType === "billing_error") return true;
+  if (error.code === "anthropic_billing_error" || error.code === "enforced_spend_limit_reached")
+    return true;
+  return error.status === 400 && /\bcredit balance is too low\b/i.test(error.detail ?? "");
+}
+
+/** Every key of the organization's pool is out of credits; nothing was sent. */
+export const ANTHROPIC_API_KEYS_OUT_OF_CREDITS = "anthropic_api_keys_out_of_credits";
+
+type AnthropicApiKeyRefusalReporter = (providerId: string, keyId: string) => void;
+const apiKeyRefusalReporters = new AsyncLocalStorage<AnthropicApiKeyRefusalReporter>();
+
+/**
+ * Runs `run` with `report` told of each pooled Anthropic API key that runs
+ * out of credits during it, so the caller can record it for later turns.
+ */
+export function withAnthropicApiKeyRefusals<T>(
+  report: AnthropicApiKeyRefusalReporter,
+  run: () => Promise<T>,
+): Promise<T> {
+  return apiKeyRefusalReporters.run(report, run);
 }
 
 /** Preserve documented spend proof, without retaining an arbitrary error body. */
@@ -1421,11 +1473,47 @@ export class AnthropicMessagesModel implements Model {
   // The same bound applies from the first image onward. A growing conversation
   // must not resize its old prefix when it crosses the many-image threshold.
   private readonly sizeImage = createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES);
+  /** Pooled API keys Anthropic refused for lack of credits while this model ran. */
+  private readonly refusedApiKeys = new Set<string>();
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
     private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
   ) {}
+
+  /**
+   * The provider as this request sends it: with an organization's several
+   * API keys (`anthropic.apiKeys`), its key is the session's first key that
+   * Anthropic has not refused for lack of credits (`anthropicApiKeyOrder`).
+   * The search and replay scopes follow that key. Without a pool it is the
+   * provider itself, unchanged.
+   */
+  private providerFor(request: ModelRequest): ResolvedModelProvider & { apiKeyId?: string } {
+    const keys = this.provider.anthropic?.apiKeys;
+    if (!keys) return this.provider;
+    const session = request.modelSettings.providerData?.prompt_cache_key;
+    const key = anthropicApiKeyOrder(
+      keys,
+      typeof session === "string" && session ? session : this.fallbackSessionId,
+    ).find((candidate) => !this.refusedApiKeys.has(candidate.id));
+    if (!key)
+      throw new AnthropicRequestError(
+        "Every Anthropic API key of this organization is out of credits. An organization administrator can add a key, or check the keys again in Models after adding credits.",
+        402,
+        ANTHROPIC_API_KEYS_OUT_OF_CREDITS,
+        undefined,
+        new Headers(),
+      );
+    return { ...this.provider, apiKey: key.apiKey, apiKeyId: key.id };
+  }
+
+  private requestScopes(request: ModelRequest) {
+    const provider = this.providerFor(request);
+    return {
+      accountScope: anthropicSearchAccountScope(provider),
+      replayScope: claudeReplayScope(request, this.model, provider),
+    };
+  }
 
   /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
   private async sizeImageBlocks(
@@ -1479,7 +1567,7 @@ export class AnthropicMessagesModel implements Model {
    */
   private requestSearchResults(request: ModelRequest): ClaudeCiteSource[] {
     return requestSearchResultSources(
-      buildAnthropicRequest(request, this.model, this.provider, false),
+      buildAnthropicRequest(request, this.model, this.providerFor(request), false),
     );
   }
 
@@ -1491,7 +1579,8 @@ export class AnthropicMessagesModel implements Model {
     },
   ) {
     request.signal?.throwIfAborted();
-    const body = buildAnthropicRequest(request, this.model, this.provider, stream, {
+    const provider = this.providerFor(request);
+    const body = buildAnthropicRequest(request, this.model, provider, stream, {
       plainHistory: replay.fallback === "plain",
       ...(replay.omitThinking ? { omitThinking: replay.omitThinking } : {}),
     });
@@ -1501,11 +1590,11 @@ export class AnthropicMessagesModel implements Model {
     }
     const signedThinking = sentThinkingFingerprints(body.messages);
     request.signal?.throwIfAborted();
-    const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
+    const base = provider.baseUrl ?? "https://api.anthropic.com/v1";
     const url = new URL(`${base.replace(/\/$/, "")}/messages`);
-    for (const [key, value] of Object.entries(this.provider.defaultQuery ?? {}))
+    for (const [key, value] of Object.entries(provider.defaultQuery ?? {}))
       url.searchParams.set(key, value);
-    const headers = new Headers(this.provider.defaultHeaders);
+    const headers = new Headers(provider.defaultHeaders);
     headers.set("content-type", "application/json");
     headers.set("accept", stream ? "text/event-stream" : "application/json");
     headers.set("anthropic-version", "2023-06-01");
@@ -1559,22 +1648,21 @@ export class AnthropicMessagesModel implements Model {
       betas.add("mid-conversation-system-2026-04-07");
       headers.set("anthropic-beta", [...betas].join(","));
     }
-    if (this.provider.kind !== "anonymous") {
-      if (!this.provider.apiKey)
-        throw new AnthropicProtocolError("Claude credentials are unavailable");
-      if (this.provider.anthropic?.auth === "oauth") {
+    if (provider.kind !== "anonymous") {
+      if (!provider.apiKey) throw new AnthropicProtocolError("Claude credentials are unavailable");
+      if (provider.anthropic?.auth === "oauth") {
         headers.delete("x-api-key");
-        headers.set("authorization", `Bearer ${this.provider.apiKey}`);
+        headers.set("authorization", `Bearer ${provider.apiKey}`);
         const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
         betas.add("oauth-2025-04-20");
         headers.set("anthropic-beta", [...betas].join(","));
       } else {
         headers.delete("authorization");
-        headers.set("x-api-key", this.provider.apiKey);
+        headers.set("x-api-key", provider.apiKey);
       }
     }
-    if (this.provider.anthropic?.auth === "oauth") {
-      const identity = this.provider.anthropic.identity;
+    if (provider.anthropic?.auth === "oauth") {
+      const identity = provider.anthropic.identity;
       if (!identity)
         throw new AnthropicProtocolError(
           "Claude subscription identity is missing. Replace the connection with its Claude account UUID and device ID in Models.",
@@ -1600,6 +1688,7 @@ export class AnthropicMessagesModel implements Model {
       signedThinking,
       body,
       replay: replay.fallback,
+      apiKeyId: provider.apiKeyId,
     };
   }
 
@@ -1641,6 +1730,15 @@ export class AnthropicMessagesModel implements Model {
           );
         return response;
       } catch (error) {
+        // A pooled API key whose organization is out of credits: it is left
+        // out from now on (and reported), and the same request goes to the
+        // session's next key. Its signed thinking and searches stay behind,
+        // since they belong to the refused key's Anthropic organization.
+        if (prepared.apiKeyId !== undefined && isAnthropicApiKeyCreditRefusal(error)) {
+          this.refusedApiKeys.add(prepared.apiKeyId);
+          apiKeyRefusalReporters.getStore()?.(this.provider.id, prepared.apiKeyId);
+          continue;
+        }
         if (
           prepared.replay === "plain" ||
           !(error instanceof AnthropicRequestError) ||
@@ -1755,8 +1853,7 @@ export class AnthropicMessagesModel implements Model {
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
-    const accountScope = anthropicSearchAccountScope(this.provider);
-    const replayScope = claudeReplayScope(request, this.model, this.provider);
+    let { accountScope, replayScope } = this.requestScopes(request);
     let merged: Json | undefined;
     let requestId: string | undefined;
     for (let continuation = 0; ; continuation += 1) {
@@ -1764,6 +1861,8 @@ export class AnthropicMessagesModel implements Model {
         ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, replayScope)
         : request;
       const response = await this.send(current, false);
+      // A pooled key out of credits moves the request to the next key.
+      ({ accountScope, replayScope } = this.requestScopes(request));
       requestId = response.headers.get("request-id") ?? undefined;
       const message = withReplayTransformations(object(await response.json()), response);
       if (message.stop_reason === "refusal")
@@ -1790,8 +1889,7 @@ export class AnthropicMessagesModel implements Model {
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
-    const accountScope = anthropicSearchAccountScope(this.provider);
-    const replayScope = claudeReplayScope(request, this.model, this.provider);
+    let { accountScope, replayScope } = this.requestScopes(request);
     let merged: Json | undefined;
     let requestId: string | undefined;
     const partial: AnthropicPartialMessage = {};
@@ -1813,6 +1911,8 @@ export class AnthropicMessagesModel implements Model {
           partial,
         );
         requestId = streamed.requestId;
+        // A pooled key out of credits moves the request to the next key.
+        ({ accountScope, replayScope } = this.requestScopes(request));
         merged = mergePausedMessage(merged, streamed.message);
         if (streamed.message.stop_reason !== "pause_turn") break;
         assertPauseContinuationAllowed(continuation);

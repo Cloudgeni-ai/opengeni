@@ -288,6 +288,35 @@ const RULES: Rule[] = [
       "List the organization's OpenAI-compatible endpoints (base URL, API style and model ids), without their keys.",
   },
   {
+    method: "GET",
+    pattern: /\/model-providers\/anthropic\/api-keys$/,
+    text: () =>
+      "List the API keys of the organization's Anthropic API connection, without their values: the connection's own key first, each key's name, its Anthropic organization and whether Anthropic refused it for lack of credits. Organization admins.",
+  },
+  {
+    method: "POST",
+    pattern: /\/model-providers\/anthropic\/api-keys$/,
+    text: () =>
+      "Add another Anthropic API key to the organization's Anthropic API connection, with a name. Its Anthropic API models then run on several keys: each chat keeps one key, and moves to another only when Anthropic refuses its key for lack of credits. Never used for Claude subscription models. The key is checked with Anthropic's free model listing, stored encrypted and never shown again. Connect the first key on the connection itself. Organization admins.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/model-providers\/anthropic\/api-keys\/:keyId$/,
+    text: () => "Rename an added Anthropic API key of the organization.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/model-providers\/anthropic\/api-keys\/:keyId$/,
+    text: () =>
+      "Remove an added Anthropic API key from the organization's Anthropic API connection. The connection's own key is replaced or disconnected on the connection instead.",
+  },
+  {
+    method: "POST",
+    pattern: /\/model-providers\/anthropic\/api-keys\/:keyId\/serve-again$/,
+    text: () =>
+      "Let an organization Anthropic API key that ran out of credits serve again, after credits were added to its Anthropic organization. If it is still out of credits, the next refused request marks it again.",
+  },
+  {
     method: "POST",
     pattern: /\/model-providers\/openai_compatible\/endpoints$/,
     text: () =>
