@@ -424,6 +424,103 @@ describe("Slack API-backed MCP pilot", () => {
         requests.find((r) => r.method === "conversations.history")?.params.get("channel"),
       ).toBe("C2");
     });
+
+    test("an upper-case bare name without digits is a name, not an ID", async () => {
+      for (const channel of ["GENERAL", "DEV"]) {
+        const { slack, requests } = listing([
+          [
+            { id: "C1", name: "general" },
+            { id: "C3", name: "dev" },
+          ],
+        ]);
+        const result = await slack.callToolResult("slack_send_message", { channel, text: "hi" });
+        expect(result.isError).not.toBe(true);
+        expect(requests.find((r) => r.method === "chat.postMessage")?.body).toMatchObject({
+          channel: channel === "GENERAL" ? "C1" : "C3",
+        });
+      }
+    });
+
+    test("pages hold at most 200 channels, and a resolved name is reused", async () => {
+      const { slack, requests } = listing([[{ id: "C2", name: "launch" }]]);
+      await slack.callToolResult("slack_send_message", { channel: "#launch", text: "one" });
+      await slack.callToolResult("slack_send_message", { channel: "launch", text: "two" });
+      const lists = requests.filter((r) => r.method === "conversations.list");
+      expect(lists).toHaveLength(1);
+      expect(lists[0]!.params.get("limit")).toBe("200");
+      expect(
+        requests.filter((r) => r.method === "chat.postMessage").map((r) => r.body),
+      ).toMatchObject([
+        { channel: "C2", text: "one" },
+        { channel: "C2", text: "two" },
+      ]);
+    });
+
+    test("a failed request with a resolved name looks the name up again next time", async () => {
+      const requests: string[] = [];
+      let failSend = true;
+      const slack = server({
+        fetchImpl: async (url) => {
+          const name = method(url)!;
+          requests.push(name);
+          if (name === "auth.test") return Response.json(identity);
+          if (name === "conversations.list")
+            return Response.json({ ok: true, channels: [{ id: "C2", name: "launch" }] });
+          if (failSend) {
+            failSend = false;
+            return Response.json({ ok: false, error: "channel_not_found" });
+          }
+          return Response.json({ ok: true, channel: "C2", ts: "1.2", message: {} });
+        },
+      });
+      const first = await slack.callToolResult("slack_send_message", {
+        channel: "#launch",
+        text: "hi",
+      });
+      expect(first.isError).toBe(true);
+      await slack.callToolResult("slack_send_message", { channel: "#launch", text: "hi" });
+      expect(requests.filter((r) => r === "conversations.list")).toHaveLength(2);
+    });
+
+    test("a name beyond the pages read, or without read access, fails clearly", async () => {
+      const many = listing(
+        Array.from({ length: 60 }, (_, page) => [{ id: `C${page + 10}`, name: `c${page}` }]),
+      );
+      const beyond = await many.slack.callToolResult("slack_send_message", {
+        channel: "#far-away",
+        text: "hi",
+      });
+      expect(beyond.content[0].text).toBe(
+        "#far-away is not among the first channels this Slack account can see. Pass its conversation ID instead; slack_list_channels lists channels with their IDs.",
+      );
+      expect(many.requests.filter((r) => r.method === "conversations.list")).toHaveLength(50);
+      expect(many.requests.map((r) => r.method)).not.toContain("chat.postMessage");
+
+      const requests: string[] = [];
+      const unreadable = server({
+        resolveCredential: async () => ({
+          status: "ok",
+          headers: { authorization: "Bearer user-token" },
+          connectionId: "conn_1",
+          grantedScopes: allScopes.filter(
+            (scope) => scope !== "channels:read" && scope !== "groups:read",
+          ),
+        }),
+        fetchImpl: async (url) => {
+          requests.push(method(url)!);
+          return Response.json(method(url) === "auth.test" ? identity : { ok: true });
+        },
+      });
+      const denied = await unreadable.callToolResult("slack_send_message", {
+        channel: "#launch",
+        text: "hi",
+      });
+      expect(denied.content[0].text).toBe(
+        "Slack has not granted access to look up #launch by name. Pass the channel's conversation ID instead.",
+      );
+      expect(requests).not.toContain("conversations.list");
+      expect(requests).not.toContain("chat.postMessage");
+    });
   });
 
   test.each([

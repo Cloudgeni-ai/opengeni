@@ -378,8 +378,8 @@ function integrationNamedIn(
 
 /**
  * Whether a request opens with the integration's one-word name, capitalised,
- * as the label of what follows: directly before an operation word or a colon
- * ("Airtable list records", "Linear: create an issue"). A sentence-opening
+ * as the label of what follows: directly before an operation word, with or
+ * without a colon ("Airtable list records", "Linear: create an issue"). A sentence-opening
  * capital alone is no evidence ("Linear regression"), but a name read as the
  * subject of an operation is.
  */
@@ -387,9 +387,9 @@ function opensRequestAsLabel(query: string, name: string): boolean {
   const nameWords = integrationNameWords(name);
   if (nameWords.length !== 1) return false;
   for (const request of query.normalize("NFKC").split(/[.!?;\n]+/)) {
-    const opening = /^\s*(\p{Lu}[\p{L}\p{N}]*)\s*(?::|\s+([\p{L}]+))/u.exec(request);
+    const opening = /^\s*(\p{Lu}[\p{L}\p{N}]*)\s*:?\s+(\p{L}+)/u.exec(request);
     if (!opening || integrationNameWords(opening[1]!).join("") !== nameWords[0]) continue;
-    if (opening[2] === undefined || isOperationWord(opening[2])) return true;
+    if (isOperationWord(opening[2]!)) return true;
   }
   return false;
 }
@@ -966,15 +966,31 @@ export class LazyToolRuntime {
 
   private discoveryCardSink: DiscoveryCardSink | undefined;
 
+  /** Catalog lookup failures already recorded for the current sink. */
+  private recordedLookupFailures = new Set<string>();
+
   /** Where skipped and failed discovery cards are recorded; absent records nothing. */
   setDiscoveryCardSink(sink: DiscoveryCardSink | undefined): void {
     this.discoveryCardSink = sink;
+    this.recordedLookupFailures = new Set();
+  }
+
+  /** Stops recording into the given sink, unless a later run replaced it. */
+  releaseDiscoveryCardSink(sink: DiscoveryCardSink | undefined): void {
+    if (this.discoveryCardSink === sink) this.setDiscoveryCardSink(undefined);
   }
 
   /** Best effort: recording never delays or fails discovery. */
   private recordDiscoveryCard(event: DiscoveryCardEvent): void {
     const sink = this.discoveryCardSink;
     if (!sink) return;
+    // A catalog that cannot be read fails every search alike: record it once
+    // per run and source, not once per search.
+    if (event.reason === "lookup_failed" || event.reason === "lookup_timed_out") {
+      const key = `${event.source}:${event.reason}`;
+      if (this.recordedLookupFailures.has(key)) return;
+      this.recordedLookupFailures.add(key);
+    }
     void Promise.resolve()
       .then(() => sink(event))
       .catch(() => undefined);

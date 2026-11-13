@@ -437,7 +437,11 @@ describe("a request that opens with an integration's name as its label", () => {
   }
 
   test("a sentence-opening capital before an ordinary word is still no evidence", async () => {
-    for (const query of ["Linear regression model on these numbers", "Linear fit of the data"]) {
+    for (const query of [
+      "Linear regression model on these numbers",
+      "Linear fit of the data",
+      "Linear: regression model on these numbers",
+    ]) {
       const { requested, request } = cardTool();
       const result = await runtimeWith("generic_dispatch", {
         matches: [LINEAR],
@@ -446,6 +450,14 @@ describe("a request that opens with an integration's name as its label", () => {
       expect(requested).toEqual([]);
       expect(outputOf(result).connectCard).toEqual({ shown: false });
     }
+  });
+
+  test("a colon label before an operation word names it", async () => {
+    const { requested, request } = cardTool();
+    await runtimeWith("generic_dispatch", { matches: [LINEAR], request }).prepareSearch({
+      query: "Linear: create an issue for the outage",
+    });
+    expect(requested).toEqual([LINEAR]);
   });
 });
 
@@ -536,6 +548,34 @@ describe("discovery records why no card was newly shown", () => {
     expect(slow.events).toMatchObject([
       { outcome: "skipped", reason: "lookup_timed_out", integrations: [] },
     ]);
+  });
+
+  test("a catalog lookup failure is recorded once per run, until the next run's recorder", async () => {
+    const { request } = cardTool();
+    const failed = recording("generic_dispatch", {
+      matches: [],
+      request,
+      lookup: async () => {
+        throw new Error("catalog unavailable");
+      },
+    });
+    await failed.runtime.prepareSearch({ query: "create a ClickUp task" });
+    await failed.runtime.prepareSearch({ query: "find contacts in HubSpot" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(failed.events).toHaveLength(1);
+    const next: DiscoveryCardEvent[] = [];
+    const sink = (event: DiscoveryCardEvent) => {
+      next.push(event);
+    };
+    failed.runtime.setDiscoveryCardSink(sink);
+    await failed.runtime.prepareSearch({ query: "create a ClickUp task" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(next).toHaveLength(1);
+    // Releasing another run's recorder keeps this one; releasing this one stops it.
+    failed.runtime.releaseDiscoveryCardSink(() => undefined);
+    failed.runtime.releaseDiscoveryCardSink(sink);
+    failed.runtime.setDiscoveryCardSink(undefined);
+    expect(next).toHaveLength(1);
   });
 
   test("skipped without a card tool; not shown, already shown and failed card calls", async () => {
@@ -645,6 +685,17 @@ describe("tool_list browsing that names an integration not installed", () => {
     expect(events).toMatchObject([{ source: "tool_list", outcome: "not_shown", query: "clickup" }]);
   });
 
+  test("a listing filter naming several integrations names them without a card", async () => {
+    const { requested, request } = cardTool();
+    const runtime = runtimeWith("generic_dispatch", { matches: [GMAIL, CALENDAR], request });
+    const output = await listing(runtime, { namePrefix: "gmail google calendar" });
+    expect(requested).toEqual([]);
+    expect(output.notConnected).toStartWith(
+      'Not connected yet: Gmail (capabilityId "api:gmail"), Google Calendar',
+    );
+    expect(output.connectCard).toEqual({ shown: false });
+  });
+
   test("generic browsing, a listing with tools, or a later page looks nothing up", async () => {
     let lookups = 0;
     const { requested, request } = cardTool();
@@ -731,6 +782,16 @@ describe("one connection's tools are browsable from one tool's digest", () => {
         "namePrefix is one tool's own digest, so this lists every tool of that tool's connection.",
       );
     }
+    // Within a group, only that group's tools of the connection.
+    const grouped = await invoke({ namePrefix: listChannels.slice(0, 28), group: "absent" });
+    expect(grouped.tools).toEqual([]);
+    const inGroup = await invoke({
+      namePrefix: listChannels.slice(0, 28),
+      group: (await invoke({ view: "groups" })).groups.find(
+        (entry: { group: string; count: number }) => entry.count === 2,
+      ).group,
+    });
+    expect(inGroup.tools).toHaveLength(2);
     // The full name still lists that one tool.
     const exact = await invoke({ namePrefix: listChannels });
     expect(exact.tools.map((t: { name: string }) => t.name)).toEqual([listChannels]);

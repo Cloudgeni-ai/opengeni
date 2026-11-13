@@ -609,7 +609,8 @@ alreadyShown? }`, and every `capability_authorization_request` result carries
 shown.
 
 A request that opens with a one-word integration name, capitalised, as the
-label of what follows ("Airtable list records…", "Linear: create an issue")
+label of an operation word that follows, with or without a colon ("Airtable
+list records…", "Linear: create an issue")
 names it distinctively; a sentence-opening capital before an ordinary word
 ("Linear regression") still does not. `tool_list` browsing gets the same card:
 a first page that a `namePrefix` or `group` filter left empty, whose filter
@@ -623,8 +624,9 @@ shows no new card for an integration a request may name, the run records a
 `tool_list`), the `outcome` (`skipped`, `already_shown`, `not_shown` or
 `failed`), a `reason` (`several_named`, `not_distinctive`, `lookup_timed_out`,
 `lookup_failed`, `no_card_tool`, `timeout` or `error`), the query bounded to
-500 characters, and the capability ids and names concerned. Recording is best
-effort and never delays or fails discovery.
+500 characters, and the capability ids and names concerned. A catalog lookup
+that failed or timed out is recorded once per run and source. Recording is best
+effort, stops when the run ends, and never delays or fails discovery.
 
 ### Recovery from tool-search misses
 
