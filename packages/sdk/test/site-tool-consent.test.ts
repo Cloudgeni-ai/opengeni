@@ -67,7 +67,9 @@ function harness(
       $invoke: async (request) => {
         invokes.push(request as ToolGatewayInvokeRequest & Record<string, unknown>);
         if (invokes.length === 1)
-          throw options.firstFailure ?? conflict(options.firstError ?? "tool_gateway_approval_required");
+          throw (
+            options.firstFailure ?? conflict(options.firstError ?? "tool_gateway_approval_required")
+          );
         return {
           operationId: request.operationId,
           tool: tool(declared),

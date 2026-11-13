@@ -12,7 +12,9 @@ const account = (serverId: string, canonicalServerId: string) => ({
 
 describe("Site tool declarations for every viewer", () => {
   test("pairs each of the publisher's own routes with its connector once, keeping order", () => {
-    const inventory = { accounts: [account("account-a", "dynamics"), account("account-b", "gmail")] };
+    const inventory = {
+      accounts: [account("account-a", "dynamics"), account("account-b", "gmail")],
+    };
     const declared = [
       { serverId: "account-a", toolName: "query" },
       { serverId: "opengeni", toolName: "sessions_list" },
