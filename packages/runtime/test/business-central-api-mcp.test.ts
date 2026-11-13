@@ -277,7 +277,7 @@ describe("Business Central API bridge", () => {
       entity: "customers",
       key: ["id"],
       properties: [
-        { name: "id", type: "Guid", required: true },
+        { name: "id", type: "Guid", nullable: false },
         { name: "displayName", type: "String", maxLength: 100 },
         { name: "type", type: "contactType", choices: ["Company", "Person"] },
       ],

@@ -107,7 +107,9 @@ describe("Microsoft Dynamics MCP endpoints", () => {
       ),
     ).toEqual({ product: "business_central", mcpUrl: BC_ROOT });
     expect(
-      microsoftDynamicsMcpEndpoint("businesscentral.dynamics.com/contoso.onmicrosoft.com/Sandbox-1"),
+      microsoftDynamicsMcpEndpoint(
+        "businesscentral.dynamics.com/contoso.onmicrosoft.com/Sandbox-1",
+      ),
     ).toEqual({
       product: "business_central",
       mcpUrl:
@@ -168,9 +170,9 @@ describe("Microsoft Dynamics MCP endpoints", () => {
     expect(microsoftDynamicsEnvironmentAddress(BC_ROOT)).toBe(
       `businesscentral.dynamics.com/${BC_TENANT}/Production`,
     );
-    expect(
-      microsoftDynamicsEnvironmentAddress("https://contoso.crm17.dynamics.com/api/mcp"),
-    ).toBe("contoso.crm17.dynamics.com");
+    expect(microsoftDynamicsEnvironmentAddress("https://contoso.crm17.dynamics.com/api/mcp")).toBe(
+      "contoso.crm17.dynamics.com",
+    );
     expect(microsoftDynamicsEnvironmentAddress("https://example.com/mcp")).toBeNull();
   });
 });

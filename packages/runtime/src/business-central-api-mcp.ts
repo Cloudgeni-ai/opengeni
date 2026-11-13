@@ -118,7 +118,7 @@ export const BUSINESS_CENTRAL_API_TOOLS: readonly BusinessCentralTool[] = Object
   ),
   tool(
     "business_central_describe_entity",
-    "Describes one entity set: its key, each property's type and whether it can be empty, choice (enum) values, navigation properties for $expand, and the actions a record supports (for example post on salesInvoices).",
+    "Describes one entity set: its key, each property's type and length, choice (enum) values, navigation properties for $expand, and the actions a record supports (for example post on salesInvoices).",
     {
       entity: {
         type: "string",
@@ -563,7 +563,7 @@ export class BusinessCentralApiMcpServer implements LocalMcpBridgeServer {
       return {
         name: attrs.Name ?? "",
         type: type.replace(/^Edm\./u, "").replace(/^Microsoft\.NAV\./u, ""),
-        ...(attrs.Nullable === "false" ? { required: true } : {}),
+        ...(attrs.Nullable === "false" ? { nullable: false } : {}),
         ...(attrs.MaxLength ? { maxLength: Number(attrs.MaxLength) } : {}),
         ...(choices ? { choices } : {}),
       };
@@ -841,10 +841,7 @@ function attributes(source: string): Record<string, string> {
  * Microsoft's own message, with the next step for errors a person can fix.
  * Business Central error bodies are `{ error: { code, message } }`.
  */
-function businessCentralErrorMessage(
-  response: Response,
-  payload: Record<string, unknown>,
-): string {
+function businessCentralErrorMessage(response: Response, payload: Record<string, unknown>): string {
   const error = payload.error as { code?: unknown; message?: unknown } | undefined;
   const raw = typeof error?.message === "string" ? error.message.trim() : "";
   const message = raw.length > 2000 ? `${raw.slice(0, 2000)}…` : raw;
