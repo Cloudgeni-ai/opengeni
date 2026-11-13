@@ -179,6 +179,18 @@ skips sandbox enrollments, and machine routes list machines only.
   one's files are gone, the chat's timeline says so, and the model is told on
   its next turn (`sandbox.box.terminated` with `drainReason: "group_end"`).
   A group no chat names is never ended this way.
+  The same rule covers the other managed backends. Their idle sandbox stops
+  and is kept as a cold lease with its saved workspace (a tar archive, or a
+  Modal snapshot the checkpoint ledger keeps with no expiry). The reaper lists
+  such cold leases whose chats are all archived
+  (`opengeni_private.cold_sandboxes_of_archived_chats_v1`, migration 1404) and
+  forgets each one as deleting its chats does
+  (`forgetColdSandboxOfArchivedChats`: only when every lease of the group is
+  cold and unheld). The checkpoint GC that runs next in the same pass deletes
+  the provider snapshots nothing names any more, and the chats are told as
+  above. The inventory is withheld from the runtime for one release, as new
+  definers are; until it is granted these sandboxes keep their saved
+  workspace until their chats are deleted.
 - **Stale enrollments**: an enrollment whose sandbox is already gone (a delete
   whose revoke failed, a create that never made a sandbox) is in no listing from the control service
   listing, so the same maintenance also revokes, from Opengeni's own records,
